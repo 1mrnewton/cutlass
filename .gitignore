@@ -6,3 +6,10 @@ Cargo.lock.bak
 # Local media fixtures (large, not for version control).
 /assets/
 
+
+
+# Added by cargo
+#
+# already existing elements were commented out
+
+#/target

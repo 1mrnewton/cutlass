@@ -1,5 +1,0 @@
-# Fixtures are generated locally by `build.sh`, not committed:
-#   - keeps the repo small (binary mp4s would dwarf the source),
-#   - lets us regenerate them deterministically against whatever
-#     ffmpeg the developer (or CI) has installed.
-*.mp4

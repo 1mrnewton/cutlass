@@ -1,23 +1,21 @@
-[workspace]
-resolver = "3"
-members = [
-    "crates/cutlass-media",
-    "crates/cutlass-app",
-]
-
-[workspace.package]
+[package]
+name = "cutlass"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
-authors = ["1mr-newton <eaidoo015@gmail.com>"]
-repository = "https://github.com/1mr-newton/cutlass"
 
-[workspace.dependencies]
-cutlass-media = { path = "crates/cutlass-media" }
+[dependencies]
+bytemuck = { version = "1.16", features = ["derive"] }
+env_logger = "0.11.10"
+image = "0.25"
+log = "0.4"
+ffmpeg-next = "8.1.0"
+pollster = "0.4.0"
+wgpu = "29.0.3"
+winit = "0.30.13"
 
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-
-[profile.release]
-lto = "thin"
-codegen-units = 1
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-core-foundation = "0.3.2"
+objc2-core-video = { version = "0.3.2", features = ["objc2-io-surface"] }
+objc2-metal = { version = "0.3.2", features = ["objc2-io-surface"] }
+objc2-io-surface = { version = "0.3.2", features = ["objc2-core-foundation"] }

@@ -9,10 +9,7 @@ default-run = "preview_ui"
 [dependencies]
 crossbeam-channel = "0.5"
 decoder = { path = "../decoder" }
-engine = { path = "../engine" }
-renderer = { path = "../renderer" }
 slint = "1.16"
-timeline = { path = "../timeline" }
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

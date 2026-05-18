@@ -1,9 +1,0 @@
-[package]
-name = "engine"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-crossbeam-channel = "0.5"
-decoder = { path = "../decoder" }
-thiserror = "2"

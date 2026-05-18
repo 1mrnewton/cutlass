@@ -1,9 +1,6 @@
 [workspace]
 members = [
     "crates/decoder",
-    "crates/renderer",
-    "crates/engine",
-    "crates/timeline",
     "crates/app",
 ]
 resolver = "3"

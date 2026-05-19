@@ -1,0 +1,77 @@
+// Center preview: toolbar (play/pause) + GPU image.
+
+export component PreviewPanel inherits Rectangle {
+    horizontal-stretch: 1;
+    vertical-stretch: 1;
+    background: #0c0c0e;
+
+    in property <image> gpu-frame;
+    in-out property <bool> playing: false;
+
+    // Fired after `playing` toggles (for Rust / engine).
+    callback playback-changed(bool);
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: center;
+
+            Text {
+                text: "Preview";
+                color: #6c6c76;
+                font-size: 11px;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+                min-height: 1px;
+            }
+
+            Rectangle {
+                min-width: 72px;
+                height: 28px;
+                border-radius: 4px;
+                background: play-ta.has-hover ? #36363e : #2a2a32;
+
+                play-ta := TouchArea {
+                    clicked => {
+                        root.playing = !root.playing;
+                        root.playback-changed(root.playing);
+                    }
+
+                    Text {
+                        width: 100%;
+                        height: 100%;
+                        text: root.playing ? "Pause" : "Play";
+                        color: #e8e8ec;
+                        font-size: 12px;
+                        font-weight: 500;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: #121216;
+            border-radius: 4px;
+            clip: true;
+
+            Image {
+                width: 100%;
+                height: 100%;
+                source: root.gpu-frame;
+                image-fit: contain;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

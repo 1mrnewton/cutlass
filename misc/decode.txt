@@ -127,3 +127,54 @@ fn save_ppm(frame: &ffmpeg::frame::Video, path: &str) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+
+
+
+
+        tracks := Flickable {
+            vertical-stretch: 1;
+            horizontal-stretch: 1;
+
+            viewport-width: 10000000px;
+            viewport-height: 10000000px;
+
+            flicked => {
+                TimelineState.scroll-x = -self.viewport-x;
+            }
+            interactive: false;
+            tracks-ta := TouchArea {
+                width: parent.viewport-width;
+                height: parent.viewport-height;
+
+                clicked => {
+                    debug("clicked");
+                }
+
+                moved() => {
+                    debug(self.mouse-x);
+                }
+
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        debug("down");
+                    }
+                }
+                VerticalLayout {
+                    spacing: 10px;
+                    x: TimelineState.ruler-offset;
+                    for tdx in 10: Rectangle {
+                        height: 60px;
+                        width: 100%;
+                        background: #1b1b1b;
+
+                        for cdx in 5: Rectangle {
+                            height: parent.height - 20px;
+                            width: 100px;
+                            background: #46469d;
+                            x: cdx * (100px + 20px);
+                        }
+                    }
+                }
+            }
+        }

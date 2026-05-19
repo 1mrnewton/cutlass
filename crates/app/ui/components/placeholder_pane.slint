@@ -1,0 +1,21 @@
+// Side pane placeholder (library, inspector, …).
+
+export component PlaceholderPane inherits Rectangle {
+    background: #222226;
+
+    in property <string> title: "";
+
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        padding: 10px;
+        alignment: start;
+
+        Text {
+            text: root.title;
+            color: #8e8e98;
+            font-size: 12px;
+            vertical-alignment: top;
+        }
+    }
+}

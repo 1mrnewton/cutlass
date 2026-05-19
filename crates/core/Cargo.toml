@@ -1,0 +1,7 @@
+[package]
+name = "cutlass_core"
+version.workspace = true
+edition.workspace = true
+description = "Cutlass shared core: cross-cutting types and utilities"
+
+[dependencies]

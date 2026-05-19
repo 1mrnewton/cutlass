@@ -1,0 +1,90 @@
+// Cutlass editor shell — composition only. Split logic lives in `components/split_grips.slint`.
+
+import { EditorHeader } from "./components/editor_header.slint";
+import { PlaceholderPane } from "./components/placeholder_pane.slint";
+import { PreviewPanel } from "./components/preview_panel.slint";
+import { TimelinePanel } from "./components/timeline/timeline.slint";
+import {
+    HSplitGripLead,
+    HSplitGripTrail,
+    VSplitGripTimeline,
+} from "./components/split_grips.slint";
+export * from "./models/index.slint";
+
+export component AppWindow inherits Window {
+    title: "Cutlass";
+    preferred-width: 1280px;
+    preferred-height: 800px;
+
+    in property <image> gpu-frame;
+
+    in-out property <bool> preview-playing: false;
+    callback preview-playback-changed(bool);
+
+    in-out property <length> left-pane-width: 260px;
+    in-out property <length> right-pane-width: 300px;
+    in-out property <length> timeline-height: 300px;
+
+    vertical-stretch: 1;
+
+    Rectangle {
+        background: #1a1a1e;
+        vertical-stretch: 1;
+
+        VerticalLayout {
+            spacing: 0px;
+
+            EditorHeader {
+                title: "Cutlass";
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+                background: #1a1a1e;
+
+                HorizontalLayout {
+                    spacing: 0px;
+
+                    PlaceholderPane {
+                        title: "Library";
+                        width: root.left-pane-width;
+                        horizontal-stretch: 0;
+                    }
+
+                    HSplitGripLead {
+                        pane-width <=> root.left-pane-width;
+                    }
+
+                    PreviewPanel {
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
+                        gpu-frame: root.gpu-frame;
+                        playing <=> root.preview-playing;
+                        playback-changed(p) => {
+                            root.preview-playback-changed(p);
+                        }
+                    }
+
+                    HSplitGripTrail {
+                        pane-width <=> root.right-pane-width;
+                    }
+
+                    PlaceholderPane {
+                        title: "Inspector";
+                        width: root.right-pane-width;
+                        horizontal-stretch: 0;
+                    }
+                }
+            }
+
+            VSplitGripTimeline {
+                timeline-height <=> root.timeline-height;
+            }
+
+            TimelinePanel {
+                height: root.timeline-height;
+                horizontal-stretch: 1;
+            }
+        }
+    }
+}

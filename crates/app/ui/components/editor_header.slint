@@ -1,0 +1,22 @@
+// Top bar — title only for now.
+
+export component EditorHeader inherits Rectangle {
+    height: 44px;
+    background: #25252b;
+
+    in property <string> title: "Cutlass";
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        alignment: center;
+
+        Text {
+            text: root.title;
+            color: #e8e8ec;
+            font-size: 14px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}

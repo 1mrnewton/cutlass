@@ -1,0 +1,104 @@
+// Bottom timeline region (height comes from parent `timeline-height`).
+
+import { Ruler } from "./ruler.slint";
+import { TimelineState } from "./state.slint";
+import { Toolbar } from "./toolbar.slint";
+import { PlayHead } from "./playhead.slint";
+
+
+
+export component TimelinePanel inherits Rectangle {
+    horizontal-stretch: 1;
+    background: #28282a;
+
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: 0px;
+
+        Toolbar { }
+
+        Rectangle {
+            height: 1px;
+            background: #202020;
+        }
+
+        HorizontalLayout {
+            spacing: 50px;
+
+            VerticalLayout {
+                Rectangle {
+                    height: TimelineState.ruler-height;
+                }
+
+                track-action := Flickable {
+                    vertical-stretch: 1;
+                    horizontal-stretch: 1;
+                    viewport-y <=> TimelineState.scroll-y;
+
+                    width: 200px;
+                    viewport-height: 10000000px;
+
+                    interactive: false;
+                    VerticalLayout {
+                        spacing: 10px;
+                        for tdx in 10: Rectangle {
+                            height: 60px;
+                            width: 100%;
+                            background: #1b1b1b;
+                        }
+                    }
+                }
+            }
+
+            timeline-viewport := Rectangle {
+                clip: true;
+                width: 100%;
+                height: 100%;
+
+                VerticalLayout {
+                    Ruler {
+                        height: TimelineState.ruler-height;
+                        width: 100%;
+                        x: tracks.viewport-x;
+                        viewport-x: tracks.viewport-x;
+                    }
+
+                    tracks := Flickable {
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+                        viewport-y <=> TimelineState.scroll-y;
+
+                        viewport-width: 10000000px;
+                        viewport-height: 10000000px;
+
+                        interactive: false;
+
+                        VerticalLayout {
+                            spacing: 10px;
+                            for tdx in 10: Rectangle {
+                                height: 60px;
+                                width: 100%;
+                                background: #1b1b1b;
+
+                                for cdx in 5: Rectangle {
+                                    height: parent.height - 10px;
+                                    width: 300px;
+                                    background: #46469d;
+                                    x: cdx * (300px + 20px);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PlayHead {
+                    y: 0;
+                    height: parent.height;
+                    viewport-x: tracks.viewport-x;
+                    viewport-width: timeline-viewport.width;
+                }
+            }
+        }
+    }
+}

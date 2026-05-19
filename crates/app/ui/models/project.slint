@@ -1,0 +1,104 @@
+export enum UiMediaKind { video, audio, image }
+export enum UiTrackKind { video, audio }
+
+export struct UiSchemaVersion {
+    major: int,
+    minor: int,
+    patch: int,
+}
+
+// Time as exact `num / den` ticks-per-second.
+// INVARIANT: within a Sequence, every UiRationalTime has `den == sequence.timebase`.
+// `num` carries the value, `den` is redundant-but-explicit so values are self-describing
+// when inspected. `den` must be > 0. Slint `int` is i32 — keep timebase coarse enough that
+// `num` won't overflow over project length (90000 gives ~6.6hrs, 48000 gives ~12hrs).
+export struct UiRationalTime {
+    num: int,
+    den: int,
+}
+
+// item in the media bin (file on disk + cached probe data)
+export struct UiMediaSource {
+    id: string,
+    name: string,                   // display name, defaults to filename
+    path: string,                   // absolute
+    kind: UiMediaKind,
+    has-video: bool,
+    has-audio: bool,
+    duration: UiRationalTime,
+    width: int,                     // 0 if no video
+    height: int,
+    fps-num: int,
+    fps-den: int,
+    video-codec: string,            // "h264", "hevc", "av1", "" if no video
+    audio-codec: string,            // "aac", "opus", "pcm_s16le", "" if no audio
+    is-supported: bool,             // engine probed and can decode
+    thumbnail: image,               // lazy-filled by Rust side
+    is-loading: bool,               // probe in progress
+    is-missing: bool,               // file moved/deleted, show red ⚠
+    error: string,                  // "" when fine, otherwise human-readable
+}
+
+// an instance of media on a track
+export struct UiClip {
+    id: string,
+    media-id: string,               // -> UiMediaSource.id ("" for generators/titles)
+    track-id: string,               // -> UiTrack.id (handy for drag logic)
+    name: string,                   // label on the clip pill
+    start: UiRationalTime,            // timeline position
+    duration: UiRationalTime,         // length on timeline
+    source-in: UiRationalTime,        // trim into source
+    source-out: UiRationalTime,
+    speed: UiRationalTime,            // 1/1=normal, -1/1=reverse, 1/2=slowmo
+    opacity: float,                 // 0..1 (video)
+    volume: float,                  // 0..2 (audio, allows +6dB)
+    enabled: bool,                  // soft-disable without deleting
+    selected: bool,                 // UI selection state
+    color: color,                   // user-assignable pill color
+}
+
+// a row in a sequence. INVARIANT: order in `UiSequence.tracks` is display order.
+export struct UiTrack {
+    id: string,
+    name: string,                   // "V1", "A1", or user-renamed
+    kind: UiTrackKind,
+    height-px: int,                 // resizable row
+    muted: bool,
+    solo: bool,
+    locked: bool,                   // edits blocked
+    visible: bool,                  // video only — eye toggle
+    clips: [UiClip],
+}
+
+// a timeline. project can hold many (nested seqs, alts, etc.)
+export struct UiSequence {
+    id: string,
+    name: string,
+    width: int,                     // canvas px
+    height: int,
+    fps-num: int,                   // 30000/1001 for 29.97
+    fps-den: int,
+    sample-rate: int,               // audio Hz
+    timebase: int,                  // canonical ticks-per-sec; den of all UiRationalTimes in this seq
+    duration: UiRationalTime,         // total length, frame-quantized on commit
+    playhead: UiRationalTime,
+    has-in-point: bool,
+    in-point: UiRationalTime,         // export range start
+    has-out-point: bool,
+    out-point: UiRationalTime,        // export range end
+    zoom: float,                    // px-per-second, UI state
+    scroll: UiRationalTime,           // leftmost visible time
+    tracks: [UiTrack],
+}
+
+// top-level "save file" view. one project = one .cutlass file
+export struct UiProject {
+    id: string,
+    name: string,
+    file-path: string,              // "" if unsaved
+    schema: UiSchemaVersion,
+    sequences: [UiSequence],
+    media-bin: [UiMediaSource],
+    active-sequence-id: string,     // which seq is loaded in timeline panel
+    is-dirty: bool,                 // for "● Untitled" title bar
+}

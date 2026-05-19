@@ -7,10 +7,9 @@ build = "build.rs"
 
 
 [dependencies]
-crossbeam-channel = "0.5"
 decoder = { path = "../decoder" }
-slint = "1.16"
-thiserror.workspace = true
+renderer = { path = "../renderer" }
+slint = { version = "1.16", features = ["unstable-wgpu-28", "renderer-femtovg-wgpu"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

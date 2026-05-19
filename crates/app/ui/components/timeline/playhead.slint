@@ -1,0 +1,70 @@
+
+import { TimelineState } from "./state.slint";
+
+export component PlayHead inherits Rectangle {
+    in property <length> head-width: 12px;
+    in property <length> head-height: 16px;
+    in property <length> head-radius: 3px;
+    in property <length> head-bottom-radius: 6px;
+    in property <length> stroke-width: 1.5px;
+    in property <length> line-width: 1.2px;
+    in property <brush> playhead-color: #ffffff;
+    in property <length> viewport-x: 0px;
+    in property <length> viewport-width: 0px;
+
+    width: head-width;
+
+    property <length> min-playhead-x: TimelineState.playhead-head-width / 2 - viewport-x;
+    property <length> max-playhead-x: viewport-width - TimelineState.playhead-head-width / 2 - viewport-x;
+    property <length> clamped-playhead-x: max(min-playhead-x, min(max-playhead-x, TimelineState.playhead-x));
+
+    x: clamped-playhead-x + viewport-x - self.width / 2;
+    background: transparent;
+
+    property <length> line-x: (self.width - stroke-width) / 2;
+
+    head := Rectangle {
+        y: 0;
+        x: 0;
+        width: head-width;
+        height: head-height;
+        border-top-left-radius: head-radius;
+        border-top-right-radius: head-radius;
+        border-bottom-left-radius: head-bottom-radius;
+        border-bottom-right-radius: head-bottom-radius;
+        background: transparent;
+        border-width: stroke-width;
+        border-color: root.playhead-color;
+    }
+
+    Rectangle {
+        x: line-x;
+        y: head-height;
+        width: line-width;
+        height: parent.height - head-height;
+        background: root.playhead-color;
+    }
+
+    ta := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: MouseCursor.ew-resize;
+
+        property <length> drag-start-playhead-x;
+        property <length> drag-origin-x;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                self.drag-start-playhead-x = TimelineState.playhead-x;
+                self.drag-origin-x = self.absolute-position.x + self.mouse-x;
+            }
+        }
+
+        moved() => {
+            if (!self.pressed) {
+                return;
+            }
+            TimelineState.playhead-x = max(root.min-playhead-x, min(root.max-playhead-x, self.drag-start-playhead-x + self.absolute-position.x + self.mouse-x - self.drag-origin-x));
+        }
+    }
+}

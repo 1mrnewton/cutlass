@@ -38,7 +38,8 @@ fn ensure_ffmpeg_init() -> Result<(), DecoderError> {
 ///
 /// # Seeking
 /// - [`Decoder::seek_scrub`]: backward sync-point seek + **first** picture (fast scrub).
-/// - [`Decoder::seek_exact`]: backward seek + decode until [`DecodedVideoFrame::pts`] ≥ target (accurate still).
+/// - [`Decoder::seek_exact`]: backward seek + decode until [`DecodedVideoFrame::pts`] ≥ target (accurate still);
+///   intermediate decoded pictures are **not** copied to owned planes — only the returned frame is.
 pub struct Decoder {
     input: Input,
     decoder: ffmpeg_next::codec::decoder::Video,
@@ -177,17 +178,14 @@ impl Decoder {
 
     /// Exact presentation time: backward seek, flush, decode forward until frame PTS ≥ `target`
     /// (media seconds). Past end of stream → `Ok(DecodeOutcome::Eof)` (engine may clamp).
+    ///
+    /// Uses [`Self::pump_skip_until`] so intermediate frames in the GOP walk are **not** copied
+    /// to owned plane buffers — only the returned frame pays `to_vec` per plane.
     pub fn seek_exact(&mut self, target: Rational) -> Result<DecodeOutcome, DecoderError> {
         self.seek_inner(target)?;
-        loop {
-            match self.pump_decoded_frame()? {
-                None => return Ok(DecodeOutcome::Eof),
-                Some(frame) => {
-                    if frame.pts.ge(target) {
-                        return Ok(DecodeOutcome::Frame(frame));
-                    }
-                }
-            }
+        match self.pump_skip_until(target)? {
+            None => Ok(DecodeOutcome::Eof),
+            Some(frame) => Ok(DecodeOutcome::Frame(frame)),
         }
     }
 
@@ -203,20 +201,54 @@ impl Decoder {
         matches!(e, FfmpegError::Other { errno } if *errno == EAGAIN)
     }
 
+    /// Decode forward without copying planes until a frame's presentation time ≥ `target`, then copy
+    /// that frame only. Used by [`Self::seek_exact`] to avoid `to_vec` on every discarded GOP step.
+    fn pump_skip_until(
+        &mut self,
+        target: Rational,
+    ) -> Result<Option<DecodedVideoFrame>, DecoderError> {
+        let fmt = self.info.pixel_format;
+        let stream_tb = self.stream_timebase;
+        let info_tb = self.info.timebase;
+        self.pump_decoder_until(|frame| {
+            let pts = Self::peek_frame_pts(frame, stream_tb)?;
+            if pts.ge(target) {
+                Ok(Some(Self::copy_video_frame(
+                    frame, stream_tb, fmt, info_tb,
+                )?))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
     fn pump_decoded_frame(&mut self) -> Result<Option<DecodedVideoFrame>, DecoderError> {
         let fmt = self.info.pixel_format;
+        let stream_tb = self.stream_timebase;
+        let info_tb = self.info.timebase;
+        self.pump_decoder_until(|frame| {
+            Ok(Some(Self::copy_video_frame(
+                frame, stream_tb, fmt, info_tb,
+            )?))
+        })
+    }
 
+    /// Shared `receive_frame` / demux loop. `on_frame` returns `Ok(None)` to drop the decoded
+    /// picture without copying (decoder retains buffers for the next output).
+    fn pump_decoder_until<F>(
+        &mut self,
+        mut on_frame: F,
+    ) -> Result<Option<DecodedVideoFrame>, DecoderError>
+    where
+        F: FnMut(&FfmpegVideo) -> Result<Option<DecodedVideoFrame>, DecoderError>,
+    {
         loop {
             let mut frame = FfmpegVideo::empty();
             match self.decoder.receive_frame(&mut frame) {
                 Ok(()) => {
-                    let decoded = Self::copy_video_frame(
-                        &frame,
-                        self.stream_timebase,
-                        fmt,
-                        self.info.timebase,
-                    )?;
-                    return Ok(Some(decoded));
+                    if let Some(decoded) = on_frame(&frame)? {
+                        return Ok(Some(decoded));
+                    }
                 }
                 Err(FfmpegError::Eof) => return Ok(None),
                 Err(e) if Self::is_eagain(&e) => {
@@ -245,6 +277,19 @@ impl Decoder {
         }
     }
 
+    #[inline]
+    fn peek_frame_pts(
+        frame: &FfmpegVideo,
+        stream_tb: FfmpegRational,
+    ) -> Result<Rational, DecoderError> {
+        let pts_ticks = frame.timestamp().or_else(|| frame.pts()).ok_or_else(|| {
+            DecoderError::unsupported("decoded frame has no PTS / best_effort_timestamp")
+        })?;
+        Rational::from_stream_ticks(pts_ticks, stream_tb).ok_or_else(|| {
+            DecoderError::unsupported("PTS × timebase overflow in Rational conversion")
+        })
+    }
+
     fn copy_video_frame(
         frame: &FfmpegVideo,
         stream_tb: FfmpegRational,
@@ -253,12 +298,7 @@ impl Decoder {
     ) -> Result<DecodedVideoFrame, DecoderError> {
         let width = frame.width();
         let height = frame.height();
-        let pts_ticks = frame.timestamp().or_else(|| frame.pts()).ok_or_else(|| {
-            DecoderError::unsupported("decoded frame has no PTS / best_effort_timestamp")
-        })?;
-        let pts = Rational::from_stream_ticks(pts_ticks, stream_tb).ok_or_else(|| {
-            DecoderError::unsupported("PTS × timebase overflow in Rational conversion")
-        })?;
+        let pts = Self::peek_frame_pts(frame, stream_tb)?;
 
         let plane_heights = fmt
             .plane_heights_full(height)
@@ -307,8 +347,6 @@ pub fn ffmpeg_version() -> Result<String, DecoderError> {
 }
 
 impl Decoder {
-    // ... existing methods
-
     /// Aggressive decode shortcuts for fast scrubbing.
     ///
     /// `true`: drop B-frames + skip deblocking. ~2× faster GOP walk, slightly

@@ -1,0 +1,51 @@
+// Timeline time ruler — tick marks + sparse labels (full geometry via UiRulerTick later).
+
+import { TimelineState } from "./state.slint";
+
+export component Ruler inherits Rectangle {
+    in property <length> viewport-x: 0px;
+
+    height: 24px;
+    horizontal-stretch: 1;
+    background: #28282a;
+    clip: true;
+
+    property <length> minor-spacing: 20px;
+    property <int> major-every: 5;
+    property <int> tick-count: max(1, ceil(self.width / minor-spacing));
+
+    for idx in tick-count: Rectangle {
+        property <bool> major: mod(idx, major-every) == 0;
+        x: idx * minor-spacing;
+        y: 2px;
+        width: major ? 1.2px : 1px;
+        height: major ? 12px : 6px;
+        background: major ? #5b5b5b : #464646;
+    }
+
+    for idx in tick-count: Text {
+        visible: mod(idx, major-every) == 0;
+        x: idx * minor-spacing + 5px;
+        y: 3.5px;
+        text: "\{idx / major-every}";
+        color: #5b5b5b;
+        font-size: 9px;
+        font-weight: 700;
+    }
+
+    ta := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: MouseCursor.pointer;
+
+        clicked => {
+            TimelineState.playhead-x = max(
+                TimelineState.playhead-head-width / 2 - root.viewport-x,
+                min(
+                    root.width - TimelineState.playhead-head-width / 2 - root.viewport-x,
+                    self.mouse-x - root.viewport-x,
+                ),
+            );
+        }
+    }
+}

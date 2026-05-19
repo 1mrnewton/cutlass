@@ -1,3 +1,3 @@
 fn main() {
-    slint_build::compile("ui/preview.slint").expect("compile slint UI");
+    slint_build::compile("ui/app.slint").expect("compile slint UI");
 }

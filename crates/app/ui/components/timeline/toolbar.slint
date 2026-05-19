@@ -1,0 +1,32 @@
+import { Slider } from "std-widgets.slint";
+import { TimelineState } from "./state.slint";
+
+export component Toolbar inherits Rectangle {
+    height: 28px;
+    horizontal-stretch: 1;
+    background: #28282a;
+
+    HorizontalLayout {
+        Text {
+            text: "Timeline Tools";
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+            color: #8e8e98;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        Slider {
+            width: 200px;
+            maximum: 100;
+            value: TimelineState.zoom;
+            step: TimelineState.zoom-step;
+            orientation: Orientation.horizontal;
+
+            changed(value) => {
+                debug(value);
+                TimelineState.zoom = value;
+            }
+        }
+    }
+}

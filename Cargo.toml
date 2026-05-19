@@ -1,7 +1,11 @@
 [workspace]
 members = [
-    "crates/decoder",
     "crates/app",
+    "crates/core",
+    "crates/decoder",
+    "crates/engine",
+    "crates/models",
+    "crates/renderer",
 ]
 resolver = "3"
 

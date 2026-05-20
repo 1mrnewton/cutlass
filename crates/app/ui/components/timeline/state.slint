@@ -1,16 +1,22 @@
-import { AppState } from "../../models/app_state.slint";
 import { RationalTime } from "../../models/project.slint";
 
 export global TimelineState {
-    // RationalTime → seconds. Strings on the DTO carry the i64 numerator;
-    // `.to-float()` parses them once, and Slint memoizes this expression so
-    // re-evaluation only happens when the underlying RT changes (not on
-    // every zoom tick). f32 precision is sub-frame for typical project
-    // lengths; promote to a pre-multiplied pixel position in Rust if we
-    // ever care about multi-hour timelines.
+    // Display-only RationalTime → seconds helper. Kept around for one-off
+    // formatting (e.g. tooltips) but **not** used for geometry: anything
+    // that scales with project-length × zoom is pre-multiplied in Rust at
+    // f64 precision and fed in via `sequence-duration-px` and the per-clip
+    // `start-px` / `duration-px` companions on the DTO. See
+    // `convert::recompute_pixel_geometry` and the `geometry-dirty`
+    // callback below.
     public pure function rt-sec(rt: RationalTime) -> float {
         rt.num.to-float() / rt.den.to-float()
     }
+
+    // Fired by Slint sites that mutate `zoom` (the toolbar slider today;
+    // future: keyboard zoom, pinch). Rust handler walks `AppState.project`
+    // and re-pushes `Clip.start-px` / `Clip.duration-px` /
+    // `sequence-duration-px` so all geometry stays at f64 precision.
+    callback geometry-dirty();
 
     in-out property <length> ruler-offset: 10px;
     in-out property <int> zoom-step: 1;
@@ -47,20 +53,22 @@ export global TimelineState {
     // a sane non-zero value so the very first frame doesn't render at 0.
     in property <length> available-width: 600px;
 
-    // Sequence duration in seconds, cached so the multi-step parse in
-    // `rt-sec` runs once per sequence change, not on every zoom tick.
-    out property <float> sequence-duration-sec:
-        rt-sec(AppState.project.sequence.duration);
+    // Sequence content extent in pixels (= sequence-duration × zoom),
+    // pre-multiplied in Rust at f64 precision. Re-pushed whenever zoom or
+    // the project changes via `geometry-dirty`. Until that first push the
+    // panel still falls back to `available-width` below, so the very
+    // first frame doesn't render at 0.
+    in property <float> sequence-duration-px;
 
     // Scrollable content width. Two contributors:
-    //   * Sequence content extent: `duration_sec × zoom × 1px + tail-padding`.
+    //   * Sequence content extent (pre-multiplied) + tail padding.
     //   * Visible panel width — track lanes must always fill the screen
     //     (real editors don't show a hard "end of track" before the panel
     //     edge; the area past the last clip is just empty drop space).
     // Taking the max of both makes lanes feel infinite while still scaling
     // the scroll extent up when zoomed in past the panel.
     out property <length> viewport-width:
-        max(sequence-duration-sec * zoom * 1px + tail-padding, available-width);
+        max(sequence-duration-px * 1px + tail-padding, available-width);
 
     // ---- Adaptive ruler scale ("nice numbers") --------------------------------
     //

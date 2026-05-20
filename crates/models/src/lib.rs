@@ -103,6 +103,15 @@ impl RationalTime {
     pub fn as_f64(self) -> f64 {
         self.num as f64 / f64::from(self.den)
     }
+
+    /// Pre-multiplied pixel offset at `px_per_sec`. Done in f64 so that
+    /// long timelines (e.g. 36 000 s × 100 px/s = 3.6 M px) keep sub-pixel
+    /// precision before the result is cast down to f32 for Slint — the
+    /// alternative path through Slint's f32 `float` would lose ~½ frame
+    /// at 60 fps once project length crosses ~2 hours.
+    pub fn to_pixels(self, px_per_sec: f64) -> f64 {
+        self.as_f64() * px_per_sec
+    }
 }
 
 impl Default for RationalTime {
@@ -365,8 +374,145 @@ pub enum ModelParseError {
     BadDenominator { field: &'static str },
 
     #[error("unknown enum value `{value}` for {field}")]
-    BadEnum {
-        field: &'static str,
-        value: String,
-    },
+    BadEnum { field: &'static str, value: String },
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::RationalTime;
+
+    // -----------------------------------------------------------------------
+    // RationalTime::to_pixels
+    //
+    // The motivation for `to_pixels` living in Rust (rather than Slint doing
+    // `seconds * zoom` in `float`/f32) is precision: f32 has ~7 decimal digits
+    // of mantissa, which is enough for ~16 M before integer steps exceed 1 px
+    // — i.e. the f32 path corrupts pixel positions on multi-hour timelines at
+    // realistic zoom. These tests pin both the easy-case correctness and the
+    // hard-case precision behaviour that motivates the API.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn to_pixels_unit_second() {
+        assert_eq!(RationalTime::new_raw(1, 1).to_pixels(100.0), 100.0);
+    }
+
+    #[test]
+    fn to_pixels_half_second() {
+        assert_eq!(RationalTime::new_raw(1, 2).to_pixels(100.0), 50.0);
+    }
+
+    #[test]
+    fn to_pixels_frame_timebase_one_second() {
+        // 90_000 / 90_000 == exactly 1 s at the common 90 kHz timebase.
+        assert_eq!(RationalTime::new_raw(90_000, 90_000).to_pixels(50.0), 50.0);
+    }
+
+    #[test]
+    fn to_pixels_zero_is_zero() {
+        assert_eq!(RationalTime::ZERO.to_pixels(50.0), 0.0);
+        // Any zoom against ZERO is zero (incl. weird zooms).
+        assert_eq!(RationalTime::ZERO.to_pixels(0.0), 0.0);
+        assert_eq!(RationalTime::ZERO.to_pixels(1_000_000.0), 0.0);
+    }
+
+    #[test]
+    fn to_pixels_negative_numerator_is_negative() {
+        // RationalTime is signed (i64 numerator), so negative times are legal.
+        assert_eq!(RationalTime::new_raw(-1, 1).to_pixels(100.0), -100.0);
+        assert_eq!(RationalTime::new_raw(-3, 2).to_pixels(40.0), -60.0);
+    }
+
+    #[test]
+    fn to_pixels_handles_numerator_beyond_i32() {
+        // 10 h at 90 kHz timebase => num = 3_240_000_000, which overflows i32
+        // (i32::MAX == 2_147_483_647). Slint's `int` is also i32, which is the
+        // whole reason `to_pixels` is computed in Rust before crossing the FFI.
+        let num: i64 = 90_000_i64 * 10 * 3600;
+        assert!(num > i64::from(i32::MAX), "test premise: num must overflow i32");
+        let t = RationalTime::new_raw(num, 90_000);
+        let px = t.to_pixels(100.0);
+        // 10 h * 3600 s * 100 px = 3_600_000 px, exact at this magnitude in f64.
+        assert_eq!(px, 3_600_000.0);
+    }
+
+    #[test]
+    fn to_pixels_precision_beats_f32_on_long_timelines() {
+        // Regression guard for the f64 → f32 fix.
+        //
+        // 9 h at 90 kHz, minus 127 ticks: num = 2_915_999_873, den = 90_000.
+        // The "−127 ticks" matters: 9 h exactly (num = 2_916_000_000) happens
+        // to be a multiple of 256 and so falls *exactly* on the f32 grid for
+        // values in [2^31, 2^32), making the f32 path accidentally exact. The
+        // offset puts us at the worst-case half-step between two f32 values.
+        //
+        // At px_per_sec = 1000 (typical zoomed-in editing), the f32 path drifts
+        // > 1 px; the f64 path is precise to a few ULPs.
+        let num: i64 = 2_915_999_873;
+        let den: u32 = 90_000;
+        let px_per_sec: f64 = 1000.0;
+        let t = RationalTime::new_raw(num, den);
+
+        let got = t.to_pixels(px_per_sec);
+
+        // Reference computed as an exact rational in i128, scaled to micropixels
+        // — `num * px_int * SCALE / den`. With SCALE = 1_000_000 the unit of
+        // comparison is micropixels (no floats, no rounding upstream of the f64
+        // result being measured).
+        const SCALE: i128 = 1_000_000;
+        let px_int: i128 = 1000;
+        let exact_micropx: i128 = (num as i128) * px_int * SCALE / (den as i128);
+        let got_micropx: i128 = (got * SCALE as f64).round() as i128;
+        let f64_err_micropx = (exact_micropx - got_micropx).abs();
+        assert!(
+            f64_err_micropx < SCALE / 1000, // < 0.001 px (well under any visible drift)
+            "f64 to_pixels drifted by {} micropx (>{} = 0.001 px) — got {}, exact ≈ {}/{}",
+            f64_err_micropx,
+            SCALE / 1000,
+            got,
+            exact_micropx,
+            SCALE
+        );
+
+        // Same computation through the old Slint path: every operand widens to
+        // f32 first, the (num as f32) cast quantizes to the nearest 256-tick
+        // multiple, and the error survives the / and * back into pixel space.
+        let f32_path: f32 = ((num as f32) / (den as f32)) * (px_per_sec as f32);
+        let f32_err_px = (f32_path as f64 - got).abs();
+        // Empirically ~1.411 px on this case; assert strictly > 1 px to fail
+        // loudly if anyone reverts to the f32 path, and < 3 px to fail loudly
+        // if the magnitude of f32 error changes (e.g. someone swaps numbers
+        // without rechecking the grid alignment).
+        assert!(
+            (1.0..3.0).contains(&f32_err_px),
+            "expected f32 path to drift in (1, 3) px vs f64; got {} px",
+            f32_err_px
+        );
+    }
+
+    #[test]
+    fn to_pixels_linear_in_px_per_sec() {
+        // `to_pixels(z1 + z2)` should equal `to_pixels(z1) + to_pixels(z2)`
+        // up to a couple of f64 ULPs. Catches refactors that accidentally
+        // introduce non-linear scaling (e.g. clamping or rounding inside).
+        let t = RationalTime::new_raw(7_654_321, 48_000);
+        let (z1, z2): (f64, f64) = (37.5, 211.25);
+        let combined = t.to_pixels(z1 + z2);
+        let separate = t.to_pixels(z1) + t.to_pixels(z2);
+        // Tolerance: a handful of ULPs at result magnitude (~40 000 px).
+        let tol = combined.abs().max(separate.abs()) * 8.0 * f64::EPSILON;
+        assert!(
+            (combined - separate).abs() <= tol,
+            "linearity violated: to_pixels({}+{}) = {} but sum = {} (tol={})",
+            z1,
+            z2,
+            combined,
+            separate,
+            tol
+        );
+    }
 }

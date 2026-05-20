@@ -31,6 +31,9 @@ export component Toolbar inherits Rectangle {
 
             changed(value) => {
                 TimelineState.zoom = max(1.0, value * value);
+                // Pixel positions on every clip are pre-multiplied by zoom
+                // in Rust (f64) — re-compute them now that zoom changed.
+                TimelineState.geometry-dirty();
             }
         }
     }

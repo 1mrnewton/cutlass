@@ -340,6 +340,15 @@ impl From<&Clip> for ui::Clip {
             volume: c.volume,
             enabled: c.enabled,
             color: color_to_slint(c.color),
+            // Pre-multiplied pixel geometry is filled in by
+            // `recompute_pixel_geometry` after the project is installed
+            // and on every `geometry-dirty` from the UI. Defaulting to
+            // 0.0 means "uncomputed yet" — Slint draws a degenerate clip
+            // at x=0, w=0 for at most one frame before Rust pushes real
+            // values. The viewport-width fallback to `available-width`
+            // ensures the panel still has a sensible scroll extent.
+            start_px: 0.0,
+            duration_px: 0.0,
             selected: false,
         }
     }
@@ -470,6 +479,67 @@ impl TryFrom<&ui::Sequence> for Sequence {
             },
             tracks,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pixel geometry recompute
+//
+// Pulls every `RationalTime` field that drives layout out of the UI DTO,
+// multiplies it by `px_per_sec` in f64, and writes the result back into
+// the matching `*_px` companion fields. Callers fire this from:
+//
+//   * `seed_demo_project` — once after `set_project`, before the first
+//     paint, so clips don't flash at x=0/w=0.
+//   * The `TimelineState.geometry-dirty` callback — every time the user
+//     drags the zoom slider (toolbar.slint).
+//
+// Walks `Track.clips` Models in place via `set_row_data`, which propagates
+// to the live VecModel referenced by `AppState.project`. Slint observes
+// the row mutations and re-binds each `ClipView`'s `info` accordingly.
+//
+// Cost: one `i64`/`u32` parse + one f64 multiply per clip per call. With
+// ~hundreds of clips this is well under a frame even on continuous slider
+// drags; rebuilding/replacing whole tracks would be measurably heavier
+// (model-row notifications fan out per row anyway).
+// ---------------------------------------------------------------------------
+
+/// Re-pushes pre-multiplied pixel positions for every clip and the
+/// sequence extent, given the current pixels-per-second `zoom`.
+///
+/// Reads from `AppState.project` and writes back to the same model rows
+/// plus `TimelineState.sequence-duration-px`. Safe to call at any time;
+/// invalid `RationalTime` strings (shouldn't happen — Rust produced them)
+/// fall back to `RationalTime::ZERO` rather than panicking.
+pub fn recompute_pixel_geometry(app: &crate::ui::AppWindow, px_per_sec: f64) {
+    use slint::ComponentHandle;
+
+    let project = app.global::<crate::ui::AppState>().get_project();
+
+    // Sequence content extent — drives the Flickable's `viewport-width`.
+    let seq_dur = RationalTime::try_from(&project.sequence.duration).unwrap_or(RationalTime::ZERO);
+    app.global::<crate::ui::TimelineState>()
+        .set_sequence_duration_px(seq_dur.to_pixels(px_per_sec) as f32);
+
+    // Per-clip x / width. ModelRc cloned from the DTO points at the same
+    // underlying VecModel installed on AppState, so `set_row_data` here
+    // is observed by every live ClipView.
+    let tracks = project.sequence.tracks;
+    for ti in 0..tracks.row_count() {
+        let Some(track) = tracks.row_data(ti) else {
+            continue;
+        };
+        let clips = track.clips;
+        for ci in 0..clips.row_count() {
+            let Some(mut clip) = clips.row_data(ci) else {
+                continue;
+            };
+            let start = RationalTime::try_from(&clip.start).unwrap_or(RationalTime::ZERO);
+            let dur = RationalTime::try_from(&clip.duration).unwrap_or(RationalTime::ZERO);
+            clip.start_px = start.to_pixels(px_per_sec) as f32;
+            clip.duration_px = dur.to_pixels(px_per_sec) as f32;
+            clips.set_row_data(ci, clip);
+        }
     }
 }
 

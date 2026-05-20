@@ -1,6 +1,7 @@
 // One row in the timeline. Renders the track's clips positioned by their
-// `start-sec` × `TimelineState.zoom`. The track's own height comes from the
-// DTO (`info.height-px`) so video tracks (typically taller, with thumbnails)
+// pre-multiplied `info.start-px` / `info.duration-px` (RationalTime × zoom
+// done in Rust at f64). The track's own height comes from the DTO
+// (`info.height-px`) so video tracks (typically taller, with thumbnails)
 // and audio tracks (shorter) coexist naturally.
 
 import { Track, TrackKind } from "../../models/project.slint";

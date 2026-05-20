@@ -1,9 +1,12 @@
-// A single clip pill on a track. Position and width are derived from the
-// clip's `start-sec` / `duration-sec` (precomputed in Rust from RationalTime)
-// multiplied by the timeline's current px-per-second zoom.
+// A single clip pill on a track. Position and width come from
+// `info.start-px` / `info.duration-px` — pre-multiplied (RationalTime ×
+// zoom) on the Rust side at f64 precision, then cast to Slint `length`
+// here. See `convert::recompute_pixel_geometry` for the producer; the
+// `TimelineState.geometry-dirty` callback drives recomputes on zoom
+// change. Doing the multiplication in f32 inside Slint accumulates
+// visible drift past ~2 hours of timeline at 60 fps, hence this split.
 
 import { Clip } from "../../models/project.slint";
-import { TimelineState } from "./state.slint";
 
 export component ClipView inherits Rectangle {
     in property <Clip> info;
@@ -16,21 +19,12 @@ export component ClipView inherits Rectangle {
     // Vertical inset inside the track row so adjacent rows visually breathe.
     in property <length> row-padding: 4px;
 
-    // RationalTime → seconds. Cached as local properties so Slint memoizes
-    // the (cheap but non-trivial) string parse — they only recompute when
-    // the underlying RT changes, not every time the user drags the zoom
-    // slider.
-    property <float> start-sec: TimelineState.rt-sec(info.start);
-    property <float> duration-sec: TimelineState.rt-sec(info.duration);
-
     // Width floor: clips shorter than 1px still get a visible sliver so the
     // user can grab and re-trim them. Without this, very-trimmed clips
     // vanish at low zoom.
-    property <length> raw-width: duration-sec * TimelineState.zoom * 1px;
-
-    x: start-sec * TimelineState.zoom * 1px;
+    x: info.start-px * 1px;
     y: row-padding;
-    width: max(2px, raw-width);
+    width: max(2px, info.duration-px * 1px);
     height: row-height - 2 * row-padding;
 
     border-radius: 4px;

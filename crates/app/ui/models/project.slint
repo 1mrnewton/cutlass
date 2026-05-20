@@ -66,17 +66,21 @@ export struct MediaSource {
     thumbnail: image,               // lazy-filled by Rust side
 }
 
-// An instance of media on a track. RationalTime fields carry the i64
-// numerator as a string; Slint code that needs seconds calls
-// `TimelineState.rt-sec(...)` (cached per binding so the parse runs once
-// per edit, not every frame).
+// An instance of media on a track. RationalTime fields are the persistent
+// truth (round-tripped to the domain side, exact `num/den` seconds); the
+// `*-px` companions are the **pre-multiplied pixel geometry** (RT × zoom
+// done in f64 on the Rust side — see `convert::recompute_pixel_geometry`
+// and the `TimelineState.geometry-dirty` callback). Doing the multiply in
+// Rust keeps multi-hour timelines from accumulating f32 drift in Slint,
+// which would otherwise cost ~½ frame of position error at 60 fps past
+// the 2-hour mark. Slint just casts these floats to lengths to draw.
 export struct Clip {
     id: string,
     media-id: string,               // -> MediaSource.id ("" for generators)
     track-id: string,               // -> Track.id
     name: string,                   // label on the clip pill
-    start: RationalTime,            // timeline position
-    duration: RationalTime,         // length on timeline
+    start: RationalTime,            // timeline position (exact)
+    duration: RationalTime,         // length on timeline (exact)
     source-in: RationalTime,        // trim into source
     source-out: RationalTime,
     speed: Rational,                // 1/1 normal, -1/1 reverse, 1/2 slowmo
@@ -84,6 +88,11 @@ export struct Clip {
     volume: float,                  // 0..2 (audio, allows +6dB)
     enabled: bool,                  // soft-disable without deleting
     color: color,                   // user-assignable pill color
+
+    // -- pre-multiplied pixel geometry (Rust-owned) ----------------------------
+    // 0.0 until Rust pushes a value (one event-loop pump after `set-project`).
+    start-px: float,                // = start × zoom    (in content pixels)
+    duration-px: float,             // = duration × zoom (in content pixels)
 
     // -- ephemeral UI state ----------------------------------------------------
     selected: bool,

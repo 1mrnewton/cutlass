@@ -32,12 +32,14 @@ export component TimelinePanel inherits Rectangle {
                 track-action := Flickable {
                     vertical-stretch: 1;
                     horizontal-stretch: 1;
-                    viewport-y <=> TimelineState.scroll-y;
 
                     width: 200px;
                     viewport-height: TimelineState.viewport-height;
 
                     interactive: false;
+                    changed viewport-y => {
+                        TimelineState.scroll-y = -self.viewport-y;
+                    }
                     VerticalLayout {
                         spacing: 10px;
                         for tdx in 10: Rectangle {
@@ -60,7 +62,6 @@ export component TimelinePanel inherits Rectangle {
 
                     Ruler {
                         height: TimelineState.ruler-height;
-                        x: tracks.viewport-x;
                     }
 
                     tracks := Flickable {
@@ -68,13 +69,19 @@ export component TimelinePanel inherits Rectangle {
                         vertical-stretch: 1;
                         horizontal-stretch: 1;
 
-                        viewport-y <=> TimelineState.scroll-y;
-                        viewport-x <=> TimelineState.scroll-x;
-
                         viewport-width: TimelineState.viewport-width;
                         viewport-height: TimelineState.viewport-height;
 
                         interactive: false;
+                        // Mirror the Flickable's internal scroll into TimelineState as a
+                        // positive offset. The Flickable's `viewport-x` is <= 0 when scrolled
+                        // right; the rest of the UI reasons about scroll as a positive value.
+                        changed viewport-x => {
+                            TimelineState.scroll-x = -self.viewport-x;
+                        }
+                        changed viewport-y => {
+                            TimelineState.scroll-y = -self.viewport-y;
+                        }
 
                         VerticalLayout {
                             spacing: 10px;
@@ -97,7 +104,7 @@ export component TimelinePanel inherits Rectangle {
                 PlayHead {
                     y: 0;
                     height: parent.height;
-                    x: TimelineState.playhead-x + tracks.viewport-x;
+                    x: TimelineState.playhead-x - TimelineState.scroll-x;
                 }
             }
         }

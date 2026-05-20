@@ -16,16 +16,21 @@ export component Toolbar inherits Rectangle {
             font-weight: 500;
         }
 
+        // Zoom slider with quadratic mapping: slider value [1, 100] -> zoom
+        // [1, 10000] px/sec. Quadratic gives smooth control across the wide
+        // useful range (zoom ~1 for hour-long overview, ~250+ for frame mode,
+        // multi-thousand for per-frame ticks). The minimum > 0 also guards
+        // the ruler picker against div-by-zero / sub-pixel tick spacing.
         Slider {
             width: 200px;
+            minimum: 1;
             maximum: 100;
-            value: TimelineState.zoom;
-            step: TimelineState.zoom-step;
+            value: sqrt(TimelineState.zoom);
+            step: 1;
             orientation: Orientation.horizontal;
 
             changed(value) => {
-                debug(value);
-                TimelineState.zoom = value;
+                TimelineState.zoom = max(1.0, value * value);
             }
         }
     }

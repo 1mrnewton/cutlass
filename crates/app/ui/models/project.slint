@@ -1,103 +1,151 @@
-export enum UiMediaKind { video, audio, image }
-export enum UiTrackKind { video, audio }
+// Slint UI DTOs that mirror `cutlass_models::*` on the Rust side.
+//
+// Conventions
+// -----------
+// * IDs are `string` here, `uuid::Uuid` (via `*Id` newtypes) on the domain side.
+// * Time numerators are `string` because Slint's `int` is i32 — typical project
+//   timebases (e.g. 90_000 ticks/s) overflow well before a feature-length
+//   project ends. The Rust side parses these to `i64`.
+// * Sentinels stand in for `Option<>`: `""` paths/ids/errors map to `None`;
+//   `has-in-point` / `has-out-point` / `has-video` / `has-audio` gate
+//   their companion fields.
+// * Ephemeral UI state (selection, thumbnails, playhead/zoom/scroll) is
+//   carried on the DTO but does **not** appear in the domain types — it is
+//   re-applied from UI session state when constructing the DTO each frame.
 
-export struct UiSchemaVersion {
+export enum MediaKind { video, audio, image }
+export enum TrackKind { video, audio }
+
+export struct SchemaVersion {
     major: int,
     minor: int,
     patch: int,
 }
 
-// Time as exact `num / den` ticks-per-second.
-// INVARIANT: within a Sequence, every UiRationalTime has `den == sequence.timebase`.
-// `num` carries the value, `den` is redundant-but-explicit so values are self-describing
-// when inspected. `den` must be > 0. Slint `int` is i32 — keep timebase coarse enough that
-// `num` won't overflow over project length (90000 gives ~6.6hrs, 48000 gives ~12hrs).
-export struct UiRationalTime {
+// Time as exact `num / den` seconds.
+//
+// INVARIANT: within a Sequence, every RationalTime has `den == sequence.timebase`.
+// `num` is a stringified i64 (parsed on the Rust side); `den` is a stringified
+// u32 — both kept as strings so the slint→rust conversion is the one place
+// where range checks happen.
+export struct RationalTime {
+    num: string,
+    den: string,
+}
+
+// Small rational for fps and clip speed (denominators stay tiny).
+export struct Rational {
     num: int,
     den: int,
 }
 
-// item in the media bin (file on disk + cached probe data)
-export struct UiMediaSource {
+// Item in the media bin (file on disk + cached probe data).
+export struct MediaSource {
     id: string,
-    name: string,                   // display name, defaults to filename
+    name: string,                   // display name; defaults to filename
     path: string,                   // absolute
-    kind: UiMediaKind,
+    kind: MediaKind,
+
     has-video: bool,
-    has-audio: bool,
-    duration: UiRationalTime,
-    width: int,                     // 0 if no video
+    width: int,                     // 0 when no video
     height: int,
-    fps-num: int,
-    fps-den: int,
-    video-codec: string,            // "h264", "hevc", "av1", "" if no video
-    audio-codec: string,            // "aac", "opus", "pcm_s16le", "" if no audio
+    fps: Rational,                  // {1,1} when no video
+    video-codec: string,            // "h264", "hevc", "av1", "" when no video
+
+    has-audio: bool,
+    sample-rate: int,               // 0 when no audio
+    audio-codec: string,            // "aac", "opus", "pcm_s16le", "" when no audio
+
+    duration: RationalTime,
     is-supported: bool,             // engine probed and can decode
-    thumbnail: image,               // lazy-filled by Rust side
     is-loading: bool,               // probe in progress
-    is-missing: bool,               // file moved/deleted, show red ⚠
+    is-missing: bool,               // file moved/deleted, show red warn
     error: string,                  // "" when fine, otherwise human-readable
+
+    // -- ephemeral UI state ----------------------------------------------------
+    thumbnail: image,               // lazy-filled by Rust side
 }
 
-// an instance of media on a track
-export struct UiClip {
+// An instance of media on a track.
+//
+// `*-sec` fields are precise-enough (f32) derivatives of the matching
+// `RationalTime`, populated by the Rust conversion. They exist so Slint can
+// do geometry math (`start-sec * zoom * 1px`) without parsing strings each
+// frame. The `RationalTime`s remain the authoritative form.
+export struct Clip {
     id: string,
-    media-id: string,               // -> UiMediaSource.id ("" for generators/titles)
-    track-id: string,               // -> UiTrack.id (handy for drag logic)
+    media-id: string,               // -> MediaSource.id ("" for generators)
+    track-id: string,               // -> Track.id
     name: string,                   // label on the clip pill
-    start: UiRationalTime,            // timeline position
-    duration: UiRationalTime,         // length on timeline
-    source-in: UiRationalTime,        // trim into source
-    source-out: UiRationalTime,
-    speed: UiRationalTime,            // 1/1=normal, -1/1=reverse, 1/2=slowmo
+    start: RationalTime,            // timeline position
+    duration: RationalTime,         // length on timeline
+    source-in: RationalTime,        // trim into source
+    source-out: RationalTime,
+    speed: Rational,                // 1/1 normal, -1/1 reverse, 1/2 slowmo
     opacity: float,                 // 0..1 (video)
     volume: float,                  // 0..2 (audio, allows +6dB)
     enabled: bool,                  // soft-disable without deleting
-    selected: bool,                 // UI selection state
     color: color,                   // user-assignable pill color
+
+    // -- derived (Rust-populated) ---------------------------------------------
+    start-sec: float,
+    duration-sec: float,
+    source-in-sec: float,
+    source-out-sec: float,
+
+    // -- ephemeral UI state ----------------------------------------------------
+    selected: bool,
 }
 
-// a row in a sequence. INVARIANT: order in `UiSequence.tracks` is display order.
-export struct UiTrack {
+// A row in a sequence. INVARIANT: order in `Sequence.tracks` is display order.
+export struct Track {
     id: string,
     name: string,                   // "V1", "A1", or user-renamed
-    kind: UiTrackKind,
+    kind: TrackKind,
     height-px: int,                 // resizable row
     muted: bool,
     solo: bool,
     locked: bool,                   // edits blocked
     visible: bool,                  // video only — eye toggle
-    clips: [UiClip],
+    clips: [Clip],
 }
 
-// the project's timeline
-export struct UiSequence {
+// The project's timeline.
+export struct Sequence {
     id: string,
     name: string,
     width: int,                     // canvas px
     height: int,
-    fps-num: int,                   // 30000/1001 for 29.97
-    fps-den: int,
+    fps: Rational,                  // 30000/1001 for 29.97
     sample-rate: int,               // audio Hz
-    timebase: int,                  // canonical ticks-per-sec; den of all UiRationalTimes in this seq
-    duration: UiRationalTime,         // total length, frame-quantized on commit
-    playhead: UiRationalTime,
+    timebase: int,                  // canonical ticks-per-sec; den of all RationalTimes in this seq
+    duration: RationalTime,         // total length, frame-quantized on commit
+
     has-in-point: bool,
-    in-point: UiRationalTime,         // export range start
+    in-point: RationalTime,         // export range start
     has-out-point: bool,
-    out-point: UiRationalTime,        // export range end
-    zoom: float,                    // px-per-second, UI state
-    scroll: UiRationalTime,           // leftmost visible time
-    tracks: [UiTrack],
+    out-point: RationalTime,        // export range end
+
+    tracks: [Track],
+
+    // -- derived (Rust-populated) ---------------------------------------------
+    duration-sec: float,
+    in-point-sec: float,
+    out-point-sec: float,
+
+    // -- ephemeral UI state ----------------------------------------------------
+    playhead: RationalTime,
+    zoom: float,                    // px-per-second
+    scroll: RationalTime,           // leftmost visible time
 }
 
-// top-level "save file" view. one project = one .cutlass file
-export struct UiProject {
+// Top-level "save file" view. One project = one .cutlass file.
+export struct Project {
     id: string,
     name: string,
     file-path: string,              // "" if unsaved
-    schema: UiSchemaVersion,
-    sequence: UiSequence,
-    media-bin: [UiMediaSource],
+    schema: SchemaVersion,
+    sequence: Sequence,
+    media-bin: [MediaSource],
     is-dirty: bool,                 // for "● Untitled" title bar
 }

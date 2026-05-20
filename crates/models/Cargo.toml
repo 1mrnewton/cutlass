@@ -5,3 +5,5 @@ edition.workspace = true
 description = "Cutlass domain models (project, timeline, media, edit commands)"
 
 [dependencies]
+uuid.workspace = true
+thiserror.workspace = true

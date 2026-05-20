@@ -1,16 +1,105 @@
-import { UiSequence } from "../../models/project.slint";
+import { AppState } from "../../models/app_state.slint";
 
 export global TimelineState {
     in-out property <length> ruler-offset: 10px;
     in-out property <int> zoom-step: 1;
+    // Pixels per second. Drives ruler scale and clip geometry.
     in-out property <float> zoom: 50.0;
-    in-out property <length> scroll-y: 0px;
+
+    // Source frame rate. Default is a reasonable placeholder; in production this
+    // is driven by the active sequence (Sequence.fps). Used to
+    // decide when the ruler switches into per-frame labelling, and to format
+    // the SMPTE-style :FF segment.
+    in-out property <float> fps: 30.0;
+
+    // Positive scroll offset (how far the user has scrolled into the timeline,
+    // in content pixels). Sourced from the tracks Flickable via a `changed
+    // viewport-x` callback that negates Slint's `viewport-x` (which is <= 0
+    // when scrolled right). Read by ruler/playhead/overlays.
     in-out property <length> scroll-x: 0px;
+    in-out property <length> scroll-y: 0px;
     in-out property <length> ruler-height: 24px;
+
+    // Timeline-space position in content coordinates: [0, viewport-width].
+    // Render-time screen x is `playhead-x - scroll-x`.
     in-out property <length> playhead-x: 160px;
     in-out property <length> playhead-head-width: 12px;
     in-out property <length> playhead-width: 1.5px;
 
-    in-out property <length> viewport-width: 10300px;
-    in-out property <length> viewport-height: 400px;
+    // How much "working space" to add past the end of the sequence so users
+    // can scroll/drag clips past the last bit of media without bumping into
+    // a wall. 400px is roughly one screen at default zoom.
+    in property <length> tail-padding: 400px;
+
+    // Scrollable content width derived from the active sequence's duration
+    // and the current zoom. When zoom changes the viewport grows/shrinks
+    // immediately (no Rust round trip needed) because both are properties.
+    out property <length> viewport-width:
+        max(AppState.project.sequence.duration-sec * zoom * 1px + tail-padding, 0px);
+
+    // ---- Adaptive ruler scale ("nice numbers") --------------------------------
+    //
+    // We pick the smallest interval such that the on-screen distance between
+    // majors is at least `target-major-px`. There are two pickers — one in
+    // seconds (for low/medium zoom) and one in frames (for high zoom). The
+    // ruler switches to frame mode when individual frames are wide enough on
+    // screen that frame-accurate labelling is meaningful.
+
+    out property <length> target-major-px: 100px;
+
+    // Derived frame metrics.
+    out property <float> px-per-frame: zoom / fps;
+    out property <int> fps-int: floor(fps + 0.5);
+
+    // Switch into per-frame ruler mode when each frame occupies enough screen
+    // space. ~8 px/frame matches CapCut/Editframe behaviour where frame markers
+    // appear well before each frame is "comfortable" but after the time ruler
+    // would have to start showing sub-second decimals.
+    out property <length> frame-mode-threshold: 8px;
+    out property <bool> frame-mode: px-per-frame * 1px >= frame-mode-threshold;
+
+    // Time-mode picker: seconds per major. Range covers sub-second zoom
+    // through multi-hour overview ticks.
+    out property <float> sec-per-major:
+        zoom *     0.1 * 1px >= target-major-px ?     0.1 :
+        zoom *     0.2 * 1px >= target-major-px ?     0.2 :
+        zoom *     0.5 * 1px >= target-major-px ?     0.5 :
+        zoom *     1.0 * 1px >= target-major-px ?     1.0 :
+        zoom *     2.0 * 1px >= target-major-px ?     2.0 :
+        zoom *     5.0 * 1px >= target-major-px ?     5.0 :
+        zoom *    10.0 * 1px >= target-major-px ?    10.0 :
+        zoom *    30.0 * 1px >= target-major-px ?    30.0 :
+        zoom *    60.0 * 1px >= target-major-px ?    60.0 :
+        zoom *   300.0 * 1px >= target-major-px ?   300.0 :
+        zoom *   600.0 * 1px >= target-major-px ?   600.0 :
+        zoom *  1800.0 * 1px >= target-major-px ?  1800.0 :
+        zoom *  3600.0 * 1px >= target-major-px ?  3600.0 :
+        zoom *  7200.0 * 1px >= target-major-px ?  7200.0 :
+        zoom * 21600.0 * 1px >= target-major-px ? 21600.0 :
+        86400.0;
+
+    // Frame-mode picker: frames per major. Discrete nice frame counts so that
+    // minor ticks always land on integer frame boundaries.
+    out property <int> frames-per-major:
+        px-per-frame *   1 * 1px >= target-major-px ?   1 :
+        px-per-frame *   2 * 1px >= target-major-px ?   2 :
+        px-per-frame *   5 * 1px >= target-major-px ?   5 :
+        px-per-frame *  10 * 1px >= target-major-px ?  10 :
+        px-per-frame *  15 * 1px >= target-major-px ?  15 :
+        px-per-frame *  30 * 1px >= target-major-px ?  30 :
+        px-per-frame *  60 * 1px >= target-major-px ?  60 :
+        px-per-frame * 120 * 1px >= target-major-px ? 120 :
+        300;
+
+    // Unified spacings. major-every adapts in deep frame mode so that we don't
+    // generate sub-frame minor ticks (would be visual noise).
+    out property <length> major-spacing:
+        frame-mode
+            ? frames-per-major * px-per-frame * 1px
+            : sec-per-major * zoom * 1px;
+    out property <int> major-every:
+        frame-mode && frames-per-major <= 1 ? 1
+        : frame-mode && frames-per-major <= 2 ? 2
+        : 5;
+    out property <length> minor-spacing: major-spacing / major-every;
 }

@@ -19,3 +19,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 wgpu = "29.0.3"
 pollster = "0.4"
 thiserror = "2"
+uuid = { version = "1", features = ["v4"] }

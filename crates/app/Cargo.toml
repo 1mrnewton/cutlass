@@ -8,10 +8,12 @@ build = "build.rs"
 
 [dependencies]
 decoder = { path = "../decoder" }
+models = { path = "../models" }
 renderer = { path = "../renderer" }
 slint = { version = "1.16", features = ["unstable-wgpu-28", "renderer-femtovg-wgpu"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
 
 [build-dependencies]
 slint-build = "1.16"

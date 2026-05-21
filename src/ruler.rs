@@ -50,6 +50,26 @@ use crate::timecode::format_timecode;
 /// projected pixel width is `>=` this value.
 const MIN_MAJOR_PX: f32 = 80.0;
 
+/// Horizontal padding (px) added to each side of the visible frame
+/// range so labels can clip gracefully across viewport edges.
+///
+/// Why this exists: a major tick's *line* is 1 px wide, but its *label*
+/// extends ~80 px to the right of the line. If we strictly clipped the
+/// frame range at the viewport edge, a major that scrolled past the
+/// left edge would be dropped from the tick model and its label would
+/// vanish *while still mostly inside the viewport* — visible "popping".
+///
+/// Instead, we emit a wider range and rely on the parent
+/// `Rectangle { clip: true }` to clip the rendered text at the actual
+/// viewport edge. The label fades off-screen one pixel at a time
+/// (same as Premiere / DaVinci Resolve / FCP behaviour).
+///
+/// `120 px` is comfortably above the widest plausible major label
+/// (`"00:00:00:00"` in caption-size mono is ~75 px) including the
+/// 3 px tick→label offset, with headroom for future longer labels
+/// (e.g. drop-frame variants or sub-frame indicators).
+const LABEL_PAD_PX: f32 = 120.0;
+
 /// Safety cap on ticks emitted per call. At sane zoom levels we emit
 /// ~20 majors + ~80 minors; the cap exists so a pathological state
 /// (zoom collapsing to ~0, or a stale invocation mid-resize) can't
@@ -87,8 +107,16 @@ pub fn compute_visible_ticks(
     // Convert pixel range to frame range. We move into integer frame
     // indices here and stay in integers through tick layout — this is
     // why an NLE's ruler doesn't drift across hours of timeline.
-    let first_frame = (left_px / zoom).floor() as i64;
-    let last_frame = (right_px / zoom).ceil() as i64;
+    //
+    // `pad_frames` extends the range by `LABEL_PAD_PX` on each side
+    // so a major tick whose *line* has scrolled just past the edge
+    // still gets emitted (its *label* would otherwise pop out while
+    // most of its glyphs are still inside the viewport — see the doc
+    // on `LABEL_PAD_PX`). The parent clip Rectangle handles the actual
+    // visual clipping; we just need to keep the right ticks in the model.
+    let pad_frames = (LABEL_PAD_PX / zoom).ceil() as i64;
+    let first_frame = (left_px / zoom).floor() as i64 - pad_frames;
+    let last_frame = (right_px / zoom).ceil() as i64 + pad_frames;
 
     let (major, minor) = pick_intervals(zoom, fps_num, fps_den);
 
@@ -316,23 +344,75 @@ mod tests {
 
     #[test]
     fn ticks_respect_scroll_offset() {
-        // Scroll right by 100 px (scroll_x == -100). Zoom = 10 px/frame.
-        // Major every 10 frames = 100 px. First major >= first_frame=10
-        // is frame 10 → content_x = 100, viewport_x = 100 + (-100) = 0.
+        // Scroll right by 100 px (scroll_x == -100). Zoom = 10 px/frame,
+        // major every 10 frames = 100 px.
+        //
+        // With label padding, frame 0 ("00:00:00:00") is still emitted
+        // — at viewport_x = -100 — so its label can clip gracefully
+        // (in practice it'd be fully off-screen here, but the model
+        // doesn't know the label width; the parent clip handles it).
+        // The first major *inside* the viewport (x >= 0) is frame 10
+        // at viewport_x = 100 + (-100) = 0, labelled "00:00:00:10".
         let ticks = compute_visible_ticks(-100.0, 1000.0, 10.0, 24, 1, false);
         let m = majors(&ticks);
-        assert_eq!(m[0].0, 0.0);
-        assert_eq!(m[0].1, "00:00:00:10");
+        let first_inside = m.iter().find(|(x, _)| *x >= 0.0).unwrap();
+        assert_eq!(first_inside.0, 0.0);
+        assert_eq!(first_inside.1, "00:00:00:10");
     }
 
     #[test]
-    fn ticks_skip_off_screen_to_the_right() {
-        // viewport_w=100 px, zoom=10 px/frame: range covers 10 frames.
-        // No tick should sit to the right of x=100.
+    fn ticks_stay_within_label_pad_of_viewport() {
+        // viewport_w=100 px, zoom=10 px/frame: visible range is 10
+        // frames, but we also emit ticks within `LABEL_PAD_PX` of each
+        // edge so a major label whose anchor scrolled just past the
+        // edge can still clip gracefully into view (see
+        // `LABEL_PAD_PX` doc).
         let ticks = compute_visible_ticks(0.0, 100.0, 10.0, 24, 1, false);
         for t in &ticks {
-            assert!(t.x <= 100.0, "tick at {} is outside viewport", t.x);
+            assert!(
+                t.x >= -LABEL_PAD_PX - 1.0 && t.x <= 100.0 + LABEL_PAD_PX + 1.0,
+                "tick at {} is too far outside viewport (pad = {})",
+                t.x,
+                LABEL_PAD_PX
+            );
         }
+    }
+
+    #[test]
+    fn major_label_survives_left_edge_until_fully_off_screen() {
+        // Regression test for the "label pops" glitch:
+        //
+        // At zoom 10, the major interval is 10 frames = 100 px. As we
+        // scroll right, the major at frame 0 (label "00:00:00:00")
+        // moves left in viewport-local space. Its tick line is 1 px
+        // wide, but its label is ~75 px wide, so the label should
+        // remain in the tick model until the tick has scrolled at
+        // least ~`LABEL_PAD_PX` past the edge.
+        //
+        // Pre-fix: any scroll_x < 0 (i.e. user has scrolled even 1 px
+        // to the right) dropped frame 0's label from the model because
+        // first_frame became >= 1.
+        let zoom = 10.0;
+
+        // Scrolled by 50 px — frame 0's tick is at viewport x = -50,
+        // label extends from -47 to ~+28, so most of "00" is still
+        // visible. We expect frame 0's label to STILL be in the model.
+        let ticks = compute_visible_ticks(-50.0, 1000.0, zoom, 24, 1, false);
+        let has_zero = ticks.iter().any(|t| t.is_major && t.label == "00:00:00:00");
+        assert!(
+            has_zero,
+            "frame 0 label dropped from model while still partly visible"
+        );
+
+        // Scrolled way past — frame 0 is fully off-screen by the
+        // padding distance; label is fine to drop now.
+        let far = -(LABEL_PAD_PX as f64 + 50.0) as f32;
+        let ticks = compute_visible_ticks(far, 1000.0, zoom, 24, 1, false);
+        let has_zero = ticks.iter().any(|t| t.is_major && t.label == "00:00:00:00");
+        assert!(
+            !has_zero,
+            "frame 0 label retained after it should have left the padded range"
+        );
     }
 
     #[test]

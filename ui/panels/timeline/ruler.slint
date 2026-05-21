@@ -78,9 +78,7 @@ export component Ruler inherits Rectangle {
         y: parent.height - self.height;
         width: AppStore.theme.metrics.stroke.hairline;
         height: tick.is-major ? 12px : 5px;
-        background: tick.is-major
-            ? AppStore.theme.text.secondary
-            : AppStore.theme.text.muted;
+        background: tick.is-major ? AppStore.theme.text.secondary : AppStore.theme.text.muted;
     }
 
     // Labels. We iterate over the same model and rely on `tick.label`

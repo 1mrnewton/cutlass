@@ -31,6 +31,33 @@ export component TimelinePanel inherits PanelBase {
     private property <length> track-height: AppStore.theme.track-lane.height;
     property <Sequence> sequence: EditorStore.project.sequence;
 
+    // Available height for the scrolling rows (everything below toolbar+ruler).
+    // Both flickables below share this — it's the row's own `height`.
+    private property <length> row-height: root.height - tb.height - rl.height;
+
+    // Total intrinsic height of the track content. The `+1` mirrors the
+    // `ForceHeadSpace` row at the top of both flickables so heads and lanes
+    // stay vertically aligned.
+    private property <length> content-height: TimelineLib.calc-viewport-height(
+        sequence.tracks.length + 1,
+        track-height,
+        track-spacing,
+    );
+
+    // The Flickable's clamp range is `[row-height - content-height, 0]` (or
+    // `[0, 0]` when content fits). Flickable re-clamps `viewport-y` on user
+    // interaction but NOT on container resize. Without the `changed` hook
+    // below, dragging the splitter taller while scrolled to the bottom
+    // leaves a stale `scroll-y` past the new lower bound, which renders as
+    // empty space below the last track until the next scroll event snaps
+    // it back. Watching the bound (not just `row-height`) also covers
+    // future track-count / track-height / spacing changes.
+    private property <length> min-scroll-y: min(0px, row-height - content-height);
+
+    changed min-scroll-y => {
+        TimelineState.scroll-y = clamp(TimelineState.scroll-y, min-scroll-y, 0px);
+    }
+
     VerticalLayout {
 
         spacing: AppStore.theme.metrics.spacing.none;
@@ -48,7 +75,7 @@ export component TimelinePanel inherits PanelBase {
         // leaving no scroll range. Pin the row to the leftover space.
         HorizontalLayout {
 
-            height: root.height - tb.height - rl.height;
+            height: row-height;
             spacing: 60px;
             Rectangle {
                 height: 100%;
@@ -57,11 +84,7 @@ export component TimelinePanel inherits PanelBase {
                 Flickable {
                     viewport-y <=> TimelineState.scroll-y;
 
-                    viewport-height: max(self.height, TimelineLib.calc-viewport-height(
-                        sequence.tracks.length + 1 /* +1 for the head space */,
-                        track-height,
-                        track-spacing,
-                    ));
+                    viewport-height: max(self.height, content-height);
 
                     VerticalLayout {
                         vertical-stretch: 1;
@@ -82,11 +105,7 @@ export component TimelinePanel inherits PanelBase {
 
             Flickable {
                 viewport-width: 1000000px;
-                viewport-height: max(self.height, TimelineLib.calc-viewport-height(
-                    sequence.tracks.length + 1 /* +1 for the head space */,
-                    track-height,
-                    track-spacing,
-                ));
+                viewport-height: max(self.height, content-height);
 
                 viewport-y <=> TimelineState.scroll-y;
                 viewport-x <=> TimelineState.scroll-x;

@@ -10,7 +10,10 @@ import { Toolbar } from "toolbar.slint";
 import { TrackLane } from "track-lane.slint";
 import { TrackHead } from "track-head.slint";
 import { Ruler } from "ruler.slint";
+import { ClipView } from "clip.slint";
 import { TimelineState } from "state.slint";
+import { Sequence } from "../../models/index.slint";
+import { EditorStore } from "../../store/index.slint";
 
 
 
@@ -22,8 +25,9 @@ import { TimelineState } from "state.slint";
 }
 
 export component TimelinePanel inherits PanelBase {
-    private property <int> track-count: 10;
     private property <length> track-spacing: AppStore.theme.metrics.spacing.sm;
+    property <Sequence> sequence: EditorStore.project.sequence;
+
     VerticalLayout {
 
         spacing: AppStore.theme.metrics.spacing.none;
@@ -50,7 +54,7 @@ export component TimelinePanel inherits PanelBase {
 
                     ForceHeadSpace { }
 
-                    for i in track-count: TrackHead { }
+                    for t in sequence.tracks: TrackHead { }
                 }
 
                 VerticalDivider {
@@ -72,13 +76,9 @@ export component TimelinePanel inherits PanelBase {
 
                     ForceHeadSpace { }
 
-                    for _ in track-count: TrackLane {
-                        for c in 10: Rectangle {
-
-                            x: c * 220px;
-                            height: 58px;
-                            width: 200px;
-                            background: #373737;
+                    for t in sequence.tracks: TrackLane {
+                        for c in t.clips: ClipView {
+                            model: c;
                         }
                     }
                 }

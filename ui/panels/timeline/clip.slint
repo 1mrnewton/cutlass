@@ -1,0 +1,19 @@
+import { AppStore } from "../../store/index.slint";
+import { Clip } from "../../models/index.slint";
+import { TimelineLib } from "../../lib/timeline-lib.slint";
+
+// View for a single Clip on a TrackLane. Positions itself within the lane
+// based on the model's `timeline-start` and effective timeline width
+// (see `TimelineLib.clip-timeline-width`).
+//
+// Note: input is named `model` (not `clip`) because `clip` is a built-in
+// boolean property on Slint visual elements.
+export component ClipView inherits Rectangle {
+    in property <Clip> model;
+
+    x: TimelineLib.rational-to-length(model.timeline-start);
+    width: TimelineLib.clip-timeline-width(model);
+    height: AppStore.theme.track-lane.clip.height;
+    background: AppStore.theme.track-lane.clip.background;
+    border-radius: AppStore.theme.track-lane.clip.radius;
+}

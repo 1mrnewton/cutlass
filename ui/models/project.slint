@@ -1,18 +1,62 @@
-export struct RationalTime {
+// Time model is OpenTimelineIO-aligned:
+//   RationalTime { value, rate } means `value` ticks at `rate` ticks-per-second.
+//   e.g. { value: 24, rate: { num: 24, den: 1 } } == 1 second.
+//
+// `rate` is itself rational so we can represent NTSC rates exactly
+// (e.g. 23.976 fps == 24000/1001) without float drift.
+
+export struct Rational {
     num: int,
     den: int,
 }
 
-export struct Fps {
-    num: int,
-    den: int,
+export struct RationalTime {
+    value: int,
+    rate: Rational,
+}
+
+// OTIO-style range: start time + duration (exclusive end == start + duration).
+export struct TimeRange {
+    start: RationalTime,
+    duration: RationalTime,
 }
 
 export struct Clip {
     id: string,
     name: string,
-    start: RationalTime,
-    duration: RationalTime,
+    // Where the clip plays on the sequence timeline.
+    //
+    // Advances under head-trim (the visible content starts later on the
+    // sequence). Unchanged under tail-trim.
+    timeline-start: RationalTime,
+    // Window into the source media (in/out points):
+    //   .start    = source in-point (offset into the underlying media)
+    //   .duration = how much of the source plays
+    //
+    // This is the SINGLE source of truth for clip extent. Effective timeline
+    // duration == source-range.duration under 1:1 playback (no time-remap),
+    // so the clip occupies the timeline interval
+    //   [timeline-start, timeline-start + source-range.duration).
+    //
+    // Trim semantics — both edges are expressed by mutating this field; there
+    // is intentionally no second "timeline-duration" to keep in sync.
+    //
+    //   head-trim by Δ (drag left edge right by Δ):
+    //     timeline-start         += Δ
+    //     source-range.start     += Δ
+    //     source-range.duration  -= Δ
+    //
+    //   tail-trim by Δ (drag right edge left by Δ):
+    //     source-range.duration  -= Δ
+    //     (timeline-start and source-range.start unchanged)
+    //
+    // Why no separate `timeline-duration`: under cut/trim the two would
+    // always be equal, so storing both invites silent drift. The only thing
+    // that breaks the invariant is speed change / time-remap, which should
+    // be modelled as an EXPLICIT warp factor or curve — not as two durations
+    // whose ratio implicitly encodes speed (OTIO does the same: `LinearTimeWarp`
+    // / `FreezeFrame` effects on top of a single `source_range`).
+    source-range: TimeRange,
 }
 
 export struct Track {
@@ -20,17 +64,17 @@ export struct Track {
     name: string,
     clips: [Clip],
 }
+
 export struct Sequence {
     id: string,
     name: string,
-    fps: Fps,
+    fps: Rational,
     tracks: [Track],
 }
-
-
 
 export struct Project {
     id: string,
     title: string,
-    sequence: Sequence, // project can have ONLY one sequence at this stage. Future may allow multiple sequences.
+    // A project has exactly one sequence at this stage. Future may allow multiple.
+    sequence: Sequence,
 }

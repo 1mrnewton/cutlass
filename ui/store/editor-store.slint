@@ -1,13 +1,14 @@
-import { Project } from "../models/index.slint";
+import { Project, Rational } from "../models/index.slint";
 
 export global EditorStore {
+    private property <Rational> fps: { num: 24, den: 1 };
     out property <Project> project: {
         id: "1",
         title: "Project 1",
         sequence: {
             id: "1",
             name: "Sequence 1",
-            fps: { num: 24, den: 1 },
+            fps: self.fps,
             tracks: [
                 {
                     id: "1",
@@ -16,8 +17,11 @@ export global EditorStore {
                         {
                             id: "1",
                             name: "Clip 1",
-                            start: { num: 0, den: 1 },
-                            duration: { num: 1, den: 1 },
+                            timeline-start: { value: 0, rate: self.fps },
+                            source-range: {
+                                start: { value: 10, rate: self.fps },
+                                duration: { value: 100, rate: self.fps },
+                            },
                         },
                     ],
                 },

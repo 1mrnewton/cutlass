@@ -1,0 +1,31 @@
+import { RationalTime, Clip } from "../models/index.slint";
+
+export global TimelineLib {
+
+    // OTIO-style: seconds = value / rate = value * rate.den / rate.num
+    public pure function to-seconds(rt: RationalTime) -> float {
+        return rt.value * rt.rate.den / rt.rate.num;
+    }
+
+    // Effective duration of a clip on the sequence timeline.
+    // Today this is just the source-range duration (1:1 playback).
+    // When time-remap lands, divide by the warp factor here — call sites
+    // do not change.
+    public pure function clip-timeline-duration(c: Clip) -> RationalTime {
+        return c.source-range.duration;
+    }
+
+    // Placeholder timeline projection: 1 tick == 1 logical pixel.
+    // Real implementation will multiply seconds (or frames) by a zoom factor
+    // owned by timeline view state, not by the time model.
+    public pure function rational-to-length(rt: RationalTime) -> length {
+        return rt.value * 1px;
+    }
+
+    // Convenience composite for clip rendering. Kept in lock-step with
+    // `clip-timeline-duration` so the call site never has to compose two
+    // helpers (and so the time-remap change later only touches this file).
+    public pure function clip-timeline-width(c: Clip) -> length {
+        return c.source-range.duration.value * 1px;
+    }
+}

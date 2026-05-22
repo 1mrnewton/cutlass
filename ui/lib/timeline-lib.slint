@@ -21,6 +21,11 @@ export global TimelineLib {
     // models procedurally.
     pure callback sequence-duration(sequence: Sequence) -> RationalTime;
 
+    // SMPTE timecode for transport / preview readouts. Implemented in
+    // Rust (`src/timecode.rs`) so preview, ruler, inspector, and export
+    // share one formatter (including drop-frame NTSC).
+    pure callback format-timecode(int, int, int, bool) -> string;
+
     // Timeline projection: 1 tick == `zoom` logical pixels.
     // Zoom is owned by `TimelineStore.zoom` rather than the time model, so
     // the same clip can render at any scale without mutating its
@@ -41,7 +46,14 @@ export global TimelineLib {
         return content_height;
     }
 
-    public pure function calc-viewport-width() -> length {
-        return 1000px;
+    // Horizontal scroll extent for the track-lane Flickable: sequence
+    // duration projected at the current zoom (1 tick == `zoom` px), plus
+    // trailing edit headroom so the last clip isn't flush against the
+    // scroll edge.
+    public pure function calc-viewport-width(sequence: Sequence, zoom: float) -> length {
+        let duration = TimelineLib.sequence-duration(sequence);
+        let pad-seconds = 5.0;
+        let pad-ticks = pad-seconds * sequence.fps.num / sequence.fps.den;
+        return (duration.value + pad-ticks) * zoom * 1px;
     }
 }

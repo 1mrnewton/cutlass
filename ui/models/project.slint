@@ -5,22 +5,26 @@
 // `rate` is itself rational so we can represent NTSC rates exactly
 // (e.g. 23.976 fps == 24000/1001) without float drift.
 
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
 export struct Rational {
     num: int,
     den: int,
 }
 
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
 export struct RationalTime {
     value: int,
     rate: Rational,
 }
 
 // OTIO-style range: start time + duration (exclusive end == start + duration).
-export struct TimeRange {
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+    export struct TimeRange {
     start: RationalTime,
     duration: RationalTime,
 }
 
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
 export struct Clip {
     id: string,
     name: string,
@@ -59,12 +63,14 @@ export struct Clip {
     source-range: TimeRange,
 }
 
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
 export struct Track {
     id: string,
     name: string,
     clips: [Clip],
 }
 
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
 export struct Sequence {
     id: string,
     name: string,
@@ -83,6 +89,7 @@ export struct Sequence {
     height: length,
 }
 
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
 export struct Project {
     id: string,
     title: string,

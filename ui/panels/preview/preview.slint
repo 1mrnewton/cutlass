@@ -1,8 +1,14 @@
 import { PanelBase, PanelHeader } from "../../components/index.slint";
 import { AppStore } from "../../store/index.slint";
+import { EditorStore } from "../../store/index.slint";
+import { TimelineLib } from "../../lib/timeline-lib.slint";
+import { RationalTime } from "../../models/index.slint";
 import { AppState } from "../../state.slint";
 
 export component PreviewPanel inherits PanelBase {
+    private property <RationalTime> sequence-duration:
+        TimelineLib.sequence-duration(EditorStore.project.sequence);
+
     VerticalLayout {
         PanelHeader {
             title: "Preview";
@@ -39,7 +45,12 @@ export component PreviewPanel inherits PanelBase {
                         spacing: AppStore.theme.metrics.spacing.sm;
 
                         Text {
-                            text: "00:00:00:00";
+                            text: TimelineLib.format-timecode(
+                                0,
+                                EditorStore.project.sequence.fps.num,
+                                EditorStore.project.sequence.fps.den,
+                                EditorStore.project.sequence.drop-frame,
+                            );
 
                             horizontal-alignment: TextHorizontalAlignment.center;
                             vertical-alignment: TextVerticalAlignment.center;
@@ -56,7 +67,12 @@ export component PreviewPanel inherits PanelBase {
                         }
 
                         Text {
-                            text: "00:00:00:00";
+                            text: TimelineLib.format-timecode(
+                                root.sequence-duration.value,
+                                root.sequence-duration.rate.num,
+                                root.sequence-duration.rate.den,
+                                EditorStore.project.sequence.drop-frame,
+                            );
 
                             horizontal-alignment: TextHorizontalAlignment.center;
                             vertical-alignment: TextVerticalAlignment.center;

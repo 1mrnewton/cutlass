@@ -6,7 +6,8 @@ build = "build.rs"
 
 [dependencies]
 
-slint = { version = "1.16", features = ["unstable-winit-030","unstable-wgpu-28", "renderer-femtovg-wgpu"] }
+slint = { version = "1.16", features = ["unstable-winit-030","unstable-wgpu-28", "renderer-femtovg-wgpu", "serde"] }
+serde = { version = "1", features = ["derive"] }
 
 
 [build-dependencies]

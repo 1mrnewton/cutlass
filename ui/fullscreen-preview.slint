@@ -6,9 +6,13 @@
 import { AppState } from "state.slint";
 import { AppStore } from "store/index.slint";
 import { EditorStore } from "store/index.slint";
+import { TimelineLib } from "lib/timeline-lib.slint";
+import { RationalTime } from "models/index.slint";
 import { Slider } from "std-widgets.slint";
 
 export component FullscreenPreview inherits Rectangle {
+    private property <RationalTime> sequence-duration:
+        TimelineLib.sequence-duration(EditorStore.project.sequence);
     private property <float> sequence-aspect-ratio:
         EditorStore.project.sequence.width / EditorStore.project.sequence.height;
     private property <bool> controls-visible: true;
@@ -132,7 +136,12 @@ export component FullscreenPreview inherits Rectangle {
         }
 
         Text {
-            text: "00:00:00:00";
+            text: TimelineLib.format-timecode(
+                0,
+                EditorStore.project.sequence.fps.num,
+                EditorStore.project.sequence.fps.den,
+                EditorStore.project.sequence.drop-frame,
+            );
             font-size: 12px;
             font-weight: 600;
             color: #ffffff;
@@ -160,7 +169,12 @@ export component FullscreenPreview inherits Rectangle {
         }
 
         Text {
-            text: "00:00:00:00";
+            text: TimelineLib.format-timecode(
+                root.sequence-duration.value,
+                root.sequence-duration.rate.num,
+                root.sequence-duration.rate.den,
+                EditorStore.project.sequence.drop-frame,
+            );
             font-size: 12px;
             font-weight: 600;
             color: #ffffff;

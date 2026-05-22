@@ -42,6 +42,10 @@ export component TimelinePanel inherits PanelBase {
         track-height,
         track-spacing,
     );
+    private property <length> content-width: TimelineLib.calc-viewport-width(
+        sequence,
+        TimelineStore.zoom,
+    );
 
     // The Flickable's clamp range is `[row-height - content-height, 0]` (or
     // `[0, 0]` when content fits). Flickable re-clamps `viewport-y` on user
@@ -119,7 +123,7 @@ export component TimelinePanel inherits PanelBase {
             }
 
             Flickable {
-                viewport-width: 1000000px;
+                viewport-width: max(content-width, self.width);
                 viewport-height: max(self.height, content-height);
 
                 viewport-y <=> TimelineViewState.scroll-y;
@@ -135,7 +139,7 @@ export component TimelinePanel inherits PanelBase {
                     for t in sequence.tracks: TrackLane {
                         for c in t.clips: ClipView {
                             model: c;
-                            height: parent.height - 2px;
+                            height: parent.height - 5px;
                             zoom: TimelineStore.zoom;
                         }
                     }

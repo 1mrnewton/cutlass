@@ -1056,6 +1056,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 name = "cutlass-ui-rewrite"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "slint",
  "slint-build",
 ]
@@ -2100,6 +2101,7 @@ dependencies = [
  "rgb",
  "scoped-tls-hkt",
  "scopeguard",
+ "serde",
  "skrifa",
  "slab",
  "strum",

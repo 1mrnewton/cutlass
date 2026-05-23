@@ -1,6 +1,6 @@
 import { AppStore, EditorStore } from "../../store/index.slint";
-import { Clip } from "../../models/index.slint";
-import { TimelineLib } from "../../lib/timeline-lib.slint";
+import { Clip, TrackKind } from "../../models/index.slint";
+import { TimelineLib, DragBackend, SnapResult, ResolvedTarget } from "../../lib/index.slint";
 import { TimelineStore } from "../../store/timeline-store.slint";
 import { TimelineViewState } from "state.slint";
 
@@ -11,97 +11,194 @@ import { TimelineViewState } from "state.slint";
 //
 // IMPORTANT: this view never mutates the clip model. The drag updates
 // only ephemeral view state; on release we dispatch ONE `move-clip`
-// command and clear the drag fields. Rust applies the command,
-// patches the Slint projection row in place, and the clip re-renders
-// at its new committed position with no further work here.
+// command (which Rust converts into the appropriate intra-lane,
+// cross-lane, or new-lane edit) and clear the drag fields. Rust
+// applies the command, patches the Slint projection in place, and
+// the clip re-renders at its new committed position with no further
+// work here.
 //
 // Note: input is named `model` (not `clip`) because `clip` is a
 // built-in boolean property on Slint visual elements.
 export component ClipView inherits Rectangle {
     in property <Clip> model;
     in property <string> track-id;
+    in property <TrackKind> track-kind;
+    // Per-lane clip color. Single source of truth for what color a
+    // clip renders in is its owning lane — so a clip changes color
+    // the instant a move-clip command lands it on a different lane.
+    in property <color> track-color;
+    // Row index of THIS clip's lane in the sequence's `track-order`.
+    // Used together with `lane-pitch-px` to translate the cursor's
+    // vertical delta during a drag into a target-lane row index.
+    in property <int> lane-index;
+    // Vertical distance between two lane centers, in logical pixels
+    // (lane height + lane spacing). Provided by the parent so this
+    // view doesn't depend on theme metrics directly.
+    in property <length> lane-pitch-px;
     in property <float> zoom;
 
+    // Snap distance in screen pixels. CapCut feels right around
+    // 8-10 px; we use 8. Converted to ticks at the current zoom
+    // before being handed to the Rust snap engine, so the snap
+    // strength is independent of how zoomed-in the user is.
+    private property <length> snap-threshold-px: 8px;
+
+    // ---- positioning -------------------------------------------------
+    //
     // Pixel position of the clip's committed `timeline-start`. Hot
     // path on every drag frame — kept as a single named property so
     // we don't recompute the projection inside two separate bindings.
     private property <length> base-x: TimelineLib.rational-to-length(model.timeline-start, zoom);
 
     // True iff this specific clip is the one currently being dragged.
-    // Keyed on (track-id, clip-id) because clip ids are unique
-    // per-track, not project-wide.
     private property <bool> is-active-drag:
-        TimelineViewState.dragging-track-id == track-id
+        TimelineViewState.dragging-source-track-id == track-id
             && TimelineViewState.dragging-clip-id == model.id;
 
-    x: base-x + (is-active-drag ? TimelineViewState.drag-dx-px : 0px);
+    // The dragged clip always tracks the cursor (no snap-lock). The
+    // snap line below tells the user where it will *commit*. Locking
+    // x to a snapped position here would invalidate the `drag-dx-px`
+    // accumulator's derivation in the `moved` handler — that math
+    // assumes x stays bound to `base-x + drag-dx-px`. Keeping the
+    // visual under the cursor matches Premiere / Resolve / CapCut
+    // behaviour: clip slides smoothly, guide pops onto neighbours,
+    // release "commits" to the guide.
+    x: is-active-drag ? base-x + TimelineViewState.drag-dx-px : base-x;
+    y: is-active-drag ? TimelineViewState.drag-dy-px : 0px;
+
     width: TimelineLib.clip-timeline-width(model, zoom);
     height: AppStore.theme.track-lane.clip.height;
-    background: AppStore.theme.track-lane.clip.background;
+    background: track-color;
     border-radius: AppStore.theme.track-lane.clip.radius;
+
+    // Slight elevation cue while dragging — CapCut adds a soft outline
+    // and a small Z-bump. We approximate with a brightened border.
+    border-width: is-active-drag ? 1px : 0px;
+    border-color: AppStore.theme.text.primary;
+    opacity: is-active-drag ? 0.92 : 1.0;
 
     ta := TouchArea {
         width: parent.width;
         height: parent.height;
 
-        // Press / release lifecycle:
+        // Press / move / release lifecycle:
+        //
         //   press   → claim the global "dragging clip" slot
-        //   move    → accumulate `drag-dx-px` in view state (no
-        //             command emitted, no domain change)
-        //   release → compute final tick delta, clear drag state,
-        //             dispatch ONE `EditorStore.move-clip` command
+        //   move    → accumulate (dx, dy) in view state, ask Rust for
+        //             snap result, compute target lane index — all
+        //             without mutating any domain state
+        //   release → dispatch ONE `EditorStore.move-clip` command
+        //             with (source, clip, target, snapped-start) and
+        //             clear drag state
         //
         // Why this shape:
-        //   - Dragging through view state keeps the per-frame work
-        //     to one length write + one binding eval; no Rust call
-        //     and no HashMap lookup until release.
-        //   - Clearing drag state BEFORE dispatching ensures the
-        //     next frame (which sees both writes) renders the clip
-        //     at the new committed position — no overshoot, no
-        //     snap-back flicker (both writes coalesce into one
-        //     redraw).
-        //   - Sub-tick pixel motion rounds to nearest tick at
-        //     release. Sub-tick precision isn't meaningful on a
-        //     drag UX; if it becomes meaningful elsewhere (e.g.
-        //     snap-to-fps for variable-rate sources) we'll capture
-        //     it as RationalTime arithmetic in Rust, not here.
+        //   * Dragging through view state keeps the per-frame work to
+        //     a handful of property writes + one pure callback into
+        //     Rust (snap). No HashMap lookup, no command, no projection
+        //     write until release.
+        //   * Clearing drag state BEFORE dispatching ensures the next
+        //     frame (which sees both writes) renders the clip at the
+        //     new committed position — no overshoot, no snap-back
+        //     flicker (both writes coalesce into one redraw).
         changed pressed => {
             if (self.pressed) {
-                TimelineViewState.dragging-track-id = track-id;
+                TimelineViewState.dragging-source-track-id = track-id;
                 TimelineViewState.dragging-clip-id = model.id;
                 TimelineViewState.drag-dx-px = 0px;
+                TimelineViewState.drag-dy-px = 0px;
+                TimelineViewState.drag-target-track-id = track-id;
+                TimelineViewState.drag-snap-active = false;
+                TimelineViewState.drag-snap-tick = 0;
+                TimelineViewState.drag-snapped-start-value = model.timeline-start.value;
             } else if (is-active-drag) {
-                // `1px * zoom` is the width of one tick on screen,
-                // so `drag-dx-px / (1px * zoom)` is the tick delta.
-                // `round` snaps to the nearest tick; assigning to
-                // `int` truncates the (now integer-valued) float.
-                let dx-ticks: int = round(TimelineViewState.drag-dx-px / (1px * zoom));
-                let new-start: int = model.timeline-start.value + dx-ticks;
+                // Compose the release args. `drag-snap-active` already
+                // captured the snapped start; if no snap fired this
+                // frame, fall back to the cursor-derived value.
+                let cursor-start: int =
+                    round((base-x + TimelineViewState.drag-dx-px) / (1px * zoom));
+                let final-start: int = TimelineViewState.drag-snap-active
+                    ? TimelineViewState.drag-snapped-start-value
+                    : cursor-start;
+                let target-track: string = TimelineViewState.drag-target-track-id != ""
+                    ? TimelineViewState.drag-target-track-id
+                    : track-id;
 
-                TimelineViewState.dragging-track-id = "";
+                // Capture before clearing — the clear triggers a
+                // re-render that depends on these.
+                TimelineViewState.dragging-source-track-id = "";
                 TimelineViewState.dragging-clip-id = "";
                 TimelineViewState.drag-dx-px = 0px;
+                TimelineViewState.drag-dy-px = 0px;
+                TimelineViewState.drag-target-track-id = "";
+                TimelineViewState.drag-snap-active = false;
+                TimelineViewState.drag-snap-tick = 0;
 
-                if (dx-ticks != 0) {
-                    EditorStore.move-clip(track-id, model.id, new-start);
+                // Dispatch only if anything actually changed —
+                // tap-without-drag is common and shouldn't emit a
+                // command.
+                if (final-start != model.timeline-start.value
+                        || target-track != track-id) {
+                    EditorStore.move-clip(track-id, model.id, target-track, final-start);
                 }
             }
         }
 
-        // `mouse-x - pressed-x` is the cursor's delta in the
-        // TouchArea's CURRENT local frame. Since we move the TA each
-        // frame by writing into `drag-dx-px`, the local frame shifts
-        // and the next `moved` event reports only the *incremental*
-        // delta from the previous position. Accumulating into
-        // `drag-dx-px` therefore tracks the cursor's absolute
-        // displacement from the press point. (Derivation:
-        // self.mouse-x - self.pressed-x = M(t) - base - X(t-1) - (M(0) - base)
-        //                              = (M(t) - M(0)) - X(t-1)
-        // and X(t) = X(t-1) + that delta = M(t) - M(0). ✓)
+        // `mouse-{x,y} - pressed-{x,y}` is the cursor's delta in the
+        // TouchArea's CURRENT local frame. Since we move the parent
+        // each frame by writing into `drag-{dx,dy}-px`, the local
+        // frame shifts and the next `moved` event reports only the
+        // *incremental* delta from the previous position. Accumulating
+        // into `drag-{dx,dy}-px` therefore tracks the cursor's absolute
+        // displacement from the press point.
         moved => {
-            if (is-active-drag) {
-                TimelineViewState.drag-dx-px += self.mouse-x - self.pressed-x;
+            if (!is-active-drag) {
+                return;
             }
+            TimelineViewState.drag-dx-px += self.mouse-x - self.pressed-x;
+            TimelineViewState.drag-dy-px += self.mouse-y - self.pressed-y;
+
+            // ---- target lane resolution (every frame) -------------
+            //
+            // Lane offset = round(dy / lane-pitch). Rust clamps to the
+            // source kind's contiguous block, returning both the
+            // resolved id AND the clamped offset; we use the latter to
+            // pin `drag-dy-px` so the dragged clip can't visually
+            // cross the video/audio boundary.
+            let raw-lane-offset: int = round(TimelineViewState.drag-dy-px / lane-pitch-px);
+            let target: ResolvedTarget =
+                DragBackend.resolve-target-lane(track-id, raw-lane-offset);
+            TimelineViewState.drag-target-track-id = target.track-id;
+            if (target.clamped-offset != raw-lane-offset) {
+                // Drag tried to go past a kind boundary — clamp the
+                // vertical offset back so the clip "sticks" at the
+                // edge of the valid block. Re-anchors the accumulator
+                // so future moves still track cursor delta correctly.
+                TimelineViewState.drag-dy-px = target.clamped-offset * lane-pitch-px;
+            }
+
+            // ---- snap probe (every frame) -------------------------
+            //
+            // Compute the raw cursor-derived start tick, ask Rust to
+            // round it to the nearest snap target inside the
+            // pixel-derived threshold (converted to ticks at the
+            // current zoom).
+            let cursor-start: int =
+                round((base-x + TimelineViewState.drag-dx-px) / (1px * zoom));
+            let dur: int = model.source-range.duration.value;
+            let snap-threshold-ticks: int =
+                max(1, round(snap-threshold-px / (1px * zoom)));
+            let snap: SnapResult = DragBackend.snap-clip-start(
+                track-id,
+                model.id,
+                cursor-start,
+                dur,
+                snap-threshold-ticks,
+            );
+            TimelineViewState.drag-snap-active = snap.has-snap;
+            TimelineViewState.drag-snap-tick = snap.snap-line-tick;
+            TimelineViewState.drag-snapped-start-value = snap.has-snap
+                ? snap.snapped-start-value
+                : cursor-start;
         }
     }
 }

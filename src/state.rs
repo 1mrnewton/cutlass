@@ -41,6 +41,15 @@ impl Editor {
         self.projector.slint_project()
     }
 
+    /// Borrow of the canonical domain project. Used by Slint-facing
+    /// helpers (e.g. snap target computation) that need to walk every
+    /// clip without paying for the Slint `Model` indirection. Read-only
+    /// — mutation MUST go through [`Editor::apply`].
+    #[inline]
+    pub fn project(&self) -> &Project {
+        &self.project
+    }
+
     /// Apply a structured command. On success the canonical project
     /// is mutated and the Slint projection is patched to match.
     ///
@@ -54,10 +63,16 @@ impl Editor {
         Ok(())
     }
 
-    /// Push an `Effect` into the Slint projection. Kept separate
-    /// from `apply` so the projector path is unit-testable on its
-    /// own and so a future undo path can reuse the same projection
-    /// logic with an inverted effect.
+    /// Push an `Effect` into the Slint projection. Kept separate from
+    /// `apply` so the projector path is unit-testable on its own and
+    /// so a future undo path can reuse the same projection logic with
+    /// an inverted effect.
+    ///
+    /// `debug_assert!` on every projector call — every reachable
+    /// `Effect` produced by `command::apply` corresponds to a domain
+    /// mutation we just made, so the projector path can't legitimately
+    /// fail. A `false` return means the projector's index drifted from
+    /// the domain, which is a logic bug we want to catch in debug.
     fn reflect(&mut self, effect: &Effect) {
         match effect {
             Effect::ClipMoved {
@@ -65,14 +80,41 @@ impl Editor {
                 clip_id,
                 new_start_value,
             } => {
-                // `false` here means the projector's index is stale
-                // relative to the domain — should be impossible while
-                // only `MoveClip` exists (it's non-structural). A
-                // structural command in the future will rebuild the
-                // affected index alongside producing its effect.
-                debug_assert!(self
-                    .projector
-                    .move_clip(track_id, clip_id, *new_start_value));
+                debug_assert!(self.projector.move_clip(track_id, clip_id, *new_start_value));
+            }
+            Effect::ClipTransferred {
+                source_track_id,
+                target_track_id,
+                clip_id,
+                new_start_value,
+            } => {
+                debug_assert!(self.projector.transfer_clip(
+                    source_track_id,
+                    target_track_id,
+                    clip_id,
+                    *new_start_value,
+                ));
+            }
+            Effect::ClipTransferredToNewTrack {
+                source_track_id,
+                new_track_id,
+                new_track_name,
+                new_track_kind,
+                new_track_color,
+                insert_at_index,
+                clip_id,
+                new_start_value,
+            } => {
+                debug_assert!(self.projector.insert_track_with_clip(
+                    new_track_id,
+                    new_track_name,
+                    *new_track_kind,
+                    *new_track_color,
+                    *insert_at_index,
+                    source_track_id,
+                    clip_id,
+                    *new_start_value,
+                ));
             }
         }
     }
@@ -90,13 +132,13 @@ mod tests {
 
         editor
             .apply(&Command::MoveClip {
-                track_id: "1".into(),
+                source_track_id: "1".into(),
                 clip_id: "1".into(),
+                target_track_id: "1".into(),
                 new_start_value: 314,
             })
             .unwrap();
 
-        // Domain reflects the move…
         assert_eq!(
             editor
                 .project
@@ -112,9 +154,6 @@ mod tests {
             314,
         );
 
-        // …and the Slint projection does too, on the same row, with
-        // no other row touched. `Track 1` / `Clip 1` are the first
-        // entries thanks to `sample_project`'s ordering.
         let slint = editor.slint_project();
         let track = slint.sequence.tracks.row_data(0).unwrap();
         let clip = track.clips.row_data(0).unwrap();
@@ -126,8 +165,6 @@ mod tests {
     fn apply_error_leaves_state_untouched() {
         let mut editor = Editor::new(sample_project());
 
-        // Capture the full slint row for the clip we'll try to
-        // (incorrectly) target so we can prove nothing moved.
         let before_value = editor
             .slint_project()
             .sequence
@@ -142,8 +179,9 @@ mod tests {
 
         let err = editor
             .apply(&Command::MoveClip {
-                track_id: "1".into(),
+                source_track_id: "1".into(),
                 clip_id: "nope".into(),
+                target_track_id: "1".into(),
                 new_start_value: 999,
             })
             .unwrap_err();
@@ -161,5 +199,39 @@ mod tests {
             .timeline_start
             .value;
         assert_eq!(before_value, after_value);
+    }
+
+    #[test]
+    fn apply_collision_drop_creates_new_lane_in_slint_projection() {
+        let mut editor = Editor::new(sample_project());
+        let initial_lane_count = editor.slint_project().sequence.tracks.row_count();
+
+        // Drop Clip 3 on top of Clip 2 within V2 → must spawn a new
+        // lane and put Clip 3 on it.
+        editor
+            .apply(&Command::MoveClip {
+                source_track_id: "2".into(),
+                clip_id: "3".into(),
+                target_track_id: "2".into(),
+                new_start_value: 10,
+            })
+            .unwrap();
+
+        let slint = editor.slint_project();
+        assert_eq!(slint.sequence.tracks.row_count(), initial_lane_count + 1);
+
+        // V2 (the old row 1) is now at row 2 — and Clip 3 is gone from it.
+        let v2 = slint.sequence.tracks.row_data(2).unwrap();
+        assert_eq!(v2.id, "2");
+        for ci in 0..v2.clips.row_count() {
+            assert_ne!(v2.clips.row_data(ci).unwrap().id, "3");
+        }
+
+        // The freshly inserted lane carries Clip 3 at value=10.
+        let new_lane = slint.sequence.tracks.row_data(1).unwrap();
+        assert_eq!(new_lane.clips.row_count(), 1);
+        let clip = new_lane.clips.row_data(0).unwrap();
+        assert_eq!(clip.id, "3");
+        assert_eq!(clip.timeline_start.value, 10);
     }
 }

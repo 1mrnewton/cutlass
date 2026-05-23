@@ -14,8 +14,18 @@ import { Project } from "../models/index.slint";
 export global EditorStore {
     in property <Project> project;
 
-    // Reposition `clip-id` inside `track-id` to start at
-    // `new-start-value` ticks at the clip's existing rate.
-    // Dispatched from `ClipView` on drag-release.
-    callback move-clip(string /* track-id */, string /* clip-id */, int /* new-start-value */);
+    // Place `clip-id` (currently on `source-track-id`) onto
+    // `target-track-id` starting at `new-start-value` ticks at the
+    // clip's existing rate. `target-track-id` may equal
+    // `source-track-id` (intra-lane reposition).
+    //
+    // Dispatched from `ClipView` on drag-release; Rust handles the
+    // collision / new-lane policy in one atomic command (see
+    // `src/command.rs`).
+    callback move-clip(
+        string /* source-track-id */,
+        string /* clip-id */,
+        string /* target-track-id */,
+        int    /* new-start-value */,
+    );
 }

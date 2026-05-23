@@ -1,8 +1,33 @@
 import { AppStore } from "../../store/index.slint";
+import { TimelineViewState } from "state.slint";
+import { TrackKind } from "../../models/index.slint";
 
+// Backdrop for one lane plus a soft highlight when this lane is the
+// current drop target for an in-flight clip drag. The highlight is
+// driven by `TimelineViewState.drag-target-track-id`; the gesture
+// layer in `clip.slint` decides which lane that is (and only sets
+// it when the lane's kind matches the dragged clip's kind, so
+// invalid drop targets never light up).
 export component TrackLane inherits Rectangle {
+    in property <string> track-id;
+    in property <TrackKind> kind;
+
     horizontal-stretch: 1;
     height: AppStore.theme.track-lane.height;
 
     background: AppStore.theme.track-lane.background;
+
+    // Subtle inner highlight when this lane is the drop target.
+    // Sits inside the lane so it doesn't bleed into the lane above /
+    // below; opacity-driven so we can animate it later without
+    // reflowing layout.
+    highlight := Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: AppStore.theme.text.primary;
+        opacity: TimelineViewState.dragging-clip-id != ""
+                    && TimelineViewState.drag-target-track-id == track-id
+                 ? 0.06
+                 : 0.0;
+    }
 }

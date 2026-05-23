@@ -7,6 +7,7 @@
 //! `crate::projector`.
 
 pub mod clip;
+pub mod color;
 pub mod project;
 pub mod rational;
 pub mod rational_time;
@@ -16,9 +17,12 @@ pub mod time_range;
 pub mod track;
 
 pub use clip::Clip;
+pub use color::Color;
 pub use project::Project;
 pub use rational::Rational;
 pub use rational_time::RationalTime;
+pub use sequence::Sequence;
 pub use time_range::TimeRange;
+pub use track::{Track, TrackKind};
 
 pub use sample::sample_project;

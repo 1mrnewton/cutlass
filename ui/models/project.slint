@@ -63,10 +63,26 @@ export struct Clip {
     source-range: TimeRange,
 }
 
+// Drives the "audio always at the bottom" lane invariant and the
+// gesture-layer rule that a clip can only land on a same-kind lane.
+// Mirrored as `crate::models::TrackKind` on the Rust side; the
+// projector converts between the two.
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export enum TrackKind {
+    video,
+    audio,
+}
+
 @rust-attr(derive(serde::Serialize, serde::Deserialize))
 export struct Track {
     id: string,
     name: string,
+    kind: TrackKind,
+    // Single source of truth for clip color on this lane. Set
+    // per-lane (not per-clip) so the "one lane, one color" invariant
+    // is structural — a clip's color simply changes the moment it
+    // moves to a different lane.
+    color: color,
     clips: [Clip],
 }
 

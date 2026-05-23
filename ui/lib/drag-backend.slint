@@ -1,0 +1,85 @@
+// Bridge between the timeline clip-drag gesture and the Rust snap
+// engine. Each drag frame the gesture layer calls
+// `DragBackend.snap-clip-start(...)` with the cursor-derived raw
+// start tick and gets back a possibly-adjusted start tick plus the
+// timeline tick where the snap guide line should be drawn.
+//
+// Why Rust-backed instead of pure Slint:
+//
+//   * The snap target list is "every clip edge across every lane",
+//     which Slint expressions can't iterate.
+//   * Keeping the policy in Rust means the AI agent can later call
+//     the same function to validate clip placements before emitting
+//     commands.
+//
+// Reactivity: this is a `pure callback`, so Slint re-invokes it
+// whenever any of its arguments changes during the drag (in practice:
+// every pointer move, which is what we want).
+
+export struct SnapResult {
+    // True when the cursor was within snap range of some target. When
+    // false, `snapped-start-value` echoes the input `cursor-start-value`
+    // unchanged.
+    has-snap: bool,
+
+    // Target sequence tick to actually place the dragged clip's
+    // leading edge at. The gesture layer uses this on release as the
+    // command's `new-start-value`.
+    snapped-start-value: int,
+
+    // Sequence tick where the visual snap guide should render. May be
+    // the dragged clip's leading edge (when its leading edge snapped)
+    // or its trailing edge (when its trailing edge snapped to a
+    // neighbour's start). The single integer is enough — the UI just
+    // multiplies by `zoom` to get its x.
+    snap-line-tick: int,
+}
+
+// Resolved target lane for an in-flight drag. `track-id` is empty
+// when the source lane id is unknown.
+export struct ResolvedTarget {
+    track-id: string,
+    // Signed offset from source lane → target lane in
+    // `Sequence.track-order` row indices, AFTER clamping to the
+    // source kind's contiguous block. The gesture layer uses this
+    // to clamp the dragged clip's visual y so it can't drift across
+    // a kind boundary.
+    clamped-offset: int,
+}
+
+export global DragBackend {
+    // Arguments (positional — Slint callbacks don't support named args):
+    //   1. dragging-source-track-id — id of the lane the clip is still
+    //                                 committed to (so self-snap is excluded)
+    //   2. dragging-clip-id         — clip being dragged
+    //   3. cursor-start-value       — raw target start tick from cursor delta
+    //   4. clip-duration-ticks      — width of the dragged clip
+    //   5. snap-threshold-ticks     — `floor(threshold_px / zoom)`, computed
+    //                                 by the gesture layer so this fn stays
+    //                                 unaware of pixels
+    //
+    // Returns a `SnapResult` — see field docs above. Handler installed
+    // from Rust in `src/main.rs`.
+    pure callback snap-clip-start(
+        string /* dragging-source-track-id */,
+        string /* dragging-clip-id */,
+        int    /* cursor-start-value */,
+        int    /* clip-duration-ticks */,
+        int    /* snap-threshold-ticks */,
+    ) -> SnapResult;
+
+    // Resolve "source lane id + vertical lane offset" to a
+    // `ResolvedTarget`, clamped to the source kind's block (so
+    // dragging a video clip can never highlight or land on an audio
+    // lane). The returned `clamped-offset` differs from the input
+    // `lane-offset` when the raw offset would have crossed a kind
+    // boundary; the gesture layer uses it to clamp the dragged clip's
+    // visual y too.
+    //
+    // `lane-offset` is signed: negative means up (smaller index), 0
+    // is the source lane, positive is down. Handler in `src/main.rs`.
+    pure callback resolve-target-lane(
+        string /* source-track-id */,
+        int    /* lane-offset */,
+    ) -> ResolvedTarget;
+}

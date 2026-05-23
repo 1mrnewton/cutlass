@@ -137,14 +137,51 @@ export component TimelinePanel inherits PanelBase {
 
                     ForceHeadSpace { }
 
-                    for t in sequence.tracks: TrackLane {
+                    for t[i] in sequence.tracks: TrackLane {
+                        track-id: t.id;
+                        kind: t.kind;
                         for c in t.clips: ClipView {
                             model: c;
                             track-id: t.id;
+                            track-kind: t.kind;
+                            // Lane is the single source of truth for
+                            // clip color — see `Track.color` in the
+                            // domain model.
+                            track-color: t.color;
+                            lane-index: i;
+                            // Lane pitch = lane height + lane spacing.
+                            // Used by ClipView to translate vertical
+                            // drag delta into a target lane offset.
+                            lane-pitch-px: track-height + track-spacing;
                             height: parent.height - 5px;
                             zoom: TimelineStore.zoom;
                         }
                     }
+                }
+
+                // ---- snap-line overlay -----------------------------
+                //
+                // Thin vertical guide that spans every lane while a
+                // snap is active during a drag. Lives inside the
+                // Flickable's viewport so it scrolls with the content
+                // (the snapped tick is in sequence space, not viewport
+                // space). Hidden via `visible:` rather than
+                // conditional-render so we don't pay layout cost on
+                // every drag-state flip.
+                //
+                // The dragged clip itself stays glued to the cursor
+                // (see `clip.slint`'s `x` derivation); the line is
+                // the user's signal that release will commit to a
+                // snapped position, not the cursor position.
+                Rectangle {
+                    visible: TimelineViewState.dragging-clip-id != ""
+                                && TimelineViewState.drag-snap-active;
+                    x: TimelineViewState.drag-snap-tick * TimelineStore.zoom * 1px;
+                    y: 0px;
+                    width: AppStore.theme.metrics.stroke.hairline;
+                    height: content-height;
+                    background: AppStore.theme.text.primary;
+                    opacity: 0.85;
                 }
             }
         }

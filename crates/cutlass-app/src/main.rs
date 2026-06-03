@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 use cutlass_decode::{DecodeOptions, Decoder, HwAccel, ffmpeg_version};
 use tracing::{info, warn};
@@ -16,21 +15,28 @@ fn setup_tracing() {
 fn main() {
     setup_tracing();
     info!(version = ffmpeg_version(), "cutlass-app starting");
-    // cutlass_engines::init();
-    // cutlass_compositor::init();
 
-    let path = String::from("assets/13232364_3840_2160_24fps.mp4");
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "assets/13232364_3840_2160_24fps.mp4".to_string());
 
-    // let hw = HwAccel::None;
-    let hw = HwAccel::VideoToolbox;
+    // Default to hardware decode; override with CUTLASS_HWACCEL (e.g. `none`, `vt`).
+    let hw = std::env::var("CUTLASS_HWACCEL")
+        .map(|v| cutlass_decode::hw_accel_from_env(&v))
+        .unwrap_or(HwAccel::Auto);
     let options = DecodeOptions::default().hw_accel(hw);
 
-    let Ok(mut decoder) = Decoder::open_with(Path::new(&path), options) else {
-        warn!(path, "failed to open video");
-        return;
+    let mut decoder = match Decoder::open_with(Path::new(&path), options) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(path, error = %e, "failed to open video");
+            return;
+        }
     };
+
     let info = decoder.info().clone();
     info!(
+        path,
         width = info.width,
         height = info.height,
         ?info.pixel_format,
@@ -38,16 +44,15 @@ fn main() {
         "decoder ready"
     );
 
-    let _t = Duration::from_secs(27);
-
-    let now = Instant::now();
-    let mut n = 0;
-    while let Some(_f) = decoder.next_video_frame().unwrap() {
-        n += 1;
-        if n >= 300 {
-            break;
-        }
+    // Smoke check: decode the first frame.
+    match decoder.next_frame() {
+        Ok(Some(frame)) => info!(
+            width = frame.width,
+            height = frame.height,
+            pts = frame.pts_ticks,
+            "decoded first frame"
+        ),
+        Ok(None) => warn!("stream produced no frames"),
+        Err(e) => warn!(error = %e, "decode failed"),
     }
-    let per_frame = now.elapsed().as_secs_f64() * 1000.0 / n as f64;
-    info!(per_frame_ms = per_frame, frames = n, "decode throughput");
 }

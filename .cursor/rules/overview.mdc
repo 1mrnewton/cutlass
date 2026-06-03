@@ -1,0 +1,17 @@
+---
+description: Cutlass vision, stack, scope, AI agent architecture, Slint/Rust shared types
+alwaysApply: true
+---
+
+# Cutlass
+
+Open-source **AI-first, prompt-to-edit** video editing (CapCut-inspired): users describe edits; an agent turns that into executable editor commands.
+
+## Stack
+
+- **Slint**: UI layers, timelines, layout, declarative UX.
+- **WGPU**: GPU work (preview, compositing/effects/export paths driven from Rust as the engine grows).
+
+## Scope
+
+Ship a **small but real** editor: cut, trim, and other **basic timeline editing**. On top sits an **AI agent** that emits **structured commands**; Rust **executes** those commands against project/timeline state (deterministic edits, auditable undo-friendly actions).

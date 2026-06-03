@@ -1,0 +1,29 @@
+---
+description: Performance mindset—algorithms, asymptotics, profiling, hot paths for editor/media/GPU work
+alwaysApply: true
+---
+
+# Performance
+
+Cutlass is interactive (timeline scrubbing, preview, export). **Performance is a correctness concern** for anything on the critical path; optimize when measurements or complexity analysis say it matters, not from habit alone.
+
+## Algorithms and data structures
+
+- **Pick the right algorithm** for the problem size and access pattern (search, overlap detection, sorting, indexing). Prefer structures that match how data is queried (e.g. sorted slices + binary search vs linear scan when *n* grows).
+- When choosing between approaches, **compare expected complexity and constants** (allocations, copies, cache behavior)—not just readability.
+
+## Complexity and hot paths
+
+- **Know the asymptotic cost** of loops, recursive structures, and library calls on **hot paths** (per-frame work, per-sample audio, timeline queries under drag/scrub, media decode hooks). Avoid accidental **O(n²)** from nested full scans, repeated string/path work, or realloc inside tight loops.
+- For non-hot code, **prioritize clarity**; don’t micro-optimize cold paths without evidence.
+
+## Measurement
+
+- **Profile or benchmark** before rewriting hot code (CPU flamegraphs, allocation counts, GPU timings where relevant). Use results to pick one change at a time and verify wins.
+- After changes, **guard regressions** where practical (benchmarks, coarse timing assertions in CI only when stable).
+
+## Media, UI, and GPU
+
+- Treat **I/O, decode, and GPU submission** as expensive: batch work, avoid redundant uploads/decodes, and keep UI-thread work bounded (defer heavy work; prefer incremental updates where Slint/engine architecture allows).---
+alwaysApply: true
+---

@@ -6,4 +6,6 @@ description = "Cutlass editing engines"
 
 [dependencies]
 cutlass-decode = { path = "../cutlass-decode" }
+cutlass-models = { path = "../cutlass-models" }
+thiserror.workspace = true
 tracing.workspace = true

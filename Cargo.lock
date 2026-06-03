@@ -103,7 +103,17 @@ name = "cutlass-engines"
 version = "0.1.0"
 dependencies = [
  "cutlass-decode",
+ "cutlass-models",
+ "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "cutlass-models"
+version = "0.1.0"
+dependencies = [
+ "rustc-hash",
+ "thiserror",
 ]
 
 [[package]]

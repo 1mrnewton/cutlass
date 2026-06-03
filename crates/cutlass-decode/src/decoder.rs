@@ -9,7 +9,7 @@ use ffmpeg_next::media::Type;
 use ffmpeg_next::packet::Packet;
 use ffmpeg_next::util::frame::video::Video;
 use ffmpeg_next::{Error as FfmpegError, Rational};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::error::DecodeError;
 use crate::frame::{DecodedFrame, PixelFormat};
@@ -45,6 +45,9 @@ pub struct Decoder {
     info: SourceInfo,
     demuxer_done: bool,
     sw_frame: Video,
+    /// A packet the demuxer produced but the decoder couldn't accept yet
+    /// (`send_packet` returned EAGAIN). Retried before reading a new one.
+    pending_packet: Option<Packet>,
     _hw_device: Option<*mut ffmpeg_next::ffi::AVBufferRef>,
 }
 
@@ -121,6 +124,7 @@ impl Decoder {
             info,
             demuxer_done: false,
             sw_frame: Video::empty(),
+            pending_packet: None,
             _hw_device: hw_device,
         })
     }
@@ -142,6 +146,7 @@ impl Decoder {
         self.input.seek(ts, ..ts).map_err(DecodeError::Io)?;
         self.decoder.flush();
         self.demuxer_done = false;
+        self.pending_packet = None;
         debug!(target_micros = ts, "seeked to keyframe");
         Ok(())
     }
@@ -149,13 +154,25 @@ impl Decoder {
     /// Seek and decode forward to the first frame at or after `target`.
     ///
     /// Returns `Ok(None)` if the stream ends before reaching `target`.
+    ///
+    /// Intermediate frames between the entry keyframe and `target` are decoded
+    /// but never read back to CPU memory: with a long GOP that throwaway work
+    /// dominates, so the GPU→CPU transfer and the plane copy
+    /// ([`DecodedFrame::from_ffmpeg`]) happen only for the frame that lands.
     pub fn seek_to_frame(&mut self, target: Duration) -> Result<Option<DecodedFrame>, DecodeError> {
         self.seek(target)?;
 
         let target_ticks = self.duration_to_ticks(target);
-        while let Some(frame) = self.next_frame()? {
-            if frame.pts_ticks >= target_ticks {
-                return Ok(Some(frame));
+        while let Some(frame) = self.next_video_frame()? {
+            let pts = frame_pts(&frame).unwrap_or(i64::MIN);
+            if pts >= target_ticks {
+                let cpu = if is_hardware_pixel_format(frame.format()) {
+                    transfer_to_cpu(&frame, &mut self.sw_frame)?;
+                    &self.sw_frame
+                } else {
+                    &frame
+                };
+                return Ok(Some(DecodedFrame::from_ffmpeg(cpu)?));
             }
         }
         Ok(None)
@@ -228,21 +245,37 @@ impl Decoder {
     }
 
     fn read_packet(&mut self) -> Result<(), DecodeError> {
+        // Retry a previously un-accepted packet before pulling a new one.
+        if let Some(packet) = self.pending_packet.take() {
+            return self.send_packet(packet);
+        }
+
         let mut packet = Packet::empty();
         match packet.read(&mut self.input) {
             Ok(()) => {
                 if packet.stream() == self.stream_index {
-                    self.decoder
-                        .send_packet(&packet)
-                        .map_err(DecodeError::Decode)?;
+                    self.send_packet(packet)
+                } else {
+                    Ok(())
                 }
-                Ok(())
             }
             Err(FfmpegError::Eof) => {
                 self.demuxer_done = true;
                 self.decoder.send_eof().map_err(DecodeError::Decode)
             }
             Err(e) => Err(DecodeError::Io(e)),
+        }
+    }
+
+    /// Send a packet, stashing it as pending if the decoder's input is full.
+    fn send_packet(&mut self, packet: Packet) -> Result<(), DecodeError> {
+        match self.decoder.send_packet(&packet) {
+            Ok(()) => Ok(()),
+            Err(e) if is_eagain(&e) => {
+                self.pending_packet = Some(packet);
+                Ok(())
+            }
+            Err(e) => Err(DecodeError::Decode(e)),
         }
     }
 }
@@ -255,6 +288,11 @@ impl Drop for Decoder {
 
 fn is_eagain(e: &FfmpegError) -> bool {
     matches!(e, FfmpegError::Other { errno } if *errno == EAGAIN)
+}
+
+/// Best-effort presentation timestamp of a raw decoded frame, in stream ticks.
+fn frame_pts(frame: &Video) -> Option<i64> {
+    frame.timestamp().or_else(|| frame.pts())
 }
 
 pub fn ffmpeg_version() -> String {

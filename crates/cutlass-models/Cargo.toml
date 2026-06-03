@@ -1,0 +1,9 @@
+[package]
+name = "cutlass-models"
+version.workspace = true
+edition.workspace = true
+description = "Cutlass project/timeline data model"
+
+[dependencies]
+rustc-hash.workspace = true
+thiserror.workspace = true

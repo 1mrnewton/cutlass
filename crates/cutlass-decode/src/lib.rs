@@ -10,8 +10,10 @@ mod decoder;
 mod error;
 mod frame;
 mod hwaccel;
+mod index;
 
 pub use decoder::{Decoder, SourceInfo, ffmpeg_version, hw_accel_from_env};
 pub use error::DecodeError;
 pub use frame::{DecodedFrame, PixelFormat, Plane};
 pub use hwaccel::{DecodeOptions, HwAccel};
+pub use index::{KeyframeIndex, duration_to_ticks, ticks_to_duration};

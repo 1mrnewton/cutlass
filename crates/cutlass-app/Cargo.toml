@@ -12,5 +12,7 @@ path = "src/main.rs"
 cutlass-compositor = { path = "../cutlass-compositor" }
 cutlass-decode = { path = "../cutlass-decode" }
 cutlass-engines = { path = "../cutlass-engines" }
+cutlass-models = { path = "../cutlass-models" }
+png = "0.17"
 tracing.workspace = true
 tracing-subscriber.workspace = true

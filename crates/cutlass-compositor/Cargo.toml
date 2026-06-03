@@ -5,4 +5,5 @@ edition.workspace = true
 description = "Cutlass frame compositor"
 
 [dependencies]
+cutlass-decode = { path = "../cutlass-decode" }
 tracing.workspace = true

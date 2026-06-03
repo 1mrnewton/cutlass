@@ -38,6 +38,14 @@ pub struct SourceInfo {
     pub hw_accel: HwAccel,
 }
 
+impl SourceInfo {
+    /// Average frame rate as `(numerator, denominator)`, letting callers build
+    /// their own rational type without depending on ffmpeg directly.
+    pub fn frame_rate_parts(&self) -> (i32, i32) {
+        (self.frame_rate.numerator(), self.frame_rate.denominator())
+    }
+}
+
 pub struct Decoder {
     input: Input,
     decoder: ffmpeg_next::codec::decoder::Video,
@@ -131,6 +139,15 @@ impl Decoder {
 
     pub fn info(&self) -> &SourceInfo {
         &self.info
+    }
+
+    /// Container duration, if the demuxer reports one.
+    ///
+    /// Read from the format context (microsecond `AV_TIME_BASE` units), so it is
+    /// the whole-file duration, independent of the video stream's time base.
+    pub fn duration(&self) -> Option<Duration> {
+        let micros = self.input.duration();
+        (micros > 0).then(|| Duration::from_micros(micros as u64))
     }
 
     /// Seek to the keyframe at or before `target` and flush decoder buffers.

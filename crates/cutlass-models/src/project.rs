@@ -5,7 +5,7 @@ use crate::media::MediaSource;
 use crate::time::{Rational, TimeRange, convert_frames};
 use crate::timeline::Timeline;
 use crate::track::{Track, TrackKind};
-use crate::clip::{Clip, Generator};
+use crate::clip::{Clip, ClipSource, Generator};
 
 /// Top-level container: a media pool plus exactly one [`Timeline`].
 ///

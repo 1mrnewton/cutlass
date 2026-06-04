@@ -52,6 +52,12 @@ impl Track {
         self.clips.values()
     }
 
+    /// Mutable iteration over the track's clips (unordered). Used by ripple
+    /// edits that shift many clips at once; callers must not introduce overlaps.
+    pub fn clips_mut(&mut self) -> impl Iterator<Item = &mut Clip> {
+        self.clips.values_mut()
+    }
+
     pub fn len(&self) -> usize {
         self.clips.len()
     }

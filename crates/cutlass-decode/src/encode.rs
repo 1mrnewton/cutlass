@@ -333,7 +333,7 @@ fn drain_decoder(
 }
 
 /// Write out every packet the encoder can currently produce.
-fn drain_encoder(
+pub(crate) fn drain_encoder(
     encoder: &mut VideoEncoder,
     octx: &mut Output,
     ost_index: usize,
@@ -357,7 +357,7 @@ fn drain_encoder(
 
 /// Pick an H.264 encoder, preferring a hardware one that accepts software input
 /// frames; always falls back to libx264 / the generic H.264 encoder.
-fn find_h264_encoder(hardware: bool) -> Option<Codec> {
+pub(crate) fn find_h264_encoder(hardware: bool) -> Option<Codec> {
     if hardware {
         #[cfg(target_os = "macos")]
         if let Some(c) = encoder::find_by_name("h264_videotoolbox") {
@@ -381,7 +381,7 @@ fn scaled_dims(src_w: u32, src_h: u32, target_h: u32) -> (u32, u32) {
     (w.max(2) & !1, h.max(2) & !1)
 }
 
-fn is_eagain(e: &FfmpegError) -> bool {
+pub(crate) fn is_eagain(e: &FfmpegError) -> bool {
     matches!(e, FfmpegError::Other { errno } if *errno == EAGAIN)
 }
 

@@ -1156,6 +1156,7 @@ name = "cutlass-engines"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "cutlass-compositor",
  "cutlass-decode",
  "cutlass-models",
  "rustc-hash 2.1.2",

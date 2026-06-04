@@ -1,12 +1,14 @@
-//! End-to-end render CLI: decode a video, build a one-clip project, composite a
-//! single timeline frame, and write it to a PNG.
+//! End-to-end render CLI: decode a video, build a one-clip project, then either
+//! composite a single timeline frame to a PNG or export the whole timeline to
+//! an MP4 (chosen by the output extension).
 //!
 //! This exercises the whole pipeline — decode -> engine resolve -> frame cache
-//! -> CPU compositor -> image — so a glance at the output confirms the stack is
-//! wired correctly. Usage:
+//! -> CPU compositor -> image/encoder — so a glance at the output confirms the
+//! stack is wired correctly. Usage:
 //!
 //! ```text
-//! cutlass-app <video> [frame_index] [output.png]
+//! cutlass-app <video> [frame_index] [output.png]   # single frame -> PNG
+//! cutlass-app <video> [frame_index] [output.mp4]   # whole timeline -> MP4
 //! ```
 
 use std::error::Error;
@@ -14,10 +16,10 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 
-use cutlass_compositor::{CompositeLayer, RgbaImage, composite};
+use cutlass_compositor::{RgbaImage, composite};
 use cutlass_decode::Decoder;
-use cutlass_engines::{Engine, RenderedContent, RenderedLayer};
-use cutlass_models::{Generator, MediaSource, Rational, TimeRange, TrackKind};
+use cutlass_engines::{Engine, ExportSettings, to_composite_layers};
+use cutlass_models::{MediaSource, Rational, TimeRange, TrackKind};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -63,30 +65,6 @@ fn probe(path: &Path) -> Result<Probe, Box<dyn Error>> {
     })
 }
 
-/// Map the engine's resolved layers onto the compositor's layer type.
-///
-/// Media frames become sampled `Frame` layers; solid generators become fills.
-/// Text/shape/adjustment generators aren't drawable by the CPU compositor yet,
-/// so they're skipped with a warning rather than failing the render.
-fn to_composite_layers(layers: &[RenderedLayer]) -> Vec<CompositeLayer<'_>> {
-    let mut out = Vec::with_capacity(layers.len());
-    for layer in layers {
-        match &layer.content {
-            RenderedContent::Media(frame) => out.push(CompositeLayer::Frame(frame.as_ref())),
-            RenderedContent::Generated(Generator::SolidColor { rgba }) => {
-                out.push(CompositeLayer::Solid(*rgba))
-            }
-            RenderedContent::Generated(other) => {
-                warn!(
-                    ?other,
-                    "skipping generator the CPU compositor can't draw yet"
-                );
-            }
-        }
-    }
-    out
-}
-
 fn write_png(path: &Path, image: &RgbaImage) -> Result<(), Box<dyn Error>> {
     let file = BufWriter::new(File::create(path)?);
     let mut encoder = png::Encoder::new(file, image.width, image.height);
@@ -126,13 +104,33 @@ fn run() -> Result<(), Box<dyn Error>> {
         false,
     );
     let media_id = engine.import_media(media)?;
-    // sleep for 1 second
-    std::thread::sleep(std::time::Duration::from_secs(1));
     let track = engine.project_mut().add_track(TrackKind::Video, "V1");
     engine
         .project_mut()
         .add_clip(track, media_id, TimeRange::new(0, probe.duration_frames), 0)?;
 
+    let out_path = Path::new(&output);
+    let is_video = out_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("mp4") || e.eq_ignore_ascii_case("mov"))
+        .unwrap_or(false);
+
+    if is_video {
+        export_timeline(&mut engine, out_path, probe.width, probe.height)
+    } else {
+        render_frame(&mut engine, out_path, frame, probe.width, probe.height)
+    }
+}
+
+/// Composite a single timeline frame and write it as a PNG.
+fn render_frame(
+    engine: &mut Engine,
+    out_path: &Path,
+    frame: i64,
+    width: u32,
+    height: u32,
+) -> Result<(), Box<dyn Error>> {
     let layers = engine.frame_at(frame)?;
     if layers.is_empty() {
         return Err(format!(
@@ -143,10 +141,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     let composite_layers = to_composite_layers(&layers);
-    let image = composite(probe.width, probe.height, &composite_layers);
-
-    let out_path = Path::new(&output);
+    let image = composite(width, height, &composite_layers);
     write_png(out_path, &image)?;
+
     let cache = engine.cache_stats();
     info!(
         ?out_path,
@@ -155,6 +152,40 @@ fn run() -> Result<(), Box<dyn Error>> {
         height = image.height,
         ?cache,
         "wrote composited frame"
+    );
+    Ok(())
+}
+
+/// Export the whole timeline to an H.264 MP4 at the source resolution.
+fn export_timeline(
+    engine: &mut Engine,
+    out_path: &Path,
+    width: u32,
+    height: u32,
+) -> Result<(), Box<dyn Error>> {
+    let total = engine.duration();
+    info!(?out_path, total_frames = total, "exporting timeline");
+
+    let mut last_pct = -1i64;
+    let mut on_progress = |done: i64, total: i64| {
+        let pct = if total > 0 { done * 100 / total } else { 100 };
+        if pct != last_pct {
+            last_pct = pct;
+            info!(done, total, pct, "export progress");
+        }
+    };
+
+    let stats = engine.export_with(
+        out_path,
+        ExportSettings::new(width, height),
+        Some(&mut on_progress),
+    )?;
+    info!(
+        ?out_path,
+        frames = stats.frames,
+        width = stats.width,
+        height = stats.height,
+        "exported timeline"
     );
     Ok(())
 }

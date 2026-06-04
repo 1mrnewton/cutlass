@@ -15,3 +15,13 @@ Open-source **AI-first, prompt-to-edit** video editing (CapCut-inspired): users 
 ## Scope
 
 Ship a **small but real** editor: cut, trim, and other **basic timeline editing**. On top sits an **AI agent** that emits **structured commands**; Rust **executes** those commands against project/timeline state (deterministic edits, auditable undo-friendly actions).
+
+## Planned: Python bindings (side feature)
+
+A **MoviePy-style Python library** so the engine can be scripted from Python. This is a **side feature** — the editor, AI agent, and all core stay pure Rust; Python only wraps the existing `Engine`.
+
+- **Shape**: separate optional crate `cutlass-py` (`crate-type = ["cdylib"]`, PyO3 + `maturin`), depending on `cutlass-engines`/`-compositor`/`-models`. Kept off the default workspace build and shipped to PyPI on its own.
+- **API**: thin, Pythonic wrapper over `Engine` (`add_clip`, `split`, `export`, `get_frame`) — do **not** expose the raw `EditCommand` enum to Python.
+- **Prerequisite (do first, in Rust)**: a **timeline → video file exporter**. The pieces exist but aren't joined — `composite()` → `RgbaImage` (`cutlass-compositor`) and the FFmpeg H.264 encoder (`cutlass-decode/encode.rs`, currently only transcodes an input file into a proxy). Need a "composite every frame `0..duration` → mux to mp4" path, landed in Rust so the future Rust export reuses it.
+- **`get_frame(t) -> numpy`**: easy given `RgbaImage` is already `width/height/Vec<u8>`.
+- **Gap to close**: `CompositeLayer` only handles `Frame`/`Solid` today; text/shape/adjustment generators aren't composited yet, so they'd be dropped on export until filled in.

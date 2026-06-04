@@ -219,6 +219,10 @@ struct App {
     /// `(when playback started, playhead at that moment)`; `None` when paused.
     play_anchor: Option<(Instant, i64)>,
     selected: Option<ClipId>,
+    /// Set when the playhead moved but the preview hasn't been re-rendered yet.
+    /// The ~60 Hz timer renders the latest position, so a burst of scrub events
+    /// collapses to one decode+composite instead of one per event.
+    dirty: bool,
     /// Rebuilt every `sync`: Slint `int` handle -> the clip it stands for.
     handles: HashMap<i32, ClipId>,
 }
@@ -233,6 +237,7 @@ impl App {
             playing: false,
             play_anchor: None,
             selected: None,
+            dirty: false,
             handles: HashMap::new(),
         }
     }
@@ -312,8 +317,11 @@ impl App {
         }
         // Nudge the proxy queue toward whatever is under the playhead.
         self.engine.set_playhead(self.playhead);
+        // Move the playhead line now (cheap), but defer the decode+composite to
+        // the next timer tick so a fast drag doesn't render every intermediate
+        // frame — only the latest one the user lands on.
         ui.set_playhead(self.playhead as i32);
-        self.render(ui);
+        self.dirty = true;
     }
 
     fn toggle_play(&mut self, ui: &AppWindow) {
@@ -332,33 +340,42 @@ impl App {
         ui.set_playing(self.playing);
     }
 
-    /// Advance the playhead to match elapsed wall-clock time, rendering only when
-    /// the displayed frame actually changes. No-op while paused.
+    /// The ~60 Hz UI tick. While playing, advance the playhead to match elapsed
+    /// wall-clock time; while paused, render a pending scrub at most once per
+    /// tick. Either way the decode+composite runs ≤ once per tick, which is what
+    /// caps CPU during a fast drag (many scrub events → one render here).
     fn tick_playback(&mut self, ui: &AppWindow) {
-        if !self.playing {
-            return;
-        }
-        let Some((started, from_frame)) = self.play_anchor else {
-            return;
-        };
-        let dur = self.engine.duration();
-        let elapsed = started.elapsed().as_secs_f64();
-        let advanced = (elapsed * self.fps.as_f64()).floor() as i64;
-        let target = from_frame + advanced;
+        if self.playing {
+            let Some((started, from_frame)) = self.play_anchor else {
+                return;
+            };
+            let dur = self.engine.duration();
+            let elapsed = started.elapsed().as_secs_f64();
+            let advanced = (elapsed * self.fps.as_f64()).floor() as i64;
+            let target = from_frame + advanced;
 
-        if target >= dur {
-            self.playhead = dur.max(0);
-            self.playing = false;
-            self.play_anchor = None;
-            self.engine.set_background_paused(false);
-            ui.set_playing(false);
-            ui.set_playhead(self.playhead as i32);
-            self.render(ui);
+            if target >= dur {
+                self.playhead = dur.max(0);
+                self.playing = false;
+                self.play_anchor = None;
+                self.dirty = false;
+                self.engine.set_background_paused(false);
+                ui.set_playing(false);
+                ui.set_playhead(self.playhead as i32);
+                self.render(ui);
+                return;
+            }
+            if target != self.playhead {
+                self.playhead = target;
+                ui.set_playhead(self.playhead as i32);
+                self.render(ui);
+            }
             return;
         }
-        if target != self.playhead {
-            self.playhead = target;
-            ui.set_playhead(self.playhead as i32);
+
+        // Paused: coalesce scrub renders to this tick.
+        if self.dirty {
+            self.dirty = false;
             self.render(ui);
         }
     }

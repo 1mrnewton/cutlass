@@ -19,4 +19,8 @@ pub enum EngineError {
     /// An edit command violated a model invariant (overlap, bounds, bad ref).
     #[error(transparent)]
     Model(#[from] ModelError),
+
+    /// An export could not be produced (e.g. an empty timeline).
+    #[error("cannot export: {0}")]
+    Export(String),
 }

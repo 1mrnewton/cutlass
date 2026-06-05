@@ -13,11 +13,14 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use cutlass_compositor::{CompositeLayer, RgbaImage, composite};
 use cutlass_decode::Decoder;
-use cutlass_engines::{EditCommand, Engine, ProxyStatus, RenderedContent, RenderedLayer};
+use cutlass_engines::{
+    EditCommand, Engine, ExportSettings, ExportStats, ProxyStatus, RenderedContent, RenderedLayer,
+};
 use cutlass_models::{
     Clip, ClipId, ClipSource, Generator, MediaSource, Rational, TimeRange, TrackId, TrackKind,
 };
@@ -129,6 +132,23 @@ fn bind_callbacks(ui: &AppWindow, app: &Rc<RefCell<App>>) {
     {
         let app = app.clone();
         let weak = ui.as_weak();
+        ui.on_export(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            // Suggest a default name; pick the destination before borrowing so a
+            // timer tick during the (modal) dialog doesn't hit a held borrow.
+            let picked = rfd::FileDialog::new()
+                .add_filter("MP4 video", &["mp4"])
+                .set_title("Export video")
+                .set_file_name("export.mp4")
+                .save_file();
+            if let Some(path) = picked {
+                app.borrow_mut().start_export(&ui, path);
+            }
+        });
+    }
+    {
+        let app = app.clone();
+        let weak = ui.as_weak();
         ui.on_scrub(move |frame| {
             if let Some(ui) = weak.upgrade() {
                 app.borrow_mut().scrub(frame as i64, &ui);
@@ -225,6 +245,15 @@ struct App {
     dirty: bool,
     /// Rebuilt every `sync`: Slint `int` handle -> the clip it stands for.
     handles: HashMap<i32, ClipId>,
+    /// `Some` while an export runs on a worker thread: progress/result arrive
+    /// here and are drained on the idle tick.
+    export_rx: Option<Receiver<ExportMsg>>,
+}
+
+/// Messages from the background export thread to the UI.
+enum ExportMsg {
+    Progress { done: i64, total: i64 },
+    Done(Result<ExportStats, String>),
 }
 
 impl App {
@@ -239,6 +268,7 @@ impl App {
             selected: None,
             dirty: false,
             handles: HashMap::new(),
+            export_rx: None,
         }
     }
 
@@ -307,6 +337,102 @@ impl App {
             "imported media and placed clip"
         );
         self.sync(ui);
+    }
+
+    /// Kick off an export on a background thread.
+    ///
+    /// The thread gets a *clone* of the project and opens its own source
+    /// decoders ([`Engine::for_export`]), so the live session keeps running and
+    /// the UI never blocks. Progress and the final result stream back over a
+    /// channel drained in [`poll_export`]. While it runs, background proxy
+    /// builds in the live engine are paused so the export gets the CPU.
+    fn start_export(&mut self, ui: &AppWindow, path: std::path::PathBuf) {
+        if self.export_rx.is_some() {
+            return; // an export is already running.
+        }
+        if self.engine.duration() <= 0 {
+            ui.set_status("Nothing to export — import a video first".into());
+            return;
+        }
+        if self.playing {
+            self.playing = false;
+            self.play_anchor = None;
+            ui.set_playing(false);
+        }
+
+        let (w, h) = self.export_dimensions();
+        let settings = ExportSettings::new(w, h);
+        let project = self.engine.project().clone();
+        let (tx, rx) = mpsc::channel();
+        self.export_rx = Some(rx);
+        self.engine.set_background_paused(true);
+
+        std::thread::spawn(move || {
+            let result = (|| -> Result<ExportStats, String> {
+                let mut engine = Engine::for_export(project).map_err(|e| e.to_string())?;
+                let tx = tx.clone();
+                let mut on_progress = |done: i64, total: i64| {
+                    let _ = tx.send(ExportMsg::Progress { done, total });
+                };
+                engine
+                    .export_with(&path, settings, Some(&mut on_progress))
+                    .map_err(|e| e.to_string())
+            })();
+            // The receiver may be gone if the window closed; ignore send errors.
+            let _ = tx.send(ExportMsg::Done(result));
+        });
+
+        ui.set_exporting(true);
+        ui.set_export_progress(0.0);
+        ui.set_status(format!("Exporting {w}×{h}…").into());
+    }
+
+    /// Drain export progress/result from the worker thread (called on idle).
+    fn poll_export(&mut self, ui: &AppWindow) {
+        let Some(rx) = self.export_rx.as_ref() else {
+            return;
+        };
+        let mut finished: Option<Result<ExportStats, String>> = None;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                ExportMsg::Progress { done, total } => {
+                    let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+                    ui.set_export_progress(frac);
+                    ui.set_status(format!("Exporting… {:.0}%", frac * 100.0).into());
+                }
+                ExportMsg::Done(result) => finished = Some(result),
+            }
+        }
+
+        if let Some(result) = finished {
+            self.export_rx = None;
+            self.engine.set_background_paused(false);
+            ui.set_exporting(false);
+            ui.set_export_progress(-1.0);
+            match result {
+                Ok(stats) => ui.set_status(
+                    format!("Exported {} frames ({}×{})", stats.frames, stats.width, stats.height)
+                        .into(),
+                ),
+                Err(e) => ui.set_status(format!("Export failed: {e}").into()),
+            }
+        }
+    }
+
+    /// Output resolution for an export: the largest imported source dimensions
+    /// (rounded to even for H.264), or 1080p when the timeline is generators-only.
+    fn export_dimensions(&self) -> (u32, u32) {
+        let dims = self
+            .engine
+            .project()
+            .media_iter()
+            .filter(|m| m.width > 0 && m.height > 0)
+            .map(|m| (m.width, m.height))
+            .max_by_key(|(w, h)| (*w as u64) * (*h as u64));
+        match dims {
+            Some((w, h)) => (w & !1, h & !1),
+            None => (1920, 1080),
+        }
     }
 
     fn scrub(&mut self, frame: i64, ui: &AppWindow) {
@@ -444,6 +570,12 @@ impl App {
     }
 
     fn idle_tick(&mut self, ui: &AppWindow) {
+        // An in-flight export owns the status line and the CPU; just pump its
+        // progress and skip proxy maintenance / re-rendering until it's done.
+        if self.export_rx.is_some() {
+            self.poll_export(ui);
+            return;
+        }
         self.engine.poll_proxies();
         self.refresh_status(ui);
         // When idle, re-render so a freshly installed proxy frame replaces the

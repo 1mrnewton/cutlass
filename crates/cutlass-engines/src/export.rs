@@ -163,6 +163,35 @@ mod tests {
     }
 
     #[test]
+    fn for_export_clone_then_export() {
+        // Mirrors what the UI's background export does: build a project, clone
+        // it, and run a standalone source-only engine on the clone. A
+        // generators-only project needs no media files, so this runs on CI.
+        let mut engine = Engine::new("gen", Rational::FPS_30);
+        let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+        engine
+            .project_mut()
+            .add_generated(
+                track,
+                Generator::SolidColor { rgba: [10, 20, 30, 255] },
+                TimeRange::new(0, 8),
+            )
+            .unwrap();
+
+        let project = engine.project().clone();
+        let mut export_engine = Engine::for_export(project).expect("standalone export engine");
+
+        let out = std::env::temp_dir().join("cutlass_for_export.mp4");
+        let _ = std::fs::remove_file(&out);
+        let stats = export_engine
+            .export(&out, ExportSettings::new(32, 32))
+            .expect("export from cloned project");
+        assert_eq!(stats.frames, 8);
+        assert!(out.exists());
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
     fn exports_solid_generator_timeline() {
         // A generator-only timeline needs no media/decoder, so this runs on CI
         // without test assets while still exercising the full export loop.

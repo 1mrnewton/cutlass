@@ -388,8 +388,8 @@ impl DiskBudget {
     }
 }
 
-/// Default disk budget for proxies: 8 GiB.
-pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Default disk budget for proxies: 50 GiB.
+pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests {

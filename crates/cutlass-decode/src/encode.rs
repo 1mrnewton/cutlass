@@ -53,7 +53,7 @@ impl Default for ProxyConfig {
         // 1080p preview tier, constant-quality software encode. All-intra H.264
         // makes every frame a keyframe (great for seeking, poor for bit
         // efficiency), so quality-targeted libx264 keeps it clean without
-        // guessing a bitrate. The 8 GiB disk budget evicts the overflow.
+        // guessing a bitrate. The 50 GiB disk budget evicts the overflow.
         Self {
             target_height: 1080,
             quality: 18,

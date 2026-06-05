@@ -66,6 +66,27 @@ impl Engine {
         }
     }
 
+    /// Build a standalone, source-only engine that owns `project`, opening a
+    /// decoder for each of its media on the **current thread**.
+    ///
+    /// Unlike [`new`](Engine::new) + [`import_media`](Engine::import_media), this
+    /// starts no background proxy builds and spawns no threads, so the whole
+    /// engine lives on one thread — which is exactly what lets an export run on a
+    /// worker thread (decoders aren't `Send`, but a freshly-opened one never
+    /// crosses threads). Frames come straight from the source files at full
+    /// resolution, the right input for a final render.
+    pub fn for_export(project: Project) -> Result<Self, EngineError> {
+        let mut pool = MediaPool::new();
+        for media in project.media_iter() {
+            pool.open(media)?;
+        }
+        Ok(Self {
+            project,
+            pool,
+            history: EditHistory::new(0),
+        })
+    }
+
     pub fn project(&self) -> &Project {
         &self.project
     }

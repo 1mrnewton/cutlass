@@ -1,0 +1,9 @@
+[package]
+name = "cutlass-decoder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cutlass video demux + decode"
+
+[dependencies]
+tracing.workspace = true

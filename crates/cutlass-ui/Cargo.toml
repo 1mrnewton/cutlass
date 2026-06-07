@@ -3,21 +3,12 @@ name = "cutlass-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Cutlass desktop editor UI (Slint)"
+description = "Cutlass desktop editor UI"
 
 [[bin]]
 name = "cutlass-ui"
 path = "src/main.rs"
 
 [dependencies]
-cutlass-compositor = { path = "../cutlass-compositor" }
-cutlass-decode = { path = "../cutlass-decode" }
-cutlass-engines = { path = "../cutlass-engines" }
-cutlass-models = { path = "../cutlass-models" }
-slint = "1"
-rfd = "0.15"
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-[build-dependencies]
-slint-build = "1"

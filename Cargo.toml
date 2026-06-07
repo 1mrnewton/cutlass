@@ -1,12 +1,14 @@
 [workspace]
 members = [
     "crates/cutlass-app",
-    "crates/cutlass-decode",
+    "crates/cutlass-decoder",
+    "crates/cutlass-encoder",
     "crates/cutlass-compositor",
-    "crates/cutlass-engines",
+    "crates/cutlass-engine",
     "crates/cutlass-models",
     "crates/cutlass-ui",
 ]
+default-members = ["crates/cutlass-app"]
 resolver = "3"
 
 [workspace.package]
@@ -16,8 +18,5 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/1Mr-Newton/cutlass"
 
 [workspace.dependencies]
-ffmpeg-next = "8.1.0"
-rustc-hash = "2"
-thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

@@ -78,6 +78,31 @@ impl Timeline {
         Some(track)
     }
 
+    /// Re-insert a removed track at its prior stack position (undo of [`remove_track`]).
+    pub fn restore_track(
+        &mut self,
+        track: Track,
+        order_index: usize,
+    ) -> Result<TrackId, ModelError> {
+        let id = track.id;
+        if self.tracks.contains_key(&id) {
+            return Err(ModelError::InvalidRange);
+        }
+        for clip in track.clips() {
+            if self.clip_index.contains_key(&clip.id) {
+                return Err(ModelError::InvalidRange);
+            }
+        }
+        let clip_ids: Vec<ClipId> = track.clips().map(|c| c.id).collect();
+        let idx = order_index.min(self.order.len());
+        self.order.insert(idx, id);
+        self.tracks.insert(id, track);
+        for clip_id in clip_ids {
+            self.clip_index.insert(clip_id, id);
+        }
+        Ok(id)
+    }
+
     // --- clips ------------------------------------------------------------
 
     /// Place `clip` on `track_id`, rejecting unknown tracks and overlaps.
@@ -207,6 +232,23 @@ mod tests {
         let id = timeline.add_track(Track::new(TrackKind::Video, "V1"));
         timeline.track_mut(id).unwrap().enabled = false;
         assert!(!timeline.track(id).unwrap().enabled);
+    }
+
+    #[test]
+    fn restore_track_reinserts_stack_position_and_clip_index() {
+        let (mut timeline, track_id) = timeline_with_track();
+        let clip_id = timeline
+            .add_clip(track_id, generated_clip(0, 10))
+            .expect("clip");
+        let track = timeline.remove_track(track_id).expect("remove");
+        assert_eq!(timeline.track_count(), 0);
+        assert!(timeline.clip(clip_id).is_none());
+
+        timeline
+            .restore_track(track, 0)
+            .expect("restore");
+        assert_eq!(timeline.track_count(), 1);
+        assert_eq!(timeline.track_of(clip_id), Some(track_id));
     }
 
     #[test]

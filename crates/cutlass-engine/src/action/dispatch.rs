@@ -54,6 +54,10 @@ fn dispatch_edit(
     ctx: &mut ApplyContext<'_>,
 ) -> Result<(ApplyOutcome, Option<Box<dyn EditAction>>), EngineError> {
     match edit {
+        EditCommand::AddTrack { kind, name } => {
+            let (id, inverse) = edit::add_track::execute(ctx, kind, name)?;
+            Ok((ApplyOutcome::Edited(EditOutcome::CreatedTrack(id)), Some(inverse)))
+        }
         EditCommand::AddClip {
             track,
             media,

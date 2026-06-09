@@ -4,8 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
-use cutlass_engine::{Engine, EngineConfig};
-use cutlass_models::{Rational, RationalTime, TimeRange};
+use cutlass_commands::{Command, EditCommand, EditOutcome};
+use cutlass_engine::{ApplyOutcome, Engine, EngineConfig};
+use cutlass_models::{Rational, RationalTime, TimeRange, TrackId, TrackKind};
 
 pub fn assets_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets")
@@ -48,9 +49,21 @@ pub fn tr(start: i64, duration: i64) -> TimeRange {
     TimeRange::at_rate(start, duration, Rational::FPS_24)
 }
 
+pub fn add_track(engine: &mut Engine, kind: TrackKind, name: &str) -> TrackId {
+    match engine
+        .apply(Command::Edit(EditCommand::AddTrack {
+            kind,
+            name: name.into(),
+        }))
+        .expect("add track")
+    {
+        ApplyOutcome::Edited(EditOutcome::CreatedTrack(id)) => id,
+        other => panic!("expected CreatedTrack, got {other:?}"),
+    }
+}
+
 pub fn import_asset(engine: &mut Engine, path: &Path) -> cutlass_models::MediaId {
     use cutlass_commands::ProjectCommand;
-    use cutlass_engine::{ApplyOutcome, Command};
     match engine
         .apply(Command::Project(ProjectCommand::Import {
             path: path.to_path_buf(),

@@ -21,7 +21,7 @@ fn undo_split_restores_single_clip() {
     };
     let (_dir, mut engine) = temp_engine();
     let media_id = import_asset(&mut engine, &path);
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let clip_id = created(
         engine
@@ -57,7 +57,7 @@ fn redo_split_after_undo() {
     };
     let (_dir, mut engine) = temp_engine();
     let media_id = import_asset(&mut engine, &path);
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let clip_id = created(
         engine
@@ -91,7 +91,7 @@ fn redo_split_after_undo() {
 #[test]
 fn undo_ripple_delete_restores_gap() {
     let (_dir, mut engine) = temp_engine();
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let first_id = created(
         engine
@@ -136,7 +136,7 @@ fn undo_ripple_delete_restores_gap() {
 #[test]
 fn undo_ripple_delete_middle_of_three_adjacent() {
     let (_dir, mut engine) = temp_engine();
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let a = created(
         engine
@@ -188,7 +188,7 @@ fn undo_trim_restores_timeline_and_source() {
     };
     let (_dir, mut engine) = temp_engine();
     let media_id = import_asset(&mut engine, &path);
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let clip_id = created(
         engine
@@ -230,8 +230,8 @@ fn undo_trim_restores_timeline_and_source() {
 #[test]
 fn undo_move_across_tracks() {
     let (_dir, mut engine) = temp_engine();
-    let v1 = engine.project_mut().add_track(TrackKind::Video, "V1");
-    let v2 = engine.project_mut().add_track(TrackKind::Video, "V2");
+    let v1 = common::add_track(&mut engine, TrackKind::Video, "V1");
+    let v2 = common::add_track(&mut engine, TrackKind::Video, "V2");
 
     let clip_id = created(
         engine
@@ -264,7 +264,7 @@ fn undo_move_across_tracks() {
 #[test]
 fn undo_remove_clip_restores_with_gap() {
     let (_dir, mut engine) = temp_engine();
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let a = created(
         engine
@@ -301,7 +301,7 @@ fn undo_remove_clip_restores_with_gap() {
 #[test]
 fn undo_add_generated() {
     let (_dir, mut engine) = temp_engine();
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let clip_id = created(
         engine
@@ -325,7 +325,7 @@ fn undo_add_generated() {
 #[test]
 fn failed_split_does_not_push_undo() {
     let (_dir, mut engine) = temp_engine();
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let clip_id = created(
         engine
@@ -345,17 +345,19 @@ fn failed_split_does_not_push_undo() {
         .unwrap_err();
     assert!(format!("{err}").contains("range") || format!("{err}").contains("Invalid"));
     assert_eq!(engine.project().timeline().clip_count(), 1);
-    // Failed split must not add an undo step; only the prior add remains.
+    // Failed split must not add an undo step; only add-track + add-generated remain.
     assert!(engine.can_undo());
     assert!(engine.undo());
     assert_eq!(engine.project().timeline().clip_count(), 0);
+    assert!(engine.can_undo());
+    assert!(engine.undo());
     assert!(!engine.can_undo());
 }
 
 #[test]
 fn failed_trim_does_not_push_undo() {
     let (_dir, mut engine) = temp_engine();
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let clip_id = created(
         engine
@@ -382,7 +384,7 @@ fn failed_trim_does_not_push_undo() {
 #[test]
 fn multi_step_undo_unwinds_in_order() {
     let (_dir, mut engine) = temp_engine();
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let a = created(
         engine
@@ -427,7 +429,7 @@ fn multi_step_undo_unwinds_in_order() {
 #[test]
 fn redo_trim_after_undo() {
     let (_dir, mut engine) = temp_engine();
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let clip_id = created(
         engine
@@ -466,7 +468,7 @@ fn redo_trim_after_undo() {
 #[test]
 fn redo_ripple_delete_after_undo() {
     let (_dir, mut engine) = temp_engine();
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let first = created(
         engine
@@ -505,8 +507,8 @@ fn redo_ripple_delete_after_undo() {
 #[test]
 fn redo_move_after_undo() {
     let (_dir, mut engine) = temp_engine();
-    let v1 = engine.project_mut().add_track(TrackKind::Video, "V1");
-    let v2 = engine.project_mut().add_track(TrackKind::Video, "V2");
+    let v1 = common::add_track(&mut engine, TrackKind::Video, "V1");
+    let v2 = common::add_track(&mut engine, TrackKind::Video, "V2");
 
     let clip_id = created(
         engine
@@ -538,7 +540,7 @@ fn redo_move_after_undo() {
 #[test]
 fn redo_remove_clip_after_undo() {
     let (_dir, mut engine) = temp_engine();
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let clip_id = created(
         engine
@@ -565,7 +567,7 @@ fn redo_remove_clip_after_undo() {
 #[test]
 fn new_edit_clears_redo_stack() {
     let (_dir, mut engine) = temp_engine();
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let clip_id = created(
         engine
@@ -602,7 +604,7 @@ fn new_edit_clears_redo_stack() {
 #[test]
 fn failed_move_overlap_does_not_push_undo() {
     let (_dir, mut engine) = temp_engine();
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let _a = created(
         engine
@@ -632,7 +634,9 @@ fn failed_move_overlap_does_not_push_undo() {
         .unwrap_err();
     assert!(format!("{err}").contains("overlap") || format!("{err}").contains("Overlap"));
     assert_eq!(engine.project().clip(b).unwrap().start().value, 30);
-    // Only the two adds are undoable; the failed move must not push a third step.
+    // add-track + two adds are undoable; the failed move must not push a fourth step.
+    assert!(engine.can_undo());
+    assert!(engine.undo());
     assert!(engine.can_undo());
     assert!(engine.undo());
     assert!(engine.can_undo());

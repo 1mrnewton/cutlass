@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use cutlass_models::{ClipId, Generator, MediaId, RationalTime, TimeRange, TrackId};
+use cutlass_models::{ClipId, Generator, MediaId, RationalTime, TimeRange, TrackId, TrackKind};
 
 /// A project-level action (media pool, not timeline placement).
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +23,11 @@ pub enum ProjectCommand {
 /// A single structured edit against the timeline.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditCommand {
+    /// Append a track to the timeline stack.
+    AddTrack {
+        kind: TrackKind,
+        name: String,
+    },
     /// Place a trimmed range of imported media on a track.
     AddClip {
         track: TrackId,
@@ -63,6 +68,7 @@ pub enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditOutcome {
     Created(ClipId),
+    CreatedTrack(TrackId),
     Updated(ClipId),
     Removed(ClipId),
 }

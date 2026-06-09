@@ -29,7 +29,7 @@ fn edit_session_via_commands() {
     };
     let (_dir, mut engine) = temp_engine();
     let media_id = import_asset(&mut engine, &path);
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let clip = match engine
         .apply(Command::Edit(EditCommand::AddClip {
@@ -71,7 +71,7 @@ fn undo_redo_roundtrip_restores_timeline() {
     };
     let (_dir, mut engine) = temp_engine();
     let media_id = import_asset(&mut engine, &path);
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     engine
         .apply(Command::Edit(EditCommand::AddClip {
@@ -96,7 +96,7 @@ fn undo_redo_roundtrip_restores_timeline() {
 #[test]
 fn failed_command_does_not_mutate_project() {
     let (_dir, mut engine) = temp_engine();
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
     let fake_media = cutlass_models::MediaId::from_raw(999);
 
     let err = match engine.apply(Command::Edit(EditCommand::AddClip {
@@ -111,7 +111,7 @@ fn failed_command_does_not_mutate_project() {
 
     assert!(format!("{err}").contains("unknown media"));
     assert_eq!(engine.project().timeline().clip_count(), 0);
-    assert!(!engine.can_undo());
+    assert!(engine.can_undo(), "add-track remains undoable after failed add-clip");
 }
 
 #[test]

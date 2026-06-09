@@ -13,7 +13,7 @@ fn get_frame_returns_rgba_for_placed_clip() {
     };
     let (_dir, mut engine) = temp_engine();
     let media_id = import_asset(&mut engine, &path);
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     engine
         .apply(Command::Edit(EditCommand::AddClip {
@@ -46,7 +46,7 @@ fn get_frame_after_split_still_decodes() {
     };
     let (_dir, mut engine) = temp_engine();
     let media_id = import_asset(&mut engine, &path);
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     let clip_id = match engine
         .apply(Command::Edit(EditCommand::AddClip {

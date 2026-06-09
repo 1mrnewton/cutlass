@@ -29,7 +29,7 @@ fn undo_add_clip_uses_inverse_not_snapshot() {
     };
     let (_dir, mut engine) = temp_engine();
     let media_id = import_asset(&mut engine, &path);
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
     engine
         .apply(Command::Edit(EditCommand::AddClip {
@@ -47,20 +47,43 @@ fn undo_add_clip_uses_inverse_not_snapshot() {
 }
 
 #[test]
-fn undo_import_fails_while_media_referenced() {
+fn undo_import_after_clip_removed() {
     let Some(path) = small_video_asset() else {
         return;
     };
     let (_dir, mut engine) = temp_engine();
     let media_id = import_asset(&mut engine, &path);
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
-    // Place clip without pushing undo — stack only holds the import inverse.
-    engine
-        .project_mut()
-        .add_clip(track, media_id, tr(0, 48), rt(0))
-        .expect("direct add");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
 
-    assert!(!engine.undo());
-    assert!(engine.project().media(media_id).is_some());
-    assert_eq!(engine.project().timeline().clip_count(), 1);
+    engine
+        .apply(Command::Edit(EditCommand::AddClip {
+            track,
+            media: media_id,
+            source: tr(0, 48),
+            start: rt(0),
+        }))
+        .expect("add clip");
+
+    assert!(engine.undo());
+    assert_eq!(engine.project().timeline().clip_count(), 0);
+
+    assert!(engine.undo());
+    assert_eq!(engine.project().timeline().track_count(), 0);
+
+    assert!(engine.undo());
+    assert!(engine.project().media(media_id).is_none());
+}
+
+#[test]
+fn undo_add_track_removes_track() {
+    let (_dir, mut engine) = temp_engine();
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
+    assert_eq!(engine.project().timeline().track_count(), 1);
+
+    assert!(engine.undo());
+    assert_eq!(engine.project().timeline().track_count(), 0);
+    assert!(engine.project().timeline().track(track).is_none());
+
+    assert!(engine.redo());
+    assert_eq!(engine.project().timeline().track_count(), 1);
 }

@@ -6,8 +6,16 @@ use std::path::PathBuf;
 
 use common::{import_asset, rt, small_video_asset, temp_engine, tr};
 use cutlass_commands::{Command, EditCommand, ProjectCommand};
-use cutlass_engine::ApplyOutcome;
-use cutlass_models::TrackKind;
+use cutlass_engine::{ApplyOutcome, Engine, EngineConfig};
+use cutlass_models::{Project, Rational, TrackKind};
+
+fn engine_config(cache_dir: PathBuf) -> EngineConfig {
+    EngineConfig {
+        cache_dir,
+        cache_budget_bytes: 64 * 1024 * 1024,
+        undo_limit: 8,
+    }
+}
 
 #[test]
 fn save_and_open_roundtrip_restores_session() {
@@ -16,7 +24,7 @@ fn save_and_open_roundtrip_restores_session() {
     };
     let (dir, mut engine) = temp_engine();
     let media_id = import_asset(&mut engine, &path);
-    let track = engine.project_mut().add_track(TrackKind::Video, "V1");
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
     engine
         .apply(Command::Edit(EditCommand::AddClip {
             track,
@@ -81,20 +89,20 @@ fn open_fails_when_media_missing() {
         .expect("save");
 
     let missing = dir.path().join("gone.mp4");
-    let mut engine2 = cutlass_engine::Engine::new(cutlass_engine::EngineConfig {
-        cache_dir: dir.path().join("cache2"),
-        cache_budget_bytes: 64 * 1024 * 1024,
-        undo_limit: 8,
-    })
-    .expect("engine");
-    engine2.project_mut().add_media(cutlass_models::MediaSource::new(
+    let mut offline_project = Project::new("offline", Rational::FPS_24);
+    offline_project.add_media(cutlass_models::MediaSource::new(
         &missing,
         1920,
         1080,
-        cutlass_models::Rational::FPS_24,
+        Rational::FPS_24,
         100,
         false,
     ));
+    let mut engine2 = Engine::with_project(
+        engine_config(dir.path().join("cache2")),
+        offline_project,
+    )
+    .expect("engine");
     let offline = dir.path().join("missing_media.cutlass");
     engine2
         .apply(Command::Project(ProjectCommand::Save { path: offline.clone() }))
@@ -108,19 +116,24 @@ fn open_fails_when_media_missing() {
 
 #[test]
 fn load_tolerates_missing_media() {
-    let (dir, mut engine) = temp_engine();
+    let dir = tempfile::tempdir().expect("tempdir");
     let missing = dir.path().join("ghost.mp4");
-    engine.project_mut().add_media(cutlass_models::MediaSource::new(
+    let mut fixture = Project::new("ghost", Rational::FPS_24);
+    fixture.add_media(cutlass_models::MediaSource::new(
         &missing,
         1280,
         720,
-        cutlass_models::Rational::FPS_24,
+        Rational::FPS_24,
         48,
         false,
     ));
-    engine
-        .project_mut()
-        .add_track(TrackKind::Video, "V1");
+    fixture.add_track(TrackKind::Video, "V1");
+
+    let mut engine = Engine::with_project(
+        engine_config(dir.path().join("cache")),
+        fixture,
+    )
+    .expect("engine");
 
     let project_file = dir.path().join("ghost.cutlass");
     engine
@@ -129,12 +142,7 @@ fn load_tolerates_missing_media() {
         }))
         .expect("save");
 
-    let mut engine2 = cutlass_engine::Engine::new(cutlass_engine::EngineConfig {
-        cache_dir: dir.path().join("cache3"),
-        cache_budget_bytes: 64 * 1024 * 1024,
-        undo_limit: 8,
-    })
-    .expect("engine");
+    let mut engine2 = Engine::new(engine_config(dir.path().join("cache3"))).expect("engine");
     assert!(matches!(
         engine2
             .apply(Command::Project(ProjectCommand::Load {

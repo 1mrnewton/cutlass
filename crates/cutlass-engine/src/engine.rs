@@ -79,12 +79,10 @@ impl Engine {
         &self.config
     }
 
+    /// Read-only view of the session project. Timeline and media mutations must
+    /// go through [`apply`](Self::apply) so undo/redo stays consistent.
     pub fn project(&self) -> &Project {
         &self.project
-    }
-
-    pub fn project_mut(&mut self) -> &mut Project {
-        &mut self.project
     }
 
     pub fn cache(&self) -> &FrameCache {

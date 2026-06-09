@@ -3,7 +3,14 @@ name = "cutlass-compositor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Cutlass frame compositor"
+description = "Cutlass WGPU frame compositor"
 
 [dependencies]
+bytemuck.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true

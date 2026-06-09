@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use cutlass_cache::FrameCache;
 use cutlass_commands::Command;
+use cutlass_compositor::{Compositor, GpuContext};
 use cutlass_models::Project;
 
 use cutlass_models::RationalTime;
@@ -13,6 +14,10 @@ use crate::decoder_pool::DecoderPool;
 use crate::error::EngineError;
 use crate::frame::RgbaFrame;
 use crate::preview;
+
+fn gpu_init_err(err: cutlass_compositor::CompositorError) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Unsupported, err.to_string())
+}
 
 /// Default on-disk frame cache budget (50 GiB).
 pub const DEFAULT_CACHE_BUDGET_BYTES: u64 = 50 * 1024 * 1024 * 1024;
@@ -46,18 +51,24 @@ pub struct Engine {
     history: History,
     project_path: Option<PathBuf>,
     decoder_pool: DecoderPool,
+    gpu: GpuContext,
+    compositor: Compositor,
 }
 
 impl Engine {
     pub fn new(config: EngineConfig) -> std::io::Result<Self> {
         let undo_limit = config.undo_limit;
         let cache = FrameCache::new(config.cache_dir.clone(), config.cache_budget_bytes)?;
+        let gpu = GpuContext::new_headless_blocking().map_err(gpu_init_err)?;
+        let compositor = Compositor::new(&gpu).map_err(gpu_init_err)?;
         Ok(Self {
             project: Project::new("untitled", cutlass_models::Rational::FPS_24),
             cache,
             history: History::new(undo_limit),
             project_path: None,
             decoder_pool: DecoderPool::new(),
+            gpu,
+            compositor,
             config,
         })
     }
@@ -65,12 +76,16 @@ impl Engine {
     pub fn with_project(config: EngineConfig, project: Project) -> std::io::Result<Self> {
         let undo_limit = config.undo_limit;
         let cache = FrameCache::new(config.cache_dir.clone(), config.cache_budget_bytes)?;
+        let gpu = GpuContext::new_headless_blocking().map_err(gpu_init_err)?;
+        let compositor = Compositor::new(&gpu).map_err(gpu_init_err)?;
         Ok(Self {
             project,
             cache,
             history: History::new(undo_limit),
             project_path: None,
             decoder_pool: DecoderPool::new(),
+            gpu,
+            compositor,
             config,
         })
     }
@@ -122,12 +137,14 @@ impl Engine {
         Ok(outcome)
     }
 
-    /// Decode the topmost enabled video clip at `time` and return an RGBA preview frame.
+    /// Composite enabled video layers at `time` and return an RGBA preview frame.
     pub fn get_frame(&mut self, time: RationalTime) -> Result<RgbaFrame, EngineError> {
         preview::get_frame(
             &self.project,
             &self.cache,
             &mut self.decoder_pool,
+            &self.gpu,
+            &mut self.compositor,
             time,
         )
     }

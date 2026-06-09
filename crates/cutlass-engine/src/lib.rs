@@ -1,6 +1,7 @@
 //! Editing engine: project session, inverse-command undo/redo, frame cache.
 
 mod action;
+mod composite;
 mod decoder_pool;
 mod engine;
 mod error;
@@ -19,5 +20,6 @@ use tracing::info;
 pub fn init() {
     cutlass_cache::init();
     cutlass_decoder::init();
+    cutlass_compositor::init();
     info!("cutlass-engine ready");
 }

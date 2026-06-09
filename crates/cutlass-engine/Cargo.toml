@@ -8,8 +8,10 @@ description = "Cutlass editing engine"
 [dependencies]
 cutlass-cache = { path = "../cutlass-cache" }
 cutlass-commands = { path = "../cutlass-commands" }
+cutlass-compositor = { path = "../cutlass-compositor" }
 cutlass-decoder = { path = "../cutlass-decoder" }
 cutlass-models = { path = "../cutlass-models" }
+pollster.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

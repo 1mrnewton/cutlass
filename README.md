@@ -16,14 +16,14 @@ This is an early-stage project. The headless editing core is real and tested, an
 - Media decode via FFmpeg, with hardware-accelerated decode where available.
 - A closed set of deterministic, undo/redo-able edit commands: add clip, add generated clip, split, trim, move, remove, and ripple-delete.
 - Frame resolution through the engine: timeline frame → ordered layers → composited image.
-- A CPU compositor and an on-disk proxy/transcode cache to keep cold seeks fast.
+- A WGPU compositor and an on-disk proxy/transcode cache to keep cold seeks fast.
 - A desktop editor shell (`cutlass-ui`, built on [Slint](https://slint.dev/)): import a video, scrub and play back a live preview, drag clips, split/delete/ripple-delete, undo/redo, with background proxy progress.
 - A small end-to-end CLI (`cutlass-app`) that decodes a clip and renders one timeline frame to a PNG — a smoke test for the whole pipeline.
 
 **Not built yet (the goal)**
 
 - The natural-language agent that turns a prompt into edit commands. The command layer it will drive already exists.
-- GPU compositing/effects/export (planned on [wgpu](https://wgpu.rs/)). The preview compositor is currently CPU-only.
+- GPU compositing via [wgpu](https://wgpu.rs/) for preview (export path next).
 
 ## Architecture
 
@@ -33,7 +33,7 @@ The codebase is a Cargo workspace split into focused crates:
 | --- | --- |
 | `cutlass-models` | Project, timeline, track, and clip data model with edit invariants. |
 | `cutlass-decoder` | FFmpeg demux + decode, hardware acceleration, keyframe indexing, proxy encode. |
-| `cutlass-compositor` | CPU frame compositor (layer sampling, fills). |
+| `cutlass-compositor` | WGPU frame compositor (multi-layer alpha-over, RGBA readback). |
 | `cutlass-engine` | Headless editing engine: edit commands + undo/redo, frame resolution, frame cache, proxy/media pool. |
 | `cutlass-ui` | Slint desktop shell: preview, scrub/playback, timeline editing, undo/redo, proxy progress. |
 | `cutlass-app` | End-to-end render CLI that exercises the full decode → resolve → composite pipeline. |

@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use cutlass_compositor::{Compositor, GpuContext};
+use cutlass_compositor::{Compositor, CompositorError, GpuContext};
 use cutlass_encoder::{ExportConfig, ExportStats, VideoExport};
 use cutlass_models::{Project, RationalTime};
 use tracing::info;
@@ -16,6 +16,10 @@ use crate::composite::composite_canvas_size;
 use crate::decoder_pool::DecoderPool;
 use crate::error::EngineError;
 use crate::preview;
+
+fn gpu_err(err: CompositorError) -> EngineError {
+    EngineError::Export(err.to_string())
+}
 
 /// Build encoder settings from the project timeline rate and composite canvas.
 pub fn export_config_for(project: &Project) -> Result<ExportConfig, EngineError> {
@@ -79,6 +83,25 @@ pub fn export_timeline(
     }
 
     sink.finish().map_err(Into::into)
+}
+
+/// Standalone export for background threads: owns its own GPU context and decoder pool.
+pub fn export_project(
+    project: &Project,
+    output: &Path,
+    color_convert: ColorConvertPath,
+) -> Result<ExportStats, EngineError> {
+    let gpu = GpuContext::new_headless_blocking().map_err(gpu_err)?;
+    let mut compositor = Compositor::new(&gpu).map_err(gpu_err)?;
+    let mut pool = DecoderPool::new();
+    export_timeline(
+        project,
+        &mut pool,
+        &gpu,
+        &mut compositor,
+        output,
+        color_convert,
+    )
 }
 
 #[cfg(test)]

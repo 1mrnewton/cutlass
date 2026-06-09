@@ -1,0 +1,319 @@
+import { Button, ScrollView, Slider } from "std-widgets.slint";
+
+// One clip placed on a track, flattened for the view. `track` is the timeline
+// stacking index (0 = bottom). `handle` is a per-sync id the backend maps back
+// to a real ClipId.
+export struct ClipData {
+    handle: int,
+    label: string,
+    start: int,
+    duration: int,
+    track: int,
+    generated: bool,
+    selected: bool,
+}
+
+export struct TrackData {
+    name: string,
+    video: bool,
+}
+
+// A single clip rectangle on the timeline. Owns its drag gesture and reports a
+// finished horizontal move back up via `moved`.
+component ClipRect inherits Rectangle {
+    in property <ClipData> data;
+    in property <length> ppf;
+    in property <length> row-height;
+    in property <int> track-count;
+    callback select(int);
+    callback moved(int, int);
+
+    property <length> drag-dx: 0;
+    property <bool> dragging: false;
+
+    x: self.ppf * self.data.start + self.drag-dx;
+    y: (self.track-count - 1 - self.data.track) * self.row-height + 3px;
+    width: max(6px, self.ppf * self.data.duration);
+    height: self.row-height - 6px;
+    border-radius: 4px;
+    border-width: self.data.selected ? 2px : 1px;
+    border-color: self.data.selected ? #ffd54a : #1c2733;
+    background: self.dragging
+        ? #4f7cc4
+        : (self.data.generated ? #6a5acd : #3a6ea5);
+
+    Text {
+        x: 6px;
+        width: parent.width - 10px;
+        height: parent.height;
+        vertical-alignment: center;
+        overflow: elide;
+        color: white;
+        font-size: 11px;
+        text: root.data.label;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: self.pressed ? grabbing : grab;
+        clicked => {
+            root.select(root.data.handle);
+        }
+        moved => {
+            root.dragging = true;
+            root.drag-dx = self.mouse-x - self.pressed-x;
+        }
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.up) {
+                if (root.dragging) {
+                    root.moved(
+                        root.data.handle,
+                        max(0, root.data.start + round(root.drag-dx / root.ppf)));
+                }
+                root.dragging = false;
+                root.drag-dx = 0;
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Cutlass";
+    preferred-width: 1180px;
+    preferred-height: 760px;
+    min-width: 720px;
+    min-height: 520px;
+    background: #0d1117;
+
+    in property <image> preview;
+    in property <int> duration;
+    in property <float> fps;
+    in property <int> playhead;
+    in property <bool> playing;
+    in property <[TrackData]> tracks;
+    in property <[ClipData]> clips;
+    in property <int> selected;
+    in property <string> status;
+    in property <float> proxy-progress;
+    in property <bool> has-media;
+    in property <bool> can-undo;
+    in property <bool> can-redo;
+    in property <bool> exporting;
+    in property <float> export-progress;
+
+    in-out property <length> ppf: 6px;
+
+    callback import();
+    callback export();
+    callback scrub(int);
+    callback toggle-play();
+    callback select-clip(int);
+    callback move-clip(int, int);
+    callback split();
+    callback delete-clip();
+    callback ripple-delete();
+    callback do-undo();
+    callback do-redo();
+
+    property <length> row-height: 46px;
+    property <length> content-width: max(self.ppf * max(self.duration, 1) + 240px, self.width);
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+
+        HorizontalLayout {
+            spacing: 6px;
+            height: 32px;
+            Button {
+                text: "Import…";
+                clicked => { root.import(); }
+            }
+
+            Button {
+                text: root.exporting ? "Exporting…" : "Export…";
+                enabled: root.has-media && !root.playing && !root.exporting;
+                clicked => { root.export(); }
+            }
+
+            Rectangle {
+                width: 12px;
+            }
+
+            Button {
+                text: "Split";
+                enabled: root.selected != -1;
+                clicked => { root.split(); }
+            }
+
+            Button {
+                text: "Delete";
+                enabled: root.selected != -1;
+                clicked => { root.delete-clip(); }
+            }
+
+            Button {
+                text: "Ripple delete";
+                enabled: root.selected != -1;
+                clicked => { root.ripple-delete(); }
+            }
+
+            Rectangle {
+                width: 12px;
+            }
+
+            Button {
+                text: "Undo";
+                enabled: root.can-undo;
+                clicked => { root.do-undo(); }
+            }
+
+            Button {
+                text: "Redo";
+                enabled: root.can-redo;
+                clicked => { root.do-redo(); }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            Button {
+                text: "-";
+                clicked => { root.ppf = clamp(root.ppf / 1.5, 0.5px, 80px); }
+            }
+
+            Button {
+                text: "+";
+                clicked => { root.ppf = clamp(root.ppf * 1.5, 0.5px, 80px); }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: black;
+            border-radius: 6px;
+            clip: true;
+
+            if root.has-media: Image {
+                source: root.preview;
+                image-fit: contain;
+                width: parent.width;
+                height: parent.height;
+            }
+            if !root.has-media: Text {
+                color: #6b7682;
+                font-size: 15px;
+                text: "Import a video to begin";
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            height: 30px;
+            Button {
+                width: 84px;
+                text: root.playing ? "❚❚ Pause" : "▶ Play";
+                enabled: root.has-media;
+                clicked => { root.toggle-play(); }
+            }
+
+            Slider {
+                horizontal-stretch: 1;
+                enabled: root.has-media;
+                minimum: 0;
+                maximum: max(root.duration, 1);
+                value: root.playhead;
+                changed(v) => { root.scrub(round(v)); }
+            }
+
+            Text {
+                width: 150px;
+                color: #c9d1d9;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+                text: root.playhead + " / " + root.duration + " f";
+            }
+        }
+
+        Rectangle {
+            height: 220px;
+            background: #11161d;
+            border-radius: 6px;
+            clip: true;
+
+            ScrollView {
+                viewport-width: root.content-width;
+                viewport-height: max(root.tracks.length * root.row-height, parent.height);
+
+                bg := TouchArea {
+                    width: root.content-width;
+                    height: max(root.tracks.length * root.row-height, 220px);
+                    clicked => { root.scrub(round(self.mouse-x / root.ppf)); }
+                    moved => { root.scrub(round(self.mouse-x / root.ppf)); }
+                }
+
+                for track[idx] in root.tracks: Rectangle {
+                    x: 0;
+                    y: (root.tracks.length - 1 - idx) * root.row-height;
+                    width: root.content-width;
+                    height: root.row-height;
+                    background: mod(idx, 2) == 0 ? #141b24 : #11161d;
+                    Text {
+                        x: 6px;
+                        y: 4px;
+                        color: #4a5560;
+                        font-size: 10px;
+                        text: track.name;
+                    }
+                }
+
+                for c in root.clips: ClipRect {
+                    data: c;
+                    ppf: root.ppf;
+                    row-height: root.row-height;
+                    track-count: root.tracks.length;
+                    select(h) => { root.select-clip(h); }
+                    moved(h, s) => { root.move-clip(h, s); }
+                }
+
+                Rectangle {
+                    x: root.ppf * root.playhead;
+                    y: 0;
+                    width: 2px;
+                    height: max(root.tracks.length * root.row-height, 220px);
+                    background: #ff5252;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            height: 18px;
+            spacing: 10px;
+            Text {
+                color: #8b949e;
+                font-size: 11px;
+                vertical-alignment: center;
+                text: root.status;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            if root.exporting: Rectangle {
+                width: 160px;
+                height: 8px;
+                y: 5px;
+                border-radius: 4px;
+                background: #21262d;
+                Rectangle {
+                    x: 0;
+                    width: parent.width * max(0, root.export-progress);
+                    height: parent.height;
+                    border-radius: 4px;
+                    background: #58a6ff;
+                }
+            }
+        }
+    }
+}

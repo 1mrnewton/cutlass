@@ -13,7 +13,7 @@ mod preview;
 pub use action::ApplyOutcome;
 pub use engine::{ColorConvertPath, DEFAULT_CACHE_BUDGET_BYTES, Engine, EngineConfig};
 pub use error::EngineError;
-pub use export::{export_config_for, export_timeline};
+pub use export::{export_config_for, export_project, export_timeline};
 pub use frame::RgbaFrame;
 pub use cutlass_commands::{Command, EditCommand, EditOutcome, ProjectCommand};
 pub use cutlass_encoder::{ExportConfig, ExportStats};

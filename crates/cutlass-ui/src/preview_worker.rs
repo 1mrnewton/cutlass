@@ -1,5 +1,6 @@
 //! Background preview rendering: engine and decode/composite stay off the UI thread.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -441,7 +442,7 @@ fn worker_main(
         export: export_weak,
         audio,
     };
-    publish_projection(&engine, &ui);
+    publish_projection(&mut engine, &ui);
 
     worker_loop(&mut engine, tl_rate, preview_weak, ui, thumbs, strips, req_rx);
     Ok(())
@@ -2141,22 +2142,48 @@ fn parse_raw_id(raw: &str) -> Option<u64> {
 /// The audio mixer gets its own snapshot from the same chokepoint, so what
 /// playback *sounds* like always matches the project the UI shows (mute
 /// toggles, trims, moves — every mutation lands here).
-fn publish_projection(engine: &Engine, ui: &UiSink) {
+fn publish_projection(engine: &mut Engine, ui: &UiSink) {
     ui.audio.publish_snapshot(audio_snapshot(engine));
 
+    let generator_sizes = generator_content_sizes(engine);
     let project = engine.project().clone();
     let can_undo = engine.can_undo();
     let can_redo = engine.can_redo();
     let editor_weak = ui.editor.clone();
     if let Err(e) = slint::invoke_from_event_loop(move || {
         if let Some(store) = editor_weak.upgrade() {
-            store.set_project(crate::projection::project_to_slint(&project));
+            store.set_project(crate::projection::project_to_slint(&project, &generator_sizes));
             store.set_can_undo(can_undo);
             store.set_can_redo(can_redo);
         }
     }) {
         error!("failed to publish project projection to UI: {e}");
     }
+}
+
+/// Drawn-content size (canvas px) for every generated clip, keyed by raw clip
+/// id. Rides the projection so the preview's selection box and hit-test hug
+/// what the generator actually draws instead of its full-canvas raster (see
+/// `src/preview_select.rs`). Served from the engine's raster cache; clips the
+/// compositor doesn't draw are absent (the UI falls back to canvas size).
+fn generator_content_sizes(engine: &mut Engine) -> HashMap<u64, (i32, i32)> {
+    let generators: Vec<(u64, Generator)> = engine
+        .project()
+        .timeline()
+        .tracks_ordered()
+        .flat_map(|track| track.clips())
+        .filter_map(|clip| match &clip.content {
+            ClipSource::Generated(generator) => Some((clip.id.raw(), generator.clone())),
+            ClipSource::Media { .. } => None,
+        })
+        .collect();
+    generators
+        .into_iter()
+        .filter_map(|(id, generator)| {
+            let (w, h) = engine.generator_content_size(&generator)?;
+            Some((id, (w as i32, h as i32)))
+        })
+        .collect()
 }
 
 /// Every audible clip on the timeline, in rational time: clips on unmuted

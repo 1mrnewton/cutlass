@@ -38,6 +38,15 @@ fn shape_key(shape: Shape) -> ShapeKey {
     }
 }
 
+/// A cached raster plus the tight bounding-box size of its non-transparent
+/// pixels. Both raster paths center their content in the canvas, so the size
+/// alone places the content rect (centered on the layer center).
+#[derive(Clone)]
+struct CachedRaster {
+    bytes: Arc<Vec<u8>>,
+    content: (u32, u32),
+}
+
 /// Rasterizes text and shape generators, caching results. Owned by the engine
 /// alongside the decoder pool.
 pub struct GeneratorRaster {
@@ -45,7 +54,7 @@ pub struct GeneratorRaster {
     /// (tests, audio-only sessions) never render text.
     font_system: Option<FontSystem>,
     swash_cache: SwashCache,
-    cache: VecDeque<(RasterKey, Arc<Vec<u8>>)>,
+    cache: VecDeque<(RasterKey, CachedRaster)>,
 }
 
 impl Default for GeneratorRaster {
@@ -68,6 +77,33 @@ impl GeneratorRaster {
     /// (sticker/effect/filter/adjustment) or for a zero-size canvas — callers
     /// skip those layers, as before.
     pub fn raster(&mut self, generator: &Generator, width: u32, height: u32) -> Option<Arc<Vec<u8>>> {
+        self.entry(generator, width, height).map(|e| e.bytes)
+    }
+
+    /// Tight size (canvas px) of the content a generator actually draws on a
+    /// `width`×`height` canvas: the whole canvas for solids, the measured
+    /// alpha bounding box for text and shapes (`(0, 0)` when nothing is
+    /// drawn, e.g. empty text). `None` for generators the compositor doesn't
+    /// draw. This is what a selection box should hug — the raster itself is
+    /// canvas-sized and mostly transparent.
+    pub fn content_size(
+        &mut self,
+        generator: &Generator,
+        width: u32,
+        height: u32,
+    ) -> Option<(u32, u32)> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        if matches!(generator, Generator::SolidColor { .. }) {
+            return Some((width, height));
+        }
+        self.entry(generator, width, height).map(|e| e.content)
+    }
+
+    /// Cache-or-raster: the shared path behind [`raster`](Self::raster) and
+    /// [`content_size`](Self::content_size).
+    fn entry(&mut self, generator: &Generator, width: u32, height: u32) -> Option<CachedRaster> {
         if width == 0 || height == 0 {
             return None;
         }
@@ -95,19 +131,22 @@ impl GeneratorRaster {
             Generator::Shape { shape, rgba } => raster_shape(*shape, *rgba, width, height),
             _ => unreachable!("filtered above"),
         };
-        let arc = Arc::new(bytes);
-        self.insert(key, arc.clone());
-        Some(arc)
+        let entry = CachedRaster {
+            content: alpha_bbox_size(&bytes, width),
+            bytes: Arc::new(bytes),
+        };
+        self.insert(key, entry.clone());
+        Some(entry)
     }
 
-    fn lookup(&mut self, key: &RasterKey) -> Option<Arc<Vec<u8>>> {
+    fn lookup(&mut self, key: &RasterKey) -> Option<CachedRaster> {
         let pos = self.cache.iter().position(|(k, _)| k == key)?;
-        let (k, arc) = self.cache.remove(pos).expect("position is valid");
-        self.cache.push_back((k, arc.clone()));
-        Some(arc)
+        let (k, entry) = self.cache.remove(pos).expect("position is valid");
+        self.cache.push_back((k, entry.clone()));
+        Some(entry)
     }
 
-    fn insert(&mut self, key: RasterKey, value: Arc<Vec<u8>>) {
+    fn insert(&mut self, key: RasterKey, value: CachedRaster) {
         if self.cache.len() >= CACHE_CAP {
             self.cache.pop_front();
         }
@@ -162,6 +201,32 @@ impl GeneratorRaster {
 
         out
     }
+}
+
+/// Tight bounding-box size of pixels with non-zero alpha in an RGBA buffer,
+/// `(0, 0)` when fully transparent. One O(w·h) pass per raster build (cold:
+/// rasters are cached), so the box is exact for any generator — including
+/// text, whose extent only layout knows.
+fn alpha_bbox_size(bytes: &[u8], width: u32) -> (u32, u32) {
+    let w = width as usize;
+    let (mut min_x, mut min_y) = (usize::MAX, usize::MAX);
+    let (mut max_x, mut max_y) = (0usize, 0usize);
+    let mut any = false;
+    for (i, px) in bytes.chunks_exact(4).enumerate() {
+        if px[3] == 0 {
+            continue;
+        }
+        let (x, y) = (i % w, i / w);
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+        any = true;
+    }
+    if !any {
+        return (0, 0);
+    }
+    ((max_x - min_x + 1) as u32, (max_y - min_y + 1) as u32)
 }
 
 /// Straight-alpha src-over of a coverage-weighted glyph pixel onto the buffer.
@@ -284,6 +349,38 @@ mod tests {
         let b = raster.raster(&generator, 32, 32).unwrap();
         // Same Arc allocation on the second call ⇒ cache hit.
         assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn content_size_hugs_the_drawn_content() {
+        let mut raster = GeneratorRaster::new();
+        // Shapes draw the centered middle 50% of the canvas; the rectangle's
+        // box is pixel-exact, the ellipse inscribes the same rect.
+        let rect = Generator::Shape {
+            shape: Shape::Rectangle,
+            rgba: [255, 0, 0, 255],
+        };
+        assert_eq!(raster.content_size(&rect, 64, 64), Some((32, 32)));
+        let ellipse = Generator::Shape {
+            shape: Shape::Ellipse,
+            rgba: [0, 255, 0, 255],
+        };
+        let (ew, eh) = raster.content_size(&ellipse, 64, 64).unwrap();
+        assert!((30..=32).contains(&ew) && (30..=32).contains(&eh), "{ew}x{eh}");
+        // Solids cover the whole canvas (no raster involved).
+        let solid = Generator::SolidColor { rgba: [1, 2, 3, 255] };
+        assert_eq!(raster.content_size(&solid, 64, 48), Some((64, 48)));
+        // Text measures its laid-out block — smaller than the canvas.
+        let text = Generator::Text { content: "Hi".into() };
+        let (tw, th) = raster.content_size(&text, 256, 128).unwrap();
+        assert!(tw > 0 && tw < 256, "text width {tw}");
+        assert!(th > 0 && th < 128, "text height {th}");
+        // Empty text draws nothing.
+        let empty = Generator::Text { content: " ".into() };
+        assert_eq!(raster.content_size(&empty, 256, 128), Some((0, 0)));
+        // Unsupported generators have no raster, hence no content.
+        assert_eq!(raster.content_size(&Generator::Sticker, 64, 64), None);
+        assert_eq!(raster.content_size(&rect, 0, 64), None);
     }
 
     #[test]

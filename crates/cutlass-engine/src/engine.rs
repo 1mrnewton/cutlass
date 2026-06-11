@@ -237,6 +237,19 @@ impl Engine {
         self.transform_override = override_transform;
     }
 
+    /// Tight size (canvas px) of the content `generator` draws on the current
+    /// composite canvas — what a preview selection box should hug, since the
+    /// raster itself is canvas-sized and mostly transparent. `None` for
+    /// generators the compositor doesn't draw. Served from the raster cache
+    /// (`&mut self`: a miss rasterizes once, warming playback too).
+    pub fn generator_content_size(
+        &mut self,
+        generator: &cutlass_models::Generator,
+    ) -> Option<(u32, u32)> {
+        let (width, height) = crate::composite::composite_canvas_size(&self.project);
+        self.raster.content_size(generator, width, height)
+    }
+
     pub fn undo(&mut self) -> bool {
         debug_assert!(!self.history.in_group(), "undo inside an open history group");
         let Some(action) = self.history.pop_undo() else {

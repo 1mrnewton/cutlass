@@ -91,9 +91,11 @@ export struct Clip {
     // selected / moved / trimmed together while the Link toggle is on —
     // e.g. the video+audio pair from one media drop. "" ⇔ unlinked.
     link-id: string,
-    // Native content dimensions for preview placement geometry: the source
-    // media's pixel size, or 0×0 for generated clips (which raster at canvas
-    // size). Keys the aspect-fit math in src/preview_select.rs.
+    // Natural content dimensions for preview placement geometry: the source
+    // media's pixel size (aspect-fit into the canvas), or a generator's
+    // drawn-content bounds in canvas px (fit 1:1, measured from its raster).
+    // 0×0 ⇔ unknown — selection geometry falls back to a canvas-sized box.
+    // Keys the placement math in src/preview_select.rs.
     media-width: int,
     media-height: int,
     // Spatial transform (preview roadmap Phase 1), mirroring the engine's

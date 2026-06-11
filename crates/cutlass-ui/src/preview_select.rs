@@ -53,21 +53,40 @@ pub(crate) fn is_composited(clip: &Clip) -> bool {
         )
 }
 
-/// The clip's canvas placement — identical to what the compositor draws,
-/// via the shared engine helper. Generators raster at canvas size.
+/// The clip's canvas placement, sized to its visible content.
+///
+/// Media clips use the shared engine helper (native size aspect-fit into the
+/// canvas) — identical to what the compositor draws. Generators raster at
+/// canvas size (fit 1:1) with their content centered inside, so the canvas
+/// placement is computed the same way the compositor does and then the size
+/// is shrunk to the drawn-content bounds the projection measured — the
+/// selection box and hit-test hug the shape/text, not the transparent raster
+/// (CapCut). Unknown bounds (0×0, e.g. empty text) keep the canvas-sized box.
 pub(crate) fn clip_placement(clip: &Clip, canvas: &CompositorConfig) -> LayerPlacement {
-    let (w, h) = if clip.media_width > 0 && clip.media_height > 0 {
-        (clip.media_width as u32, clip.media_height as u32)
-    } else {
-        (canvas.width, canvas.height)
-    };
     let transform = ClipTransform {
         position: [clip.transform_position_x, clip.transform_position_y],
         scale: clip.transform_scale,
         rotation: clip.transform_rotation,
         opacity: clip.transform_opacity,
     };
-    layer_placement(&transform, w, h, canvas)
+    let has_size = clip.media_width > 0 && clip.media_height > 0;
+    if !clip.media_id.is_empty() {
+        let (w, h) = if has_size {
+            (clip.media_width as u32, clip.media_height as u32)
+        } else {
+            // Media that vanished from the pool: degrade to canvas size.
+            (canvas.width, canvas.height)
+        };
+        return layer_placement(&transform, w, h, canvas);
+    }
+    let mut placement = layer_placement(&transform, canvas.width, canvas.height, canvas);
+    if has_size {
+        placement.size = [
+            clip.media_width as f32 * transform.scale,
+            clip.media_height as f32 * transform.scale,
+        ];
+    }
+    placement
 }
 
 fn covers_tick(clip: &Clip, tick: i32) -> bool {
@@ -378,20 +397,71 @@ mod tests {
         assert_eq!(hit_test(&seq, 10, 480.0, 420.0, VW, VH).clip_id.as_str(), "A");
     }
 
-    #[test]
-    fn generators_hit_at_canvas_size() {
-        let mut clip = media_clip("T", 0, 100, 0, 0);
+    /// Generated clip with measured content bounds `w×h` in canvas px
+    /// (0×0 ⇔ unmeasured, falls back to a canvas-sized box).
+    fn generated_clip(id: &str, kind: &str, w: i32, h: i32) -> Clip {
+        let mut clip = media_clip(id, 0, 100, w, h);
         clip.media_id = SharedString::default();
-        clip.generator_kind = SharedString::from("text");
-        let mut sticker = media_clip("S", 0, 100, 0, 0);
-        sticker.media_id = SharedString::default();
-        sticker.generator_kind = SharedString::default(); // not composited yet
+        clip.generator_kind = SharedString::from(kind);
+        clip
+    }
+
+    #[test]
+    fn generators_without_bounds_hit_at_canvas_size() {
+        let clip = generated_clip("T", "text", 0, 0);
+        let mut sticker = generated_clip("S", "", 0, 0); // not composited yet
+        sticker.generator_kind = SharedString::default();
         let seq = sequence(vec![
             track("2", TrackKind::Video, vec![sticker]),
             track("1", TrackKind::Video, vec![clip]),
         ]);
         let hit = hit_test(&seq, 10, 480.0, 270.0, VW, VH);
         assert_eq!(hit.clip_id.as_str(), "T", "sticker lane falls through");
+    }
+
+    #[test]
+    fn generator_hit_uses_content_bounds() {
+        // Content 960×540 centered on the 1920×1080 canvas spans
+        // [480,1440]×[270,810] in canvas px — half that in the viewport.
+        let seq = sequence(vec![track(
+            "1",
+            TrackKind::Video,
+            vec![generated_clip("E", "ellipse", 960, 540)],
+        )]);
+        assert_eq!(hit_test(&seq, 10, 480.0, 270.0, VW, VH).clip_id.as_str(), "E");
+        // Inside the canvas but outside the drawn content: falls through.
+        assert_eq!(hit_test(&seq, 10, 100.0, 50.0, VW, VH).clip_id.as_str(), "");
+    }
+
+    #[test]
+    fn generator_selection_box_hugs_content_bounds() {
+        // Same 960×540 content: the box is content-sized about the canvas
+        // center — at viewport scale 0.5, 480×270 centered at (480, 270).
+        let seq = sequence(vec![track(
+            "1",
+            TrackKind::Video,
+            vec![generated_clip("E", "ellipse", 960, 540)],
+        )]);
+        let b = selection_box(&seq, "E", 10, VW, VH, None);
+        assert!(b.visible);
+        assert_eq!(
+            corners(&b),
+            [(240.0, 135.0), (720.0, 135.0), (720.0, 405.0), (240.0, 405.0)]
+        );
+        assert_eq!((b.hx, b.hy), (480.0, 405.0 + 26.0));
+    }
+
+    #[test]
+    fn generator_content_box_rides_the_transform_scale() {
+        let mut clip = generated_clip("E", "ellipse", 960, 540);
+        clip.transform_scale = 0.5;
+        let seq = sequence(vec![track("1", TrackKind::Video, vec![clip])]);
+        let b = selection_box(&seq, "E", 10, VW, VH, None);
+        assert!(b.visible);
+        assert_eq!(
+            corners(&b),
+            [(360.0, 202.5), (600.0, 202.5), (600.0, 337.5), (360.0, 337.5)]
+        );
     }
 
     fn corners(b: &PreviewSelectionBox) -> [(f32, f32); 4] {

@@ -10,6 +10,7 @@
 //! defaulted here; everything structural — tracks, clips, placement, fps,
 //! canvas size — is read straight from the engine.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use cutlass_models::{
@@ -27,7 +28,15 @@ const DEFAULT_CANVAS_W: f32 = 1920.0;
 const DEFAULT_CANVAS_H: f32 = 1080.0;
 
 /// Project the engine's project state into the Slint view model.
-pub fn project_to_slint(project: &EngineProject) -> Project {
+///
+/// `generator_sizes` maps raw clip ids of generated clips to their
+/// drawn-content size in canvas px (computed on the engine thread, where the
+/// raster cache lives) — the preview's selection geometry needs it because
+/// generators raster at full canvas size.
+pub fn project_to_slint(
+    project: &EngineProject,
+    generator_sizes: &HashMap<u64, (i32, i32)>,
+) -> Project {
     let timeline = project.timeline();
     let (width, height) = canvas_size(project);
 
@@ -36,7 +45,7 @@ pub fn project_to_slint(project: &EngineProject) -> Project {
     // CapCut/Premiere. UI row r ↔ engine order index (track_count - 1 - r).
     let mut tracks: Vec<Track> = timeline
         .tracks_ordered()
-        .map(|track| track_to_slint(project, track))
+        .map(|track| track_to_slint(project, track, generator_sizes))
         .collect();
     tracks.reverse();
 
@@ -111,11 +120,15 @@ fn media_name(media: &MediaSource) -> String {
         .unwrap_or_else(|| format!("Media {}", media.id.raw()))
 }
 
-fn track_to_slint(project: &EngineProject, track: &EngineTrack) -> Track {
+fn track_to_slint(
+    project: &EngineProject,
+    track: &EngineTrack,
+    generator_sizes: &HashMap<u64, (i32, i32)>,
+) -> Track {
     let clips: Vec<Clip> = track
         .clips_ordered()
         .into_iter()
-        .map(|clip| clip_to_slint(project, clip))
+        .map(|clip| clip_to_slint(project, clip, generator_sizes))
         .collect();
 
     Track {
@@ -130,7 +143,11 @@ fn track_to_slint(project: &EngineProject, track: &EngineTrack) -> Track {
     }
 }
 
-fn clip_to_slint(project: &EngineProject, clip: &EngineClip) -> Clip {
+fn clip_to_slint(
+    project: &EngineProject,
+    clip: &EngineClip,
+    generator_sizes: &HashMap<u64, (i32, i32)>,
+) -> Clip {
     // The timeline UI positions a clip at `timeline-start` and derives its width
     // from `source-range.duration`, both in sequence ticks. The engine's
     // authoritative on-sequence placement is `clip.timeline`, so mirror it here
@@ -145,14 +162,20 @@ fn clip_to_slint(project: &EngineProject, clip: &EngineClip) -> Clip {
         }
         ClipSource::Generated(_) => (String::new(), 0.0),
     };
-    // Native content size for preview placement (0×0 ⇔ rasters at canvas
-    // size). Media that vanished from the pool degrades the same way.
+    // Natural content size for preview placement: the media's native pixels
+    // (aspect-fit into the canvas), or a generator's drawn-content bounds in
+    // canvas px (fit 1:1). 0×0 ⇔ unknown — the selection geometry falls back
+    // to a canvas-sized box. Media that vanished from the pool degrades the
+    // same way.
     let (media_w, media_h) = match &clip.content {
         ClipSource::Media { media, .. } => project
             .media(*media)
             .map(|m| (m.width as i32, m.height as i32))
             .unwrap_or((0, 0)),
-        ClipSource::Generated(_) => (0, 0),
+        ClipSource::Generated(_) => generator_sizes
+            .get(&clip.id.raw())
+            .copied()
+            .unwrap_or((0, 0)),
     };
 
     Clip {

@@ -40,4 +40,7 @@ pub enum EngineError {
 
     #[error("export: {0}")]
     Export(String),
+
+    #[error("export cancelled")]
+    ExportCancelled,
 }

@@ -92,6 +92,55 @@ fn yuv_to_rgb_at(y: &[u8], u: &[u8], v: &[u8], w: u32, x: u32, y_px: u32) -> [u8
     ]
 }
 
+/// At 1:1 the YUV blit must read texels exactly — no resampling blur.
+/// Regression: a half-texel offset in the sampling math bilinear-blended
+/// neighbouring texels on every frame, softening preview and export.
+#[test]
+fn gpu_yuv_blit_at_native_size_preserves_sharp_edges() {
+    let Some(gpu) = try_gpu() else {
+        eprintln!("skip: no GPU");
+        return;
+    };
+    let mut compositor = Compositor::new(&gpu).expect("compositor");
+
+    // Vertical luma step: left half black (Y=16), right half white (Y=235).
+    let (w, h) = (64u32, 64u32);
+    let mut layer = solid_yuv420p(w, h, 16, 128, 128);
+    for row in 0..h as usize {
+        for col in (w / 2) as usize..w as usize {
+            layer.y[row * w as usize + col] = 235;
+        }
+    }
+    let legacy = legacy_yuv_to_rgba(&layer);
+
+    let image = compositor
+        .composite(
+            &gpu,
+            &CompositorConfig::new(w, h),
+            &[CompositeLayer::Yuv420p(layer)],
+        )
+        .expect("gpu composite");
+
+    // Every pixel matches the per-texel CPU reference: the boundary column
+    // jumps straight from black to white with no blended in-between column.
+    for (i, (gpu_px, cpu_px)) in image
+        .bytes
+        .chunks_exact(4)
+        .zip(legacy.chunks_exact(4))
+        .enumerate()
+    {
+        for ch in 0..3 {
+            let diff = i16::from(gpu_px[ch]) - i16::from(cpu_px[ch]);
+            assert!(
+                diff.abs() <= 2,
+                "pixel {i} channel {ch}: gpu={} cpu={}",
+                gpu_px[ch],
+                cpu_px[ch]
+            );
+        }
+    }
+}
+
 #[test]
 fn legacy_rgba_yuv_roundtrip_1080p_solid() {
     let (w, h) = (1920u32, 1080u32);

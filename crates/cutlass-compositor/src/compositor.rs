@@ -20,13 +20,6 @@ struct SolidUniforms {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct YuvUniforms {
-    src_size: [f32; 2],
-    dst_size: [f32; 2],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
 struct RgbaToYuvParams {
     width: u32,
     height: u32,
@@ -47,7 +40,6 @@ pub struct Compositor {
     rgba_to_yuv_bind_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     solid_uniform: wgpu::Buffer,
-    yuv_uniform: wgpu::Buffer,
     rgba_to_yuv_params: wgpu::Buffer,
     /// Reused each composite when canvas size matches.
     target: Option<CachedTarget>,
@@ -102,16 +94,6 @@ impl Compositor {
                         texture_binding(1, wgpu::ShaderStages::FRAGMENT),
                         texture_binding(2, wgpu::ShaderStages::FRAGMENT),
                         sampler_binding(3, wgpu::ShaderStages::FRAGMENT),
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 4,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
                     ],
                 });
 
@@ -187,14 +169,6 @@ impl Compositor {
         let solid_uniform = uniform_buffer(gpu, "solid_uniform", &SolidUniforms {
             color: [0.0; 4],
         });
-        let yuv_uniform = uniform_buffer(
-            gpu,
-            "yuv_uniform",
-            &YuvUniforms {
-                src_size: [0.0; 2],
-                dst_size: [0.0; 2],
-            },
-        );
         let rgba_to_yuv_params = uniform_buffer(
             gpu,
             "rgba_to_yuv_params",
@@ -217,7 +191,6 @@ impl Compositor {
             rgba_to_yuv_bind_layout,
             sampler,
             solid_uniform,
-            yuv_uniform,
             rgba_to_yuv_params,
             target: None,
         })
@@ -375,12 +348,6 @@ impl Compositor {
                             upload_r8_texture(gpu, "u_plane", &layer.tight_u(), uv_w, uv_h);
                         let v_tex =
                             upload_r8_texture(gpu, "v_plane", &layer.tight_v(), uv_w, uv_h);
-                        let uniforms = YuvUniforms {
-                            src_size: [layer.width as f32, layer.height as f32],
-                            dst_size: [config.width as f32, config.height as f32],
-                        };
-                        gpu.queue
-                            .write_buffer(&self.yuv_uniform, 0, bytemuck::bytes_of(&uniforms));
                         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some("yuv_bind"),
                             layout: &self.yuv_bind_layout,
@@ -406,10 +373,6 @@ impl Compositor {
                                 wgpu::BindGroupEntry {
                                     binding: 3,
                                     resource: wgpu::BindingResource::Sampler(&self.sampler),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 4,
-                                    resource: self.yuv_uniform.as_entire_binding(),
                                 },
                             ],
                         });

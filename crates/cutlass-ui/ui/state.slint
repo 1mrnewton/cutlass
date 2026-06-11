@@ -4,6 +4,9 @@
 export global AppState {
     in-out property <bool> preview-maximized: false;
 
+    // Export settings dialog (modal overlay; see shell/export-dialog.slint).
+    in-out property <bool> export-dialog-open: false;
+
     // Bumped to pull keyboard focus back to the window's shortcut
     // FocusScope (app.slint watches it). Text inputs legitimately take
     // focus while editing; timeline interactions (clip grab, lane

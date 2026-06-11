@@ -1,0 +1,262 @@
+// Export settings dialog (CapCut-style): an in-window modal over the whole
+// shell — destination, resolution, frame rate, and quality, then a progress
+// bar while the job runs. In-window rather than a native `Dialog` window so
+// it lives inside the frameless shell like the rest of the chrome.
+//
+// The job itself runs on a dedicated thread (src/preview_worker.rs); this
+// dialog only reads/writes ExportBackend. While a job runs the dialog can't
+// be dismissed — the explicit Cancel routes through the backend so the file
+// on disk is never silently abandoned.
+
+import { CutlassText, AccentButton, SubtleButton } from "../components/index.slint";
+import { AppStore, EditorStore } from "../store/index.slint";
+import { ExportBackend } from "../lib/export-backend.slint";
+import { AppState } from "../state.slint";
+import { ComboBox } from "std-widgets.slint";
+
+component FieldLabel inherits CutlassText {
+    width: 96px;
+    vertical-alignment: center;
+    style: AppStore.theme.typography.label;
+    foreground: AppStore.theme.text.secondary;
+}
+
+export component ExportDialog inherits Rectangle {
+    background: #000000A0;
+
+    // Option values, index-aligned with the ComboBox models below.
+    // Height 0 ⇒ composite canvas size; fps 0 ⇒ timeline rate.
+    property <[int]> resolution-heights: [0, 2160, 1440, 1080, 720, 480];
+    property <[int]> fps-values: [0, 24, 25, 30, 50, 60];
+    property <[int]> crf-values: [18, 23, 28];
+
+    property <bool> configuring: !ExportBackend.running && !ExportBackend.completed && !ExportBackend.failed;
+
+    init => {
+        // A previous job's terminal state is stale once the dialog is
+        // reopened; a job still running keeps its live progress view.
+        if (!ExportBackend.running) {
+            ExportBackend.reset-job-state();
+        }
+    }
+
+    function close() {
+        ExportBackend.reset-job-state();
+        AppState.export-dialog-open = false;
+    }
+
+    // Scrim: absorb every pointer event so the editor underneath is inert.
+    TouchArea { }
+
+    panel := Rectangle {
+        width: 480px;
+        height: content.preferred-height;
+        background: AppStore.theme.panel.background;
+        border-radius: AppStore.theme.metrics.radius.lg;
+        border-width: 1px;
+        border-color: #ffffff14;
+        drop-shadow-blur: 32px;
+        drop-shadow-color: #00000080;
+        drop-shadow-offset-y: 8px;
+
+        // Keep clicks inside the panel from reaching the scrim above.
+        TouchArea { }
+
+        content := VerticalLayout {
+            padding: AppStore.theme.metrics.spacing.xl;
+            spacing: AppStore.theme.metrics.spacing.lg;
+
+            HorizontalLayout {
+                CutlassText {
+                    text: "Export";
+                    style: AppStore.theme.typography.heading-md;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                close-button := Rectangle {
+                    width: 26px;
+                    height: 26px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: close-ta.has-hover && root.configuring ? #ffffff14 : transparent;
+                    opacity: root.configuring ? 1.0 : 0.3;
+
+                    CutlassText {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "✕";
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        style: AppStore.theme.typography.label;
+                        foreground: AppStore.theme.text.secondary;
+                    }
+
+                    close-ta := TouchArea {
+                        enabled: root.configuring;
+                        clicked => {
+                            root.close();
+                        }
+                    }
+                }
+            }
+
+            // --- destination -------------------------------------------
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                FieldLabel {
+                    text: "Save to";
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 26px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: #00000040;
+                    border-width: 1px;
+                    border-color: #ffffff14;
+
+                    CutlassText {
+                        x: AppStore.theme.metrics.spacing.sm;
+                        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+                        height: parent.height;
+                        text: ExportBackend.output-path == "" ? "Choose a destination…" : ExportBackend.output-path;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        style: AppStore.theme.typography.caption;
+                        foreground: ExportBackend.output-path == ""
+                            ? AppStore.theme.text.muted
+                            : AppStore.theme.text.primary;
+                    }
+                }
+
+                SubtleButton {
+                    label: "Browse…";
+                    enabled: root.configuring;
+                    clicked => {
+                        ExportBackend.output-path = ExportBackend.pick-output(ExportBackend.output-path);
+                    }
+                }
+            }
+
+            // --- settings ----------------------------------------------
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                FieldLabel {
+                    text: "Resolution";
+                }
+
+                resolution := ComboBox {
+                    horizontal-stretch: 1;
+                    enabled: root.configuring;
+                    model: ["Original (canvas)", "2160p (4K)", "1440p", "1080p", "720p", "480p"];
+                    current-index: 0;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                FieldLabel {
+                    text: "Frame rate";
+                }
+
+                fps := ComboBox {
+                    horizontal-stretch: 1;
+                    enabled: root.configuring;
+                    model: ["Timeline (project)", "24 fps", "25 fps", "30 fps", "50 fps", "60 fps"];
+                    current-index: 0;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                FieldLabel {
+                    text: "Quality";
+                }
+
+                quality := ComboBox {
+                    horizontal-stretch: 1;
+                    enabled: root.configuring;
+                    model: ["High (CRF 18)", "Medium (CRF 23)", "Low (CRF 28)"];
+                    current-index: 0;
+                }
+            }
+
+            // --- progress / outcome ------------------------------------
+            if ExportBackend.running: VerticalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                track := Rectangle {
+                    height: 6px;
+                    border-radius: 3px;
+                    background: #00000060;
+
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * clamp(ExportBackend.progress, 0.0, 1.0);
+                        height: parent.height;
+                        border-radius: parent.border-radius;
+                        background: #00E5C7;
+                    }
+                }
+
+                CutlassText {
+                    text: round(clamp(ExportBackend.progress, 0.0, 1.0) * 100) + "%  ·  "
+                        + ExportBackend.frames-done + " / " + ExportBackend.frames-total + " frames";
+                    style: AppStore.theme.typography.caption;
+                    foreground: AppStore.theme.text.secondary;
+                    horizontal-alignment: center;
+                }
+            }
+
+            if ExportBackend.completed || ExportBackend.failed: CutlassText {
+                text: ExportBackend.status;
+                wrap: word-wrap;
+                style: AppStore.theme.typography.caption;
+                foreground: ExportBackend.failed ? #FF6B6B : #00E5C7;
+            }
+
+            // --- actions -----------------------------------------------
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+                alignment: end;
+
+                if root.configuring: SubtleButton {
+                    label: "Cancel";
+                    clicked => {
+                        root.close();
+                    }
+                }
+
+                if root.configuring: AccentButton {
+                    label: "Export";
+                    enabled: ExportBackend.output-path != "";
+                    clicked => {
+                        ExportBackend.start(
+                            ExportBackend.output-path,
+                            root.resolution-heights[resolution.current-index],
+                            root.fps-values[fps.current-index],
+                            root.crf-values[quality.current-index]);
+                    }
+                }
+
+                if ExportBackend.running: SubtleButton {
+                    label: "Cancel export";
+                    clicked => {
+                        ExportBackend.cancel();
+                    }
+                }
+
+                if ExportBackend.completed || ExportBackend.failed: AccentButton {
+                    label: ExportBackend.completed ? "Done" : "Close";
+                    clicked => {
+                        root.close();
+                    }
+                }
+            }
+        }
+    }
+}

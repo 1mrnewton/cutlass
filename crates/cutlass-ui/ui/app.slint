@@ -13,6 +13,8 @@ import { AppStore, EditorStore, TimelineStore, TimelineActions } from "store/ind
 import { AppState } from "state.slint";
 import { FullscreenPreview } from "fullscreen-preview.slint";
 import { TitleBar } from "shell/title-bar.slint";
+import { ExportDialog } from "shell/export-dialog.slint";
+import { ExportBackend } from "lib/export-backend.slint";
 
 // Re-export globals so Slint's codegen generates accessors on `AppWindow`.
 // Slint only exposes globals from the entry file's exports to the host
@@ -37,6 +39,7 @@ export { InspectorBackend, SelectedClipInfo }from "lib/inspector-backend.slint";
 export { StripBackend, StripTile }from "lib/strip-backend.slint";
 export { TransportBackend }from "lib/transport-backend.slint";
 export { WindowBackend }from "lib/window-backend.slint";
+export { ExportBackend }from "lib/export-backend.slint";
 
 export component AppWindow inherits Window {
     title: "Cutlass";
@@ -98,6 +101,17 @@ export component AppWindow inherits Window {
 
     shortcuts := FocusScope {
         key-pressed(event) => {
+            // The export dialog is modal: swallow timeline shortcuts while
+            // it's up (Space must not start playback under the scrim).
+            // Escape dismisses it unless a job is running — then stopping
+            // must go through the explicit Cancel.
+            if (AppState.export-dialog-open) {
+                if (event.text == Key.Escape && !ExportBackend.running) {
+                    ExportBackend.reset-job-state();
+                    AppState.export-dialog-open = false;
+                }
+                return accept;
+            }
             // Accept both Ctrl and Cmd (macOS) as the command modifier.
             if (event.modifiers.control || event.modifiers.meta) {
                 if (event.text == "b" || event.text == "B") {
@@ -265,5 +279,12 @@ export component AppWindow inherits Window {
         y: AppState.library-drag-cursor-y - AppState.library-drag-tile-anchor-y;
         background: #C83A3A;
         border-radius: AppStore.theme.track-lane.clip.radius;
+    }
+
+    // Export settings dialog — declared last so the modal paints above
+    // every panel and the title bar.
+    if AppState.export-dialog-open: ExportDialog {
+        width: root.width;
+        height: root.height;
     }
 }

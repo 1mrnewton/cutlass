@@ -358,6 +358,206 @@ fn export_decodes_from_source_when_cache_corrupt() {
         .expect("decoded frame after corrupt cache");
 }
 
+// --- dialog settings: resolution / fps / cancel -----------------------------
+
+#[test]
+fn export_with_settings_scales_and_resamples() {
+    let (dir, mut engine) = temp_engine();
+    let track = add_track(&mut engine, TrackKind::Sticker, "T1");
+    add_generated(
+        &mut engine,
+        track,
+        Generator::SolidColor {
+            rgba: [40, 80, 120, 255],
+        },
+        tr(0, 24),
+    );
+
+    let out = dir.path().join("settings_export.mp4");
+    let settings = cutlass_engine::ExportSettings {
+        target_height: Some(540),
+        fps: Some(cutlass_models::Rational::new(12, 1)),
+        quality: Some(28),
+    };
+    let mut calls = 0u64;
+    let stats = cutlass_engine::export_project_with(
+        engine.project(),
+        &out,
+        cutlass_engine::ColorConvertPath::Gpu,
+        settings,
+        &mut |done, total| {
+            assert!(done <= total);
+            calls += 1;
+            true
+        },
+    )
+    .expect("export with settings");
+
+    // 24 ticks @ 24fps resampled to 12fps ⇒ 12 frames; 1920x1080 canvas at
+    // target height 540 ⇒ 960x540.
+    assert_eq!(stats.frames, 12);
+    assert_eq!((stats.width, stats.height), (960, 540));
+    // (0, total) plus one call per encoded frame.
+    assert_eq!(calls, 13);
+    assert_export_duration_near(&out, 12, 12);
+
+    let mut dec = open_export(&out);
+    let frame = dec
+        .seek_to_frame(Duration::ZERO)
+        .expect("seek")
+        .expect("frame");
+    assert_eq!((frame.width, frame.height), (960, 540));
+}
+
+#[test]
+fn export_cancel_stops_partway() {
+    let (dir, mut engine) = temp_engine();
+    let track = add_track(&mut engine, TrackKind::Sticker, "T1");
+    add_generated(
+        &mut engine,
+        track,
+        Generator::SolidColor {
+            rgba: [1, 2, 3, 255],
+        },
+        tr(0, 48),
+    );
+
+    let out = dir.path().join("cancelled_export.mp4");
+    let err = cutlass_engine::export_project_with(
+        engine.project(),
+        &out,
+        cutlass_engine::ColorConvertPath::Gpu,
+        cutlass_engine::ExportSettings::default(),
+        &mut |done, _| done < 5,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, cutlass_engine::EngineError::ExportCancelled),
+        "expected ExportCancelled, got: {err}"
+    );
+}
+
+// --- audio ------------------------------------------------------------------
+
+fn audio_asset() -> Option<std::path::PathBuf> {
+    let path = common::assets_dir().join("baby.mp3");
+    path.exists().then_some(path)
+}
+
+#[test]
+fn export_with_audio_clip_muxes_an_audio_track() {
+    let Some(audio_path) = audio_asset() else {
+        return;
+    };
+    let (dir, mut engine) = temp_engine();
+
+    // Visuals: 1s solid. Audio: the same 1s span from an mp3 on an audio lane.
+    let overlay = add_track(&mut engine, TrackKind::Sticker, "T1");
+    add_generated(
+        &mut engine,
+        overlay,
+        Generator::SolidColor {
+            rgba: [20, 40, 60, 255],
+        },
+        tr(0, 24),
+    );
+    let media_id = import_asset(&mut engine, &audio_path);
+    let a1 = add_track(&mut engine, TrackKind::Audio, "A1");
+    // Source ranges are expressed at the media's native rate (1000/1 for
+    // audio-only media): 1000 ticks = 1s = 24 timeline frames.
+    let rate = engine.project().media(media_id).expect("media").frame_rate;
+    add_media_clip(
+        &mut engine,
+        a1,
+        media_id,
+        cutlass_models::TimeRange::at_rate(0, rate.num as i64, rate),
+        rt(0),
+    );
+
+    let out = dir.path().join("audio_export.mp4");
+    let stats = export_to(&mut engine, &out);
+    assert_eq!(stats.frames, 24);
+
+    // The deliverable carries a decodable audio stream covering ~1s.
+    let mut reader = cutlass_decoder::AudioReader::open(&out, 48_000)
+        .expect("exported file has an audio stream");
+    let mut buf = vec![0f32; 4096 * 2];
+    let mut frames = 0u64;
+    loop {
+        let n = reader.read(&mut buf).expect("decode exported audio");
+        if n == 0 {
+            break;
+        }
+        frames += n as u64;
+    }
+    let seconds = frames as f64 / 48_000.0;
+    assert!(
+        (seconds - 1.0).abs() < 0.2,
+        "expected ~1s of audio, got {seconds:.3}s"
+    );
+}
+
+#[test]
+fn export_without_audible_clips_writes_video_only_file() {
+    let (dir, mut engine) = temp_engine();
+    let track = add_track(&mut engine, TrackKind::Sticker, "T1");
+    add_generated(
+        &mut engine,
+        track,
+        Generator::SolidColor {
+            rgba: [50, 60, 70, 255],
+        },
+        tr(0, 12),
+    );
+
+    let out = dir.path().join("video_only.mp4");
+    export_to(&mut engine, &out);
+    assert!(
+        cutlass_decoder::AudioReader::open(&out, 48_000).is_err(),
+        "silent timeline must not grow an audio track"
+    );
+}
+
+#[test]
+fn export_muted_audio_lane_is_omitted() {
+    let Some(audio_path) = audio_asset() else {
+        return;
+    };
+    let (dir, mut engine) = temp_engine();
+    let overlay = add_track(&mut engine, TrackKind::Sticker, "T1");
+    add_generated(
+        &mut engine,
+        overlay,
+        Generator::SolidColor {
+            rgba: [1, 2, 3, 255],
+        },
+        tr(0, 12),
+    );
+    let media_id = import_asset(&mut engine, &audio_path);
+    let a1 = add_track(&mut engine, TrackKind::Audio, "A1");
+    let rate = engine.project().media(media_id).expect("media").frame_rate;
+    add_media_clip(
+        &mut engine,
+        a1,
+        media_id,
+        cutlass_models::TimeRange::at_rate(0, rate.num as i64 / 2, rate),
+        rt(0),
+    );
+    engine
+        .apply(Command::Edit(EditCommand::SetTrackMuted {
+            track: a1,
+            muted: true,
+        }))
+        .expect("mute lane");
+
+    let out = dir.path().join("muted_export.mp4");
+    export_to(&mut engine, &out);
+    assert!(
+        cutlass_decoder::AudioReader::open(&out, 48_000).is_err(),
+        "muted lanes contribute no audio track"
+    );
+}
+
 // --- engine semantics -----------------------------------------------------
 
 #[test]

@@ -1,0 +1,47 @@
+// Export job plumbing, implemented in Rust (src/main.rs wires the
+// callbacks; src/preview_worker.rs runs the job). The dialog collects
+// settings and calls `start`; the engine thread clones the project and
+// hands it to a dedicated export thread, which publishes progress and the
+// final outcome back into the properties below.
+export global ExportBackend {
+    // Open the native save dialog, seeded from `current` (directory +
+    // file name). Returns the chosen path, or `current` unchanged when
+    // dismissed. Modal on the main thread — exactly where Slint
+    // callbacks run.
+    callback pick-output(current: string) -> string;
+    // Kick off the export. `target-height` 0 ⇒ the composite canvas size;
+    // `fps-num` 0 ⇒ the timeline rate (presets are integer rates, den 1);
+    // `crf` is the libx264 constant-quality level.
+    callback start(path: string, target-height: int, fps-num: int, crf: int);
+    // Flag the running job to stop after the frame in flight. The job
+    // confirms by publishing `failed` with a cancellation status.
+    callback cancel();
+
+    // Destination shown in the dialog; prefilled by Rust at startup and
+    // updated through `pick-output`. Persists across dialog open/close.
+    in-out property <string> output-path: "";
+
+    // --- job state, published from the export thread -------------------
+    in-out property <bool> running: false;
+    // 0..1, for the progress bar fill.
+    in-out property <float> progress: 0.0;
+    in-out property <int> frames-done: 0;
+    in-out property <int> frames-total: 0;
+    // Terminal states: exactly one goes true when `running` drops.
+    in-out property <bool> completed: false;
+    in-out property <bool> failed: false;
+    // Human-readable outcome ("Saved to …" / error / "Export cancelled").
+    in-out property <string> status: "";
+
+    // Back to the pre-job state (dialog close buttons after a terminal
+    // state, and dialog open while idle).
+    public function reset-job-state() {
+        self.running = false;
+        self.progress = 0.0;
+        self.frames-done = 0;
+        self.frames-total = 0;
+        self.completed = false;
+        self.failed = false;
+        self.status = "";
+    }
+}

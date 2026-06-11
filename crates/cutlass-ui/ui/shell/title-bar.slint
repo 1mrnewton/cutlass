@@ -5,9 +5,11 @@
 // declared after the drag TouchArea so they stack above it and keep their
 // clicks.
 
-import { CutlassText } from "../components/index.slint";
+import { CutlassText, AccentButton } from "../components/index.slint";
 import { AppStore, EditorStore } from "../store/index.slint";
 import { WindowBackend } from "../lib/window-backend.slint";
+import { ExportBackend } from "../lib/export-backend.slint";
+import { AppState } from "../state.slint";
 
 // Caption button (minimize/maximize/close): full-height hover strip, no
 // radius — Windows-style, like CapCut's. `danger` paints the close
@@ -30,33 +32,6 @@ component CaptionButton inherits Rectangle {
         vertical-alignment: center;
         style: AppStore.theme.typography.label;
         foreground: ta.has-hover ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
-    }
-
-    ta := TouchArea {
-        clicked => {
-            root.clicked();
-        }
-    }
-}
-
-// Filled accent button (CapCut's Export).
-component AccentButton inherits Rectangle {
-    in property <string> label;
-    callback clicked();
-
-    width: text.preferred-width + 2 * AppStore.theme.metrics.spacing.lg;
-    height: 26px;
-    border-radius: AppStore.theme.metrics.radius.sm;
-    background: ta.has-hover ? #2BEFD6 : #00E5C7;
-
-    text := CutlassText {
-        width: parent.width;
-        height: parent.height;
-        text: label;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        style: AppStore.theme.typography.label;
-        foreground: #0A0A0A;
     }
 
     ta := TouchArea {
@@ -142,10 +117,15 @@ export component TitleBar inherits Rectangle {
         VerticalLayout {
             alignment: center;
 
+            // While a job runs the dialog may be reopened from here; the
+            // label doubles as a compact progress readout (CapCut does the
+            // same with its export chip).
             AccentButton {
-                label: "Export";
+                label: ExportBackend.running
+                    ? "Exporting " + round(clamp(ExportBackend.progress, 0.0, 1.0) * 100) + "%"
+                    : "Export";
                 clicked => {
-                    EditorStore.on-export-clicked();
+                    AppState.export-dialog-open = true;
                 }
             }
         }

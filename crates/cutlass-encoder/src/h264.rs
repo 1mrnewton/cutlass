@@ -3,10 +3,7 @@ use std::sync::OnceLock;
 use ffmpeg_next::error::EAGAIN;
 use ffmpeg_next::format::context::Output;
 use ffmpeg_next::util::frame::video::Video as VideoFrame;
-use ffmpeg_next::{
-    Codec, Error as FfmpegError, Packet, Rational, codec, encoder,
-    encoder::Video as VideoEncoder,
-};
+use ffmpeg_next::{Codec, Error as FfmpegError, Packet, Rational, codec, encoder};
 
 use crate::error::EncodeError;
 
@@ -19,9 +16,10 @@ pub(crate) fn ensure_ffmpeg_init() -> Result<(), EncodeError> {
     }
 }
 
-/// Write out every packet the encoder can currently produce.
+/// Write out every packet the encoder can currently produce. Works for any
+/// stream kind — video and audio encoders both deref to the raw encoder.
 pub(crate) fn drain_encoder(
-    encoder: &mut VideoEncoder,
+    encoder: &mut encoder::Encoder,
     octx: &mut Output,
     ost_index: usize,
     enc_tb: Rational,
@@ -63,7 +61,7 @@ pub(crate) fn is_eagain(e: &FfmpegError) -> bool {
 }
 
 /// Target dimensions: preserve aspect ratio, never upscale, round to even.
-pub(crate) fn scaled_dims(src_w: u32, src_h: u32, target_h: u32) -> (u32, u32) {
+pub fn scaled_dims(src_w: u32, src_h: u32, target_h: u32) -> (u32, u32) {
     if src_h == 0 {
         return (src_w.max(2) & !1, src_h);
     }

@@ -25,6 +25,23 @@ use cutlass_engine::EngineConfig;
 
 slint::include_modules!();
 
+/// Prefilled export destination: ~/Movies when present, else the home
+/// directory, else the working directory. Only seeds the save panel — the
+/// user picks the real spot from the dialog.
+fn default_export_path() -> SharedString {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    let dir = match home {
+        Some(home) => {
+            let movies = home.join("Movies");
+            if movies.is_dir() { movies } else { home }
+        }
+        None => std::path::PathBuf::from("."),
+    };
+    dir.join("untitled.mp4").to_string_lossy().into_owned().into()
+}
+
 fn setup_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -112,6 +129,7 @@ fn main() -> Result<(), slint::PlatformError> {
         EngineConfig::default(),
         preview_store_weak,
         editor_store_weak,
+        app.global::<ExportBackend>().as_weak(),
         thumbnail_worker.handle(),
         strip_worker.handle(),
         audio_system.handle(),
@@ -167,10 +185,45 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    editor.on_on_export_clicked(|| {
-        // Title bar button lands ahead of the exporter; the timeline →
-        // video-file path is the next engine milestone (see overview).
-        tracing::info!("export requested — exporter not wired up yet");
+    // --- export (title bar → dialog → engine thread → export thread) -----
+
+    let export_backend = app.global::<ExportBackend>();
+    export_backend.set_output_path(default_export_path());
+
+    // Native save panel, seeded from the previous choice. Modal on the main
+    // thread (same policy as the import picker); returns the current path
+    // unchanged when dismissed so the dialog binding is a plain assignment.
+    export_backend.on_pick_output(|current| {
+        let current = std::path::Path::new(current.as_str());
+        let mut dialog = rfd::FileDialog::new().add_filter("MP4 video", &["mp4"]);
+        if let Some(dir) = current.parent().filter(|d| d.is_dir()) {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog = dialog.set_file_name(
+            current
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "untitled.mp4".into()),
+        );
+        match dialog.save_file() {
+            Some(path) => path.to_string_lossy().into_owned().into(),
+            None => current.to_string_lossy().into_owned().into(),
+        }
+    });
+
+    let export_handle = preview_worker.handle();
+    export_backend.on_start(move |path, target_height, fps_num, crf| {
+        export_handle.export(preview_worker::ExportRequest {
+            path: std::path::PathBuf::from(path.as_str()),
+            target_height: u32::try_from(target_height).ok().filter(|&h| h > 0),
+            fps_num: (fps_num > 0).then_some(fps_num),
+            crf: crf.clamp(0, 51) as u8,
+        });
+    });
+
+    let export_cancel_handle = preview_worker.handle();
+    export_backend.on_cancel(move || {
+        export_cancel_handle.cancel_export();
     });
 
     let timeline = app.global::<TimelineLib>();

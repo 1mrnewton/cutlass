@@ -1,18 +1,17 @@
 // yuv_blit.wgsl — YUV420P → RGBA layer with optional upscale/downscale
 //
-// Upload Y/U/V as R8Unorm textures (U/V at half resolution). Maps canvas UV to
-// source pixel coords with center-aligned bilinear sampling on Y and chroma.
-
-struct YuvUniforms {
-    src_size: vec2<f32>,
-    dst_size: vec2<f32>,
-}
+// Upload Y/U/V as R8Unorm textures (U/V at half resolution). The layer is
+// stretched over the whole canvas, so the interpolated fragment UV *is* the
+// correct normalized sample position for every plane: `textureSample` already
+// handles texel-center alignment internally (sample point uv·size − 0.5 in
+// texel space). At 1:1 this lands exactly on texel centers — bit-exact reads,
+// no filtering blur. (A previous version recomputed pixel coordinates with an
+// extra half-texel offset, which bilinear-blurred every frame even at 1:1.)
 
 @group(0) @binding(0) var y_tex: texture_2d<f32>;
 @group(0) @binding(1) var u_tex: texture_2d<f32>;
 @group(0) @binding(2) var v_tex: texture_2d<f32>;
 @group(0) @binding(3) var yuv_sampler: sampler;
-@group(0) @binding(4) var<uniform> uniforms: YuvUniforms;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -29,12 +28,6 @@ fn vs(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-fn sample_plane(tex: texture_2d<f32>, samp: sampler, src_px: vec2<f32>, plane_size: vec2<f32>) -> f32 {
-    let uv = (src_px + vec2(0.5)) / plane_size;
-    let clamped = clamp(uv, vec2(0.0), vec2(1.0));
-    return textureSample(tex, samp, clamped).r * 255.0;
-}
-
 fn yuv_to_rgb(yv: f32, uv: f32, vv: f32) -> vec3<f32> {
     let y = yv - 16.0;
     let u = uv - 128.0;
@@ -47,19 +40,9 @@ fn yuv_to_rgb(yv: f32, uv: f32, vv: f32) -> vec3<f32> {
 
 @fragment
 fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
-    let dst = uniforms.dst_size;
-    let src = uniforms.src_size;
-    let dst_px = vec2(in.uv.x * dst.x, in.uv.y * dst.y);
-    let src_px = vec2(
-        (dst_px.x + 0.5) * src.x / dst.x - 0.5,
-        (dst_px.y + 0.5) * src.y / dst.y - 0.5,
-    );
-    let chroma_px = src_px * 0.5;
-    let chroma_size = src * 0.5;
-
-    let yv = sample_plane(y_tex, yuv_sampler, src_px, src);
-    let uv = sample_plane(u_tex, yuv_sampler, chroma_px, chroma_size);
-    let vv = sample_plane(v_tex, yuv_sampler, chroma_px, chroma_size);
+    let yv = textureSample(y_tex, yuv_sampler, in.uv).r * 255.0;
+    let uv = textureSample(u_tex, yuv_sampler, in.uv).r * 255.0;
+    let vv = textureSample(v_tex, yuv_sampler, in.uv).r * 255.0;
     let rgb = yuv_to_rgb(yv, uv, vv);
     return vec4(rgb, 1.0);
 }

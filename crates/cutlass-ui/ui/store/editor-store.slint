@@ -13,10 +13,6 @@ export global EditorStore {
     // newest tick on the worker thread, so this can fire per-frame.
     callback on-playhead-changed(tick: int);
     callback on-import-clicked();
-    // The title bar's Export button. The exporter itself isn't wired up
-    // yet (timeline → video file is the next engine milestone); Rust
-    // currently just logs the request.
-    callback on-export-clicked();
     // A library tile was dropped on the timeline. `track-id` is the video lane
     // under the cursor, or empty when there is none — the engine then creates
     // a new video track at `drop-row` (the lane-list row under the cursor; may

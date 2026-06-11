@@ -135,15 +135,49 @@ fn clip_to_slint(project: &EngineProject, clip: &EngineClip) -> Clip {
     // live inspector requires it).
     let (name, text_content) = clip_labels(project, clip);
     let (head_room, tail_room) = trim_rooms(project, clip);
+    let (media_id, source_in_s) = match &clip.content {
+        ClipSource::Media { media, source } => {
+            (media.raw().to_string(), time_to_seconds(source.start) as f32)
+        }
+        ClipSource::Generated(_) => (String::new(), 0.0),
+    };
 
     Clip {
         id: clip.id.raw().to_string().into(),
         name: name.into(),
         timeline_start: rational_time(clip.timeline.start),
         source_range: time_range(clip.timeline),
+        media_id: media_id.into(),
+        source_in_s,
+        duration_label: clip_duration_label(clip.timeline.duration).into(),
         text_content: text_content.into(),
         head_room_ticks: head_room,
         tail_room_ticks: tail_room,
+    }
+}
+
+/// `time` as seconds, exact rational division in floating point.
+fn time_to_seconds(time: EngineTime) -> f64 {
+    if time.rate.num <= 0 || time.rate.den <= 0 {
+        return 0.0;
+    }
+    time.value as f64 * f64::from(time.rate.den) / f64::from(time.rate.num)
+}
+
+/// Clip badge: CapCut-style `3.4s` under a minute, `M:SS` (or `H:MM:SS`)
+/// from there up.
+fn clip_duration_label(duration: EngineTime) -> String {
+    let secs = time_to_seconds(duration).max(0.0);
+    if secs < 60.0 {
+        format!("{secs:.1}s")
+    } else {
+        let whole = secs.round() as i64;
+        let (h, m, s) = (whole / 3600, (whole / 60) % 60, whole % 60);
+        if h > 0 {
+            format!("{h}:{m:02}:{s:02}")
+        } else {
+            format!("{m}:{s:02}")
+        }
     }
 }
 
@@ -303,4 +337,40 @@ fn clamp_i32(value: i64) -> i32 {
 
 fn model<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
     ModelRc::from(Rc::new(VecModel::from(items)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(value: i64, num: i32, den: i32) -> EngineTime {
+        EngineTime::new(value, EngineRational { num, den })
+    }
+
+    #[test]
+    fn duration_label_uses_seconds_under_a_minute() {
+        assert_eq!(clip_duration_label(t(90, 30, 1)), "3.0s");
+        assert_eq!(clip_duration_label(t(101, 30, 1)), "3.4s");
+        assert_eq!(clip_duration_label(t(0, 30, 1)), "0.0s");
+    }
+
+    #[test]
+    fn duration_label_switches_to_timecode_at_a_minute() {
+        assert_eq!(clip_duration_label(t(1800, 30, 1)), "1:00");
+        // 1h 0m 23s at 30fps.
+        assert_eq!(clip_duration_label(t(30 * 3623, 30, 1)), "1:00:23");
+    }
+
+    #[test]
+    fn duration_label_handles_ntsc_rates() {
+        // Exactly 60 logical frames at 29.97: just under 60.06s.
+        assert_eq!(clip_duration_label(t(1800, 30000, 1001)), "1:00");
+    }
+
+    #[test]
+    fn time_to_seconds_is_rate_exact() {
+        assert_eq!(time_to_seconds(t(48, 24, 1)), 2.0);
+        assert_eq!(time_to_seconds(t(500, 1000, 1)), 0.5);
+        assert_eq!(time_to_seconds(t(1, 0, 1)), 0.0, "degenerate rate is safe");
+    }
 }

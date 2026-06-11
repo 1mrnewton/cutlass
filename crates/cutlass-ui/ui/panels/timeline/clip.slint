@@ -1,6 +1,6 @@
-import { AppStore } from "../../store/index.slint";
-import { Clip } from "../../models/index.slint";
-import { TimelineLib } from "../../lib/index.slint";
+import { AppStore, EditorStore } from "../../store/index.slint";
+import { Clip, TrackKind } from "../../models/index.slint";
+import { TimelineLib, StripBackend } from "../../lib/index.slint";
 import { TimelineStore } from "../../store/timeline-store.slint";
 import { TimelineViewState } from "state.slint";
 import { AppState } from "../../state.slint";
@@ -15,6 +15,7 @@ export component ClipView inherits Rectangle {
     in property <Clip> model;
     in property <string> track-id;
     in property <int> track-row;
+    in property <TrackKind> track-kind;
     in property <color> track-color;
     in property <float> zoom;
 
@@ -44,17 +45,83 @@ export component ClipView inherits Rectangle {
     // aborts the app inside wgpu.
     private property <bool> dimmed: is-active-drag || is-active-trim;
 
+    // --- Phase 8: clip content (filmstrip / waveform / inline text) ------
+
+    private property <bool> has-media: model.media-id != "";
+    private property <bool> show-filmstrip: has-media && track-kind == TrackKind.video;
+    private property <bool> show-waveform: has-media && track-kind == TrackKind.audio;
+    private property <bool> is-text: track-kind == TrackKind.text;
+
+    // Visible slice of this clip in 256px buckets of clip-local x, so
+    // scrolling only re-resolves the tile model when a bucket boundary is
+    // crossed (src/strips.rs pads by one tile). scroll-x is the Flickable
+    // viewport-x: ≤ 0 when scrolled right.
+    private property <int> vis-from-bucket: floor(
+        (-TimelineViewState.scroll-x - root.x) / 256px);
+    private property <int> vis-to-bucket: floor(
+        (-TimelineViewState.scroll-x + TimelineViewState.viewport-w - root.x) / 256px);
+
+    // The name/duration row needs space; hide labels on slivers entirely.
+    private property <bool> show-labels: root.width > 40px;
+    private property <length> label-row-h: 14px;
+
     x: TimelineLib.rational-to-length(model.timeline-start, zoom);
 
     width: TimelineLib.clip-timeline-width(model, zoom);
     height: AppStore.theme.track-lane.clip.height;
     background: dimmed ? track-color.with-alpha(0.35) : track-color;
     border-radius: AppStore.theme.track-lane.clip.radius;
+    // Tiles are grid-aligned to media time, so the first one usually starts
+    // left of the clip edge — crop everything to the rounded card.
+    clip: true;
 
-    border-width: is-selected ? 1px : 0px;
-    border-color: dimmed
-        ? AppStore.theme.text.primary.with-alpha(0.35)
-        : AppStore.theme.text.primary;
+    // Filmstrip: sampled source frames, decoded off-thread and cached per
+    // media + power-of-two zoom bucket. Missing tiles draw nothing — the
+    // lane-colored card shows through until the frame lands.
+    if show-filmstrip: Rectangle {
+        for tile in StripBackend.filmstrip-tiles(
+            model.media-id,
+            model.source-in-s,
+            model.source-range.duration.value,
+            EditorStore.project.sequence.fps.num,
+            EditorStore.project.sequence.fps.den,
+            root.zoom,
+            root.vis-from-bucket,
+            root.vis-to-bucket,
+            StripBackend.generation): Image {
+            x: tile.x;
+            y: 0;
+            width: tile.width;
+            height: parent.height;
+            source: tile.image;
+            image-fit: cover;
+            // Leaf element: opacity folds into the draw (no layer texture).
+            opacity: root.dimmed ? 0.35 : 1.0;
+        }
+    }
+
+    // Waveform: peak file computed once per media, tiles rasterized per
+    // zoom bucket; the raster stretches to the live tile width (≤ 2×).
+    if show-waveform: Rectangle {
+        for tile in StripBackend.waveform-tiles(
+            model.media-id,
+            model.source-in-s,
+            model.source-range.duration.value,
+            EditorStore.project.sequence.fps.num,
+            EditorStore.project.sequence.fps.den,
+            root.zoom,
+            root.vis-from-bucket,
+            root.vis-to-bucket,
+            StripBackend.generation): Image {
+            x: tile.x;
+            y: 0;
+            width: tile.width;
+            height: parent.height;
+            source: tile.image;
+            image-fit: fill;
+            opacity: root.dimmed ? 0.35 : 1.0;
+        }
+    }
 
     ta := TouchArea {
         width: parent.width;
@@ -96,10 +163,54 @@ export component ClipView inherits Rectangle {
         }
     }
 
-    Text {
-        text: model.name;
+    // Text clips render their generator content inline (Phase 8); the name
+    // row above still identifies the lane kind.
+    if is-text: Text {
+        x: 6px;
+        y: root.show-labels ? root.label-row-h : 0;
+        width: parent.width - 12px;
+        height: parent.height - self.y;
+        text: model.text-content == "" ? model.name : model.text-content;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
         // Leaf element: opacity here is folded into the glyph color (no layer).
         opacity: dimmed ? 0.35 : 1.0;
+    }
+
+    // Name + duration badge on a thin scrim, CapCut-style — legible over
+    // filmstrip frames, harmless on flat cards. (The root clips the corners.)
+    if show-labels: Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: root.label-row-h;
+        background: dimmed ? #00000020 : #00000059;
+
+        Text {
+            x: 4px;
+            width: min(self.preferred-width,
+                parent.width - (root.width > 90px ? 44px : 8px));
+            height: parent.height;
+            vertical-alignment: center;
+            text: model.name;
+            font-size: 9px;
+            overflow: elide;
+            color: AppStore.theme.text.primary;
+            opacity: dimmed ? 0.35 : 1.0;
+        }
+
+        // Duration badge (speed/volume markers join it once they exist in
+        // the model).
+        if root.width > 90px: Text {
+            x: parent.width - self.preferred-width - 4px;
+            height: parent.height;
+            vertical-alignment: center;
+            text: model.duration-label;
+            font-size: 9px;
+            color: AppStore.theme.text.primary.with-alpha(0.75);
+            opacity: dimmed ? 0.35 : 1.0;
+        }
     }
 
     // --- trim handles (declared last ⇒ on top of the move TouchArea) -----
@@ -177,5 +288,15 @@ export component ClipView inherits Rectangle {
         height: parent.height * 0.5;
         background: AppStore.theme.text.primary;
         border-radius: 1px;
+    }
+
+    // Selection outline, drawn last: a border on the root itself would be
+    // painted *under* the filmstrip/waveform tiles and the label scrim.
+    if is-selected: Rectangle {
+        border-width: 1px;
+        border-color: dimmed
+            ? AppStore.theme.text.primary.with-alpha(0.35)
+            : AppStore.theme.text.primary;
+        border-radius: AppStore.theme.track-lane.clip.radius;
     }
 }

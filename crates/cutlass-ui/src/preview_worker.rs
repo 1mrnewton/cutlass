@@ -12,6 +12,7 @@ use cutlass_models::{
 };
 use tracing::{error, info};
 
+use crate::strips::StripHandle;
 use crate::thumbnails::{ThumbKind, ThumbnailHandle};
 use crate::{EditorStore, PreviewStore};
 
@@ -197,6 +198,7 @@ impl PreviewWorker {
         preview_weak: slint::Weak<PreviewStore<'static>>,
         editor_weak: slint::Weak<EditorStore<'static>>,
         thumbs: ThumbnailHandle,
+        strips: StripHandle,
     ) -> Result<(Self, PreviewSession), String> {
         let (ready_tx, ready_rx) = bounded(1);
         let (req_tx, req_rx) = unbounded();
@@ -204,9 +206,15 @@ impl PreviewWorker {
         let join = std::thread::Builder::new()
             .name("cutlass-preview".into())
             .spawn(move || {
-                if let Err(e) =
-                    worker_main(config, preview_weak, editor_weak, thumbs, req_rx, ready_tx)
-                {
+                if let Err(e) = worker_main(
+                    config,
+                    preview_weak,
+                    editor_weak,
+                    thumbs,
+                    strips,
+                    req_rx,
+                    ready_tx,
+                ) {
                     error!("preview worker exited: {e}");
                 }
             })
@@ -237,6 +245,7 @@ fn worker_main(
     preview_weak: slint::Weak<PreviewStore<'static>>,
     editor_weak: slint::Weak<EditorStore<'static>>,
     thumbs: ThumbnailHandle,
+    strips: StripHandle,
     req_rx: Receiver<WorkerMsg>,
     ready_tx: Sender<Result<PreviewSession, String>>,
 ) -> Result<(), String> {
@@ -262,7 +271,7 @@ fn worker_main(
     // from the first frame (rather than any Slint-side placeholder).
     publish_projection(&engine, &editor_weak);
 
-    worker_loop(&mut engine, tl_rate, preview_weak, editor_weak, thumbs, req_rx);
+    worker_loop(&mut engine, tl_rate, preview_weak, editor_weak, thumbs, strips, req_rx);
     Ok(())
 }
 
@@ -275,6 +284,7 @@ fn worker_loop(
     preview_weak: slint::Weak<PreviewStore<'static>>,
     editor_weak: slint::Weak<EditorStore<'static>>,
     thumbs: ThumbnailHandle,
+    strips: StripHandle,
     req_rx: Receiver<WorkerMsg>,
 ) {
     // Clipboard lives with the loop: it's edit-session state, not project
@@ -290,7 +300,9 @@ fn worker_loop(
                   main_magnet: &mut bool,
                   msg: WorkerMsg| {
         match msg {
-            WorkerMsg::Import(path) => import_and_publish(engine, &path, &editor_weak, &thumbs),
+            WorkerMsg::Import(path) => {
+                import_and_publish(engine, &path, &editor_weak, &thumbs, &strips)
+            }
             WorkerMsg::AddClip {
                 media,
                 track,
@@ -380,6 +392,7 @@ fn import_and_publish(
     path: &Path,
     editor_weak: &slint::Weak<EditorStore<'static>>,
     thumbs: &ThumbnailHandle,
+    strips: &StripHandle,
 ) {
     match engine.apply(Command::Project(ProjectCommand::Import {
         path: path.to_path_buf(),
@@ -400,6 +413,9 @@ fn import_and_publish(
                     ThumbKind::Video
                 };
                 thumbs.request(media.raw(), source.path().to_path_buf(), kind);
+                // The strip worker resolves filmstrip/waveform requests by
+                // media id alone; it needs the path on record (src/strips.rs).
+                strips.register_media(media.raw(), source.path().to_path_buf());
             }
             publish_projection(engine, editor_weak);
         }

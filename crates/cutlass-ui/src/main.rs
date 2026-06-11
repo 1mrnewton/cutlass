@@ -4,6 +4,7 @@ mod preview_worker;
 mod projection;
 mod ruler;
 mod snap;
+mod strips;
 mod thumbnails;
 mod timecode;
 mod timeline;
@@ -50,11 +51,18 @@ fn main() -> Result<(), slint::PlatformError> {
         thumbnails::ThumbnailWorker::spawn(app.global::<EditorStore>().as_weak())
             .map_err(slint::PlatformError::from)?;
 
+    // Timeline clip content (filmstrip frames, waveform tiles) decodes on a
+    // third thread: a long strip batch must not delay library tiles, and
+    // neither may ever touch the UI or engine threads.
+    let strip_worker = strips::StripWorker::spawn(app.global::<StripBackend>().as_weak())
+        .map_err(slint::PlatformError::from)?;
+
     let (preview_worker, session) = preview_worker::PreviewWorker::spawn(
         EngineConfig::default(),
         preview_store_weak,
         editor_store_weak,
         thumbnail_worker.handle(),
+        strip_worker.handle(),
     )
     .map_err(slint::PlatformError::from)?;
 
@@ -121,6 +129,44 @@ fn main() -> Result<(), slint::PlatformError> {
     app.global::<RulerBackend>().on_ticks(|scroll_x, viewport_w, zoom, fps_num, fps_den| {
         ruler::ticks_model(scroll_x, viewport_w, zoom, fps_num, fps_den)
     });
+
+    // Timeline clip content tiles (Phase 8). Cache lookups on the UI thread;
+    // misses queue decode work on the strip thread and come back through a
+    // `StripBackend.generation` bump (the trailing argument both callbacks
+    // take exists only to re-trigger evaluation on delivery).
+    let filmstrip_handle = strip_worker.handle();
+    app.global::<StripBackend>().on_filmstrip_tiles(
+        move |media_id, source_in_s, duration, fps_num, fps_den, zoom, from_bucket, to_bucket, _generation| {
+            strips::filmstrip_tiles(
+                &filmstrip_handle,
+                media_id.as_str(),
+                source_in_s,
+                duration,
+                fps_num,
+                fps_den,
+                zoom,
+                from_bucket,
+                to_bucket,
+            )
+        },
+    );
+
+    let waveform_handle = strip_worker.handle();
+    app.global::<StripBackend>().on_waveform_tiles(
+        move |media_id, source_in_s, duration, fps_num, fps_den, zoom, from_bucket, to_bucket, _generation| {
+            strips::waveform_tiles(
+                &waveform_handle,
+                media_id.as_str(),
+                source_in_s,
+                duration,
+                fps_num,
+                fps_den,
+                zoom,
+                from_bucket,
+                to_bucket,
+            )
+        },
+    );
 
     app.global::<DragBackend>().on_snap_clip_start(
         |sequence,

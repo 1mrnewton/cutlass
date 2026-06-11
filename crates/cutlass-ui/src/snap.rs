@@ -591,9 +591,9 @@ mod tests {
                 start: rt(0),
                 duration: rt(dur),
             },
-            text_content: Default::default(),
             head_room_ticks: head_room,
             tail_room_ticks: tail_room,
+            ..Default::default()
         }
     }
 

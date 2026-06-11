@@ -192,17 +192,39 @@ leave/eat a gap. Needs a resolver mode (no neighbor clamp) plus a
 `TrimClip`+`ShiftClips` composition with order depending on grow vs shrink —
 tracked as the first item of future ripple work.
 
-## Phase 8 — Clip content rendering
+## Phase 8 — Clip content rendering ✅
 
-Perf-sensitive; everything decoded off the UI thread and cached.
+Perf-sensitive; everything decodes off the UI thread (`src/strips.rs` +
+a dedicated `cutlass-strips` worker, newest request first) and lands in
+UI-thread caches via a `StripBackend.generation` bump — the tile models
+are pure callbacks that take it as an argument, so delivery re-evaluates
+them automatically (same reactivity pattern as the ruler).
 
-- [ ] Video clips: filmstrip thumbnails (sample frames at zoom-dependent
-      density; cache per media + zoom bucket; never decode on the UI thread).
-- [ ] Audio clips: waveform strips (peak files computed once per media,
-      rendered per zoom).
-- [ ] Text clips: render `text-content` inline (basic version exists via name
-      label).
-- [ ] Clip badges: duration, speed, volume markers as they land in the model.
+- [x] Video clips: filmstrip thumbnails. Tiles sit on a power-of-two grid
+      of *media-time* seconds picked from the zoom (tile width ∈ [64, 128)
+      px); powers of two nest, so zooming reuses every cached frame, and
+      trims/moves slide the strip under the clip window (grid keys are
+      media-anchored) instead of resampling. `cutlass_decoder::video_strip`
+      decodes N targets in one demuxer pass, rolling forward between nearby
+      targets and re-seeking past gaps; frames are decoded *to* the target
+      pts so tiles inside one GOP differ. Resolvers are viewport-virtualized
+      (clip-local 256px buckets from `ClipView`) and LRU-capped; misses
+      render the lane-colored card until the frame lands.
+- [x] Audio clips: waveform strips. A peak file (~100 peaks/s,
+      `audio_peaks_per_second`) is computed once per media on first demand;
+      tiles are rasterized per power-of-two zoom bucket on the worker
+      (mirrored bars on a transparent ground over the lane color) and
+      stretched ≤ 2× between buckets.
+- [x] Text clips: `text-content` rendered inline (centered, elided;
+      falls back to the lane label while empty).
+- [x] Clip badges: name + duration (`3.4s` / `M:SS`, computed rate-exactly
+      in the projection) on a thin top scrim, hidden on sliver-thin clips;
+      the selection outline moved above the content tiles. Speed/volume
+      markers join when those land in the model.
+
+Deliberate gap: **no speed/volume badges yet** (no model fields). The drag
+floating copy and trim stretch preview stay flat color — content in those
+gestures is a polish item for later.
 
 ## Phase 9 — Drag & viewport polish
 

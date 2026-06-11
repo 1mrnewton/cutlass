@@ -107,7 +107,13 @@ fn decode_first_frame(
     }
 }
 
-fn scale_to_rgba(frame: &Video, max_w: u32, max_h: u32) -> Result<ThumbnailImage, DecodeError> {
+/// Convert + downscale a decoded frame to fit within `max_w` × `max_h`
+/// (aspect preserved, never upscaled). Shared with the filmstrip sampler.
+pub(crate) fn scale_to_rgba(
+    frame: &Video,
+    max_w: u32,
+    max_h: u32,
+) -> Result<ThumbnailImage, DecodeError> {
     let (src_w, src_h) = (frame.width(), frame.height());
     if src_w == 0 || src_h == 0 {
         return Err(DecodeError::unsupported("zero video dimensions"));

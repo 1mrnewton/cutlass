@@ -1,0 +1,48 @@
+// Bridge between timeline clips and the Rust strip cache/worker
+// (src/strips.rs): filmstrip frames on video clips, waveform tiles on
+// audio clips.
+//
+// Same shape as the ruler backend: the clip reports its visible slice and
+// `for`-iterates the returned tiles. The resolvers are cache lookups only —
+// decode and rasterization happen on the `cutlass-strips` thread, and every
+// delivered tile bumps `generation`, which re-evaluates all visible tile
+// models (each call takes it as an argument).
+//
+// Tiles sit on a power-of-two grid of *media-time* seconds, so the same
+// cached frames serve every zoom level, and trims/moves slide the strip
+// under the clip window instead of resampling it.
+
+export struct StripTile {
+    // Clip-local x of the tile's left edge. Can be negative for the first,
+    // partially visible tile (grid-aligned to media time); the clip's
+    // `clip: true` crops it.
+    x: length,
+    width: length,
+    // Decoded frame / rendered waveform. Empty while the worker is still
+    // on it (the lane-colored clip card shows through), or permanently for
+    // failed decodes.
+    image: image,
+}
+
+export global StripBackend {
+    // Bumped by the Rust side whenever a tile is delivered; resolvers take
+    // it as an argument purely to re-evaluate on delivery.
+    in-out property <int> generation;
+
+    // Visible tiles for one clip, in clip-local coordinates.
+    //
+    // Arguments (positional — Slint callbacks don't support named args):
+    //   1. media-id     — Clip.media-id (raw media-pool id)
+    //   2. source-in-s  — Clip.source-in-s (media seconds at the left edge)
+    //   3. duration     — Clip.source-range.duration.value (sequence ticks)
+    //   4. fps-num      — sequence tick rate numerator
+    //   5. fps-den      — sequence tick rate denominator
+    //   6. zoom         — TimelineStore.zoom; px per sequence tick
+    //   7. from-bucket  — first visible 256px bucket of clip-local x
+    //   8. to-bucket    — last visible 256px bucket of clip-local x
+    //   9. generation   — StripBackend.generation (reactivity only)
+    //
+    // The handlers are installed from Rust in `src/main.rs`.
+    pure callback filmstrip-tiles(string, float, int, int, int, float, int, int, int) -> [StripTile];
+    pure callback waveform-tiles(string, float, int, int, int, float, int, int, int) -> [StripTile];
+}

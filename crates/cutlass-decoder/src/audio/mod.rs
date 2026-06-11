@@ -23,13 +23,73 @@ use crate::video::ensure_ffmpeg_init;
 /// reduced from these). ~23ms at 44.1kHz: fine enough for any waveform image.
 const COARSE_CHUNK: usize = 1024;
 
+/// Peak amplitudes at a fixed time resolution — the "peak file" for a media
+/// source, computed once and re-rendered per zoom by the strip worker.
+#[derive(Debug, Clone)]
+pub struct AudioPeaks {
+    /// Actual peaks per second (the requested rate adjusted to a whole number
+    /// of samples per peak, and lowered if `max_peaks` capped the output).
+    pub per_second: f64,
+    /// Peak amplitudes in `0.0..=1.0`, one per `1 / per_second` of audio.
+    pub peaks: Vec<f32>,
+}
+
 /// Decode the whole audio stream of `path` and return `buckets` peak
 /// amplitudes in `0.0..=1.0`, evenly spread across the stream's duration.
 pub fn audio_peaks(path: &Path, buckets: usize) -> Result<Vec<f32>, DecodeError> {
-    ensure_ffmpeg_init()?;
     if buckets == 0 {
         return Err(DecodeError::unsupported("zero waveform buckets"));
     }
+    let (coarse, ..) = decode_coarse_peaks(path, &|_| COARSE_CHUNK)?;
+    if coarse.is_empty() {
+        return Err(DecodeError::unsupported("audio stream has no samples"));
+    }
+    Ok(reduce_to_buckets(&coarse, buckets))
+}
+
+/// Decode the whole audio stream of `path` into peaks at (approximately)
+/// `per_second` peaks per second of audio, capped at `max_peaks` entries.
+/// Time-anchored — peak `i` always covers `[i, i+1) / per_second` seconds —
+/// so any sub-range of the file can be re-rendered at any zoom later.
+pub fn audio_peaks_per_second(
+    path: &Path,
+    per_second: f64,
+    max_peaks: usize,
+) -> Result<AudioPeaks, DecodeError> {
+    if per_second <= 0.0 || per_second.is_nan() || max_peaks == 0 {
+        return Err(DecodeError::unsupported("invalid waveform resolution"));
+    }
+
+    let (coarse, sample_rate, chunk) =
+        decode_coarse_peaks(path, &|rate| ((f64::from(rate) / per_second).round() as usize).max(1))?;
+    if coarse.is_empty() {
+        return Err(DecodeError::unsupported("audio stream has no samples"));
+    }
+
+    // The chunk is a whole number of samples, so the realized rate differs
+    // slightly from the request; report what the data actually is.
+    let realized = f64::from(sample_rate) / chunk as f64;
+    if coarse.len() <= max_peaks {
+        return Ok(AudioPeaks {
+            per_second: realized,
+            peaks: coarse,
+        });
+    }
+    let reduced = reduce_to_buckets(&coarse, max_peaks);
+    Ok(AudioPeaks {
+        per_second: realized * max_peaks as f64 / coarse.len() as f64,
+        peaks: reduced,
+    })
+}
+
+/// Shared decode loop: best audio stream → mono f32 → per-chunk peaks.
+/// `chunk_for_rate` picks the chunk size once the sample rate is known.
+/// Returns `(peaks, sample_rate, chunk)`.
+fn decode_coarse_peaks(
+    path: &Path,
+    chunk_for_rate: &dyn Fn(u32) -> usize,
+) -> Result<(Vec<f32>, u32, usize), DecodeError> {
+    ensure_ffmpeg_init()?;
 
     let path_str = path
         .to_str()
@@ -69,7 +129,8 @@ pub fn audio_peaks(path: &Path, buckets: usize) -> Result<Vec<f32>, DecodeError>
     )
     .map_err(DecodeError::Decode)?;
 
-    let mut peaks = PeakAccumulator::new(COARSE_CHUNK);
+    let chunk = chunk_for_rate(rate).max(1);
+    let mut peaks = PeakAccumulator::new(chunk);
     let mut decoded = Audio::empty();
     let mut demuxer_done = false;
 
@@ -120,11 +181,7 @@ pub fn audio_peaks(path: &Path, buckets: usize) -> Result<Vec<f32>, DecodeError>
         }
     }
 
-    let coarse = peaks.finish();
-    if coarse.is_empty() {
-        return Err(DecodeError::unsupported("audio stream has no samples"));
-    }
-    Ok(reduce_to_buckets(&coarse, buckets))
+    Ok((peaks.finish(), rate, chunk))
 }
 
 /// Streams mono f32 samples into fixed-size chunk peaks so memory stays
@@ -225,5 +282,41 @@ mod tests {
     fn zero_buckets_is_rejected() {
         let err = audio_peaks(Path::new("/nonexistent.mp3"), 0);
         assert!(matches!(err, Err(DecodeError::Unsupported { .. })));
+    }
+
+    #[test]
+    fn per_second_peaks_match_duration() {
+        let Some(path) = any_audio_asset() else {
+            return;
+        };
+        let peaks = audio_peaks_per_second(&path, 100.0, 1_000_000).expect("peaks");
+        assert!((peaks.per_second - 100.0).abs() < 1.0, "realized rate ≈ requested");
+        assert!(peaks.peaks.iter().all(|p| (0.0..=1.0).contains(p)));
+        assert!(peaks.peaks.iter().any(|&p| p > 0.0));
+        // Sanity: count implies a plausible duration (between 1s and 1h).
+        let duration_s = peaks.peaks.len() as f64 / peaks.per_second;
+        assert!(duration_s > 1.0 && duration_s < 3600.0, "duration {duration_s}");
+    }
+
+    #[test]
+    fn per_second_peaks_respect_the_cap() {
+        let Some(path) = any_audio_asset() else {
+            return;
+        };
+        let peaks = audio_peaks_per_second(&path, 100.0, 50).expect("peaks");
+        assert_eq!(peaks.peaks.len(), 50);
+        assert!(peaks.per_second < 100.0, "cap lowers the realized rate");
+    }
+
+    #[test]
+    fn invalid_resolution_is_rejected() {
+        assert!(matches!(
+            audio_peaks_per_second(Path::new("/nonexistent.mp3"), 0.0, 100),
+            Err(DecodeError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            audio_peaks_per_second(Path::new("/nonexistent.mp3"), 100.0, 0),
+            Err(DecodeError::Unsupported { .. })
+        ));
     }
 }

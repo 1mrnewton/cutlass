@@ -61,6 +61,16 @@ export struct Clip {
     // whose ratio implicitly encodes speed (OTIO does the same: `LinearTimeWarp`
     // / `FreezeFrame` effects on top of a single `source_range`).
     source-range: TimeRange,
+    // Media-pool id of the underlying source ("" for generated clips).
+    // Keys the filmstrip / waveform tile lookups (src/strips.rs).
+    media-id: string,
+    // The clip's in-point in *media time*, as seconds into the source file.
+    // Anchors the filmstrip/waveform sampling grid to the media (not the
+    // timeline), so trims and moves slide the strip under the clip window
+    // instead of resampling it. 0 for generated clips.
+    source-in-s: float,
+    // Timeline length as "3.4s" / "M:SS", for the clip badge.
+    duration-label: string,
     // Text / title generator content. Empty on non-text clips.
     text-content: string,
     // How far (sequence ticks) each edge can EXTEND beyond the current

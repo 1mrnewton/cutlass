@@ -5,6 +5,7 @@ use crate::clip::{Clip, ClipSource, Generator};
 use crate::error::ModelError;
 use crate::ids::{ClipId, TrackId};
 use crate::time::{RationalTime, TimeRange};
+use crate::transition::Transition;
 
 /// Lane category on the timeline. Drives drag targeting, clip placement rules,
 /// and compositor participation.
@@ -91,6 +92,11 @@ pub struct Track {
     pub locked: bool,
     #[serde(with = "crate::serde_map")]
     clips: Map<ClipId, Clip>,
+    /// Transitions at clip junctions, keyed by the left (outgoing) clip id.
+    /// Additive (M4): old projects load with none. A junction lives only
+    /// while its pair still abuts; structural edits prune dead ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    transitions: Vec<Transition>,
 }
 
 impl Track {
@@ -104,6 +110,7 @@ impl Track {
             muted: false,
             locked: false,
             clips: Map::default(),
+            transitions: Vec::new(),
         }
     }
 
@@ -179,6 +186,70 @@ impl Track {
 
     pub(crate) fn remove_clip(&mut self, id: ClipId) -> Option<Clip> {
         self.clips.remove(&id)
+    }
+
+    // --- transitions (M4) -------------------------------------------------
+
+    /// All transitions on this track (junction order is not guaranteed).
+    pub fn transitions(&self) -> &[Transition] {
+        &self.transitions
+    }
+
+    /// Replace the whole transition set (used by undo/prune restore).
+    pub(crate) fn set_transitions(&mut self, transitions: Vec<Transition>) {
+        self.transitions = transitions;
+    }
+
+    /// The transition whose outgoing side is `left`, if any.
+    pub fn transition_at(&self, left: ClipId) -> Option<&Transition> {
+        self.transitions.iter().find(|t| t.left == left)
+    }
+
+    pub fn transition_at_mut(&mut self, left: ClipId) -> Option<&mut Transition> {
+        self.transitions.iter_mut().find(|t| t.left == left)
+    }
+
+    /// Add or replace the transition at the `left` junction.
+    pub(crate) fn upsert_transition(&mut self, transition: Transition) {
+        if let Some(existing) = self.transition_at_mut(transition.left) {
+            *existing = transition;
+        } else {
+            self.transitions.push(transition);
+        }
+    }
+
+    /// Remove the transition at the `left` junction, returning it if present.
+    pub(crate) fn remove_transition(&mut self, left: ClipId) -> Option<Transition> {
+        let idx = self.transitions.iter().position(|t| t.left == left)?;
+        Some(self.transitions.remove(idx))
+    }
+
+    /// Whether `left` and `right` abut on this track: `left` ends exactly
+    /// where `right` starts and both are present.
+    pub fn clips_abut(&self, left: ClipId, right: ClipId) -> bool {
+        match (self.clip(left), self.clip(right)) {
+            (Some(l), Some(r)) => l.timeline.end_tick() == r.timeline.start.value,
+            _ => false,
+        }
+    }
+
+    /// Drop transitions whose junction no longer abuts (a clip moved, trimmed,
+    /// split, or was removed). Returns whether anything was pruned.
+    pub(crate) fn prune_dead_transitions(&mut self) -> bool {
+        let before = self.transitions.len();
+        // Borrow-checker dance: collect survivors against an immutable view.
+        let survivors: Vec<Transition> = self
+            .transitions
+            .iter()
+            .filter(|t| self.clips_abut(t.left, t.right))
+            .cloned()
+            .collect();
+        if survivors.len() != before {
+            self.transitions = survivors;
+            true
+        } else {
+            false
+        }
     }
 }
 

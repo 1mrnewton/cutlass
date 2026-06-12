@@ -26,6 +26,7 @@ mod serde_map;
 mod time;
 mod timeline;
 mod track;
+mod transition;
 
 /// Fast hash map for integer-keyed entities (FxHash; no DoS resistance needed
 /// for an in-process editing model, but much faster than SipHash for `u64`).
@@ -52,3 +53,6 @@ pub use time::{
 };
 pub use timeline::{CanvasAspect, CanvasSettings, Marker, MarkerColor, Timeline};
 pub use track::{Track, TrackKind};
+pub use transition::{
+    DEFAULT_TRANSITION_TICKS, Transition, TransitionSpec, transition_catalog, transition_spec,
+};

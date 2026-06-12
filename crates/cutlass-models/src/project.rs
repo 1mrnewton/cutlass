@@ -16,6 +16,7 @@ use crate::time::{
 };
 use crate::timeline::Timeline;
 use crate::track::{Track, TrackKind};
+use crate::transition::Transition;
 
 /// Top-level container: a media pool plus exactly one [`Timeline`].
 ///
@@ -443,6 +444,120 @@ impl Project {
             .clip_mut(clip_id)
             .ok_or(ModelError::UnknownClip(clip_id))?;
         effect_mut(clip, index as u32)?.set_param_constant(param, value)
+    }
+
+    // --- transitions (M4) -------------------------------------------------
+
+    /// Add (or replace) a transition at the junction where `left` abuts the
+    /// next clip on its track. The catalog id must exist and `left` must abut
+    /// a following clip. Uses the default window length.
+    pub fn add_transition(&mut self, left: ClipId, transition_id: &str) -> Result<(), ModelError> {
+        if crate::transition::transition_spec(transition_id).is_none() {
+            return Err(ModelError::InvalidParam(format!(
+                "unknown transition '{transition_id}'"
+            )));
+        }
+        let track_id = self
+            .timeline
+            .track_of(left)
+            .ok_or(ModelError::UnknownClip(left))?;
+        let right = self
+            .right_neighbor(track_id, left)
+            .ok_or_else(|| ModelError::InvalidParam("clip has no abutting clip to its right".into()))?;
+        let transition =
+            Transition::new(left, right, transition_id, crate::transition::DEFAULT_TRANSITION_TICKS);
+        self.timeline
+            .track_mut(track_id)
+            .ok_or(ModelError::UnknownClip(left))?
+            .upsert_transition(transition);
+        Ok(())
+    }
+
+    /// Remove the transition at the `left` junction. Errors if none exists.
+    pub fn remove_transition(&mut self, left: ClipId) -> Result<(), ModelError> {
+        let track_id = self
+            .timeline
+            .track_of(left)
+            .ok_or(ModelError::UnknownClip(left))?;
+        let removed = self
+            .timeline
+            .track_mut(track_id)
+            .and_then(|t| t.remove_transition(left));
+        if removed.is_none() {
+            return Err(ModelError::InvalidParam(
+                "clip has no transition at its right junction".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Set the window length (timeline ticks) of an existing transition.
+    pub fn set_transition_duration(
+        &mut self,
+        left: ClipId,
+        duration: i64,
+    ) -> Result<(), ModelError> {
+        let track_id = self
+            .timeline
+            .track_of(left)
+            .ok_or(ModelError::UnknownClip(left))?;
+        let transition = self
+            .timeline
+            .track_mut(track_id)
+            .and_then(|t| t.transition_at_mut(left))
+            .ok_or_else(|| {
+                ModelError::InvalidParam("clip has no transition at its right junction".into())
+            })?;
+        transition.duration = duration.max(1);
+        Ok(())
+    }
+
+    /// The clip on `track` whose start abuts the end of `left`, if any.
+    fn right_neighbor(&self, track_id: TrackId, left: ClipId) -> Option<ClipId> {
+        let track = self.timeline.track(track_id)?;
+        let left_end = track.clip(left)?.timeline.end_tick();
+        track
+            .clips()
+            .find(|c| c.id != left && c.timeline.start.value == left_end)
+            .map(|c| c.id)
+    }
+
+    /// Whether any track carries a transition (cheap guard for prune).
+    pub fn has_transitions(&self) -> bool {
+        self.timeline
+            .tracks_ordered()
+            .any(|t| !t.transitions().is_empty())
+    }
+
+    /// Snapshot every track's transitions (for undo of structural edits that
+    /// prune dead junctions).
+    pub fn transitions_snapshot(&self) -> Vec<(TrackId, Vec<Transition>)> {
+        self.timeline
+            .tracks_ordered()
+            .map(|t| (t.id, t.transitions().to_vec()))
+            .collect()
+    }
+
+    /// Restore a [`Self::transitions_snapshot`] across tracks.
+    pub fn restore_transitions(&mut self, snapshot: Vec<(TrackId, Vec<Transition>)>) {
+        for (track_id, transitions) in snapshot {
+            if let Some(track) = self.timeline.track_mut(track_id) {
+                track.set_transitions(transitions);
+            }
+        }
+    }
+
+    /// Drop transitions whose junction no longer abuts, across all tracks.
+    /// Returns whether anything was pruned.
+    pub fn prune_dead_transitions(&mut self) -> bool {
+        let track_ids: Vec<TrackId> = self.timeline.tracks_ordered().map(|t| t.id).collect();
+        let mut pruned = false;
+        for id in track_ids {
+            if let Some(track) = self.timeline.track_mut(id) {
+                pruned |= track.prune_dead_transitions();
+            }
+        }
+        pruned
     }
 
     /// Find a clip by ID anywhere on the timeline (O(1)).
@@ -989,6 +1104,94 @@ mod tests {
         let media_id = project.add_media(sample_media(R24, duration));
         let track = project.add_track(TrackKind::Video, "V1");
         (project, media_id, track)
+    }
+
+    // --- transitions (M4) -------------------------------------------------
+
+    /// Two abutting adjustment clips on one track; returns `(project, left,
+    /// right, track)`.
+    fn project_with_abutting_pair() -> (Project, ClipId, ClipId, TrackId) {
+        let mut project = Project::new("test", R24);
+        let track = project.add_track(TrackKind::Adjustment, "FX");
+        let left = project
+            .add_generated(track, Generator::Adjustment, tr(0, 24))
+            .unwrap();
+        let right = project
+            .add_generated(track, Generator::Adjustment, tr(24, 24))
+            .unwrap();
+        (project, left, right, track)
+    }
+
+    #[test]
+    fn add_transition_links_abutting_pair() {
+        let (mut project, left, right, track) = project_with_abutting_pair();
+        project.add_transition(left, "crossfade").unwrap();
+        let t = project.timeline().track(track).unwrap().transition_at(left).unwrap();
+        assert_eq!(t.right, right);
+        assert_eq!(t.transition_id, "crossfade");
+        assert_eq!(t.duration, crate::transition::DEFAULT_TRANSITION_TICKS);
+    }
+
+    #[test]
+    fn add_transition_rejects_unknown_id_and_non_abutting() {
+        let (mut project, left, _right, _track) = project_with_abutting_pair();
+        assert!(matches!(
+            project.add_transition(left, "warp_speed"),
+            Err(ModelError::InvalidParam(_))
+        ));
+        // A lone clip with no right neighbor cannot take a transition.
+        let track = project.add_track(TrackKind::Adjustment, "FX2");
+        let lone = project
+            .add_generated(track, Generator::Adjustment, tr(0, 24))
+            .unwrap();
+        assert!(matches!(
+            project.add_transition(lone, "crossfade"),
+            Err(ModelError::InvalidParam(_))
+        ));
+    }
+
+    #[test]
+    fn set_and_remove_transition_duration() {
+        let (mut project, left, _right, track) = project_with_abutting_pair();
+        project.add_transition(left, "wipe_left").unwrap();
+        project.set_transition_duration(left, 12).unwrap();
+        assert_eq!(
+            project.timeline().track(track).unwrap().transition_at(left).unwrap().duration,
+            12
+        );
+        project.remove_transition(left).unwrap();
+        assert!(project.timeline().track(track).unwrap().transition_at(left).is_none());
+        assert!(matches!(
+            project.remove_transition(left),
+            Err(ModelError::InvalidParam(_))
+        ));
+    }
+
+    #[test]
+    fn prune_drops_transition_when_junction_breaks() {
+        let (mut project, left, _right, track) = project_with_abutting_pair();
+        project.add_transition(left, "slide").unwrap();
+        assert!(project.has_transitions());
+
+        // Move the left clip so the pair no longer abuts.
+        project.move_clip(left, track, rt(100)).unwrap();
+        assert!(project.prune_dead_transitions());
+        assert!(!project.has_transitions());
+        // Idempotent: a second prune finds nothing to do.
+        assert!(!project.prune_dead_transitions());
+    }
+
+    #[test]
+    fn transitions_snapshot_round_trips() {
+        let (mut project, left, _right, _track) = project_with_abutting_pair();
+        project.add_transition(left, "dip_to_black").unwrap();
+        let snapshot = project.transitions_snapshot();
+
+        project.remove_transition(left).unwrap();
+        assert!(!project.has_transitions());
+
+        project.restore_transitions(snapshot);
+        assert!(project.has_transitions());
     }
 
     // --- Project::new -----------------------------------------------------

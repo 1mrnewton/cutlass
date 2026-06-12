@@ -60,6 +60,26 @@ export struct TextClipStyle {
     shadow-distance: float,
 }
 
+// One keyframe of an animatable clip property, projected for the inspector
+// and timeline keyframe UI (M2). `tick` is the ABSOLUTE sequence tick (clip
+// start + clip-relative offset) so playhead math needs no conversions.
+// Scalar properties carry their value in `value-x` (`value-y` unused);
+// position carries both axes. `easing` mirrors the engine enum:
+//   0 linear, 1 ease-in, 2 ease-out, 3 ease-in-out, 4 bezier
+// with the bezier control points in `bez-*` (zero otherwise) so UI-side
+// sampling reproduces the engine curve exactly.
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct ParamKeyframe {
+    tick: int,
+    value-x: float,
+    value-y: float,
+    easing: int,
+    bez-x1: float,
+    bez-y1: float,
+    bez-x2: float,
+    bez-y2: float,
+}
+
 @rust-attr(derive(serde::Serialize, serde::Deserialize))
 export struct Clip {
     id: string,
@@ -143,11 +163,25 @@ export struct Clip {
     // to canvas dimensions (+y down), uniform scale (1.0 = aspect-fit),
     // rotation in degrees clockwise, opacity 0..=1. Projected read-only —
     // edits go through `EditCommand::SetClipTransform` on the worker.
+    //
+    // These are the CLIP-START sample of the animated transform. For an
+    // animated property the playhead-accurate value comes from sampling the
+    // matching `kf-*` curve UI-side (src/params.rs) — that's how the
+    // inspector rows and the preview selection geometry stay glued to the
+    // rendered frame without a projection republish per playhead tick.
     transform-position-x: float,
     transform-position-y: float,
     transform-scale: float,
     transform-rotation: float,
     transform-opacity: float,
+    // Keyframe curves per animatable property (M2), in tick order with
+    // ABSOLUTE sequence ticks. Empty ⇔ the property is a constant (read it
+    // from `transform-*` above). Edits go through
+    // `InspectorBackend.set/remove-param-keyframe` on the worker.
+    kf-position: [ParamKeyframe],
+    kf-scale: [ParamKeyframe],
+    kf-rotation: [ParamKeyframe],
+    kf-opacity: [ParamKeyframe],
 }
 
 // Drives lane ordering, drag targeting (same-kind blocks), and which

@@ -45,6 +45,9 @@ pub enum ModelError {
     #[error("invalid transform: {0}")]
     InvalidTransform(String),
 
+    #[error("invalid parameter: {0}")]
+    InvalidParam(String),
+
     #[error("rate mismatch: expected {expected:?}, got {got:?}")]
     RateMismatch { expected: Rational, got: Rational },
 

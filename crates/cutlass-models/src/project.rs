@@ -3,11 +3,12 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::Map;
-use crate::clip::{Clip, ClipSource, ClipTransform, Generator};
+use crate::clip::{Clip, ClipParam, ClipSource, ClipTransform, Generator, ParamValue};
 use crate::error::ModelError;
 use crate::ids::{ClipId, MediaId, ProjectId, TrackId};
 use crate::media::MediaSource;
 use crate::metadata::ProjectMetadata;
+use crate::param::Easing;
 use crate::schema::ProjectSchema;
 use crate::time::{
     Rational, RationalTime, TimeRange, check_same_rate, resample, time_add, time_sub,
@@ -230,10 +231,17 @@ impl Project {
     /// numerics). Errors if the clip is unknown, sits on an audio track
     /// (nothing to place), or the transform is invalid (non-finite, scale
     /// ≤ 0, opacity outside 0..=1).
+    ///
+    /// `at` composes the edit with animation CapCut-style: `Some(timeline
+    /// tick)` writes a keyframe at that position on properties that already
+    /// have keyframes (constants stay constant); `None` flattens every
+    /// property to a constant, dropping keyframes. Never-animated clips
+    /// behave identically either way.
     pub fn set_transform(
         &mut self,
         clip_id: ClipId,
         transform: ClipTransform,
+        at: Option<RationalTime>,
     ) -> Result<(), ModelError> {
         transform.validate()?;
         let track_id = self
@@ -251,11 +259,112 @@ impl Project {
                 kind,
             });
         }
+        if let Some(at) = at {
+            check_same_rate(at.rate, self.timeline.frame_rate)?;
+        }
+        let clip = self
+            .timeline
+            .clip_mut(clip_id)
+            .ok_or(ModelError::UnknownClip(clip_id))?;
+        match at {
+            Some(at) => {
+                let tick = clip.animation_tick(at.value);
+                clip.transform.compose_at(transform, tick);
+            }
+            None => clip.transform.set_constant(transform),
+        }
+        Ok(())
+    }
+
+    /// Shared precondition for parameter edits: the clip exists on a visual
+    /// track. Returns the track kind error otherwise (audio has no canvas
+    /// placement to animate).
+    fn check_param_target(&self, clip_id: ClipId) -> Result<(), ModelError> {
+        let track_id = self
+            .timeline
+            .track_of(clip_id)
+            .ok_or(ModelError::UnknownClip(clip_id))?;
+        let kind = self
+            .timeline
+            .track(track_id)
+            .ok_or(ModelError::UnknownTrack(track_id))?
+            .kind;
+        if !kind.is_visual() {
+            return Err(ModelError::IncompatibleTrackKind {
+                track: track_id,
+                kind,
+            });
+        }
+        Ok(())
+    }
+
+    /// Convert an absolute timeline position to a clip-relative animation
+    /// tick, rejecting positions outside the clip (a keyframe must sit on
+    /// the clip it animates).
+    fn keyframe_tick(&self, clip_id: ClipId, at: RationalTime) -> Result<i64, ModelError> {
+        check_same_rate(at.rate, self.timeline.frame_rate)?;
+        let clip = self
+            .timeline
+            .clip(clip_id)
+            .ok_or(ModelError::UnknownClip(clip_id))?;
+        if !clip.timeline.contains(at)? {
+            return Err(ModelError::InvalidParam(format!(
+                "keyframe position {} is outside clip {clip_id}",
+                at.value
+            )));
+        }
+        Ok(at.value - clip.timeline.start.value)
+    }
+
+    /// Insert or replace a keyframe on one animatable clip property. `at` is
+    /// an absolute timeline position and must fall inside the clip.
+    pub fn set_param_keyframe(
+        &mut self,
+        clip_id: ClipId,
+        param: ClipParam,
+        at: RationalTime,
+        value: ParamValue,
+        easing: Easing,
+    ) -> Result<(), ModelError> {
+        self.check_param_target(clip_id)?;
+        let tick = self.keyframe_tick(clip_id, at)?;
         self.timeline
             .clip_mut(clip_id)
             .ok_or(ModelError::UnknownClip(clip_id))?
-            .transform = transform;
-        Ok(())
+            .transform
+            .set_param_keyframe(param, tick, value, easing)
+    }
+
+    /// Remove the keyframe at exactly `at` (absolute timeline position) on
+    /// one property. Errors when no keyframe sits there.
+    pub fn remove_param_keyframe(
+        &mut self,
+        clip_id: ClipId,
+        param: ClipParam,
+        at: RationalTime,
+    ) -> Result<(), ModelError> {
+        self.check_param_target(clip_id)?;
+        let tick = self.keyframe_tick(clip_id, at)?;
+        self.timeline
+            .clip_mut(clip_id)
+            .ok_or(ModelError::UnknownClip(clip_id))?
+            .transform
+            .remove_param_keyframe(param, tick)
+    }
+
+    /// Replace one animatable property with a constant, dropping keyframes.
+    pub fn set_param_constant(
+        &mut self,
+        clip_id: ClipId,
+        param: ClipParam,
+        value: ParamValue,
+    ) -> Result<(), ModelError> {
+        self.check_param_target(clip_id)?;
+        self.timeline
+            .clip_mut(clip_id)
+            .ok_or(ModelError::UnknownClip(clip_id))?
+            .transform
+            .set_param_constant(param, value)
     }
 
     /// Find a clip by ID anywhere on the timeline (O(1)).

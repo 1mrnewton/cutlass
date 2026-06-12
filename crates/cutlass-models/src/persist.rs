@@ -25,8 +25,16 @@ struct LegacyProjectFile {
 
 impl Project {
     /// Serialize this project to a `.cutlass` JSON file.
+    ///
+    /// The document is stamped with this build's schema version regardless
+    /// of what was loaded: the writer defines the format. (A project opened
+    /// from a v1 file may now hold v2-only data like keyframes; persisting
+    /// it as "v1" would lie to older readers.)
     pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
+        let mut doc = self.clone();
+        doc.schema.version = PROJECT_SCHEMA_VERSION;
+        doc.schema.kind = crate::schema::PROJECT_SCHEMA_KIND.into();
+        let json = serde_json::to_string_pretty(&doc).map_err(io::Error::other)?;
         let mut writer = BufWriter::new(File::create(path)?);
         writer.write_all(json.as_bytes())?;
         writer.write_all(b"\n")?;
@@ -136,8 +144,71 @@ mod tests {
         project.save_to_file(&path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let schema = json.get("schema").expect("schema object");
-        assert_eq!(schema["version"], 1);
+        assert_eq!(schema["version"], PROJECT_SCHEMA_VERSION);
         assert_eq!(schema["kind"], "cutlass.project");
+    }
+
+    #[test]
+    fn load_accepts_v1_schema_files() {
+        // Every pre-M2 alpha save is a v1 file; v2 readers open them as-is.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v1.cutlass");
+        std::fs::write(
+            &path,
+            r#"{"schema":{"version":1,"kind":"cutlass.project"},"id":1,"name":"v1","metadata":{},"media":[],"timeline":{"frame_rate":{"num":24,"den":1},"tracks":[],"order":[],"clip_index":[]}}"#,
+        )
+        .unwrap();
+        let loaded = Project::load_from_file(&path).unwrap();
+        assert_eq!(loaded.schema.version, 1);
+
+        // Re-saving a v1 project writes the current format version.
+        let resaved = dir.path().join("resaved.cutlass");
+        loaded.save_to_file(&resaved).unwrap();
+        let reloaded = Project::load_from_file(&resaved).unwrap();
+        assert_eq!(reloaded.schema.version, PROJECT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn keyframed_transform_survives_save_load() {
+        use crate::clip::{ClipParam, ParamValue};
+        use crate::param::Easing;
+
+        let mut project = Project::new("anim", R24);
+        let track = project.add_track(TrackKind::Text, "T1");
+        let clip = project
+            .timeline_mut()
+            .add_clip(
+                track,
+                Clip::generated(Generator::text("fade"), TimeRange::at_rate(0, 48, R24)),
+            )
+            .unwrap();
+        project
+            .set_param_keyframe(
+                clip,
+                ClipParam::Opacity,
+                RationalTime::new(0, R24),
+                ParamValue::Scalar(0.0),
+                Easing::EaseInOut,
+            )
+            .unwrap();
+        project
+            .set_param_keyframe(
+                clip,
+                ClipParam::Opacity,
+                RationalTime::new(24, R24),
+                ParamValue::Scalar(1.0),
+                Easing::Linear,
+            )
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("anim.cutlass");
+        project.save_to_file(&path).unwrap();
+        let loaded = Project::load_from_file(&path).unwrap();
+        let transform = &loaded.clip(clip).unwrap().transform;
+        assert!(transform.is_animated());
+        assert_eq!(transform.opacity.keyframes().len(), 2);
+        assert_eq!(transform.sample(24).opacity, 1.0);
     }
 
     #[test]

@@ -138,12 +138,14 @@ pub fn hit_test(
             continue;
         }
         for idx in 0..track.clips.row_count() {
-            let Some(clip) = track.clips.row_data(idx) else {
+            let Some(mut clip) = track.clips.row_data(idx) else {
                 continue;
             };
             if !covers_tick(&clip, tick) || !is_composited(&clip) {
                 continue;
             }
+            // Animated clips are picked where the playhead renders them.
+            crate::params::apply_sampled_transform(&mut clip, tick);
             if placement_contains(&clip_placement(&clip, &canvas), px, py) {
                 return PreviewHit {
                     track_id: track.id.clone(),
@@ -214,6 +216,9 @@ pub fn selection_box(
             if !covers_tick(&clip, tick) || !is_composited(&clip) {
                 return PreviewSelectionBox::default();
             }
+            // Box follows the rendered frame on animated clips; a live
+            // gesture's resolution then wins (it previews via override).
+            crate::params::apply_sampled_transform(&mut clip, tick);
             if let Some(res) = gesture {
                 clip.transform_position_x = res.position_x;
                 clip.transform_position_y = res.position_y;
@@ -508,6 +513,29 @@ mod tests {
         // The rotate affordance rides the rotation: 90° cw points the
         // content's bottom edge left, so the handle sits left of the box.
         assert!((b.hx - (345.0 - 26.0)).abs() < 1e-3 && (b.hy - 270.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn selection_geometry_follows_the_playhead_sample() {
+        use crate::ParamKeyframe;
+        let mut clip = media_clip("A", 0, 100, 1920, 1080);
+        // Scale animates 1.0 → 0.5 over ticks 0..40.
+        clip.kf_scale = ModelRc::from(Rc::new(VecModel::from(vec![
+            ParamKeyframe { tick: 0, value_x: 1.0, ..Default::default() },
+            ParamKeyframe { tick: 40, value_x: 0.5, ..Default::default() },
+        ])));
+        let seq = sequence(vec![track("1", TrackKind::Video, vec![clip])]);
+
+        // At the last keyframe the content is half-size: the box shrinks to
+        // the centered 480×270 quad, and a click near the viewport corner
+        // (inside at tick 0) now misses.
+        let b = selection_box(&seq, "A", 40, VW, VH, None);
+        assert_eq!(
+            corners(&b),
+            [(240.0, 135.0), (720.0, 135.0), (720.0, 405.0), (240.0, 405.0)]
+        );
+        assert_eq!(hit_test(&seq, 0, 100.0, 60.0, VW, VH).clip_id.as_str(), "A");
+        assert_eq!(hit_test(&seq, 40, 100.0, 60.0, VW, VH).clip_id.as_str(), "");
     }
 
     #[test]

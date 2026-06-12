@@ -113,10 +113,14 @@ pub fn resolve_layers(
             continue;
         };
 
+        // Animated params sample at the clip-relative tick (M2): pure binary
+        // search + lerp per property, allocation-free. A live gesture
+        // override replaces the whole sampled value for this resolve only.
         let transform = match &override_transform {
-            Some((id, t)) if *id == clip.id => t,
-            _ => &clip.transform,
+            Some((id, t)) if *id == clip.id => *t,
+            _ => clip.transform.sample(clip.animation_tick(time.value)),
         };
+        let transform = &transform;
         match &clip.content {
             cutlass_models::ClipSource::Media { .. } => {
                 let layer = match color_convert {
@@ -353,6 +357,54 @@ mod tests {
         assert_eq!(bytes.len(), (320 * 240 * 4) as usize);
         // Text rasterizes some visible (non-transparent) pixels.
         assert!(bytes.chunks_exact(4).any(|p| p[3] > 0));
+    }
+
+    #[test]
+    fn resolve_samples_keyframed_transform_at_frame_tick() {
+        use cutlass_models::{ClipParam, Easing, ParamValue, RationalTime as RT, TimeRange};
+        let rate = cutlass_models::Rational::FPS_24;
+        let mut project = Project::new("t", rate);
+        let track = project.add_track(TrackKind::Sticker, "ST1");
+        let clip = project
+            .add_generated(
+                track,
+                Generator::SolidColor { rgba: [255, 0, 0, 255] },
+                // Clip starts at tick 12, not 0 — sampling must be clip-relative.
+                TimeRange::at_rate(12, 48, rate),
+            )
+            .unwrap();
+        // Opacity fades 0 → 1 over the first 24 clip ticks.
+        project
+            .set_param_keyframe(clip, ClipParam::Opacity, RT::new(12, rate), ParamValue::Scalar(0.0), Easing::Linear)
+            .unwrap();
+        project
+            .set_param_keyframe(clip, ClipParam::Opacity, RT::new(36, rate), ParamValue::Scalar(1.0), Easing::Linear)
+            .unwrap();
+
+        let mut pool = DecoderPool::new();
+        let mut raster = GeneratorRaster::new();
+        let canvas = CompositorConfig::new(64, 64);
+        let opacity_at = |pool: &mut DecoderPool, raster: &mut GeneratorRaster, tick: i64| {
+            let layers = resolve_layers(
+                &project,
+                None,
+                pool,
+                raster,
+                RationalTime::new(tick, rate),
+                &canvas,
+                ColorConvertPath::Gpu,
+                None,
+                None,
+            )
+            .unwrap();
+            layers[0].placement.opacity
+        };
+
+        assert_eq!(opacity_at(&mut pool, &mut raster, 12), 0.0);
+        assert_eq!(opacity_at(&mut pool, &mut raster, 24), 0.5);
+        assert_eq!(opacity_at(&mut pool, &mut raster, 36), 1.0);
+        // Past the last keyframe the value holds.
+        assert_eq!(opacity_at(&mut pool, &mut raster, 50), 1.0);
     }
 
     #[test]

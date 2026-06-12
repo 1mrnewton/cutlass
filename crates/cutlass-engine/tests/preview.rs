@@ -136,6 +136,7 @@ fn get_frame_places_transformed_solid() {
                 rotation: 0.0,
                 opacity: 1.0,
             },
+            at: None,
         }))
         .expect("set transform");
 
@@ -197,7 +198,7 @@ fn transform_override_previews_without_touching_state() {
     assert_eq!(pixel(&frame, 1440, 810), [0, 0, 0, 255], "rest stays black");
 
     // ...but the project and history never saw it: session state only.
-    let committed = engine.project().clip(clip_id).expect("clip").transform;
+    let committed = &engine.project().clip(clip_id).expect("clip").transform;
     assert!(committed.is_identity(), "project transform untouched");
     assert_eq!(engine.can_undo(), history_depth_before, "no history entry");
 

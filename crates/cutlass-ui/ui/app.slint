@@ -138,6 +138,7 @@ export component AppWindow inherits Window {
         self.nudge-res = PreviewBackend.nudge(
             EditorStore.project.sequence,
             TimelineStore.selected-clip-id,
+            TimelineStore.playhead-tick,
             dx,
             dy);
         if (!self.nudge-res.valid) {

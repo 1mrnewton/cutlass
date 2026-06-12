@@ -148,6 +148,12 @@ export global EditorStore {
     in-out property <bool> can-undo: false;
     in-out property <bool> can-redo: false;
 
+    // Bumped by the worker when a transform commit wrote keyframes (CapCut
+    // compose semantics: a gesture on an animated clip keyframes at the
+    // playhead instead of flattening). The inspector watches it to flash
+    // its transient "keyframe added" chip.
+    in-out property <int> keyframe-commit-epoch: 0;
+
     // Incremented after each projection publish. UI-side optimistic gesture
     // state uses this as the "committed model caught up" signal.
     in-out property <int> projection-revision: 0;

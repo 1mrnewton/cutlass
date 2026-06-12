@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 
 use cutlass_commands::{Command, EditCommand, ProjectCommand};
 use cutlass_engine::{ApplyOutcome, Engine, EngineConfig};
-use cutlass_models::{Generator, Rational, RationalTime, TimeRange, TrackKind};
+use cutlass_models::{
+    ClipParam, Easing, Generator, ParamValue, Rational, RationalTime, TimeRange, TrackKind,
+};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 fn assets_dir() -> PathBuf {
@@ -47,7 +49,7 @@ fn tr(start: i64, duration: i64) -> TimeRange {
     TimeRange::at_rate(start, duration, Rational::FPS_24)
 }
 
-fn engine_with_solid_clip(frames: i64) -> (tempfile::TempDir, Engine) {
+fn engine_with_solid_clip(frames: i64) -> (tempfile::TempDir, Engine, cutlass_models::ClipId) {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = EngineConfig {
         cache_dir: dir.path().join("cache"),
@@ -56,10 +58,11 @@ fn engine_with_solid_clip(frames: i64) -> (tempfile::TempDir, Engine) {
         ..Default::default()
     };
     let mut engine = Engine::new(config).expect("engine");
+    // Solid generators live on sticker lanes (lane typing).
     let track = match engine
         .apply(Command::Edit(EditCommand::AddTrack {
-            kind: TrackKind::Video,
-            name: "V1".into(),
+            kind: TrackKind::Sticker,
+            name: "ST1".into(),
             index: None,
         }))
         .expect("track")
@@ -67,7 +70,7 @@ fn engine_with_solid_clip(frames: i64) -> (tempfile::TempDir, Engine) {
         ApplyOutcome::Edited(cutlass_commands::EditOutcome::CreatedTrack(id)) => id,
         o => panic!("{o:?}"),
     };
-    engine
+    let clip = match engine
         .apply(Command::Edit(EditCommand::AddGenerated {
             track,
             generator: Generator::SolidColor {
@@ -75,8 +78,12 @@ fn engine_with_solid_clip(frames: i64) -> (tempfile::TempDir, Engine) {
             },
             timeline: tr(0, frames),
         }))
-        .expect("clip");
-    (dir, engine)
+        .expect("clip")
+    {
+        ApplyOutcome::Edited(cutlass_commands::EditOutcome::Created(id)) => id,
+        o => panic!("{o:?}"),
+    };
+    (dir, engine, clip)
 }
 
 fn engine_with_media(path: &Path, source_frames: i64) -> (tempfile::TempDir, Engine) {
@@ -120,7 +127,7 @@ fn engine_with_media(path: &Path, source_frames: i64) -> (tempfile::TempDir, Eng
 }
 
 fn bench_get_frame_solid(c: &mut Criterion) {
-    let (_dir, mut engine) = engine_with_solid_clip(120);
+    let (_dir, mut engine, clip) = engine_with_solid_clip(120);
     let (w, h) = (1920u32, 1080u32);
     let bytes = (w as u64) * (h as u64) * 4;
 
@@ -128,6 +135,30 @@ fn bench_get_frame_solid(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(bytes));
     group.bench_function("solid_1080p_warm", |b| {
         b.iter(|| engine.get_frame(rt(0)).expect("frame"));
+    });
+
+    // Same frame with keyframed transform params: guards the marginal cost
+    // of M2 param sampling on the per-frame hot path (binary search + eased
+    // lerp per property — should be noise next to composite + readback).
+    for (param, a, b_) in [
+        (ClipParam::Opacity, 0.2, 1.0),
+        (ClipParam::Scale, 0.5, 1.0),
+        (ClipParam::Rotation, 0.0, 180.0),
+    ] {
+        for (tick, value) in [(0i64, a), (119, b_)] {
+            engine
+                .apply(Command::Edit(EditCommand::SetParamKeyframe {
+                    clip,
+                    param,
+                    at: rt(tick),
+                    value: ParamValue::Scalar(value),
+                    easing: Easing::EaseInOut,
+                }))
+                .expect("keyframe");
+        }
+    }
+    group.bench_function("solid_1080p_animated_warm", |b| {
+        b.iter(|| engine.get_frame(rt(60)).expect("frame"));
     });
     group.finish();
 }

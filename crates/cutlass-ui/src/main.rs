@@ -2,6 +2,7 @@ mod agent;
 mod audio;
 mod autosave;
 mod inspector;
+mod params;
 mod preview;
 mod preview_gesture;
 mod preview_select;
@@ -59,6 +60,24 @@ fn generator_from_key(key: &str) -> Option<cutlass_models::Generator> {
             shape: Shape::Ellipse,
             rgba: [255, 255, 255, 255],
         },
+        _ => return None,
+    })
+}
+
+/// Map an inspector param key to the engine's `ClipParam` plus the matching
+/// `ParamValue` shape (position is the one vec2; scalars ride `value_x`).
+/// `None` for an unknown key.
+fn clip_param_value(
+    param: &str,
+    value_x: f32,
+    value_y: f32,
+) -> Option<(cutlass_models::ClipParam, cutlass_models::ParamValue)> {
+    use cutlass_models::{ClipParam, ParamValue};
+    Some(match param {
+        "position" => (ClipParam::Position, ParamValue::Vec2([value_x, value_y])),
+        "scale" => (ClipParam::Scale, ParamValue::Scalar(value_x)),
+        "rotation" => (ClipParam::Rotation, ParamValue::Scalar(value_x)),
+        "opacity" => (ClipParam::Opacity, ParamValue::Scalar(value_x)),
         _ => return None,
     })
 }
@@ -967,10 +986,11 @@ fn main() -> Result<(), slint::PlatformError> {
     // --- preview roadmap Phase 3: move gesture, guides, nudges ------------
 
     app.global::<PreviewBackend>().on_resolve_drag(
-        |sequence, clip_id, press_x, press_y, cursor_x, cursor_y, view_w, view_h, snap_tol| {
+        |sequence, clip_id, tick, press_x, press_y, cursor_x, cursor_y, view_w, view_h, snap_tol| {
             preview_gesture::resolve_drag(
                 &sequence,
                 clip_id.as_str(),
+                tick,
                 press_x,
                 press_y,
                 cursor_x,
@@ -982,17 +1002,18 @@ fn main() -> Result<(), slint::PlatformError> {
         },
     );
 
-    app.global::<PreviewBackend>().on_nudge(|sequence, clip_id, dx, dy| {
-        preview_gesture::nudge(&sequence, clip_id.as_str(), dx, dy)
+    app.global::<PreviewBackend>().on_nudge(|sequence, clip_id, tick, dx, dy| {
+        preview_gesture::nudge(&sequence, clip_id.as_str(), tick, dx, dy)
     });
 
     // --- preview roadmap Phase 4: scale & rotate handles -------------------
 
     app.global::<PreviewBackend>().on_resolve_scale(
-        |sequence, clip_id, press_x, press_y, cursor_x, cursor_y, view_w, view_h| {
+        |sequence, clip_id, tick, press_x, press_y, cursor_x, cursor_y, view_w, view_h| {
             preview_gesture::resolve_scale(
                 &sequence,
                 clip_id.as_str(),
+                tick,
                 press_x,
                 press_y,
                 cursor_x,
@@ -1004,10 +1025,11 @@ fn main() -> Result<(), slint::PlatformError> {
     );
 
     app.global::<PreviewBackend>().on_resolve_rotate(
-        |sequence, clip_id, press_x, press_y, cursor_x, cursor_y, view_w, view_h, snap_deg| {
+        |sequence, clip_id, tick, press_x, press_y, cursor_x, cursor_y, view_w, view_h, snap_deg| {
             preview_gesture::resolve_rotate(
                 &sequence,
                 clip_id.as_str(),
+                tick,
                 press_x,
                 press_y,
                 cursor_x,
@@ -1167,6 +1189,36 @@ fn main() -> Result<(), slint::PlatformError> {
     app.global::<InspectorBackend>()
         .on_resolve_selection(|sequence, track_id, clip_id| {
             inspector::resolve_selection(sequence, track_id.as_str(), clip_id.as_str())
+        });
+
+    app.global::<InspectorBackend>()
+        .on_sample_transform(|clip, playhead| inspector::sample_transform(&clip, playhead));
+
+    let kf_set_handle = preview_worker.handle();
+    app.global::<InspectorBackend>().on_set_param_keyframe(
+        move |clip_id, param, tick, value_x, value_y, easing| {
+            let Some((param, value)) = clip_param_value(param.as_str(), value_x, value_y) else {
+                tracing::error!(param = param.as_str(), "ignoring keyframe on unknown param");
+                return;
+            };
+            kf_set_handle.set_param_keyframe(
+                clip_id.to_string(),
+                param,
+                i64::from(tick),
+                value,
+                params::easing_from_ui(easing, [0.0; 4]),
+            );
+        },
+    );
+
+    let kf_remove_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_remove_param_keyframe(move |clip_id, param, tick| {
+            let Some((param, _)) = clip_param_value(param.as_str(), 0.0, 0.0) else {
+                tracing::error!(param = param.as_str(), "ignoring keyframe removal on unknown param");
+                return;
+            };
+            kf_remove_handle.remove_param_keyframe(clip_id.to_string(), param, i64::from(tick));
         });
     let set_text_handle = preview_worker.handle();
     app.global::<InspectorBackend>()

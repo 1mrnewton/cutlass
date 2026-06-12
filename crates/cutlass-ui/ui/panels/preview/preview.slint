@@ -205,6 +205,7 @@ export component PreviewPanel inherits PanelBase {
                                 viewport.drag-res = PreviewBackend.resolve-drag(
                                     EditorStore.project.sequence,
                                     viewport.drag-clip,
+                                    TimelineStore.playhead-tick,
                                     viewport.press-x,
                                     viewport.press-y,
                                     self.mouse-x / 1px,
@@ -216,6 +217,7 @@ export component PreviewPanel inherits PanelBase {
                                 viewport.drag-res = PreviewBackend.resolve-scale(
                                     EditorStore.project.sequence,
                                     viewport.drag-clip,
+                                    TimelineStore.playhead-tick,
                                     viewport.press-x,
                                     viewport.press-y,
                                     self.mouse-x / 1px,
@@ -226,6 +228,7 @@ export component PreviewPanel inherits PanelBase {
                                 viewport.drag-res = PreviewBackend.resolve-rotate(
                                     EditorStore.project.sequence,
                                     viewport.drag-clip,
+                                    TimelineStore.playhead-tick,
                                     viewport.press-x,
                                     viewport.press-y,
                                     self.mouse-x / 1px,

@@ -14,16 +14,17 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use cutlass_models::{
-    Clip as EngineClip, ClipSource, Generator, MediaSource, Project as EngineProject,
-    Rational as EngineRational, RationalTime as EngineTime, TextAlignH, TextAlignV, TextCase,
-    TextStyle as EngineTextStyle, TimeRange as EngineRange, Track as EngineTrack,
-    TrackKind as EngineKind, rate_eq, resample,
+    Clip as EngineClip, ClipSource, Generator, Keyframe, Lerp, MediaSource, Param,
+    Project as EngineProject, Rational as EngineRational, RationalTime as EngineTime, TextAlignH,
+    TextAlignV, TextCase, TextStyle as EngineTextStyle, TimeRange as EngineRange,
+    Track as EngineTrack, TrackKind as EngineKind, rate_eq, resample,
 };
 use slint::{Color, ModelRc, VecModel};
 
+use crate::params::easing_to_ui;
 use crate::{
-    Clip, Media, Project, Rational, RationalTime, Sequence, TextClipStyle, TimeRange, Track,
-    TrackKind,
+    Clip, Media, ParamKeyframe, Project, Rational, RationalTime, Sequence, TextClipStyle,
+    TimeRange, Track, TrackKind,
 };
 
 /// Fallback canvas size when no video media has been imported yet. Mirrors the
@@ -188,6 +189,8 @@ fn clip_to_slint(
             .copied()
             .unwrap_or((0, 0)),
     };
+    let transform = clip.transform.sample(0);
+    let clip_start = clip.timeline.start.value;
 
     Clip {
         id: clip.id.raw().to_string().into(),
@@ -210,12 +213,49 @@ fn clip_to_slint(
             .into(),
         media_width: media_w,
         media_height: media_h,
-        transform_position_x: clip.transform.position[0],
-        transform_position_y: clip.transform.position[1],
-        transform_scale: clip.transform.scale,
-        transform_rotation: clip.transform.rotation,
-        transform_opacity: clip.transform.opacity,
+        // The clip-start sample: exact for constant properties; animated
+        // properties additionally publish their curve below, and consumers
+        // that need playhead accuracy sample it UI-side (src/params.rs).
+        transform_position_x: transform.position[0],
+        transform_position_y: transform.position[1],
+        transform_scale: transform.scale,
+        transform_rotation: transform.rotation,
+        transform_opacity: transform.opacity,
+        kf_position: keyframes_to_slint(&clip.transform.position, clip_start, |v| (v[0], v[1])),
+        kf_scale: keyframes_to_slint(&clip.transform.scale, clip_start, |v| (*v, 0.0)),
+        kf_rotation: keyframes_to_slint(&clip.transform.rotation, clip_start, |v| (*v, 0.0)),
+        kf_opacity: keyframes_to_slint(&clip.transform.opacity, clip_start, |v| (*v, 0.0)),
     }
+}
+
+/// Project one animatable property's keyframes for the UI: clip-relative
+/// engine ticks become ABSOLUTE sequence ticks (start + offset), easing is
+/// flattened to the Slint encoding, and `split` maps the value into the
+/// `(value-x, value-y)` pair (scalars leave y at 0). Empty ⇔ constant.
+fn keyframes_to_slint<T: Lerp>(
+    param: &Param<T>,
+    clip_start: i64,
+    split: impl Fn(&T) -> (f32, f32),
+) -> ModelRc<ParamKeyframe> {
+    let rows: Vec<ParamKeyframe> = param
+        .keyframes()
+        .iter()
+        .map(|kf: &Keyframe<T>| {
+            let (value_x, value_y) = split(&kf.value);
+            let (easing, [bez_x1, bez_y1, bez_x2, bez_y2]) = easing_to_ui(kf.easing);
+            ParamKeyframe {
+                tick: clamp_i32(clip_start + kf.tick),
+                value_x,
+                value_y,
+                easing,
+                bez_x1,
+                bez_y1,
+                bez_x2,
+                bez_y2,
+            }
+        })
+        .collect();
+    model(rows)
 }
 
 /// `time` as seconds, exact rational division in floating point.
@@ -535,5 +575,35 @@ mod tests {
         assert_eq!(time_to_seconds(t(48, 24, 1)), 2.0);
         assert_eq!(time_to_seconds(t(500, 1000, 1)), 0.5);
         assert_eq!(time_to_seconds(t(1, 0, 1)), 0.0, "degenerate rate is safe");
+    }
+
+    #[test]
+    fn keyframes_publish_absolute_ticks_and_easing() {
+        use cutlass_models::{Easing, Keyframe, Param};
+        use slint::Model;
+
+        let constant: Param<f32> = Param::Constant(1.0);
+        assert_eq!(keyframes_to_slint(&constant, 100, |v| (*v, 0.0)).row_count(), 0);
+
+        let param = Param::Keyframed {
+            keyframes: vec![
+                Keyframe { tick: 0, value: 0.5f32, easing: Easing::EaseOut },
+                Keyframe {
+                    tick: 24,
+                    value: 1.0,
+                    easing: Easing::Bezier { points: [0.42, 0.0, 0.58, 1.0] },
+                },
+            ],
+        };
+        let rows = keyframes_to_slint(&param, 100, |v| (*v, 0.0));
+        assert_eq!(rows.row_count(), 2);
+        let first = rows.row_data(0).unwrap();
+        assert_eq!((first.tick, first.value_x, first.easing), (100, 0.5, 2));
+        let second = rows.row_data(1).unwrap();
+        assert_eq!((second.tick, second.easing), (124, 4));
+        assert_eq!(
+            [second.bez_x1, second.bez_y1, second.bez_x2, second.bez_y2],
+            [0.42, 0.0, 0.58, 1.0]
+        );
     }
 }

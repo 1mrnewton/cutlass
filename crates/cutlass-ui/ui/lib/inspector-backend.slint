@@ -6,6 +6,38 @@ export struct SelectedClipInfo {
     clip: Clip,
 }
 
+// Keyframe state of one animatable property at the playhead, for the
+// inspector's diamond cluster (keyframes roadmap Phase 1).
+export struct ParamRowState {
+    // The property has at least one keyframe.
+    animated: bool,
+    // The playhead sits exactly on a keyframe (diamond renders filled;
+    // clicking it removes instead of adds).
+    on-keyframe: bool,
+    // Absolute tick of the nearest keyframe strictly before / after the
+    // playhead; -1 when there is none (disables the ◀ / ▶ arrow).
+    prev-tick: int,
+    next-tick: int,
+    // Easing of the keyframe under the playhead (0 linear … 3 ease-in-out,
+    // 4 bezier); only meaningful when `on-keyframe`.
+    easing: int,
+}
+
+// The clip's transform sampled at the playhead, plus per-property keyframe
+// row state. One pure-callback evaluation per playhead move feeds every
+// inspector value row — no projection republish per tick.
+export struct TransformSample {
+    position-x: float,
+    position-y: float,
+    scale: float,
+    rotation: float,
+    opacity: float,
+    position-row: ParamRowState,
+    scale-row: ParamRowState,
+    rotation-row: ParamRowState,
+    opacity-row: ParamRowState,
+}
+
 // Selection lookup and clip-property writes for the inspector panel.
 // Implemented in Rust (`src/inspector.rs`) so nested model traversal
 // stays out of Slint.
@@ -15,6 +47,30 @@ export global InspectorBackend {
         track-id: string,
         clip-id: string,
     ) -> SelectedClipInfo;
+
+    // Sample the clip's animated transform at the playhead and report each
+    // property's keyframe row state. Implemented in Rust over the projected
+    // `kf-*` curves with the engine's own `Param` sampling math, so the
+    // numbers always match the composited frame.
+    pure callback sample-transform(clip: Clip, playhead-tick: int) -> TransformSample;
+
+    // Insert or replace a keyframe on `param` ("position" | "scale" |
+    // "rotation" | "opacity") at the absolute sequence tick. Scalars ride
+    // `value-x`; position uses both axes. `easing`: 0 linear, 1 ease-in,
+    // 2 ease-out, 3 ease-in-out. One undoable engine edit.
+    callback set-param-keyframe(
+        clip-id: string,
+        param: string,
+        tick: int,
+        value-x: float,
+        value-y: float,
+        easing: int,
+    );
+
+    // Remove the keyframe sitting exactly at `tick` on `param`. Removing
+    // the last keyframe collapses the property to a constant (engine
+    // semantics). One undoable engine edit.
+    callback remove-param-keyframe(clip-id: string, param: string, tick: int);
 
     // Replace a text clip's content and/or styling in one undoable edit. The
     // inspector always sends the full current style with the single changed

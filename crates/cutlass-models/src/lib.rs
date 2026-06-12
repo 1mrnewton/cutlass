@@ -17,6 +17,7 @@ mod error;
 mod ids;
 mod media;
 mod metadata;
+mod param;
 mod persist;
 mod project;
 mod schema;
@@ -30,10 +31,11 @@ mod track;
 pub type Map<K, V> = rustc_hash::FxHashMap<K, V>;
 
 pub use clip::{
-    Clip, ClipSource, ClipTransform, Generator, Shape, TextAlignH, TextAlignV, TextBackground,
-    TextCase, TextShadow, TextStroke, TextStyle,
+    AnimatedTransform, Clip, ClipParam, ClipSource, ClipTransform, Generator, ParamValue, Shape,
+    TextAlignH, TextAlignV, TextBackground, TextCase, TextShadow, TextStroke, TextStyle,
 };
 pub use error::ModelError;
+pub use param::{Easing, Keyframe, Lerp, Param};
 pub use ids::{ClipId, LinkId, MediaId, ProjectId, TrackId};
 pub use media::MediaSource;
 pub use metadata::ProjectMetadata;

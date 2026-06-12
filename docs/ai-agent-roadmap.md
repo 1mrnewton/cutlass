@@ -329,6 +329,10 @@ undone with one click. The M3 exit criterion, shipped.
       way — the "grows for free" promise made enforceable. Lives as
       the "Growing the vocabulary" section of the crate docs
       (`cutlass-ai/src/lib.rs`), next to the code it governs.
+      *First exercise of the checklist: M2's `set_param_keyframe` /
+      `remove_param_keyframe` / `set_param_constant` joined (tool
+      schema v2) — "fade the clip in over the first second" is an
+      eval case.*
 - [ ] **Guarded project commands (stretch)**: `Import` behind an
       explicit per-prompt user confirmation card — the first crack in
       the edit-only wall, deliberately after the trust model is proven.

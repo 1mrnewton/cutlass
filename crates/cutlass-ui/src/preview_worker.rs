@@ -11,8 +11,8 @@ use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use cutlass_commands::{Command, EditCommand, EditOutcome, ProjectCommand};
 use cutlass_engine::{ApplyOutcome, Engine, EngineConfig, EngineError, ExportSettings};
 use cutlass_models::{
-    ClipId, ClipSource, ClipTransform, Generator, MediaId, Project, Rational, RationalTime,
-    TimeRange, Track, TrackId, TrackKind, resample,
+    ClipId, ClipParam, ClipSource, ClipTransform, Easing, Generator, MediaId, ParamValue, Project,
+    Rational, RationalTime, TimeRange, Track, TrackId, TrackKind, resample,
 };
 use tracing::{error, info, warn};
 
@@ -126,6 +126,25 @@ enum WorkerMsg {
     SetTransform {
         clip: String,
         transform: ClipTransform,
+        tick: i64,
+    },
+    /// Insert or replace a keyframe on one animatable property of `clip`
+    /// (raw id) at the absolute sequence tick (the playhead — must fall
+    /// inside the clip; the engine validates). One undoable edit; the
+    /// projection republish carries the updated curve back to the UI.
+    SetParamKeyframe {
+        clip: String,
+        param: ClipParam,
+        tick: i64,
+        value: ParamValue,
+        easing: Easing,
+    },
+    /// Remove the keyframe sitting exactly at `tick` on one property of
+    /// `clip`. Removing the last keyframe collapses the property to a
+    /// constant of that keyframe's value (engine semantics). Undoable.
+    RemoveParamKeyframe {
+        clip: String,
+        param: ClipParam,
         tick: i64,
     },
     /// Split `clip` (raw id) at `at_tick` (sequence ticks). The UI gates on
@@ -383,6 +402,29 @@ impl WorkerHandle {
 
     pub fn clear_generator_override(&self, tick: i64) {
         let _ = self.tx.send(WorkerMsg::ClearGeneratorOverride { tick });
+    }
+
+    pub fn set_param_keyframe(
+        &self,
+        clip: String,
+        param: ClipParam,
+        tick: i64,
+        value: ParamValue,
+        easing: Easing,
+    ) {
+        let _ = self.tx.send(WorkerMsg::SetParamKeyframe {
+            clip,
+            param,
+            tick,
+            value,
+            easing,
+        });
+    }
+
+    pub fn remove_param_keyframe(&self, clip: String, param: ClipParam, tick: i64) {
+        let _ = self
+            .tx
+            .send(WorkerMsg::RemoveParamKeyframe { clip, param, tick });
     }
 
     pub fn set_transform(&self, clip: String, transform: ClipTransform, tick: i64) {
@@ -695,8 +737,36 @@ fn worker_loop(
                 // the command lands means the next render is identical — no
                 // flicker between gesture end and commit.
                 engine.set_transform_override(None);
-                set_transform_and_publish(engine, &clip, transform, &ui);
+                // The gesture happened at the visible frame: pass the playhead
+                // so animated properties get a keyframe there instead of being
+                // flattened (M2 compose semantics).
+                let at = RationalTime::new(tick, tl_rate);
+                set_transform_and_publish(engine, &clip, transform, at, &ui);
                 render_frame(engine, tl_rate, &preview_weak, tick);
+            }
+            WorkerMsg::SetParamKeyframe {
+                clip,
+                param,
+                tick,
+                value,
+                easing,
+            } => set_param_keyframe_and_publish(
+                engine,
+                &clip,
+                param,
+                RationalTime::new(tick, tl_rate),
+                value,
+                easing,
+                &ui,
+            ),
+            WorkerMsg::RemoveParamKeyframe { clip, param, tick } => {
+                remove_param_keyframe_and_publish(
+                    engine,
+                    &clip,
+                    param,
+                    RationalTime::new(tick, tl_rate),
+                    &ui,
+                )
             }
             WorkerMsg::SplitClip { clip, at_tick } => {
                 split_clip_and_publish(engine, &clip, at_tick, *linkage, &ui)
@@ -873,6 +943,8 @@ fn mutation_redraws_preview(msg: &WorkerMsg) -> bool {
             | WorkerMsg::TrimClip { .. }
             | WorkerMsg::RemoveClips { .. }
             | WorkerMsg::SetGenerator { .. }
+            | WorkerMsg::SetParamKeyframe { .. }
+            | WorkerMsg::RemoveParamKeyframe { .. }
             | WorkerMsg::SplitClip { .. }
             | WorkerMsg::PasteAt { .. }
             | WorkerMsg::DuplicateClip { .. }
@@ -906,29 +978,113 @@ fn apply_generator_override(engine: &mut Engine, clip: &str, generator: Generato
     }
 }
 
-/// Commit a transform gesture as one undoable `SetClipTransform`.
+/// Commit a transform gesture as one undoable `SetClipTransform`, keyframing
+/// at `at` (the playhead) when the property is animated.
 fn set_transform_and_publish(
     engine: &mut Engine,
     clip: &str,
     transform: ClipTransform,
+    at: RationalTime,
     ui: &UiSink,
 ) {
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-transform ignored: unparsable clip id");
         return;
     };
+    // CapCut compose semantics: on a clip with animated properties this
+    // commit writes keyframes at the playhead instead of flattening. Note it
+    // before applying so the UI can surface "a gesture added a keyframe".
+    let wrote_keyframe = engine
+        .project()
+        .clip(clip_id)
+        .is_some_and(|c| c.transform.is_animated());
     match engine.apply(Command::Edit(EditCommand::SetClipTransform {
         clip: clip_id,
         transform,
+        at: Some(at),
     })) {
         Ok(_) => {
             info!(%clip_id, ?transform, "set clip transform");
+            if wrote_keyframe {
+                bump_keyframe_commit_epoch(ui);
+            }
             publish_projection(engine, ui);
         }
         Err(e) => {
             error!(%clip_id, "set transform failed: {e}");
             publish_projection(engine, ui);
         }
+    }
+}
+
+/// Signal the inspector that a transform gesture just wrote keyframes (the
+/// transient "keyframe added" chip): bump `EditorStore.keyframe-commit-epoch`.
+fn bump_keyframe_commit_epoch(ui: &UiSink) {
+    let editor_weak = ui.editor.clone();
+    if let Err(e) = slint::invoke_from_event_loop(move || {
+        if let Some(store) = editor_weak.upgrade() {
+            store.set_keyframe_commit_epoch(store.get_keyframe_commit_epoch().wrapping_add(1));
+        }
+    }) {
+        error!("failed to bump keyframe commit epoch: {e}");
+    }
+}
+
+/// Insert or replace one property keyframe at `at` (absolute playhead
+/// position) as one undoable edit (keyframes roadmap Phase 1: the inspector
+/// diamond / easing picker). Engine-rejected positions (playhead outside the
+/// clip — the UI gates, but a stale projection can race) only log.
+fn set_param_keyframe_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    param: ClipParam,
+    at: RationalTime,
+    value: ParamValue,
+    easing: Easing,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-param-keyframe ignored: unparsable clip id");
+        return;
+    };
+    match engine.apply(Command::Edit(EditCommand::SetParamKeyframe {
+        clip: clip_id,
+        param,
+        at,
+        value,
+        easing,
+    })) {
+        Ok(_) => {
+            info!(%clip_id, ?param, tick = at.value, "set param keyframe");
+            publish_projection(engine, ui);
+        }
+        Err(e) => error!(%clip_id, ?param, "set param keyframe failed: {e}"),
+    }
+}
+
+/// Remove the keyframe at exactly `at` on one property (inspector diamond
+/// toggled off). The engine rejects when nothing sits there.
+fn remove_param_keyframe_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    param: ClipParam,
+    at: RationalTime,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "remove-param-keyframe ignored: unparsable clip id");
+        return;
+    };
+    match engine.apply(Command::Edit(EditCommand::RemoveParamKeyframe {
+        clip: clip_id,
+        param,
+        at,
+    })) {
+        Ok(_) => {
+            info!(%clip_id, ?param, tick = at.value, "removed param keyframe");
+            publish_projection(engine, ui);
+        }
+        Err(e) => error!(%clip_id, ?param, "remove param keyframe failed: {e}"),
     }
 }
 

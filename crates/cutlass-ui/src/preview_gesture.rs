@@ -20,7 +20,12 @@ use crate::{Clip, PreviewDragResolution, Sequence, TrackKind};
 /// Find a draggable clip by id: on a visual, enabled, unlocked lane, and
 /// actually composited. Mirrors the hit-test gates — anything pickable is
 /// draggable, nothing else.
-fn draggable_clip(sequence: &Sequence, clip_id: &str) -> Option<Clip> {
+///
+/// The returned clip's `transform-*` fields hold the playhead sample (`tick`),
+/// not the clip-start values: a gesture on an animated clip starts from what
+/// the user sees, and its commit keyframes at the playhead (M2 compose
+/// semantics), so the sampled value is also the right "unchanged" baseline.
+fn draggable_clip(sequence: &Sequence, clip_id: &str, tick: i32) -> Option<Clip> {
     if clip_id.is_empty() {
         return None;
     }
@@ -32,11 +37,15 @@ fn draggable_clip(sequence: &Sequence, clip_id: &str) -> Option<Clip> {
             continue;
         }
         for idx in 0..track.clips.row_count() {
-            let Some(clip) = track.clips.row_data(idx) else {
+            let Some(mut clip) = track.clips.row_data(idx) else {
                 continue;
             };
             if clip.id == clip_id {
-                return is_composited(&clip).then_some(clip);
+                if !is_composited(&clip) {
+                    return None;
+                }
+                crate::params::apply_sampled_transform(&mut clip, tick);
+                return Some(clip);
             }
         }
     }
@@ -60,6 +69,7 @@ fn invalid() -> PreviewDragResolution {
 pub fn resolve_drag(
     sequence: &Sequence,
     clip_id: &str,
+    tick: i32,
     press_x: f32,
     press_y: f32,
     cursor_x: f32,
@@ -68,7 +78,7 @@ pub fn resolve_drag(
     view_h: f32,
     snap_tolerance_px: f32,
 ) -> PreviewDragResolution {
-    let Some(clip) = draggable_clip(sequence, clip_id) else {
+    let Some(clip) = draggable_clip(sequence, clip_id, tick) else {
         return invalid();
     };
     let canvas = canvas_config(sequence);
@@ -150,6 +160,7 @@ fn center_in_view(
 pub fn resolve_scale(
     sequence: &Sequence,
     clip_id: &str,
+    tick: i32,
     press_x: f32,
     press_y: f32,
     cursor_x: f32,
@@ -157,7 +168,7 @@ pub fn resolve_scale(
     view_w: f32,
     view_h: f32,
 ) -> PreviewDragResolution {
-    let Some(clip) = draggable_clip(sequence, clip_id) else {
+    let Some(clip) = draggable_clip(sequence, clip_id, tick) else {
         return invalid();
     };
     let Some((center_x, center_y)) = center_in_view(sequence, &clip, view_w, view_h) else {
@@ -203,6 +214,7 @@ fn normalize_degrees(angle: f32) -> f32 {
 pub fn resolve_rotate(
     sequence: &Sequence,
     clip_id: &str,
+    tick: i32,
     press_x: f32,
     press_y: f32,
     cursor_x: f32,
@@ -211,7 +223,7 @@ pub fn resolve_rotate(
     view_h: f32,
     snap_tolerance_deg: f32,
 ) -> PreviewDragResolution {
-    let Some(clip) = draggable_clip(sequence, clip_id) else {
+    let Some(clip) = draggable_clip(sequence, clip_id, tick) else {
         return invalid();
     };
     let Some((center_x, center_y)) = center_in_view(sequence, &clip, view_w, view_h) else {
@@ -252,10 +264,11 @@ pub fn resolve_rotate(
 pub fn nudge(
     sequence: &Sequence,
     clip_id: &str,
+    tick: i32,
     dx_canvas_px: f32,
     dy_canvas_px: f32,
 ) -> PreviewDragResolution {
-    let Some(clip) = draggable_clip(sequence, clip_id) else {
+    let Some(clip) = draggable_clip(sequence, clip_id, tick) else {
         return invalid();
     };
     let canvas = canvas_config(sequence);
@@ -343,7 +356,7 @@ mod tests {
         let seq = sequence(vec![track("1", vec![media_clip("A", 1920, 1080)])]);
         // 96 px right, 27 px down in the viewport = 192 / 54 canvas px =
         // +0.1 / +0.05 normalized.
-        let r = resolve_drag(&seq, "A", 100.0, 100.0, 196.0, 127.0, VW, VH, 0.0);
+        let r = resolve_drag(&seq, "A", 10, 100.0, 100.0, 196.0, 127.0, VW, VH, 0.0);
         assert!(r.valid && r.moved);
         assert!((r.position_x - 0.1).abs() < 1e-6);
         assert!((r.position_y - 0.05).abs() < 1e-6);
@@ -355,7 +368,7 @@ mod tests {
     #[test]
     fn drag_without_displacement_is_not_moved() {
         let seq = sequence(vec![track("1", vec![media_clip("A", 1920, 1080)])]);
-        let r = resolve_drag(&seq, "A", 100.0, 100.0, 100.0, 100.0, VW, VH, 6.0);
+        let r = resolve_drag(&seq, "A", 10, 100.0, 100.0, 100.0, 100.0, VW, VH, 6.0);
         assert!(r.valid && !r.moved);
         assert_eq!((r.position_x, r.position_y), (0.0, 0.0));
     }
@@ -365,7 +378,7 @@ mod tests {
         let seq = sequence(vec![track("1", vec![media_clip("A", 1920, 1080)])]);
         // 4 viewport px right of dead center with 6 px tolerance: x snaps
         // back to centered (and reads as unmoved); y is 100 px off, free.
-        let r = resolve_drag(&seq, "A", 100.0, 100.0, 104.0, 200.0, VW, VH, 6.0);
+        let r = resolve_drag(&seq, "A", 10, 100.0, 100.0, 104.0, 200.0, VW, VH, 6.0);
         assert!(r.valid && r.moved);
         assert!(r.snap_v && !r.snap_h);
         assert_eq!(r.position_x, 0.0);
@@ -379,7 +392,7 @@ mod tests {
         // Centered clip wiggled 2 px: the magnet returns it to exactly its
         // committed position ⇒ not moved ⇒ release is a no-op.
         let seq = sequence(vec![track("1", vec![media_clip("A", 1920, 1080)])]);
-        let r = resolve_drag(&seq, "A", 100.0, 100.0, 102.0, 101.0, VW, VH, 6.0);
+        let r = resolve_drag(&seq, "A", 10, 100.0, 100.0, 102.0, 101.0, VW, VH, 6.0);
         assert!(r.valid && !r.moved);
         assert!(r.snap_v && r.snap_h);
     }
@@ -390,7 +403,7 @@ mod tests {
         clip.transform_position_x = 0.25;
         let seq = sequence(vec![track("1", vec![clip])]);
         // 48 viewport px left = 96 canvas px = -0.05 normalized.
-        let r = resolve_drag(&seq, "A", 100.0, 100.0, 52.0, 100.0, VW, VH, 0.0);
+        let r = resolve_drag(&seq, "A", 10, 100.0, 100.0, 52.0, 100.0, VW, VH, 0.0);
         assert!(r.valid && r.moved);
         assert!((r.position_x - 0.2).abs() < 1e-6);
     }
@@ -402,10 +415,10 @@ mod tests {
         let mut hidden = track("3", vec![media_clip("H", 1920, 1080)]);
         hidden.enabled = false;
         let seq = sequence(vec![locked, hidden, track("1", vec![media_clip("A", 1920, 1080)])]);
-        assert!(!resolve_drag(&seq, "L", 0.0, 0.0, 50.0, 0.0, VW, VH, 0.0).valid);
-        assert!(!resolve_drag(&seq, "H", 0.0, 0.0, 50.0, 0.0, VW, VH, 0.0).valid);
-        assert!(!resolve_drag(&seq, "404", 0.0, 0.0, 50.0, 0.0, VW, VH, 0.0).valid);
-        assert!(resolve_drag(&seq, "A", 0.0, 0.0, 50.0, 0.0, VW, VH, 0.0).valid);
+        assert!(!resolve_drag(&seq, "L", 10, 0.0, 0.0, 50.0, 0.0, VW, VH, 0.0).valid);
+        assert!(!resolve_drag(&seq, "H", 10, 0.0, 0.0, 50.0, 0.0, VW, VH, 0.0).valid);
+        assert!(!resolve_drag(&seq, "404", 10, 0.0, 0.0, 50.0, 0.0, VW, VH, 0.0).valid);
+        assert!(resolve_drag(&seq, "A", 10, 0.0, 0.0, 50.0, 0.0, VW, VH, 0.0).valid);
     }
 
     // Scale/rotate fixtures: centered 1920×1080 clip in the 960×540
@@ -415,7 +428,7 @@ mod tests {
     fn scale_follows_cursor_distance_ratio() {
         let seq = sequence(vec![track("1", vec![media_clip("A", 1920, 1080)])]);
         // Press 200 px from the center, drag to 100 px: scale halves.
-        let r = resolve_scale(&seq, "A", 680.0, 270.0, 580.0, 270.0, VW, VH);
+        let r = resolve_scale(&seq, "A", 10, 680.0, 270.0, 580.0, 270.0, VW, VH);
         assert!(r.valid && r.moved);
         assert!((r.scale - 0.5).abs() < 1e-6);
         // Everything else passes through for the commit.
@@ -430,7 +443,7 @@ mod tests {
         clip.transform_scale = 0.5;
         let seq = sequence(vec![track("1", vec![clip])]);
         // 200 → 300 px from center: ×1.5 on top of the committed 0.5.
-        let r = resolve_scale(&seq, "A", 680.0, 270.0, 780.0, 270.0, VW, VH);
+        let r = resolve_scale(&seq, "A", 10, 680.0, 270.0, 780.0, 270.0, VW, VH);
         assert!(r.valid && r.moved);
         assert!((r.scale - 0.75).abs() < 1e-6);
     }
@@ -439,7 +452,7 @@ mod tests {
     fn scale_clamps_at_the_minimum() {
         let seq = sequence(vec![track("1", vec![media_clip("A", 1920, 1080)])]);
         // Dragged almost onto the pivot: raw ratio would be 1/200.
-        let r = resolve_scale(&seq, "A", 680.0, 270.0, 481.0, 270.0, VW, VH);
+        let r = resolve_scale(&seq, "A", 10, 680.0, 270.0, 481.0, 270.0, VW, VH);
         assert!(r.valid && r.moved);
         assert_eq!(r.scale, 0.05);
     }
@@ -447,7 +460,7 @@ mod tests {
     #[test]
     fn scale_back_at_the_press_point_is_not_moved() {
         let seq = sequence(vec![track("1", vec![media_clip("A", 1920, 1080)])]);
-        let r = resolve_scale(&seq, "A", 680.0, 270.0, 680.0, 270.0, VW, VH);
+        let r = resolve_scale(&seq, "A", 10, 680.0, 270.0, 680.0, 270.0, VW, VH);
         assert!(r.valid && !r.moved);
         assert_eq!(r.scale, 1.0);
     }
@@ -455,8 +468,8 @@ mod tests {
     #[test]
     fn scale_rejects_press_at_the_pivot_and_unknown_clips() {
         let seq = sequence(vec![track("1", vec![media_clip("A", 1920, 1080)])]);
-        assert!(!resolve_scale(&seq, "A", 480.0, 270.0, 580.0, 270.0, VW, VH).valid);
-        assert!(!resolve_scale(&seq, "404", 680.0, 270.0, 580.0, 270.0, VW, VH).valid);
+        assert!(!resolve_scale(&seq, "A", 10, 480.0, 270.0, 580.0, 270.0, VW, VH).valid);
+        assert!(!resolve_scale(&seq, "404", 10, 680.0, 270.0, 580.0, 270.0, VW, VH).valid);
     }
 
     #[test]
@@ -464,7 +477,7 @@ mod tests {
         let seq = sequence(vec![track("1", vec![media_clip("A", 1920, 1080)])]);
         // Press at angle 0°, drag to 45° (down-right in y-down coords):
         // far from any cardinal, no magnet.
-        let r = resolve_rotate(&seq, "A", 680.0, 270.0, 680.0, 470.0, VW, VH, 3.0);
+        let r = resolve_rotate(&seq, "A", 10, 680.0, 270.0, 680.0, 470.0, VW, VH, 3.0);
         assert!(r.valid && r.moved);
         assert!((r.rotation - 45.0).abs() < 1e-3);
         // Position and scale pass through.
@@ -475,7 +488,7 @@ mod tests {
     fn rotate_magnets_to_cardinal_angles() {
         let seq = sequence(vec![track("1", vec![media_clip("A", 1920, 1080)])]);
         // ~90.6°: inside the 3° magnet ⇒ exactly 90.
-        let r = resolve_rotate(&seq, "A", 680.0, 270.0, 478.0, 470.0, VW, VH, 3.0);
+        let r = resolve_rotate(&seq, "A", 10, 680.0, 270.0, 478.0, 470.0, VW, VH, 3.0);
         assert!(r.valid && r.moved);
         assert_eq!(r.rotation, 90.0);
     }
@@ -486,7 +499,7 @@ mod tests {
         clip.transform_rotation = 30.0;
         let seq = sequence(vec![track("1", vec![clip])]);
         // +45° of cursor travel on top of the committed 30°.
-        let r = resolve_rotate(&seq, "A", 680.0, 270.0, 680.0, 470.0, VW, VH, 3.0);
+        let r = resolve_rotate(&seq, "A", 10, 680.0, 270.0, 680.0, 470.0, VW, VH, 3.0);
         assert!(r.valid && r.moved);
         assert!((r.rotation - 75.0).abs() < 1e-3);
     }
@@ -497,7 +510,7 @@ mod tests {
         clip.transform_rotation = 170.0;
         let seq = sequence(vec![track("1", vec![clip])]);
         // +90° lands at 260 ⇒ normalized to -100 (same visual rotation).
-        let r = resolve_rotate(&seq, "A", 680.0, 270.0, 480.0, 470.0, VW, VH, 3.0);
+        let r = resolve_rotate(&seq, "A", 10, 680.0, 270.0, 480.0, 470.0, VW, VH, 3.0);
         assert!(r.valid && r.moved);
         assert!((r.rotation + 100.0).abs() < 1e-3);
     }
@@ -505,23 +518,43 @@ mod tests {
     #[test]
     fn rotate_back_at_the_press_point_is_not_moved() {
         let seq = sequence(vec![track("1", vec![media_clip("A", 1920, 1080)])]);
-        let r = resolve_rotate(&seq, "A", 680.0, 270.0, 680.0, 270.0, VW, VH, 3.0);
+        let r = resolve_rotate(&seq, "A", 10, 680.0, 270.0, 680.0, 270.0, VW, VH, 3.0);
         assert!(r.valid && !r.moved);
         assert_eq!(r.rotation, 0.0);
 
-        assert!(!resolve_rotate(&seq, "404", 680.0, 270.0, 680.0, 470.0, VW, VH, 3.0).valid);
+        assert!(!resolve_rotate(&seq, "404", 10, 680.0, 270.0, 680.0, 470.0, VW, VH, 3.0).valid);
+    }
+
+    #[test]
+    fn gestures_start_from_the_playhead_sample_on_animated_clips() {
+        use crate::ParamKeyframe;
+        let mut clip = media_clip("A", 1920, 1080);
+        // Scale animates 1.0 → 2.0 over ticks 0..40: at tick 20 the frame
+        // renders 1.5, and that's what a scale gesture must compound.
+        clip.kf_scale = ModelRc::from(Rc::new(VecModel::from(vec![
+            ParamKeyframe { tick: 0, value_x: 1.0, ..Default::default() },
+            ParamKeyframe { tick: 40, value_x: 2.0, ..Default::default() },
+        ])));
+        let seq = sequence(vec![track("1", vec![clip])]);
+        // Press 200 px from the center, drag to 100 px: halves the sample.
+        let r = resolve_scale(&seq, "A", 20, 680.0, 270.0, 580.0, 270.0, VW, VH);
+        assert!(r.valid && r.moved);
+        assert!((r.scale - 0.75).abs() < 1e-6, "got {}", r.scale);
+        // Same gesture at the first keyframe starts from 1.0.
+        let r = resolve_scale(&seq, "A", 0, 680.0, 270.0, 580.0, 270.0, VW, VH);
+        assert!((r.scale - 0.5).abs() < 1e-6, "got {}", r.scale);
     }
 
     #[test]
     fn nudge_moves_whole_canvas_pixels() {
         let seq = sequence(vec![track("1", vec![media_clip("A", 1920, 1080)])]);
-        let r = nudge(&seq, "A", 10.0, -1.0);
+        let r = nudge(&seq, "A", 10, 10.0, -1.0);
         assert!(r.valid && r.moved);
         assert!((r.position_x - 10.0 / 1920.0).abs() < 1e-7);
         assert!((r.position_y + 1.0 / 1080.0).abs() < 1e-7);
         assert!(!r.snap_h && !r.snap_v);
 
-        let locked_miss = nudge(&seq, "404", 1.0, 0.0);
+        let locked_miss = nudge(&seq, "404", 10, 1.0, 0.0);
         assert!(!locked_miss.valid, "unknown clip falls through to frame-step");
     }
 }

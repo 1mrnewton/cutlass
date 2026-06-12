@@ -12,9 +12,14 @@ import {
     TimelineStore,
     PreviewStore,
 } from "../../store/index.slint";
-import { InspectorBackend } from "../../lib/inspector-backend.slint";
+import {
+    InspectorBackend,
+    ParamRowState,
+    TransformSample,
+} from "../../lib/inspector-backend.slint";
 import { Clip, TextClipStyle } from "../../models/index.slint";
 import { AppState } from "../../state.slint";
+import { KeyframeControl } from "keyframe-control.slint";
 
 component InspectorDivider inherits Rectangle {
     height: 1px;
@@ -473,9 +478,16 @@ component SliderRow inherits HorizontalLayout {
     in property <float> maximum;
     in property <string> suffix;
     in property <float> reset-value: 0;
+    // Keyframe cluster (◀ ◆ ▶ + easing), shown only on animatable rows
+    // (the transform/blend properties — keyframes roadmap Phase 1).
+    in property <bool> kf-visible: false;
+    in property <ParamRowState> kf;
+    in property <bool> kf-can-toggle;
 
     callback preview(value: float);
     callback commit(value: float);
+    callback kf-toggle();
+    callback kf-set-easing(easing: int);
 
     spacing: AppStore.theme.metrics.spacing.md;
     height: 28px;
@@ -553,6 +565,20 @@ component SliderRow inherits HorizontalLayout {
         foreground: AppStore.theme.text.muted;
         vertical-alignment: TextVerticalAlignment.center;
     }
+
+    if root.kf-visible: KeyframeControl {
+        state: root.kf;
+        can-toggle: root.kf-can-toggle;
+        toggle => {
+            root.kf-toggle();
+        }
+        jump(tick) => {
+            TimelineStore.playhead-tick = tick;
+        }
+        set-easing(easing) => {
+            root.kf-set-easing(easing);
+        }
+    }
 }
 
 component NumberBox inherits Rectangle {
@@ -599,9 +625,14 @@ component NumberBox inherits Rectangle {
 component PositionRow inherits HorizontalLayout {
     in property <float> x-value;
     in property <float> y-value;
+    // Position is one vec2 param: one cluster keyframes both axes.
+    in property <ParamRowState> kf;
+    in property <bool> kf-can-toggle;
 
     callback commit-x(value: float);
     callback commit-y(value: float);
+    callback kf-toggle();
+    callback kf-set-easing(easing: int);
 
     spacing: AppStore.theme.metrics.spacing.md;
     height: 28px;
@@ -629,6 +660,20 @@ component PositionRow inherits HorizontalLayout {
 
     Rectangle {
         horizontal-stretch: 1;
+    }
+
+    KeyframeControl {
+        state: root.kf;
+        can-toggle: root.kf-can-toggle;
+        toggle => {
+            root.kf-toggle();
+        }
+        jump(tick) => {
+            TimelineStore.playhead-tick = tick;
+        }
+        set-easing(easing) => {
+            root.kf-set-easing(easing);
+        }
     }
 }
 
@@ -694,14 +739,20 @@ export component TextInspector inherits VerticalLayout {
     private property <TextClipStyle> style;
     private property <float> canvas-w: EditorStore.project.sequence.width / 1px;
     private property <float> canvas-h: EditorStore.project.sequence.height / 1px;
+    // Playhead sample + per-property keyframe row state (keyframes roadmap
+    // Phase 1): value rows track the rendered frame on animated clips.
+    private property <TransformSample> sample: InspectorBackend.sample-transform(
+        root.model, TimelineStore.playhead-tick);
+    private property <bool> playhead-inside: TimelineStore.playhead-tick >= root.model.timeline-start.value
+        && TimelineStore.playhead-tick < root.model.timeline-start.value + root.model.source-range.duration.value;
     private property <bool> live: PreviewStore.gesture-active
         && PreviewStore.gesture-clip == model.id
         && PreviewStore.gesture.valid;
-    private property <float> pos-x: live ? PreviewStore.gesture.position-x : model.transform-position-x;
-    private property <float> pos-y: live ? PreviewStore.gesture.position-y : model.transform-position-y;
-    private property <float> scale-v: live ? PreviewStore.gesture.scale : model.transform-scale;
-    private property <float> rot-v: live ? PreviewStore.gesture.rotation : model.transform-rotation;
-    private property <float> opacity-v: live ? PreviewStore.gesture.opacity : model.transform-opacity;
+    private property <float> pos-x: live ? PreviewStore.gesture.position-x : sample.position-x;
+    private property <float> pos-y: live ? PreviewStore.gesture.position-y : sample.position-y;
+    private property <float> scale-v: live ? PreviewStore.gesture.scale : sample.scale;
+    private property <float> rot-v: live ? PreviewStore.gesture.rotation : sample.rotation;
+    private property <float> opacity-v: live ? PreviewStore.gesture.opacity : sample.opacity;
 
     changed bound-clip-id => {
         edit-text = model.text-content;
@@ -741,11 +792,12 @@ export component TextInspector inherits VerticalLayout {
 
     function apply(px: float, py: float, s: float, r: float, o: float, commit: bool) {
         if (commit) {
-            if (px == model.transform-position-x
-                && py == model.transform-position-y
-                && s == model.transform-scale
-                && r == model.transform-rotation
-                && o == model.transform-opacity) {
+            // No-op against the playhead sample (what the rows display).
+            if (px == sample.position-x
+                && py == sample.position-y
+                && s == sample.scale
+                && r == sample.rotation
+                && o == sample.opacity) {
                 if (PreviewStore.gesture-active && PreviewStore.gesture-clip == model.id) {
                     EditorStore.on-preview-override-cleared(TimelineStore.playhead-tick);
                 }
@@ -776,6 +828,25 @@ export component TextInspector inherits VerticalLayout {
             EditorStore.on-preview-transform-overridden(
                 model.id, px, py, s, r, o, TimelineStore.playhead-tick);
         }
+    }
+
+    // Diamond toggle for one property: on a keyframe ⇒ remove it; anywhere
+    // else ⇒ write one at the playhead holding the displayed (sampled)
+    // value, so toggling never visibly changes the frame.
+    function toggle-kf(param: string, on-keyframe: bool, vx: float, vy: float) {
+        if (on-keyframe) {
+            InspectorBackend.remove-param-keyframe(model.id, param, TimelineStore.playhead-tick);
+        } else {
+            InspectorBackend.set-param-keyframe(
+                model.id, param, TimelineStore.playhead-tick, vx, vy, 0);
+        }
+    }
+
+    // Re-ease the keyframe under the playhead: same tick + value, new
+    // outgoing curve.
+    function ease-kf(param: string, easing: int, vx: float, vy: float) {
+        InspectorBackend.set-param-keyframe(
+            model.id, param, TimelineStore.playhead-tick, vx, vy, easing);
     }
 
     PanelHeader {
@@ -1262,11 +1333,20 @@ export component TextInspector inherits VerticalLayout {
                 minimum: 1;
                 maximum: 400;
                 reset-value: 100;
+                kf-visible: true;
+                kf: root.sample.scale-row;
+                kf-can-toggle: root.playhead-inside;
                 preview(v) => {
                     root.apply(root.pos-x, root.pos-y, max(v, 1) / 100, root.rot-v, root.opacity-v, false);
                 }
                 commit(v) => {
                     root.apply(root.pos-x, root.pos-y, max(v, 1) / 100, root.rot-v, root.opacity-v, true);
+                }
+                kf-toggle => {
+                    root.toggle-kf("scale", root.sample.scale-row.on-keyframe, root.scale-v, 0);
+                }
+                kf-set-easing(e) => {
+                    root.ease-kf("scale", e, root.scale-v, 0);
                 }
             }
 
@@ -1289,11 +1369,19 @@ export component TextInspector inherits VerticalLayout {
             PositionRow {
                 x-value: root.pos-x * root.canvas-w;
                 y-value: root.pos-y * root.canvas-h;
+                kf: root.sample.position-row;
+                kf-can-toggle: root.playhead-inside;
                 commit-x(v) => {
                     root.apply(v / root.canvas-w, root.pos-y, root.scale-v, root.rot-v, root.opacity-v, true);
                 }
                 commit-y(v) => {
                     root.apply(root.pos-x, v / root.canvas-h, root.scale-v, root.rot-v, root.opacity-v, true);
+                }
+                kf-toggle => {
+                    root.toggle-kf("position", root.sample.position-row.on-keyframe, root.pos-x, root.pos-y);
+                }
+                kf-set-easing(e) => {
+                    root.ease-kf("position", e, root.pos-x, root.pos-y);
                 }
             }
 
@@ -1304,11 +1392,20 @@ export component TextInspector inherits VerticalLayout {
                 minimum: -180;
                 maximum: 180;
                 reset-value: 0;
+                kf-visible: true;
+                kf: root.sample.rotation-row;
+                kf-can-toggle: root.playhead-inside;
                 preview(v) => {
                     root.apply(root.pos-x, root.pos-y, root.scale-v, v, root.opacity-v, false);
                 }
                 commit(v) => {
                     root.apply(root.pos-x, root.pos-y, root.scale-v, v, root.opacity-v, true);
+                }
+                kf-toggle => {
+                    root.toggle-kf("rotation", root.sample.rotation-row.on-keyframe, root.rot-v, 0);
+                }
+                kf-set-easing(e) => {
+                    root.ease-kf("rotation", e, root.rot-v, 0);
                 }
             }
 
@@ -1357,11 +1454,20 @@ export component TextInspector inherits VerticalLayout {
                 minimum: 0;
                 maximum: 100;
                 reset-value: 100;
+                kf-visible: true;
+                kf: root.sample.opacity-row;
+                kf-can-toggle: root.playhead-inside;
                 preview(v) => {
                     root.apply(root.pos-x, root.pos-y, root.scale-v, root.rot-v, clamp(v, 0, 100) / 100, false);
                 }
                 commit(v) => {
                     root.apply(root.pos-x, root.pos-y, root.scale-v, root.rot-v, clamp(v, 0, 100) / 100, true);
+                }
+                kf-toggle => {
+                    root.toggle-kf("opacity", root.sample.opacity-row.on-keyframe, root.opacity-v, 0);
+                }
+                kf-set-easing(e) => {
+                    root.ease-kf("opacity", e, root.opacity-v, 0);
                 }
             }
 

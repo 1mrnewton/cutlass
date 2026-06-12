@@ -645,6 +645,122 @@ fn delete_every_clip_on_the_music_track() {
 }
 
 #[test]
+fn fade_in_with_opacity_keyframes() {
+    let (mut host, _, _, clip) = fixture();
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![
+            (
+                "call_1",
+                "set_param_keyframe",
+                serde_json::json!({
+                    "clip": clip, "param": "opacity", "at": 0.0,
+                    "value": 0.0, "easing": "ease_in_out",
+                }),
+            ),
+            (
+                "call_2",
+                "set_param_keyframe",
+                serde_json::json!({
+                    "clip": clip, "param": "opacity", "at": 1.0, "value": 1.0,
+                }),
+            ),
+        ]),
+        text_turn("Added a 1-second fade-in."),
+    ]);
+
+    let (outcome, _) = run(
+        &provider,
+        &mut host,
+        &EditorContext::default(),
+        "fade the clip in over the first second",
+        &AgentConfig::default(),
+    );
+
+    assert_eq!(outcome.status, PromptStatus::Completed);
+    assert_eq!(outcome.actions.len(), 2);
+    assert_eq!(
+        outcome.actions[0].description,
+        format!("keyframed clip {clip} opacity = 0% at 0.00s")
+    );
+    assert_eq!(
+        outcome.actions[1].description,
+        format!("keyframed clip {clip} opacity = 100% at 1.00s")
+    );
+
+    // The curve landed: 0 → 1 over the first 24 ticks, eased.
+    let placed = host
+        .engine
+        .project()
+        .clip(cutlass_models::ClipId::from_raw(clip))
+        .unwrap();
+    assert!(placed.transform.is_animated());
+    assert_eq!(placed.transform.opacity.keyframes().len(), 2);
+    assert_eq!(placed.transform.sample(0).opacity, 0.0);
+    assert_eq!(placed.transform.sample(24).opacity, 1.0);
+
+    // One prompt = one undo: the animation disappears as a unit.
+    assert!(host.engine.undo());
+    let restored = host
+        .engine
+        .project()
+        .clip(cutlass_models::ClipId::from_raw(clip))
+        .unwrap();
+    assert!(!restored.transform.is_animated());
+    assert!(!host.engine.undo());
+}
+
+#[test]
+fn keyframe_outside_clip_is_rejected_with_extent() {
+    let (mut host, _, _, clip) = fixture();
+    // First call misses the clip (it ends at 10 s); the model corrects.
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![(
+            "call_1",
+            "set_param_keyframe",
+            serde_json::json!({
+                "clip": clip, "param": "scale", "at": 30.0, "value": 2.0,
+            }),
+        )]),
+        tool_turn(vec![(
+            "call_2",
+            "set_param_keyframe",
+            serde_json::json!({
+                "clip": clip, "param": "scale", "at": 9.0, "value": 2.0,
+            }),
+        )]),
+        text_turn("Keyframed the zoom at 9 seconds."),
+    ]);
+
+    let (outcome, _) = run(
+        &provider,
+        &mut host,
+        &EditorContext::default(),
+        "zoom in at the end of the clip",
+        &AgentConfig::default(),
+    );
+
+    assert_eq!(outcome.status, PromptStatus::Completed);
+    assert_eq!(outcome.actions.len(), 1, "only the corrected call applied");
+
+    // The rejection named the clip's extent so the model could correct.
+    let requests = provider.requests();
+    let tool_results: Vec<&str> = requests
+        .iter()
+        .flat_map(|msgs| msgs.iter())
+        .filter_map(|m| match m {
+            Message::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        tool_results
+            .iter()
+            .any(|r| r.contains("outside clip") && r.contains("10.000s")),
+        "rejection names the extent: {tool_results:?}"
+    );
+}
+
+#[test]
 fn provider_failure_mid_prompt_rolls_back() {
     let (mut host, _, _, clip) = fixture();
     // One successful edit turn, then the script runs dry — which the loop

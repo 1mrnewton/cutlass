@@ -10,6 +10,7 @@ pub mod move_clip;
 pub mod remove_clip;
 pub mod remove_media;
 pub mod set_generator;
+pub mod set_param;
 pub mod set_track_flags;
 pub mod set_transform;
 pub mod restore_clip;

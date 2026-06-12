@@ -84,8 +84,26 @@ fn dispatch_edit(
             let inverse = edit::set_generator::execute(ctx, clip, generator)?;
             Ok((ApplyOutcome::Edited(EditOutcome::Updated(clip)), Some(inverse)))
         }
-        EditCommand::SetClipTransform { clip, transform } => {
-            let inverse = edit::set_transform::execute(ctx, clip, transform)?;
+        EditCommand::SetClipTransform { clip, transform, at } => {
+            let inverse = edit::set_transform::execute(ctx, clip, transform, at)?;
+            Ok((ApplyOutcome::Edited(EditOutcome::Updated(clip)), Some(inverse)))
+        }
+        EditCommand::SetParamKeyframe {
+            clip,
+            param,
+            at,
+            value,
+            easing,
+        } => {
+            let inverse = edit::set_param::set_keyframe(ctx, clip, param, at, value, easing)?;
+            Ok((ApplyOutcome::Edited(EditOutcome::Updated(clip)), Some(inverse)))
+        }
+        EditCommand::RemoveParamKeyframe { clip, param, at } => {
+            let inverse = edit::set_param::remove_keyframe(ctx, clip, param, at)?;
+            Ok((ApplyOutcome::Edited(EditOutcome::Updated(clip)), Some(inverse)))
+        }
+        EditCommand::SetParamConstant { clip, param, value } => {
+            let inverse = edit::set_param::set_constant(ctx, clip, param, value)?;
             Ok((ApplyOutcome::Edited(EditOutcome::Updated(clip)), Some(inverse)))
         }
         EditCommand::SplitClip { clip, at } => {

@@ -1,6 +1,8 @@
-//! Inspector helpers: resolve the selected clip for the property sheet.
+//! Inspector helpers: resolve the selected clip for the property sheet, and
+//! sample its animated transform at the playhead for the keyframe UI.
 
-use crate::{Clip, SelectedClipInfo, Sequence, TextClipStyle, TrackKind};
+use crate::params::{row_state, sampled_transform};
+use crate::{Clip, SelectedClipInfo, Sequence, TextClipStyle, TrackKind, TransformSample};
 use cutlass_models::{
     TextAlignH, TextAlignV, TextBackground, TextCase, TextShadow, TextStroke,
     TextStyle as ModelTextStyle,
@@ -73,6 +75,26 @@ fn align_v_from_int(align: i32) -> TextAlignV {
         0 => TextAlignV::Top,
         2 => TextAlignV::Bottom,
         _ => TextAlignV::Middle,
+    }
+}
+
+/// The inspector's per-playhead view of a clip's transform: every property
+/// sampled at the (clamped) playhead, plus the keyframe row state driving
+/// each row's diamond cluster. Pure — re-evaluated by Slint when the
+/// playhead or the projected clip changes, so value rows track playback
+/// without a projection republish per tick.
+pub fn sample_transform(clip: &Clip, playhead: i32) -> TransformSample {
+    let t = sampled_transform(clip, playhead);
+    TransformSample {
+        position_x: t.position[0],
+        position_y: t.position[1],
+        scale: t.scale,
+        rotation: t.rotation,
+        opacity: t.opacity,
+        position_row: row_state(&clip.kf_position, playhead),
+        scale_row: row_state(&clip.kf_scale, playhead),
+        rotation_row: row_state(&clip.kf_rotation, playhead),
+        opacity_row: row_state(&clip.kf_opacity, playhead),
     }
 }
 

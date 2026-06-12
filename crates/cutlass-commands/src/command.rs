@@ -6,7 +6,8 @@
 use std::path::PathBuf;
 
 use cutlass_models::{
-    ClipId, ClipTransform, Generator, MediaId, RationalTime, TimeRange, TrackId, TrackKind,
+    ClipId, ClipParam, ClipTransform, Easing, Generator, MediaId, ParamValue, RationalTime,
+    TimeRange, TrackId, TrackKind,
 };
 
 /// A project-level action (media pool, not timeline placement).
@@ -55,9 +56,41 @@ pub enum EditCommand {
     /// Set a clip's spatial transform (position/scale/rotation/opacity on
     /// the canvas). Rejected for audio-track clips. The inverse restores the
     /// previous transform.
+    ///
+    /// `at` composes the edit with animation: `Some(playhead)` writes a
+    /// keyframe at that timeline position on properties that already have
+    /// keyframes (the CapCut gesture semantics); `None` flattens every
+    /// property to a constant. Identical behavior on never-animated clips.
     SetClipTransform {
         clip: ClipId,
         transform: ClipTransform,
+        at: Option<RationalTime>,
+    },
+    /// Insert or replace a keyframe on one animatable clip property at an
+    /// absolute timeline position (must fall inside the clip). A constant
+    /// property becomes a single-keyframe curve. The inverse restores the
+    /// previous parameter state.
+    SetParamKeyframe {
+        clip: ClipId,
+        param: ClipParam,
+        at: RationalTime,
+        value: ParamValue,
+        easing: Easing,
+    },
+    /// Remove the keyframe at exactly `at` on one property. Removing the
+    /// last keyframe collapses the property to a constant of that
+    /// keyframe's value. Rejected when no keyframe sits at `at`.
+    RemoveParamKeyframe {
+        clip: ClipId,
+        param: ClipParam,
+        at: RationalTime,
+    },
+    /// Replace one animatable property with a constant, dropping all its
+    /// keyframes.
+    SetParamConstant {
+        clip: ClipId,
+        param: ClipParam,
+        value: ParamValue,
     },
     /// Split a clip at a timeline position into two abutting clips.
     SplitClip { clip: ClipId, at: RationalTime },

@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+### Keyframes & animatable parameters (M2 foundation)
+
+- New `Param<T>` system in the model: any animatable property is a
+  constant or an eased keyframe curve (linear / ease-in / ease-out /
+  ease-in-out / cubic-bezier).
+- Clip transforms (position, scale, rotation, opacity) are now
+  animatable; preview and export sample curves per frame with no
+  measurable hot-path cost.
+- New undoable commands: `SetParamKeyframe`, `RemoveParamKeyframe`,
+  `SetParamConstant`; transform gestures committed at the playhead write
+  keyframes on already-animated properties (CapCut compose semantics).
+- The AI agent can animate: `set_param_keyframe` / `remove_param_keyframe`
+  / `set_param_constant` joined the tool vocabulary (schema v2) — e.g.
+  "fade the clip in over the first second".
+- Project format: schema v2. Old (v1) projects open unchanged; projects
+  saved by this build require this build or newer. Never-animated
+  projects keep the v1 field shapes.
+- Inspector keyframe UI (CapCut diamond UX): every transform/blend row
+  in the video and text inspectors grows a keyframe cluster — diamond
+  toggles a keyframe at the playhead, ◀ ▶ jump between keyframes, and an
+  easing flyout re-eases the keyframe under the playhead.
+- Inspector value rows, the preview selection box, and preview gestures
+  now track the playhead-sampled value on animated clips, so what you
+  grab is what's rendered; a transient "Keyframe added" chip appears
+  when a gesture writes a keyframe.
+
 ## [alpha-0.1.0] — 2026-06-11
 
 First public alpha of the Cutlass desktop editor. Expect rough edges, missing

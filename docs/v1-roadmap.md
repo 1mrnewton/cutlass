@@ -364,28 +364,36 @@ except looks and animation.
 ### M2 — Parameters & keyframes (the keystone)
 
 Goal: one animation system, built once, used by everything after.
+Detailed plan: `keyframes-roadmap.md`.
 
-- [ ] **`Param<T>` in `cutlass-models`**: constant or keyframed; keyframe
-      = `(tick, value, easing)` with linear / ease-in / ease-out / bezier
-      easing. Serialized compactly; `#[serde(default)]` keeps old files
-      loading.
-- [ ] **Migrate `ClipTransform` + opacity + volume to `Param`s** (constant
-      params behave identically — zero visual change until a keyframe is
-      added).
-- [ ] **Engine evaluation**: `resolve_layers` samples params at the frame
-      tick (pure, allocation-free — this is per-layer-per-frame hot path);
+- [x] **`Param<T>` in `cutlass-models`**: constant or keyframed; keyframe
+      = `(tick, value, easing)` with linear / ease-in / ease-out /
+      ease-in-out / bezier easing. Serialized compactly (constants stay
+      bare values — old files load unchanged, never-animated saves keep
+      the old shape); schema v2 with v1 read-forward.
+- [x] **Migrate `ClipTransform` + opacity to `Param`s** (constant params
+      behave identically — zero visual change until a keyframe is added).
+      *Volume joins when M1 lands the field, same as speed below.*
+- [x] **Engine evaluation**: `resolve_layers` samples params at the frame
+      tick (pure, allocation-free — benched: animated ≈ constant cost);
       export inherits for free. Interactive transform override composes
-      with keyframed values CapCut-style (gesture edits the keyframe at
-      the playhead, or the constant).
-- [ ] **Commands**: `SetParamKeyframe`, `RemoveParamKeyframe`,
-      `SetParamConstant` — undoable, group-friendly, agent-ready.
-- [ ] **Inspector keyframe UI**: the CapCut diamond per property row
-      (add/remove/navigate keyframes at the playhead), value rows show
-      sampled value while playing.
+      with keyframed values CapCut-style (gesture commit keyframes at
+      the playhead via `SetClipTransform.at`, or sets the constant).
+- [x] **Commands**: `SetParamKeyframe`, `RemoveParamKeyframe`,
+      `SetParamConstant` — undoable, group-friendly, agent-ready (in the
+      agent vocabulary with evals: "fade the clip in over the first
+      second" works end-to-end, one undo per prompt).
+- [x] **Inspector keyframe UI**: the CapCut diamond per property row
+      (add/remove/navigate keyframes at the playhead, easing picker per
+      keyframe), value rows show the playhead-sampled value via UI-side
+      `Param` sampling over projected curves — no republish per tick.
+      Preview hit-test / selection box / gestures follow the sampled
+      frame; a "Keyframe added" chip surfaces gesture-written keyframes.
 - [ ] **Timeline keyframe markers** on selected clips (diamonds on the
       clip body; drag to retime — CapCut behavior).
 - [ ] **Speed curves**: retime `speed` as a keyframable param →
       velocity-edit ramps; presets (montage, hero moment) as data.
+      *Blocked on M1's speed field.*
 - [ ] **Tick model audit**: keyframes make long/dense timelines likelier —
       resolve the Slint `i32` vs engine `i64` clamp now.
 

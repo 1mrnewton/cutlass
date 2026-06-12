@@ -10,11 +10,13 @@
 
 use cutlass_commands::{Command, EditCommand};
 use cutlass_models::{
-    Clip, ClipId, ClipTransform, Generator, MediaId, Project, Rational, RationalTime, TimeRange,
-    TrackId, TrackKind,
+    Clip, ClipId, ClipParam, ClipTransform, Easing, Generator, MediaId, ParamValue, Project,
+    Rational, RationalTime, TimeRange, TrackId, TrackKind,
 };
 
-use crate::wire::{WireCommand, WireGenerator, WireShape, WireTrackKind};
+use crate::wire::{
+    WireClipParam, WireCommand, WireEasing, WireGenerator, WireShape, WireTrackKind,
+};
 
 /// A wire command the project as it stands cannot accept. The message is
 /// written for the model: it names the problem and the valid alternatives.
@@ -93,7 +95,10 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         }
         WireCommand::SetClipTransform(args) => {
             let clip = clip_ref(project, args.clip)?;
-            let current = clip.transform;
+            // Omitted properties keep their current value — sampled at the
+            // clip start for animated params (the agent edits whole-clip
+            // placement; keyframe-level edits get their own commands).
+            let current = clip.transform.sample(0);
             let transform = ClipTransform {
                 position: [
                     args.position_x.map_or(current.position[0], |v| v as f32),
@@ -109,6 +114,37 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
             EditCommand::SetClipTransform {
                 clip: clip.id,
                 transform,
+                at: None,
+            }
+        }
+        WireCommand::SetParamKeyframe(args) => {
+            let clip = clip_ref(project, args.clip)?;
+            let at = keyframe_position(project, clip, args.at)?;
+            let value = param_value(args.param, args.value, args.position)?;
+            EditCommand::SetParamKeyframe {
+                clip: clip.id,
+                param: clip_param(args.param),
+                at,
+                value,
+                easing: easing(args.easing),
+            }
+        }
+        WireCommand::RemoveParamKeyframe(args) => {
+            let clip = clip_ref(project, args.clip)?;
+            let at = keyframe_position(project, clip, args.at)?;
+            EditCommand::RemoveParamKeyframe {
+                clip: clip.id,
+                param: clip_param(args.param),
+                at,
+            }
+        }
+        WireCommand::SetParamConstant(args) => {
+            let clip = clip_ref(project, args.clip)?;
+            let value = param_value(args.param, args.value, args.position)?;
+            EditCommand::SetParamConstant {
+                clip: clip.id,
+                param: clip_param(args.param),
+                value,
             }
         }
         WireCommand::SplitClip(args) => {
@@ -379,6 +415,69 @@ fn generated_content(clip: &Clip) -> Option<&Generator> {
 
 fn timeline_rate(project: &Project) -> Rational {
     project.timeline().frame_rate
+}
+
+fn clip_param(param: WireClipParam) -> ClipParam {
+    match param {
+        WireClipParam::Position => ClipParam::Position,
+        WireClipParam::Scale => ClipParam::Scale,
+        WireClipParam::Rotation => ClipParam::Rotation,
+        WireClipParam::Opacity => ClipParam::Opacity,
+    }
+}
+
+fn easing(easing: Option<WireEasing>) -> Easing {
+    match easing {
+        None | Some(WireEasing::Linear) => Easing::Linear,
+        Some(WireEasing::EaseIn) => Easing::EaseIn,
+        Some(WireEasing::EaseOut) => Easing::EaseOut,
+        Some(WireEasing::EaseInOut) => Easing::EaseInOut,
+    }
+}
+
+/// Build the typed parameter value from the wire's `value` / `position`
+/// fields, rejecting the wrong shape with a message naming the right one.
+fn param_value(
+    param: WireClipParam,
+    value: Option<f64>,
+    position: Option<[f64; 2]>,
+) -> Result<ParamValue, Rejection> {
+    match param {
+        WireClipParam::Position => position
+            .map(|p| ParamValue::Vec2([p[0] as f32, p[1] as f32]))
+            .ok_or_else(|| {
+                Rejection::new("param 'position' needs the 'position' argument as [x, y]")
+            }),
+        WireClipParam::Scale | WireClipParam::Rotation | WireClipParam::Opacity => value
+            .map(|v| ParamValue::Scalar(v as f32))
+            .ok_or_else(|| {
+                Rejection::new(format!(
+                    "param '{param:?}' needs the 'value' argument (a number)",
+                )
+                .to_lowercase())
+            }),
+    }
+}
+
+/// A keyframe's timeline position in seconds, pre-checked against the
+/// clip's extent so the model gets a message naming where the clip sits.
+fn keyframe_position(
+    project: &Project,
+    clip: &Clip,
+    seconds: f64,
+) -> Result<RationalTime, Rejection> {
+    let at = timeline_time(project, seconds, "at")?;
+    let tl = clip.timeline;
+    if at.value < tl.start.value || at.value >= tl.end_tick() {
+        let rate = timeline_rate(project);
+        return Err(Rejection::new(format!(
+            "keyframe position {seconds:.3}s is outside clip {} ({:.3}s to {:.3}s)",
+            clip.id.raw(),
+            ticks_to_seconds(tl.start.value, rate),
+            ticks_to_seconds(tl.end_tick(), rate),
+        )));
+    }
+    Ok(at)
 }
 
 fn ticks_to_seconds(ticks: i64, rate: Rational) -> f64 {
@@ -763,6 +862,7 @@ mod tests {
                     rotation: 10.0,
                     opacity: 0.8,
                 },
+                None,
             )
             .unwrap();
 
@@ -787,6 +887,7 @@ mod tests {
                     rotation: 10.0,
                     opacity: 1.0,
                 },
+                at: None,
             }
         );
 

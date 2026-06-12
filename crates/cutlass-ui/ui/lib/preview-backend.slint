@@ -73,22 +73,25 @@ export global PreviewBackend {
     // Move gesture (preview roadmap Phase 3): press point + current cursor
     // (viewport-element px) → new normalized position, center-guide magnet
     // applied within `snap-tolerance-px`. Called on every pointer move; the
-    // result feeds the live override and the release commit.
-    pure callback resolve-drag(Sequence /* sequence */, string /* clip-id */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* snap-tolerance-px */, ) -> PreviewDragResolution;
+    // result feeds the live override and the release commit. The playhead
+    // tick anchors animated clips: the gesture starts from the transform the
+    // frame renders (M2), not the clip-start sample.
+    pure callback resolve-drag(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* snap-tolerance-px */, ) -> PreviewDragResolution;
 
-    // Arrow-key nudge: displace the clip by whole canvas pixels. Invalid
-    // when the selected clip isn't draggable — the caller falls through to
-    // the transport frame-step binding.
-    pure callback nudge(Sequence /* sequence */, string /* clip-id */, float  /* dx-canvas-px */, float  /* dy-canvas-px */, ) -> PreviewDragResolution;
+    // Arrow-key nudge: displace the clip by whole canvas pixels (from its
+    // playhead-sampled position on animated clips). Invalid when the
+    // selected clip isn't draggable — the caller falls through to the
+    // transport frame-step binding.
+    pure callback nudge(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* dx-canvas-px */, float  /* dy-canvas-px */, ) -> PreviewDragResolution;
 
     // Corner-handle scale gesture (preview roadmap Phase 4): uniform about
     // the content center, factor = cursor distance ÷ press distance from
     // the center, clamped at a minimum so the box stays grabbable.
-    pure callback resolve-scale(Sequence /* sequence */, string /* clip-id */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, ) -> PreviewDragResolution;
+    pure callback resolve-scale(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, ) -> PreviewDragResolution;
 
     // Rotate-affordance gesture: cursor angle about the content center
     // relative to the press, added to the committed rotation; magnets to
     // the cardinal angles within `snap-tolerance-deg`. The resolution's
     // `rotation` also feeds the live degree tooltip.
-    pure callback resolve-rotate(Sequence /* sequence */, string /* clip-id */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* snap-tolerance-deg */, ) -> PreviewDragResolution;
+    pure callback resolve-rotate(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* snap-tolerance-deg */, ) -> PreviewDragResolution;
 }

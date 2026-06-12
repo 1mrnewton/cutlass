@@ -6,7 +6,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub const PROJECT_SCHEMA_KIND: &str = "cutlass.project";
 
 /// Current [`ProjectSchema::version`] for newly created projects.
-pub const PROJECT_SCHEMA_VERSION: u32 = 1;
+///
+/// History:
+/// - **1** — alpha format through M0/M3.
+/// - **2** — M2 animatable params: transform properties may serialize as
+///   `{"kf": [...]}` keyframe curves instead of bare values. v2 readers
+///   accept v1 files unchanged (constant params share the v1 shape); v1
+///   builds refuse v2 files rather than half-parse keyframes.
+pub const PROJECT_SCHEMA_VERSION: u32 = 2;
 
 /// Identifies the serialized shape of a [`Project`](crate::Project).
 ///
@@ -34,8 +41,12 @@ impl ProjectSchema {
     }
 
     /// Whether this engine build can load the schema without migration.
+    /// Every version up to the current one reads forward (the M2+ policy:
+    /// newer fields are additive or tolerated as bare-value constants).
     pub fn is_supported(&self) -> bool {
-        self.kind == PROJECT_SCHEMA_KIND && self.version == PROJECT_SCHEMA_VERSION
+        self.kind == PROJECT_SCHEMA_KIND
+            && self.version >= 1
+            && self.version <= PROJECT_SCHEMA_VERSION
     }
 }
 

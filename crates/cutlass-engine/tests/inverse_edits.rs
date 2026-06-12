@@ -5,7 +5,7 @@ mod common;
 use common::{import_asset, rt, small_video_asset, temp_engine, tr};
 use cutlass_commands::{Command, EditCommand, EditOutcome};
 use cutlass_engine::ApplyOutcome;
-use cutlass_models::{ClipTransform, Generator, TrackKind};
+use cutlass_models::{ClipParam, ClipTransform, Easing, Generator, ParamValue, TrackKind};
 
 fn created(outcome: ApplyOutcome) -> cutlass_models::ClipId {
     match outcome {
@@ -460,18 +460,20 @@ fn undo_redo_set_clip_transform_oscillates() {
         .apply(Command::Edit(EditCommand::SetClipTransform {
             clip: clip_id,
             transform: moved,
+            at: None,
         }))
         .expect("set transform");
 
-    let transform =
-        |engine: &cutlass_engine::Engine| engine.project().clip(clip_id).unwrap().transform;
-    assert_eq!(transform(&engine), moved);
+    let transform = |engine: &cutlass_engine::Engine| {
+        engine.project().clip(clip_id).unwrap().transform.clone()
+    };
+    assert_eq!(transform(&engine), moved.into());
 
     assert!(engine.undo());
     assert!(transform(&engine).is_identity());
 
     assert!(engine.redo());
-    assert_eq!(transform(&engine), moved);
+    assert_eq!(transform(&engine), moved.into());
 }
 
 #[test]
@@ -498,10 +500,210 @@ fn invalid_transform_rejected_and_state_unchanged() {
                     scale: 0.0,
                     ..ClipTransform::IDENTITY
                 },
+                at: None,
             }))
             .is_err()
     );
     assert!(engine.project().clip(clip_id).unwrap().transform.is_identity());
+}
+
+/// Add a text clip at [0, 48) and return its id — fixture for param tests.
+fn text_clip(engine: &mut cutlass_engine::Engine) -> cutlass_models::ClipId {
+    let track = common::add_track(engine, TrackKind::Text, "T1");
+    created(
+        engine
+            .apply(Command::Edit(EditCommand::AddGenerated {
+                track,
+                generator: Generator::text("title"),
+                timeline: tr(0, 48),
+            }))
+            .expect("add"),
+    )
+}
+
+#[test]
+fn set_param_keyframe_undo_redo_roundtrip() {
+    let (_dir, mut engine) = temp_engine();
+    let clip_id = text_clip(&mut engine);
+
+    engine
+        .apply(Command::Edit(EditCommand::SetParamKeyframe {
+            clip: clip_id,
+            param: ClipParam::Opacity,
+            at: rt(0),
+            value: ParamValue::Scalar(0.0),
+            easing: Easing::Linear,
+        }))
+        .expect("first keyframe");
+    engine
+        .apply(Command::Edit(EditCommand::SetParamKeyframe {
+            clip: clip_id,
+            param: ClipParam::Opacity,
+            at: rt(24),
+            value: ParamValue::Scalar(1.0),
+            easing: Easing::EaseInOut,
+        }))
+        .expect("second keyframe");
+
+    let opacity = |engine: &cutlass_engine::Engine| {
+        engine.project().clip(clip_id).unwrap().transform.opacity.clone()
+    };
+    assert_eq!(opacity(&engine).keyframes().len(), 2);
+
+    // Undo peels one keyframe at a time; the first undo restores the
+    // single-keyframe curve, the second the constant.
+    assert!(engine.undo());
+    assert_eq!(opacity(&engine).keyframes().len(), 1);
+    assert!(engine.undo());
+    assert!(!opacity(&engine).is_animated());
+    assert_eq!(opacity(&engine).constant(), Some(1.0));
+
+    assert!(engine.redo());
+    assert!(engine.redo());
+    assert_eq!(opacity(&engine).keyframes().len(), 2);
+    assert_eq!(
+        engine.project().clip(clip_id).unwrap().transform.sample(12).opacity,
+        0.5
+    );
+}
+
+#[test]
+fn remove_param_keyframe_undo_restores_curve() {
+    let (_dir, mut engine) = temp_engine();
+    let clip_id = text_clip(&mut engine);
+
+    for (tick, value) in [(0, 0.0), (24, 1.0)] {
+        engine
+            .apply(Command::Edit(EditCommand::SetParamKeyframe {
+                clip: clip_id,
+                param: ClipParam::Scale,
+                at: rt(tick),
+                value: ParamValue::Scalar(value + 1.0),
+                easing: Easing::Linear,
+            }))
+            .expect("keyframe");
+    }
+
+    engine
+        .apply(Command::Edit(EditCommand::RemoveParamKeyframe {
+            clip: clip_id,
+            param: ClipParam::Scale,
+            at: rt(24),
+        }))
+        .expect("remove");
+    let scale = |engine: &cutlass_engine::Engine| {
+        engine.project().clip(clip_id).unwrap().transform.scale.clone()
+    };
+    assert_eq!(scale(&engine).keyframes().len(), 1);
+
+    assert!(engine.undo());
+    assert_eq!(scale(&engine).keyframes().len(), 2);
+
+    // Removing a keyframe that isn't there is rejected and pushes no history.
+    assert!(
+        engine
+            .apply(Command::Edit(EditCommand::RemoveParamKeyframe {
+                clip: clip_id,
+                param: ClipParam::Scale,
+                at: rt(7),
+            }))
+            .is_err()
+    );
+    assert_eq!(scale(&engine).keyframes().len(), 2);
+}
+
+#[test]
+fn set_param_constant_undo_restores_keyframes() {
+    let (_dir, mut engine) = temp_engine();
+    let clip_id = text_clip(&mut engine);
+
+    for tick in [0, 24] {
+        engine
+            .apply(Command::Edit(EditCommand::SetParamKeyframe {
+                clip: clip_id,
+                param: ClipParam::Rotation,
+                at: rt(tick),
+                value: ParamValue::Scalar(tick as f32),
+                easing: Easing::Linear,
+            }))
+            .expect("keyframe");
+    }
+
+    engine
+        .apply(Command::Edit(EditCommand::SetParamConstant {
+            clip: clip_id,
+            param: ClipParam::Rotation,
+            value: ParamValue::Scalar(90.0),
+        }))
+        .expect("flatten");
+    let rotation = |engine: &cutlass_engine::Engine| {
+        engine.project().clip(clip_id).unwrap().transform.rotation.clone()
+    };
+    assert_eq!(rotation(&engine).constant(), Some(90.0));
+
+    assert!(engine.undo());
+    assert_eq!(rotation(&engine).keyframes().len(), 2);
+    assert!(engine.redo());
+    assert_eq!(rotation(&engine).constant(), Some(90.0));
+}
+
+#[test]
+fn param_keyframe_outside_clip_rejected() {
+    let (_dir, mut engine) = temp_engine();
+    let clip_id = text_clip(&mut engine); // [0, 48)
+
+    assert!(
+        engine
+            .apply(Command::Edit(EditCommand::SetParamKeyframe {
+                clip: clip_id,
+                param: ClipParam::Opacity,
+                at: rt(48), // exclusive end — outside
+                value: ParamValue::Scalar(0.5),
+                easing: Easing::Linear,
+            }))
+            .is_err()
+    );
+    assert!(!engine.project().clip(clip_id).unwrap().transform.is_animated());
+}
+
+#[test]
+fn transform_gesture_at_playhead_keyframes_animated_property() {
+    let (_dir, mut engine) = temp_engine();
+    let clip_id = text_clip(&mut engine);
+
+    // Animate scale 1 → 3 across the clip.
+    for (tick, value) in [(0, 1.0), (40, 3.0)] {
+        engine
+            .apply(Command::Edit(EditCommand::SetParamKeyframe {
+                clip: clip_id,
+                param: ClipParam::Scale,
+                at: rt(tick),
+                value: ParamValue::Scalar(value),
+                easing: Easing::Linear,
+            }))
+            .expect("keyframe");
+    }
+
+    // A gesture commit at tick 20 (sampled scale 2.0 → user dragged to 2.5).
+    engine
+        .apply(Command::Edit(EditCommand::SetClipTransform {
+            clip: clip_id,
+            transform: ClipTransform {
+                scale: 2.5,
+                ..ClipTransform::IDENTITY
+            },
+            at: Some(rt(20)),
+        }))
+        .expect("compose");
+
+    let transform = engine.project().clip(clip_id).unwrap().transform.clone();
+    // Scale gained a keyframe; the endpoints survive.
+    assert_eq!(transform.scale.keyframes().len(), 3);
+    assert_eq!(transform.sample(20).scale, 2.5);
+    assert_eq!(transform.sample(0).scale, 1.0);
+    assert_eq!(transform.sample(40).scale, 3.0);
+    // Un-animated properties stay constant.
+    assert!(!transform.position.is_animated());
 }
 
 #[test]

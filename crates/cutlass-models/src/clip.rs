@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ModelError;
 use crate::ids::{ClipId, LinkId, MediaId};
+use crate::param::{Easing, Param};
 use crate::time::{RationalTime, TimeRange, resample, time_add, time_sub};
 
 /// What a clip draws. Either a trimmed range of imported media, or synthetic
@@ -337,6 +338,298 @@ impl Default for ClipTransform {
     }
 }
 
+/// Which animatable clip property a parameter command addresses. Grows as
+/// later milestones make more properties animatable (effect params, volume).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipParam {
+    Position,
+    Scale,
+    Rotation,
+    Opacity,
+}
+
+/// A value for a [`ClipParam`]: scalar properties take `Scalar`, `position`
+/// takes `Vec2`. Commands carry this so one command shape serves every
+/// param kind.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParamValue {
+    Scalar(f32),
+    Vec2([f32; 2]),
+}
+
+impl ParamValue {
+    fn scalar(self) -> Result<f32, ModelError> {
+        match self {
+            ParamValue::Scalar(v) => Ok(v),
+            ParamValue::Vec2(_) => Err(ModelError::InvalidParam(
+                "expected a scalar value, got a vec2".into(),
+            )),
+        }
+    }
+
+    fn vec2(self) -> Result<[f32; 2], ModelError> {
+        match self {
+            ParamValue::Vec2(v) => Ok(v),
+            ParamValue::Scalar(_) => Err(ModelError::InvalidParam(
+                "expected a vec2 value, got a scalar".into(),
+            )),
+        }
+    }
+}
+
+/// The animatable spatial placement stored on a clip: each [`ClipTransform`]
+/// property as a [`Param`] (M2 keystone). Constant params serialize as bare
+/// values, so a never-animated transform is byte-identical to the pre-M2
+/// `ClipTransform` JSON and old projects load unchanged.
+///
+/// Keyframe ticks are clip-relative (offset from the clip's timeline start)
+/// at the timeline rate — animation rides along when a clip moves.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnimatedTransform {
+    /// Content-center offset from canvas center (see [`ClipTransform::position`]).
+    #[serde(default = "default_position_param")]
+    pub position: Param<[f32; 2]>,
+    /// Uniform scale (see [`ClipTransform::scale`]).
+    #[serde(default = "default_scale_param")]
+    pub scale: Param<f32>,
+    /// Clockwise rotation in degrees (see [`ClipTransform::rotation`]).
+    #[serde(default = "default_rotation_param")]
+    pub rotation: Param<f32>,
+    /// Layer opacity 0..=1 (see [`ClipTransform::opacity`]).
+    #[serde(default = "default_opacity_param")]
+    pub opacity: Param<f32>,
+}
+
+fn default_position_param() -> Param<[f32; 2]> {
+    Param::Constant([0.0, 0.0])
+}
+fn default_scale_param() -> Param<f32> {
+    Param::Constant(1.0)
+}
+fn default_rotation_param() -> Param<f32> {
+    Param::Constant(0.0)
+}
+fn default_opacity_param() -> Param<f32> {
+    Param::Constant(1.0)
+}
+
+impl AnimatedTransform {
+    /// All-constant identity (centered, aspect-fit, opaque).
+    pub fn identity() -> Self {
+        Self::from(ClipTransform::IDENTITY)
+    }
+
+    /// True iff no property is animated and every constant is the identity.
+    pub fn is_identity(&self) -> bool {
+        !self.is_animated() && self.sample(0).is_identity()
+    }
+
+    /// True iff any property has keyframes.
+    pub fn is_animated(&self) -> bool {
+        self.position.is_animated()
+            || self.scale.is_animated()
+            || self.rotation.is_animated()
+            || self.opacity.is_animated()
+    }
+
+    /// The transform value at a clip-relative `tick` — the per-frame hot
+    /// path (pure, allocation-free).
+    pub fn sample(&self, tick: i64) -> ClipTransform {
+        ClipTransform {
+            position: self.position.sample(tick),
+            scale: self.scale.sample(tick),
+            rotation: self.rotation.sample(tick),
+            opacity: self.opacity.sample(tick),
+        }
+    }
+
+    /// Set every property to a constant, dropping any keyframes.
+    pub fn set_constant(&mut self, transform: ClipTransform) {
+        self.position.set_constant(transform.position);
+        self.scale.set_constant(transform.scale);
+        self.rotation.set_constant(transform.rotation);
+        self.opacity.set_constant(transform.opacity);
+    }
+
+    /// Apply a full-transform edit composing with animation CapCut-style:
+    /// animated properties get a keyframe at `tick` (linear easing),
+    /// constant properties stay constant. A gesture on a never-animated
+    /// clip behaves exactly like the pre-M2 `set_constant`.
+    pub fn compose_at(&mut self, transform: ClipTransform, tick: i64) {
+        if self.position.is_animated() {
+            self.position.set_keyframe(tick, transform.position, Easing::Linear);
+        } else {
+            self.position.set_constant(transform.position);
+        }
+        if self.scale.is_animated() {
+            self.scale.set_keyframe(tick, transform.scale, Easing::Linear);
+        } else {
+            self.scale.set_constant(transform.scale);
+        }
+        if self.rotation.is_animated() {
+            self.rotation.set_keyframe(tick, transform.rotation, Easing::Linear);
+        } else {
+            self.rotation.set_constant(transform.rotation);
+        }
+        if self.opacity.is_animated() {
+            self.opacity.set_keyframe(tick, transform.opacity, Easing::Linear);
+        } else {
+            self.opacity.set_constant(transform.opacity);
+        }
+    }
+
+    /// Upsert a keyframe on one property. The value kind must match the
+    /// property and pass the property's range validation.
+    pub fn set_param_keyframe(
+        &mut self,
+        param: ClipParam,
+        tick: i64,
+        value: ParamValue,
+        easing: Easing,
+    ) -> Result<(), ModelError> {
+        easing.validate()?;
+        match param {
+            ClipParam::Position => {
+                let v = value.vec2()?;
+                validate_position(&v)?;
+                self.position.set_keyframe(tick, v, easing);
+            }
+            ClipParam::Scale => {
+                let v = value.scalar()?;
+                validate_scale(v)?;
+                self.scale.set_keyframe(tick, v, easing);
+            }
+            ClipParam::Rotation => {
+                let v = value.scalar()?;
+                validate_rotation(v)?;
+                self.rotation.set_keyframe(tick, v, easing);
+            }
+            ClipParam::Opacity => {
+                let v = value.scalar()?;
+                validate_opacity(v)?;
+                self.opacity.set_keyframe(tick, v, easing);
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove the keyframe at exactly `tick` on one property. Errors when no
+    /// keyframe sits there (so a no-op never lands in undo history).
+    pub fn remove_param_keyframe(&mut self, param: ClipParam, tick: i64) -> Result<(), ModelError> {
+        let removed = match param {
+            ClipParam::Position => self.position.remove_keyframe(tick),
+            ClipParam::Scale => self.scale.remove_keyframe(tick),
+            ClipParam::Rotation => self.rotation.remove_keyframe(tick),
+            ClipParam::Opacity => self.opacity.remove_keyframe(tick),
+        };
+        if removed {
+            Ok(())
+        } else {
+            Err(ModelError::InvalidParam(format!(
+                "no {param:?} keyframe at tick {tick}"
+            )))
+        }
+    }
+
+    /// Replace one property with a constant, dropping its keyframes.
+    pub fn set_param_constant(&mut self, param: ClipParam, value: ParamValue) -> Result<(), ModelError> {
+        match param {
+            ClipParam::Position => {
+                let v = value.vec2()?;
+                validate_position(&v)?;
+                self.position.set_constant(v);
+            }
+            ClipParam::Scale => {
+                let v = value.scalar()?;
+                validate_scale(v)?;
+                self.scale.set_constant(v);
+            }
+            ClipParam::Rotation => {
+                let v = value.scalar()?;
+                validate_rotation(v)?;
+                self.rotation.set_constant(v);
+            }
+            ClipParam::Opacity => {
+                let v = value.scalar()?;
+                validate_opacity(v)?;
+                self.opacity.set_constant(v);
+            }
+        }
+        Ok(())
+    }
+
+    /// `Ok` iff every stored value (constants and keyframes) passes the
+    /// per-property rules [`ClipTransform::validate`] enforces, and every
+    /// keyframed param is structurally sound (sorted, non-empty, valid
+    /// easings). Used on load and by model mutators.
+    pub fn validate(&self) -> Result<(), ModelError> {
+        self.position.validate_shape()?;
+        self.scale.validate_shape()?;
+        self.rotation.validate_shape()?;
+        self.opacity.validate_shape()?;
+        self.position.for_each_value(validate_position)?;
+        self.scale.for_each_value(|v| validate_scale(*v))?;
+        self.rotation.for_each_value(|v| validate_rotation(*v))?;
+        self.opacity.for_each_value(|v| validate_opacity(*v))?;
+        Ok(())
+    }
+}
+
+fn validate_position(v: &[f32; 2]) -> Result<(), ModelError> {
+    if v.iter().all(|c| c.is_finite()) {
+        Ok(())
+    } else {
+        Err(ModelError::InvalidTransform("non-finite component".into()))
+    }
+}
+
+fn validate_scale(v: f32) -> Result<(), ModelError> {
+    if !v.is_finite() {
+        return Err(ModelError::InvalidTransform("non-finite component".into()));
+    }
+    if v <= 0.0 {
+        return Err(ModelError::InvalidTransform("scale must be positive".into()));
+    }
+    Ok(())
+}
+
+fn validate_rotation(v: f32) -> Result<(), ModelError> {
+    if v.is_finite() {
+        Ok(())
+    } else {
+        Err(ModelError::InvalidTransform("non-finite component".into()))
+    }
+}
+
+fn validate_opacity(v: f32) -> Result<(), ModelError> {
+    if !v.is_finite() {
+        return Err(ModelError::InvalidTransform("non-finite component".into()));
+    }
+    if !(0.0..=1.0).contains(&v) {
+        return Err(ModelError::InvalidTransform("opacity must be in 0..=1".into()));
+    }
+    Ok(())
+}
+
+impl Default for AnimatedTransform {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
+impl From<ClipTransform> for AnimatedTransform {
+    fn from(t: ClipTransform) -> Self {
+        Self {
+            position: Param::Constant(t.position),
+            scale: Param::Constant(t.scale),
+            rotation: Param::Constant(t.rotation),
+            opacity: Param::Constant(t.opacity),
+        }
+    }
+}
+
 /// A placement of some [`ClipSource`] on a track.
 ///
 /// `timeline` is where the clip sits on the sequence, at the timeline rate.
@@ -350,10 +643,13 @@ pub struct Clip {
     /// dropping media with an audio stream. `None` ⇔ unlinked.
     #[serde(default)]
     pub link: Option<LinkId>,
-    /// Spatial placement on the canvas. Identity (aspect-fit, centered) for
-    /// clips created before transforms existed. Ignored on audio tracks.
+    /// Spatial placement on the canvas, animatable per property. Identity
+    /// (aspect-fit, centered) for clips created before transforms existed.
+    /// Ignored on audio tracks. Sample at a clip-relative tick via
+    /// [`AnimatedTransform::sample`]; never-animated transforms serialize
+    /// exactly like the pre-M2 plain [`ClipTransform`].
     #[serde(default)]
-    pub transform: ClipTransform,
+    pub transform: AnimatedTransform,
 }
 
 impl Clip {
@@ -364,7 +660,7 @@ impl Clip {
             content: ClipSource::Media { media, source },
             timeline,
             link: None,
-            transform: ClipTransform::IDENTITY,
+            transform: AnimatedTransform::identity(),
         }
     }
 
@@ -375,8 +671,17 @@ impl Clip {
             content: ClipSource::Generated(generator),
             timeline,
             link: None,
-            transform: ClipTransform::IDENTITY,
+            transform: AnimatedTransform::identity(),
         }
+    }
+
+    /// Clip-relative animation tick for an absolute timeline position: the
+    /// offset from the clip's start. Positions outside the clip clamp into
+    /// `[0, duration)` so callers sampling at a stale playhead still get the
+    /// nearest in-range value.
+    pub fn animation_tick(&self, timeline_tick: i64) -> i64 {
+        let offset = timeline_tick - self.timeline.start.value;
+        offset.clamp(0, (self.timeline.duration.value - 1).max(0))
     }
 
     /// Timeline start position.
@@ -665,7 +970,7 @@ mod tests {
     fn new_clips_have_identity_transform() {
         let clip = Clip::generated(Generator::Adjustment, tr(0, 10, R24));
         assert!(clip.transform.is_identity());
-        assert_eq!(clip.transform, ClipTransform::default());
+        assert_eq!(clip.transform, AnimatedTransform::default());
     }
 
     #[test]
@@ -692,10 +997,156 @@ mod tests {
             scale: 1.5,
             rotation: 90.0,
             opacity: 0.25,
-        };
+        }
+        .into();
         let json = serde_json::to_string(&clip).expect("serialize");
         let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(loaded.transform, clip.transform);
+    }
+
+    #[test]
+    fn legacy_plain_transform_json_deserializes_as_constants() {
+        // The exact shape every pre-M2 save wrote: bare values per property.
+        let json = r#"{
+            "id": 1,
+            "content": { "Generated": { "Text": { "content": "t" } } },
+            "timeline": { "start": { "value": 0, "rate": { "num": 24, "den": 1 } },
+                          "duration": { "value": 24, "rate": { "num": 24, "den": 1 } } },
+            "transform": { "position": [0.25, -0.1], "scale": 2.0,
+                           "rotation": 45.0, "opacity": 0.5 }
+        }"#;
+        let clip: Clip = serde_json::from_str(json).expect("deserialize pre-M2 transform");
+        assert!(!clip.transform.is_animated());
+        assert_eq!(
+            clip.transform.sample(0),
+            ClipTransform {
+                position: [0.25, -0.1],
+                scale: 2.0,
+                rotation: 45.0,
+                opacity: 0.5,
+            }
+        );
+    }
+
+    #[test]
+    fn constant_transform_serializes_in_pre_m2_shape() {
+        let mut clip = Clip::generated(Generator::Adjustment, tr(0, 10, R24));
+        clip.transform = ClipTransform {
+            position: [0.25, 0.5],
+            scale: 1.5,
+            rotation: 0.0,
+            opacity: 1.0,
+        }
+        .into();
+        let value = serde_json::to_value(&clip).expect("serialize");
+        // Bare values, not {"kf": ...} wrappers — byte-compatible with old readers.
+        assert_eq!(value["transform"]["scale"], 1.5);
+        assert_eq!(value["transform"]["position"][0], 0.25);
+    }
+
+    #[test]
+    fn keyframed_transform_roundtrips() {
+        let mut clip = Clip::generated(Generator::Adjustment, tr(0, 48, R24));
+        clip.transform
+            .set_param_keyframe(ClipParam::Opacity, 0, ParamValue::Scalar(0.0), Easing::Linear)
+            .unwrap();
+        clip.transform
+            .set_param_keyframe(ClipParam::Opacity, 24, ParamValue::Scalar(1.0), Easing::EaseOut)
+            .unwrap();
+        let json = serde_json::to_string(&clip).expect("serialize");
+        let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(loaded.transform, clip.transform);
+        assert!(loaded.transform.is_animated());
+        // Segment 0→24 leaves the linear keyframe at tick 0: halfway = 0.5.
+        assert_eq!(loaded.transform.sample(12).opacity, 0.5);
+    }
+
+    #[test]
+    fn animated_transform_samples_per_property() {
+        let mut t = AnimatedTransform::identity();
+        t.set_param_keyframe(ClipParam::Scale, 0, ParamValue::Scalar(1.0), Easing::Linear)
+            .unwrap();
+        t.set_param_keyframe(ClipParam::Scale, 10, ParamValue::Scalar(2.0), Easing::Linear)
+            .unwrap();
+        // Scale animates; everything else stays constant.
+        let mid = t.sample(5);
+        assert_eq!(mid.scale, 1.5);
+        assert_eq!(mid.position, [0.0, 0.0]);
+        assert_eq!(mid.opacity, 1.0);
+    }
+
+    #[test]
+    fn compose_at_writes_keyframe_only_on_animated_properties() {
+        let mut t = AnimatedTransform::identity();
+        t.set_param_keyframe(ClipParam::Scale, 0, ParamValue::Scalar(1.0), Easing::Linear)
+            .unwrap();
+        t.set_param_keyframe(ClipParam::Scale, 20, ParamValue::Scalar(3.0), Easing::Linear)
+            .unwrap();
+
+        let edit = ClipTransform {
+            position: [0.3, 0.0],
+            scale: 2.0,
+            rotation: 0.0,
+            opacity: 1.0,
+        };
+        t.compose_at(edit, 10);
+
+        // Scale gained a keyframe at tick 10; the curve still animates.
+        assert_eq!(t.scale.keyframes().len(), 3);
+        assert_eq!(t.sample(10).scale, 2.0);
+        assert_eq!(t.sample(0).scale, 1.0);
+        assert_eq!(t.sample(20).scale, 3.0);
+        // Position was constant and stays constant.
+        assert!(!t.position.is_animated());
+        assert_eq!(t.sample(0).position, [0.3, 0.0]);
+    }
+
+    #[test]
+    fn remove_param_keyframe_errors_when_absent() {
+        let mut t = AnimatedTransform::identity();
+        assert!(t.remove_param_keyframe(ClipParam::Scale, 5).is_err());
+        t.set_param_keyframe(ClipParam::Scale, 5, ParamValue::Scalar(2.0), Easing::Linear)
+            .unwrap();
+        assert!(t.remove_param_keyframe(ClipParam::Scale, 5).is_ok());
+        assert!(!t.scale.is_animated());
+        assert_eq!(t.scale.constant(), Some(2.0));
+    }
+
+    #[test]
+    fn param_kind_mismatch_rejected() {
+        let mut t = AnimatedTransform::identity();
+        assert!(matches!(
+            t.set_param_keyframe(ClipParam::Scale, 0, ParamValue::Vec2([1.0, 1.0]), Easing::Linear),
+            Err(ModelError::InvalidParam(_))
+        ));
+        assert!(matches!(
+            t.set_param_constant(ClipParam::Position, ParamValue::Scalar(1.0)),
+            Err(ModelError::InvalidParam(_))
+        ));
+    }
+
+    #[test]
+    fn param_values_validated_per_property() {
+        let mut t = AnimatedTransform::identity();
+        assert!(t
+            .set_param_keyframe(ClipParam::Scale, 0, ParamValue::Scalar(-1.0), Easing::Linear)
+            .is_err());
+        assert!(t
+            .set_param_keyframe(ClipParam::Opacity, 0, ParamValue::Scalar(1.5), Easing::Linear)
+            .is_err());
+        assert!(t
+            .set_param_constant(ClipParam::Position, ParamValue::Vec2([f32::NAN, 0.0]))
+            .is_err());
+    }
+
+    #[test]
+    fn animation_tick_clamps_into_clip() {
+        let clip = Clip::generated(Generator::Adjustment, tr(100, 50, R24));
+        assert_eq!(clip.animation_tick(100), 0);
+        assert_eq!(clip.animation_tick(125), 25);
+        assert_eq!(clip.animation_tick(149), 49);
+        assert_eq!(clip.animation_tick(90), 0);
+        assert_eq!(clip.animation_tick(500), 49);
     }
 
     // --- text style ---------------------------------------------------------

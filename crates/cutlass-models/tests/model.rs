@@ -85,12 +85,12 @@ fn set_transform_updates_visual_and_rejects_audio() {
         rotation: -30.0,
         opacity: 0.5,
     };
-    project.set_transform(video, t).expect("set transform");
-    assert_eq!(project.clip(video).unwrap().transform, t);
+    project.set_transform(video, t, None).expect("set transform");
+    assert_eq!(project.clip(video).unwrap().transform, t.into());
 
     // Audio clips have nothing to place on the canvas.
     assert!(matches!(
-        project.set_transform(audio, t),
+        project.set_transform(audio, t, None),
         Err(ModelError::IncompatibleTrackKind { .. })
     ));
 
@@ -114,11 +114,11 @@ fn set_transform_updates_visual_and_rejects_audio() {
         },
     ] {
         assert!(matches!(
-            project.set_transform(video, bad),
+            project.set_transform(video, bad, None),
             Err(ModelError::InvalidTransform(_))
         ));
     }
-    assert_eq!(project.clip(video).unwrap().transform, t);
+    assert_eq!(project.clip(video).unwrap().transform, t.into());
 }
 
 #[test]

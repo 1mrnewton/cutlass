@@ -2,12 +2,19 @@ import { Slider, LineEdit } from "std-widgets.slint";
 import { CutlassText } from "../../components/index.slint";
 import { AppStore, EditorStore, TimelineStore, PreviewStore } from "../../store/index.slint";
 import { Clip } from "../../models/index.slint";
+import {
+    InspectorBackend,
+    ParamRowState,
+    TransformSample,
+} from "../../lib/inspector-backend.slint";
+import { KeyframeControl } from "keyframe-control.slint";
 
 // One transform property row: slider for coarse motion, numeric entry for
-// precision, double-click the label to reset (CapCut). Works in display
-// units (px / % / °); the parent converts to and from the normalized model
-// space. Slider motion previews (uncommitted worker override), slider
-// release / Enter / reset commit one undoable SetClipTransform.
+// precision, double-click the label to reset (CapCut), and the keyframe
+// cluster (◀ ◆ ▶ + easing) on the right. Works in display units (px / % /
+// °); the parent converts to and from the normalized model space. Slider
+// motion previews (uncommitted worker override), slider release / Enter /
+// reset commit one undoable SetClipTransform.
 component TransformRow inherits HorizontalLayout {
     in property <string> label;
     in property <float> value;
@@ -15,16 +22,25 @@ component TransformRow inherits HorizontalLayout {
     in property <float> maximum;
     in property <string> suffix;
     in property <float> reset-value: 0;
+    // Keyframe state for the row's property at the playhead, and whether
+    // the diamond may toggle (playhead inside the clip).
+    in property <ParamRowState> kf;
+    in property <bool> kf-can-toggle;
 
     callback preview(value: float);
     callback commit(value: float);
+    // Diamond / arrows / easing flyout, routed to the parent (it owns the
+    // param identity and the current sampled values).
+    callback kf-toggle();
+    callback kf-set-easing(easing: int);
 
     spacing: AppStore.theme.metrics.spacing.md;
 
     // The slider assigns `value` internally on drag and the box assigns
     // `text` on typing — both would permanently drop a plain binding, so
     // external updates (projection republish, live gestures, selection
-    // changes) re-sync through this watcher instead.
+    // changes, playhead moves over an animated property) re-sync through
+    // this watcher instead.
     changed value => {
         sl.value = clamp(root.value, root.minimum, root.maximum);
         num.text = Math.round(root.value) + "";
@@ -85,13 +101,30 @@ component TransformRow inherits HorizontalLayout {
         foreground: AppStore.theme.text.muted;
         vertical-alignment: TextVerticalAlignment.center;
     }
+
+    KeyframeControl {
+        state: root.kf;
+        can-toggle: root.kf-can-toggle;
+        toggle => {
+            root.kf-toggle();
+        }
+        jump(tick) => {
+            TimelineStore.playhead-tick = tick;
+        }
+        set-easing(easing) => {
+            root.kf-set-easing(easing);
+        }
+    }
 }
 
 // CapCut's "Basic" transform block (preview roadmap Phase 5): numeric truth
-// for what the mouse does in the preview. Reads live values mid-gesture
-// from PreviewStore (the projection is frozen during one), and its own
-// slider drags ride the same override-then-commit pipeline as preview
-// gestures — so the preview frame and selection box follow the sliders.
+// for what the mouse does in the preview. Value rows show the playhead
+// sample of each (possibly animated) property — `sample-transform` re-runs
+// per playhead move, no projection republish needed (keyframes roadmap
+// Phase 1). Reads live values mid-gesture from PreviewStore (the projection
+// is frozen during one), and its own slider drags ride the same
+// override-then-commit pipeline as preview gestures — so the preview frame
+// and selection box follow the sliders.
 export component TransformInspector inherits VerticalLayout {
     // Named `model` — `clip` is a built-in boolean on Slint elements.
     in property <Clip> model;
@@ -102,29 +135,57 @@ export component TransformInspector inherits VerticalLayout {
     private property <float> canvas-w: EditorStore.project.sequence.width / 1px;
     private property <float> canvas-h: EditorStore.project.sequence.height / 1px;
 
+    // Playhead sample + per-property keyframe row state, recomputed when
+    // the playhead or the projected clip changes.
+    private property <TransformSample> sample: InspectorBackend.sample-transform(
+        root.model, TimelineStore.playhead-tick);
+    // Keyframes may only sit inside the clip (engine rule); gate the
+    // diamonds rather than letting the command bounce.
+    private property <bool> playhead-inside: TimelineStore.playhead-tick >= root.model.timeline-start.value
+        && TimelineStore.playhead-tick < root.model.timeline-start.value + root.model.source-range.duration.value;
+
     // Mid-gesture the projection still holds committed values; the live
     // resolution is mirrored in PreviewStore by whoever drives the gesture.
     private property <bool> live: PreviewStore.gesture-active
         && PreviewStore.gesture-clip == model.id
         && PreviewStore.gesture.valid;
-    private property <float> pos-x: live ? PreviewStore.gesture.position-x : model.transform-position-x;
-    private property <float> pos-y: live ? PreviewStore.gesture.position-y : model.transform-position-y;
-    private property <float> scale-v: live ? PreviewStore.gesture.scale : model.transform-scale;
-    private property <float> rot-v: live ? PreviewStore.gesture.rotation : model.transform-rotation;
-    private property <float> opacity-v: live ? PreviewStore.gesture.opacity : model.transform-opacity;
+    private property <float> pos-x: live ? PreviewStore.gesture.position-x : sample.position-x;
+    private property <float> pos-y: live ? PreviewStore.gesture.position-y : sample.position-y;
+    private property <float> scale-v: live ? PreviewStore.gesture.scale : sample.scale;
+    private property <float> rot-v: live ? PreviewStore.gesture.rotation : sample.rotation;
+    private property <float> opacity-v: live ? PreviewStore.gesture.opacity : sample.opacity;
+
+    // Transient "keyframe added" chip: the worker bumps the epoch when a
+    // transform commit wrote keyframes (gesture on an animated clip — M2
+    // compose semantics), which is otherwise easy to miss.
+    private property <int> kf-epoch: EditorStore.keyframe-commit-epoch;
+    private property <bool> badge-visible: false;
+
+    changed kf-epoch => {
+        root.badge-visible = true;
+    }
+
+    badge-timer := Timer {
+        interval: 2.5s;
+        running: root.badge-visible;
+        triggered => {
+            root.badge-visible = false;
+        }
+    }
 
     // One funnel for every row, in normalized model units. Previews render
     // as an uncommitted worker override (no history, projection frozen);
     // commits land one undoable SetClipTransform — unless nothing changed
-    // (slider released without motion, Enter on the same value, reset of an
-    // already-default property), which only drops any active override.
+    // against the playhead sample (slider released without motion, Enter on
+    // the same value, reset of an already-default property), which only
+    // drops any active override.
     function apply(px: float, py: float, s: float, r: float, o: float, commit: bool) {
         if (commit) {
-            if (px == model.transform-position-x
-                && py == model.transform-position-y
-                && s == model.transform-scale
-                && r == model.transform-rotation
-                && o == model.transform-opacity) {
+            if (px == sample.position-x
+                && py == sample.position-y
+                && s == sample.scale
+                && r == sample.rotation
+                && o == sample.opacity) {
                 if (PreviewStore.gesture-active && PreviewStore.gesture-clip == model.id) {
                     EditorStore.on-preview-override-cleared(TimelineStore.playhead-tick);
                 }
@@ -157,9 +218,65 @@ export component TransformInspector inherits VerticalLayout {
         }
     }
 
-    CutlassText {
-        text: "Transform";
-        style: AppStore.theme.typography.heading-sm;
+    // Diamond toggle for one property: on a keyframe ⇒ remove it; anywhere
+    // else ⇒ write one at the playhead holding the value currently shown
+    // (the sample), so toggling never visibly changes the frame.
+    function toggle-kf(param: string, on-keyframe: bool, vx: float, vy: float) {
+        if (on-keyframe) {
+            InspectorBackend.remove-param-keyframe(model.id, param, TimelineStore.playhead-tick);
+        } else {
+            InspectorBackend.set-param-keyframe(
+                model.id, param, TimelineStore.playhead-tick, vx, vy, 0);
+        }
+    }
+
+    // Re-ease the keyframe under the playhead: same tick + value (the
+    // sample IS the keyframe value there), new outgoing curve.
+    function ease-kf(param: string, easing: int, vx: float, vy: float) {
+        InspectorBackend.set-param-keyframe(
+            model.id, param, TimelineStore.playhead-tick, vx, vy, easing);
+    }
+
+    HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.sm;
+        alignment: LayoutAlignment.start;
+
+        CutlassText {
+            text: "Transform";
+            style: AppStore.theme.typography.heading-sm;
+        }
+
+        if root.badge-visible: Rectangle {
+            border-radius: AppStore.theme.metrics.radius.sm;
+            background: #00E5C71f;
+
+            HorizontalLayout {
+                padding-left: AppStore.theme.metrics.spacing.sm;
+                padding-right: AppStore.theme.metrics.spacing.sm;
+                spacing: AppStore.theme.metrics.spacing.xs;
+
+                Path {
+                    width: 7px;
+                    height: 100%;
+                    viewbox-width: 10;
+                    viewbox-height: 10;
+                    fill: #00E5C7;
+
+                    MoveTo { x: 5; y: 0.8; }
+                    LineTo { x: 9.2; y: 5; }
+                    LineTo { x: 5; y: 9.2; }
+                    LineTo { x: 0.8; y: 5; }
+                    Close { }
+                }
+
+                CutlassText {
+                    text: "Keyframe added";
+                    style: AppStore.theme.typography.caption;
+                    foreground: #00E5C7;
+                    vertical-alignment: TextVerticalAlignment.center;
+                }
+            }
+        }
     }
 
     TransformRow {
@@ -169,11 +286,20 @@ export component TransformInspector inherits VerticalLayout {
         minimum: -root.canvas-w;
         maximum: root.canvas-w;
         reset-value: 0;
+        kf: root.sample.position-row;
+        kf-can-toggle: root.playhead-inside;
         preview(v) => {
             root.apply(v / root.canvas-w, root.pos-y, root.scale-v, root.rot-v, root.opacity-v, false);
         }
         commit(v) => {
             root.apply(v / root.canvas-w, root.pos-y, root.scale-v, root.rot-v, root.opacity-v, true);
+        }
+        // Position is one vec2 param: either axis row keyframes both.
+        kf-toggle => {
+            root.toggle-kf("position", root.sample.position-row.on-keyframe, root.pos-x, root.pos-y);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("position", e, root.pos-x, root.pos-y);
         }
     }
 
@@ -184,11 +310,19 @@ export component TransformInspector inherits VerticalLayout {
         minimum: -root.canvas-h;
         maximum: root.canvas-h;
         reset-value: 0;
+        kf: root.sample.position-row;
+        kf-can-toggle: root.playhead-inside;
         preview(v) => {
             root.apply(root.pos-x, v / root.canvas-h, root.scale-v, root.rot-v, root.opacity-v, false);
         }
         commit(v) => {
             root.apply(root.pos-x, v / root.canvas-h, root.scale-v, root.rot-v, root.opacity-v, true);
+        }
+        kf-toggle => {
+            root.toggle-kf("position", root.sample.position-row.on-keyframe, root.pos-x, root.pos-y);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("position", e, root.pos-x, root.pos-y);
         }
     }
 
@@ -201,11 +335,19 @@ export component TransformInspector inherits VerticalLayout {
         minimum: 1;
         maximum: 400;
         reset-value: 100;
+        kf: root.sample.scale-row;
+        kf-can-toggle: root.playhead-inside;
         preview(v) => {
             root.apply(root.pos-x, root.pos-y, max(v, 1) / 100, root.rot-v, root.opacity-v, false);
         }
         commit(v) => {
             root.apply(root.pos-x, root.pos-y, max(v, 1) / 100, root.rot-v, root.opacity-v, true);
+        }
+        kf-toggle => {
+            root.toggle-kf("scale", root.sample.scale-row.on-keyframe, root.scale-v, 0);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("scale", e, root.scale-v, 0);
         }
     }
 
@@ -216,11 +358,19 @@ export component TransformInspector inherits VerticalLayout {
         minimum: -180;
         maximum: 180;
         reset-value: 0;
+        kf: root.sample.rotation-row;
+        kf-can-toggle: root.playhead-inside;
         preview(v) => {
             root.apply(root.pos-x, root.pos-y, root.scale-v, v, root.opacity-v, false);
         }
         commit(v) => {
             root.apply(root.pos-x, root.pos-y, root.scale-v, v, root.opacity-v, true);
+        }
+        kf-toggle => {
+            root.toggle-kf("rotation", root.sample.rotation-row.on-keyframe, root.rot-v, 0);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("rotation", e, root.rot-v, 0);
         }
     }
 
@@ -231,11 +381,19 @@ export component TransformInspector inherits VerticalLayout {
         minimum: 0;
         maximum: 100;
         reset-value: 100;
+        kf: root.sample.opacity-row;
+        kf-can-toggle: root.playhead-inside;
         preview(v) => {
             root.apply(root.pos-x, root.pos-y, root.scale-v, root.rot-v, clamp(v, 0, 100) / 100, false);
         }
         commit(v) => {
             root.apply(root.pos-x, root.pos-y, root.scale-v, root.rot-v, clamp(v, 0, 100) / 100, true);
+        }
+        kf-toggle => {
+            root.toggle-kf("opacity", root.sample.opacity-row.on-keyframe, root.opacity-v, 0);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("opacity", e, root.opacity-v, 0);
         }
     }
 }

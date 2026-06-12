@@ -1,0 +1,201 @@
+// The CapCut keyframe cluster for one inspector property row (keyframes
+// roadmap Phase 1): ◀ jumps the playhead to the previous keyframe, the
+// diamond toggles a keyframe at the playhead (filled = the playhead sits on
+// one, hollow accent = the property is animated elsewhere, hollow gray =
+// constant), ▶ jumps to the next keyframe. When the playhead is on a
+// keyframe an easing flyout appears for that keyframe's outgoing segment.
+//
+// Pure presentation: the parent owns the param identity and the commit
+// (`toggle` / `jump` / `set-easing` route to `InspectorBackend`).
+
+import { AppStore } from "../../store/index.slint";
+import { CutlassText } from "../../components/index.slint";
+import { ParamRowState } from "../../lib/inspector-backend.slint";
+import { AppState } from "../../state.slint";
+
+component JumpArrow inherits Rectangle {
+    // Tick to jump to; < 0 disables the arrow.
+    in property <int> target;
+    // Mirrors the triangle: false = ◀ (prev), true = ▶ (next).
+    in property <bool> forward;
+
+    callback jump(tick: int);
+
+    private property <bool> active: root.target >= 0;
+
+    width: 14px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: ta.has-hover && active ? #ffffff14 : transparent;
+
+    Path {
+        width: 6px;
+        height: 8px;
+        viewbox-width: 6;
+        viewbox-height: 8;
+        fill: root.active ? AppStore.theme.text.secondary : #ffffff24;
+
+        MoveTo { x: root.forward ? 0 : 6; y: 0; }
+        LineTo { x: root.forward ? 0 : 6; y: 8; }
+        LineTo { x: root.forward ? 6 : 0; y: 4; }
+        Close { }
+    }
+
+    ta := TouchArea {
+        enabled: root.active;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.jump(root.target);
+            AppState.refocus-shortcuts();
+        }
+    }
+}
+
+export component KeyframeControl inherits HorizontalLayout {
+    in property <ParamRowState> state;
+    // Whether the diamond may add/remove at the playhead (the playhead is
+    // inside the clip; the engine rejects keyframes outside it).
+    in property <bool> can-toggle: true;
+
+    // Add (or remove, when `state.on-keyframe`) a keyframe at the playhead.
+    callback toggle();
+    // Move the playhead to a neighboring keyframe's tick.
+    callback jump(tick: int);
+    // Re-ease the keyframe under the playhead (0 linear … 3 ease-in-out).
+    callback set-easing(easing: int);
+
+    private property <color> accent: #00E5C7;
+    private property <[string]> easing-names: ["Linear", "Ease in", "Ease out", "Ease in & out"];
+
+    spacing: AppStore.theme.metrics.spacing.none;
+    alignment: LayoutAlignment.center;
+
+    JumpArrow {
+        target: root.state.prev-tick;
+        forward: false;
+        jump(tick) => {
+            root.jump(tick);
+        }
+    }
+
+    diamond := Rectangle {
+        width: 18px;
+        border-radius: AppStore.theme.metrics.radius.sm;
+        background: diamond-ta.has-hover && root.can-toggle ? #ffffff14 : transparent;
+        opacity: root.can-toggle ? 1.0 : 0.4;
+
+        Path {
+            width: 9px;
+            height: 9px;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            fill: root.state.on-keyframe ? root.accent : transparent;
+            stroke: root.state.on-keyframe
+                ? root.accent
+                : (root.state.animated ? root.accent : AppStore.theme.text.muted);
+            stroke-width: 1.2px;
+
+            MoveTo { x: 5; y: 0.8; }
+            LineTo { x: 9.2; y: 5; }
+            LineTo { x: 5; y: 9.2; }
+            LineTo { x: 0.8; y: 5; }
+            Close { }
+        }
+
+        diamond-ta := TouchArea {
+            enabled: root.can-toggle;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                root.toggle();
+                AppState.refocus-shortcuts();
+            }
+        }
+    }
+
+    JumpArrow {
+        target: root.state.next-tick;
+        forward: true;
+        jump(tick) => {
+            root.jump(tick);
+        }
+    }
+
+    // Easing flyout: a fixed-width slot so rows don't reflow; the trigger
+    // only renders (and reacts) while the playhead sits on a keyframe.
+    easing-slot := Rectangle {
+        width: 16px;
+        border-radius: AppStore.theme.metrics.radius.sm;
+        background: easing-ta.has-hover && root.state.on-keyframe ? #ffffff14 : transparent;
+
+        if root.state.on-keyframe: CutlassText {
+            width: 100%;
+            height: 100%;
+            text: "~";
+            style: AppStore.theme.typography.label;
+            // Non-linear easing reads as "configured", like the diamond.
+            foreground: root.state.easing != 0 ? root.accent : AppStore.theme.text.secondary;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        easing-ta := TouchArea {
+            enabled: root.state.on-keyframe;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                easing-popup.show();
+            }
+        }
+
+        easing-popup := PopupWindow {
+            x: -120px + 16px;
+            y: parent.height + 4px;
+            width: 120px;
+            height: easing-list.preferred-height + 2 * AppStore.theme.metrics.spacing.sm;
+            close-policy: PopupClosePolicy.close-on-click-outside;
+
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                background: AppStore.theme.panel.background;
+                border-radius: AppStore.theme.metrics.radius.md;
+                border-width: 1px;
+                border-color: #ffffff1f;
+                drop-shadow-blur: 24px;
+                drop-shadow-color: #00000080;
+                drop-shadow-offset-y: 6px;
+
+                easing-list := VerticalLayout {
+                    padding: AppStore.theme.metrics.spacing.sm;
+                    spacing: 0;
+
+                    for name[idx] in root.easing-names: Rectangle {
+                        height: 26px;
+                        border-radius: AppStore.theme.metrics.radius.sm;
+                        background: idx == root.state.easing
+                            ? #00E5C71f
+                            : (row-ta.has-hover ? #ffffff10 : transparent);
+
+                        CutlassText {
+                            x: AppStore.theme.metrics.spacing.sm;
+                            width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+                            height: parent.height;
+                            vertical-alignment: center;
+                            text: name;
+                            style: AppStore.theme.typography.body;
+                            foreground: idx == root.state.easing
+                                ? root.accent
+                                : AppStore.theme.text.primary;
+                        }
+
+                        row-ta := TouchArea {
+                            clicked => {
+                                root.set-easing(idx);
+                                easing-popup.close();
+                                AppState.refocus-shortcuts();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

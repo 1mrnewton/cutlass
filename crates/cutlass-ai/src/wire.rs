@@ -16,7 +16,10 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped whenever the prompt-visible tool surface changes shape.
 /// The snapshot test in `tests/tool_schema.rs` makes drift a reviewed diff.
-pub const TOOL_SCHEMA_VERSION: u32 = 1;
+///
+/// 2: M2 keyframe commands (`set_param_keyframe`, `remove_param_keyframe`,
+///    `set_param_constant`).
+pub const TOOL_SCHEMA_VERSION: u32 = 2;
 
 /// Track lane categories the agent may create or target.
 ///
@@ -141,6 +144,80 @@ pub struct SetClipTransform {
     pub opacity: Option<f64>,
 }
 
+/// An animatable clip property the keyframe commands can address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WireClipParam {
+    /// Canvas placement of the content center (vec2: use the `position`
+    /// argument, not `value`).
+    Position,
+    /// Uniform scale (1.0 = fit inside the canvas).
+    Scale,
+    /// Clockwise rotation in degrees.
+    Rotation,
+    /// Layer opacity 0.0–1.0.
+    Opacity,
+}
+
+/// Interpolation toward the next keyframe. (Custom bezier curves exist in
+/// the engine but are inspector-only; the agent surface stays simple.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WireEasing {
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+}
+
+/// Add or replace a keyframe on one animatable clip property, making the
+/// property animate over time. The first keyframe on a property turns its
+/// fixed value into a curve.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SetParamKeyframe {
+    pub clip: u64,
+    pub param: WireClipParam,
+    /// Timeline position of the keyframe, in seconds. Must fall inside the
+    /// clip.
+    pub at: f64,
+    /// New value for `scale` / `rotation` / `opacity`. Ignored for
+    /// `position`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    /// New `[x, y]` for `position` (fractions of canvas size from center,
+    /// +x right, +y down). Ignored for scalar params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<[f64; 2]>,
+    /// Interpolation toward the next keyframe. Defaults to linear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub easing: Option<WireEasing>,
+}
+
+/// Remove the keyframe at exactly a timeline position on one property.
+/// Removing the last keyframe freezes the property at that value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoveParamKeyframe {
+    pub clip: u64,
+    pub param: WireClipParam,
+    /// Timeline position of the keyframe to remove, in seconds.
+    pub at: f64,
+}
+
+/// Set one animatable property to a fixed value, removing all its
+/// keyframes (stops the animation).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SetParamConstant {
+    pub clip: u64,
+    pub param: WireClipParam,
+    /// New value for `scale` / `rotation` / `opacity`. Ignored for
+    /// `position`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    /// New `[x, y]` for `position`. Ignored for scalar params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<[f64; 2]>,
+}
+
 /// Split a clip at a timeline position into two abutting clips.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SplitClip {
@@ -260,6 +337,9 @@ pub enum WireCommand {
     AddGenerated(AddGenerated),
     SetGenerator(SetGenerator),
     SetClipTransform(SetClipTransform),
+    SetParamKeyframe(SetParamKeyframe),
+    RemoveParamKeyframe(RemoveParamKeyframe),
+    SetParamConstant(SetParamConstant),
     SplitClip(SplitClip),
     TrimClip(TrimClip),
     MoveClip(MoveClip),
@@ -304,6 +384,9 @@ impl WireCommand {
             WireCommand::AddGenerated(a) => track(&mut a.track),
             WireCommand::SetGenerator(a) => clip(&mut a.clip),
             WireCommand::SetClipTransform(a) => clip(&mut a.clip),
+            WireCommand::SetParamKeyframe(a) => clip(&mut a.clip),
+            WireCommand::RemoveParamKeyframe(a) => clip(&mut a.clip),
+            WireCommand::SetParamConstant(a) => clip(&mut a.clip),
             WireCommand::SplitClip(a) => clip(&mut a.clip),
             WireCommand::TrimClip(a) => clip(&mut a.clip),
             WireCommand::MoveClip(a) => {
@@ -406,6 +489,12 @@ tools! {
         "Replace a generated clip's content: change a title's text (styling preserved) or recolor a solid/shape. Not valid for media clips.";
     "set_clip_transform" => SetClipTransform(SetClipTransform),
         "Change a clip's placement on the canvas: position, scale, rotation, opacity. Omitted fields keep their current value. Not valid on audio tracks.";
+    "set_param_keyframe" => SetParamKeyframe(SetParamKeyframe),
+        "Add or replace a keyframe on a clip property (position, scale, rotation, opacity) at a timeline position in seconds, animating it over time. Use 'value' for scalar params, 'position' for position.";
+    "remove_param_keyframe" => RemoveParamKeyframe(RemoveParamKeyframe),
+        "Remove the keyframe at a timeline position (seconds) on a clip property. Removing the last keyframe freezes the property at that value.";
+    "set_param_constant" => SetParamConstant(SetParamConstant),
+        "Set a clip property to a fixed value and remove all its keyframes (stops its animation).";
     "split_clip" => SplitClip(SplitClip),
         "Split a clip at a timeline position (seconds) into two abutting clips.";
     "trim_clip" => TrimClip(TrimClip),
@@ -533,7 +622,7 @@ mod tests {
     #[test]
     fn tool_specs_cover_every_command_with_object_schemas() {
         let specs = tool_specs();
-        assert_eq!(specs.len(), 17);
+        assert_eq!(specs.len(), 20);
         for spec in &specs {
             assert!(!spec.description.is_empty(), "{} missing description", spec.name);
             assert_eq!(

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Animated clips no longer shake.** Moving a keyframed layer (e.g. a
+  title gliding across the canvas) shimmered in preview and export: the
+  layer was translated by sub-pixel amounts every frame through the
+  bilinear sampler, so glyph edges pulsed between sharp and blurred.
+  Unrotated layers now pixel-snap their placement — text stays bit-crisp
+  while it moves.
+- **Export frame rates above the timeline rate now animate at the output
+  rate.** Keyframed transforms sample at the exact output frame time
+  (sub-frame), so a 60 fps export of a 24 fps timeline renders 60 Hz
+  motion instead of repeating 24 fps positions in an uneven 3-2 cadence.
+- **The agent's generated-clip tools work with small local models.** Tool
+  schemas are fully inlined (no `$ref` indirection, schema v7), the
+  `generator` argument documents its exact JSON shapes, and rejections
+  carry a corrective example — adding a text clip via gemma-class models
+  no longer dead-ends.
+
 ### Crop & flip (M1)
 
 - Clips can be **cropped** (trim a fraction off each edge; the kept region

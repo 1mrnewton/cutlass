@@ -11,8 +11,8 @@ use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use cutlass_commands::{Command, EditCommand, EditOutcome, ProjectCommand};
 use cutlass_engine::{ApplyOutcome, Engine, EngineConfig, EngineError, ExportSettings};
 use cutlass_models::{
-    ClipId, ClipParam, ClipSource, ClipTransform, Easing, Generator, MediaId, ParamValue, Project,
-    Rational, RationalTime, TimeRange, Track, TrackId, TrackKind, resample,
+    AnimatedTransform, ClipId, ClipParam, ClipSource, ClipTransform, Easing, Generator, MediaId,
+    ParamValue, Project, Rational, RationalTime, TimeRange, Track, TrackId, TrackKind, resample,
 };
 use tracing::{error, info, warn};
 
@@ -147,6 +147,19 @@ enum WorkerMsg {
         param: ClipParam,
         tick: i64,
     },
+    /// Move every keyframe sitting at `from_tick` (across all animated
+    /// properties of `clip`) to `to_tick` — the timeline diamond drag
+    /// (keyframes roadmap Phase 2). One history group: a single undo puts
+    /// the merged diamond back.
+    RetimeKeyframes {
+        clip: String,
+        from_tick: i64,
+        to_tick: i64,
+    },
+    /// Remove every keyframe sitting at `tick` across all animated
+    /// properties of `clip` (timeline diamond right-click). One history
+    /// group.
+    RemoveKeyframesAt { clip: String, tick: i64 },
     /// Split `clip` (raw id) at `at_tick` (sequence ticks). The UI gates on
     /// the playhead being strictly inside the clip; the engine re-validates.
     SplitClip { clip: String, at_tick: i64 },
@@ -425,6 +438,18 @@ impl WorkerHandle {
         let _ = self
             .tx
             .send(WorkerMsg::RemoveParamKeyframe { clip, param, tick });
+    }
+
+    pub fn retime_keyframes(&self, clip: String, from_tick: i64, to_tick: i64) {
+        let _ = self.tx.send(WorkerMsg::RetimeKeyframes {
+            clip,
+            from_tick,
+            to_tick,
+        });
+    }
+
+    pub fn remove_keyframes_at(&self, clip: String, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::RemoveKeyframesAt { clip, tick });
     }
 
     pub fn set_transform(&self, clip: String, transform: ClipTransform, tick: i64) {
@@ -768,6 +793,14 @@ fn worker_loop(
                     &ui,
                 )
             }
+            WorkerMsg::RetimeKeyframes {
+                clip,
+                from_tick,
+                to_tick,
+            } => retime_keyframes_and_publish(engine, &clip, from_tick, to_tick, tl_rate, &ui),
+            WorkerMsg::RemoveKeyframesAt { clip, tick } => {
+                remove_keyframes_at_and_publish(engine, &clip, tick, tl_rate, &ui)
+            }
             WorkerMsg::SplitClip { clip, at_tick } => {
                 split_clip_and_publish(engine, &clip, at_tick, *linkage, &ui)
             }
@@ -945,6 +978,8 @@ fn mutation_redraws_preview(msg: &WorkerMsg) -> bool {
             | WorkerMsg::SetGenerator { .. }
             | WorkerMsg::SetParamKeyframe { .. }
             | WorkerMsg::RemoveParamKeyframe { .. }
+            | WorkerMsg::RetimeKeyframes { .. }
+            | WorkerMsg::RemoveKeyframesAt { .. }
             | WorkerMsg::SplitClip { .. }
             | WorkerMsg::PasteAt { .. }
             | WorkerMsg::DuplicateClip { .. }
@@ -1086,6 +1121,136 @@ fn remove_param_keyframe_and_publish(
         }
         Err(e) => error!(%clip_id, ?param, "remove param keyframe failed: {e}"),
     }
+}
+
+/// Every animated property with a keyframe exactly at the clip-relative
+/// `rel_tick`, with that keyframe's value and easing — the slice of one
+/// merged timeline diamond (the timeline draws one diamond per tick across
+/// all properties, CapCut-style).
+fn keyframes_at(
+    transform: &AnimatedTransform,
+    rel_tick: i64,
+) -> Vec<(ClipParam, ParamValue, Easing)> {
+    let mut hits = Vec::new();
+    if let Some(kf) = transform
+        .position
+        .keyframes()
+        .iter()
+        .find(|k| k.tick == rel_tick)
+    {
+        hits.push((ClipParam::Position, ParamValue::Vec2(kf.value), kf.easing));
+    }
+    let scalars = [
+        (ClipParam::Scale, &transform.scale),
+        (ClipParam::Rotation, &transform.rotation),
+        (ClipParam::Opacity, &transform.opacity),
+    ];
+    for (param, p) in scalars {
+        if let Some(kf) = p.keyframes().iter().find(|k| k.tick == rel_tick) {
+            hits.push((param, ParamValue::Scalar(kf.value), kf.easing));
+        }
+    }
+    hits
+}
+
+/// Move every keyframe at `from_tick` to `to_tick` (timeline diamond drag,
+/// keyframes roadmap Phase 2): per property a remove + re-set with the same
+/// value and easing, all in one history group so a single undo puts the
+/// diamond back. A keyframe already sitting at the destination on the same
+/// property is replaced (the diamonds merge, like CapCut). The engine
+/// re-validates that `to_tick` falls inside the clip.
+fn retime_keyframes_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    from_tick: i64,
+    to_tick: i64,
+    tl_rate: Rational,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "retime-keyframes ignored: unparsable clip id");
+        return;
+    };
+    if from_tick == to_tick {
+        return;
+    }
+    let Some(model) = engine.project().clip(clip_id) else {
+        error!(%clip_id, "retime-keyframes ignored: clip not on the timeline");
+        return;
+    };
+    let moved = keyframes_at(&model.transform, from_tick - model.timeline.start.value);
+    if moved.is_empty() {
+        error!(%clip_id, from_tick, "retime-keyframes ignored: no keyframes at tick");
+        return;
+    }
+
+    engine.begin_group();
+    for (param, value, easing) in moved {
+        if let Err(e) = engine.apply(Command::Edit(EditCommand::RemoveParamKeyframe {
+            clip: clip_id,
+            param,
+            at: RationalTime::new(from_tick, tl_rate),
+        })) {
+            error!(%clip_id, ?param, "retime keyframes failed removing: {e}");
+            engine.rollback_group();
+            return;
+        }
+        if let Err(e) = engine.apply(Command::Edit(EditCommand::SetParamKeyframe {
+            clip: clip_id,
+            param,
+            at: RationalTime::new(to_tick, tl_rate),
+            value,
+            easing,
+        })) {
+            error!(%clip_id, ?param, "retime keyframes failed setting: {e}");
+            engine.rollback_group();
+            return;
+        }
+    }
+    engine.commit_group();
+    info!(%clip_id, from_tick, to_tick, "retimed keyframes");
+    publish_projection(engine, ui);
+}
+
+/// Remove every property's keyframe at `tick` (timeline diamond
+/// right-click) as one history group — one undo restores the whole merged
+/// diamond.
+fn remove_keyframes_at_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    tick: i64,
+    tl_rate: Rational,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "remove-keyframes ignored: unparsable clip id");
+        return;
+    };
+    let Some(model) = engine.project().clip(clip_id) else {
+        error!(%clip_id, "remove-keyframes ignored: clip not on the timeline");
+        return;
+    };
+    let hits = keyframes_at(&model.transform, tick - model.timeline.start.value);
+    if hits.is_empty() {
+        error!(%clip_id, tick, "remove-keyframes ignored: no keyframes at tick");
+        return;
+    }
+
+    engine.begin_group();
+    for (param, _, _) in hits {
+        if let Err(e) = engine.apply(Command::Edit(EditCommand::RemoveParamKeyframe {
+            clip: clip_id,
+            param,
+            at: RationalTime::new(tick, tl_rate),
+        })) {
+            error!(%clip_id, ?param, "remove keyframes failed: {e}");
+            engine.rollback_group();
+            return;
+        }
+    }
+    engine.commit_group();
+    info!(%clip_id, tick, "removed keyframes at tick");
+    publish_projection(engine, ui);
 }
 
 /// Playback read-ahead (playback roadmap Phase 2): with the queue idle after
@@ -2955,5 +3120,47 @@ fn render_frame(
             }
         }
         Err(e) => error!(tick, "preview frame failed: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `keyframes_at` slices one merged timeline diamond: only the
+    /// properties keyframed exactly at the tick, each with its own value
+    /// and easing, position as vec2.
+    #[test]
+    fn keyframes_at_collects_per_property_hits() {
+        let mut t = AnimatedTransform::identity();
+        t.set_param_keyframe(ClipParam::Scale, 10, ParamValue::Scalar(2.0), Easing::EaseIn)
+            .unwrap();
+        t.set_param_keyframe(ClipParam::Scale, 20, ParamValue::Scalar(3.0), Easing::Linear)
+            .unwrap();
+        t.set_param_keyframe(
+            ClipParam::Position,
+            10,
+            ParamValue::Vec2([0.1, -0.2]),
+            Easing::Linear,
+        )
+        .unwrap();
+        t.set_param_keyframe(ClipParam::Opacity, 30, ParamValue::Scalar(0.5), Easing::Linear)
+            .unwrap();
+
+        let hits = keyframes_at(&t, 10);
+        assert_eq!(
+            hits,
+            vec![
+                (
+                    ClipParam::Position,
+                    ParamValue::Vec2([0.1, -0.2]),
+                    Easing::Linear
+                ),
+                (ClipParam::Scale, ParamValue::Scalar(2.0), Easing::EaseIn),
+            ]
+        );
+
+        assert!(keyframes_at(&t, 15).is_empty());
+        assert_eq!(keyframes_at(&t, 30).len(), 1);
     }
 }

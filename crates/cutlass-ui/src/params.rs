@@ -111,6 +111,24 @@ pub(crate) fn apply_sampled_transform(clip: &mut Clip, playhead: i32) {
     clip.transform_opacity = t.opacity;
 }
 
+/// Merged, deduped keyframe ticks (absolute, ascending) across every
+/// animated property — the timeline draws one diamond per tick on the
+/// selected clip (keyframes roadmap Phase 2), CapCut-style.
+pub(crate) fn merged_keyframe_ticks(clip: &Clip) -> slint::ModelRc<i32> {
+    let mut ticks: Vec<i32> = [
+        &clip.kf_position,
+        &clip.kf_scale,
+        &clip.kf_rotation,
+        &clip.kf_opacity,
+    ]
+    .iter()
+    .flat_map(|kfs| kfs.iter().map(|kf| kf.tick))
+    .collect();
+    ticks.sort_unstable();
+    ticks.dedup();
+    slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(ticks)))
+}
+
 /// Keyframe row state for one property at the playhead: drives the
 /// inspector's diamond (add/remove at playhead) and ◀ ▶ navigation.
 pub(crate) fn row_state(kfs: &slint::ModelRc<ParamKeyframe>, playhead: i32) -> ParamRowState {
@@ -253,6 +271,22 @@ mod tests {
         let curve = kfs(vec![eased, kf(20, 1.0)]);
         assert_eq!(row_state(&curve, 10).easing, 3);
         assert_eq!(row_state(&curve, 20).easing, 0);
+    }
+
+    #[test]
+    fn merged_ticks_dedup_across_properties_in_order() {
+        let mut c = clip(0, 100);
+        c.kf_scale = kfs(vec![kf(10, 1.0), kf(30, 2.0)]);
+        c.kf_opacity = kfs(vec![kf(5, 0.0), kf(30, 1.0)]);
+        let mut pos = kf(30, 0.1);
+        pos.value_y = 0.2;
+        c.kf_position = kfs(vec![pos]);
+
+        let merged = merged_keyframe_ticks(&c);
+        let ticks: Vec<i32> = merged.iter().collect();
+        assert_eq!(ticks, vec![5, 10, 30]);
+
+        assert_eq!(merged_keyframe_ticks(&clip(0, 10)).row_count(), 0);
     }
 
     #[test]

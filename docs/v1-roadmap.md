@@ -389,8 +389,9 @@ Detailed plan: `keyframes-roadmap.md`.
       `Param` sampling over projected curves — no republish per tick.
       Preview hit-test / selection box / gestures follow the sampled
       frame; a "Keyframe added" chip surfaces gesture-written keyframes.
-- [ ] **Timeline keyframe markers** on selected clips (diamonds on the
-      clip body; drag to retime — CapCut behavior).
+- [x] **Timeline keyframe markers** on selected clips (diamonds on the
+      clip body, all properties merged; drag to retime, right-click to
+      delete — each one undoable history group, CapCut behavior).
 - [ ] **Speed curves**: retime `speed` as a keyframable param →
       velocity-edit ramps; presets (montage, hero moment) as data.
       *Blocked on M1's speed field.*

@@ -1,0 +1,22 @@
+// Bridge between the timeline's keyframe diamonds and the engine worker
+// (keyframes roadmap Phase 2). The selected clip renders one diamond per
+// merged keyframe tick; dragging a diamond retimes every property's
+// keyframe at that tick, right-clicking removes them. Both land in Rust as
+// one history group — a single undo restores the diamond.
+import { Clip } from "../models/index.slint";
+
+export global KeyframeBackend {
+    // Merged, deduped keyframe ticks (ABSOLUTE sequence ticks, ascending)
+    // across all animated properties of `clip` — one diamond per tick,
+    // CapCut-style. Re-evaluates when the projected clip changes.
+    pure callback ticks(clip: Clip) -> [int];
+
+    // Move every keyframe at `from-tick` to `to-tick` (diamond drag
+    // commit). The UI clamps the target inside the clip; the engine
+    // re-validates. A keyframe already at the target on the same property
+    // is replaced (diamonds merge).
+    callback retime(clip-id: string, from-tick: int, to-tick: int);
+
+    // Remove every keyframe at `tick` (diamond right-click).
+    callback remove-at(clip-id: string, tick: int);
+}

@@ -1,6 +1,6 @@
 import { AppStore, EditorStore } from "../../store/index.slint";
 import { Clip, TrackKind } from "../../models/index.slint";
-import { TimelineLib, StripBackend, SelectionBackend } from "../../lib/index.slint";
+import { TimelineLib, StripBackend, SelectionBackend, KeyframeBackend } from "../../lib/index.slint";
 import { TimelineStore } from "../../store/timeline-store.slint";
 import { TimelineViewState } from "state.slint";
 import { AppState } from "../../state.slint";
@@ -382,5 +382,107 @@ export component ClipView inherits Rectangle {
             ? AppStore.theme.text.primary.with-alpha(0.35)
             : AppStore.theme.text.primary;
         border-radius: AppStore.theme.track-lane.clip.radius;
+    }
+
+    // --- keyframe diamonds (keyframes roadmap Phase 2) --------------------
+    // One diamond per merged keyframe tick across all animated properties,
+    // on the selected clip only (CapCut). Drag retimes every property's
+    // keyframe at that tick (the diamonds stay merged); right-click deletes
+    // them. Declared after the trim handles so a diamond near a clip edge
+    // wins the press.
+    //
+    // The diamonds themselves never move during the drag — a moving
+    // TouchArea under a held cursor feeds its own offset back into
+    // `mouse-x` (same trap as the clip move gesture). The grabbed diamond
+    // hides and a root-level ghost tracks the resolved target tick instead;
+    // the commit republishes the projection, which re-evaluates `ticks`.
+
+    private property <int> kf-drag-tick: -1; // grabbed diamond's tick; -1 ⇔ idle
+    private property <length> kf-drag-dx: 0px;
+    // Drag target snapped to whole ticks and clamped inside the clip (the
+    // engine rejects keyframes outside it).
+    private property <int> kf-drag-target: clamp(
+        root.kf-drag-tick + round(root.kf-drag-dx / (root.zoom * 1px)),
+        model.timeline-start.value,
+        model.timeline-start.value + model.source-range.duration.value - 1);
+
+    if is-selected && !dimmed: Rectangle {
+        for tick in KeyframeBackend.ticks(root.model): Rectangle {
+            property <bool> grabbed: root.kf-drag-tick == tick;
+
+            x: (tick - root.model.timeline-start.value) * root.zoom * 1px - self.width / 2;
+            y: (parent.height - self.height) / 2;
+            width: 14px;
+            height: 14px;
+
+            Path {
+                width: 9px;
+                height: 9px;
+                viewbox-width: 10;
+                viewbox-height: 10;
+                visible: !grabbed;
+                fill: #00E5C7;
+                stroke: kf-ta.has-hover ? #ffffff : #000000a0;
+                stroke-width: 1px;
+
+                MoveTo { x: 5; y: 0.8; }
+                LineTo { x: 9.2; y: 5; }
+                LineTo { x: 5; y: 9.2; }
+                LineTo { x: 0.8; y: 5; }
+                Close { }
+            }
+
+            kf-ta := TouchArea {
+                enabled: !root.track-locked;
+                mouse-cursor: MouseCursor.pointer;
+
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down
+                            && e.button == PointerEventButton.left) {
+                        AppState.refocus-shortcuts();
+                        root.kf-drag-tick = tick;
+                        root.kf-drag-dx = 0px;
+                    } else if (e.kind == PointerEventKind.up
+                            && e.button == PointerEventButton.left
+                            && grabbed) {
+                        if (root.kf-drag-target != tick) {
+                            KeyframeBackend.retime(
+                                root.model.id, tick, root.kf-drag-target);
+                        }
+                        root.kf-drag-tick = -1;
+                        root.kf-drag-dx = 0px;
+                    } else if (e.kind == PointerEventKind.down
+                            && e.button == PointerEventButton.right) {
+                        AppState.refocus-shortcuts();
+                        KeyframeBackend.remove-at(root.model.id, tick);
+                    }
+                }
+
+                moved => {
+                    if (grabbed) {
+                        root.kf-drag-dx = self.mouse-x - self.pressed-x;
+                    }
+                }
+            }
+        }
+    }
+
+    // Ghost of the grabbed diamond at the resolved target tick.
+    if kf-drag-tick >= 0: Path {
+        x: (root.kf-drag-target - model.timeline-start.value) * root.zoom * 1px - self.width / 2;
+        y: (parent.height - self.height) / 2;
+        width: 9px;
+        height: 9px;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        fill: #00E5C7;
+        stroke: #ffffff;
+        stroke-width: 1px;
+
+        MoveTo { x: 5; y: 0.8; }
+        LineTo { x: 9.2; y: 5; }
+        LineTo { x: 5; y: 9.2; }
+        LineTo { x: 0.8; y: 5; }
+        Close { }
     }
 }

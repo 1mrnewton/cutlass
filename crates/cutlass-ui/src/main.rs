@@ -1220,6 +1220,24 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             kf_remove_handle.remove_param_keyframe(clip_id.to_string(), param, i64::from(tick));
         });
+
+    // Timeline keyframe diamonds (keyframes roadmap Phase 2): merged tick
+    // model for the selected clip, drag-retime, right-click delete.
+    app.global::<KeyframeBackend>()
+        .on_ticks(|clip| params::merged_keyframe_ticks(&clip));
+    let kf_retime_handle = preview_worker.handle();
+    app.global::<KeyframeBackend>()
+        .on_retime(move |clip_id, from_tick, to_tick| {
+            kf_retime_handle.retime_keyframes(
+                clip_id.to_string(),
+                i64::from(from_tick),
+                i64::from(to_tick),
+            );
+        });
+    let kf_remove_at_handle = preview_worker.handle();
+    app.global::<KeyframeBackend>().on_remove_at(move |clip_id, tick| {
+        kf_remove_at_handle.remove_keyframes_at(clip_id.to_string(), i64::from(tick));
+    });
     let set_text_handle = preview_worker.handle();
     app.global::<InspectorBackend>()
         .on_set_text_generator(move |_track_id, clip_id, content, style| {

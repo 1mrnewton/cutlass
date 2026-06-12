@@ -105,13 +105,23 @@ the feature-area plan for `v1-roadmap.md` § M2.
       gesture writes keyframes and the inspector shows a transient
       "Keyframe added" chip.
 
-## Phase 2 — Timeline keyframe markers
+## Phase 2 — Timeline keyframe markers ✅
 
-- [ ] **Diamonds on the selected clip's body** at keyframe positions
-      (all animated properties merged, CapCut-style).
-- [ ] **Drag a diamond to retime** the keyframe (new command or
-      remove+set composition — decide with the gesture).
-- [ ] **Right-click delete** on a diamond.
+- [x] **Diamonds on the selected clip's body** at keyframe positions
+      (all animated properties merged, CapCut-style). The projection's
+      `kf-*` curves feed a pure `KeyframeBackend.ticks` callback (merged +
+      deduped in Rust); diamonds only render on selected, unlocked clips.
+- [x] **Drag a diamond to retime** the keyframe — decided for the
+      remove+set composition over a new command: the worker collects every
+      property keyframed at the grabbed tick and replays remove + set
+      (same value and easing) per property inside one history group, so
+      one undo puts the merged diamond back and a keyframe already at the
+      target is replaced (diamonds merge). The gesture drags a root-level
+      ghost snapped to ticks and clamped inside the clip; the grabbed
+      diamond itself never moves (a moving TouchArea would feed back into
+      its own `mouse-x`).
+- [x] **Right-click delete** on a diamond: removes every property's
+      keyframe at that tick, also one history group.
 
 ## Phase 3 — Speed curves (blocked on M1)
 

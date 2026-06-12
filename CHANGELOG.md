@@ -27,6 +27,10 @@
   now track the playhead-sampled value on animated clips, so what you
   grab is what's rendered; a transient "Keyframe added" chip appears
   when a gesture writes a keyframe.
+- Timeline keyframe markers: selected clips show a diamond per keyframe
+  tick (all animated properties merged). Drag a diamond to retime the
+  keyframes under it, right-click to delete them — either way one undo
+  restores everything.
 
 ## [alpha-0.1.0] — 2026-06-11
 

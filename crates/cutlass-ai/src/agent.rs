@@ -481,10 +481,39 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        WireCommand::AddMarker(a) => {
+            let name = match &a.name {
+                Some(name) if !name.is_empty() => format!(" '{name}'"),
+                _ => String::new(),
+            };
+            let color = a
+                .color
+                .map(|c| format!(" ({c:?})").to_lowercase())
+                .unwrap_or_default();
+            format!("added marker{name} at {}{color}", secs(a.at))
+        }
+        WireCommand::RemoveMarker(a) => format!("removed marker {}", a.marker),
+        WireCommand::SetMarker(a) => {
+            let mut parts = Vec::new();
+            if let Some(at) = a.at {
+                parts.push(format!("moved to {}", secs(at)));
+            }
+            if let Some(name) = &a.name {
+                parts.push(format!("named '{name}'"));
+            }
+            if let Some(color) = a.color {
+                parts.push(format!("colored {color:?}").to_lowercase());
+            }
+            if parts.is_empty() {
+                parts.push("unchanged".into());
+            }
+            format!("set marker {} {}", a.marker, parts.join(", "))
+        }
     };
     match outcome {
         Some(EditOutcome::Created(id)) => line.push_str(&format!(" (new clip {})", id.raw())),
         Some(EditOutcome::CreatedTrack(id)) => line.push_str(&format!(" (track {})", id.raw())),
+        Some(EditOutcome::CreatedMarker(id)) => line.push_str(&format!(" (marker {})", id.raw())),
         _ => {}
     }
     line
@@ -534,6 +563,7 @@ mod tests {
             frame_rate_fps: 24.0,
             duration_seconds: 10.0,
             tracks: vec![],
+            markers: vec![],
             media: vec![],
         };
         let ctx = EditorContext {

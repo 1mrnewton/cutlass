@@ -14,17 +14,18 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use cutlass_models::{
-    Clip as EngineClip, ClipSource, Generator, Keyframe, Lerp, MediaSource, Param,
-    Project as EngineProject, Rational as EngineRational, RationalTime as EngineTime, TextAlignH,
-    TextAlignV, TextCase, TextStyle as EngineTextStyle, TimeRange as EngineRange,
-    Track as EngineTrack, TrackKind as EngineKind, rate_eq, resample,
+    Clip as EngineClip, ClipSource, Generator, Keyframe, Lerp, Marker as EngineMarker,
+    MediaSource, Param, Project as EngineProject,
+    Rational as EngineRational, RationalTime as EngineTime, TextAlignH, TextAlignV, TextCase,
+    TextStyle as EngineTextStyle, TimeRange as EngineRange, Track as EngineTrack,
+    TrackKind as EngineKind, rate_eq, resample,
 };
 use slint::{Color, ModelRc, VecModel};
 
 use crate::params::easing_to_ui;
 use crate::{
     Clip, Media, ParamKeyframe, Project, Rational, RationalTime, Sequence, TextClipStyle,
-    TimeRange, Track, TrackKind,
+    TimeRange, TimelineMarker, Track, TrackKind,
 };
 
 /// Fallback canvas size when no video media has been imported yet. Mirrors the
@@ -74,6 +75,13 @@ pub fn project_to_slint(
             width,
             height,
             tracks: model(tracks),
+            markers: model(
+                timeline
+                    .markers()
+                    .iter()
+                    .map(marker_to_slint)
+                    .collect::<Vec<_>>(),
+            ),
         },
         media: model(pool),
         media_audio: model(audio_pool),
@@ -570,6 +578,16 @@ fn kind_color(kind: EngineKind) -> Color {
         EngineKind::Adjustment => (0x6C, 0x5B, 0x7B),
     };
     Color::from_rgb_u8(r, g, b)
+}
+
+fn marker_to_slint(marker: &EngineMarker) -> TimelineMarker {
+    let [r, g, b, a] = marker.color.rgba();
+    TimelineMarker {
+        id: marker.id.raw().to_string().into(),
+        tick: clamp_i32(marker.tick.value),
+        name: marker.name.clone().into(),
+        color: Color::from_argb_u8(a, r, g, b),
+    }
 }
 
 fn rational(rate: cutlass_models::Rational) -> Rational {

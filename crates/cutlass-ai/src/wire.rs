@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 ///    `set_param_constant`).
 /// 3: M1 clip speed (`set_clip_speed`).
 /// 4: M1 clip audio mix (`set_clip_audio`).
-pub const TOOL_SCHEMA_VERSION: u32 = 4;
+/// 5: M1 timeline markers (`add_marker`, `remove_marker`, `set_marker`).
+pub const TOOL_SCHEMA_VERSION: u32 = 5;
 
 /// Track lane categories the agent may create or target.
 ///
@@ -367,6 +368,59 @@ pub struct LinkClips {
     pub clips: Vec<u64>,
 }
 
+/// Marker flag colors (the editor's fixed palette).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WireMarkerColor {
+    Teal,
+    Blue,
+    Purple,
+    Pink,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+}
+
+/// Drop a named, colored marker on the timeline ruler — an anchor for
+/// navigation and for aligning edits ("cut at the marker", beat sync).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AddMarker {
+    /// Timeline position of the marker, in seconds.
+    pub at: f64,
+    /// Short label shown beside the flag (e.g. "Drop", "Beat 1"). Omit for
+    /// an unnamed marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Flag color. Omit to cycle the palette automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<WireMarkerColor>,
+}
+
+/// Remove a timeline marker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RemoveMarker {
+    /// The marker to remove.
+    pub marker: u64,
+}
+
+/// Move, rename, or recolor an existing timeline marker. Omitted fields
+/// keep their current value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SetMarker {
+    /// The marker to change.
+    pub marker: u64,
+    /// New timeline position in seconds. Omit to keep the position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<f64>,
+    /// New label ("" clears it). Omit to keep the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// New flag color. Omit to keep the color.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<WireMarkerColor>,
+}
+
 /// Every timeline edit the agent may request, as one tagged value.
 ///
 /// Tool calls arrive as `(name, arguments)` pairs and convert through
@@ -397,11 +451,14 @@ pub enum WireCommand {
     ShiftClips(ShiftClips),
     RippleInsert(RippleInsert),
     LinkClips(LinkClips),
+    AddMarker(AddMarker),
+    RemoveMarker(RemoveMarker),
+    SetMarker(SetMarker),
 }
 
 impl WireCommand {
-    /// Rewrite clip/track references through the given maps (ids absent
-    /// from a map pass through unchanged).
+    /// Rewrite clip/track/marker references through the given maps (ids
+    /// absent from a map pass through unchanged).
     ///
     /// This is what makes plan replay work: a plan is recorded against a
     /// sandbox where `add_track`/`split_clip` allocated sandbox-local ids;
@@ -412,6 +469,7 @@ impl WireCommand {
         &mut self,
         clip_map: &std::collections::HashMap<u64, u64>,
         track_map: &std::collections::HashMap<u64, u64>,
+        marker_map: &std::collections::HashMap<u64, u64>,
     ) {
         let clip = |id: &mut u64| {
             if let Some(mapped) = clip_map.get(id) {
@@ -420,6 +478,11 @@ impl WireCommand {
         };
         let track = |id: &mut u64| {
             if let Some(mapped) = track_map.get(id) {
+                *id = *mapped;
+            }
+        };
+        let marker = |id: &mut u64| {
+            if let Some(mapped) = marker_map.get(id) {
                 *id = *mapped;
             }
         };
@@ -449,6 +512,9 @@ impl WireCommand {
             WireCommand::ShiftClips(a) => track(&mut a.track),
             WireCommand::RippleInsert(a) => track(&mut a.track),
             WireCommand::LinkClips(a) => a.clips.iter_mut().for_each(clip),
+            WireCommand::AddMarker(_) => {}
+            WireCommand::RemoveMarker(a) => marker(&mut a.marker),
+            WireCommand::SetMarker(a) => marker(&mut a.marker),
         }
     }
 }
@@ -570,6 +636,12 @@ tools! {
         "Insert a trimmed range of media at a timeline position, shifting later clips right to make room. Times are in seconds.";
     "link_clips" => LinkClips(LinkClips),
         "Link two or more clips so they select, move, and trim together (replaces their previous links).";
+    "add_marker" => AddMarker(AddMarker),
+        "Drop a named, colored marker on the timeline ruler at a position in seconds. Omit color to cycle the palette.";
+    "remove_marker" => RemoveMarker(RemoveMarker),
+        "Remove a ruler marker by id.";
+    "set_marker" => SetMarker(SetMarker),
+        "Move, rename, or recolor a ruler marker. Omitted fields keep their current value.";
 }
 
 #[cfg(test)]
@@ -641,13 +713,14 @@ mod tests {
     fn remap_ids_rewrites_only_mapped_references() {
         let clip_map = std::collections::HashMap::from([(10u64, 99u64)]);
         let track_map = std::collections::HashMap::from([(2u64, 7u64)]);
+        let marker_map = std::collections::HashMap::from([(4u64, 40u64)]);
 
         let mut mv = WireCommand::MoveClip(MoveClip {
             clip: 10,
             to_track: 2,
             start: 1.0,
         });
-        mv.remap_ids(&clip_map, &track_map);
+        mv.remap_ids(&clip_map, &track_map, &marker_map);
         assert_eq!(
             mv,
             WireCommand::MoveClip(MoveClip {
@@ -661,11 +734,30 @@ mod tests {
         let mut link = WireCommand::LinkClips(LinkClips {
             clips: vec![10, 11],
         });
-        link.remap_ids(&clip_map, &track_map);
+        link.remap_ids(&clip_map, &track_map, &marker_map);
         assert_eq!(
             link,
             WireCommand::LinkClips(LinkClips {
                 clips: vec![99, 11],
+            })
+        );
+
+        // Marker references follow the marker map (sandbox add_marker ids
+        // land on the live engine's ids during plan replay).
+        let mut set = WireCommand::SetMarker(SetMarker {
+            marker: 4,
+            at: Some(2.0),
+            name: None,
+            color: None,
+        });
+        set.remap_ids(&clip_map, &track_map, &marker_map);
+        assert_eq!(
+            set,
+            WireCommand::SetMarker(SetMarker {
+                marker: 40,
+                at: Some(2.0),
+                name: None,
+                color: None,
             })
         );
     }
@@ -673,7 +765,7 @@ mod tests {
     #[test]
     fn tool_specs_cover_every_command_with_object_schemas() {
         let specs = tool_specs();
-        assert_eq!(specs.len(), 22);
+        assert_eq!(specs.len(), 25);
         for spec in &specs {
             assert!(!spec.description.is_empty(), "{} missing description", spec.name);
             assert_eq!(

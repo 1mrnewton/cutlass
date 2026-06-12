@@ -183,5 +183,22 @@ fn dispatch_edit(
             let inverse = edit::link_clips::execute(ctx, &clips)?;
             Ok((ApplyOutcome::Edited(EditOutcome::Updated(first)), Some(inverse)))
         }
+        EditCommand::AddMarker { at, name, color } => {
+            let (id, inverse) = edit::marker::add(ctx, at, name, color)?;
+            Ok((ApplyOutcome::Edited(EditOutcome::CreatedMarker(id)), Some(inverse)))
+        }
+        EditCommand::RemoveMarker { marker } => {
+            let inverse = Box::new(edit::marker::RemoveMarkerAction { marker }).apply(ctx)?;
+            Ok((ApplyOutcome::Edited(EditOutcome::RemovedMarker(marker)), Some(inverse)))
+        }
+        EditCommand::SetMarker {
+            marker,
+            at,
+            name,
+            color,
+        } => {
+            let inverse = edit::marker::set(ctx, marker, at, name, color)?;
+            Ok((ApplyOutcome::Edited(EditOutcome::UpdatedMarker(marker)), Some(inverse)))
+        }
     }
 }

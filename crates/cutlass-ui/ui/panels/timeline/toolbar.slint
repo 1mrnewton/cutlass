@@ -92,6 +92,13 @@ export component Toolbar inherits Rectangle {
         }
 
         ToolButton {
+            label: "Marker";
+            clicked => {
+                TimelineActions.add-marker-at-playhead();
+            }
+        }
+
+        ToolButton {
             label: "Delete";
             enabled: TimelineActions.has-selection();
             clicked => {

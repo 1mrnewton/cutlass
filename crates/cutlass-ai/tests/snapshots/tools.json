@@ -1040,6 +1040,144 @@
       }
     },
     {
+      "description": "Drop a named, colored marker on the timeline ruler at a position in seconds. Omit color to cycle the palette.",
+      "name": "add_marker",
+      "parameters": {
+        "$defs": {
+          "WireMarkerColor": {
+            "description": "Marker flag colors (the editor's fixed palette).",
+            "enum": [
+              "teal",
+              "blue",
+              "purple",
+              "pink",
+              "red",
+              "orange",
+              "yellow",
+              "green"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Drop a named, colored marker on the timeline ruler — an anchor for\nnavigation and for aligning edits (\"cut at the marker\", beat sync).",
+        "properties": {
+          "at": {
+            "description": "Timeline position of the marker, in seconds.",
+            "format": "double",
+            "type": "number"
+          },
+          "color": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMarkerColor"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Flag color. Omit to cycle the palette automatically."
+          },
+          "name": {
+            "description": "Short label shown beside the flag (e.g. \"Drop\", \"Beat 1\"). Omit for\nan unnamed marker.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "at"
+        ],
+        "title": "AddMarker",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Remove a ruler marker by id.",
+      "name": "remove_marker",
+      "parameters": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Remove a timeline marker.",
+        "properties": {
+          "marker": {
+            "description": "The marker to remove.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "marker"
+        ],
+        "title": "RemoveMarker",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Move, rename, or recolor a ruler marker. Omitted fields keep their current value.",
+      "name": "set_marker",
+      "parameters": {
+        "$defs": {
+          "WireMarkerColor": {
+            "description": "Marker flag colors (the editor's fixed palette).",
+            "enum": [
+              "teal",
+              "blue",
+              "purple",
+              "pink",
+              "red",
+              "orange",
+              "yellow",
+              "green"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Move, rename, or recolor an existing timeline marker. Omitted fields\nkeep their current value.",
+        "properties": {
+          "at": {
+            "description": "New timeline position in seconds. Omit to keep the position.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "color": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMarkerColor"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "New flag color. Omit to keep the color."
+          },
+          "marker": {
+            "description": "The marker to change.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "description": "New label (\"\" clears it). Omit to keep the name.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "marker"
+        ],
+        "title": "SetMarker",
+        "type": "object"
+      }
+    },
+    {
       "description": "Get the current state of the project: tracks, clips with ids and times in seconds, the media pool, and the user's selection and playhead. Call this whenever you are unsure about ids or timing.",
       "name": "describe_project",
       "parameters": {
@@ -1048,5 +1186,5 @@
       }
     }
   ],
-  "version": 4
+  "version": 5
 }

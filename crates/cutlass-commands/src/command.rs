@@ -6,8 +6,8 @@
 use std::path::PathBuf;
 
 use cutlass_models::{
-    ClipId, ClipParam, ClipTransform, Easing, Generator, MediaId, ParamValue, Rational,
-    RationalTime, TimeRange, TrackId, TrackKind,
+    ClipId, ClipParam, ClipTransform, Easing, Generator, MarkerColor, MarkerId, MediaId,
+    ParamValue, Rational, RationalTime, TimeRange, TrackId, TrackKind,
 };
 
 /// A project-level action (media pool, not timeline placement).
@@ -158,6 +158,25 @@ pub enum EditCommand {
     /// select, move, and trim together. Any previous links on the clips are
     /// replaced; the inverse restores them.
     LinkClips { clips: Vec<ClipId> },
+    /// Drop a named, colored marker on the timeline ruler at `at` (M1
+    /// markers). `color: None` cycles the fixed palette. The inverse
+    /// removes it.
+    AddMarker {
+        at: RationalTime,
+        name: String,
+        color: Option<MarkerColor>,
+    },
+    /// Remove a ruler marker. The inverse restores it (same id).
+    RemoveMarker { marker: MarkerId },
+    /// Move / rename / recolor a ruler marker in one shot (callers resolve
+    /// "keep current" before dispatch). The inverse restores the previous
+    /// marker state.
+    SetMarker {
+        marker: MarkerId,
+        at: RationalTime,
+        name: String,
+        color: MarkerColor,
+    },
 }
 
 /// Top-level command surface: media registration or a timeline edit.
@@ -179,4 +198,8 @@ pub enum EditOutcome {
     ShiftedTrack(TrackId),
     /// A track flag (enabled / muted / locked) was changed.
     UpdatedTrack(TrackId),
+    /// A ruler marker was added / changed / removed (M1 markers).
+    CreatedMarker(MarkerId),
+    UpdatedMarker(MarkerId),
+    RemovedMarker(MarkerId),
 }

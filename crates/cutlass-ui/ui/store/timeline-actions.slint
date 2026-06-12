@@ -93,6 +93,19 @@ export global TimelineActions {
         EditorStore.on-clip-split(TimelineStore.selected-clip-id, TimelineStore.playhead-tick);
     }
 
+    // Drop an unnamed marker at the playhead (M key / toolbar). Empty color
+    // cycles the fixed palette on the engine side.
+    public function add-marker-at-playhead() {
+        TimelineStore.on-marker-added(TimelineStore.playhead-tick, "", "");
+    }
+
+    // Remove a ruler marker by id (right-click on the flag).
+    public function remove-marker(marker-id: string) {
+        if (marker-id != "") {
+            TimelineStore.on-marker-removed(marker-id);
+        }
+    }
+
     // Copy/duplicate act on the whole multi-selection (one block, one
     // history entry), same as delete — linked partners ride along because
     // selection includes them.

@@ -6,6 +6,7 @@ pub mod add_track;
 pub mod insert_clip;
 pub mod insert_media;
 pub mod link_clips;
+pub mod marker;
 pub mod move_clip;
 pub mod remove_clip;
 pub mod remove_media;

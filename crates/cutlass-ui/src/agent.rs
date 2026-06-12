@@ -39,6 +39,7 @@ use crate::{AgentEntry, AgentStore};
 pub enum AgentCreated {
     Clip(u64),
     Track(u64),
+    Marker(u64),
 }
 
 /// One rehearsed command, ready for live replay.
@@ -212,6 +213,7 @@ impl EngineBridge for SandboxBridge<'_> {
                 let created = match &outcome {
                     EditOutcome::Created(id) => Some(AgentCreated::Clip(id.raw())),
                     EditOutcome::CreatedTrack(id) => Some(AgentCreated::Track(id.raw())),
+                    EditOutcome::CreatedMarker(id) => Some(AgentCreated::Marker(id.raw())),
                     _ => None,
                 };
                 self.plan.push(AgentPlanStep {

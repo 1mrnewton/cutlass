@@ -828,6 +828,54 @@ fn speed_up_and_reverse_clip() {
 }
 
 #[test]
+fn add_marker_at_playhead() {
+    let (mut host, _, _, _) = fixture();
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![(
+            "call_1",
+            "add_marker",
+            serde_json::json!({ "at": 5.0, "name": "beat drop", "color": "red" }),
+        )]),
+        text_turn("Dropped a red marker at the beat."),
+    ]);
+
+    let (outcome, _) = run(
+        &provider,
+        &mut host,
+        &EditorContext::default(),
+        "mark the beat drop at 5 seconds",
+        &AgentConfig::default(),
+    );
+
+    assert_eq!(outcome.status, PromptStatus::Completed);
+    assert_eq!(outcome.actions.len(), 1);
+    assert!(
+        outcome.actions[0].description.contains("added marker 'beat drop' at 5.00s"),
+        "{}",
+        outcome.actions[0].description
+    );
+    assert!(
+        outcome.actions[0].description.contains("(red)"),
+        "{}",
+        outcome.actions[0].description
+    );
+
+    let markers = host.engine.project().timeline().markers();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].tick.value, 120);
+    assert_eq!(markers[0].name, "beat drop");
+    assert_eq!(markers[0].color, cutlass_models::MarkerColor::Red);
+
+    let summary = summarize(host.engine.project());
+    assert_eq!(summary.markers.len(), 1);
+    assert_eq!(summary.markers[0].name, "beat drop");
+    assert_eq!(summary.markers[0].color, "red");
+
+    assert!(host.engine.undo());
+    assert!(host.engine.project().timeline().markers().is_empty());
+}
+
+#[test]
 fn keyframe_outside_clip_is_rejected_with_extent() {
     let (mut host, _, _, clip) = fixture();
     // First call misses the clip (it ends at 10 s); the model corrects.

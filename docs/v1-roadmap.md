@@ -383,10 +383,16 @@ Goal: the everyday CapCut edit vocabulary, minus animation.
 - [ ] **Canvas settings**: project resolution/aspect presets (16:9, 9:16,
       1:1, 4:5, 21:9), background color per project; "fit/fill" clip
       helpers.
-- [ ] **Markers** on the timeline ruler (named, colored) — cheap, and the
-      agent + beat-sync (M8) both want them as anchors.
+- [x] **Markers** on the timeline ruler (named, colored) — cheap, and the
+      agent + beat-sync (M8) both want them as anchors — *shipped*:
+      `Marker { id, tick, name, color }` on the timeline (8-color
+      palette, optional serde field), undoable add/remove/set commands,
+      agent tools `add_marker` / `remove_marker` / `set_marker`, ruler
+      flags with names, M-key / toolbar add at playhead, right-click
+      remove.
 - [ ] **Timeline UX**: speed/volume badges on clips (the reserved slot
-      from timeline Phase 8), drag-content preview polish.
+      from timeline Phase 8) — *shipped* (retime chip + audio chip:
+      muted / volume % / fade ramp); drag-content preview polish remains.
 
 Exit: a talking-head + b-roll edit needs nothing Cutlass doesn't have,
 except looks and animation.

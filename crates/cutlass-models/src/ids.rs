@@ -63,6 +63,10 @@ define_id!(
     /// (CapCut linkage — e.g. the video+audio pair from one media drop).
     LinkId
 );
+define_id!(
+    /// Identifies a [`Marker`](crate::Marker) on the timeline ruler.
+    MarkerId
+);
 
 #[cfg(test)]
 mod tests {

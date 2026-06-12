@@ -284,6 +284,11 @@ export component AppWindow inherits Window {
                 TimelineActions.set-range-out();
                 return accept;
             }
+            // Drop a ruler marker at the playhead (M1 markers).
+            if (event.text == "m" || event.text == "M") {
+                TimelineActions.add-marker-at-playhead();
+                return accept;
+            }
             // Arrows: nudge the selected clip in the canvas (Shift = 10 px);
             // with nothing nudgeable selected, ←/→ frame-step the playhead
             // (Phase 4 transport keys) and ↑/↓ do nothing.

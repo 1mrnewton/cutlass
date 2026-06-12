@@ -233,6 +233,15 @@ export struct Track {
     locked: bool,
 }
 
+// A named, colored anchor on the timeline ruler (M1 markers).
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct TimelineMarker {
+    id: string,
+    tick: int,
+    name: string,
+    color: color,
+}
+
 @rust-attr(derive(serde::Serialize, serde::Deserialize))
 export struct Sequence {
     id: string,
@@ -248,6 +257,8 @@ export struct Sequence {
     // ~3.6s/hour drift.)
     drop-frame: bool,
     tracks: [Track],
+    // Ruler markers in tick order (M1). Empty when none are placed.
+    markers: [TimelineMarker],
     width: length,
     height: length,
 }

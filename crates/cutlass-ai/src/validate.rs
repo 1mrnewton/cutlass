@@ -10,12 +10,13 @@
 
 use cutlass_commands::{Command, EditCommand};
 use cutlass_models::{
-    Clip, ClipId, ClipParam, ClipTransform, Easing, Generator, MediaId, ParamValue, Project,
-    Rational, RationalTime, TimeRange, TrackId, TrackKind,
+    Clip, ClipId, ClipParam, ClipTransform, Easing, Generator, Marker, MarkerColor, MarkerId,
+    MediaId, ParamValue, Project, Rational, RationalTime, TimeRange, TrackId, TrackKind,
 };
 
 use crate::wire::{
-    WireClipParam, WireCommand, WireEasing, WireGenerator, WireShape, WireTrackKind,
+    WireClipParam, WireCommand, WireEasing, WireGenerator, WireMarkerColor, WireShape,
+    WireTrackKind,
 };
 
 /// A wire command the project as it stands cannot accept. The message is
@@ -358,6 +359,34 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
             }
             EditCommand::LinkClips { clips }
         }
+        WireCommand::AddMarker(args) => {
+            require_non_negative(args.at, "at")?;
+            let at = timeline_time(project, args.at, "at")?;
+            EditCommand::AddMarker {
+                at,
+                name: args.name.clone().unwrap_or_default(),
+                color: args.color.map(marker_color),
+            }
+        }
+        WireCommand::RemoveMarker(args) => EditCommand::RemoveMarker {
+            marker: marker_ref(project, args.marker)?.id,
+        },
+        WireCommand::SetMarker(args) => {
+            let marker = marker_ref(project, args.marker)?;
+            let at = match args.at {
+                Some(seconds) => {
+                    require_non_negative(seconds, "at")?;
+                    timeline_time(project, seconds, "at")?
+                }
+                None => marker.tick,
+            };
+            EditCommand::SetMarker {
+                marker: marker.id,
+                at,
+                name: args.name.clone().unwrap_or_else(|| marker.name.clone()),
+                color: args.color.map(marker_color).unwrap_or(marker.color),
+            }
+        }
     };
     Ok(Command::Edit(edit))
 }
@@ -421,6 +450,37 @@ fn media_ref(project: &Project, raw: u64) -> Result<&cutlass_models::MediaSource
             list_ids(existing)
         ))
     })
+}
+
+fn marker_ref(project: &Project, raw: u64) -> Result<&Marker, Rejection> {
+    project
+        .timeline()
+        .marker(MarkerId::from_raw(raw))
+        .ok_or_else(|| {
+            let existing = project
+                .timeline()
+                .markers()
+                .iter()
+                .map(|m| m.id.raw())
+                .collect();
+            Rejection::new(format!(
+                "marker {raw} does not exist; markers on the timeline: {}",
+                list_ids(existing)
+            ))
+        })
+}
+
+fn marker_color(color: WireMarkerColor) -> MarkerColor {
+    match color {
+        WireMarkerColor::Teal => MarkerColor::Teal,
+        WireMarkerColor::Blue => MarkerColor::Blue,
+        WireMarkerColor::Purple => MarkerColor::Purple,
+        WireMarkerColor::Pink => MarkerColor::Pink,
+        WireMarkerColor::Red => MarkerColor::Red,
+        WireMarkerColor::Orange => MarkerColor::Orange,
+        WireMarkerColor::Yellow => MarkerColor::Yellow,
+        WireMarkerColor::Green => MarkerColor::Green,
+    }
 }
 
 // --- kind rules -------------------------------------------------------------
@@ -1223,6 +1283,93 @@ mod tests {
             WireCommand::LinkClips(wire::LinkClips { clips: vec![clip] }),
         );
         assert!(msg.contains("at least two"), "{msg}");
+    }
+
+    #[test]
+    fn marker_commands_lower_to_engine() {
+        let (project, _, _, _, _, _) = fixture();
+        let edit = lower(
+            &project,
+            WireCommand::AddMarker(wire::AddMarker {
+                at: 2.0,
+                name: Some("intro".into()),
+                color: None,
+            }),
+        );
+        assert_eq!(
+            edit,
+            EditCommand::AddMarker {
+                at: RationalTime::new(48, R24),
+                name: "intro".into(),
+                color: None,
+            }
+        );
+
+        // Negative positions are rejected before reaching the engine.
+        let msg = reject(
+            &project,
+            WireCommand::AddMarker(wire::AddMarker {
+                at: -1.0,
+                name: None,
+                color: None,
+            }),
+        );
+        assert!(msg.contains("must not be negative"), "{msg}");
+
+        let mut project = project;
+        let id = project
+            .timeline_mut()
+            .add_marker(cutlass_models::Marker::new(
+                RationalTime::new(48, R24),
+                "mid",
+                MarkerColor::Blue,
+            ))
+            .unwrap();
+        let edit = lower(
+            &project,
+            WireCommand::SetMarker(wire::SetMarker {
+                marker: id.raw(),
+                at: Some(3.0),
+                name: Some("outro".into()),
+                color: Some(WireMarkerColor::Green),
+            }),
+        );
+        assert_eq!(
+            edit,
+            EditCommand::SetMarker {
+                marker: id,
+                at: RationalTime::new(72, R24),
+                name: "outro".into(),
+                color: MarkerColor::Green,
+            }
+        );
+
+        // Omitted fields keep the marker's current state.
+        let edit = lower(
+            &project,
+            WireCommand::SetMarker(wire::SetMarker {
+                marker: id.raw(),
+                at: None,
+                name: None,
+                color: None,
+            }),
+        );
+        assert_eq!(
+            edit,
+            EditCommand::SetMarker {
+                marker: id,
+                at: RationalTime::new(48, R24),
+                name: "mid".into(),
+                color: MarkerColor::Blue,
+            }
+        );
+
+        let msg = reject(
+            &project,
+            WireCommand::RemoveMarker(wire::RemoveMarker { marker: 404 }),
+        );
+        assert!(msg.contains("marker 404 does not exist"), "{msg}");
+        assert!(msg.contains(&id.raw().to_string()), "{msg}");
     }
 
     #[test]

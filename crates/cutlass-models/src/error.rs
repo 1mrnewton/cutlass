@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::ids::{ClipId, MediaId, TrackId};
+use crate::ids::{ClipId, MarkerId, MediaId, TrackId};
 use crate::schema::ProjectSchema;
 use crate::time::Rational;
 use crate::track::TrackKind;
@@ -26,6 +26,9 @@ pub enum ModelError {
 
     #[error("unknown clip: {0}")]
     UnknownClip(ClipId),
+
+    #[error("unknown marker: {0}")]
+    UnknownMarker(MarkerId),
 
     #[error("clip overlaps an existing clip on {0}")]
     Overlap(TrackId),

@@ -32,7 +32,7 @@
 //   same Rust resolver (`DragBackend.snap-clip-start` with a zero-width
 //   "clip").
 
-import { AppStore, TimelineStore, EditorStore } from "../../store/index.slint";
+import { AppStore, TimelineStore, EditorStore, TimelineActions } from "../../store/index.slint";
 import { CutlassText } from "../../components/index.slint";
 import { TimelineViewState } from "state.slint";
 import { RulerBackend, RulerTick } from "../../lib/ruler-backend.slint";
@@ -134,6 +134,48 @@ export component Ruler inherits Rectangle {
             mono: true;
             style: AppStore.theme.typography.caption;
             foreground: AppStore.theme.text.secondary;
+        }
+    }
+
+    // M1 ruler markers: colored flags in tick order; right-click removes.
+    for marker in EditorStore.project.sequence.markers: Rectangle {
+        property <length> marker-x: marker.tick * zoom * 1px + scroll-x;
+        x: marker-x;
+        y: 0;
+        width: 0;
+        height: parent.height;
+
+        Rectangle {
+            x: -3px;
+            y: 2px;
+            width: 6px;
+            height: 10px;
+            border-radius: 1px;
+            background: marker.color;
+        }
+
+        if marker.name != "": CutlassText {
+            x: 5px;
+            y: 1px;
+            text: marker.name;
+            style: AppStore.theme.typography.caption;
+            foreground: marker.color;
+        }
+
+        marker-ta := TouchArea {
+            x: -8px;
+            y: 0;
+            width: 16px;
+            height: parent.height;
+            mouse-cursor: MouseCursor.pointer;
+
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down
+                        && e.button == PointerEventButton.right) {
+                    AppState.refocus-shortcuts();
+                    TimelineActions.remove-marker(marker.id);
+                }
+            }
         }
     }
 

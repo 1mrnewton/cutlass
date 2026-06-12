@@ -59,4 +59,8 @@ export global TimelineStore {
     // independently (links persist, dormant). Mirrored to the worker via
     // EditorStore.on-linkage-changed (drops/trims/splits need the flag).
     in-out property <bool> link-enabled: true;
+
+    // Ruler marker gestures (M1): wired from main.rs to the preview worker.
+    callback on-marker-added(at-tick: int, name: string, color: string);
+    callback on-marker-removed(marker-id: string);
 }

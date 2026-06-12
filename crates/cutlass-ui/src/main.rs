@@ -1162,6 +1162,20 @@ fn main() -> Result<(), slint::PlatformError> {
         split_handle.split_clip(clip_id.to_string(), i64::from(at_tick));
     });
 
+    let marker_handle = preview_worker.handle();
+    let timeline = app.global::<TimelineStore>();
+    timeline.on_on_marker_added(move |at_tick, name, color| {
+        marker_handle.add_marker(
+            i64::from(at_tick),
+            name.to_string(),
+            color.to_string(),
+        );
+    });
+    let marker_remove_handle = preview_worker.handle();
+    timeline.on_on_marker_removed(move |marker_id| {
+        marker_remove_handle.remove_marker(marker_id.to_string());
+    });
+
     let undo_handle = preview_worker.handle();
     editor.on_on_undo(move || {
         undo_handle.undo();

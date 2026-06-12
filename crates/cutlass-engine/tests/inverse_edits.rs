@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{import_asset, rt, small_video_asset, temp_engine, tr};
+use common::{image_asset, import_asset, rt, small_video_asset, temp_engine, tr};
 use cutlass_commands::{Command, EditCommand, EditOutcome};
 use cutlass_engine::ApplyOutcome;
 use cutlass_models::{ClipParam, ClipTransform, Easing, Generator, ParamValue, TrackKind};
@@ -179,6 +179,76 @@ fn undo_ripple_delete_middle_of_three_adjacent() {
     assert_eq!(engine.project().clip(a).unwrap().start().value, 0);
     assert_eq!(engine.project().clip(b).unwrap().start().value, 10);
     assert_eq!(engine.project().clip(c).unwrap().start().value, 20);
+}
+
+#[test]
+fn trim_extends_image_clip_past_default_placement() {
+    let Some(png) = image_asset() else {
+        return;
+    };
+    let (_dir, mut engine) = temp_engine();
+    let media_id = import_asset(&mut engine, &png);
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
+    let source = engine.project().media(media_id).unwrap().full_range();
+
+    let clip_id = created(
+        engine
+            .apply(Command::Edit(EditCommand::AddClip {
+                track,
+                media: media_id,
+                source,
+                start: rt(0),
+            }))
+            .expect("add"),
+    );
+
+    // Default 5s placement at 24fps timeline.
+    assert_eq!(engine.project().clip(clip_id).unwrap().timeline, tr(0, 120));
+
+    engine
+        .apply(Command::Edit(EditCommand::TrimClip {
+            clip: clip_id,
+            timeline: tr(0, 240),
+        }))
+        .expect("extend still to 10s");
+
+    let clip = engine.project().clip(clip_id).unwrap();
+    assert_eq!(clip.timeline, tr(0, 240));
+    let source = clip.source_range().unwrap();
+    assert!(source.duration.value > 5_000);
+}
+
+#[test]
+fn trim_video_past_source_bounds_fails() {
+    let Some(path) = small_video_asset() else {
+        return;
+    };
+    let (_dir, mut engine) = temp_engine();
+    let media_id = import_asset(&mut engine, &path);
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
+
+    let clip_id = created(
+        engine
+            .apply(Command::Edit(EditCommand::AddClip {
+                track,
+                media: media_id,
+                source: tr(0, 48),
+                start: rt(0),
+            }))
+            .expect("add"),
+    );
+
+    let err = engine
+        .apply(Command::Edit(EditCommand::TrimClip {
+            clip: clip_id,
+            timeline: tr(0, 10_000),
+        }))
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("bounds") || format!("{err}").contains("Source"),
+        "expected source bounds error, got {err}"
+    );
+    assert_eq!(engine.project().clip(clip_id).unwrap().timeline, tr(0, 48));
 }
 
 #[test]
@@ -1107,6 +1177,148 @@ fn new_edit_clears_redo_stack() {
 
     assert!(!engine.can_redo());
     assert_eq!(engine.project().clip(clip_id).unwrap().start().value, 6);
+}
+
+// --- markers (M1) -----------------------------------------------------------
+
+fn created_marker(outcome: ApplyOutcome) -> cutlass_models::MarkerId {
+    match outcome {
+        ApplyOutcome::Edited(EditOutcome::CreatedMarker(id)) => id,
+        other => panic!("expected CreatedMarker, got {other:?}"),
+    }
+}
+
+#[test]
+fn undo_add_marker_removes_it_and_redo_restores_same_id() {
+    let (_dir, mut engine) = temp_engine();
+
+    let id = created_marker(
+        engine
+            .apply(Command::Edit(EditCommand::AddMarker {
+                at: rt(48),
+                name: "drop".into(),
+                color: Some(cutlass_models::MarkerColor::Red),
+            }))
+            .expect("add marker"),
+    );
+    assert_eq!(engine.project().timeline().marker_count(), 1);
+
+    assert!(engine.undo());
+    assert_eq!(engine.project().timeline().marker_count(), 0);
+
+    assert!(engine.redo());
+    let marker = engine.project().timeline().marker(id).expect("same id restored");
+    assert_eq!(marker.tick, rt(48));
+    assert_eq!(marker.name, "drop");
+    assert_eq!(marker.color, cutlass_models::MarkerColor::Red);
+}
+
+#[test]
+fn add_marker_without_color_cycles_the_palette() {
+    let (_dir, mut engine) = temp_engine();
+    for i in 0..3 {
+        engine
+            .apply(Command::Edit(EditCommand::AddMarker {
+                at: rt(i * 10),
+                name: String::new(),
+                color: None,
+            }))
+            .expect("add marker");
+    }
+    let colors: Vec<_> = engine
+        .project()
+        .timeline()
+        .markers()
+        .iter()
+        .map(|m| m.color)
+        .collect();
+    assert_eq!(
+        colors,
+        [
+            cutlass_models::MarkerColor::cycle(0),
+            cutlass_models::MarkerColor::cycle(1),
+            cutlass_models::MarkerColor::cycle(2),
+        ]
+    );
+}
+
+#[test]
+fn undo_remove_marker_restores_snapshot() {
+    let (_dir, mut engine) = temp_engine();
+    let id = created_marker(
+        engine
+            .apply(Command::Edit(EditCommand::AddMarker {
+                at: rt(24),
+                name: "beat".into(),
+                color: Some(cutlass_models::MarkerColor::Blue),
+            }))
+            .expect("add marker"),
+    );
+
+    engine
+        .apply(Command::Edit(EditCommand::RemoveMarker { marker: id }))
+        .expect("remove marker");
+    assert_eq!(engine.project().timeline().marker_count(), 0);
+
+    assert!(engine.undo());
+    let marker = engine.project().timeline().marker(id).expect("restored");
+    assert_eq!((marker.tick, marker.name.as_str()), (rt(24), "beat"));
+
+    assert!(engine.redo());
+    assert_eq!(engine.project().timeline().marker_count(), 0);
+}
+
+#[test]
+fn undo_set_marker_restores_previous_state() {
+    let (_dir, mut engine) = temp_engine();
+    let id = created_marker(
+        engine
+            .apply(Command::Edit(EditCommand::AddMarker {
+                at: rt(10),
+                name: "intro".into(),
+                color: Some(cutlass_models::MarkerColor::Teal),
+            }))
+            .expect("add marker"),
+    );
+
+    engine
+        .apply(Command::Edit(EditCommand::SetMarker {
+            marker: id,
+            at: rt(99),
+            name: "outro".into(),
+            color: cutlass_models::MarkerColor::Green,
+        }))
+        .expect("set marker");
+    let moved = engine.project().timeline().marker(id).unwrap();
+    assert_eq!((moved.tick, moved.name.as_str()), (rt(99), "outro"));
+
+    assert!(engine.undo());
+    let restored = engine.project().timeline().marker(id).unwrap();
+    assert_eq!((restored.tick, restored.name.as_str()), (rt(10), "intro"));
+    assert_eq!(restored.color, cutlass_models::MarkerColor::Teal);
+
+    assert!(engine.redo());
+    let again = engine.project().timeline().marker(id).unwrap();
+    assert_eq!((again.tick, again.name.as_str()), (rt(99), "outro"));
+}
+
+#[test]
+fn marker_commands_reject_unknown_ids_without_history() {
+    let (_dir, mut engine) = temp_engine();
+    let missing = cutlass_models::MarkerId::from_raw(404);
+
+    assert!(engine
+        .apply(Command::Edit(EditCommand::RemoveMarker { marker: missing }))
+        .is_err());
+    assert!(engine
+        .apply(Command::Edit(EditCommand::SetMarker {
+            marker: missing,
+            at: rt(0),
+            name: String::new(),
+            color: cutlass_models::MarkerColor::Teal,
+        }))
+        .is_err());
+    assert!(!engine.can_undo(), "failed marker edits push no history");
 }
 
 #[test]

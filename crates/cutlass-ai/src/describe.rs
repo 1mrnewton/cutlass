@@ -36,8 +36,25 @@ pub struct ProjectSummary {
     pub duration_seconds: f64,
     /// Tracks in stack order, bottom (composited first) to top.
     pub tracks: Vec<TrackSummary>,
+    /// Ruler markers in tick order (M1). Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<MarkerSummary>,
     /// The media pool, id-ascending.
     pub media: Vec<MediaSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MarkerSummary {
+    pub id: u64,
+    /// Timeline position in seconds.
+    pub at_seconds: f64,
+    /// Exact timeline position in frames at the project rate.
+    pub at_frames: i64,
+    /// Short label; omitted when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// Palette name: teal, blue, purple, pink, red, orange, yellow, green.
+    pub color: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -245,11 +262,25 @@ pub fn summarize(project: &Project) -> ProjectSummary {
         .collect();
     media.sort_by_key(|m| m.id);
 
+    let markers = project
+        .timeline()
+        .markers()
+        .iter()
+        .map(|m| MarkerSummary {
+            id: m.id.raw(),
+            at_seconds: seconds(m.tick.value, rate),
+            at_frames: m.tick.value,
+            name: m.name.clone(),
+            color: m.color.name().to_string(),
+        })
+        .collect();
+
     ProjectSummary {
         name: project.name.clone(),
         frame_rate_fps: rate.as_f64(),
         duration_seconds: seconds(duration_ticks, rate),
         tracks,
+        markers,
         media,
     }
 }

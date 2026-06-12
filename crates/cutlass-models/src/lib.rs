@@ -37,7 +37,7 @@ pub use clip::{
 };
 pub use error::ModelError;
 pub use param::{Easing, Keyframe, Lerp, Param};
-pub use ids::{ClipId, LinkId, MediaId, ProjectId, TrackId};
+pub use ids::{ClipId, LinkId, MarkerId, MediaId, ProjectId, TrackId};
 pub use media::{MediaKind, MediaSource, STILL_DEFAULT_DURATION_TICKS, STILL_TICK_RATE};
 pub use metadata::ProjectMetadata;
 pub use persist::{PROJECT_FILE_EXTENSION, PROJECT_FILE_VERSION};
@@ -46,5 +46,5 @@ pub use schema::{ProjectSchema, PROJECT_SCHEMA_KIND, PROJECT_SCHEMA_VERSION};
 pub use time::{
     Rational, RationalTime, TimeRange, check_same_rate, rate_eq, resample, time_add, time_sub,
 };
-pub use timeline::Timeline;
+pub use timeline::{Marker, MarkerColor, Timeline};
 pub use track::{Track, TrackKind};

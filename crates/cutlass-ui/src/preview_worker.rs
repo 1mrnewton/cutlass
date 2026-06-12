@@ -12,8 +12,8 @@ use cutlass_commands::{Command, EditCommand, EditOutcome, ProjectCommand};
 use cutlass_engine::{ApplyOutcome, Engine, EngineConfig, EngineError, ExportSettings};
 use cutlass_models::{
     AnimatedTransform, ClipId, ClipParam, ClipSource, ClipTransform, Easing, Generator, LinkId,
-    MediaId, ParamValue, Project, Rational, RationalTime, TimeRange, Track, TrackId, TrackKind,
-    resample,
+    MarkerColor, MarkerId, MediaId, ParamValue, Project, Rational, RationalTime, TimeRange, Track,
+    TrackId, TrackKind, resample,
 };
 use tracing::{error, info, warn};
 
@@ -183,6 +183,15 @@ enum WorkerMsg {
     /// Split `clip` (raw id) at `at_tick` (sequence ticks). The UI gates on
     /// the playhead being strictly inside the clip; the engine re-validates.
     SplitClip { clip: String, at_tick: i64 },
+    /// Drop a ruler marker at `at_tick`. `color` is a palette name
+    /// ("teal", "blue", …) or empty to cycle. One undoable history entry.
+    AddMarker {
+        at_tick: i64,
+        name: String,
+        color: String,
+    },
+    /// Remove a ruler marker by raw id. One undoable history entry.
+    RemoveMarker { marker: String },
     /// Step the engine history one entry back / forward.
     Undo,
     Redo,
@@ -421,6 +430,18 @@ impl WorkerHandle {
 
     pub fn split_clip(&self, clip: String, at_tick: i64) {
         let _ = self.tx.send(WorkerMsg::SplitClip { clip, at_tick });
+    }
+
+    pub fn add_marker(&self, at_tick: i64, name: String, color: String) {
+        let _ = self.tx.send(WorkerMsg::AddMarker {
+            at_tick,
+            name,
+            color,
+        });
+    }
+
+    pub fn remove_marker(&self, marker: String) {
+        let _ = self.tx.send(WorkerMsg::RemoveMarker { marker });
     }
 
     pub fn set_generator(&self, clip: String, generator: Generator) {
@@ -872,6 +893,14 @@ fn worker_loop(
             }
             WorkerMsg::SplitClip { clip, at_tick } => {
                 split_clip_and_publish(engine, &clip, at_tick, *linkage, &ui)
+            }
+            WorkerMsg::AddMarker {
+                at_tick,
+                name,
+                color,
+            } => add_marker_and_publish(engine, at_tick, &name, &color, tl_rate, &ui),
+            WorkerMsg::RemoveMarker { marker } => {
+                remove_marker_and_publish(engine, &marker, &ui)
             }
             WorkerMsg::Undo => history_step_and_publish(engine, false, &ui),
             WorkerMsg::Redo => history_step_and_publish(engine, true, &ui),
@@ -1878,6 +1907,63 @@ fn set_clip_audio_and_publish(
     engine.commit_group();
     info!(%clip_id, volume, fade_in_s, fade_out_s, clips = targets.len(), "set clip audio");
     publish_projection(engine, ui);
+}
+
+/// Drop a ruler marker (M1). Empty `color` cycles the palette; one undoable
+/// history entry.
+fn add_marker_and_publish(
+    engine: &mut Engine,
+    at_tick: i64,
+    name: &str,
+    color: &str,
+    tl_rate: Rational,
+    ui: &UiSink,
+) {
+    let at = RationalTime::new(at_tick.max(0), tl_rate);
+    let color = parse_marker_color(color);
+    match engine.apply(Command::Edit(EditCommand::AddMarker {
+        at,
+        name: name.to_string(),
+        color,
+    })) {
+        Ok(ApplyOutcome::Edited(EditOutcome::CreatedMarker(id))) => {
+            info!(%id, at_tick, "added timeline marker");
+            publish_projection(engine, ui);
+        }
+        Ok(other) => error!(at_tick, "unexpected add-marker outcome: {other:?}"),
+        Err(e) => error!(at_tick, "add marker failed: {e}"),
+    }
+}
+
+/// Remove a ruler marker by raw id (M1). One undoable history entry.
+fn remove_marker_and_publish(engine: &mut Engine, marker: &str, ui: &UiSink) {
+    let Some(marker_id) = parse_raw_id(marker).map(MarkerId::from_raw) else {
+        error!(marker, "remove-marker ignored: unparsable marker id");
+        return;
+    };
+    match engine.apply(Command::Edit(EditCommand::RemoveMarker {
+        marker: marker_id,
+    })) {
+        Ok(_) => {
+            info!(%marker_id, "removed timeline marker");
+            publish_projection(engine, ui);
+        }
+        Err(e) => error!(%marker_id, "remove marker failed: {e}"),
+    }
+}
+
+fn parse_marker_color(name: &str) -> Option<MarkerColor> {
+    match name {
+        "teal" => Some(MarkerColor::Teal),
+        "blue" => Some(MarkerColor::Blue),
+        "purple" => Some(MarkerColor::Purple),
+        "pink" => Some(MarkerColor::Pink),
+        "red" => Some(MarkerColor::Red),
+        "orange" => Some(MarkerColor::Orange),
+        "yellow" => Some(MarkerColor::Yellow),
+        "green" => Some(MarkerColor::Green),
+        _ => None,
+    }
 }
 
 /// Replace a generated clip's content (inspector title edit). One history
@@ -3177,11 +3263,12 @@ pub(crate) fn agent_replay(
     use std::collections::HashMap as Map;
     let mut clip_map: Map<u64, u64> = Map::new();
     let mut track_map: Map<u64, u64> = Map::new();
+    let mut marker_map: Map<u64, u64> = Map::new();
 
     let total = steps.len();
     engine.begin_group();
     for (index, mut step) in steps.into_iter().enumerate() {
-        step.command.remap_ids(&clip_map, &track_map);
+        step.command.remap_ids(&clip_map, &track_map, &marker_map);
         let outcome = cutlass_ai::validate(&step.command, engine.project())
             .map_err(|r| r.message)
             .and_then(|lowered| engine.apply(lowered).map_err(|e| e.to_string()));
@@ -3193,6 +3280,9 @@ pub(crate) fn agent_replay(
                     }
                     (Some(AgentCreated::Track(sandbox)), EditOutcome::CreatedTrack(live)) => {
                         track_map.insert(sandbox, live.raw());
+                    }
+                    (Some(AgentCreated::Marker(sandbox)), EditOutcome::CreatedMarker(live)) => {
+                        marker_map.insert(sandbox, live.raw());
                     }
                     _ => {}
                 }

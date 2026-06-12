@@ -3,9 +3,96 @@ use serde::{Deserialize, Serialize};
 use crate::Map;
 use crate::clip::Clip;
 use crate::error::ModelError;
-use crate::ids::{ClipId, TrackId};
-use crate::time::{Rational, RationalTime};
+use crate::ids::{ClipId, MarkerId, TrackId};
+use crate::time::{Rational, RationalTime, resample};
 use crate::track::Track;
+
+/// Fixed marker flag palette (M1 markers). Serialized by name so project
+/// files stay readable; [`rgba`](Self::rgba) gives the render color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerColor {
+    Teal,
+    Blue,
+    Purple,
+    Pink,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+}
+
+impl MarkerColor {
+    pub const ALL: [MarkerColor; 8] = [
+        MarkerColor::Teal,
+        MarkerColor::Blue,
+        MarkerColor::Purple,
+        MarkerColor::Pink,
+        MarkerColor::Red,
+        MarkerColor::Orange,
+        MarkerColor::Yellow,
+        MarkerColor::Green,
+    ];
+
+    /// The color for the `index`-th marker when none was chosen explicitly:
+    /// cycle through the palette so neighboring markers stay distinguishable.
+    pub fn cycle(index: usize) -> Self {
+        Self::ALL[index % Self::ALL.len()]
+    }
+
+    /// Render color as `[r, g, b, a]`.
+    pub fn rgba(self) -> [u8; 4] {
+        match self {
+            MarkerColor::Teal => [0x00, 0xE5, 0xC7, 0xFF],
+            MarkerColor::Blue => [0x4A, 0x9E, 0xF5, 0xFF],
+            MarkerColor::Purple => [0xA7, 0x7B, 0xF5, 0xFF],
+            MarkerColor::Pink => [0xF5, 0x6F, 0xC0, 0xFF],
+            MarkerColor::Red => [0xF5, 0x5A, 0x5A, 0xFF],
+            MarkerColor::Orange => [0xF5, 0x9A, 0x3C, 0xFF],
+            MarkerColor::Yellow => [0xF0, 0xD0, 0x4A, 0xFF],
+            MarkerColor::Green => [0x6F, 0xD8, 0x5E, 0xFF],
+        }
+    }
+
+    /// The serialized lowercase name ("teal", "blue", …).
+    pub fn name(self) -> &'static str {
+        match self {
+            MarkerColor::Teal => "teal",
+            MarkerColor::Blue => "blue",
+            MarkerColor::Purple => "purple",
+            MarkerColor::Pink => "pink",
+            MarkerColor::Red => "red",
+            MarkerColor::Orange => "orange",
+            MarkerColor::Yellow => "yellow",
+            MarkerColor::Green => "green",
+        }
+    }
+}
+
+/// A named, colored anchor point on the timeline ruler (M1 markers): the
+/// agent aligns edits to them, beat-sync (M8) will emit them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Marker {
+    pub id: MarkerId,
+    /// Position on the timeline, stored at the timeline frame rate
+    /// ([`Timeline::add_marker`] resamples on insert).
+    pub tick: RationalTime,
+    /// Short label shown beside the flag. May be empty (unnamed marker).
+    pub name: String,
+    pub color: MarkerColor,
+}
+
+impl Marker {
+    /// A fresh marker with a newly allocated id.
+    pub fn new(tick: RationalTime, name: impl Into<String>, color: MarkerColor) -> Self {
+        Self {
+            id: MarkerId::next(),
+            tick,
+            name: name.into(),
+            color,
+        }
+    }
+}
 
 /// The single sequence of a [`Project`](crate::Project): an ordered stack of
 /// tracks plus a clip-location index.
@@ -24,6 +111,10 @@ pub struct Timeline {
     order: Vec<TrackId>,
     #[serde(with = "crate::serde_map")]
     clip_index: Map<ClipId, TrackId>,
+    /// Ruler markers in `(tick, id)` order. Optional + defaulted so pre-marker
+    /// project files load unchanged and marker-free saves stay byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    markers: Vec<Marker>,
 }
 
 impl Timeline {
@@ -33,6 +124,7 @@ impl Timeline {
             tracks: Map::default(),
             order: Vec::new(),
             clip_index: Map::default(),
+            markers: Vec::new(),
         }
     }
 
@@ -164,6 +256,72 @@ impl Timeline {
 
     pub fn clip_count(&self) -> usize {
         self.clip_index.len()
+    }
+
+    // --- markers ------------------------------------------------------------
+
+    /// Ruler markers in `(tick, id)` order.
+    pub fn markers(&self) -> &[Marker] {
+        &self.markers
+    }
+
+    pub fn marker(&self, id: MarkerId) -> Option<&Marker> {
+        self.markers.iter().find(|m| m.id == id)
+    }
+
+    pub fn marker_count(&self) -> usize {
+        self.markers.len()
+    }
+
+    /// Insert a marker, keeping `(tick, id)` order. The tick is resampled to
+    /// the timeline rate so every stored marker shares it. Rejects negative
+    /// positions and duplicate ids (undo restores must not double-insert).
+    pub fn add_marker(&mut self, mut marker: Marker) -> Result<MarkerId, ModelError> {
+        if marker.tick.value < 0 || !marker.tick.rate.is_valid() {
+            return Err(ModelError::InvalidRange);
+        }
+        if self.marker(marker.id).is_some() {
+            return Err(ModelError::InvalidRange);
+        }
+        marker.tick = resample(marker.tick, self.frame_rate);
+        let id = marker.id;
+        let at = self
+            .markers
+            .partition_point(|m| (m.tick.value, m.id) <= (marker.tick.value, marker.id));
+        self.markers.insert(at, marker);
+        Ok(id)
+    }
+
+    /// Remove a marker by id, returning it for undo capture.
+    pub fn remove_marker(&mut self, id: MarkerId) -> Option<Marker> {
+        let index = self.markers.iter().position(|m| m.id == id)?;
+        Some(self.markers.remove(index))
+    }
+
+    /// Move / rename / recolor a marker in one shot (the `SetMarker`
+    /// command and its undo both funnel through here). Re-sorts on tick
+    /// change; rejects unknown ids and negative positions.
+    pub fn set_marker(
+        &mut self,
+        id: MarkerId,
+        tick: RationalTime,
+        name: String,
+        color: MarkerColor,
+    ) -> Result<(), ModelError> {
+        let mut marker = self.remove_marker(id).ok_or(ModelError::UnknownMarker(id))?;
+        let before = marker.clone();
+        marker.tick = tick;
+        marker.name = name;
+        marker.color = color;
+        match self.add_marker(marker) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // Validation failed: put the original back untouched.
+                let restored = self.add_marker(before);
+                debug_assert!(restored.is_ok(), "re-inserting the removed marker");
+                Err(e)
+            }
+        }
     }
 
     /// Total timeline length: the end of the last-ending clip at [`frame_rate`](Self::frame_rate).
@@ -430,6 +588,126 @@ mod tests {
         timeline.add_clip(track, generated_clip(100, 30)).unwrap(); // ends 130
 
         assert_eq!(timeline.duration().value, 130);
+    }
+
+    // --- markers ------------------------------------------------------------
+
+    fn marker_at(tick: i64) -> Marker {
+        Marker::new(rt(tick), "", MarkerColor::Teal)
+    }
+
+    #[test]
+    fn add_marker_keeps_tick_order_and_resamples() {
+        let mut timeline = Timeline::new(R24);
+        let late = timeline.add_marker(marker_at(100)).unwrap();
+        let early = timeline.add_marker(marker_at(10)).unwrap();
+        // 2 s at 48 ticks/s resamples to 24 ticks at the 24 fps timeline.
+        let resampled = timeline
+            .add_marker(Marker::new(
+                RationalTime::new(96, Rational::new(48, 1)),
+                "beat",
+                MarkerColor::Red,
+            ))
+            .unwrap();
+
+        let order: Vec<MarkerId> = timeline.markers().iter().map(|m| m.id).collect();
+        assert_eq!(order, [early, resampled, late]);
+        let beat = timeline.marker(resampled).unwrap();
+        assert_eq!(beat.tick, rt(48));
+        assert_eq!(beat.name, "beat");
+        assert_eq!(beat.color, MarkerColor::Red);
+    }
+
+    #[test]
+    fn add_marker_rejects_negative_tick_and_duplicate_id() {
+        let mut timeline = Timeline::new(R24);
+        assert_eq!(
+            timeline.add_marker(marker_at(-1)),
+            Err(ModelError::InvalidRange)
+        );
+        let marker = marker_at(5);
+        let dup = marker.clone();
+        timeline.add_marker(marker).unwrap();
+        assert_eq!(timeline.add_marker(dup), Err(ModelError::InvalidRange));
+        assert_eq!(timeline.marker_count(), 1);
+    }
+
+    #[test]
+    fn remove_marker_returns_snapshot_for_undo() {
+        let mut timeline = Timeline::new(R24);
+        let id = timeline
+            .add_marker(Marker::new(rt(7), "drop", MarkerColor::Pink))
+            .unwrap();
+
+        let removed = timeline.remove_marker(id).unwrap();
+        assert_eq!(removed.name, "drop");
+        assert_eq!(timeline.marker_count(), 0);
+        assert!(timeline.remove_marker(id).is_none());
+
+        // Restoring the snapshot keeps the same id (undo of remove).
+        timeline.add_marker(removed).unwrap();
+        assert_eq!(timeline.marker(id).unwrap().tick, rt(7));
+    }
+
+    #[test]
+    fn set_marker_moves_renames_recolors_and_resorts() {
+        let mut timeline = Timeline::new(R24);
+        let a = timeline.add_marker(marker_at(10)).unwrap();
+        let b = timeline.add_marker(marker_at(20)).unwrap();
+
+        timeline
+            .set_marker(a, rt(30), "outro".into(), MarkerColor::Green)
+            .unwrap();
+        let order: Vec<MarkerId> = timeline.markers().iter().map(|m| m.id).collect();
+        assert_eq!(order, [b, a], "tick change re-sorts");
+        let moved = timeline.marker(a).unwrap();
+        assert_eq!((moved.tick, moved.name.as_str()), (rt(30), "outro"));
+        assert_eq!(moved.color, MarkerColor::Green);
+
+        assert_eq!(
+            timeline.set_marker(MarkerId::from_raw(999), rt(0), String::new(), MarkerColor::Teal),
+            Err(ModelError::UnknownMarker(MarkerId::from_raw(999)))
+        );
+        // A rejected move leaves the marker untouched.
+        assert_eq!(
+            timeline.set_marker(a, rt(-5), String::new(), MarkerColor::Teal),
+            Err(ModelError::InvalidRange)
+        );
+        assert_eq!(timeline.marker(a).unwrap().tick, rt(30));
+        assert_eq!(timeline.marker(a).unwrap().name, "outro");
+    }
+
+    #[test]
+    fn markers_serialize_only_when_present() {
+        let mut timeline = Timeline::new(R24);
+        let empty = serde_json::to_value(&timeline).unwrap();
+        assert!(
+            empty.get("markers").is_none(),
+            "marker-free timelines serialize without the field"
+        );
+        // Pre-marker files (no `markers` key) deserialize to an empty list.
+        let loaded: Timeline = serde_json::from_value(empty).unwrap();
+        assert_eq!(loaded.marker_count(), 0);
+
+        timeline
+            .add_marker(Marker::new(rt(12), "intro", MarkerColor::Blue))
+            .unwrap();
+        let json = serde_json::to_value(&timeline).unwrap();
+        assert_eq!(json["markers"][0]["name"], "intro");
+        assert_eq!(json["markers"][0]["color"], "blue");
+        let back: Timeline = serde_json::from_value(json).unwrap();
+        assert_eq!(back.markers(), timeline.markers());
+    }
+
+    #[test]
+    fn marker_color_cycles_through_the_palette() {
+        assert_eq!(MarkerColor::cycle(0), MarkerColor::Teal);
+        assert_eq!(MarkerColor::cycle(7), MarkerColor::Green);
+        assert_eq!(MarkerColor::cycle(8), MarkerColor::Teal);
+        for color in MarkerColor::ALL {
+            assert_eq!(color.rgba()[3], 0xFF, "palette colors are opaque");
+            assert!(!color.name().is_empty());
+        }
     }
 
     // --- Clone ------------------------------------------------------------

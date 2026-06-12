@@ -522,6 +522,7 @@ mod tests {
             fps: Rational { num: 24, den: 1 },
             drop_frame: false,
             tracks: ModelRc::from(Rc::new(VecModel::from(tracks))),
+            markers: Default::default(),
             width: 1920.0,
             height: 1080.0,
         }

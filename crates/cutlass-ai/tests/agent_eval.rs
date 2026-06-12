@@ -828,6 +828,59 @@ fn speed_up_and_reverse_clip() {
 }
 
 #[test]
+fn crop_to_center_and_mirror_clip() {
+    let (mut host, _, _, clip) = fixture();
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![(
+            "call_1",
+            "set_clip_crop",
+            serde_json::json!({ "clip": clip, "left": 0.25, "right": 0.25, "flip_h": true }),
+        )]),
+        text_turn("Cropped to the middle half and mirrored it."),
+    ]);
+
+    let (outcome, _) = run(
+        &provider,
+        &mut host,
+        &EditorContext::default(),
+        "crop to the center half and mirror it",
+        &AgentConfig::default(),
+    );
+
+    assert_eq!(outcome.status, PromptStatus::Completed);
+    assert_eq!(outcome.actions.len(), 1);
+    assert_eq!(
+        outcome.actions[0].description,
+        format!("set clip {clip} cropped left 25%, right 25%, flipped horizontally")
+    );
+
+    // The kept region and flip land on the model, and the next describe()
+    // surfaces them so the model can reason about current framing.
+    let placed = host
+        .engine
+        .project()
+        .clip(cutlass_models::ClipId::from_raw(clip))
+        .unwrap();
+    assert_eq!(placed.crop.x, 0.25);
+    assert_eq!(placed.crop.w, 0.5);
+    assert!(placed.flip_h && !placed.flip_v);
+    let summary = summarize(host.engine.project());
+    let described = &summary.tracks[0].clips[0];
+    assert_eq!(described.crop, Some([0.25, 0.0, 0.25, 0.0]));
+    assert_eq!(described.flip_h, Some(true));
+    assert_eq!(described.flip_v, None);
+
+    // One undo restores the full frame.
+    assert!(host.engine.undo());
+    let restored = host
+        .engine
+        .project()
+        .clip(cutlass_models::ClipId::from_raw(clip))
+        .unwrap();
+    assert!(!restored.has_custom_crop());
+}
+
+#[test]
 fn add_marker_at_playhead() {
     let (mut host, _, _, _) = fixture();
     let provider = ScriptedProvider::new(vec![

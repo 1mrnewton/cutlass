@@ -101,6 +101,16 @@ pub struct ClipSummary {
     /// Fade-out seconds (set_clip_audio); absent when 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade_out: Option<f64>,
+    /// Fractions trimmed off each edge as `[left, top, right, bottom]`
+    /// (set_clip_crop); absent when the full frame shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<[f64; 4]>,
+    /// Mirrored left-right (set_clip_crop); absent when not flipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flip_h: Option<bool>,
+    /// Mirrored top-bottom (set_clip_crop); absent when not flipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flip_v: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -236,6 +246,17 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                     volume: (clip.volume != 1.0).then(|| f64::from(clip.volume)),
                     fade_in: (clip.fade_in > 0).then(|| seconds(clip.fade_in, rate)),
                     fade_out: (clip.fade_out > 0).then(|| seconds(clip.fade_out, rate)),
+                    crop: (!clip.crop.is_full()).then(|| {
+                        let c = clip.crop;
+                        [
+                            f64::from(c.x),
+                            f64::from(c.y),
+                            f64::from(1.0 - c.x - c.w),
+                            f64::from(1.0 - c.y - c.h),
+                        ]
+                    }),
+                    flip_h: clip.flip_h.then_some(true),
+                    flip_v: clip.flip_v.then_some(true),
                 })
                 .collect(),
         })

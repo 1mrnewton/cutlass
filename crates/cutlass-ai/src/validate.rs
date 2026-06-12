@@ -10,8 +10,8 @@
 
 use cutlass_commands::{Command, EditCommand};
 use cutlass_models::{
-    Clip, ClipId, ClipParam, ClipTransform, Easing, Generator, Marker, MarkerColor, MarkerId,
-    MediaId, ParamValue, Project, Rational, RationalTime, TimeRange, TrackId, TrackKind,
+    Clip, ClipId, ClipParam, ClipTransform, CropRect, Easing, Generator, Marker, MarkerColor,
+    MarkerId, MediaId, ParamValue, Project, Rational, RationalTime, TimeRange, TrackId, TrackKind,
 };
 
 use crate::wire::{
@@ -116,6 +116,56 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 clip: clip.id,
                 transform,
                 at: None,
+            }
+        }
+        WireCommand::SetClipCrop(args) => {
+            let clip = clip_ref(project, args.clip)?;
+            let timeline = project.timeline();
+            let on_audio_lane = timeline
+                .track_of(clip.id)
+                .and_then(|id| timeline.track(id))
+                .is_some_and(|t| t.kind == TrackKind::Audio);
+            if on_audio_lane {
+                return Err(Rejection::new(format!(
+                    "clip {} is on an audio lane; there is no frame to crop",
+                    args.clip
+                )));
+            }
+            // Omitted edges keep the clip's current framing. Current insets
+            // derive from the stored kept-region rect.
+            let current = clip.crop;
+            let inset = |requested: Option<f64>, current: f32, what: &str| {
+                let Some(v) = requested else {
+                    return Ok(current);
+                };
+                if !v.is_finite() || !(0.0..1.0).contains(&v) {
+                    return Err(Rejection::new(format!(
+                        "{what} must be a fraction between 0 and 1 (got {v})"
+                    )));
+                }
+                Ok(v as f32)
+            };
+            let left = inset(args.left, current.x, "left")?;
+            let top = inset(args.top, current.y, "top")?;
+            let right = inset(args.right, 1.0 - current.x - current.w, "right")?;
+            let bottom = inset(args.bottom, 1.0 - current.y - current.h, "bottom")?;
+            let crop = CropRect {
+                x: left,
+                y: top,
+                w: 1.0 - left - right,
+                h: 1.0 - top - bottom,
+            };
+            crop.validate().map_err(|_| {
+                Rejection::new(format!(
+                    "crop leaves no visible frame: left {left} + right {right} and \
+                     top {top} + bottom {bottom} must each keep at least 1% of the frame"
+                ))
+            })?;
+            EditCommand::SetClipCrop {
+                clip: clip.id,
+                crop,
+                flip_h: args.flip_h.unwrap_or(clip.flip_h),
+                flip_v: args.flip_v.unwrap_or(clip.flip_v),
             }
         }
         WireCommand::SetParamKeyframe(args) => {
@@ -1080,6 +1130,134 @@ mod tests {
             }),
         );
         assert!(msg.contains("invalid transform"), "{msg}");
+    }
+
+    #[test]
+    fn clip_crop_merges_edges_and_rejects_empty_frames() {
+        let (mut project, _, _, _, clip, _) = fixture();
+
+        // Fresh clip: edges lower straight into the kept-region rect.
+        let edit = lower(
+            &project,
+            WireCommand::SetClipCrop(wire::SetClipCrop {
+                clip,
+                left: Some(0.25),
+                top: None,
+                right: Some(0.25),
+                bottom: None,
+                flip_h: Some(true),
+                flip_v: None,
+            }),
+        );
+        assert_eq!(
+            edit,
+            EditCommand::SetClipCrop {
+                clip: ClipId::from_raw(clip),
+                crop: CropRect {
+                    x: 0.25,
+                    y: 0.0,
+                    w: 0.5,
+                    h: 1.0
+                },
+                flip_h: true,
+                flip_v: false,
+            }
+        );
+
+        // Omitted fields keep the stored framing: crop the top, keep the
+        // earlier horizontal window and flip.
+        project
+            .set_clip_crop(
+                ClipId::from_raw(clip),
+                CropRect {
+                    x: 0.25,
+                    y: 0.0,
+                    w: 0.5,
+                    h: 1.0,
+                },
+                true,
+                false,
+            )
+            .unwrap();
+        let edit = lower(
+            &project,
+            WireCommand::SetClipCrop(wire::SetClipCrop {
+                clip,
+                left: None,
+                top: Some(0.1),
+                right: None,
+                bottom: None,
+                flip_h: None,
+                flip_v: None,
+            }),
+        );
+        match edit {
+            EditCommand::SetClipCrop { crop, flip_h, .. } => {
+                assert_eq!(crop.x, 0.25);
+                assert_eq!(crop.w, 0.5);
+                assert_eq!(crop.y, 0.1);
+                assert!((crop.h - 0.9).abs() < 1e-6);
+                assert!(flip_h, "stored flip must be kept");
+            }
+            other => panic!("unexpected lowering: {other:?}"),
+        }
+
+        // Edges that eat the whole frame are rejected with a hint.
+        let msg = reject(
+            &project,
+            WireCommand::SetClipCrop(wire::SetClipCrop {
+                clip,
+                left: Some(0.6),
+                top: None,
+                right: Some(0.6),
+                bottom: None,
+                flip_h: None,
+                flip_v: None,
+            }),
+        );
+        assert!(msg.contains("leaves no visible frame"), "{msg}");
+
+        // Out-of-range fractions are rejected by name.
+        let msg = reject(
+            &project,
+            WireCommand::SetClipCrop(wire::SetClipCrop {
+                clip,
+                left: None,
+                top: None,
+                right: None,
+                bottom: Some(1.5),
+                flip_h: None,
+                flip_v: None,
+            }),
+        );
+        assert!(msg.contains("bottom must be a fraction"), "{msg}");
+    }
+
+    #[test]
+    fn clip_crop_rejects_audio_lane_clips() {
+        let (mut project, media, _, _, _, _) = fixture();
+        let lane = project.add_track(TrackKind::Audio, "A1");
+        let audio_clip = project
+            .add_clip(
+                lane,
+                cutlass_models::MediaId::from_raw(media),
+                TimeRange::at_rate(0, 240, R24),
+                RationalTime::new(0, R24),
+            )
+            .unwrap();
+        let msg = reject(
+            &project,
+            WireCommand::SetClipCrop(wire::SetClipCrop {
+                clip: audio_clip.raw(),
+                left: Some(0.2),
+                top: None,
+                right: None,
+                bottom: None,
+                flip_h: None,
+                flip_v: None,
+            }),
+        );
+        assert!(msg.contains("no frame to crop"), "{msg}");
     }
 
     #[test]

@@ -381,6 +381,31 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
             }
             format!("set clip {} {}", a.clip, parts.join(", "))
         }
+        WireCommand::SetClipCrop(a) => {
+            let mut parts = Vec::new();
+            let edges: Vec<String> = [
+                ("left", a.left),
+                ("top", a.top),
+                ("right", a.right),
+                ("bottom", a.bottom),
+            ]
+            .iter()
+            .filter_map(|(name, v)| v.map(|v| format!("{name} {:.0}%", v * 100.0)))
+            .collect();
+            if !edges.is_empty() {
+                parts.push(format!("cropped {}", edges.join(", ")));
+            }
+            if let Some(h) = a.flip_h {
+                parts.push(if h { "flipped horizontally" } else { "unflipped horizontally" }.into());
+            }
+            if let Some(v) = a.flip_v {
+                parts.push(if v { "flipped vertically" } else { "unflipped vertically" }.into());
+            }
+            if parts.is_empty() {
+                parts.push("framing unchanged".into());
+            }
+            format!("set clip {} {}", a.clip, parts.join(", "))
+        }
         WireCommand::SetParamKeyframe(a) => format!(
             "keyframed clip {} {} = {} at {}",
             a.clip,

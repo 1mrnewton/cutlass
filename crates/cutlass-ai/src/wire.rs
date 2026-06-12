@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 /// 3: M1 clip speed (`set_clip_speed`).
 /// 4: M1 clip audio mix (`set_clip_audio`).
 /// 5: M1 timeline markers (`add_marker`, `remove_marker`, `set_marker`).
-pub const TOOL_SCHEMA_VERSION: u32 = 5;
+/// 6: M1 crop + flip (`set_clip_crop`).
+pub const TOOL_SCHEMA_VERSION: u32 = 6;
 
 /// Track lane categories the agent may create or target.
 ///
@@ -145,6 +146,35 @@ pub struct SetClipTransform {
     /// Layer opacity, 0.0 (transparent) to 1.0 (opaque).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opacity: Option<f64>,
+}
+
+/// Crop a clip to a sub-region of its frame and/or mirror it. Crop values
+/// are the fractions trimmed off each edge (left 0.25 removes the left
+/// quarter); the kept region aspect-fits the canvas exactly like the full
+/// frame did, so cropping never moves the layer. Omitted fields keep
+/// their current value. Rejected for clips on audio tracks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SetClipCrop {
+    pub clip: u64,
+    /// Fraction of the frame width trimmed off the left edge (0–1). Omit
+    /// to keep the current value; 0 restores the edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<f64>,
+    /// Fraction of the frame height trimmed off the top edge (0–1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<f64>,
+    /// Fraction of the frame width trimmed off the right edge (0–1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<f64>,
+    /// Fraction of the frame height trimmed off the bottom edge (0–1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<f64>,
+    /// Mirror the content left-right. Omit to keep the current state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flip_h: Option<bool>,
+    /// Mirror the content top-bottom. Omit to keep the current state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flip_v: Option<bool>,
 }
 
 /// An animatable clip property the keyframe commands can address.
@@ -434,6 +464,7 @@ pub enum WireCommand {
     AddGenerated(AddGenerated),
     SetGenerator(SetGenerator),
     SetClipTransform(SetClipTransform),
+    SetClipCrop(SetClipCrop),
     SetParamKeyframe(SetParamKeyframe),
     RemoveParamKeyframe(RemoveParamKeyframe),
     SetParamConstant(SetParamConstant),
@@ -492,6 +523,7 @@ impl WireCommand {
             WireCommand::AddGenerated(a) => track(&mut a.track),
             WireCommand::SetGenerator(a) => clip(&mut a.clip),
             WireCommand::SetClipTransform(a) => clip(&mut a.clip),
+            WireCommand::SetClipCrop(a) => clip(&mut a.clip),
             WireCommand::SetParamKeyframe(a) => clip(&mut a.clip),
             WireCommand::RemoveParamKeyframe(a) => clip(&mut a.clip),
             WireCommand::SetParamConstant(a) => clip(&mut a.clip),
@@ -602,6 +634,8 @@ tools! {
         "Replace a generated clip's content: change a title's text (styling preserved) or recolor a solid/shape. Not valid for media clips.";
     "set_clip_transform" => SetClipTransform(SetClipTransform),
         "Change a clip's placement on the canvas: position, scale, rotation, opacity. Omitted fields keep their current value. Not valid on audio tracks.";
+    "set_clip_crop" => SetClipCrop(SetClipCrop),
+        "Crop a clip to a sub-region of its frame (fractions trimmed off each edge; 0 restores an edge) and/or mirror it with flip_h / flip_v. Omitted fields keep their current value. Not valid on audio tracks.";
     "set_param_keyframe" => SetParamKeyframe(SetParamKeyframe),
         "Add or replace a keyframe on a clip property (position, scale, rotation, opacity) at a timeline position in seconds, animating it over time. Use 'value' for scalar params, 'position' for position.";
     "remove_param_keyframe" => RemoveParamKeyframe(RemoveParamKeyframe),
@@ -765,7 +799,7 @@ mod tests {
     #[test]
     fn tool_specs_cover_every_command_with_object_schemas() {
         let specs = tool_specs();
-        assert_eq!(specs.len(), 25);
+        assert_eq!(specs.len(), 26);
         for spec in &specs {
             assert!(!spec.description.is_empty(), "{} missing description", spec.name);
             assert_eq!(

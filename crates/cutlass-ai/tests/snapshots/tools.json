@@ -406,6 +406,72 @@
       }
     },
     {
+      "description": "Crop a clip to a sub-region of its frame (fractions trimmed off each edge; 0 restores an edge) and/or mirror it with flip_h / flip_v. Omitted fields keep their current value. Not valid on audio tracks.",
+      "name": "set_clip_crop",
+      "parameters": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Crop a clip to a sub-region of its frame and/or mirror it. Crop values\nare the fractions trimmed off each edge (left 0.25 removes the left\nquarter); the kept region aspect-fits the canvas exactly like the full\nframe did, so cropping never moves the layer. Omitted fields keep\ntheir current value. Rejected for clips on audio tracks.",
+        "properties": {
+          "bottom": {
+            "description": "Fraction of the frame height trimmed off the bottom edge (0–1).",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "clip": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "flip_h": {
+            "description": "Mirror the content left-right. Omit to keep the current state.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "flip_v": {
+            "description": "Mirror the content top-bottom. Omit to keep the current state.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "left": {
+            "description": "Fraction of the frame width trimmed off the left edge (0–1). Omit\nto keep the current value; 0 restores the edge.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "right": {
+            "description": "Fraction of the frame width trimmed off the right edge (0–1).",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "top": {
+            "description": "Fraction of the frame height trimmed off the top edge (0–1).",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "clip"
+        ],
+        "title": "SetClipCrop",
+        "type": "object"
+      }
+    },
+    {
       "description": "Add or replace a keyframe on a clip property (position, scale, rotation, opacity) at a timeline position in seconds, animating it over time. Use 'value' for scalar params, 'position' for position.",
       "name": "set_param_keyframe",
       "parameters": {
@@ -1186,5 +1252,5 @@
       }
     }
   ],
-  "version": 5
+  "version": 6
 }

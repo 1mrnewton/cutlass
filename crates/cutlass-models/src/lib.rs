@@ -34,10 +34,11 @@ pub type Map<K, V> = rustc_hash::FxHashMap<K, V>;
 
 pub use clip::{
     AnimatedTransform, Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator,
-    MAX_CLIP_VOLUME, MAX_SPEED, MIN_CROP_FRACTION, MIN_SPEED, ParamValue, SPEED_CURVE_SCALE, Shape,
-    TextAlignH, TextAlignV, TextBackground, TextCase, TextShadow, TextStroke, TextStyle,
-    audio_gain_at, speed_curve_integral, speed_curve_source_fraction, speed_preset,
-    validate_speed_curve, validate_volume, validate_volume_envelope,
+    MAX_CLIP_VOLUME, MAX_SPEED, MIN_CROP_FRACTION, MIN_SPEED, ParamValue, SHAPE_DROP_HEIGHT,
+    SHAPE_DROP_WIDTH, SPEED_CURVE_SCALE, Shape, TextAlignH, TextAlignV, TextBackground, TextCase,
+    TextShadow, TextStroke, TextStyle, audio_gain_at, speed_curve_integral,
+    speed_curve_source_fraction, speed_preset, validate_speed_curve, validate_volume,
+    validate_volume_envelope,
 };
 pub use effects::{
     EffectInstance, EffectParamSpec, EffectSpec, effect_catalog, effect_spec,

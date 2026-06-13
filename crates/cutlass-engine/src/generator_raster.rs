@@ -50,7 +50,7 @@ enum RasterKey {
         w: u32,
         h: u32,
     },
-    Shape { shape: ShapeKey, rgba: [u8; 4], w: u32, h: u32 },
+    Shape { shape: ShapeKey, rgba: [u8; 4], w: u32, h: u32, width_bits: u32, height_bits: u32 },
 }
 
 /// Hashable mirror of [`TextStyle`]: `f32` fields are stored as their IEEE bit
@@ -188,11 +188,18 @@ impl GeneratorRaster {
                 w: width,
                 h: height,
             },
-            Generator::Shape { shape, rgba } => RasterKey::Shape {
+            Generator::Shape {
+                shape,
+                rgba,
+                width: shape_w,
+                height: shape_h,
+            } => RasterKey::Shape {
                 shape: shape_key(*shape),
                 rgba: *rgba,
                 w: width,
                 h: height,
+                width_bits: shape_w.to_bits(),
+                height_bits: shape_h.to_bits(),
             },
             _ => return None,
         };
@@ -203,7 +210,12 @@ impl GeneratorRaster {
 
         let bytes = match generator {
             Generator::Text { content, style } => self.raster_text(content, style, width, height),
-            Generator::Shape { shape, rgba } => raster_shape(*shape, *rgba, width, height),
+            Generator::Shape {
+                shape,
+                rgba,
+                width: shape_w,
+                height: shape_h,
+            } => raster_shape(*shape, *rgba, *shape_w, *shape_h, width, height),
             _ => unreachable!("filtered above"),
         };
         let entry = CachedRaster {
@@ -675,10 +687,17 @@ fn push_round_rect(pb: &mut PathBuilder, rect: Rect, r: f32) {
     pb.close();
 }
 
-/// Rasterize a centered shape covering the middle 50% of the canvas.
-fn raster_shape(shape: Shape, rgba: [u8; 4], width: u32, height: u32) -> Vec<u8> {
-    let mut out = vec![0u8; (width as usize) * (height as usize) * 4];
-    let Some(mut pixmap) = Pixmap::new(width, height) else {
+/// Rasterize a centered shape at the given reference-pixel size.
+fn raster_shape(
+    shape: Shape,
+    rgba: [u8; 4],
+    shape_w: f32,
+    shape_h: f32,
+    canvas_w: u32,
+    canvas_h: u32,
+) -> Vec<u8> {
+    let mut out = vec![0u8; (canvas_w as usize) * (canvas_h as usize) * 4];
+    let Some(mut pixmap) = Pixmap::new(canvas_w, canvas_h) else {
         return out;
     };
 
@@ -686,10 +705,11 @@ fn raster_shape(shape: Shape, rgba: [u8; 4], width: u32, height: u32) -> Vec<u8>
     paint.set_color_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]);
     paint.anti_alias = true;
 
-    let ext_w = width as f32 * 0.5;
-    let ext_h = height as f32 * 0.5;
-    let x = (width as f32 - ext_w) / 2.0;
-    let y = (height as f32 - ext_h) / 2.0;
+    let scale = canvas_h as f32 / REFERENCE_HEIGHT;
+    let ext_w = shape_w * scale;
+    let ext_h = shape_h * scale;
+    let x = (canvas_w as f32 - ext_w) / 2.0;
+    let y = (canvas_h as f32 - ext_h) / 2.0;
     let Some(rect) = Rect::from_xywh(x, y, ext_w, ext_h) else {
         return out;
     };
@@ -735,9 +755,9 @@ mod tests {
     #[test]
     fn shape_rect_fills_center_not_corner() {
         let (w, h) = (64, 64);
-        let buf = raster_shape(Shape::Rectangle, [255, 0, 0, 255], w, h);
+        let buf = raster_shape(Shape::Rectangle, [255, 0, 0, 255], 960.0, 540.0, w, h);
         assert_eq!(buf.len(), (w * h * 4) as usize);
-        // Center is inside the middle 50% box.
+        // Center is inside the legacy-default box.
         assert_eq!(alpha_at(&buf, w, w / 2, h / 2), 255);
         // Red channel set at the center.
         let center = ((h / 2 * w + w / 2) * 4) as usize;
@@ -749,21 +769,18 @@ mod tests {
     #[test]
     fn shape_ellipse_corner_of_box_is_empty() {
         let (w, h) = (64, 64);
-        let buf = raster_shape(Shape::Ellipse, [0, 255, 0, 255], w, h);
+        let buf = raster_shape(Shape::Ellipse, [0, 255, 0, 255], 960.0, 540.0, w, h);
         // Center filled.
         assert_eq!(alpha_at(&buf, w, w / 2, h / 2), 255);
-        // The box spans [16,48); its top-left corner (16,16) sits outside the
-        // inscribed ellipse, so it should be (near) transparent.
+        // Legacy default at 64×64: box ≈ 57×32 centered; corner (16,16) sits
+        // outside the inscribed ellipse.
         assert_eq!(alpha_at(&buf, w, 16, 16), 0);
     }
 
     #[test]
     fn raster_caches_repeated_lookups() {
         let mut raster = GeneratorRaster::new();
-        let generator = Generator::Shape {
-            shape: Shape::Rectangle,
-            rgba: [10, 20, 30, 255],
-        };
+        let generator = Generator::shape(Shape::Rectangle, [10, 20, 30, 255]);
         let a = raster.raster(&generator, 32, 32).unwrap();
         let b = raster.raster(&generator, 32, 32).unwrap();
         // Same Arc allocation on the second call ⇒ cache hit.
@@ -773,19 +790,26 @@ mod tests {
     #[test]
     fn content_size_hugs_the_drawn_content() {
         let mut raster = GeneratorRaster::new();
-        // Shapes draw the centered middle 50% of the canvas; the rectangle's
-        // box is pixel-exact, the ellipse inscribes the same rect.
+        // Legacy-default shapes scale with canvas height; at 64×64 the box is
+        // 960×540 ref px → ≈57×32 canvas px (rectangle exact, ellipse inscribes).
         let rect = Generator::Shape {
             shape: Shape::Rectangle,
             rgba: [255, 0, 0, 255],
+            width: 960.0,
+            height: 540.0,
         };
-        assert_eq!(raster.content_size(&rect, 64, 64), Some((32, 32)));
+        assert_eq!(raster.content_size(&rect, 64, 64), Some((58, 32)));
         let ellipse = Generator::Shape {
             shape: Shape::Ellipse,
             rgba: [0, 255, 0, 255],
+            width: 960.0,
+            height: 540.0,
         };
         let (ew, eh) = raster.content_size(&ellipse, 64, 64).unwrap();
-        assert!((30..=32).contains(&ew) && (30..=32).contains(&eh), "{ew}x{eh}");
+        assert!((55..=58).contains(&ew) && (30..=32).contains(&eh), "{ew}x{eh}");
+        // Drop-size shapes at 1080p canvas land at 200×200 px.
+        let small = Generator::shape(Shape::Rectangle, [255, 255, 255, 255]);
+        assert_eq!(raster.content_size(&small, 1920, 1080), Some((200, 200)));
         // Solids cover the whole canvas (no raster involved).
         let solid = Generator::SolidColor { rgba: [1, 2, 3, 255] };
         assert_eq!(raster.content_size(&solid, 64, 48), Some((64, 48)));

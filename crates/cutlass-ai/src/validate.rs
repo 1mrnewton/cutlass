@@ -884,13 +884,33 @@ fn lower_generator(wire: &WireGenerator, current: Option<&Generator>) -> Generat
             }
         }
         WireGenerator::Solid { rgba } => Generator::SolidColor { rgba: *rgba },
-        WireGenerator::Shape { shape, rgba } => Generator::Shape {
-            shape: match shape {
-                WireShape::Rectangle => cutlass_models::Shape::Rectangle,
-                WireShape::Ellipse => cutlass_models::Shape::Ellipse,
-            },
-            rgba: *rgba,
-        },
+        WireGenerator::Shape {
+            shape,
+            rgba,
+            width,
+            height,
+        } => {
+            let (shape_w, shape_h) = match current {
+                Some(Generator::Shape {
+                    width: w,
+                    height: h,
+                    ..
+                }) => (*w, *h),
+                _ => (
+                    cutlass_models::SHAPE_DROP_WIDTH,
+                    cutlass_models::SHAPE_DROP_HEIGHT,
+                ),
+            };
+            Generator::Shape {
+                shape: match shape {
+                    WireShape::Rectangle => cutlass_models::Shape::Rectangle,
+                    WireShape::Ellipse => cutlass_models::Shape::Ellipse,
+                },
+                rgba: *rgba,
+                width: width.unwrap_or(shape_w),
+                height: height.unwrap_or(shape_h),
+            }
+        }
     }
 }
 

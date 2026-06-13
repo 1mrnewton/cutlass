@@ -52,14 +52,8 @@ fn generator_from_key(key: &str) -> Option<cutlass_models::Generator> {
         "solid" => Generator::SolidColor {
             rgba: [30, 30, 30, 255],
         },
-        "rect" => Generator::Shape {
-            shape: Shape::Rectangle,
-            rgba: [255, 255, 255, 255],
-        },
-        "ellipse" => Generator::Shape {
-            shape: Shape::Ellipse,
-            rgba: [255, 255, 255, 255],
-        },
+        "rect" => Generator::shape(Shape::Rectangle, [255, 255, 255, 255]),
+        "ellipse" => Generator::shape(Shape::Ellipse, [255, 255, 255, 255]),
         _ => return None,
     })
 }
@@ -1452,6 +1446,29 @@ fn main() -> Result<(), slint::PlatformError> {
     app.global::<InspectorBackend>()
         .on_clear_text_generator(move |tick| {
             clear_text_handle.clear_generator_override(i64::from(tick));
+        });
+
+    let set_shape_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_set_shape_generator(move |clip_id, width, height| {
+            set_shape_handle.set_shape_size(clip_id.to_string(), width, height);
+        });
+
+    let preview_shape_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_preview_shape_generator(move |clip_id, width, height, tick| {
+            preview_shape_handle.preview_shape_size(
+                clip_id.to_string(),
+                width,
+                height,
+                i64::from(tick),
+            );
+        });
+
+    let clear_shape_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_clear_shape_generator(move |tick| {
+            clear_shape_handle.clear_generator_override(i64::from(tick));
         });
 
     app.global::<InspectorBackend>()

@@ -1106,10 +1106,7 @@ mod tests {
         project
             .add_generated(
                 track,
-                Generator::Shape {
-                    shape: Shape::Ellipse,
-                    rgba: [10, 200, 50, 255],
-                },
+                Generator::shape(Shape::Ellipse, [10, 200, 50, 255]),
                 TimeRange::at_rate(0, 24, cutlass_models::Rational::FPS_24),
             )
             .unwrap();

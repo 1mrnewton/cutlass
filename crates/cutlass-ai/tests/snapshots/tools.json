@@ -162,6 +162,14 @@
               {
                 "description": "A filled vector shape centered on the canvas.",
                 "properties": {
+                  "height": {
+                    "description": "Height in reference pixels. Omit to keep the clip's current size.",
+                    "format": "float",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
                   "rgba": {
                     "description": "Fill color as `[red, green, blue, alpha]`, each 0-255.",
                     "items": {
@@ -185,6 +193,14 @@
                   "type": {
                     "const": "shape",
                     "type": "string"
+                  },
+                  "width": {
+                    "description": "Width in reference pixels (1080px-tall canvas). Omit to keep the\nclip's current size when editing an existing shape.",
+                    "format": "float",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -281,6 +297,14 @@
               {
                 "description": "A filled vector shape centered on the canvas.",
                 "properties": {
+                  "height": {
+                    "description": "Height in reference pixels. Omit to keep the clip's current size.",
+                    "format": "float",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
                   "rgba": {
                     "description": "Fill color as `[red, green, blue, alpha]`, each 0-255.",
                     "items": {
@@ -304,6 +328,14 @@
                   "type": {
                     "const": "shape",
                     "type": "string"
+                  },
+                  "width": {
+                    "description": "Width in reference pixels (1080px-tall canvas). Omit to keep the\nclip's current size when editing an existing shape.",
+                    "format": "float",
+                    "type": [
+                      "number",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -1534,5 +1566,5 @@
       }
     }
   ],
-  "version": 14
+  "version": 15
 }

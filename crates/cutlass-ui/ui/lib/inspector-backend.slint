@@ -195,6 +195,17 @@ export global InspectorBackend {
     // (control released with no net change).
     callback clear-text-generator(tick: int);
 
+    // Replace a shape clip's reference-pixel size in one undoable edit. The
+    // inspector sends the full current width/height each time.
+    callback set-shape-generator(clip-id: string, width: float, height: float);
+
+    // Live preview of an uncommitted shape resize (slider drag): render `tick`
+    // with the clip's generator replaced, no history entry.
+    callback preview-shape-generator(clip-id: string, width: float, height: float, tick: int);
+
+    // Drop a lingering shape preview override.
+    callback clear-shape-generator(tick: int);
+
     // Installed font family names for the Font picker, populated once at
     // startup (system font enumeration is slow, so it runs off the UI thread).
     in-out property <[string]> font-families: [];

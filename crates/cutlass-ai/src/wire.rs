@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 /// 13: M8 varispeed pitch lock (`set_clip_pitch`); retimed-audio descriptions
 ///     drop the "muted" language now that speed/reverse/ramp clips sound.
 /// 14: M8 sidechain ducking (`duck`).
-pub const TOOL_SCHEMA_VERSION: u32 = 14;
+pub const TOOL_SCHEMA_VERSION: u32 = 15;
 
 /// Track lane categories the agent may create or target.
 ///
@@ -80,6 +80,13 @@ pub enum WireGenerator {
         shape: WireShape,
         /// Fill color as `[red, green, blue, alpha]`, each 0-255.
         rgba: [u8; 4],
+        /// Width in reference pixels (1080px-tall canvas). Omit to keep the
+        /// clip's current size when editing an existing shape.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<f32>,
+        /// Height in reference pixels. Omit to keep the clip's current size.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<f32>,
     },
 }
 
@@ -1031,6 +1038,8 @@ mod tests {
         let shape = WireGenerator::Shape {
             shape: WireShape::Ellipse,
             rgba: [255, 0, 0, 255],
+            width: None,
+            height: None,
         };
         assert_eq!(
             serde_json::to_value(&shape).unwrap(),

@@ -399,14 +399,22 @@ fn generator_phrase(generator: &wire::WireGenerator) -> String {
     match generator {
         wire::WireGenerator::Text { content } => format!("text '{content}'"),
         wire::WireGenerator::Solid { rgba: c } => format!("solid {}", rgba(*c)),
-        wire::WireGenerator::Shape { shape, rgba: c } => format!(
-            "{} {}",
-            rgba(*c),
-            match shape {
+        wire::WireGenerator::Shape {
+            shape,
+            rgba: c,
+            width,
+            height,
+        } => {
+            let name = match shape {
                 wire::WireShape::Rectangle => "rectangle",
                 wire::WireShape::Ellipse => "ellipse",
-            }
-        ),
+            };
+            let size = match (width, height) {
+                (Some(w), Some(h)) => format!(" {w:.0}×{h:.0} ref px"),
+                _ => String::new(),
+            };
+            format!("{} {}{}", rgba(*c), name, size)
+        }
     }
 }
 

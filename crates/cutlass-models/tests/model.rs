@@ -51,10 +51,7 @@ fn generated_clips_need_no_media() {
     let shape = project
         .add_generated(
             gfx,
-            Generator::Shape {
-                shape: Shape::Rectangle,
-                rgba: [255, 255, 255, 255],
-            },
+            Generator::shape(Shape::Rectangle, [255, 255, 255, 255]),
             tr(48, 48),
         )
         .unwrap();

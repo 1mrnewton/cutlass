@@ -97,6 +97,20 @@ enum WorkerMsg {
     /// Replace a generated clip's content (raw id) — e.g. an inspector title
     /// edit. One undoable history entry per committed edit.
     SetGenerator { clip: String, generator: Generator },
+    /// Resize a shape clip's reference-pixel dimensions. Preserves shape kind
+    /// and fill from the committed generator.
+    SetShapeSize {
+        clip: String,
+        width: f32,
+        height: f32,
+    },
+    /// Live preview of a shape resize at `tick` — no history entry.
+    PreviewShapeSize {
+        clip: String,
+        width: f32,
+        height: f32,
+        tick: i64,
+    },
     /// Retime a media clip (CapCut speed, M1): positive rational `num/den`
     /// playback rate plus the reverse flag. The engine re-derives the
     /// timeline duration; one undoable history entry.
@@ -557,6 +571,23 @@ impl WorkerHandle {
 
     pub fn set_generator(&self, clip: String, generator: Generator) {
         let _ = self.tx.send(WorkerMsg::SetGenerator { clip, generator });
+    }
+
+    pub fn set_shape_size(&self, clip: String, width: f32, height: f32) {
+        let _ = self.tx.send(WorkerMsg::SetShapeSize {
+            clip,
+            width,
+            height,
+        });
+    }
+
+    pub fn preview_shape_size(&self, clip: String, width: f32, height: f32, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::PreviewShapeSize {
+            clip,
+            width,
+            height,
+            tick,
+        });
     }
 
     pub fn set_clip_speed(&self, clip: String, num: i32, den: i32, reversed: bool) {
@@ -1024,6 +1055,25 @@ fn worker_loop(
             WorkerMsg::SetGenerator { clip, generator } => {
                 set_generator_and_publish(engine, &clip, generator, &ui)
             }
+            WorkerMsg::SetShapeSize { clip, width, height } => {
+                if let Some(generator) = shape_size_from_engine(engine, &clip, width, height) {
+                    set_generator_and_publish(engine, &clip, generator, &ui);
+                }
+            }
+            // Only reached when a shape-resize burst interleaves with another
+            // coalesced gesture's drain (practically impossible — one slider at
+            // a time). The dedicated loop arm coalesces the common case.
+            WorkerMsg::PreviewShapeSize {
+                clip,
+                width,
+                height,
+                tick,
+            } => {
+                if let Some(generator) = shape_size_from_engine(engine, &clip, width, height) {
+                    apply_generator_override(engine, &clip, generator);
+                    render_frame(engine, tl_rate, &preview_weak, tick);
+                }
+            }
             WorkerMsg::SetClipSpeed {
                 clip,
                 num,
@@ -1332,6 +1382,52 @@ fn worker_loop(
                 }
                 last_tick = tick;
                 if pending {
+                    apply_generator_override(engine, &clip, generator);
+                }
+                render_frame(engine, tl_rate, &preview_weak, tick);
+            }
+            // Shape resize drags (width/height sliders) arrive at pointer-move
+            // rate; coalesce to the newest like the generator/transform
+            // overrides so a fast drag can't back the render queue up. The
+            // override generator is rebuilt from committed engine state, so the
+            // drained-mutation ordering rule (above) applies unchanged.
+            WorkerMsg::PreviewShapeSize {
+                mut clip,
+                mut width,
+                mut height,
+                mut tick,
+            } => {
+                let mut pending = true;
+                while let Ok(next) = req_rx.try_recv() {
+                    match next {
+                        WorkerMsg::Frame(latest) => tick = latest,
+                        WorkerMsg::PreviewShapeSize {
+                            clip: c,
+                            width: w,
+                            height: h,
+                            tick: at,
+                        } => {
+                            clip = c;
+                            width = w;
+                            height = h;
+                            tick = at;
+                            pending = true;
+                        }
+                        other => {
+                            if std::mem::take(&mut pending)
+                                && let Some(generator) =
+                                    shape_size_from_engine(engine, &clip, width, height)
+                            {
+                                apply_generator_override(engine, &clip, generator);
+                            }
+                            mutate(engine, &mut clipboard, &mut main_magnet, &mut linkage, &mut autosave_slot, other)
+                        }
+                    }
+                }
+                last_tick = tick;
+                if pending && let Some(generator) =
+                    shape_size_from_engine(engine, &clip, width, height)
+                {
                     apply_generator_override(engine, &clip, generator);
                 }
                 render_frame(engine, tl_rate, &preview_weak, tick);
@@ -2781,6 +2877,38 @@ fn parse_marker_color(name: &str) -> Option<MarkerColor> {
         "orange" => Some(MarkerColor::Orange),
         "yellow" => Some(MarkerColor::Yellow),
         "green" => Some(MarkerColor::Green),
+        _ => None,
+    }
+}
+
+/// Build a shape generator with new reference-pixel dimensions, preserving the
+/// clip's shape kind and fill. `None` when the clip is missing or not a shape.
+///
+/// Dimensions are floored at 1px and non-finite input is rejected: the slider
+/// stays in `8..=1920`, but a typed entry or double-click reset can deliver
+/// anything, and a zero/negative extent would collapse the raster's `Rect` to
+/// an invisible shape.
+fn shape_size_from_engine(
+    engine: &Engine,
+    clip: &str,
+    width: f32,
+    height: f32,
+) -> Option<Generator> {
+    if !width.is_finite() || !height.is_finite() {
+        return None;
+    }
+    let clip_id = parse_raw_id(clip).map(ClipId::from_raw)?;
+    let generator = match &engine.project().timeline().clip(clip_id)?.content {
+        ClipSource::Generated(g) => g,
+        ClipSource::Media { .. } => return None,
+    };
+    match generator {
+        Generator::Shape { shape, rgba, .. } => Some(Generator::Shape {
+            shape: *shape,
+            rgba: *rgba,
+            width: width.max(1.0),
+            height: height.max(1.0),
+        }),
         _ => None,
     }
 }

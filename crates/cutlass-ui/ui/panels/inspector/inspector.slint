@@ -538,6 +538,8 @@ component VisualClipInspector inherits VerticalLayout {
 
     spacing: AppStore.theme.metrics.spacing.none;
 
+    private property <bool> is-shape: model.generator-kind == "rect" || model.generator-kind == "ellipse";
+
     InspectorTabHeader {
         tabs: ["Video", "Animation", "Tracking", "Adjustment"];
         selected: 0;
@@ -567,6 +569,62 @@ component VisualClipInspector inherits VerticalLayout {
             spacing: AppStore.theme.metrics.spacing.lg;
             alignment: LayoutAlignment.start;
             padding: AppStore.theme.metrics.spacing.lg;
+
+            if root.is-shape: SectionHeader {
+                title: "Shape";
+            }
+
+            // `value` tracks the committed projection (only moves on commit);
+            // the slider drives its own value during a drag, so previewing the
+            // dragged dimension reads the *other* one straight from the model
+            // (you can only drag one slider at a time). This honors the
+            // SliderRow contract — writing the bound `value` mid-drag would
+            // fight the slider's internal value.
+            if root.is-shape: SliderRow {
+                label: "Width";
+                suffix: "px";
+                value: model.shape-width;
+                minimum: 8;
+                maximum: 1920;
+                step: 1;
+                decimals: 0;
+                reset-value: 200;
+                preview(v) => {
+                    InspectorBackend.preview-shape-generator(
+                        model.id, v, model.shape-height, TimelineStore.playhead-tick);
+                }
+                commit(v) => {
+                    if (v != model.shape-width) {
+                        InspectorBackend.set-shape-generator(model.id, v, model.shape-height);
+                    } else {
+                        InspectorBackend.clear-shape-generator(TimelineStore.playhead-tick);
+                    }
+                }
+            }
+
+            if root.is-shape: SliderRow {
+                label: "Height";
+                suffix: "px";
+                value: model.shape-height;
+                minimum: 8;
+                maximum: 1920;
+                step: 1;
+                decimals: 0;
+                reset-value: 200;
+                preview(v) => {
+                    InspectorBackend.preview-shape-generator(
+                        model.id, model.shape-width, v, TimelineStore.playhead-tick);
+                }
+                commit(v) => {
+                    if (v != model.shape-height) {
+                        InspectorBackend.set-shape-generator(model.id, model.shape-width, v);
+                    } else {
+                        InspectorBackend.clear-shape-generator(TimelineStore.playhead-tick);
+                    }
+                }
+            }
+
+            if root.is-shape: InspectorDivider { }
 
             TransformInspector {
                 model: root.model;

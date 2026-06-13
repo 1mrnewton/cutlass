@@ -214,6 +214,7 @@ fn clip_to_slint(
     };
     let transform = clip.transform.sample(0);
     let clip_start = clip.timeline.start.value;
+    let (shape_width, shape_height) = clip_shape_size(clip);
 
     Clip {
         id: clip.id.raw().to_string().into(),
@@ -238,6 +239,8 @@ fn clip_to_slint(
         text_style: clip_text_style(clip),
         generator_kind: generator_kind.into(),
         fill_color,
+        shape_width,
+        shape_height,
         head_room_ticks: head_room,
         tail_room_ticks: tail_room,
         link_id: clip
@@ -588,6 +591,13 @@ fn clip_labels(project: &EngineProject, clip: &EngineClip) -> (String, String) {
     }
 }
 
+fn clip_shape_size(clip: &EngineClip) -> (f32, f32) {
+    match &clip.content {
+        ClipSource::Generated(Generator::Shape { width, height, .. }) => (*width, *height),
+        _ => (0.0, 0.0),
+    }
+}
+
 /// `(generator-kind tag, fill color)` for the timeline card. The tag selects
 /// the card's preview rendering (see `panels/timeline/clip.slint`); the color
 /// is the solid/shape fill (transparent for everything else).
@@ -596,7 +606,7 @@ fn clip_generator_visual(clip: &EngineClip) -> (&'static str, Color) {
     match &clip.content {
         ClipSource::Generated(Generator::Text { .. }) => ("text", transparent),
         ClipSource::Generated(Generator::SolidColor { rgba }) => ("solid", rgba_color(*rgba)),
-        ClipSource::Generated(Generator::Shape { shape, rgba }) => {
+        ClipSource::Generated(Generator::Shape { shape, rgba, .. }) => {
             let tag = match shape {
                 cutlass_models::Shape::Rectangle => "rect",
                 cutlass_models::Shape::Ellipse => "ellipse",

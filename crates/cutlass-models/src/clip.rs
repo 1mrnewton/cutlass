@@ -35,13 +35,22 @@ pub enum Generator {
     },
     /// A solid fill (RGBA, 0-255).
     SolidColor { rgba: [u8; 4] },
-    /// A vector shape with a fill color (RGBA, 0-255). Geometry (a centered
-    /// rect/ellipse) is fixed until per-layer transforms land.
+    /// A centered vector shape (rectangle or ellipse) with a fill color.
+    ///
+    /// `width` and `height` are in *reference pixels* relative to a 1080px-tall
+    /// canvas; the rasterizer scales them by `canvas_height / 1080` (same
+    /// convention as [`TextStyle::size`]). Missing fields deserialize to the
+    /// legacy centered-50%-of-canvas look; freshly dropped shapes use
+    /// [`SHAPE_DROP_WIDTH`] × [`SHAPE_DROP_HEIGHT`].
     Shape {
         shape: Shape,
         /// Fill color. Old projects without this field default to white.
         #[serde(default = "default_shape_rgba")]
         rgba: [u8; 4],
+        #[serde(default = "default_shape_width")]
+        width: f32,
+        #[serde(default = "default_shape_height")]
+        height: f32,
     },
     /// Image or animated sticker (asset wiring TBD).
     Sticker,
@@ -64,6 +73,21 @@ fn default_shape_rgba() -> [u8; 4] {
     [255, 255, 255, 255]
 }
 
+/// Default width for shapes missing the field — reproduces the legacy
+/// centered 50%-of-canvas geometry on a 1920×1080 project.
+fn default_shape_width() -> f32 {
+    960.0
+}
+
+/// Default height for shapes missing the field — same legacy geometry.
+fn default_shape_height() -> f32 {
+    540.0
+}
+
+/// Size of a freshly dropped shape (reference pixels @ 1080 canvas height).
+pub const SHAPE_DROP_WIDTH: f32 = 200.0;
+pub const SHAPE_DROP_HEIGHT: f32 = 200.0;
+
 impl Generator {
     /// A text generator with the default style. Convenience for the common
     /// case of creating a freshly-dropped title.
@@ -71,6 +95,16 @@ impl Generator {
         Generator::Text {
             content: content.into(),
             style: TextStyle::default(),
+        }
+    }
+
+    /// A shape generator with the default drop size and fill color.
+    pub fn shape(shape: Shape, rgba: [u8; 4]) -> Self {
+        Generator::Shape {
+            shape,
+            rgba,
+            width: SHAPE_DROP_WIDTH,
+            height: SHAPE_DROP_HEIGHT,
         }
     }
 }
@@ -1385,10 +1419,7 @@ mod tests {
         ));
 
         let shape = Clip::generated(
-            Generator::Shape {
-                shape: Shape::Ellipse,
-                rgba: [0, 128, 255, 255],
-            },
+            Generator::shape(Shape::Ellipse, [0, 128, 255, 255]),
             timeline,
         );
         assert!(matches!(
@@ -2186,6 +2217,31 @@ mod tests {
                 assert_eq!(style, TextStyle::default());
             }
             other => panic!("expected text generator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_shape_without_dimensions_loads_legacy_defaults() {
+        let json = r#"{
+            "id": 1,
+            "content": { "Generated": { "Shape": {
+                "shape": "Rectangle",
+                "rgba": [255, 0, 0, 255]
+            } } },
+            "timeline": { "start": { "value": 0, "rate": { "num": 24, "den": 1 } },
+                          "duration": { "value": 24, "rate": { "num": 24, "den": 1 } } }
+        }"#;
+        let clip: Clip = serde_json::from_str(json).expect("deserialize legacy shape clip");
+        match clip.content {
+            ClipSource::Generated(Generator::Shape {
+                width,
+                height,
+                ..
+            }) => {
+                assert_eq!(width, 960.0);
+                assert_eq!(height, 540.0);
+            }
+            other => panic!("expected shape generator, got {other:?}"),
         }
     }
 

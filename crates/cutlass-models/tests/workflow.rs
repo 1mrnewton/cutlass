@@ -193,10 +193,7 @@ fn shape_generator_and_move_preserves_source() {
     let shape = project
         .add_generated(
             gfx,
-            Generator::Shape {
-                shape: Shape::Ellipse,
-                rgba: [255, 255, 255, 255],
-            },
+            Generator::shape(Shape::Ellipse, [255, 255, 255, 255]),
             tr(50, 100),
         )
         .unwrap();

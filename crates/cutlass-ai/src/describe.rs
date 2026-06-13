@@ -169,6 +169,8 @@ pub enum ClipContent {
     Shape {
         shape: String,
         rgba: [u8; 4],
+        width: f64,
+        height: f64,
     },
     /// A generator kind the agent cannot create or edit.
     Other {
@@ -222,12 +224,19 @@ fn clip_content(project: &Project, content: &ClipSource) -> ClipContent {
                 text: content.clone(),
             },
             Generator::SolidColor { rgba } => ClipContent::Solid { rgba: *rgba },
-            Generator::Shape { shape, rgba } => ClipContent::Shape {
+            Generator::Shape {
+                shape,
+                rgba,
+                width,
+                height,
+            } => ClipContent::Shape {
                 shape: match shape {
                     Shape::Rectangle => "rectangle".to_string(),
                     Shape::Ellipse => "ellipse".to_string(),
                 },
                 rgba: *rgba,
+                width: f64::from(*width),
+                height: f64::from(*height),
             },
             Generator::Sticker => ClipContent::Other {
                 kind: "sticker".to_string(),

@@ -1560,10 +1560,7 @@ mod tests {
         assert_eq!(
             project.add_generated(
                 track,
-                Generator::Shape {
-                    shape: Shape::Rectangle,
-                    rgba: [255, 255, 255, 255],
-                },
+                Generator::shape(Shape::Rectangle, [255, 255, 255, 255]),
                 tr_at(0, 10, R30),
             ),
             Err(ModelError::RateMismatch {

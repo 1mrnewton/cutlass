@@ -201,6 +201,11 @@ export struct Clip {
     // Fill color for solid / shape generators (transparent otherwise), so the
     // timeline card shows the clip's actual color instead of the lane color.
     fill-color: color,
+    // Shape generator size in reference pixels (1080px-tall canvas).
+    // Default-valued for non-shape clips. Edits go through
+    // `InspectorBackend.set-shape-generator`.
+    shape-width: float,
+    shape-height: float,
     // How far (sequence ticks) each edge can EXTEND beyond the current
     // placement before running out of source media: head = lowering
     // `timeline-start`, tail = raising the end. Shrinking is always allowed

@@ -2,10 +2,10 @@ import { Sequence } from "../models/index.slint";
 
 // Bridge between preview-viewport gestures and the Rust geometry helpers
 // (src/preview_select.rs). The preview shows the composited canvas
-// aspect-fitted (ImageFit.contain) inside the viewport element; these
-// callbacks own the letterbox mapping and the per-clip placement math —
-// the exact same `layer_placement` the compositor renders with — so picking
-// can never disagree with pixels.
+// aspect-fitted (ImageFit.contain) inside a zoomable/pannable viewport; these
+// callbacks own the viewport mapping and the per-clip placement math — the
+// exact same `layer_placement` the compositor renders with — so picking can
+// never disagree with pixels.
 
 // Result of a preview click: the topmost visible, unlocked clip under the
 // point at the current playhead tick. Empty `clip-id` ⇔ miss (letterbox
@@ -63,16 +63,17 @@ export struct PreviewDragResolution {
 
 export global PreviewBackend {
     // Topmost hit at (x, y) in viewport-element coordinates, given the
-    // viewport's current size. Locked lanes don't hit-test (same rule as
-    // the timeline); hidden lanes aren't composited so they can't be hit.
-    pure callback hit-test(Sequence /* sequence */, int    /* playhead-tick */, float  /* x */, float  /* y */, float  /* view-w */, float  /* view-h */, ) -> PreviewHit;
+    // viewport's current size and zoom/pan. Locked lanes don't hit-test
+    // (same rule as the timeline); hidden lanes aren't composited so they
+    // can't be hit.
+    pure callback hit-test(Sequence /* sequence */, int    /* playhead-tick */, float  /* x */, float  /* y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, ) -> PreviewHit;
 
     // Outline of `clip-id` (the primary selection) at the playhead tick,
     // mapped into viewport-element coordinates. While a gesture is live the
     // projection still holds the press-time transform, so the panel passes
     // the gesture's resolution (`gesture-active` + `gesture`) to keep the
     // box glued to the moving/scaling/rotating content.
-    pure callback selection-box(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* view-w */, float  /* view-h */, bool   /* gesture-active */, PreviewDragResolution /* gesture */, ) -> PreviewSelectionBox;
+    pure callback selection-box(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* gesture-active */, PreviewDragResolution /* gesture */, ) -> PreviewSelectionBox;
 
     // Move gesture (preview roadmap Phase 3): press point + current cursor
     // (viewport-element px) → new normalized position, center-guide magnet
@@ -80,7 +81,7 @@ export global PreviewBackend {
     // result feeds the live override and the release commit. The playhead
     // tick anchors animated clips: the gesture starts from the transform the
     // frame renders (M2), not the clip-start sample.
-    pure callback resolve-drag(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* snap-tolerance-px */, ) -> PreviewDragResolution;
+    pure callback resolve-drag(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, float  /* snap-tolerance-px */, ) -> PreviewDragResolution;
 
     // Arrow-key nudge: displace the clip by whole canvas pixels (from its
     // playhead-sampled position on animated clips). Invalid when the
@@ -91,15 +92,15 @@ export global PreviewBackend {
     // Corner-handle scale gesture (preview roadmap Phase 4): uniform about
     // the content center, factor = cursor distance ÷ press distance from
     // the center, clamped at a minimum so the box stays grabbable.
-    pure callback resolve-scale(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, ) -> PreviewDragResolution;
+    pure callback resolve-scale(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, ) -> PreviewDragResolution;
 
     // Rotate-affordance gesture: cursor angle about the anchor relative to
     // the press, added to the committed rotation; magnets to the cardinal
     // angles within `snap-tolerance-deg`. The resolution's `rotation` also
     // feeds the live degree tooltip.
-    pure callback resolve-rotate(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* snap-tolerance-deg */, ) -> PreviewDragResolution;
+    pure callback resolve-rotate(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, float  /* snap-tolerance-deg */, ) -> PreviewDragResolution;
 
     // Anchor-handle drag: move the pivot within the content while keeping
     // the rendered frame fixed — updates both anchor and position.
-    pure callback resolve-anchor(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, ) -> PreviewDragResolution;
+    pure callback resolve-anchor(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, ) -> PreviewDragResolution;
 }

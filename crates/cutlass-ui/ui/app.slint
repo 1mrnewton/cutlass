@@ -111,6 +111,9 @@ export component AppWindow inherits Window {
         TimelineActions.clear-selection();
         TimelineActions.clear-range();
         TimelineActions.seek-start();
+        PreviewStore.viewport-zoom = 1.0;
+        PreviewStore.viewport-pan-x = 0px;
+        PreviewStore.viewport-pan-y = 0px;
         // A running prompt and any parked plan rehearsed against the old
         // project; cancel/discard them (main.rs forwards to the agent).
         AgentStore.session-changed();

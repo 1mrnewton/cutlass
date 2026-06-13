@@ -16,7 +16,9 @@ use slint::Model;
 
 use cutlass_engine::{anchor_canvas_position, reposition_anchor};
 
-use crate::preview_select::{canvas_config, clip_placement, clip_transform, contain_mapping, is_composited};
+use crate::preview_select::{
+    canvas_config, clip_placement, clip_transform, is_composited, viewport_mapping,
+};
 use crate::{Clip, PreviewDragResolution, Sequence, TrackKind};
 
 /// Find a draggable clip by id: on a visual, enabled, unlocked lane, and
@@ -80,12 +82,45 @@ pub fn resolve_drag(
     view_h: f32,
     snap_tolerance_px: f32,
 ) -> PreviewDragResolution {
+    resolve_drag_in_viewport(
+        sequence,
+        clip_id,
+        tick,
+        press_x,
+        press_y,
+        cursor_x,
+        cursor_y,
+        view_w,
+        view_h,
+        1.0,
+        0.0,
+        0.0,
+        snap_tolerance_px,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_drag_in_viewport(
+    sequence: &Sequence,
+    clip_id: &str,
+    tick: i32,
+    press_x: f32,
+    press_y: f32,
+    cursor_x: f32,
+    cursor_y: f32,
+    view_w: f32,
+    view_h: f32,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
+    snap_tolerance_px: f32,
+) -> PreviewDragResolution {
     let Some(clip) = draggable_clip(sequence, clip_id, tick) else {
         return invalid();
     };
     let canvas = canvas_config(sequence);
     let (cw, ch) = (canvas.width as f32, canvas.height as f32);
-    let (scale, ox, oy) = contain_mapping(cw, ch, view_w, view_h);
+    let (scale, ox, oy) = viewport_mapping(cw, ch, view_w, view_h, zoom, pan_x, pan_y);
     if scale <= 0.0 {
         return invalid();
     }
@@ -135,15 +170,18 @@ const MIN_SCALE: f32 = 0.05;
 
 /// The clip's anchor pivot in viewport-element coordinates — the fixed point
 /// scale and rotate gestures pivot about. `None` when the mapping is degenerate.
-fn pivot_in_view(
+fn pivot_in_viewport(
     sequence: &Sequence,
     clip: &Clip,
     view_w: f32,
     view_h: f32,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
 ) -> Option<(f32, f32)> {
     let canvas = canvas_config(sequence);
     let (cw, ch) = (canvas.width as f32, canvas.height as f32);
-    let (scale, ox, oy) = contain_mapping(cw, ch, view_w, view_h);
+    let (scale, ox, oy) = viewport_mapping(cw, ch, view_w, view_h, zoom, pan_x, pan_y);
     if scale <= 0.0 {
         return None;
     }
@@ -168,10 +206,33 @@ pub fn resolve_scale(
     view_w: f32,
     view_h: f32,
 ) -> PreviewDragResolution {
+    resolve_scale_in_viewport(
+        sequence, clip_id, tick, press_x, press_y, cursor_x, cursor_y, view_w, view_h, 1.0, 0.0,
+        0.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_scale_in_viewport(
+    sequence: &Sequence,
+    clip_id: &str,
+    tick: i32,
+    press_x: f32,
+    press_y: f32,
+    cursor_x: f32,
+    cursor_y: f32,
+    view_w: f32,
+    view_h: f32,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
+) -> PreviewDragResolution {
     let Some(clip) = draggable_clip(sequence, clip_id, tick) else {
         return invalid();
     };
-    let Some((center_x, center_y)) = pivot_in_view(sequence, &clip, view_w, view_h) else {
+    let Some((center_x, center_y)) =
+        pivot_in_viewport(sequence, &clip, view_w, view_h, zoom, pan_x, pan_y)
+    else {
         return invalid();
     };
 
@@ -225,10 +286,45 @@ pub fn resolve_rotate(
     view_h: f32,
     snap_tolerance_deg: f32,
 ) -> PreviewDragResolution {
+    resolve_rotate_in_viewport(
+        sequence,
+        clip_id,
+        tick,
+        press_x,
+        press_y,
+        cursor_x,
+        cursor_y,
+        view_w,
+        view_h,
+        1.0,
+        0.0,
+        0.0,
+        snap_tolerance_deg,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_rotate_in_viewport(
+    sequence: &Sequence,
+    clip_id: &str,
+    tick: i32,
+    press_x: f32,
+    press_y: f32,
+    cursor_x: f32,
+    cursor_y: f32,
+    view_w: f32,
+    view_h: f32,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
+    snap_tolerance_deg: f32,
+) -> PreviewDragResolution {
     let Some(clip) = draggable_clip(sequence, clip_id, tick) else {
         return invalid();
     };
-    let Some((center_x, center_y)) = pivot_in_view(sequence, &clip, view_w, view_h) else {
+    let Some((center_x, center_y)) =
+        pivot_in_viewport(sequence, &clip, view_w, view_h, zoom, pan_x, pan_y)
+    else {
         return invalid();
     };
 
@@ -309,12 +405,33 @@ pub fn resolve_anchor(
     view_w: f32,
     view_h: f32,
 ) -> PreviewDragResolution {
+    resolve_anchor_in_viewport(
+        sequence, clip_id, tick, _press_x, _press_y, cursor_x, cursor_y, view_w, view_h, 1.0, 0.0,
+        0.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_anchor_in_viewport(
+    sequence: &Sequence,
+    clip_id: &str,
+    tick: i32,
+    _press_x: f32,
+    _press_y: f32,
+    cursor_x: f32,
+    cursor_y: f32,
+    view_w: f32,
+    view_h: f32,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
+) -> PreviewDragResolution {
     let Some(clip) = draggable_clip(sequence, clip_id, tick) else {
         return invalid();
     };
     let canvas = canvas_config(sequence);
     let (cw, ch) = (canvas.width as f32, canvas.height as f32);
-    let (scale, ox, oy) = contain_mapping(cw, ch, view_w, view_h);
+    let (scale, ox, oy) = viewport_mapping(cw, ch, view_w, view_h, zoom, pan_x, pan_y);
     if scale <= 0.0 {
         return invalid();
     }
@@ -352,6 +469,7 @@ pub fn resolve_anchor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preview_select::{canvas_config, clip_placement, clip_transform};
     use crate::{Rational, RationalTime, TimeRange, Track};
     use slint::{ModelRc, SharedString, VecModel};
     use std::rc::Rc;
@@ -430,6 +548,18 @@ mod tests {
         assert!(!r.snap_h && !r.snap_v);
         // Untouched transform components pass through for the commit.
         assert_eq!((r.scale, r.rotation, r.opacity), (1.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn drag_respects_preview_zoom() {
+        let seq = sequence(vec![track("1", vec![media_clip("A", 1920, 1080)])]);
+        // At 2× preview zoom the viewport scale is 1:1 canvas px, so the
+        // same 96 px drag moves half as far in normalized canvas space.
+        let r = resolve_drag_in_viewport(
+            &seq, "A", 10, 100.0, 100.0, 196.0, 100.0, VW, VH, 2.0, 0.0, 0.0, 0.0,
+        );
+        assert!(r.valid && r.moved);
+        assert!((r.position_x - 96.0 / 1920.0).abs() < 1e-6);
     }
 
     #[test]
@@ -590,6 +720,52 @@ mod tests {
         assert_eq!(r.rotation, 0.0);
 
         assert!(!resolve_rotate(&seq, "404", 10, 680.0, 270.0, 680.0, 470.0, VW, VH, 3.0).valid);
+    }
+
+    #[test]
+    fn anchor_drag_preserves_composited_center() {
+        let seq = sequence(vec![track("1", vec![media_clip("A", 1920, 1080)])]);
+        let canvas = canvas_config(&seq);
+        let clip = media_clip("A", 1920, 1080);
+        let center_before = clip_placement(&clip, &canvas).center;
+
+        let r = resolve_anchor(&seq, "A", 10, 480.0, 270.0, 580.0, 320.0, VW, VH);
+        assert!(r.valid && r.moved);
+
+        let mut moved = clip.clone();
+        moved.transform_position_x = r.position_x;
+        moved.transform_position_y = r.position_y;
+        moved.transform_anchor_x = r.anchor_x;
+        moved.transform_anchor_y = r.anchor_y;
+        let center_after = clip_placement(&moved, &canvas).center;
+        assert!((center_after[0] - center_before[0]).abs() < 1e-2);
+        assert!((center_after[1] - center_before[1]).abs() < 1e-2);
+    }
+
+    #[test]
+    fn scale_about_off_center_anchor_keeps_pivot_in_view() {
+        let mut clip = media_clip("A", 1920, 1080);
+        clip.transform_anchor_x = 0.25;
+        clip.transform_anchor_y = 0.5;
+        let seq = sequence(vec![track("1", vec![clip])]);
+        let canvas = canvas_config(&seq);
+        let base = seq.tracks.row_data(0).unwrap().clips.row_data(0).unwrap();
+        let t = clip_transform(&base);
+        let a0 = anchor_canvas_position(&t, &clip_placement(&base, &canvas));
+
+        // Double distance from pivot ⇒ scale doubles.
+        let r = resolve_scale(&seq, "A", 10, 680.0, 270.0, 880.0, 270.0, VW, VH);
+        assert!(r.valid && r.moved);
+        assert!((r.scale - 2.0).abs() < 1e-6);
+
+        let mut scaled = base.clone();
+        scaled.transform_scale = r.scale;
+        let a1 = anchor_canvas_position(
+            &clip_transform(&scaled),
+            &clip_placement(&scaled, &canvas),
+        );
+        assert!((a0[0] - a1[0]).abs() < 1e-2);
+        assert!((a0[1] - a1[1]).abs() < 1e-2);
     }
 
     #[test]

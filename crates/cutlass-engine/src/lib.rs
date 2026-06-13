@@ -15,7 +15,7 @@ mod preview;
 pub use action::ApplyOutcome;
 pub use composite::{
     anchor_canvas_position, composite_canvas_config, composite_canvas_size, content_uv,
-    cropped_layer_placement, layer_placement, reposition_anchor,
+    cropped_layer_placement, layer_placement, position_preserving_center, reposition_anchor,
 };
 pub use generator_raster::system_font_families;
 pub use engine::{ColorConvertPath, DEFAULT_CACHE_BUDGET_BYTES, Engine, EngineConfig};

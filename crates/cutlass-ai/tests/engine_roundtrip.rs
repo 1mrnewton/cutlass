@@ -159,6 +159,8 @@ fn prompt_sized_scenario_round_trips_and_unwinds() {
             clip: title,
             position_x: None,
             position_y: Some(0.3),
+            anchor_x: None,
+            anchor_y: None,
             scale: Some(0.5),
             rotation: None,
             opacity: None,

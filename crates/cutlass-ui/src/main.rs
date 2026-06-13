@@ -1053,18 +1053,24 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // --- preview roadmap Phase 2: click-to-select in the viewport ---------
 
-    app.global::<PreviewBackend>().on_hit_test(|sequence, tick, x, y, view_w, view_h| {
-        preview_select::hit_test(&sequence, tick, x, y, view_w, view_h)
-    });
+    app.global::<PreviewBackend>()
+        .on_hit_test(|sequence, tick, x, y, view_w, view_h, zoom, pan_x, pan_y| {
+            preview_select::hit_test_in_viewport(
+                &sequence, tick, x, y, view_w, view_h, zoom, pan_x, pan_y,
+            )
+        });
 
     app.global::<PreviewBackend>().on_selection_box(
-        |sequence, clip_id, tick, view_w, view_h, gesture_active, gesture| {
-            preview_select::selection_box(
+        |sequence, clip_id, tick, view_w, view_h, zoom, pan_x, pan_y, gesture_active, gesture| {
+            preview_select::selection_box_in_viewport(
                 &sequence,
                 clip_id.as_str(),
                 tick,
                 view_w,
                 view_h,
+                zoom,
+                pan_x,
+                pan_y,
                 gesture_active.then_some(&gesture),
             )
         },
@@ -1073,8 +1079,20 @@ fn main() -> Result<(), slint::PlatformError> {
     // --- preview roadmap Phase 3: move gesture, guides, nudges ------------
 
     app.global::<PreviewBackend>().on_resolve_drag(
-        |sequence, clip_id, tick, press_x, press_y, cursor_x, cursor_y, view_w, view_h, snap_tol| {
-            preview_gesture::resolve_drag(
+        |sequence,
+         clip_id,
+         tick,
+         press_x,
+         press_y,
+         cursor_x,
+         cursor_y,
+         view_w,
+         view_h,
+         zoom,
+         pan_x,
+         pan_y,
+         snap_tol| {
+            preview_gesture::resolve_drag_in_viewport(
                 &sequence,
                 clip_id.as_str(),
                 tick,
@@ -1084,6 +1102,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 cursor_y,
                 view_w,
                 view_h,
+                zoom,
+                pan_x,
+                pan_y,
                 snap_tol,
             )
         },
@@ -1096,8 +1117,19 @@ fn main() -> Result<(), slint::PlatformError> {
     // --- preview roadmap Phase 4: scale & rotate handles -------------------
 
     app.global::<PreviewBackend>().on_resolve_scale(
-        |sequence, clip_id, tick, press_x, press_y, cursor_x, cursor_y, view_w, view_h| {
-            preview_gesture::resolve_scale(
+        |sequence,
+         clip_id,
+         tick,
+         press_x,
+         press_y,
+         cursor_x,
+         cursor_y,
+         view_w,
+         view_h,
+         zoom,
+         pan_x,
+         pan_y| {
+            preview_gesture::resolve_scale_in_viewport(
                 &sequence,
                 clip_id.as_str(),
                 tick,
@@ -1107,13 +1139,28 @@ fn main() -> Result<(), slint::PlatformError> {
                 cursor_y,
                 view_w,
                 view_h,
+                zoom,
+                pan_x,
+                pan_y,
             )
         },
     );
 
     app.global::<PreviewBackend>().on_resolve_rotate(
-        |sequence, clip_id, tick, press_x, press_y, cursor_x, cursor_y, view_w, view_h, snap_deg| {
-            preview_gesture::resolve_rotate(
+        |sequence,
+         clip_id,
+         tick,
+         press_x,
+         press_y,
+         cursor_x,
+         cursor_y,
+         view_w,
+         view_h,
+         zoom,
+         pan_x,
+         pan_y,
+         snap_deg| {
+            preview_gesture::resolve_rotate_in_viewport(
                 &sequence,
                 clip_id.as_str(),
                 tick,
@@ -1123,14 +1170,28 @@ fn main() -> Result<(), slint::PlatformError> {
                 cursor_y,
                 view_w,
                 view_h,
+                zoom,
+                pan_x,
+                pan_y,
                 snap_deg,
             )
         },
     );
 
     app.global::<PreviewBackend>().on_resolve_anchor(
-        |sequence, clip_id, tick, press_x, press_y, cursor_x, cursor_y, view_w, view_h| {
-            preview_gesture::resolve_anchor(
+        |sequence,
+         clip_id,
+         tick,
+         press_x,
+         press_y,
+         cursor_x,
+         cursor_y,
+         view_w,
+         view_h,
+         zoom,
+         pan_x,
+         pan_y| {
+            preview_gesture::resolve_anchor_in_viewport(
                 &sequence,
                 clip_id.as_str(),
                 tick,
@@ -1140,6 +1201,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 cursor_y,
                 view_w,
                 view_h,
+                zoom,
+                pan_x,
+                pan_y,
             )
         },
     );
@@ -1321,6 +1385,19 @@ fn main() -> Result<(), slint::PlatformError> {
 
     app.global::<InspectorBackend>()
         .on_sample_transform(|clip, playhead| inspector::sample_transform(&clip, playhead));
+    app.global::<InspectorBackend>().on_compensate_anchor_position(
+        |clip, sequence, playhead, anchor_x, anchor_y, scale, rotation| {
+            inspector::compensate_anchor_position(
+                &clip,
+                sequence,
+                playhead,
+                anchor_x,
+                anchor_y,
+                scale,
+                rotation,
+            )
+        },
+    );
 
     app.global::<InspectorBackend>()
         .on_sample_audio(|clip, playhead| inspector::sample_audio(&clip, playhead));

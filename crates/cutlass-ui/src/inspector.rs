@@ -1,10 +1,13 @@
 //! Inspector helpers: resolve the selected clip for the property sheet, and
 //! sample its animated transform at the playhead for the keyframe UI.
 
-use crate::params::{row_state, sampled_transform, sampled_volume};
+use crate::params::{apply_sampled_transform, row_state, sampled_transform, sampled_volume};
+use crate::preview_select::{canvas_config, clip_placement};
 use crate::{
-    AudioSample, Clip, SelectedClipInfo, Sequence, TextClipStyle, TrackKind, TransformSample,
+    AudioSample, Clip, CompensatedPosition, SelectedClipInfo, Sequence, TextClipStyle, TrackKind,
+    TransformSample,
 };
+use cutlass_engine::position_preserving_center;
 use cutlass_models::{
     TextAlignH, TextAlignV, TextBackground, TextCase, TextShadow, TextStroke,
     TextStyle as ModelTextStyle,
@@ -104,6 +107,36 @@ pub fn sample_transform(clip: &Clip, playhead: i32) -> TransformSample {
     }
 }
 
+/// Position that keeps the composited frame fixed while the in-content
+/// anchor moves — mirrors the preview anchor-handle gesture.
+pub fn compensate_anchor_position(
+    clip: &Clip,
+    sequence: Sequence,
+    playhead: i32,
+    anchor_x: f32,
+    anchor_y: f32,
+    scale: f32,
+    rotation: f32,
+) -> CompensatedPosition {
+    let canvas = canvas_config(&sequence);
+    let mut c = clip.clone();
+    apply_sampled_transform(&mut c, playhead);
+    c.transform_scale = scale;
+    c.transform_rotation = rotation;
+    let placement = clip_placement(&c, &canvas);
+    let position = position_preserving_center(
+        placement.center,
+        placement.size,
+        [anchor_x, anchor_y],
+        rotation,
+        &canvas,
+    );
+    CompensatedPosition {
+        position_x: position[0],
+        position_y: position[1],
+    }
+}
+
 /// The inspector's per-playhead view of a clip's audio gain: the envelope
 /// sampled at the (clamped) playhead plus the keyframe row state driving the
 /// volume row's diamond. The audio analogue of [`sample_transform`].
@@ -172,6 +205,7 @@ pub fn resolve_selection(
 mod tests {
     use super::*;
     use crate::Track;
+    use crate::{Rational, RationalTime, TimeRange};
     use slint::{ModelRc, SharedString, VecModel};
     use std::rc::Rc;
 
@@ -195,6 +229,53 @@ mod tests {
             tracks: ModelRc::from(Rc::new(VecModel::from(tracks))),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn compensate_anchor_preserves_composited_center() {
+        use crate::preview_select::{canvas_config, clip_placement};
+        use crate::{Rational, RationalTime, TimeRange};
+
+        let clip = Clip {
+            media_id: SharedString::from("m1"),
+            media_width: 1920,
+            media_height: 1080,
+            transform_scale: 1.0,
+            transform_opacity: 1.0,
+            transform_anchor_x: 0.5,
+            transform_anchor_y: 0.5,
+            timeline_start: RationalTime {
+                value: 0,
+                rate: Rational { num: 24, den: 1 },
+            },
+            source_range: TimeRange {
+                start: RationalTime {
+                    value: 0,
+                    rate: Rational { num: 24, den: 1 },
+                },
+                duration: RationalTime {
+                    value: 100,
+                    rate: Rational { num: 24, den: 1 },
+                },
+            },
+            ..Default::default()
+        };
+        let sequence = Sequence {
+            width: 1920.0,
+            height: 1080.0,
+            ..Default::default()
+        };
+        let canvas = canvas_config(&sequence);
+        let before = clip_placement(&clip, &canvas).center;
+        let c = compensate_anchor_position(&clip, sequence, 10, 0.2, 0.8, 1.0, 0.0);
+        let mut after_clip = clip.clone();
+        after_clip.transform_position_x = c.position_x;
+        after_clip.transform_position_y = c.position_y;
+        after_clip.transform_anchor_x = 0.2;
+        after_clip.transform_anchor_y = 0.8;
+        let after = clip_placement(&after_clip, &canvas).center;
+        assert!((after[0] - before[0]).abs() < 1e-2);
+        assert!((after[1] - before[1]).abs() < 1e-2);
     }
 
     #[test]

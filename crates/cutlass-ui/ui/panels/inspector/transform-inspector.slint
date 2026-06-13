@@ -66,6 +66,20 @@ export component TransformInspector inherits VerticalLayout {
         }
     }
 
+    // Anchor edits compensate position so pixels stay fixed (preview handle
+    // semantics). Position / scale / rotation / opacity use `apply` directly.
+    function apply-anchor(ax: float, ay: float, commit: bool) {
+        let c = InspectorBackend.compensate-anchor-position(
+            model,
+            EditorStore.project.sequence,
+            TimelineStore.playhead-tick,
+            ax,
+            ay,
+            root.scale-v,
+            root.rot-v);
+        root.apply(c.position-x, c.position-y, ax, ay, root.scale-v, root.rot-v, root.opacity-v, commit);
+    }
+
     // One funnel for every row, in normalized model units. Previews render
     // as an uncommitted worker override (no history, projection frozen);
     // commits land one undoable SetClipTransform — unless nothing changed
@@ -260,10 +274,10 @@ export component TransformInspector inherits VerticalLayout {
         kf: root.sample.anchor-row;
         kf-can-toggle: root.playhead-inside;
         preview(v) => {
-            root.apply(root.pos-x, root.pos-y, v / 100, root.anchor-y, root.scale-v, root.rot-v, root.opacity-v, false);
+            root.apply-anchor(v / 100, root.anchor-y, false);
         }
         commit(v) => {
-            root.apply(root.pos-x, root.pos-y, v / 100, root.anchor-y, root.scale-v, root.rot-v, root.opacity-v, true);
+            root.apply-anchor(v / 100, root.anchor-y, true);
         }
         kf-toggle => {
             root.toggle-kf("anchor", root.sample.anchor-row.on-keyframe, root.anchor-x, root.anchor-y);
@@ -284,10 +298,10 @@ export component TransformInspector inherits VerticalLayout {
         kf: root.sample.anchor-row;
         kf-can-toggle: root.playhead-inside;
         preview(v) => {
-            root.apply(root.pos-x, root.pos-y, root.anchor-x, v / 100, root.scale-v, root.rot-v, root.opacity-v, false);
+            root.apply-anchor(root.anchor-x, v / 100, false);
         }
         commit(v) => {
-            root.apply(root.pos-x, root.pos-y, root.anchor-x, v / 100, root.scale-v, root.rot-v, root.opacity-v, true);
+            root.apply-anchor(root.anchor-x, v / 100, true);
         }
         kf-toggle => {
             root.toggle-kf("anchor", root.sample.anchor-row.on-keyframe, root.anchor-x, root.anchor-y);

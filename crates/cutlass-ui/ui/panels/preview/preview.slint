@@ -36,6 +36,8 @@ export component PreviewPanel inherits PanelBase {
                 // per-clip placement — lives in Rust (src/preview_select.rs),
                 // shared with the compositor so picking matches pixels.
                 viewport := Rectangle {
+                    clip: true;
+
                     // Transform gestures (preview roadmap Phases 3–4).
                     // Pressing a clip arms a move; pressing a corner handle
                     // arms a scale, the affordance below the box a rotation.
@@ -56,6 +58,80 @@ export component PreviewPanel inherits PanelBase {
                     private property <float> press-y;
                     private property <PreviewDragResolution> drag-res;
                     private property <PreviewHit> hit;
+                    private property <bool> pan-dragging: false;
+                    private property <float> pan-press-x;
+                    private property <float> pan-press-y;
+                    private property <length> pan-start-x;
+                    private property <length> pan-start-y;
+
+                    private property <float> min-zoom: 1.0;
+                    private property <float> max-zoom: 8.0;
+                    private property <float> sequence-aspect:
+                        EditorStore.project.sequence.width / EditorStore.project.sequence.height;
+                    private property <length> fitted-width:
+                        min(self.width, self.height * self.sequence-aspect);
+                    private property <length> fitted-height: self.fitted-width / self.sequence-aspect;
+                    private property <length> max-pan-x:
+                        max(0px, (self.fitted-width * PreviewStore.viewport-zoom - self.width) / 2);
+                    private property <length> max-pan-y:
+                        max(0px, (self.fitted-height * PreviewStore.viewport-zoom - self.height) / 2);
+
+                    changed max-pan-x => { self.clamp-pan(); }
+                    changed max-pan-y => { self.clamp-pan(); }
+
+                    function clamp-pan() {
+                        if (PreviewStore.viewport-zoom <= self.min-zoom + 0.001) {
+                            PreviewStore.viewport-pan-x = 0px;
+                            PreviewStore.viewport-pan-y = 0px;
+                            return;
+                        }
+                        PreviewStore.viewport-pan-x = clamp(
+                            PreviewStore.viewport-pan-x,
+                            -self.max-pan-x,
+                            self.max-pan-x);
+                        PreviewStore.viewport-pan-y = clamp(
+                            PreviewStore.viewport-pan-y,
+                            -self.max-pan-y,
+                            self.max-pan-y);
+                    }
+
+                    function reset-viewport() {
+                        PreviewStore.viewport-zoom = self.min-zoom;
+                        PreviewStore.viewport-pan-x = 0px;
+                        PreviewStore.viewport-pan-y = 0px;
+                    }
+
+                    function zoom-at(px: float, py: float, next-zoom: float) {
+                        let clamped-zoom = clamp(next-zoom, self.min-zoom, self.max-zoom);
+                        if (abs(clamped-zoom - PreviewStore.viewport-zoom) < 0.001) {
+                            return;
+                        }
+                        if (clamped-zoom <= self.min-zoom + 0.001) {
+                            self.reset-viewport();
+                            return;
+                        }
+
+                        // Keep the canvas point under the cursor stable while
+                        // changing zoom. Pan is measured from viewport center.
+                        let factor = clamped-zoom / PreviewStore.viewport-zoom;
+                        let vx = px - self.width / 2 / 1px;
+                        let vy = py - self.height / 2 / 1px;
+                        let pan-x = PreviewStore.viewport-pan-x / 1px;
+                        let pan-y = PreviewStore.viewport-pan-y / 1px;
+                        PreviewStore.viewport-zoom = clamped-zoom;
+                        PreviewStore.viewport-pan-x = (vx - (vx - pan-x) * factor) * 1px;
+                        PreviewStore.viewport-pan-y = (vy - (vy - pan-y) * factor) * 1px;
+                        self.clamp-pan();
+                    }
+
+                    function pan-by(dx: length, dy: length) {
+                        if (PreviewStore.viewport-zoom <= self.min-zoom + 0.001) {
+                            return;
+                        }
+                        PreviewStore.viewport-pan-x += dx;
+                        PreviewStore.viewport-pan-y += dy;
+                        self.clamp-pan();
+                    }
 
                     // Recomputed reactively: follows playhead, edits
                     // (projection republish), selection, panel resizes, and
@@ -69,6 +145,9 @@ export component PreviewPanel inherits PanelBase {
                         TimelineStore.playhead-tick,
                         self.width / 1px,
                         self.height / 1px,
+                        PreviewStore.viewport-zoom,
+                        PreviewStore.viewport-pan-x / 1px,
+                        PreviewStore.viewport-pan-y / 1px,
                         PreviewStore.gesture-active
                             && PreviewStore.gesture-clip == TimelineStore.selected-clip-id
                             && PreviewStore.gesture.valid,
@@ -146,20 +225,35 @@ export component PreviewPanel inherits PanelBase {
                     }
 
                     Image {
-                        width: 100%;
-                        height: 100%;
+                        x: (viewport.width - self.width) / 2 + PreviewStore.viewport-pan-x;
+                        y: (viewport.height - self.height) / 2 + PreviewStore.viewport-pan-y;
+                        width: viewport.width * PreviewStore.viewport-zoom;
+                        height: viewport.height * PreviewStore.viewport-zoom;
                         source: PreviewStore.frame;
                         image-fit: ImageFit.contain;
                     }
 
                     ta := TouchArea {
-                        mouse-cursor: viewport.drag-mode != 0
+                        mouse-cursor: viewport.pan-dragging
+                            ? MouseCursor.grabbing
+                            : viewport.drag-mode != 0
                             ? viewport.cursor-for(viewport.drag-zone, true)
                             : viewport.cursor-for(
                                 self.has-hover ? viewport.zone-at(self.mouse-x / 1px, self.mouse-y / 1px) : 0,
                                 false);
 
                         pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.down
+                                    && (ev.button == PointerEventButton.right
+                                        || (ev.button == PointerEventButton.left && ev.modifiers.alt))) {
+                                AppState.refocus-shortcuts();
+                                viewport.pan-dragging = true;
+                                viewport.pan-press-x = self.mouse-x / 1px;
+                                viewport.pan-press-y = self.mouse-y / 1px;
+                                viewport.pan-start-x = PreviewStore.viewport-pan-x;
+                                viewport.pan-start-y = PreviewStore.viewport-pan-y;
+                                return;
+                            }
                             if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
                                 viewport.press-x = self.mouse-x / 1px;
                                 viewport.press-y = self.mouse-y / 1px;
@@ -176,7 +270,10 @@ export component PreviewPanel inherits PanelBase {
                                         viewport.press-x,
                                         viewport.press-y,
                                         viewport.width / 1px,
-                                        viewport.height / 1px);
+                                        viewport.height / 1px,
+                                        PreviewStore.viewport-zoom,
+                                        PreviewStore.viewport-pan-x / 1px,
+                                        PreviewStore.viewport-pan-y / 1px);
                                     if (viewport.hit.clip-id == "") {
                                         // Empty canvas or letterbox bar:
                                         // deselect, CapCut-style.
@@ -197,15 +294,45 @@ export component PreviewPanel inherits PanelBase {
                                     }
                                 }
                             }
+                            if (ev.kind == PointerEventKind.up && viewport.pan-dragging) {
+                                viewport.pan-dragging = false;
+                                return;
+                            }
                             if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
                                 viewport.end-drag(true);
                             }
                             if (ev.kind == PointerEventKind.cancel) {
+                                viewport.pan-dragging = false;
                                 viewport.end-drag(false);
                             }
                         }
 
+                        scroll-event(e) => {
+                            AppState.refocus-shortcuts();
+                            if (e.modifiers.shift) {
+                                viewport.pan-by(e.delta-y, 0px);
+                                return accept;
+                            }
+                            if (abs(e.delta-x / 1px) > abs(e.delta-y / 1px)) {
+                                viewport.pan-by(e.delta-x, e.delta-y);
+                                return accept;
+                            }
+                            viewport.zoom-at(
+                                self.mouse-x / 1px,
+                                self.mouse-y / 1px,
+                                PreviewStore.viewport-zoom * Math.pow(1.0018, e.delta-y / 1px));
+                            return accept;
+                        }
+
                         moved => {
+                            if (viewport.pan-dragging) {
+                                PreviewStore.viewport-pan-x =
+                                    viewport.pan-start-x + (self.mouse-x / 1px - viewport.pan-press-x) * 1px;
+                                PreviewStore.viewport-pan-y =
+                                    viewport.pan-start-y + (self.mouse-y / 1px - viewport.pan-press-y) * 1px;
+                                viewport.clamp-pan();
+                                return;
+                            }
                             if (viewport.drag-mode == 0) {
                                 return;
                             }
@@ -220,6 +347,9 @@ export component PreviewPanel inherits PanelBase {
                                     self.mouse-y / 1px,
                                     viewport.width / 1px,
                                     viewport.height / 1px,
+                                    PreviewStore.viewport-zoom,
+                                    PreviewStore.viewport-pan-x / 1px,
+                                    PreviewStore.viewport-pan-y / 1px,
                                     6.0);
                             } else if (viewport.drag-mode == 2) {
                                 viewport.drag-res = PreviewBackend.resolve-scale(
@@ -231,7 +361,10 @@ export component PreviewPanel inherits PanelBase {
                                     self.mouse-x / 1px,
                                     self.mouse-y / 1px,
                                     viewport.width / 1px,
-                                    viewport.height / 1px);
+                                    viewport.height / 1px,
+                                    PreviewStore.viewport-zoom,
+                                    PreviewStore.viewport-pan-x / 1px,
+                                    PreviewStore.viewport-pan-y / 1px);
                             } else if (viewport.drag-mode == 3) {
                                 viewport.drag-res = PreviewBackend.resolve-rotate(
                                     EditorStore.project.sequence,
@@ -243,6 +376,9 @@ export component PreviewPanel inherits PanelBase {
                                     self.mouse-y / 1px,
                                     viewport.width / 1px,
                                     viewport.height / 1px,
+                                    PreviewStore.viewport-zoom,
+                                    PreviewStore.viewport-pan-x / 1px,
+                                    PreviewStore.viewport-pan-y / 1px,
                                     3.0);
                             } else {
                                 viewport.drag-res = PreviewBackend.resolve-anchor(
@@ -254,7 +390,10 @@ export component PreviewPanel inherits PanelBase {
                                     self.mouse-x / 1px,
                                     self.mouse-y / 1px,
                                     viewport.width / 1px,
-                                    viewport.height / 1px);
+                                    viewport.height / 1px,
+                                    PreviewStore.viewport-zoom,
+                                    PreviewStore.viewport-pan-x / 1px,
+                                    PreviewStore.viewport-pan-y / 1px);
                             }
                             if (viewport.drag-res.valid) {
                                 viewport.dragging = true;
@@ -502,6 +641,38 @@ export component PreviewPanel inherits PanelBase {
                     width: 33%;
                     HorizontalLayout {
                         alignment: LayoutAlignment.end;
+                        spacing: AppStore.theme.metrics.spacing.sm;
+
+                        Rectangle {
+                            width: 52px;
+                            height: 24px;
+                            border-radius: 4px;
+                            background: PreviewStore.viewport-zoom > 1.001 ? #2A2A2A : transparent;
+                            border-width: 1px;
+                            border-color: #FFFFFF24;
+
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: round(PreviewStore.viewport-zoom * 100) + "%";
+                                color: #DCDCDC;
+                                font-size: 11px;
+                                horizontal-alignment: TextHorizontalAlignment.center;
+                                vertical-alignment: TextVerticalAlignment.center;
+                            }
+
+                            TouchArea {
+                                width: parent.width;
+                                height: parent.height;
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    PreviewStore.viewport-zoom = 1.0;
+                                    PreviewStore.viewport-pan-x = 0px;
+                                    PreviewStore.viewport-pan-y = 0px;
+                                }
+                            }
+                        }
+
                         Image {
                             source: @image-url("../../assets/icon/fullscreen.svg");
                             image-fit: ImageFit.contain;

@@ -3,6 +3,12 @@ import { PreviewDragResolution } from "../lib/preview-backend.slint";
 export global PreviewStore {
     in-out property <image> frame;
 
+    // Docked preview viewport state. This is UI-only: it changes how the
+    // composited frame is inspected, not the project canvas or clip transforms.
+    in-out property <float> viewport-zoom: 1.0;
+    in-out property <length> viewport-pan-x: 0px;
+    in-out property <length> viewport-pan-y: 0px;
+
     // Live transform gesture (preview roadmap Phases 3–5): the uncommitted
     // resolution of whatever gesture is in flight — a preview move/scale/
     // rotate drag or an inspector slider — mirrored UI-wide. The projection

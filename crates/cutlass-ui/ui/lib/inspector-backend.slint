@@ -23,9 +23,6 @@ export struct ParamRowState {
     easing: int,
 }
 
-// The clip's transform sampled at the playhead, plus per-property keyframe
-// row state. One pure-callback evaluation per playhead move feeds every
-// inspector value row — no projection republish per tick.
 export struct TransformSample {
     position-x: float,
     position-y: float,
@@ -39,6 +36,12 @@ export struct TransformSample {
     scale-row: ParamRowState,
     rotation-row: ParamRowState,
     opacity-row: ParamRowState,
+}
+
+// Position that keeps the rendered frame fixed while `anchor-*` moves.
+export struct CompensatedPosition {
+    position-x: float,
+    position-y: float,
 }
 
 // The clip's audio gain sampled at the playhead, plus the volume envelope's
@@ -64,6 +67,18 @@ export global InspectorBackend {
     // `kf-*` curves with the engine's own `Param` sampling math, so the
     // numbers always match the composited frame.
     pure callback sample-transform(clip: Clip, playhead-tick: int) -> TransformSample;
+
+    // Recompute canvas position so a new in-content anchor leaves pixels
+    // unchanged — the same compensation the preview anchor handle uses.
+    pure callback compensate-anchor-position(
+        clip: Clip,
+        sequence: Sequence,
+        playhead-tick: int,
+        anchor-x: float,
+        anchor-y: float,
+        scale: float,
+        rotation: float,
+    ) -> CompensatedPosition;
 
     // Sample the clip's volume envelope at the playhead and report its
     // keyframe row state, mirroring `sample-transform` for the audio sheet

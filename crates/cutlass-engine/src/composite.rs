@@ -201,6 +201,31 @@ pub fn reposition_anchor(
     (anchor_point, position)
 }
 
+/// Canvas `position` that keeps `center` fixed when `anchor_point` changes
+/// (inspector anchor sliders and keyframe edits that should not shift pixels).
+pub fn position_preserving_center(
+    center: [f32; 2],
+    size: [f32; 2],
+    anchor_point: [f32; 2],
+    rotation_deg: f32,
+    canvas: &CompositorConfig,
+) -> [f32; 2] {
+    let to_center = [
+        (0.5 - anchor_point[0]) * size[0],
+        (0.5 - anchor_point[1]) * size[1],
+    ];
+    let (sin, cos) = rotation_deg.to_radians().sin_cos();
+    let anchor = [
+        center[0] - (to_center[0] * cos - to_center[1] * sin),
+        center[1] - (to_center[0] * sin + to_center[1] * cos),
+    ];
+    let (cw, ch) = (canvas.width as f32, canvas.height as f32);
+    [
+        (anchor[0] - cw * 0.5) / cw,
+        (anchor[1] - ch * 0.5) / ch,
+    ]
+}
+
 /// The compositor UV rect sampling a clip's kept region: the crop window,
 /// with a flipped axis encoded as a reversed UV span.
 pub fn content_uv(crop: &CropRect, flip_h: bool, flip_v: bool) -> [f32; 4] {
@@ -709,6 +734,44 @@ mod tests {
         assert_eq!(p.size, [1920.0, 1080.0]);
         assert_eq!(p.center, [960.0 + 960.0, 540.0 + 540.0]);
         assert_eq!(anchor_canvas_position(&t, &p), [960.0, 540.0]);
+    }
+
+    #[test]
+    fn position_preserving_center_roundtrips_with_placement() {
+        let base = ClipTransform {
+            position: [0.125, -0.130],
+            anchor_point: [0.25, 0.75],
+            rotation: 30.0,
+            ..ClipTransform::IDENTITY
+        };
+        let p0 = layer_placement(&base, 1920, 1080, &CANVAS);
+        let pos = position_preserving_center(p0.center, p0.size, [0.8, 0.2], 30.0, &CANVAS);
+        let t = ClipTransform {
+            position: pos,
+            anchor_point: [0.8, 0.2],
+            rotation: 30.0,
+            ..ClipTransform::IDENTITY
+        };
+        let p1 = layer_placement(&t, 1920, 1080, &CANVAS);
+        assert!((p1.center[0] - p0.center[0]).abs() < 1e-3);
+        assert!((p1.center[1] - p0.center[1]).abs() < 1e-3);
+    }
+
+    #[test]
+    fn scale_about_off_center_anchor_keeps_canvas_pivot() {
+        let t0 = ClipTransform {
+            anchor_point: [0.25, 0.5],
+            scale: 1.0,
+            ..ClipTransform::IDENTITY
+        };
+        let p0 = layer_placement(&t0, 1920, 1080, &CANVAS);
+        let a0 = anchor_canvas_position(&t0, &p0);
+        let t1 = ClipTransform { scale: 0.5, ..t0 };
+        let p1 = layer_placement(&t1, 1920, 1080, &CANVAS);
+        let a1 = anchor_canvas_position(&t1, &p1);
+        assert!((a0[0] - a1[0]).abs() < 1e-3);
+        assert!((a0[1] - a1[1]).abs() < 1e-3);
+        assert!((p1.size[0] - p0.size[0] * 0.5).abs() < 1e-3);
     }
 
     #[test]

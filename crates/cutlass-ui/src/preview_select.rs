@@ -1,17 +1,17 @@
-//! Preview-viewport geometry: the canvas → viewport letterbox mapping, click
+//! Preview-viewport geometry: the canvas → viewport mapping, click
 //! hit-testing, and the selection outline (preview roadmap Phase 2).
 //!
 //! The preview shows the composited frame aspect-fitted (`ImageFit.contain`)
-//! inside the viewport element. Hit-testing inverts that mapping into canvas
-//! pixels, then asks the engine's [`layer_placement`] — the same function the
-//! compositor renders with — whether a layer's rotated quad contains the
-//! point, walking lanes top-first (CapCut: the topmost layer under the cursor
-//! wins). The selection box runs the mapping forward to outline the selected
-//! clip's placement in viewport coordinates.
+//! inside a zoomable/pannable viewport. Hit-testing inverts that mapping into
+//! canvas pixels, then asks the engine's [`layer_placement`] — the same
+//! function the compositor renders with — whether a layer's rotated quad
+//! contains the point, walking lanes top-first (CapCut: the topmost layer under
+//! the cursor wins). The selection box runs the mapping forward to outline the
+//! selected clip's placement in viewport coordinates.
 
 use cutlass_compositor::{CompositorConfig, LayerPlacement};
-use cutlass_engine::cropped_layer_placement;
 use cutlass_engine::anchor_canvas_position;
+use cutlass_engine::cropped_layer_placement;
 use cutlass_models::{ClipTransform, CropRect};
 use slint::Model;
 
@@ -33,6 +33,32 @@ pub(crate) fn contain_mapping(
         scale,
         (view_w - canvas_w * scale) / 2.0,
         (view_h - canvas_h * scale) / 2.0,
+    )
+}
+
+/// Zoom/pan-aware canvas mapping. `zoom = 1, pan = 0` matches
+/// [`contain_mapping`]. Pan is in viewport logical px and moves the canvas
+/// center relative to the viewport center.
+pub(crate) fn viewport_mapping(
+    canvas_w: f32,
+    canvas_h: f32,
+    view_w: f32,
+    view_h: f32,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
+) -> (f32, f32, f32) {
+    let (base_scale, _, _) = contain_mapping(canvas_w, canvas_h, view_w, view_h);
+    let zoom = if zoom.is_finite() {
+        zoom.max(0.01)
+    } else {
+        1.0
+    };
+    let scale = base_scale * zoom;
+    (
+        scale,
+        (view_w - canvas_w * scale) / 2.0 + pan_x,
+        (view_h - canvas_h * scale) / 2.0 + pan_y,
     )
 }
 
@@ -146,9 +172,24 @@ pub fn hit_test(
     view_w: f32,
     view_h: f32,
 ) -> PreviewHit {
+    hit_test_in_viewport(sequence, tick, x, y, view_w, view_h, 1.0, 0.0, 0.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn hit_test_in_viewport(
+    sequence: &Sequence,
+    tick: i32,
+    x: f32,
+    y: f32,
+    view_w: f32,
+    view_h: f32,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
+) -> PreviewHit {
     let canvas = canvas_config(sequence);
     let (cw, ch) = (canvas.width as f32, canvas.height as f32);
-    let (scale, ox, oy) = contain_mapping(cw, ch, view_w, view_h);
+    let (scale, ox, oy) = viewport_mapping(cw, ch, view_w, view_h, zoom, pan_x, pan_y);
     if scale <= 0.0 {
         return PreviewHit::default();
     }
@@ -220,12 +261,29 @@ pub fn selection_box(
     view_h: f32,
     gesture: Option<&PreviewDragResolution>,
 ) -> PreviewSelectionBox {
+    selection_box_in_viewport(
+        sequence, clip_id, tick, view_w, view_h, 1.0, 0.0, 0.0, gesture,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn selection_box_in_viewport(
+    sequence: &Sequence,
+    clip_id: &str,
+    tick: i32,
+    view_w: f32,
+    view_h: f32,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
+    gesture: Option<&PreviewDragResolution>,
+) -> PreviewSelectionBox {
     if clip_id.is_empty() {
         return PreviewSelectionBox::default();
     }
     let canvas = canvas_config(sequence);
     let (cw, ch) = (canvas.width as f32, canvas.height as f32);
-    let (scale, ox, oy) = contain_mapping(cw, ch, view_w, view_h);
+    let (scale, ox, oy) = viewport_mapping(cw, ch, view_w, view_h, zoom, pan_x, pan_y);
 
     for row in 0..sequence.tracks.row_count() {
         let Some(track) = sequence.tracks.row_data(row) else {
@@ -363,8 +421,16 @@ mod tests {
     #[test]
     fn hit_picks_topmost_layer() {
         let seq = sequence(vec![
-            track("2", TrackKind::Video, vec![media_clip("top", 0, 100, 1920, 1080)]),
-            track("1", TrackKind::Video, vec![media_clip("bottom", 0, 100, 1920, 1080)]),
+            track(
+                "2",
+                TrackKind::Video,
+                vec![media_clip("top", 0, 100, 1920, 1080)],
+            ),
+            track(
+                "1",
+                TrackKind::Video,
+                vec![media_clip("bottom", 0, 100, 1920, 1080)],
+            ),
         ]);
         let hit = hit_test(&seq, 10, 480.0, 270.0, VW, VH);
         assert_eq!((hit.track_id.as_str(), hit.clip_id.as_str()), ("2", "top"));
@@ -372,15 +438,31 @@ mod tests {
 
     #[test]
     fn hit_skips_locked_hidden_and_audio_lanes() {
-        let mut locked = track("3", TrackKind::Video, vec![media_clip("locked", 0, 100, 1920, 1080)]);
+        let mut locked = track(
+            "3",
+            TrackKind::Video,
+            vec![media_clip("locked", 0, 100, 1920, 1080)],
+        );
         locked.locked = true;
-        let mut hidden = track("2", TrackKind::Video, vec![media_clip("hidden", 0, 100, 1920, 1080)]);
+        let mut hidden = track(
+            "2",
+            TrackKind::Video,
+            vec![media_clip("hidden", 0, 100, 1920, 1080)],
+        );
         hidden.enabled = false;
         let seq = sequence(vec![
             locked,
             hidden,
-            track("9", TrackKind::Audio, vec![media_clip("audio", 0, 100, 0, 0)]),
-            track("1", TrackKind::Video, vec![media_clip("base", 0, 100, 1920, 1080)]),
+            track(
+                "9",
+                TrackKind::Audio,
+                vec![media_clip("audio", 0, 100, 0, 0)],
+            ),
+            track(
+                "1",
+                TrackKind::Video,
+                vec![media_clip("base", 0, 100, 1920, 1080)],
+            ),
         ]);
         let hit = hit_test(&seq, 10, 480.0, 270.0, VW, VH);
         assert_eq!(hit.clip_id.as_str(), "base");
@@ -393,10 +475,22 @@ mod tests {
             TrackKind::Video,
             vec![media_clip("A", 50, 50, 1920, 1080)],
         )]);
-        assert_eq!(hit_test(&seq, 49, 480.0, 270.0, VW, VH).clip_id.as_str(), "");
-        assert_eq!(hit_test(&seq, 50, 480.0, 270.0, VW, VH).clip_id.as_str(), "A");
-        assert_eq!(hit_test(&seq, 99, 480.0, 270.0, VW, VH).clip_id.as_str(), "A");
-        assert_eq!(hit_test(&seq, 100, 480.0, 270.0, VW, VH).clip_id.as_str(), "");
+        assert_eq!(
+            hit_test(&seq, 49, 480.0, 270.0, VW, VH).clip_id.as_str(),
+            ""
+        );
+        assert_eq!(
+            hit_test(&seq, 50, 480.0, 270.0, VW, VH).clip_id.as_str(),
+            "A"
+        );
+        assert_eq!(
+            hit_test(&seq, 99, 480.0, 270.0, VW, VH).clip_id.as_str(),
+            "A"
+        );
+        assert_eq!(
+            hit_test(&seq, 100, 480.0, 270.0, VW, VH).clip_id.as_str(),
+            ""
+        );
     }
 
     #[test]
@@ -409,8 +503,14 @@ mod tests {
         // Viewport wider than 16:9: content spans x ∈ [20, 980).
         let (vw, vh) = (1000.0, 540.0);
         assert_eq!(hit_test(&seq, 10, 10.0, 270.0, vw, vh).clip_id.as_str(), "");
-        assert_eq!(hit_test(&seq, 10, 500.0, 270.0, vw, vh).clip_id.as_str(), "A");
-        assert_eq!(hit_test(&seq, 10, 990.0, 270.0, vw, vh).clip_id.as_str(), "");
+        assert_eq!(
+            hit_test(&seq, 10, 500.0, 270.0, vw, vh).clip_id.as_str(),
+            "A"
+        );
+        assert_eq!(
+            hit_test(&seq, 10, 990.0, 270.0, vw, vh).clip_id.as_str(),
+            ""
+        );
     }
 
     #[test]
@@ -424,9 +524,15 @@ mod tests {
         clip.transform_position_y = -0.25;
         let seq = sequence(vec![track("1", TrackKind::Video, vec![clip])]);
 
-        assert_eq!(hit_test(&seq, 10, 120.0, 67.0, VW, VH).clip_id.as_str(), "A");
+        assert_eq!(
+            hit_test(&seq, 10, 120.0, 67.0, VW, VH).clip_id.as_str(),
+            "A"
+        );
         // Bottom-right quadrant of the viewport: empty canvas.
-        assert_eq!(hit_test(&seq, 10, 720.0, 405.0, VW, VH).clip_id.as_str(), "");
+        assert_eq!(
+            hit_test(&seq, 10, 720.0, 405.0, VW, VH).clip_id.as_str(),
+            ""
+        );
     }
 
     #[test]
@@ -440,9 +546,15 @@ mod tests {
         let seq = sequence(vec![track("1", TrackKind::Video, vec![clip])]);
 
         // canvas (1260, 540) → viewport (630, 270)
-        assert_eq!(hit_test(&seq, 10, 630.0, 270.0, VW, VH).clip_id.as_str(), "");
+        assert_eq!(
+            hit_test(&seq, 10, 630.0, 270.0, VW, VH).clip_id.as_str(),
+            ""
+        );
         // canvas (960, 840) → viewport (480, 420)
-        assert_eq!(hit_test(&seq, 10, 480.0, 420.0, VW, VH).clip_id.as_str(), "A");
+        assert_eq!(
+            hit_test(&seq, 10, 480.0, 420.0, VW, VH).clip_id.as_str(),
+            "A"
+        );
     }
 
     /// Generated clip with measured content bounds `w×h` in canvas px
@@ -476,7 +588,10 @@ mod tests {
             TrackKind::Video,
             vec![generated_clip("E", "ellipse", 960, 540)],
         )]);
-        assert_eq!(hit_test(&seq, 10, 480.0, 270.0, VW, VH).clip_id.as_str(), "E");
+        assert_eq!(
+            hit_test(&seq, 10, 480.0, 270.0, VW, VH).clip_id.as_str(),
+            "E"
+        );
         // Inside the canvas but outside the drawn content: falls through.
         assert_eq!(hit_test(&seq, 10, 100.0, 50.0, VW, VH).clip_id.as_str(), "");
     }
@@ -494,7 +609,12 @@ mod tests {
         assert!(b.visible);
         assert_eq!(
             corners(&b),
-            [(240.0, 135.0), (720.0, 135.0), (720.0, 405.0), (240.0, 405.0)]
+            [
+                (240.0, 135.0),
+                (720.0, 135.0),
+                (720.0, 405.0),
+                (240.0, 405.0)
+            ]
         );
         assert_eq!((b.hx, b.hy), (480.0, 405.0 + 26.0));
     }
@@ -508,7 +628,12 @@ mod tests {
         assert!(b.visible);
         assert_eq!(
             corners(&b),
-            [(360.0, 202.5), (600.0, 202.5), (600.0, 337.5), (360.0, 337.5)]
+            [
+                (360.0, 202.5),
+                (600.0, 202.5),
+                (600.0, 337.5),
+                (360.0, 337.5)
+            ]
         );
     }
 
@@ -538,6 +663,26 @@ mod tests {
     }
 
     #[test]
+    fn selection_box_follows_preview_zoom_and_pan() {
+        let seq = sequence(vec![track(
+            "1",
+            TrackKind::Video,
+            vec![media_clip("A", 0, 100, 1920, 1080)],
+        )]);
+        let b = selection_box_in_viewport(&seq, "A", 10, VW, VH, 2.0, 20.0, -10.0, None);
+        assert!(b.visible);
+        assert_eq!(
+            corners(&b),
+            [
+                (-460.0, -280.0),
+                (1460.0, -280.0),
+                (1460.0, 800.0),
+                (-460.0, 800.0)
+            ]
+        );
+    }
+
+    #[test]
     fn selection_box_rotates_corners() {
         // Half-size centered quad rotated 90° cw: the content's top-left
         // corner (canvas Δ(-480, -270)) lands at Δ(270, -480) from center —
@@ -551,7 +696,10 @@ mod tests {
         let [c0, c1, c2, c3] = corners(&b);
         let expect = [(615.0, 30.0), (615.0, 510.0), (345.0, 510.0), (345.0, 30.0)];
         for ((x, y), (ex, ey)) in [c0, c1, c2, c3].into_iter().zip(expect) {
-            assert!((x - ex).abs() < 1e-3 && (y - ey).abs() < 1e-3, "({x},{y}) vs ({ex},{ey})");
+            assert!(
+                (x - ex).abs() < 1e-3 && (y - ey).abs() < 1e-3,
+                "({x},{y}) vs ({ex},{ey})"
+            );
         }
         // The rotate affordance rides the rotation: 90° cw points the
         // content's bottom edge left, so the handle sits left of the box.
@@ -564,8 +712,16 @@ mod tests {
         let mut clip = media_clip("A", 0, 100, 1920, 1080);
         // Scale animates 1.0 → 0.5 over ticks 0..40.
         clip.kf_scale = ModelRc::from(Rc::new(VecModel::from(vec![
-            ParamKeyframe { tick: 0, value_x: 1.0, ..Default::default() },
-            ParamKeyframe { tick: 40, value_x: 0.5, ..Default::default() },
+            ParamKeyframe {
+                tick: 0,
+                value_x: 1.0,
+                ..Default::default()
+            },
+            ParamKeyframe {
+                tick: 40,
+                value_x: 0.5,
+                ..Default::default()
+            },
         ])));
         let seq = sequence(vec![track("1", TrackKind::Video, vec![clip])]);
 
@@ -575,7 +731,12 @@ mod tests {
         let b = selection_box(&seq, "A", 40, VW, VH, None);
         assert_eq!(
             corners(&b),
-            [(240.0, 135.0), (720.0, 135.0), (720.0, 405.0), (240.0, 405.0)]
+            [
+                (240.0, 135.0),
+                (720.0, 135.0),
+                (720.0, 405.0),
+                (240.0, 405.0)
+            ]
         );
         assert_eq!(hit_test(&seq, 0, 100.0, 60.0, VW, VH).clip_id.as_str(), "A");
         assert_eq!(hit_test(&seq, 40, 100.0, 60.0, VW, VH).clip_id.as_str(), "");
@@ -595,8 +756,14 @@ mod tests {
         let seq = sequence(vec![track("1", TrackKind::Video, vec![clip])]);
 
         // Outside the pillarbox (full-frame would hit here) vs inside it.
-        assert_eq!(hit_test(&seq, 10, 100.0, 270.0, VW, VH).clip_id.as_str(), "");
-        assert_eq!(hit_test(&seq, 10, 480.0, 270.0, VW, VH).clip_id.as_str(), "A");
+        assert_eq!(
+            hit_test(&seq, 10, 100.0, 270.0, VW, VH).clip_id.as_str(),
+            ""
+        );
+        assert_eq!(
+            hit_test(&seq, 10, 480.0, 270.0, VW, VH).clip_id.as_str(),
+            "A"
+        );
 
         let b = selection_box(&seq, "A", 10, VW, VH, None);
         assert!(b.visible);
@@ -616,7 +783,10 @@ mod tests {
             TrackKind::Video,
             vec![media_clip("A", 0, 100, 1920, 1080)],
         )]);
-        assert_eq!(hit_test(&seq, 10, 480.0, 270.0, VW, VH).clip_id.as_str(), "A");
+        assert_eq!(
+            hit_test(&seq, 10, 480.0, 270.0, VW, VH).clip_id.as_str(),
+            "A"
+        );
         let b = selection_box(&seq, "A", 10, VW, VH, None);
         assert_eq!(
             corners(&b),
@@ -626,16 +796,30 @@ mod tests {
 
     #[test]
     fn selection_box_hides_when_off_playhead_or_hidden() {
-        let mut hidden = track("2", TrackKind::Video, vec![media_clip("H", 0, 100, 1920, 1080)]);
+        let mut hidden = track(
+            "2",
+            TrackKind::Video,
+            vec![media_clip("H", 0, 100, 1920, 1080)],
+        );
         hidden.enabled = false;
         let seq = sequence(vec![
             hidden,
-            track("1", TrackKind::Video, vec![media_clip("A", 50, 50, 1920, 1080)]),
+            track(
+                "1",
+                TrackKind::Video,
+                vec![media_clip("A", 50, 50, 1920, 1080)],
+            ),
         ]);
         assert!(!selection_box(&seq, "", 60, VW, VH, None).visible);
-        assert!(!selection_box(&seq, "A", 10, VW, VH, None).visible, "off playhead");
+        assert!(
+            !selection_box(&seq, "A", 10, VW, VH, None).visible,
+            "off playhead"
+        );
         assert!(selection_box(&seq, "A", 60, VW, VH, None).visible);
-        assert!(!selection_box(&seq, "H", 60, VW, VH, None).visible, "hidden lane");
+        assert!(
+            !selection_box(&seq, "H", 60, VW, VH, None).visible,
+            "hidden lane"
+        );
         assert!(!selection_box(&seq, "404", 60, VW, VH, None).visible);
     }
 }

@@ -1,6 +1,6 @@
 import { AppStore, EditorStore } from "../../store/index.slint";
 import { Clip, TrackKind } from "../../models/index.slint";
-import { TimelineLib, StripBackend, SelectionBackend, KeyframeBackend } from "../../lib/index.slint";
+import { TimelineLib, StripBackend, SelectionBackend, KeyframeBackend, InspectorBackend } from "../../lib/index.slint";
 import { TimelineStore } from "../../store/timeline-store.slint";
 import { TimelineViewState } from "state.slint";
 import { AppState } from "../../state.slint";
@@ -88,6 +88,43 @@ export component ClipView inherits Rectangle {
         && model.volume != 1.0 && model.volume != 0.0;
     private property <bool> audio-faded-only: !audio-enveloped && model.volume == 1.0
         && (model.fade-in-s > 0 || model.fade-out-s > 0);
+
+    // --- audio fade corner handles (M8 fades) ----------------------------
+    // CapCut-style fade ramps: drag the top corners of an audio clip to set
+    // fade-in (left) / fade-out (right) durations. Geometry maps seconds to
+    // px proportionally against the card width (so it survives zoom and the
+    // retime scale), committing one envelope-preserving set-clip-fades edit
+    // on release. The handle only tracks the gesture; the live width drives
+    // the preview triangle, and the projection republish re-snaps on commit.
+    private property <float> aud-dur-s: root.model.source-range.duration.rate.num > 0
+        ? root.model.source-range.duration.value * root.model.source-range.duration.rate.den
+            / root.model.source-range.duration.rate.num
+        : 0;
+    // 0 idle · 1 dragging fade-in · 2 dragging fade-out.
+    private property <int> fade-drag: 0;
+    private property <length> fade-drag-dx: 0px;
+    private property <length> fade-in-w: root.width * (root.aud-dur-s > 0 ? root.model.fade-in-s / root.aud-dur-s : 0);
+    private property <length> fade-out-w: root.width * (root.aud-dur-s > 0 ? root.model.fade-out-s / root.aud-dur-s : 0);
+    // Live widths during a drag (fade-out grows as the cursor moves left).
+    private property <length> fade-in-w-live: root.fade-drag == 1
+        ? clamp(root.fade-in-w + root.fade-drag-dx, 0px, root.width) : root.fade-in-w;
+    private property <length> fade-out-w-live: root.fade-drag == 2
+        ? clamp(root.fade-out-w - root.fade-drag-dx, 0px, root.width) : root.fade-out-w;
+    private property <float> fade-in-frac: root.width > 0px ? root.fade-in-w-live / root.width : 0;
+    private property <float> fade-out-frac: root.width > 0px ? root.fade-out-w-live / root.width : 0;
+
+    function commit-fade-in() {
+        if (root.width > 0px) {
+            InspectorBackend.set-clip-fades(
+                root.model.id, root.fade-in-w-live / root.width * root.aud-dur-s, root.model.fade-out-s);
+        }
+    }
+    function commit-fade-out() {
+        if (root.width > 0px) {
+            InspectorBackend.set-clip-fades(
+                root.model.id, root.model.fade-in-s, root.fade-out-w-live / root.width * root.aud-dur-s);
+        }
+    }
 
     x: TimelineLib.rational-to-length(model.timeline-start, zoom);
 
@@ -185,6 +222,70 @@ export component ClipView inherits Rectangle {
             background: AppStore.theme.accent.primary;
             border-width: 1px;
             border-color: #ffffff;
+        }
+    }
+
+    // Audio fade ramps: a darkening triangle over each attenuated corner with
+    // a bright edge line. Driven by the projected fade-*-s (or the live drag
+    // width); drawn before the labels so the badges stay legible.
+    if root.show-waveform && root.width > 24px && (root.fade-in-w-live > 0.5px || root.fade-drag == 1): Rectangle {
+        width: 100%;
+        height: 100%;
+        opacity: root.dimmed ? 0.4 : 1.0;
+
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            fill: #00000059;
+
+            MoveTo { x: 0; y: 0; }
+            LineTo { x: root.fade-in-frac * 100; y: 0; }
+            LineTo { x: 0; y: 100; }
+            Close { }
+        }
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            stroke: #ffffff;
+            stroke-width: 1px;
+            fill: transparent;
+
+            MoveTo { x: 0; y: 100; }
+            LineTo { x: root.fade-in-frac * 100; y: 0; }
+        }
+    }
+    if root.show-waveform && root.width > 24px && (root.fade-out-w-live > 0.5px || root.fade-drag == 2): Rectangle {
+        width: 100%;
+        height: 100%;
+        opacity: root.dimmed ? 0.4 : 1.0;
+
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            fill: #00000059;
+
+            MoveTo { x: 100; y: 0; }
+            LineTo { x: 100 - root.fade-out-frac * 100; y: 0; }
+            LineTo { x: 100; y: 100; }
+            Close { }
+        }
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            stroke: #ffffff;
+            stroke-width: 1px;
+            fill: transparent;
+
+            MoveTo { x: 100; y: 100; }
+            LineTo { x: 100 - root.fade-out-frac * 100; y: 0; }
         }
     }
 
@@ -535,6 +636,91 @@ export component ClipView inherits Rectangle {
         height: parent.height * 0.5;
         background: AppStore.theme.text.primary;
         border-radius: 1px;
+    }
+
+    // Audio fade handles (M8): grab dots at the top corners of a selected
+    // audio clip; drag to set the fade durations. Declared after the trim
+    // handles so a corner grab adjusts the fade rather than trimming. The
+    // gesture only records the live width — `commit-fade-*` lands one
+    // envelope-preserving edit on release.
+    if root.show-waveform && is-selected && !dimmed: Rectangle {
+        fade-in-handle := Rectangle {
+            x: root.fade-in-w-live - self.width / 2;
+            y: 1px;
+            width: 14px;
+            height: 14px;
+
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: in-ta.has-hover || root.fade-drag == 1 ? AppStore.theme.accent.primary : #ffffff;
+                border-width: 1px;
+                border-color: #000000a0;
+            }
+
+            in-ta := TouchArea {
+                mouse-cursor: ew-resize;
+                enabled: !root.track-locked;
+
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                        AppState.refocus-shortcuts();
+                        root.fade-drag = 1;
+                        root.fade-drag-dx = 0px;
+                    } else if (e.kind == PointerEventKind.up
+                            && e.button == PointerEventButton.left && root.fade-drag == 1) {
+                        root.commit-fade-in();
+                        root.fade-drag = 0;
+                        root.fade-drag-dx = 0px;
+                    }
+                }
+                moved => {
+                    if (root.fade-drag == 1) {
+                        root.fade-drag-dx = self.mouse-x - self.pressed-x;
+                    }
+                }
+            }
+        }
+
+        fade-out-handle := Rectangle {
+            x: root.width - root.fade-out-w-live - self.width / 2;
+            y: 1px;
+            width: 14px;
+            height: 14px;
+
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: out-ta.has-hover || root.fade-drag == 2 ? AppStore.theme.accent.primary : #ffffff;
+                border-width: 1px;
+                border-color: #000000a0;
+            }
+
+            out-ta := TouchArea {
+                mouse-cursor: ew-resize;
+                enabled: !root.track-locked;
+
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                        AppState.refocus-shortcuts();
+                        root.fade-drag = 2;
+                        root.fade-drag-dx = 0px;
+                    } else if (e.kind == PointerEventKind.up
+                            && e.button == PointerEventButton.left && root.fade-drag == 2) {
+                        root.commit-fade-out();
+                        root.fade-drag = 0;
+                        root.fade-drag-dx = 0px;
+                    }
+                }
+                moved => {
+                    if (root.fade-drag == 2) {
+                        root.fade-drag-dx = self.mouse-x - self.pressed-x;
+                    }
+                }
+            }
+        }
     }
 
     // Selection outline, drawn last: a border on the root itself would be

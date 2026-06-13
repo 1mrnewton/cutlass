@@ -162,6 +162,12 @@ pub struct SetClipTransform {
     /// fraction of canvas height (+ is down).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_y: Option<f64>,
+    /// Horizontal anchor within the content bounds (0 = left, 0.5 = center).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_x: Option<f64>,
+    /// Vertical anchor within the content bounds (0 = top, 0.5 = center).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_y: Option<f64>,
     /// Uniform scale; 1.0 fits the content inside the canvas (100%).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<f64>,

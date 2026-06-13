@@ -106,6 +106,10 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                     args.position_x.map_or(current.position[0], |v| v as f32),
                     args.position_y.map_or(current.position[1], |v| v as f32),
                 ],
+                anchor_point: [
+                    args.anchor_x.map_or(current.anchor_point[0], |v| v as f32),
+                    args.anchor_y.map_or(current.anchor_point[1], |v| v as f32),
+                ],
                 scale: args.scale.map_or(current.scale, |v| v as f32),
                 rotation: args.rotation.map_or(current.rotation, |v| v as f32),
                 opacity: args.opacity.map_or(current.opacity, |v| v as f32),
@@ -1395,6 +1399,7 @@ mod tests {
                     scale: 0.5,
                     rotation: 10.0,
                     opacity: 0.8,
+                    ..ClipTransform::IDENTITY
                 },
                 None,
             )
@@ -1420,6 +1425,7 @@ mod tests {
                     scale: 0.5,
                     rotation: 10.0,
                     opacity: 1.0,
+                    ..ClipTransform::IDENTITY
                 },
                 at: None,
             }

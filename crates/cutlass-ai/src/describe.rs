@@ -108,6 +108,10 @@ pub struct ClipSummary {
     /// plays at a single constant speed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed_ramp: Option<bool>,
+    /// Pitch rides the playback speed instead of being preserved
+    /// (set_clip_pitch); absent in the default pitch-locked state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pitch_follows_speed: Option<bool>,
     /// Audio gain multiplier (set_clip_audio); absent when 1.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<f64>,
@@ -277,6 +281,7 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                     }),
                     reversed: clip.reversed.then_some(true),
                     speed_ramp: clip.has_speed_curve().then_some(true),
+                    pitch_follows_speed: (!clip.preserve_pitch).then_some(true),
                     volume: clip.volume.constant().filter(|v| *v != 1.0).map(f64::from),
                     fade_in: (clip.fade_in > 0).then(|| seconds(clip.fade_in, rate)),
                     fade_out: (clip.fade_out > 0).then(|| seconds(clip.fade_out, rate)),

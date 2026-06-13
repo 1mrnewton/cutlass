@@ -30,7 +30,9 @@ use serde::{Deserialize, Serialize};
 /// 10: M4 transitions (`add_transition`, `remove_transition`, `set_transition`).
 /// 11: M2 speed ramps (`set_speed_curve`).
 /// 12: M8 volume envelopes (`volume` joins the keyframe param enum).
-pub const TOOL_SCHEMA_VERSION: u32 = 12;
+/// 13: M8 varispeed pitch lock (`set_clip_pitch`); retimed-audio descriptions
+///     drop the "muted" language now that speed/reverse/ramp clips sound.
+pub const TOOL_SCHEMA_VERSION: u32 = 13;
 
 /// Track lane categories the agent may create or target.
 ///
@@ -333,8 +335,9 @@ pub struct SetParamConstant {
 
 /// Change a media clip's constant playback speed and/or direction. The clip
 /// keeps its timeline start and source footage; its timeline length
-/// re-derives from the speed (a 2x clip takes half the time). Audio of
-/// retimed clips is muted. Not valid for generated clips (text/solid/shape).
+/// re-derives from the speed (a 2x clip takes half the time). Audio
+/// time-stretches to match (pitch preserved by default; see set_clip_pitch).
+/// Not valid for generated clips (text/solid/shape).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetClipSpeed {
     /// The media clip to retime.
@@ -365,6 +368,21 @@ pub struct SetSpeedCurve {
     /// back to a constant speed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
+}
+
+/// Lock or unlock a retimed media clip's pitch (CapCut "pitch" switch). When
+/// preserved (the default), the audio time-stretches and keeps its original
+/// pitch; when not, pitch rides the playback speed — the "chipmunk" effect on
+/// a sped-up clip, a deep growl on a slowed one. Only affects sound on a
+/// retimed clip (a speed change, reverse, or ramp). Not valid for generated
+/// clips.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SetClipPitch {
+    /// The media clip whose pitch handling to set.
+    pub clip: u64,
+    /// True keeps the original pitch (time-stretch); false lets the pitch
+    /// follow the playback speed.
+    pub preserve_pitch: bool,
 }
 
 /// Set a clip's audio mix: a constant volume gain plus linear fade-in/out
@@ -622,6 +640,7 @@ pub enum WireCommand {
     SetParamConstant(SetParamConstant),
     SetClipSpeed(SetClipSpeed),
     SetSpeedCurve(SetSpeedCurve),
+    SetClipPitch(SetClipPitch),
     SetClipAudio(SetClipAudio),
     SplitClip(SplitClip),
     TrimClip(TrimClip),
@@ -689,6 +708,7 @@ impl WireCommand {
             WireCommand::SetParamConstant(a) => clip(&mut a.clip),
             WireCommand::SetClipSpeed(a) => clip(&mut a.clip),
             WireCommand::SetSpeedCurve(a) => clip(&mut a.clip),
+            WireCommand::SetClipPitch(a) => clip(&mut a.clip),
             WireCommand::SetClipAudio(a) => clip(&mut a.clip),
             WireCommand::SplitClip(a) => clip(&mut a.clip),
             WireCommand::TrimClip(a) => clip(&mut a.clip),
@@ -847,6 +867,8 @@ tools! {
         "Change a media clip's playback speed (2.0 = double speed, 0.5 = slow motion) and/or play it in reverse. The clip's timeline length re-derives from the speed; its audio time-stretches to match (pitch preserved by default). Not valid for generated clips.";
     "set_speed_curve" => SetSpeedCurve(SetSpeedCurve),
         "Apply a CapCut-style speed ramp to a media clip so its speed varies across its length: preset 'ramp_up' (slow to fast), 'ramp_down' (fast to slow), 'montage' (fast/slow/fast), 'hero' (slow-mo on the action), or 'bullet' (fast/hard-slow/fast). Omit preset to clear the ramp. The clip's length re-derives from the ramp's average speed; its audio time-stretches along the ramp. Not valid for generated clips.";
+    "set_clip_pitch" => SetClipPitch(SetClipPitch),
+        "Lock or unlock a retimed media clip's pitch. preserve_pitch true (default) keeps the original pitch while time-stretching; false lets pitch follow speed (the chipmunk effect when sped up). Only affects a clip that is retimed (speed change, reverse, or ramp). Not valid for generated clips.";
     "set_clip_audio" => SetClipAudio(SetClipAudio),
         "Set an audio-lane clip's volume (0.0 mutes, 1.0 unchanged, 2.0 doubles) and/or fade-in/fade-out durations in seconds. Omitted fields keep their current value. For a video clip, target its linked audio companion clip.";
     "split_clip" => SplitClip(SplitClip),
@@ -1036,7 +1058,7 @@ mod tests {
     #[test]
     fn tool_specs_cover_every_command_with_object_schemas() {
         let specs = tool_specs();
-        assert_eq!(specs.len(), 34);
+        assert_eq!(specs.len(), 35);
         for spec in &specs {
             assert!(!spec.description.is_empty(), "{} missing description", spec.name);
             assert_eq!(

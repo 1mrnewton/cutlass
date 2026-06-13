@@ -335,6 +335,20 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 curve,
             }
         }
+        WireCommand::SetClipPitch(args) => {
+            let clip = clip_ref(project, args.clip)?;
+            if clip.is_generated() {
+                return Err(Rejection::new(format!(
+                    "clip {} is a generated clip; set_clip_pitch only works on media \
+                     clips (footage with a source file)",
+                    args.clip
+                )));
+            }
+            EditCommand::SetClipPitch {
+                clip: clip.id,
+                preserve_pitch: args.preserve_pitch,
+            }
+        }
         WireCommand::SetClipAudio(args) => {
             let clip = clip_ref(project, args.clip)?;
             if clip.is_generated() {
@@ -1550,6 +1564,36 @@ mod tests {
                 clip: title,
                 speed: Some(2.0),
                 reversed: None,
+            }),
+        );
+        assert!(msg.contains("generated clip"), "{msg}");
+    }
+
+    #[test]
+    fn clip_pitch_lowers_and_rejects_generated() {
+        let (project, _, _, _, clip, title) = fixture();
+
+        let edit = lower(
+            &project,
+            WireCommand::SetClipPitch(wire::SetClipPitch {
+                clip,
+                preserve_pitch: false,
+            }),
+        );
+        assert_eq!(
+            edit,
+            EditCommand::SetClipPitch {
+                clip: ClipId::from_raw(clip),
+                preserve_pitch: false,
+            }
+        );
+
+        // Generated clips have no footage to stretch, so pitch is meaningless.
+        let msg = reject(
+            &project,
+            WireCommand::SetClipPitch(wire::SetClipPitch {
+                clip: title,
+                preserve_pitch: true,
             }),
         );
         assert!(msg.contains("generated clip"), "{msg}");

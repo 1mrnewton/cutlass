@@ -445,6 +445,15 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
             Some(preset) => format!("applied {preset} speed ramp to clip {}", a.clip),
             None => format!("cleared speed ramp on clip {}", a.clip),
         },
+        WireCommand::SetClipPitch(a) => format!(
+            "set clip {} pitch to {}",
+            a.clip,
+            if a.preserve_pitch {
+                "preserved"
+            } else {
+                "follow speed"
+            }
+        ),
         WireCommand::SetClipAudio(a) => {
             let mut parts = Vec::new();
             if let Some(v) = a.volume {

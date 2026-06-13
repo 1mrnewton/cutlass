@@ -837,7 +837,7 @@
       "name": "set_clip_speed",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Change a media clip's constant playback speed and/or direction. The clip\nkeeps its timeline start and source footage; its timeline length\nre-derives from the speed (a 2x clip takes half the time). Audio of\nretimed clips is muted. Not valid for generated clips (text/solid/shape).",
+        "description": "Change a media clip's constant playback speed and/or direction. The clip\nkeeps its timeline start and source footage; its timeline length\nre-derives from the speed (a 2x clip takes half the time). Audio\ntime-stretches to match (pitch preserved by default; see set_clip_pitch).\nNot valid for generated clips (text/solid/shape).",
         "properties": {
           "clip": {
             "description": "The media clip to retime.",
@@ -893,6 +893,32 @@
           "clip"
         ],
         "title": "SetSpeedCurve",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Lock or unlock a retimed media clip's pitch. preserve_pitch true (default) keeps the original pitch while time-stretching; false lets pitch follow speed (the chipmunk effect when sped up). Only affects a clip that is retimed (speed change, reverse, or ramp). Not valid for generated clips.",
+      "name": "set_clip_pitch",
+      "parameters": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Lock or unlock a retimed media clip's pitch (CapCut \"pitch\" switch). When\npreserved (the default), the audio time-stretches and keeps its original\npitch; when not, pitch rides the playback speed — the \"chipmunk\" effect on\na sped-up clip, a deep growl on a slowed one. Only affects sound on a\nretimed clip (a speed change, reverse, or ramp). Not valid for generated\nclips.",
+        "properties": {
+          "clip": {
+            "description": "The media clip whose pitch handling to set.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "preserve_pitch": {
+            "description": "True keeps the original pitch (time-stretch); false lets the pitch\nfollow the playback speed.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "clip",
+          "preserve_pitch"
+        ],
+        "title": "SetClipPitch",
         "type": "object"
       }
     },
@@ -1450,5 +1476,5 @@
       }
     }
   ],
-  "version": 12
+  "version": 13
 }

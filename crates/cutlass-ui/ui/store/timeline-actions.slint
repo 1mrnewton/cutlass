@@ -167,8 +167,15 @@ export global TimelineActions {
     // TimelinePanel watches playhead-tick and turns every change into a
     // (coalesced) preview frame request, so these only set the tick.
 
+    // Confine a manual seek (ruler scrub, frame-step keys, fullscreen
+    // slider) to the sequence. An empty timeline ends at tick 0, so the
+    // clamp pins the playhead there — nothing to seek or scrub past.
+    public pure function clamp-playhead(tick: int) -> int {
+        return clamp(tick, 0, self.sequence-end-tick());
+    }
+
     public function step-playhead(delta-frames: int) {
-        TimelineStore.playhead-tick = max(0, TimelineStore.playhead-tick + delta-frames);
+        TimelineStore.playhead-tick = self.clamp-playhead(TimelineStore.playhead-tick + delta-frames);
     }
 
     public function seek-start() {

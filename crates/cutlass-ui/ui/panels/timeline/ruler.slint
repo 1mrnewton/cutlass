@@ -60,8 +60,11 @@ export component Ruler inherits Rectangle {
     // Passing a zero-width span makes the resolver treat the playhead
     // itself as the dragged edge; playhead-tick is passed as 0 so the
     // old playhead position is not a magnet candidate (0 already is).
+    // The result is clamped to the sequence so a drag into the padded
+    // scroll region past the last clip can't push the playhead past the
+    // end (and an empty timeline stays parked at 0).
     function scrub-to(mx: length) {
-        TimelineStore.playhead-tick = max(0, DragBackend.snap-clip-start(
+        TimelineStore.playhead-tick = TimelineActions.clamp-playhead(DragBackend.snap-clip-start(
             EditorStore.project.sequence,
             "",
             "",

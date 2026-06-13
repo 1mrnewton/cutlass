@@ -8,6 +8,7 @@ import {
 import { AppState } from "../../state.slint";
 import { AppStore, EditorStore, TimelineStore } from "../../store/index.slint";
 import {
+    AudioSample,
     InspectorBackend,
     SelectedClipInfo,
 } from "../../lib/inspector-backend.slint";
@@ -365,10 +366,12 @@ component SpeedRampInspector inherits VerticalLayout {
     }
 }
 
-// Volume + fades for audio-lane clips (CapCut audio mix, M1). Constant
-// gain for now — envelopes ride M8. Each commit is one undoable edit; the
-// projection republish re-snapshots the playback mixer, so the change is
-// audible within a buffer block.
+// Volume + fades for audio-lane clips (CapCut audio mix). Volume is a
+// keyframable gain envelope (M8): the diamond writes automation at the
+// playhead and the slider then sculpts it; a flat clip still rides the M1
+// constant slider. Each commit is one undoable edit; the projection
+// republish re-snapshots the playback mixer, so the change is audible within
+// a buffer block.
 component AudioMixInspector inherits VerticalLayout {
     in property <Clip> model;
 
@@ -381,11 +384,37 @@ component AudioMixInspector inherits VerticalLayout {
         : 0;
     private property <float> fade-max: min(10.0, root.duration-s);
 
+    // Gain sampled at the playhead + the volume envelope's keyframe row
+    // state, recomputed when the playhead or the projected clip changes.
+    private property <AudioSample> sample: InspectorBackend.sample-audio(
+        root.model, TimelineStore.playhead-tick);
+    // Keyframes may only sit inside the clip (engine rule); gate the diamond
+    // rather than letting the command bounce.
+    private property <bool> playhead-inside: TimelineStore.playhead-tick >= root.model.timeline-start.value
+        && TimelineStore.playhead-tick < root.model.timeline-start.value + root.model.source-range.duration.value;
+
     spacing: AppStore.theme.metrics.spacing.lg;
     alignment: LayoutAlignment.start;
 
     function commit(volume: float, fade-in: float, fade-out: float) {
         InspectorBackend.set-clip-audio(root.model.id, volume, fade-in, fade-out);
+    }
+
+    // Diamond toggle: on a keyframe ⇒ remove it; else ⇒ write one at the
+    // playhead holding the value shown, so toggling never jumps the gain.
+    function toggle-kf(on-keyframe: bool, gain: float) {
+        if (on-keyframe) {
+            InspectorBackend.remove-param-keyframe(root.model.id, "volume", TimelineStore.playhead-tick);
+        } else {
+            InspectorBackend.set-param-keyframe(
+                root.model.id, "volume", TimelineStore.playhead-tick, gain, 0, 0);
+        }
+    }
+
+    // Re-ease the keyframe under the playhead (same tick + gain, new curve).
+    function ease-kf(easing: int, gain: float) {
+        InspectorBackend.set-param-keyframe(
+            root.model.id, "volume", TimelineStore.playhead-tick, gain, 0, easing);
     }
 
     SectionHeader {
@@ -395,16 +424,43 @@ component AudioMixInspector inherits VerticalLayout {
     SliderRow {
         label: "Volume";
         suffix: "%";
-        value: root.model.volume * 100;
+        // Playhead sample: the constant gain on a flat clip, the envelope
+        // value on an animated one (matches the diamond + the mix).
+        value: root.sample.volume * 100;
         minimum: 0;
         maximum: 200;
         reset-value: 100;
+        kf-visible: true;
+        kf: root.sample.volume-row;
+        kf-can-toggle: root.playhead-inside;
+        // On an envelope the slider sculpts the keyframe at the playhead;
+        // on a flat clip it sets the constant level (CapCut's basic slider).
+        // Animated + playhead outside the clip: leave the envelope alone
+        // rather than flattening it.
         commit(v) => {
-            root.commit(v / 100, root.model.fade-in-s, root.model.fade-out-s);
+            if (root.sample.volume-row.animated) {
+                if (root.playhead-inside) {
+                    InspectorBackend.set-param-keyframe(
+                        root.model.id, "volume", TimelineStore.playhead-tick, v / 100, 0, 0);
+                }
+            } else {
+                root.commit(v / 100, root.model.fade-in-s, root.model.fade-out-s);
+            }
+        }
+        kf-toggle => {
+            root.toggle-kf(root.sample.volume-row.on-keyframe, root.sample.volume);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf(e, root.sample.volume);
         }
     }
 
-    SliderRow {
+    // The basic fade ramps set a flat level + edge fades in one shot
+    // (set-clip-audio), which would flatten a keyframed envelope. While the
+    // gain is animated, hide them — fades belong in the curve itself, drawn
+    // with the diamond — and say so. (Envelope-preserving fades are a later
+    // audio-suite slice.)
+    if !root.model.has-volume-envelope: SliderRow {
         label: "Fade in";
         suffix: "s";
         value: root.model.fade-in-s;
@@ -417,7 +473,7 @@ component AudioMixInspector inherits VerticalLayout {
         }
     }
 
-    SliderRow {
+    if !root.model.has-volume-envelope: SliderRow {
         label: "Fade out";
         suffix: "s";
         value: root.model.fade-out-s;
@@ -428,6 +484,12 @@ component AudioMixInspector inherits VerticalLayout {
         commit(v) => {
             root.commit(root.model.volume, root.model.fade-in-s, v);
         }
+    }
+
+    if root.model.has-volume-envelope: CutlassText {
+        text: "Fades fold into the volume curve while it's keyframed.";
+        style: AppStore.theme.typography.caption;
+        foreground: AppStore.theme.text.muted;
     }
 }
 

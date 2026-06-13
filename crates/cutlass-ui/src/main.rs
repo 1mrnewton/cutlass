@@ -78,6 +78,7 @@ fn clip_param_value(
         "scale" => (ClipParam::Scale, ParamValue::Scalar(value_x)),
         "rotation" => (ClipParam::Rotation, ParamValue::Scalar(value_x)),
         "opacity" => (ClipParam::Opacity, ParamValue::Scalar(value_x)),
+        "volume" => (ClipParam::Volume, ParamValue::Scalar(value_x)),
         _ => return None,
     })
 }
@@ -1304,6 +1305,9 @@ fn main() -> Result<(), slint::PlatformError> {
 
     app.global::<InspectorBackend>()
         .on_sample_transform(|clip, playhead| inspector::sample_transform(&clip, playhead));
+
+    app.global::<InspectorBackend>()
+        .on_sample_audio(|clip, playhead| inspector::sample_audio(&clip, playhead));
 
     let kf_set_handle = preview_worker.handle();
     app.global::<InspectorBackend>().on_set_param_keyframe(

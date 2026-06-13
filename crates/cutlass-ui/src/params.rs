@@ -99,6 +99,14 @@ pub(crate) fn sampled_transform(clip: &Clip, playhead: i32) -> ClipTransform {
     }
 }
 
+/// The clip's audio gain sampled at the (clamped) playhead — the same
+/// `Param` math the mixers use, so the inspector readout and diamond track
+/// exactly what's heard. An empty `kf-volume` ⇔ the constant in `volume`.
+pub(crate) fn sampled_volume(clip: &Clip, playhead: i32) -> f32 {
+    let tick = clamped_tick(clip, playhead);
+    scalar_param(&clip.kf_volume, clip.volume).sample(tick)
+}
+
 /// Overwrite the clip's `transform-*` fields with the playhead sample, so
 /// geometry code that reads those fields (placement, hit-test, gestures)
 /// follows the rendered frame on animated clips.

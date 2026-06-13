@@ -38,6 +38,14 @@ export struct TransformSample {
     opacity-row: ParamRowState,
 }
 
+// The clip's audio gain sampled at the playhead, plus the volume envelope's
+// keyframe row state — the audio analogue of `TransformSample`, feeding the
+// inspector's volume diamond (M8 volume envelopes).
+export struct AudioSample {
+    volume: float,
+    volume-row: ParamRowState,
+}
+
 // Selection lookup and clip-property writes for the inspector panel.
 // Implemented in Rust (`src/inspector.rs`) so nested model traversal
 // stays out of Slint.
@@ -54,10 +62,17 @@ export global InspectorBackend {
     // numbers always match the composited frame.
     pure callback sample-transform(clip: Clip, playhead-tick: int) -> TransformSample;
 
+    // Sample the clip's volume envelope at the playhead and report its
+    // keyframe row state, mirroring `sample-transform` for the audio sheet
+    // (M8 volume envelopes). Implemented in Rust over the projected
+    // `kf-volume` curve with the engine's `Param` math, so the readout always
+    // matches the mixed gain.
+    pure callback sample-audio(clip: Clip, playhead-tick: int) -> AudioSample;
+
     // Insert or replace a keyframe on `param` ("position" | "scale" |
-    // "rotation" | "opacity") at the absolute sequence tick. Scalars ride
-    // `value-x`; position uses both axes. `easing`: 0 linear, 1 ease-in,
-    // 2 ease-out, 3 ease-in-out. One undoable engine edit.
+    // "rotation" | "opacity" | "volume") at the absolute sequence tick.
+    // Scalars ride `value-x`; position uses both axes. `easing`: 0 linear,
+    // 1 ease-in, 2 ease-out, 3 ease-in-out. One undoable engine edit.
     callback set-param-keyframe(
         clip-id: string,
         param: string,

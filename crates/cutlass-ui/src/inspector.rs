@@ -1,8 +1,10 @@
 //! Inspector helpers: resolve the selected clip for the property sheet, and
 //! sample its animated transform at the playhead for the keyframe UI.
 
-use crate::params::{row_state, sampled_transform};
-use crate::{Clip, SelectedClipInfo, Sequence, TextClipStyle, TrackKind, TransformSample};
+use crate::params::{row_state, sampled_transform, sampled_volume};
+use crate::{
+    AudioSample, Clip, SelectedClipInfo, Sequence, TextClipStyle, TrackKind, TransformSample,
+};
 use cutlass_models::{
     TextAlignH, TextAlignV, TextBackground, TextCase, TextShadow, TextStroke,
     TextStyle as ModelTextStyle,
@@ -95,6 +97,16 @@ pub fn sample_transform(clip: &Clip, playhead: i32) -> TransformSample {
         scale_row: row_state(&clip.kf_scale, playhead),
         rotation_row: row_state(&clip.kf_rotation, playhead),
         opacity_row: row_state(&clip.kf_opacity, playhead),
+    }
+}
+
+/// The inspector's per-playhead view of a clip's audio gain: the envelope
+/// sampled at the (clamped) playhead plus the keyframe row state driving the
+/// volume row's diamond. The audio analogue of [`sample_transform`].
+pub fn sample_audio(clip: &Clip, playhead: i32) -> AudioSample {
+    AudioSample {
+        volume: sampled_volume(clip, playhead),
+        volume_row: row_state(&clip.kf_volume, playhead),
     }
 }
 

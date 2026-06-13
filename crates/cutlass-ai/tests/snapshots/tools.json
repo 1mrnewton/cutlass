@@ -664,6 +664,11 @@
                 "const": "opacity",
                 "description": "Layer opacity 0.0–1.0.",
                 "type": "string"
+              },
+              {
+                "const": "volume",
+                "description": "Audio gain envelope (0.0 = mute, 1.0 = unchanged, up to 10.0 boost).\nKeyframing it draws volume automation; this is how you fade audio in\nor out over time or duck music under a voice. Media-backed clips only.",
+                "type": "string"
               }
             ]
           },
@@ -737,6 +742,11 @@
                 "const": "opacity",
                 "description": "Layer opacity 0.0–1.0.",
                 "type": "string"
+              },
+              {
+                "const": "volume",
+                "description": "Audio gain envelope (0.0 = mute, 1.0 = unchanged, up to 10.0 boost).\nKeyframing it draws volume automation; this is how you fade audio in\nor out over time or duck music under a voice. Media-backed clips only.",
+                "type": "string"
               }
             ]
           }
@@ -783,6 +793,11 @@
               {
                 "const": "opacity",
                 "description": "Layer opacity 0.0–1.0.",
+                "type": "string"
+              },
+              {
+                "const": "volume",
+                "description": "Audio gain envelope (0.0 = mute, 1.0 = unchanged, up to 10.0 boost).\nKeyframing it draws volume automation; this is how you fade audio in\nor out over time or duck music under a voice. Media-backed clips only.",
                 "type": "string"
               }
             ]
@@ -1435,5 +1450,5 @@
       }
     }
   ],
-  "version": 11
+  "version": 12
 }

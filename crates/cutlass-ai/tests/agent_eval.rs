@@ -711,6 +711,74 @@ fn lower_music_volume_with_fades() {
 }
 
 #[test]
+fn volume_envelope_with_keyframes() {
+    // Fixture with an audio lane holding one music clip (10s at 24fps).
+    let mut project = Project::new("eval-envelope", R24);
+    let media = project.add_media(MediaSource::new("/tmp/music.mp3", 0, 0, R24, 120 * 24, true));
+    let music = project.add_track(TrackKind::Audio, "Music");
+    let clip = project
+        .add_clip(
+            music,
+            media,
+            TimeRange::at_rate(0, 240, R24),
+            RationalTime::new(0, R24),
+        )
+        .unwrap()
+        .raw();
+    let mut host = EngineHost::new(project);
+
+    // "duck the music down to 20% between 2s and 4s" → a volume envelope.
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![
+            (
+                "call_1",
+                "set_param_keyframe",
+                serde_json::json!({ "clip": clip, "param": "volume", "at": 2.0, "value": 1.0 }),
+            ),
+            (
+                "call_2",
+                "set_param_keyframe",
+                serde_json::json!({ "clip": clip, "param": "volume", "at": 3.0, "value": 0.2 }),
+            ),
+            (
+                "call_3",
+                "set_param_keyframe",
+                serde_json::json!({ "clip": clip, "param": "volume", "at": 4.0, "value": 1.0 }),
+            ),
+        ]),
+        text_turn("Ducked the music to 20% from 2 to 4 seconds."),
+    ]);
+
+    let (outcome, _) = run(
+        &provider,
+        &mut host,
+        &EditorContext::default(),
+        "duck the music to 20% between 2 and 4 seconds",
+        &AgentConfig::default(),
+    );
+
+    assert_eq!(outcome.status, PromptStatus::Completed);
+    assert_eq!(outcome.actions.len(), 3);
+    assert_eq!(
+        outcome.actions[1].description,
+        format!("keyframed clip {clip} volume = 20% at 3.00s")
+    );
+
+    // The envelope landed: a keyframed volume that dips at 3s (72 ticks).
+    let clip_id = cutlass_models::ClipId::from_raw(clip);
+    let c = host.engine.project().clip(clip_id).unwrap();
+    assert!(c.has_volume_envelope());
+    assert_eq!(c.volume.keyframes().len(), 3);
+    assert_eq!(c.volume.sample(48), 1.0);
+    assert_eq!(c.volume.sample(72), 0.2);
+    assert_eq!(c.volume.sample(96), 1.0);
+
+    // One prompt = one undo: the whole envelope disappears as a unit.
+    assert!(host.engine.undo());
+    assert!(!host.engine.project().clip(clip_id).unwrap().has_volume_envelope());
+}
+
+#[test]
 fn fade_in_with_opacity_keyframes() {
     let (mut host, _, _, clip) = fixture();
     let provider = ScriptedProvider::new(vec![

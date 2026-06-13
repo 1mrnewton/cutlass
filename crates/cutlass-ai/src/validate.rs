@@ -875,6 +875,7 @@ fn clip_param(param: WireClipParam) -> ClipParam {
         WireClipParam::Scale => ClipParam::Scale,
         WireClipParam::Rotation => ClipParam::Rotation,
         WireClipParam::Opacity => ClipParam::Opacity,
+        WireClipParam::Volume => ClipParam::Volume,
     }
 }
 
@@ -900,7 +901,10 @@ fn param_value(
             .ok_or_else(|| {
                 Rejection::new("param 'position' needs the 'position' argument as [x, y]")
             }),
-        WireClipParam::Scale | WireClipParam::Rotation | WireClipParam::Opacity => value
+        WireClipParam::Scale
+        | WireClipParam::Rotation
+        | WireClipParam::Opacity
+        | WireClipParam::Volume => value
             .map(|v| ParamValue::Scalar(v as f32))
             .ok_or_else(|| {
                 Rejection::new(format!(

@@ -300,6 +300,7 @@ fn param_name(param: wire::WireClipParam) -> &'static str {
         wire::WireClipParam::Scale => "scale",
         wire::WireClipParam::Rotation => "rotation",
         wire::WireClipParam::Opacity => "opacity",
+        wire::WireClipParam::Volume => "volume",
     }
 }
 
@@ -315,9 +316,11 @@ fn param_value_phrase(
         wire::WireClipParam::Position => position
             .map(|p| format!("[{:.2}, {:.2}]", p[0], p[1]))
             .unwrap_or_else(|| "?".into()),
-        wire::WireClipParam::Scale | wire::WireClipParam::Opacity => value
-            .map(|v| format!("{:.0}%", v * 100.0))
-            .unwrap_or_else(|| "?".into()),
+        wire::WireClipParam::Scale | wire::WireClipParam::Opacity | wire::WireClipParam::Volume => {
+            value
+                .map(|v| format!("{:.0}%", v * 100.0))
+                .unwrap_or_else(|| "?".into())
+        }
         wire::WireClipParam::Rotation => value
             .map(|v| format!("{v:.0}°"))
             .unwrap_or_else(|| "?".into()),

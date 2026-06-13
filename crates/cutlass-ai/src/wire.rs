@@ -29,7 +29,8 @@ use serde::{Deserialize, Serialize};
 /// 9: M4 effects (`add_effect`, `remove_effect`, `set_effect_param`).
 /// 10: M4 transitions (`add_transition`, `remove_transition`, `set_transition`).
 /// 11: M2 speed ramps (`set_speed_curve`).
-pub const TOOL_SCHEMA_VERSION: u32 = 11;
+/// 12: M8 volume envelopes (`volume` joins the keyframe param enum).
+pub const TOOL_SCHEMA_VERSION: u32 = 12;
 
 /// Track lane categories the agent may create or target.
 ///
@@ -265,6 +266,10 @@ pub enum WireClipParam {
     Rotation,
     /// Layer opacity 0.0–1.0.
     Opacity,
+    /// Audio gain envelope (0.0 = mute, 1.0 = unchanged, up to 10.0 boost).
+    /// Keyframing it draws volume automation; this is how you fade audio in
+    /// or out over time or duck music under a voice. Media-backed clips only.
+    Volume,
 }
 
 /// Interpolation toward the next keyframe. (Custom bezier curves exist in

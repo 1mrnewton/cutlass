@@ -4,7 +4,6 @@ import {
     CutlassText,
     CutlassDropdown,
     CutlassColorSwatch,
-    PanelHeader,
 } from "../../components/index.slint";
 import {
     AppStore,
@@ -20,11 +19,14 @@ import {
 import { Clip, TextClipStyle } from "../../models/index.slint";
 import { AppState } from "../../state.slint";
 import { KeyframeControl } from "keyframe-control.slint";
-
-component InspectorDivider inherits Rectangle {
-    height: 1px;
-    background: #ffffff12;
-}
+import {
+    InspectorDivider,
+    InspectorTabHeader,
+    SectionHeader,
+    LabelCell,
+    LineTextInput,
+    SliderRow,
+} from "inspector-widgets.slint";
 
 component PillTab inherits Rectangle {
     in property <string> label;
@@ -51,112 +53,6 @@ component PillTab inherits Rectangle {
         enabled: root.enabled;
         clicked => {
             AppState.refocus-shortcuts();
-        }
-    }
-}
-
-component CategoryTab inherits Rectangle {
-    in property <string> label;
-    in-out property <bool> selected: false;
-    in property <bool> enabled: false;
-
-    width: label-text.preferred-width + 28px;
-    height: 50px;
-    border-radius: AppStore.theme.metrics.radius.sm;
-    background: transparent;
-    opacity: enabled || selected ? 1.0 : 0.78;
-
-    label-text := CutlassText {
-        width: 100%;
-        height: 100%;
-        text: root.label;
-        style: AppStore.theme.typography.heading-md;
-        foreground: root.selected ? AppStore.theme.accent.primary : AppStore.theme.text.primary;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-
-    ta := TouchArea {
-        enabled: root.enabled;
-        clicked => {
-            AppState.refocus-shortcuts();
-        }
-    }
-}
-
-component SectionHeader inherits HorizontalLayout {
-    in property <string> title;
-    in property <bool> active: true;
-    in property <bool> checkable: false;
-    // When true the checkbox/title toggles the section (fires `toggled`) and
-    // the "reset" affordance fires `reset`.
-    in property <bool> interactive: false;
-
-    callback toggled();
-    callback reset();
-
-    spacing: AppStore.theme.metrics.spacing.sm;
-    height: 24px;
-    vertical-stretch: 0;
-    opacity: active || root.interactive ? 1.0 : 0.45;
-
-    if checkable: Rectangle {
-        width: 14px;
-        height: 14px;
-        border-radius: 3px;
-        border-width: 1px;
-        border-color: active ? AppStore.theme.accent.primary : #ffffff2f;
-        background: active ? AppStore.theme.accent.primary : #ffffff14;
-        vertical-stretch: 0;
-        y: 5px;
-
-        check-ta := TouchArea {
-            enabled: root.interactive;
-            clicked => {
-                root.toggled();
-                AppState.refocus-shortcuts();
-            }
-        }
-    }
-
-    title-area := TouchArea {
-        horizontal-stretch: 1;
-        enabled: root.interactive;
-        clicked => {
-            root.toggled();
-            AppState.refocus-shortcuts();
-        }
-
-        HorizontalLayout {
-            CutlassText {
-                text: root.title + " ^";
-                style: AppStore.theme.typography.heading-sm;
-                foreground: active ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
-                vertical-alignment: TextVerticalAlignment.center;
-            }
-
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-        }
-    }
-
-    reset-area := TouchArea {
-        width: reset-label.preferred-width + AppStore.theme.metrics.spacing.sm;
-        enabled: root.interactive && root.active;
-        mouse-cursor: MouseCursor.pointer;
-        clicked => {
-            root.reset();
-            AppState.refocus-shortcuts();
-        }
-
-        reset-label := CutlassText {
-            width: 100%;
-            text: active ? "reset" : "";
-            style: AppStore.theme.typography.caption;
-            foreground: AppStore.theme.text.muted;
-            horizontal-alignment: TextHorizontalAlignment.right;
-            vertical-alignment: TextVerticalAlignment.center;
         }
     }
 }
@@ -282,95 +178,6 @@ component MultilineTextInput inherits Rectangle {
     }
 }
 
-component LineTextInput inherits Rectangle {
-    in-out property <string> text;
-    in property <string> placeholder-text: "";
-    in property <TextHorizontalAlignment> horizontal-alignment: TextHorizontalAlignment.left;
-    in property <length> text-padding-left: AppStore.theme.metrics.spacing.sm;
-    in property <length> text-padding-right: AppStore.theme.metrics.spacing.sm;
-    in property <bool> read-only: false;
-    in property <bool> enabled: true;
-    out property <bool> has-focus: input.has-focus;
-
-    callback accepted(text: string);
-    callback edited(text: string);
-
-    height: 28px;
-    horizontal-stretch: 1;
-    border-radius: AppStore.theme.metrics.radius.sm;
-    border-width: input.has-focus ? 1px : 0px;
-    border-color: AppStore.theme.accent.primary;
-    background: input.has-focus ? #202020 : #1a1a1a;
-    opacity: enabled ? 1.0 : 0.55;
-    clip: true;
-    forward-focus: input;
-
-    animate background {
-        duration: 120ms;
-        easing: ease-out;
-    }
-    animate border-width {
-        duration: 120ms;
-        easing: ease-out;
-    }
-
-    // Clicking the field's padding (e.g. the prefix gutter in NumberBox)
-    // focuses the input instead of falling through to the blur catcher.
-    TouchArea {
-        enabled: root.enabled && !root.read-only;
-        mouse-cursor: MouseCursor.text;
-        clicked => {
-            input.focus();
-        }
-    }
-
-    input := TextInput {
-        x: root.text-padding-left;
-        width: max(0px, root.width - root.text-padding-left - root.text-padding-right);
-        height: root.height;
-        text <=> root.text;
-        enabled: root.enabled;
-        read-only: root.read-only;
-        single-line: true;
-        horizontal-alignment: root.horizontal-alignment;
-        vertical-alignment: TextVerticalAlignment.center;
-        color: AppStore.theme.text.primary;
-        font-size: AppStore.theme.typography.body.size;
-        font-weight: AppStore.theme.typography.body.weight;
-        selection-background-color: AppStore.theme.accent.primary.with-alpha(0.33);
-        selection-foreground-color: AppStore.theme.text.primary;
-        accessible-role: none;
-
-        // Blur commits like Enter does, so a value typed and then clicked
-        // away from isn't silently left uncommitted in the box.
-        changed has-focus => {
-            if (!self.has-focus) {
-                root.accepted(self.text);
-            }
-        }
-
-        accepted => {
-            root.accepted(self.text);
-        }
-
-        edited => {
-            root.edited(self.text);
-        }
-    }
-
-    placeholder := CutlassText {
-        x: root.text-padding-left;
-        width: max(0px, root.width - root.text-padding-left - root.text-padding-right);
-        height: root.height;
-        text: (root.text == "" && input.preedit-text == "") ? root.placeholder-text : "";
-        style: AppStore.theme.typography.body;
-        foreground: AppStore.theme.text.muted;
-        vertical-alignment: TextVerticalAlignment.center;
-        overflow: TextOverflow.elide;
-        accessible-role: none;
-    }
-}
-
 component IconButton inherits Rectangle {
     in property <string> label;
     in property <bool> selected: false;
@@ -441,18 +248,6 @@ component PresetStyle inherits Rectangle {
     }
 }
 
-component LabelCell inherits CutlassText {
-    in property <string> label;
-
-    text: label;
-    width: 96px;
-    height: 28px;
-    vertical-stretch: 0;
-    style: AppStore.theme.typography.label;
-    foreground: AppStore.theme.text.secondary;
-    vertical-alignment: TextVerticalAlignment.center;
-}
-
 component DisabledPropertyRow inherits HorizontalLayout {
     in property <string> label;
     in property <string> value;
@@ -468,116 +263,6 @@ component DisabledPropertyRow inherits HorizontalLayout {
 
     FakeField {
         text: root.value;
-    }
-}
-
-component SliderRow inherits HorizontalLayout {
-    in property <string> label;
-    in property <float> value;
-    in property <float> minimum;
-    in property <float> maximum;
-    in property <string> suffix;
-    in property <float> reset-value: 0;
-    // Keyframe cluster (◀ ◆ ▶ + easing), shown only on animatable rows
-    // (the transform/blend properties — keyframes roadmap Phase 1).
-    in property <bool> kf-visible: false;
-    in property <ParamRowState> kf;
-    in property <bool> kf-can-toggle;
-
-    callback preview(value: float);
-    callback commit(value: float);
-    callback kf-toggle();
-    callback kf-set-easing(easing: int);
-
-    spacing: AppStore.theme.metrics.spacing.md;
-    height: 28px;
-    vertical-stretch: 0;
-
-    changed value => {
-        sl.value = clamp(root.value, root.minimum, root.maximum);
-        num.text = Math.round(root.value) + "";
-    }
-
-    TouchArea {
-        width: 96px;
-        height: 28px;
-        vertical-stretch: 0;
-        mouse-cursor: MouseCursor.pointer;
-        clicked => {
-            AppState.refocus-shortcuts();
-        }
-        double-clicked => {
-            root.commit(root.reset-value);
-        }
-
-        CutlassText {
-            width: 100%;
-            height: 100%;
-            text: root.label;
-            style: AppStore.theme.typography.label;
-            foreground: AppStore.theme.text.secondary;
-            vertical-alignment: TextVerticalAlignment.center;
-            overflow: TextOverflow.elide;
-        }
-    }
-
-    sl := CutlassSlider {
-        horizontal-stretch: 1;
-        height: 28px;
-        vertical-stretch: 0;
-        minimum: root.minimum;
-        maximum: root.maximum;
-        value: clamp(root.value, root.minimum, root.maximum);
-
-        changed(v) => {
-            // `root.value` only moves on commit, so drive the readout off the
-            // live slider value — otherwise the number lags behind the cap.
-            num.text = Math.round(v) + "";
-            root.preview(v);
-        }
-
-        released(v) => {
-            root.commit(v);
-        }
-    }
-
-    num := LineTextInput {
-        width: 62px;
-        height: 28px;
-        vertical-stretch: 0;
-        horizontal-alignment: TextHorizontalAlignment.right;
-        text: Math.round(root.value) + "";
-
-        accepted(entered) => {
-            if (entered.is-float()) {
-                root.commit(entered.to-float());
-            }
-            self.text = Math.round(root.value) + "";
-        }
-    }
-
-    CutlassText {
-        width: 20px;
-        height: 28px;
-        vertical-stretch: 0;
-        text: root.suffix;
-        style: AppStore.theme.typography.label;
-        foreground: AppStore.theme.text.muted;
-        vertical-alignment: TextVerticalAlignment.center;
-    }
-
-    if root.kf-visible: KeyframeControl {
-        state: root.kf;
-        can-toggle: root.kf-can-toggle;
-        toggle => {
-            root.kf-toggle();
-        }
-        jump(tick) => {
-            TimelineStore.playhead-tick = tick;
-        }
-        set-easing(easing) => {
-            root.kf-set-easing(easing);
-        }
     }
 }
 
@@ -849,58 +534,9 @@ export component TextInspector inherits VerticalLayout {
             model.id, param, TimelineStore.playhead-tick, vx, vy, easing);
     }
 
-    PanelHeader {
-        tab-scroll := CutlassScrollView {
-            width: 100%;
-            height: 100%;
-            viewport-width: category-tabs.preferred-width;
-            viewport-height: self.height;
-            show-vertical-scrollbar: false;
-            show-horizontal-scrollbar: false;
-
-            // Clicks on dead space in the tab strip blur the focused text
-            // box by pulling keyboard focus back to the shortcut scope.
-            // Lives inside the scroll view because its Flickable swallows
-            // presses that no child handles.
-            TouchArea {
-                x: 0;
-                y: 0;
-                width: max(tab-scroll.width, category-tabs.preferred-width);
-                height: tab-scroll.height;
-                clicked => {
-                    AppState.refocus-shortcuts();
-                }
-            }
-
-            category-tabs := HorizontalLayout {
-                height: 100%;
-                spacing: AppStore.theme.metrics.spacing.sm;
-                padding-left: AppStore.theme.metrics.spacing.lg;
-                padding-right: AppStore.theme.metrics.spacing.lg;
-
-                CategoryTab {
-                    label: "Text";
-                    selected: true;
-                    enabled: true;
-                }
-
-                CategoryTab {
-                    label: "Animation";
-                }
-
-                CategoryTab {
-                    label: "Tracking";
-                }
-
-                CategoryTab {
-                    label: "Text to speech";
-                }
-
-                CategoryTab {
-                    label: "AI avatars";
-                }
-            }
-        }
+    InspectorTabHeader {
+        tabs: ["Text", "Animation", "Tracking", "Text to speech", "AI avatars"];
+        selected: 0;
     }
 
     body-scroll := CutlassScrollView {

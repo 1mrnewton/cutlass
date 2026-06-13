@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use cosmic_text::{
     Attrs, Buffer, Color as TextColor, Family, FontSystem, Metrics, Shaping, Style as FontStyle,
-    SwashCache, Weight,
+    SwashCache, Weight, Wrap,
 };
 use cutlass_models::{Generator, Shape, TextAlignH, TextAlignV, TextStyle};
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Rect, Transform};
@@ -69,6 +69,7 @@ struct TextStyleKey {
     line_spacing_bits: u32,
     align_h: TextAlignH,
     align_v: TextAlignV,
+    wrap: bool,
     stroke: Option<([u8; 4], u32)>,
     background: Option<([u8; 4], u32)>,
     shadow: Option<([u8; 4], u32, u32)>,
@@ -88,6 +89,7 @@ impl TextStyleKey {
             line_spacing_bits: style.line_spacing.to_bits(),
             align_h: style.align_h,
             align_v: style.align_v,
+            wrap: style.wrap,
             stroke: style.stroke.map(|s| (s.rgba, s.width.to_bits())),
             background: style.background.map(|b| (b.rgba, b.radius.to_bits())),
             shadow: style
@@ -331,11 +333,21 @@ impl GeneratorRaster {
 
         let metrics = Metrics::new(font_size, line_height);
         let mut buffer = Buffer::new(font_system, metrics);
-        // Wrap inside the canvas with a small margin so descenders/ascenders of
-        // big titles don't clip against the edge.
+        // Small inset so descenders/ascenders of big titles don't clip against
+        // the edge; it also serves as the left/right alignment margin below.
         let margin = width as f32 * 0.05;
-        let wrap_w = (width as f32 - 2.0 * margin).max(1.0);
-        buffer.set_size(font_system, Some(wrap_w), Some(height as f32));
+        if style.wrap {
+            // Wrap the title inside the canvas width.
+            let wrap_w = (width as f32 - 2.0 * margin).max(1.0);
+            buffer.set_size(font_system, Some(wrap_w), Some(height as f32));
+        } else {
+            // No wrap: lay the text on a single line (explicit newlines still
+            // break) that may overflow the canvas edges, where it's clipped to
+            // the frame — `Wrap::None` plus an unbounded layout width so
+            // cosmic-text never inserts soft breaks.
+            buffer.set_wrap(font_system, Wrap::None);
+            buffer.set_size(font_system, None, Some(height as f32));
+        }
         buffer.set_text(font_system, text, &attrs, Shaping::Advanced);
         buffer.shape_until_scroll(font_system, false);
 
@@ -887,6 +899,29 @@ mod tests {
         assert!(
             grown.0 > base.0 && grown.1 > base.1,
             "stroke should enlarge the content box: {base:?} -> {grown:?}"
+        );
+    }
+
+    #[test]
+    fn wrap_off_lays_out_fewer_lines_than_wrap_on() {
+        let mut raster = GeneratorRaster::new();
+        // A long run of words that must wrap to several lines inside the canvas.
+        let long = "the quick brown fox jumps over the lazy dog again and again";
+        let wrapped = raster
+            .content_size(&Generator::text(long), 256, 256)
+            .unwrap();
+        let no_wrap = styled(
+            long,
+            TextStyle {
+                wrap: false,
+                ..TextStyle::default()
+            },
+        );
+        let single = raster.content_size(&no_wrap, 256, 256).unwrap();
+        // One overflowing line is far shorter than the multi-line wrapped block.
+        assert!(
+            single.1 < wrapped.1,
+            "wrap-off should be shorter (single line): {single:?} vs wrapped {wrapped:?}"
         );
     }
 

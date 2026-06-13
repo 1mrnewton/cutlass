@@ -643,6 +643,7 @@ fn text_style_to_ui(style: &EngineTextStyle) -> TextClipStyle {
         line_spacing: style.line_spacing,
         align_h: align_h_to_int(style.align_h),
         align_v: align_v_to_int(style.align_v),
+        wrap: style.wrap,
         stroke_enabled: style.stroke.is_some(),
         stroke_color: opaque(stroke.rgba),
         stroke_width: stroke.width,

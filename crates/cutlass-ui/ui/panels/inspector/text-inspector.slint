@@ -893,6 +893,29 @@ export component TextInspector inherits VerticalLayout {
                 }
             }
 
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Wrap";
+                }
+
+                IconButton {
+                    label: model.text-style.wrap ? "On" : "Off";
+                    enabled: true;
+                    selected: model.text-style.wrap;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.wrap = !model.text-style.wrap;
+                        root.commit-style();
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
             InspectorDivider { }
 
             CutlassText {

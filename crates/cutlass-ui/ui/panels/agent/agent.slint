@@ -15,8 +15,7 @@ import { AgentStore, AgentEntry, AppStore, TimelineActions } from "../../store/i
 
 // The prompt composer: multi-line input styled like the inspector's
 // text fields (focus ring in the accent teal). Grows with content up to
-// a cap, then scrolls. Enter inserts a newline; Ctrl+Enter (or Cmd+Enter)
-// sends.
+// a cap, then scrolls. Enter sends; Shift+Enter inserts a newline.
 component PromptInput inherits Rectangle {
     in-out property <string> text;
     in property <bool> enabled: true;
@@ -56,7 +55,7 @@ component PromptInput inherits Rectangle {
         width: parent.width - 2 * root.pad-x;
         height: parent.height;
         vertical-alignment: center;
-        text: "Describe an edit…  (Ctrl+Enter sends)";
+        text: "Describe an edit…  (Enter sends, Shift+Enter for newline)";
         style: AppStore.theme.typography.body;
         foreground: AppStore.theme.text.muted;
         overflow: elide;
@@ -87,7 +86,7 @@ component PromptInput inherits Rectangle {
             page-height: editor-scroll.height;
             accessible-role: none;
             key-pressed(event) => {
-                if (event.text == Key.Return && (event.modifiers.control || event.modifiers.meta)) {
+                if (event.text == Key.Return && !event.modifiers.shift) {
                     root.accepted(root.text);
                     return accept;
                 }

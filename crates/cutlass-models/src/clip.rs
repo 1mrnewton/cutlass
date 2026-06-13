@@ -230,6 +230,12 @@ pub struct TextStyle {
     pub align_h: TextAlignH,
     #[serde(default)]
     pub align_v: TextAlignV,
+    /// Whether the title wraps onto multiple lines when it overflows the
+    /// canvas width. `true` (default) keeps the legacy auto-wrap; `false` lays
+    /// the text out on a single line — explicit newlines still break — so a
+    /// long title overflows the frame edges instead of reflowing (CapCut).
+    #[serde(default = "default_wrap")]
+    pub wrap: bool,
     /// Optional glyph outline.
     #[serde(default)]
     pub stroke: Option<TextStroke>,
@@ -257,6 +263,12 @@ fn default_line_spacing() -> f32 {
     1.2
 }
 
+/// Default wrap behavior (on) — matches the legacy always-wrap raster so older
+/// projects, which had no toggle, deserialize to their original look.
+fn default_wrap() -> bool {
+    true
+}
+
 impl Default for TextStyle {
     fn default() -> Self {
         Self {
@@ -271,6 +283,7 @@ impl Default for TextStyle {
             line_spacing: default_line_spacing(),
             align_h: TextAlignH::Center,
             align_v: TextAlignV::Middle,
+            wrap: default_wrap(),
             stroke: None,
             background: None,
             shadow: None,
@@ -2190,6 +2203,7 @@ mod tests {
             line_spacing: 1.5,
             align_h: TextAlignH::Right,
             align_v: TextAlignV::Bottom,
+            wrap: false,
             stroke: Some(TextStroke {
                 rgba: [0, 0, 0, 255],
                 width: 8.0,

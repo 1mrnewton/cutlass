@@ -39,6 +39,7 @@ pub fn text_style_from_ui(style: &TextClipStyle) -> ModelTextStyle {
         line_spacing: style.line_spacing,
         align_h: align_h_from_int(style.align_h),
         align_v: align_v_from_int(style.align_v),
+        wrap: style.wrap,
         stroke: style.stroke_enabled.then(|| TextStroke {
             rgba: rgba(style.stroke_color),
             width: style.stroke_width,

@@ -245,15 +245,23 @@ fn dispatch_edit(
             Ok((ApplyOutcome::Edited(EditOutcome::RemovedTrack(track)), Some(inverse)))
         }
         EditCommand::SetTrackEnabled { track, enabled } => {
-            let inverse = edit::set_track_flags::execute(ctx, track, Some(enabled), None, None)?;
+            let inverse =
+                edit::set_track_flags::execute(ctx, track, Some(enabled), None, None, None)?;
             Ok((ApplyOutcome::Edited(EditOutcome::UpdatedTrack(track)), Some(inverse)))
         }
         EditCommand::SetTrackMuted { track, muted } => {
-            let inverse = edit::set_track_flags::execute(ctx, track, None, Some(muted), None)?;
+            let inverse =
+                edit::set_track_flags::execute(ctx, track, None, Some(muted), None, None)?;
             Ok((ApplyOutcome::Edited(EditOutcome::UpdatedTrack(track)), Some(inverse)))
         }
         EditCommand::SetTrackLocked { track, locked } => {
-            let inverse = edit::set_track_flags::execute(ctx, track, None, None, Some(locked))?;
+            let inverse =
+                edit::set_track_flags::execute(ctx, track, None, None, Some(locked), None)?;
+            Ok((ApplyOutcome::Edited(EditOutcome::UpdatedTrack(track)), Some(inverse)))
+        }
+        EditCommand::SetTrackDuckSource { track, duck_source } => {
+            let inverse =
+                edit::set_track_flags::execute(ctx, track, None, None, None, Some(duck_source))?;
             Ok((ApplyOutcome::Edited(EditOutcome::UpdatedTrack(track)), Some(inverse)))
         }
         EditCommand::RippleDelete { clip } => {

@@ -764,7 +764,7 @@ mod tests {
         let mut ctx = test_ctx(&mut project, &cache, &mut project_path, &mut history);
 
         // Disable the track; only `enabled` changes, the rest stay put.
-        let inv1 = set_track_flags::execute(&mut ctx, track, Some(false), None, None).unwrap();
+        let inv1 = set_track_flags::execute(&mut ctx, track, Some(false), None, None, None).unwrap();
         assert!(!ctx.project.timeline().track(track).unwrap().enabled);
         assert!(!ctx.project.timeline().track(track).unwrap().muted);
         assert!(!ctx.project.timeline().track(track).unwrap().locked);
@@ -850,7 +850,7 @@ mod tests {
         let mut history = History::new(32);
         let mut ctx = test_ctx(&mut project, &cache, &mut project_path, &mut history);
         let missing = cutlass_models::TrackId::from_raw(999);
-        assert!(set_track_flags::execute(&mut ctx, missing, Some(false), None, None).is_err());
+        assert!(set_track_flags::execute(&mut ctx, missing, Some(false), None, None, None).is_err());
     }
 
     /// Inert action for history bookkeeping tests.

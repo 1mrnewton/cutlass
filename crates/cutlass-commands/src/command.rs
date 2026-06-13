@@ -199,6 +199,10 @@ pub enum EditCommand {
     SetTrackMuted { track: TrackId, muted: bool },
     /// Toggle whether a track's clips are editable (selection/move/trim).
     SetTrackLocked { track: TrackId, locked: bool },
+    /// Tag (or untag) an audio track as a sidechain "voice" source for audio
+    /// ducking (M8 Phase 4): a "duck under voice" gesture dips music under the
+    /// clips on every lane flagged here. The inverse restores the flag.
+    SetTrackDuckSource { track: TrackId, duck_source: bool },
     /// Remove a clip and slide later clips on its track left to close the gap.
     RippleDelete { clip: ClipId },
     /// Shift every clip on `track` whose start is ≥ `from` by `delta` ticks

@@ -81,6 +81,7 @@ fn set_transform_updates_visual_and_rejects_audio() {
         scale: 2.0,
         rotation: -30.0,
         opacity: 0.5,
+        ..ClipTransform::IDENTITY
     };
     project.set_transform(video, t, None).expect("set transform");
     assert_eq!(project.clip(video).unwrap().transform, t.into());

@@ -391,30 +391,42 @@ impl Default for CropRect {
 }
 
 /// Spatial placement of a clip's content on the canvas (CapCut "Basic"
-/// transform: position, scale, rotation, opacity).
+/// transform: position, anchor, scale, rotation, opacity).
 ///
 /// Coordinates are normalized to the canvas so projects survive canvas-size
-/// changes: `position` is the offset of the content center from the canvas
+/// changes: `position` is the offset of the [`anchor_point`] from the canvas
 /// center as a fraction of canvas width/height (+x right, +y down — screen
-/// convention). `scale` is uniform with 1.0 = aspect-fit inside the canvas
-/// (CapCut's 100%). `rotation` is degrees clockwise about the content center.
+/// convention). With the default center anchor this matches the legacy
+/// content-center semantics. `anchor_point` is the pivot within the content
+/// bounds (0,0 = top-left, 0.5,0.5 = center). `scale` is uniform with 1.0 =
+/// aspect-fit inside the canvas (CapCut's 100%). `rotation` is degrees
+/// clockwise about the anchor.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ClipTransform {
-    /// Content-center offset from canvas center, normalized to canvas
-    /// dimensions. `[0.0, 0.0]` = centered; `[0.5, 0.0]` = center sits on
+    /// Anchor offset from canvas center, normalized to canvas dimensions.
+    /// `[0.0, 0.0]` = anchor on the canvas center; `[0.5, 0.0]` = anchor on
     /// the right canvas edge.
     pub position: [f32; 2],
+    /// Pivot within the content bounds, normalized to the placed size
+    /// (+x right, +y down). `[0.5, 0.5]` = content center (default).
+    #[serde(default = "default_anchor_point")]
+    pub anchor_point: [f32; 2],
     /// Uniform scale; 1.0 aspect-fits the content inside the canvas.
     pub scale: f32,
-    /// Clockwise rotation in degrees about the content center.
+    /// Clockwise rotation in degrees about the anchor.
     pub rotation: f32,
     /// Layer opacity, 0.0 (transparent) ..= 1.0 (opaque).
     pub opacity: f32,
 }
 
+fn default_anchor_point() -> [f32; 2] {
+    [0.5, 0.5]
+}
+
 impl ClipTransform {
     pub const IDENTITY: Self = Self {
         position: [0.0, 0.0],
+        anchor_point: [0.5, 0.5],
         scale: 1.0,
         rotation: 0.0,
         opacity: 1.0,
@@ -429,6 +441,7 @@ impl ClipTransform {
     /// enforces before storing.
     pub fn validate(&self) -> Result<(), ModelError> {
         let finite = self.position.iter().all(|v| v.is_finite())
+            && self.anchor_point.iter().all(|v| v.is_finite())
             && self.scale.is_finite()
             && self.rotation.is_finite()
             && self.opacity.is_finite();
@@ -457,6 +470,7 @@ impl Default for ClipTransform {
 #[serde(rename_all = "snake_case")]
 pub enum ClipParam {
     Position,
+    AnchorPoint,
     Scale,
     Rotation,
     Opacity,
@@ -518,9 +532,12 @@ impl ParamValue {
 /// at the timeline rate — animation rides along when a clip moves.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnimatedTransform {
-    /// Content-center offset from canvas center (see [`ClipTransform::position`]).
+    /// Anchor offset from canvas center (see [`ClipTransform::position`]).
     #[serde(default = "default_position_param")]
     pub position: Param<[f32; 2]>,
+    /// Pivot within the content bounds (see [`ClipTransform::anchor_point`]).
+    #[serde(default = "default_anchor_point_param", skip_serializing_if = "is_default_anchor_param")]
+    pub anchor_point: Param<[f32; 2]>,
     /// Uniform scale (see [`ClipTransform::scale`]).
     #[serde(default = "default_scale_param")]
     pub scale: Param<f32>,
@@ -534,6 +551,12 @@ pub struct AnimatedTransform {
 
 fn default_position_param() -> Param<[f32; 2]> {
     Param::Constant([0.0, 0.0])
+}
+fn default_anchor_point_param() -> Param<[f32; 2]> {
+    Param::Constant([0.5, 0.5])
+}
+fn is_default_anchor_param(p: &Param<[f32; 2]>) -> bool {
+    p.constant() == Some([0.5, 0.5])
 }
 fn default_scale_param() -> Param<f32> {
     Param::Constant(1.0)
@@ -559,6 +582,7 @@ impl AnimatedTransform {
     /// True iff any property has keyframes.
     pub fn is_animated(&self) -> bool {
         self.position.is_animated()
+            || self.anchor_point.is_animated()
             || self.scale.is_animated()
             || self.rotation.is_animated()
             || self.opacity.is_animated()
@@ -576,6 +600,7 @@ impl AnimatedTransform {
     pub fn sample_at(&self, tick: f64) -> ClipTransform {
         ClipTransform {
             position: self.position.sample_at(tick),
+            anchor_point: self.anchor_point.sample_at(tick),
             scale: self.scale.sample_at(tick),
             rotation: self.rotation.sample_at(tick),
             opacity: self.opacity.sample_at(tick),
@@ -585,6 +610,7 @@ impl AnimatedTransform {
     /// Set every property to a constant, dropping any keyframes.
     pub fn set_constant(&mut self, transform: ClipTransform) {
         self.position.set_constant(transform.position);
+        self.anchor_point.set_constant(transform.anchor_point);
         self.scale.set_constant(transform.scale);
         self.rotation.set_constant(transform.rotation);
         self.opacity.set_constant(transform.opacity);
@@ -599,6 +625,12 @@ impl AnimatedTransform {
             self.position.set_keyframe(tick, transform.position, Easing::Linear);
         } else {
             self.position.set_constant(transform.position);
+        }
+        if self.anchor_point.is_animated() {
+            self.anchor_point
+                .set_keyframe(tick, transform.anchor_point, Easing::Linear);
+        } else {
+            self.anchor_point.set_constant(transform.anchor_point);
         }
         if self.scale.is_animated() {
             self.scale.set_keyframe(tick, transform.scale, Easing::Linear);
@@ -633,6 +665,11 @@ impl AnimatedTransform {
                 validate_position(&v)?;
                 self.position.set_keyframe(tick, v, easing);
             }
+            ClipParam::AnchorPoint => {
+                let v = value.vec2()?;
+                validate_anchor_point(&v)?;
+                self.anchor_point.set_keyframe(tick, v, easing);
+            }
             ClipParam::Scale => {
                 let v = value.scalar()?;
                 validate_scale(v)?;
@@ -660,6 +697,7 @@ impl AnimatedTransform {
     pub fn remove_param_keyframe(&mut self, param: ClipParam, tick: i64) -> Result<(), ModelError> {
         let removed = match param {
             ClipParam::Position => self.position.remove_keyframe(tick),
+            ClipParam::AnchorPoint => self.anchor_point.remove_keyframe(tick),
             ClipParam::Scale => self.scale.remove_keyframe(tick),
             ClipParam::Rotation => self.rotation.remove_keyframe(tick),
             ClipParam::Opacity => self.opacity.remove_keyframe(tick),
@@ -683,6 +721,11 @@ impl AnimatedTransform {
                 let v = value.vec2()?;
                 validate_position(&v)?;
                 self.position.set_constant(v);
+            }
+            ClipParam::AnchorPoint => {
+                let v = value.vec2()?;
+                validate_anchor_point(&v)?;
+                self.anchor_point.set_constant(v);
             }
             ClipParam::Scale => {
                 let v = value.scalar()?;
@@ -712,10 +755,12 @@ impl AnimatedTransform {
     /// easings). Used on load and by model mutators.
     pub fn validate(&self) -> Result<(), ModelError> {
         self.position.validate_shape()?;
+        self.anchor_point.validate_shape()?;
         self.scale.validate_shape()?;
         self.rotation.validate_shape()?;
         self.opacity.validate_shape()?;
         self.position.for_each_value(validate_position)?;
+        self.anchor_point.for_each_value(validate_anchor_point)?;
         self.scale.for_each_value(|v| validate_scale(*v))?;
         self.rotation.for_each_value(|v| validate_rotation(*v))?;
         self.opacity.for_each_value(|v| validate_opacity(*v))?;
@@ -735,6 +780,14 @@ fn validate_position(v: &[f32; 2]) -> Result<(), ModelError> {
         Ok(())
     } else {
         Err(ModelError::InvalidTransform("non-finite component".into()))
+    }
+}
+
+fn validate_anchor_point(v: &[f32; 2]) -> Result<(), ModelError> {
+    if v.iter().all(|c| c.is_finite()) {
+        Ok(())
+    } else {
+        Err(ModelError::InvalidTransform("non-finite anchor".into()))
     }
 }
 
@@ -776,6 +829,7 @@ impl From<ClipTransform> for AnimatedTransform {
     fn from(t: ClipTransform) -> Self {
         Self {
             position: Param::Constant(t.position),
+            anchor_point: Param::Constant(t.anchor_point),
             scale: Param::Constant(t.scale),
             rotation: Param::Constant(t.rotation),
             opacity: Param::Constant(t.opacity),
@@ -2041,6 +2095,7 @@ mod tests {
             scale: 1.5,
             rotation: 90.0,
             opacity: 0.25,
+            ..ClipTransform::IDENTITY
         }
         .into();
         let json = serde_json::to_string(&clip).expect("serialize");
@@ -2068,6 +2123,7 @@ mod tests {
                 scale: 2.0,
                 rotation: 45.0,
                 opacity: 0.5,
+                ..ClipTransform::IDENTITY
             }
         );
     }
@@ -2080,6 +2136,7 @@ mod tests {
             scale: 1.5,
             rotation: 0.0,
             opacity: 1.0,
+            ..ClipTransform::IDENTITY
         }
         .into();
         let value = serde_json::to_value(&clip).expect("serialize");
@@ -2132,6 +2189,7 @@ mod tests {
             scale: 2.0,
             rotation: 0.0,
             opacity: 1.0,
+            ..ClipTransform::IDENTITY
         };
         t.compose_at(edit, 10);
 
@@ -2310,6 +2368,7 @@ mod tests {
                 scale: 3.0,
                 rotation: -720.0,
                 opacity: 0.0,
+                ..ClipTransform::IDENTITY
             }
             .validate()
             .is_ok()

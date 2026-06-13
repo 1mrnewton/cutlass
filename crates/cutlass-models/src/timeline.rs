@@ -5,7 +5,7 @@ use crate::clip::Clip;
 use crate::error::ModelError;
 use crate::ids::{ClipId, MarkerId, TrackId};
 use crate::time::{Rational, RationalTime, resample};
-use crate::track::Track;
+use crate::track::{Track, TrackKind};
 
 /// Fixed marker flag palette (M1 markers). Serialized by name so project
 /// files stay readable; [`rgba`](Self::rgba) gives the render color.
@@ -187,7 +187,11 @@ impl Marker {
 ///
 /// - `tracks` is keyed by [`TrackId`] for O(1) lookup.
 /// - `order` is the z-stack from bottom (index 0) to top; the topmost enabled
-///   video track wins when compositing.
+///   video track wins when compositing. The UI renders it top-first, so index 0
+///   shows at the *bottom* of the lane list.
+/// - **Audio-floor invariant:** every [`TrackKind::Audio`] lane sits below every
+///   visual lane in `order`, so audio always renders at the bottom of the
+///   timeline (CapCut behavior). Maintained by every add/insert/restore path.
 /// - `clip_index` maps every [`ClipId`] to the track containing it, so a clip
 ///   can be found across the whole timeline in O(1) without scanning tracks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,21 +240,53 @@ impl Timeline {
     // --- tracks -----------------------------------------------------------
 
     /// Append a track to the top of the stack. Returns its [`TrackId`].
+    ///
+    /// Audio lanes are sunk to the bottom of the stack to keep the audio-floor
+    /// invariant (see [`Timeline`]), so a new audio track lands at the top of
+    /// the audio block — still below every visual lane.
     pub fn add_track(&mut self, track: Track) -> TrackId {
         let id = track.id;
         self.tracks.insert(id, track);
         self.order.push(id);
+        self.enforce_audio_floor();
         id
     }
 
     /// Insert a track at `order_index` in the stack (0 = bottom layer),
     /// clamped to the current stack height. Returns its [`TrackId`].
+    ///
+    /// The audio-floor invariant (see [`Timeline`]) is re-applied afterwards:
+    /// a visual track requested below the audio block is lifted just above it,
+    /// and an audio track requested above visual lanes sinks back down.
     pub fn insert_track(&mut self, track: Track, order_index: usize) -> TrackId {
         let id = track.id;
         self.tracks.insert(id, track);
         let idx = order_index.min(self.order.len());
         self.order.insert(idx, id);
+        self.enforce_audio_floor();
         id
+    }
+
+    /// Stable-partition `order` so every audio lane sits below every visual
+    /// lane (index 0 = bottom of the stack / bottom of the UI lane list).
+    /// Relative order within the audio group and within the visual group is
+    /// preserved, so the only movement is sinking audio under video.
+    ///
+    /// This is the single chokepoint that guarantees the audio-floor invariant
+    /// for every add/insert/restore (and therefore for AI commands, drag-drop,
+    /// and undo/redo). O(n) on the track count — a cold, per-track-edit path.
+    fn enforce_audio_floor(&mut self) {
+        let mut audio: Vec<TrackId> = Vec::with_capacity(self.order.len());
+        let mut visual: Vec<TrackId> = Vec::with_capacity(self.order.len());
+        for &id in &self.order {
+            if self.tracks.get(&id).is_some_and(|t| t.kind == TrackKind::Audio) {
+                audio.push(id);
+            } else {
+                visual.push(id);
+            }
+        }
+        audio.extend(visual);
+        self.order = audio;
     }
 
     pub fn track(&self, id: TrackId) -> Option<&Track> {
@@ -304,6 +340,7 @@ impl Timeline {
         let idx = order_index.min(self.order.len());
         self.order.insert(idx, id);
         self.tracks.insert(id, track);
+        self.enforce_audio_floor();
         for clip_id in clip_ids {
             self.clip_index.insert(clip_id, id);
         }
@@ -483,16 +520,48 @@ mod tests {
     // --- tracks -----------------------------------------------------------
 
     #[test]
-    fn add_track_appends_to_stack_order() {
+    fn add_track_appends_visual_to_top_and_floors_audio() {
         let mut timeline = Timeline::new(R24);
         let v1 = timeline.add_track(Track::new(TrackKind::Video, "V1"));
         let v2 = timeline.add_track(Track::new(TrackKind::Video, "V2"));
         let a1 = timeline.add_track(Track::new(TrackKind::Audio, "A1"));
 
-        assert_eq!(timeline.order(), &[v1, v2, a1]);
+        // Visual lanes stack bottom→top in insert order; the audio lane sinks
+        // below them (index 0 = bottom of the stack / bottom of the UI).
+        assert_eq!(timeline.order(), &[a1, v1, v2]);
         assert_eq!(timeline.track_count(), 3);
         assert_eq!(timeline.track(v1).unwrap().name, "V1");
         assert_eq!(timeline.track(a1).unwrap().kind, TrackKind::Audio);
+    }
+
+    #[test]
+    fn audio_always_sinks_below_video_regardless_of_add_order() {
+        // Interleave kinds and confirm every audio lane ends up below every
+        // visual lane, with relative order preserved inside each group.
+        let mut timeline = Timeline::new(R24);
+        let a1 = timeline.add_track(Track::new(TrackKind::Audio, "A1"));
+        let v1 = timeline.add_track(Track::new(TrackKind::Video, "V1"));
+        let a2 = timeline.add_track(Track::new(TrackKind::Audio, "A2"));
+        let t1 = timeline.add_track(Track::new(TrackKind::Text, "T1"));
+        let v2 = timeline.add_track(Track::new(TrackKind::Video, "V2"));
+
+        assert_eq!(timeline.order(), &[a1, a2, v1, t1, v2]);
+    }
+
+    #[test]
+    fn insert_track_audio_sinks_and_visual_clamps_above_audio() {
+        let mut timeline = Timeline::new(R24);
+        let a1 = timeline.add_track(Track::new(TrackKind::Audio, "A1"));
+        let v1 = timeline.add_track(Track::new(TrackKind::Video, "V1"));
+
+        // Requesting a visual track at the very bottom (index 0) lifts it just
+        // above the audio block rather than under it.
+        let v0 = timeline.insert_track(Track::new(TrackKind::Video, "V0"), 0);
+        assert_eq!(timeline.order(), &[a1, v0, v1]);
+
+        // Requesting an audio track at the top sinks back into the audio block.
+        let a2 = timeline.insert_track(Track::new(TrackKind::Audio, "A2"), 99);
+        assert_eq!(timeline.order(), &[a1, a2, v0, v1]);
     }
 
     #[test]
@@ -544,6 +613,23 @@ mod tests {
             .expect("restore");
         assert_eq!(timeline.track_count(), 1);
         assert_eq!(timeline.track_of(clip_id), Some(track_id));
+    }
+
+    #[test]
+    fn restore_track_keeps_audio_below_video() {
+        // Undo of removing a video lane must not slip it under the audio floor.
+        let mut timeline = Timeline::new(R24);
+        let a1 = timeline.add_track(Track::new(TrackKind::Audio, "A1"));
+        let v1 = timeline.add_track(Track::new(TrackKind::Video, "V1"));
+        let v2 = timeline.add_track(Track::new(TrackKind::Video, "V2"));
+        assert_eq!(timeline.order(), &[a1, v1, v2]);
+
+        let order_index = timeline.order().iter().position(|&t| t == v1).unwrap();
+        let removed = timeline.remove_track(v1).expect("remove");
+        assert_eq!(timeline.order(), &[a1, v2]);
+
+        timeline.restore_track(removed, order_index).expect("restore");
+        assert_eq!(timeline.order(), &[a1, v1, v2]);
     }
 
     #[test]

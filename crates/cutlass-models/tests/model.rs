@@ -187,19 +187,21 @@ fn removing_referenced_media_fails_then_succeeds() {
 }
 
 #[test]
-fn track_stacking_order_is_preserved() {
+fn audio_tracks_stack_below_visual_lanes() {
     let mut project = Project::new("demo", FPS_24);
     let v1 = project.add_track(TrackKind::Video, "V1");
     let v2 = project.add_track(TrackKind::Video, "V2");
     let a1 = project.add_track(TrackKind::Audio, "A1");
 
-    assert_eq!(project.timeline().order(), &[v1, v2, a1]);
+    // Visual lanes keep their insertion order; audio sinks to the bottom of the
+    // stack (index 0) so it always renders at the bottom of the timeline.
+    assert_eq!(project.timeline().order(), &[a1, v1, v2]);
     let names: Vec<&str> = project
         .timeline()
         .tracks_ordered()
         .map(|t| t.name.as_str())
         .collect();
-    assert_eq!(names, ["V1", "V2", "A1"]);
+    assert_eq!(names, ["A1", "V1", "V2"]);
 }
 
 #[test]

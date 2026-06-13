@@ -833,7 +833,7 @@
       }
     },
     {
-      "description": "Change a media clip's playback speed (2.0 = double speed, 0.5 = slow motion) and/or play it in reverse. The clip's timeline length re-derives from the speed; its audio is muted while retimed. Not valid for generated clips.",
+      "description": "Change a media clip's playback speed (2.0 = double speed, 0.5 = slow motion) and/or play it in reverse. The clip's timeline length re-derives from the speed; its audio time-stretches to match (pitch preserved by default). Not valid for generated clips.",
       "name": "set_clip_speed",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -869,11 +869,11 @@
       }
     },
     {
-      "description": "Apply a CapCut-style speed ramp to a media clip so its speed varies across its length: preset 'ramp_up' (slow to fast), 'ramp_down' (fast to slow), 'montage' (fast/slow/fast), 'hero' (slow-mo on the action), or 'bullet' (fast/hard-slow/fast). Omit preset to clear the ramp. The clip's length re-derives from the ramp's average speed; its audio is muted while ramped. Not valid for generated clips.",
+      "description": "Apply a CapCut-style speed ramp to a media clip so its speed varies across its length: preset 'ramp_up' (slow to fast), 'ramp_down' (fast to slow), 'montage' (fast/slow/fast), 'hero' (slow-mo on the action), or 'bullet' (fast/hard-slow/fast). Omit preset to clear the ramp. The clip's length re-derives from the ramp's average speed; its audio time-stretches along the ramp. Not valid for generated clips.",
       "name": "set_speed_curve",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Apply (or clear) a CapCut-style speed ramp on a media clip: its playback\nspeed varies across its length following a named preset, instead of a\nsingle constant speed. The clip keeps its source footage; its timeline\nlength re-derives from the ramp's average speed. Audio of retimed clips is\nmuted. Not valid for generated clips.",
+        "description": "Apply (or clear) a CapCut-style speed ramp on a media clip: its playback\nspeed varies across its length following a named preset, instead of a\nsingle constant speed. The clip keeps its source footage; its timeline\nlength re-derives from the ramp's average speed. The audio time-stretches\nalong the ramp. Not valid for generated clips.",
         "properties": {
           "clip": {
             "description": "The media clip to ramp.",

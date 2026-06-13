@@ -353,8 +353,8 @@ pub struct SetClipSpeed {
 /// Apply (or clear) a CapCut-style speed ramp on a media clip: its playback
 /// speed varies across its length following a named preset, instead of a
 /// single constant speed. The clip keeps its source footage; its timeline
-/// length re-derives from the ramp's average speed. Audio of retimed clips is
-/// muted. Not valid for generated clips.
+/// length re-derives from the ramp's average speed. The audio time-stretches
+/// along the ramp. Not valid for generated clips.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetSpeedCurve {
     /// The media clip to ramp.
@@ -844,9 +844,9 @@ tools! {
     "set_param_constant" => SetParamConstant(SetParamConstant),
         "Set a clip property to a fixed value and remove all its keyframes (stops its animation).";
     "set_clip_speed" => SetClipSpeed(SetClipSpeed),
-        "Change a media clip's playback speed (2.0 = double speed, 0.5 = slow motion) and/or play it in reverse. The clip's timeline length re-derives from the speed; its audio is muted while retimed. Not valid for generated clips.";
+        "Change a media clip's playback speed (2.0 = double speed, 0.5 = slow motion) and/or play it in reverse. The clip's timeline length re-derives from the speed; its audio time-stretches to match (pitch preserved by default). Not valid for generated clips.";
     "set_speed_curve" => SetSpeedCurve(SetSpeedCurve),
-        "Apply a CapCut-style speed ramp to a media clip so its speed varies across its length: preset 'ramp_up' (slow to fast), 'ramp_down' (fast to slow), 'montage' (fast/slow/fast), 'hero' (slow-mo on the action), or 'bullet' (fast/hard-slow/fast). Omit preset to clear the ramp. The clip's length re-derives from the ramp's average speed; its audio is muted while ramped. Not valid for generated clips.";
+        "Apply a CapCut-style speed ramp to a media clip so its speed varies across its length: preset 'ramp_up' (slow to fast), 'ramp_down' (fast to slow), 'montage' (fast/slow/fast), 'hero' (slow-mo on the action), or 'bullet' (fast/hard-slow/fast). Omit preset to clear the ramp. The clip's length re-derives from the ramp's average speed; its audio time-stretches along the ramp. Not valid for generated clips.";
     "set_clip_audio" => SetClipAudio(SetClipAudio),
         "Set an audio-lane clip's volume (0.0 mutes, 1.0 unchanged, 2.0 doubles) and/or fade-in/fade-out durations in seconds. Omitted fields keep their current value. For a video clip, target its linked audio companion clip.";
     "split_clip" => SplitClip(SplitClip),

@@ -36,16 +36,14 @@ behind. The same loop is codified for the agent in
 
 ## Where icons live
 
-> ⚠️ **`.gitignore:3` ignores `assets/` everywhere.** Anything dropped under
-> an `assets/` dir is untracked and won't be committed. The current
-> `assets/icon/library/*.svg` set is local-only; in
-> `crates/cutlass-ui/ui/assets/icon/`, `play.svg`/`fullscreen.svg` were
-> force-added but `pause.svg` is untracked. Before adding new icons, give
-> them a **tracked** home — either unignore the UI dir (e.g.
-> `!crates/cutlass-ui/ui/assets/` in `.gitignore`) or use a fresh
-> `crates/cutlass-ui/ui/icons/` folder — and standardize on **one** root
-> (preview loads from `ui/assets/icon/`, the library loads from the
-> repo-root `assets/icon/library/` — pick one).
+All UI icons live under the **single** tracked root
+`crates/cutlass-ui/ui/assets/icon/` (transport in `icon/`, library glyphs in
+`icon/library/`). `.gitignore` ignores `assets/` everywhere **except** this
+dir (`!crates/cutlass-ui/ui/assets/`), so anything dropped here commits
+normally — drop new icons in and reference them with a relative `@image-url`.
+Only the media scratch dirs (repo-root `assets/`, `frames/`, `proxy/`) stay
+ignored. The dock icon is also loaded from here via `include_bytes!` in
+`src/main.rs`.
 
 Loaded via `@image-url(...)` relative to the `.slint` file, then tinted with
 `colorize:` so one SVG works across themes.

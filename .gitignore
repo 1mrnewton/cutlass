@@ -1,6 +1,10 @@
 /target
 /dist
 assets/
+# Keep the UI's bundled icon/texture assets tracked — they're real source,
+# compiled into the binary via @image-url. Only the media scratch dirs
+# (repo-root assets/, frames/, proxy/) stay ignored.
+!crates/cutlass-ui/ui/assets/
 .env
 .DS_Store
 frames/

@@ -95,6 +95,10 @@ This repository is a Rust workspace. The root commands above build and test ever
 
 Each crate has its own README under `crates/` with the details for that part of the system. Packaging notes for maintainers are in [packaging/README.md](packaging/README.md).
 
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, project layout, coding conventions, commit style, and how to open a pull request.
+
 ## License
 
 Cutlass is licensed under either of:

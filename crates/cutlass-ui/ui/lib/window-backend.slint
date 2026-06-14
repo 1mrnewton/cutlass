@@ -8,6 +8,10 @@ export global WindowBackend {
 
     callback minimize();
     callback toggle-maximize();
+    // Drive the OS maximized state directly (Rust mirrors `maximized` back).
+    // Used to size the window to the active surface: the launch screen opens
+    // at the window's natural size, the editor maximizes.
+    callback set-maximized(maximized: bool);
     callback close();
     // Start an OS-driven window move. Must be called while a pointer
     // button is down (the title bar's drag TouchArea); once the system

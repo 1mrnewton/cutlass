@@ -1,4 +1,4 @@
-import { PanelBase, PanelHeader, ProjectWelcome } from "../../components/index.slint";
+import { PanelBase, PanelHeader } from "../../components/index.slint";
 import { AppStore } from "../../store/index.slint";
 import { EditorStore, PreviewStore } from "../../store/index.slint";
 import { TimelineLib } from "../../lib/timeline-lib.slint";
@@ -11,8 +11,6 @@ import { SelectionBackend } from "../../lib/selection-backend.slint";
 export component PreviewPanel inherits PanelBase {
     private property <RationalTime> sequence-duration:
         TimelineLib.sequence-duration(EditorStore.project.sequence);
-    private property <bool> session-empty: EditorStore.project.media.length == 0
-        && EditorStore.project.sequence.tracks.length == 0;
 
     VerticalLayout {
         PanelHeader {
@@ -557,10 +555,6 @@ export component PreviewPanel inherits PanelBase {
                         }
                     }
 
-                    if root.session-empty: ProjectWelcome {
-                        width: parent.width;
-                        height: parent.height;
-                    }
                 }
             }
 

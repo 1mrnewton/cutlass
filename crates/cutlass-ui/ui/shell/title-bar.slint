@@ -75,7 +75,12 @@ export component TitleBar inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: AppStore.theme.metrics.spacing.md;
+        // On macOS the native traffic lights sit at the top-left (the titlebar
+        // is hidden, not removed — see src/window.rs), so the brand insets
+        // clear of them and the custom caption buttons drop out below. Other
+        // platforms keep the flush brand and the full custom chrome.
+        padding-left: AppState.is-macos ? 78px : AppStore.theme.metrics.spacing.md;
+        padding-right: AppState.is-macos ? AppStore.theme.metrics.spacing.sm : AppStore.theme.metrics.spacing.none;
         spacing: AppStore.theme.metrics.spacing.sm;
 
         VerticalLayout {
@@ -227,21 +232,23 @@ export component TitleBar inherits Rectangle {
             width: AppStore.theme.metrics.spacing.md;
         }
 
-        CaptionButton {
+        // Custom window controls — only off macOS, where the native
+        // traffic lights (kept on the hidden titlebar) handle these.
+        if !AppState.is-macos: CaptionButton {
             glyph: "─";
             clicked => {
                 WindowBackend.minimize();
             }
         }
 
-        CaptionButton {
+        if !AppState.is-macos: CaptionButton {
             glyph: WindowBackend.maximized ? "❐" : "□";
             clicked => {
                 WindowBackend.toggle-maximize();
             }
         }
 
-        CaptionButton {
+        if !AppState.is-macos: CaptionButton {
             glyph: "✕";
             danger: true;
             clicked => {

@@ -1,0 +1,95 @@
+// App settings screen. Opened from the native "Cutlass" menu → Settings…
+// (app.slint wires the MenuItem to AppState.settings-open). In-window modal
+// like the canvas/export dialogs for now — this is just the basic flow
+// scaffold; the actual settings UI (sections, fields) lands on top of it.
+
+import { CutlassText, AccentButton } from "../components/index.slint";
+import { AppStore } from "../store/index.slint";
+import { AppState } from "../state.slint";
+
+export component SettingsDialog inherits Rectangle {
+    background: #000000A0;
+
+    function close() {
+        AppState.settings-open = false;
+    }
+
+    // Scrim: absorb every pointer event so the editor underneath is inert.
+    TouchArea { }
+
+    panel := Rectangle {
+        width: 560px;
+        height: 420px;
+        background: AppStore.theme.panel.background;
+        border-radius: AppStore.theme.metrics.radius.lg;
+        border-width: 1px;
+        border-color: #ffffff14;
+        drop-shadow-blur: 32px;
+        drop-shadow-color: #00000080;
+        drop-shadow-offset-y: 8px;
+
+        // Keep clicks inside the panel from reaching the scrim above.
+        TouchArea { }
+
+        VerticalLayout {
+            padding: AppStore.theme.metrics.spacing.xl;
+            spacing: AppStore.theme.metrics.spacing.lg;
+
+            HorizontalLayout {
+                CutlassText {
+                    text: "Settings";
+                    style: AppStore.theme.typography.heading-md;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                close-button := Rectangle {
+                    width: 26px;
+                    height: 26px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: close-ta.has-hover ? #ffffff14 : transparent;
+
+                    CutlassText {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "✕";
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        style: AppStore.theme.typography.label;
+                        foreground: AppStore.theme.text.secondary;
+                    }
+
+                    close-ta := TouchArea {
+                        clicked => {
+                            root.close();
+                        }
+                    }
+                }
+            }
+
+            // Placeholder body — replaced by the real settings sections.
+            Rectangle {
+                vertical-stretch: 1;
+
+                CutlassText {
+                    text: "Settings UI coming soon.";
+                    style: AppStore.theme.typography.body;
+                    foreground: AppStore.theme.text.muted;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            HorizontalLayout {
+                alignment: end;
+
+                AccentButton {
+                    label: "Done";
+                    clicked => {
+                        root.close();
+                    }
+                }
+            }
+        }
+    }
+}

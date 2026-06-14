@@ -313,21 +313,24 @@ export component LaunchScreen inherits Rectangle {
                     horizontal-stretch: 1;
                 }
 
-                WinButton {
+                // Custom controls only off macOS — there the native traffic
+                // lights (kept on the hidden titlebar) sit over the empty left
+                // of this drag strip.
+                if !AppState.is-macos: WinButton {
                     glyph: "─";
                     clicked => {
                         WindowBackend.minimize();
                     }
                 }
 
-                WinButton {
+                if !AppState.is-macos: WinButton {
                     glyph: WindowBackend.maximized ? "❐" : "□";
                     clicked => {
                         WindowBackend.toggle-maximize();
                     }
                 }
 
-                WinButton {
+                if !AppState.is-macos: WinButton {
                     glyph: "✕";
                     danger: true;
                     clicked => {
@@ -365,21 +368,14 @@ export component LaunchScreen inherits Rectangle {
                         VerticalLayout {
                             alignment: center;
 
-                            Rectangle {
-                                width: 26px;
-                                height: 26px;
-                                border-radius: AppStore.theme.metrics.radius.md;
-                                background: @linear-gradient(135deg, AppStore.theme.accent.primary 0%, AppStore.theme.accent.gradient-end 100%);
-
-                                CutlassText {
-                                    width: parent.width;
-                                    height: parent.height;
-                                    text: "C";
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    style: AppStore.theme.typography.heading-md;
-                                    foreground: #0A0A0A;
-                                }
+                            // Brand mark — the Cutlass wordmark logo (the
+                            // sword fills the square canvas, so it sits in the
+                            // mark box), replacing the earlier "C" placeholder.
+                            Image {
+                                width: 28px;
+                                height: 28px;
+                                source: @image-url("../../../assets/icon/cutlass-in-app.png");
+                                image-fit: contain;
                             }
                         }
 

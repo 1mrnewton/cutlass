@@ -15,7 +15,7 @@ use cutlass_models::{
     LinkId, MAX_SPEED, MIN_SPEED, MarkerColor, MarkerId, MediaId, Param, ParamValue, Project,
     Rational, RationalTime, TimeRange, Track, TrackId, TrackKind, resample,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::agent::{AgentCreated, AgentPlanStep};
 use crate::audio::{AudioHandle, AudioSnapshot, AudioSpan};
@@ -957,7 +957,11 @@ fn worker_main(
         duration_ticks: timeline.duration().value,
         tl_rate: timeline.frame_rate,
     };
-    info!(
+    // Debug, not info: the worker boots an empty engine so it's ready behind
+    // the launch screen, but no project exists yet — the user-facing project
+    // lifecycle ("new session" / "opened project") logs at info once they
+    // actually create or open one.
+    debug!(
         duration_ticks = session.duration_ticks,
         tl_rate = ?session.tl_rate,
         "preview worker ready (empty project)"

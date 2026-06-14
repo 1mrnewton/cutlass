@@ -112,17 +112,18 @@ export global EditorStore {
     // one on the first save (main.rs decides — it owns the async dialog).
     callback on-save-requested(save-as: bool);
     // Open a .cutlass project / start a fresh session (Cmd/Ctrl+O / +N).
-    // main.rs runs the unsaved-changes guard first, then the open picker.
+    // No save prompt: autosave keeps the outgoing session safe, so main.rs
+    // forces one snapshot and then swaps (Open shows the picker first).
     callback on-open-requested();
     callback on-new-requested();
-    // Open a specific .cutlass file (Open Recent, welcome panel): same
-    // unsaved-changes guard as on-open-requested, no picker — the path is
+    // Open a specific .cutlass file (Open Recent, launch screen list): same
+    // autosave-then-swap as on-open-requested, no picker — the path is
     // already known. A file that vanished since the list was read fails
     // like any open and surfaces through `session-error`.
     callback on-open-recent-requested(path: string);
     // Rust→Rust completion signal: the worker invokes it after every save
-    // attempt; main.rs handles it to continue (or abort) a guarded
-    // transition (open/new/close) that chose "Save" first.
+    // attempt. Currently unconsumed (the save guard is gone); kept so the
+    // worker's save path has a stable hook for future wiring.
     callback save-finished(ok: bool);
 
     // --- missing-media relink (v1 roadmap M0) ------------------------------
@@ -146,8 +147,8 @@ export global EditorStore {
     in-out property <bool> project-dirty: false;
     in-out property <bool> project-has-path: false;
     in-out property <string> project-file-name: "";
-    // Full path of the session's file (empty before the first save) — main.rs
-    // reads it to address the autosave slot on a "Don't Save" close.
+    // Full path of the session's file (empty before the first save),
+    // published by the worker alongside the other save-state facts.
     in-out property <string> project-file-path: "";
     // Bumped by the worker when the session is replaced wholesale (open /
     // new) — the app.slint watcher resets UI session state (playback,

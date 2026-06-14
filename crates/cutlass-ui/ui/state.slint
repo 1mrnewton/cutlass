@@ -13,6 +13,13 @@ export global AppState {
 
     in-out property <bool> preview-maximized: false;
 
+    // True on macOS, where the shell keeps the OS-drawn window frame (rounded
+    // corners, drop shadow, traffic lights) and only hides the titlebar
+    // (src/window.rs). There `no-frame` stays off and the title bar insets
+    // past the traffic lights with no custom caption buttons; elsewhere the
+    // shell is fully frameless. Set once at startup from src/main.rs.
+    in-out property <bool> is-macos: false;
+
     // AI assistant chat panel (ai-agent roadmap Phase 4): docked at the
     // far right, toggled from the title bar.
     in-out property <bool> agent-panel-open: false;
@@ -23,6 +30,10 @@ export global AppState {
     // Canvas settings dialog (M1: ratio preset + background; see
     // shell/canvas-dialog.slint).
     in-out property <bool> canvas-dialog-open: false;
+
+    // App settings screen (modal overlay; see shell/settings-dialog.slint).
+    // Opened from the native "Cutlass" menu → Settings… on macOS.
+    in-out property <bool> settings-open: false;
 
     // Missing-media relink dialog (modal overlay; see
     // shell/relink-dialog.slint). Raised by app.slint when a freshly

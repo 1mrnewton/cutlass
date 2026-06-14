@@ -18,6 +18,7 @@ mod thumbnails;
 mod timecode;
 mod timeline;
 mod transport;
+mod window;
 
 use slint::BackendSelector;
 use slint::Global;
@@ -27,7 +28,7 @@ use slint::SharedString;
 use slint::VecModel;
 use slint::wgpu_28::WGPUConfiguration;
 use slint::winit_030::WinitWindowAccessor;
-use tracing::info;
+use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
 use cutlass_engine::EngineConfig;
@@ -162,36 +163,43 @@ async fn pick_relink_folder() -> Option<std::path::PathBuf> {
         .map(|file| file.path().to_path_buf())
 }
 
-// --- session transitions & the unsaved-changes guard (Phase 2) -----------
+// --- session lifecycle: autosave-backed, no save prompts (CapCut-style) ---
 //
-// Open, New, and window close all destroy the current session, so they all
-// funnel through `request_transition`: clean sessions proceed immediately,
-// dirty ones get one native Save / Don't Save / Cancel dialog. Choosing
-// "Save" parks the transition in `pending` and triggers the ordinary save
-// path (including the first-save picker); the worker's `save-finished`
-// signal then continues or aborts it. A cancelled save picker aborts too
-// (the save handler clears `pending`).
+// Cutlass autosaves continuously (the periodic sweep wired up below snapshots
+// every dirty session to its recovery slot), so the user never has to save by
+// hand and no edit is lost. Replacing the live session — New, Open, Open
+// Recent — therefore needs no "save your changes?" gate: we force one
+// autosave so the outgoing project's recovery slot is current, then swap.
+// Closing is handled separately (`request_close`): from the editor it returns
+// to the launch screen, from the launch screen it quits the app.
 
-#[derive(Clone, PartialEq)]
-enum Transition {
-    NewProject,
-    OpenProject,
-    /// Open a known `.cutlass` path (Open Recent, welcome panel) — same
-    /// guard as `OpenProject`, no picker.
+enum SessionChange {
+    New,
+    /// Pick a `.cutlass` file from a dialog, then open it.
+    Open,
+    /// Open a known `.cutlass` path (Open Recent / launch screen list).
     OpenPath(std::path::PathBuf),
-    CloseWindow,
 }
 
-type PendingTransition = std::rc::Rc<std::cell::RefCell<Option<Transition>>>;
-type GuardOpen = std::rc::Rc<std::cell::Cell<bool>>;
-
-fn perform_transition(handle: &preview_worker::WorkerHandle, transition: Transition) {
-    match transition {
-        Transition::NewProject => handle.new_project(),
-        Transition::OpenProject => {
+/// Snapshot the outgoing session to its recovery slot (a no-op when it is
+/// already clean or idle), then replace it. The autosave and the replacement
+/// are ordered on the worker's single message queue, so the snapshot always
+/// captures the project we're leaving.
+fn change_session(handle: &preview_worker::WorkerHandle, change: SessionChange) {
+    match change {
+        SessionChange::New => {
+            handle.autosave();
+            handle.new_project();
+        }
+        SessionChange::OpenPath(path) => {
+            handle.autosave();
+            handle.open_project(path);
+        }
+        SessionChange::Open => {
             let handle = handle.clone();
             let task = slint::spawn_local(async move {
                 if let Some(path) = pick_open_path().await {
+                    handle.autosave();
                     handle.open_project(path);
                 }
             });
@@ -199,90 +207,26 @@ fn perform_transition(handle: &preview_worker::WorkerHandle, transition: Transit
                 tracing::error!("failed to open project dialog: {e}");
             }
         }
-        Transition::OpenPath(path) => handle.open_project(path),
-        Transition::CloseWindow => {
-            let _ = slint::quit_event_loop();
-        }
     }
 }
 
-fn request_transition(
-    app_weak: &slint::Weak<AppWindow>,
-    handle: &preview_worker::WorkerHandle,
-    pending: &PendingTransition,
-    guard_open: &GuardOpen,
-    transition: Transition,
-) {
+/// The window close button, context-aware (CapCut-style). In the editor it
+/// closes the project back to the launch screen — autosave already keeps the
+/// work safe, so there's no save prompt and the app stays open; on the launch
+/// screen there's nothing left to return to, so it quits. Wired to both the
+/// custom caption ✕ and the OS close request (the macOS traffic light).
+fn request_close(app_weak: &slint::Weak<AppWindow>, handle: &preview_worker::WorkerHandle) {
     let Some(app) = app_weak.upgrade() else {
         return;
     };
-    // One lifecycle transition at a time: ignore requests while the guard
-    // dialog is up or a save-then-continue is in flight.
-    if guard_open.get() || pending.borrow().is_some() {
-        return;
+    if app.global::<AppState>().get_launch_visible() {
+        let _ = slint::quit_event_loop();
+    } else {
+        // Force a final snapshot of the project we're closing, then reveal the
+        // launch screen over the (still in-memory) session.
+        handle.autosave();
+        app.global::<AppState>().set_launch_visible(true);
     }
-    if !app.global::<EditorStore>().get_project_dirty() {
-        perform_transition(handle, transition);
-        return;
-    }
-    guard_open.set(true);
-    let app_weak = app_weak.clone();
-    let handle = handle.clone();
-    let pending = pending.clone();
-    let guard = guard_open.clone();
-    let task = slint::spawn_local(async move {
-        let choice = rfd::AsyncMessageDialog::new()
-            .set_level(rfd::MessageLevel::Warning)
-            .set_title("Unsaved changes")
-            .set_description("This project has unsaved changes. Save them before continuing?")
-            .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
-                "Save".to_owned(),
-                "Don't Save".to_owned(),
-                "Cancel".to_owned(),
-            ))
-            .show()
-            .await;
-        guard.set(false);
-        match choice {
-            rfd::MessageDialogResult::Custom(label) if label == "Save" => {
-                *pending.borrow_mut() = Some(transition);
-                if let Some(app) = app_weak.upgrade() {
-                    app.global::<EditorStore>().invoke_on_save_requested(false);
-                }
-            }
-            rfd::MessageDialogResult::Custom(label) if label == "Don't Save" => {
-                // Closing discards for good: drop the autosave slot too, or
-                // the next launch would offer back work the user just threw
-                // away. Open/New don't need this — the worker's next sweep
-                // sees the replaced session and cleans the slot itself.
-                if transition == Transition::CloseWindow
-                    && let Some(app) = app_weak.upgrade()
-                {
-                    discard_session_autosave(&app);
-                }
-                perform_transition(&handle, transition);
-            }
-            _ => {} // Cancel / dismissed: stay in the session.
-        }
-    });
-    if let Err(e) = task {
-        guard_open.set(false);
-        tracing::error!("failed to open unsaved-changes dialog: {e}");
-    }
-}
-
-/// Remove the session's autosave slot (best effort, benign if absent).
-/// Addressed the same way the worker writes it: by the project's file
-/// path, or the process-keyed unsaved slot before the first save.
-fn discard_session_autosave(app: &AppWindow) {
-    let editor = app.global::<EditorStore>();
-    let source = editor
-        .get_project_has_path()
-        .then(|| std::path::PathBuf::from(editor.get_project_file_path().to_string()));
-    autosave::discard(&autosave::slot_for(
-        &autosave::default_dir(),
-        source.as_deref(),
-    ));
 }
 
 async fn pick_export_path(current: std::path::PathBuf) -> Option<std::path::PathBuf> {
@@ -371,14 +315,26 @@ fn main() -> Result<(), slint::PlatformError> {
     #[cfg(target_os = "macos")]
     set_dock_icon();
 
+    // On macOS the shell keeps the OS-drawn frame (rounded corners, drop
+    // shadow, traffic lights) and only hides the titlebar, so `no-frame`
+    // stays off there and the title bar insets past the traffic lights with
+    // no custom caption buttons (see app.slint / shell/title-bar.slint). Set
+    // before the window is shown so `no-frame` resolves correctly at creation.
+    app.global::<AppState>()
+        .set_is_macos(cfg!(target_os = "macos"));
+
     let app_weak = app.as_weak();
     slint::invoke_from_event_loop(move || {
         if let Some(app) = app_weak.upgrade() {
-            app.window().set_maximized(true);
-            app.global::<WindowBackend>().set_maximized(true);
+            // Hide the native titlebar once the winit window is realized
+            // (no-op off macOS); must run on the event loop, not before show.
+            // The window opens at its natural size on the launch screen — the
+            // editor maximizes via WindowBackend.set-maximized (app.slint
+            // watches launch-visible), not here.
+            app.window().with_winit_window(window::apply_native_chrome);
         }
     })
-    .map_err(|e| slint::PlatformError::from(format!("failed to schedule maximize: {e}")))?;
+    .map_err(|e| slint::PlatformError::from(format!("failed to apply window chrome: {e}")))?;
 
     // Frameless shell (`no-frame` in app.slint): the custom title bar
     // replaces the OS decorations, so window management is wired here.
@@ -396,6 +352,20 @@ fn main() -> Result<(), slint::PlatformError> {
         if let Some(app) = weak.upgrade() {
             let maximized = !app.window().is_maximized();
             app.window().set_maximized(maximized);
+            app.global::<WindowBackend>().set_maximized(maximized);
+        }
+    });
+
+    // Surface-driven sizing (app.slint watches launch-visible): the launch
+    // screen stays at the window's natural size, the editor maximizes. Goes
+    // through window::set_maximized, which on macOS skips the native zoom
+    // animation so the editor appears already maximized rather than visibly
+    // growing into it.
+    let weak = app.as_weak();
+    window_backend.on_set_maximized(move |maximized| {
+        if let Some(app) = weak.upgrade() {
+            app.window()
+                .with_winit_window(|w| window::set_maximized(w, maximized));
             app.global::<WindowBackend>().set_maximized(maximized);
         }
     });
@@ -450,10 +420,13 @@ fn main() -> Result<(), slint::PlatformError> {
     )
     .map_err(slint::PlatformError::from)?;
 
-    info!(
+    // Debug, not info: this is just the engine spinning up behind the launch
+    // screen. There's no project until the user creates or opens one, which
+    // logs at info on its own.
+    debug!(
         duration_ticks = session.duration_ticks,
         tl_rate = ?session.tl_rate,
-        "preview worker ready; import media to populate the timeline"
+        "preview worker spawned (empty session)"
     );
 
     // AI assistant (ai-agent roadmap Phase 4): a dedicated worker thread
@@ -601,22 +574,16 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // --- project lifecycle (Phase 1 + 2) ----------------------------------
+    // --- project lifecycle: optional save + autosave-backed swaps ---------
 
-    // A guarded transition (open/new/close) waiting on a "Save" choice, and
-    // the lock that keeps a second guard dialog from stacking on the first.
-    let pending_transition: PendingTransition = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let guard_open: GuardOpen = std::rc::Rc::new(std::cell::Cell::new(false));
-
-    // Save / Save As (Cmd/Ctrl+S / +Shift+S, title bar button). A plain
-    // save on a session that already has a file goes straight to the
-    // worker; Save As — and the first save — pick a path first. The
-    // worker republishes the projection on success, which clears the
-    // title bar's dirty dot. A cancelled picker aborts any transition
-    // waiting on this save (Save-before-open/new/close).
+    // Save / Save As (Cmd/Ctrl+S / +Shift+S, File menu) stays available for
+    // writing the project to a chosen `.cutlass` file, but it's no longer
+    // required — autosave keeps every edit safe. A plain save on a session
+    // that already has a file goes straight to the worker; Save As — and the
+    // first save — pick a path first. The worker republishes the projection
+    // on success, which clears the title bar's dirty dot.
     let save_handle = preview_worker.handle();
     let app_weak = app.as_weak();
-    let save_pending = pending_transition.clone();
     editor.on_on_save_requested(move |save_as| {
         let Some(app) = app_weak.upgrade() else {
             return;
@@ -627,13 +594,10 @@ fn main() -> Result<(), slint::PlatformError> {
             return;
         }
         let save_handle = save_handle.clone();
-        let pending = save_pending.clone();
         let default_stem = editor.get_project_file_name().to_string();
         let task = slint::spawn_local(async move {
             if let Some(path) = pick_save_path(default_stem).await {
                 save_handle.save_project(Some(path));
-            } else {
-                pending.borrow_mut().take();
             }
         });
         if let Err(e) = task {
@@ -641,63 +605,25 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // The worker reports every save attempt; a parked transition continues
-    // on success and aborts on failure (the worker already surfaced the
-    // error dialog).
-    let finish_handle = preview_worker.handle();
-    let finish_pending = pending_transition.clone();
-    editor.on_save_finished(move |ok| {
-        let Some(transition) = finish_pending.borrow_mut().take() else {
-            return;
-        };
-        if ok {
-            perform_transition(&finish_handle, transition);
-        }
-    });
-
-    // Open / New (Cmd/Ctrl+O / +N) — guarded session replacements.
+    // Open / New (Cmd/Ctrl+O / +N) — autosave the outgoing session, then swap.
     let open_handle = preview_worker.handle();
-    let app_weak = app.as_weak();
-    let open_pending = pending_transition.clone();
-    let open_guard = guard_open.clone();
     editor.on_on_open_requested(move || {
-        request_transition(
-            &app_weak,
-            &open_handle,
-            &open_pending,
-            &open_guard,
-            Transition::OpenProject,
-        );
+        change_session(&open_handle, SessionChange::Open);
     });
 
     let new_handle = preview_worker.handle();
-    let app_weak = app.as_weak();
-    let new_pending = pending_transition.clone();
-    let new_guard = guard_open.clone();
     editor.on_on_new_requested(move || {
-        request_transition(
-            &app_weak,
-            &new_handle,
-            &new_pending,
-            &new_guard,
-            Transition::NewProject,
-        );
+        change_session(&new_handle, SessionChange::New);
     });
 
-    // Open Recent (lifecycle roadmap Phase 3): a known path skips the
-    // picker but runs the same unsaved-changes guard. A file deleted since
-    // the list was read fails like any open (session-error dialog).
+    // Open Recent / launch screen list — a known path, no picker; same
+    // autosave-then-swap. A file deleted since the list was read fails like
+    // any open (session-error dialog).
     let recent_handle = preview_worker.handle();
-    let app_weak = app.as_weak();
-    let recent_pending = pending_transition.clone();
-    let recent_guard = guard_open.clone();
     editor.on_on_open_recent_requested(move |path| {
-        request_transition(
-            &app_weak,
+        change_session(
             &recent_handle,
-            &recent_pending,
-            &recent_guard,
-            Transition::OpenPath(std::path::PathBuf::from(path.as_str())),
+            SessionChange::OpenPath(std::path::PathBuf::from(path.as_str())),
         );
     });
 
@@ -707,34 +633,19 @@ fn main() -> Result<(), slint::PlatformError> {
         &recent::read(&recent::default_path()),
     ))));
 
-    // Window close — the title-bar ✕ and the OS close request both consult
-    // the same guard before the event loop quits.
+    // Window close — the title-bar ✕ and the OS close request both go through
+    // the context-aware close: from the editor it returns to the launch
+    // screen (work already autosaved), from the launch screen it quits.
     let close_handle = preview_worker.handle();
     let app_weak = app.as_weak();
-    let close_pending = pending_transition.clone();
-    let close_guard = guard_open.clone();
     app.global::<WindowBackend>().on_close(move || {
-        request_transition(
-            &app_weak,
-            &close_handle,
-            &close_pending,
-            &close_guard,
-            Transition::CloseWindow,
-        );
+        request_close(&app_weak, &close_handle);
     });
 
     let close_handle = preview_worker.handle();
     let app_weak = app.as_weak();
-    let close_pending = pending_transition.clone();
-    let close_guard = guard_open.clone();
     app.window().on_close_requested(move || {
-        request_transition(
-            &app_weak,
-            &close_handle,
-            &close_pending,
-            &close_guard,
-            Transition::CloseWindow,
-        );
+        request_close(&app_weak, &close_handle);
         slint::CloseRequestResponse::KeepWindowShown
     });
 

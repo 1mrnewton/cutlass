@@ -141,12 +141,42 @@ which is for model-backed inference) plus the existing ripple commands.
       caption worker runs it synchronously off the UI thread for now (no
       progress bar / cancellation surfaced yet).
 
-## Phase 3 — Transcript-based editing (flagship) — needs Phase 2
+## Phase 3 — Transcript-based editing (flagship) — **shipped**
 
-- [ ] **Transcript panel**: words mapped to source time from whisper stamps;
-      selecting/deleting words emits ordinary ripple-cut commands on the
-      underlying clips (one undoable history group), so editing the text edits
-      the video. This + the M3 agent is the "AI-first" identity shipped.
+Editing the text edits the video: transcribe the selected clip, then select a
+run of words and delete it to ripple-cut that span out of the clip. This + the
+M3 agent is the "AI-first" identity.
+
+- [x] **Shared ripple-cut primitive** (`action::edit::ripple_cut`): the
+      structural edit Phase 1 grew inside `remove_silences` — split-at + cut +
+      ripple-close on a track's own lane, with the snapshot inverse
+      (`SetTrackClipsAction`) that survives redo without re-minting clip ids —
+      generalized to arbitrary absolute timeline ranges and reused by both
+      silence removal and the transcript delete. The mono decode both share
+      moved to `clip_audio` at the same time.
+- [x] **`Engine::transcribe_clip`** (read-only): decode the clip to 16 kHz mono
+      (`clip_audio`), run the injected `Transcribe` backend, return the
+      word-timed `Transcript` — no project mutation, so it runs off a `&Engine`.
+      Rejected on generated, retimed, and audio-less clips (the seconds → tick
+      map is linear only at 1×), and when no backend is configured.
+- [x] **`Engine::ripple_delete_ranges`** (durable edit): ripple-delete a set of
+      absolute timeline ranges on a track via the shared primitive, recorded as
+      one undoable history entry. Integration-tested for the cut + clean
+      undo/redo oscillation.
+- [x] **Transcript panel** (`TranscriptStore` + `panels/transcript`): the
+      worker maps whisper word stamps to absolute timeline ticks, greedy-packs
+      them into panel-width lines (Slint has no flow layout), and publishes them
+      to the store on the event loop. Clicking a word seeks the playhead;
+      click + shift-click select a run. Deleting unions the selection's tick
+      span and lowers it to `ripple_delete_ranges` (one undoable cut) while the
+      panel reflows in place — struck words park at the cut start and later
+      words shift left by the removed span, so transcript and timeline stay in
+      lockstep without a re-transcribe. Gated to media clips at 1×; lean builds
+      (no `whisper` feature) show an unavailable hint.
+- [ ] **Deferred to a follow-up**: persisting the transcript in the project
+      (today it's transient, re-derived per session); a transcript agent tool
+      ("delete the filler words"); linked A/V ripple-together; and editing the
+      *text* (rename/replace a word) rather than only deleting spans.
 
 ## Phase 4 — Auto captions — **shipped** (captions *are* text clips)
 

@@ -225,7 +225,7 @@ Research base: the CapCut desktop 2025–2026 feature set (editor + AI toolkit).
 | --- | --- | --- |
 | **Prompt-to-edit agent** (our identity; CapCut has no real equivalent) | ✅ (M3 foundation: chat panel, sandbox + atomic replay, dry-run preview, one undo per prompt) | vocabulary grows every milestone |
 | Auto captions + translation | ✅ captions (M9, whisper local, as text clips); translation cloud later | M9 (whisper local; cloud later) |
-| Transcript-based editing (edit video by editing text) | ❌ | M9 — flagship |
+| Transcript-based editing (edit video by editing text) | ✅ (M9, delete words → ripple-cut) | M9 — flagship |
 | AutoCut / silence removal | ✅ (M9, energy-based, local) | M9 (energy-based, local) |
 | Text-to-speech | ❌ | M9 (local TTS; cloud voices later) |
 | Background removal (no green screen) | ❌ | M9 (video matting, local ONNX) |
@@ -690,11 +690,12 @@ M7 (caption track), M8 (beat markers).
       inspector control and a `caption_clip` agent tool drive it. (A styled
       caption-group identity for batch restyle / SRT export lands with M7 — see
       `ai-media-roadmap.md`.)
-- [ ] **Transcript-based editing (flagship)**: transcript panel where
-      selecting/deleting words ripple-cuts the underlying clips (text ↔
-      time mapping from whisper word stamps, edits emitted as ordinary
-      ripple commands → undoable). This + the M3 agent is the "AI-first"
-      identity, shipped.
+- [x] **Transcript-based editing (flagship)**: a Transcript panel where
+      selecting/deleting words ripple-cuts the underlying clip (whisper word
+      stamps → timeline ticks, the delete lowered through a shared
+      `ripple_cut` primitive as one undoable cut; the panel reflows in place).
+      This + the M3 agent is the "AI-first" identity. (Transient transcript +
+      a transcript agent tool are follow-ups — see `ai-media-roadmap.md`.)
 - [x] **Silence removal / AutoCut**: energy-based silence detection
       (`detect_silences`, local DSP) → ripple-deleted on the clip's track
       as one undoable history group; a "Remove silences" inspector button

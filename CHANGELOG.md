@@ -167,6 +167,29 @@ and export agree on every one, and each edit is a single undo.
   caption-group identity for batch restyle/export is left for M7's caption
   track work — captions land as independent text clips until then.
 
+### Transcript-based editing (M9 Phase 3)
+
+- **Editing the text edits the video.** A new **Transcript** panel transcribes
+  the selected clip and lays out its words; select a run of words, hit delete,
+  and that span is ripple-cut out of the clip so the remaining speech closes
+  up — one undoable history entry. Clicking a word seeks the playhead to it.
+  This + the M3 agent is the "AI-first" identity.
+- **A shared ripple-cut primitive.** The split + cut + ripple-close edit that
+  silence removal grew was generalized into `action::edit::ripple_cut` over
+  arbitrary timeline ranges (the snapshot inverse that survives redo without
+  re-minting clip ids came along), and the mono audio decode both paths share
+  moved to a `clip_audio` seam. Silence removal now rides the same primitive.
+- **Read-only transcription, durable delete.** `Engine::transcribe_clip` runs
+  the backend off a `&Engine` (no mutation; rejected on generated, retimed, and
+  audio-less clips), while `Engine::ripple_delete_ranges` applies the word
+  delete as one undoable cut. The panel reflows in place — struck words park at
+  the cut start and later words shift left by the removed span — so transcript
+  and timeline stay in lockstep without a re-transcribe.
+- **Deferred.** The transcript is transient (re-derived per session, not saved
+  in the project), there's no transcript agent tool yet ("delete the filler
+  words"), no linked A/V ripple-together, and you can only delete spans — not
+  yet rename/replace a word.
+
 ## [alpha-0.4.0] — 2026-06-15
 
 The **Windows & performance alpha**: Windows joins macOS and Linux with

@@ -394,6 +394,14 @@ enum WorkerMsg {
     RelinkFolder {
         folder: PathBuf,
     },
+    /// Delete a source (raw id) from the media pool / Library bin. `force`
+    /// false removes only when no clip references it (the engine rejects a
+    /// referenced source); `force` true first deletes every referencing clip
+    /// and then the source, all in one undo. One history entry either way.
+    RemoveMedia {
+        media: String,
+        force: bool,
+    },
     /// Replace the session with a fresh, empty, unsaved project (File →
     /// New). Same epoch bump as `OpenProject`; guard ran UI-side.
     NewProject,
@@ -524,6 +532,10 @@ impl WorkerHandle {
 
     pub fn relink_folder(&self, folder: PathBuf) {
         let _ = self.tx.send(WorkerMsg::RelinkFolder { folder });
+    }
+
+    pub fn remove_media(&self, media: String, force: bool) {
+        let _ = self.tx.send(WorkerMsg::RemoveMedia { media, force });
     }
 
     pub fn add_clip(
@@ -1294,6 +1306,9 @@ fn worker_loop(
             WorkerMsg::RelinkFolder { folder } => {
                 relink_folder_and_publish(engine, folder, &ui, &thumbs, &strips)
             }
+            WorkerMsg::RemoveMedia { media, force } => {
+                remove_media_and_publish(engine, &media, force, &ui)
+            }
             WorkerMsg::NewProject => new_project_and_publish(engine, &ui),
             WorkerMsg::Autosave => autosave_sweep(engine, autosave_slot),
             WorkerMsg::RestoreAutosave { autosave, source } => restore_autosave_and_publish(
@@ -1567,6 +1582,9 @@ fn mutation_redraws_preview(msg: &WorkerMsg) -> bool {
             // Relinked media decodes again — refresh the stale composite.
             | WorkerMsg::RelinkMedia { .. }
             | WorkerMsg::RelinkFolder { .. }
+            // A forced library delete removes the source's clips too; an
+            // unreferenced delete touches nothing on the canvas.
+            | WorkerMsg::RemoveMedia { force: true, .. }
     )
 }
 
@@ -2120,6 +2138,83 @@ fn relink_folder_and_publish(
         info!(count = relinked, folder = %folder.display(), "relinked media from folder");
         publish_projection(engine, ui);
     }
+}
+
+/// Delete a source from the media pool (Library bin). `force` false removes
+/// only unreferenced media — the engine rejects a referenced source, which the
+/// UI prevents by gating on the tile's usage count. `force` true first deletes
+/// every clip referencing the source and then the source, all in one history
+/// group, so a single undo restores both. The thumbnail cache entry is evicted
+/// on success. Lanes the cascade empties are pruned, matching the clip-delete
+/// flow (`remove_clips_and_publish`).
+fn remove_media_and_publish(engine: &mut Engine, media: &str, force: bool, ui: &UiSink) {
+    let Some(media_id) = parse_raw_id(media).map(MediaId::from_raw) else {
+        error!(media, "delete-media ignored: unparsable media id");
+        return;
+    };
+    if engine.project().media(media_id).is_none() {
+        error!(%media_id, "delete-media ignored: not in the pool");
+        return;
+    }
+
+    if !force {
+        match engine.apply(Command::Project(ProjectCommand::RemoveMedia { media: media_id })) {
+            Ok(ApplyOutcome::RemovedMedia { media }) => {
+                info!(?media, "removed media from pool");
+                crate::thumbnails::forget(media.raw());
+                publish_projection(engine, ui);
+            }
+            Ok(other) => error!(%media_id, "unexpected remove-media outcome: {other:?}"),
+            // The UI only sends the unforced delete for an unreferenced tile,
+            // so a rejection here is a race (a clip landed on it between the
+            // projection and the click) — surface it instead of dropping it.
+            Err(e) => {
+                error!(%media_id, "remove media failed: {e}");
+                publish_session_error(ui, format!("Couldn't remove the media: {e}"));
+            }
+        }
+        return;
+    }
+
+    // Cascade: gather every clip that references the source up front (a Library
+    // delete leaves gaps where the clips sat — it isn't a timeline-timing
+    // edit), then remove them and the source as one undoable group.
+    let mut doomed: Vec<(ClipId, TrackId)> = Vec::new();
+    for track in engine.project().timeline().tracks_ordered() {
+        for clip in track.clips() {
+            if clip.media() == Some(media_id) {
+                doomed.push((clip.id, track.id));
+            }
+        }
+    }
+
+    engine.begin_group();
+    for &(clip_id, _) in &doomed {
+        if let Err(e) = apply_edit(engine, EditCommand::RemoveClip { clip: clip_id }) {
+            error!(%clip_id, "remove referencing clip failed: {e}");
+            engine.rollback_group();
+            publish_projection(engine, ui);
+            return;
+        }
+    }
+    if let Err(e) = engine.apply(Command::Project(ProjectCommand::RemoveMedia { media: media_id }))
+    {
+        error!(%media_id, "remove media failed after clearing clips: {e}");
+        engine.rollback_group();
+        publish_projection(engine, ui);
+        return;
+    }
+    // Prune lanes the removals emptied (CapCut drops emptied overlay tracks).
+    let mut lanes: Vec<TrackId> = doomed.iter().map(|&(_, track)| track).collect();
+    lanes.sort();
+    lanes.dedup();
+    for lane in lanes {
+        remove_track_if_empty(engine, lane);
+    }
+    engine.commit_group();
+    info!(%media_id, clips = doomed.len(), "removed media and its referencing clips");
+    crate::thumbnails::forget(media_id.raw());
+    publish_projection(engine, ui);
 }
 
 /// Replace the session with a fresh, empty, unsaved project (File → New).

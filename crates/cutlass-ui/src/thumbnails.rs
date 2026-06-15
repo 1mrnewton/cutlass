@@ -162,6 +162,18 @@ pub fn thumbnail_for(media_id: u64) -> Option<Image> {
     THUMBS.with(|thumbs| thumbs.borrow().get(&media_id).cloned())
 }
 
+/// Drop a deleted source's cached thumbnail so its texture isn't held for the
+/// rest of the session. Safe to call from any thread — the eviction hops onto
+/// the UI thread, where `THUMBS` lives. A no-op id (never imported, or already
+/// forgotten) just clears nothing.
+pub fn forget(media_id: u64) {
+    if let Err(e) = slint::invoke_from_event_loop(move || {
+        THUMBS.with(|thumbs| thumbs.borrow_mut().remove(&media_id));
+    }) {
+        error!(media_id, "failed to evict thumbnail on delete: {e}");
+    }
+}
+
 /// Draw mirrored peak bars onto a solid card, CapCut-library style.
 fn render_waveform(peaks: &[f32], width: u32, height: u32) -> (u32, u32, Vec<u8>) {
     let w = width as usize;

@@ -1397,6 +1397,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutlass-ml"
+version = "0.4.0-alpha.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cutlass-models"
 version = "0.4.0-alpha.0"
 dependencies = [

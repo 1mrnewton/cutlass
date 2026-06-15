@@ -548,6 +548,14 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // Library asset delete: right-click a media tile → Remove from project.
+    // `force` is decided UI-side (unused tile deletes straight away; a used
+    // one confirms first, then sends force=true to cascade the clip removals).
+    let delete_media_handle = preview_worker.handle();
+    editor.on_on_media_deleted(move |media_id, force| {
+        delete_media_handle.remove_media(media_id.to_string(), force);
+    });
+
     // Missing-media relink (v1 roadmap M0): "Locate…" in the relink dialog
     // or on a tile's missing badge. Same media picker as import; the worker
     // re-probes the chosen file and swaps the entry's path in place.

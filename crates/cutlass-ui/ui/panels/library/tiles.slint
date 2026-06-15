@@ -77,6 +77,11 @@ export component MediaTile inherits Rectangle {
     border-radius: 4px;
     clip: true;
 
+    // Cursor position (tile-local) of the last right-press, used to anchor the
+    // context-menu popup below.
+    property <length> menu-x;
+    property <length> menu-y;
+
     // Poster frame (video) or waveform card (audio), generated off-thread
     // after import — empty until ready (see src/thumbnails.rs).
     if media.thumbnail.width > 0: Image {
@@ -105,6 +110,12 @@ export component MediaTile inherits Rectangle {
                 AppState.library-drag-cursor-x = self.absolute-position.x + self.mouse-x;
                 AppState.library-drag-cursor-y = self.absolute-position.y + self.mouse-y;
                 AppState.library-drag-active = true;
+            }
+            // Right-press opens the tile's context menu at the cursor.
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.right {
+                root.menu-x = self.mouse-x;
+                root.menu-y = self.mouse-y;
+                menu-popup.show();
             }
             if event.kind == PointerEventKind.up {
                 AppState.library-drag-active = false;
@@ -181,6 +192,71 @@ export component MediaTile inherits Rectangle {
         TouchArea {
             clicked => {
                 EditorStore.on-relink-media-requested(media.id);
+            }
+        }
+    }
+
+    // Right-click "Remove from project" menu, anchored at the press point.
+    // A plain PopupWindow (close-on-click-outside) rather than a
+    // ContextMenuArea: the area's native right-click gesture was swallowed by
+    // the drag TouchArea above, and a programmatic show() left a stale active
+    // menu that re-opened on the next right-click anywhere. This popup is fully
+    // local — it dismisses on any outside click and never re-triggers itself.
+    // Routing: an unused source deletes straight away; a used one raises the
+    // confirm dialog, which cascades the referencing clips' removal in one undo.
+    menu-popup := PopupWindow {
+        x: root.menu-x;
+        y: root.menu-y;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        Rectangle {
+            width: 184px;
+            height: menu-list.preferred-height;
+            background: AppStore.theme.panel.background;
+            border-radius: AppStore.theme.metrics.radius.md;
+            border-width: 1px;
+            border-color: #ffffff1f;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000080;
+            drop-shadow-offset-y: 6px;
+
+            menu-list := VerticalLayout {
+                padding: AppStore.theme.metrics.spacing.xs;
+                spacing: 0;
+
+                Rectangle {
+                    height: 28px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: remove-ta.has-hover ? #ffffff10 : transparent;
+
+                    CutlassText {
+                        x: AppStore.theme.metrics.spacing.sm;
+                        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        text: "Remove from project";
+                        style: AppStore.theme.typography.body;
+                        foreground: AppStore.theme.text.primary;
+                        overflow: elide;
+                    }
+
+                    remove-ta := TouchArea {
+                        clicked => {
+                            // Reclaim focus so the next Delete/etc. acts on the
+                            // timeline, not a stale text box.
+                            AppState.refocus-shortcuts();
+                            if (root.media.usage-count > 0) {
+                                AppState.confirm-delete-media-id = root.media.id;
+                                AppState.confirm-delete-media-name = root.media.name;
+                                AppState.confirm-delete-media-clip-count = root.media.usage-count;
+                                AppState.confirm-delete-media-open = true;
+                            } else {
+                                EditorStore.on-media-deleted(root.media.id, false);
+                            }
+                            menu-popup.close();
+                        }
+                    }
+                }
             }
         }
     }

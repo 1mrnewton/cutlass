@@ -27,6 +27,7 @@ import { CanvasDialog } from "shell/canvas-dialog.slint";
 import { SettingsDialog } from "shell/settings-dialog.slint";
 import { MessageDialog } from "shell/message-dialog.slint";
 import { RelinkDialog } from "shell/relink-dialog.slint";
+import { ConfirmDeleteDialog } from "shell/confirm-delete-dialog.slint";
 import { ExportBackend } from "lib/export-backend.slint";
 import {
     PreviewBackend,
@@ -283,6 +284,15 @@ export component AppWindow inherits Window {
             if (EditorStore.session-error != "") {
                 if (event.text == Key.Escape || event.text == Key.Return) {
                     EditorStore.session-error = "";
+                }
+                return accept;
+            }
+            // Confirm-delete-media dialog is modal and destructive: Escape
+            // cancels, everything else (including Enter) is swallowed so the
+            // delete only fires on an explicit button click.
+            if (AppState.confirm-delete-media-open) {
+                if (event.text == Key.Escape) {
+                    AppState.confirm-delete-media-open = false;
                 }
                 return accept;
             }
@@ -565,6 +575,14 @@ export component AppWindow inherits Window {
     // restore that found dead media paths; above the export dialog, below
     // the error dialog.
     if AppState.relink-dialog-open: RelinkDialog {
+        width: root.width;
+        height: root.height;
+    }
+
+    // Confirm-delete-media dialog (library tile → Remove from project on a
+    // source still used by clips). Above the relink dialog, below the
+    // session-error dialog.
+    if AppState.confirm-delete-media-open: ConfirmDeleteDialog {
         width: root.width;
         height: root.height;
     }

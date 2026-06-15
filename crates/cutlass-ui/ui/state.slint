@@ -50,6 +50,15 @@ export global AppState {
     // dismissable — the library tiles keep their missing badges.
     in-out property <bool> relink-dialog-open: false;
 
+    // Confirm-delete-media dialog (modal overlay; see
+    // shell/confirm-delete-dialog.slint). A library tile raises it when the
+    // user deletes a source still used on the timeline; confirming cascades
+    // the referencing clips' removal. The tile fills these before opening.
+    in-out property <bool> confirm-delete-media-open: false;
+    in-out property <string> confirm-delete-media-id: "";
+    in-out property <string> confirm-delete-media-name: "";
+    in-out property <int> confirm-delete-media-clip-count: 0;
+
     // Bumped to pull keyboard focus back to the window's shortcut
     // FocusScope (app.slint watches it). Text inputs legitimately take
     // focus while editing; timeline interactions (clip grab, lane

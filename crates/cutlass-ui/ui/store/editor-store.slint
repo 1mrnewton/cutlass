@@ -126,6 +126,14 @@ export global EditorStore {
     // worker's save path has a stable hook for future wiring.
     callback save-finished(ok: bool);
 
+    // --- library asset management ------------------------------------------
+    // Delete a source from the media pool (Library bin right-click → Remove
+    // from project). `force` false removes only an unreferenced source; the
+    // tile raises a confirmation when its `usage-count` is non-zero and then
+    // calls this with `force` true, which cascades the referencing clips'
+    // removal in one undo. The worker validates and republishes.
+    callback on-media-deleted(media-id: string, force: bool);
+
     // --- missing-media relink (v1 roadmap M0) ------------------------------
     // "Locate…" was clicked for a pool entry whose file is gone (relink
     // dialog row or library tile badge). main.rs opens the async file

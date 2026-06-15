@@ -1,0 +1,117 @@
+// Confirm-delete-media dialog: an in-window modal in the MessageDialog mold,
+// raised by a library tile when the user deletes a source still used on the
+// timeline. Confirming cascades the referencing clips' removal (one undo);
+// Cancel leaves everything untouched. app.slint mounts it while
+// `AppState.confirm-delete-media-open` is set; both buttons clear that flag.
+
+import { CutlassText, SubtleButton } from "../components/index.slint";
+import { AppStore, EditorStore } from "../store/index.slint";
+import { AppState } from "../state.slint";
+
+// Destructive primary action, local to this dialog (the only place a red
+// confirm is needed today). Same shape as AccentButton with a danger fill.
+component DangerButton inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+
+    width: text.preferred-width + 2 * AppStore.theme.metrics.spacing.lg;
+    height: 26px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: ta.has-hover ? #D6453F : #C83A3A;
+
+    text := CutlassText {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        style: AppStore.theme.typography.label;
+        foreground: #ffffff;
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component ConfirmDeleteDialog inherits Rectangle {
+    background: #000000A0;
+
+    // Clip-count phrasing ("1 clip" vs "N clips") for the body copy.
+    property <string> clip-phrase: AppState.confirm-delete-media-clip-count == 1
+        ? "1 clip"
+        : AppState.confirm-delete-media-clip-count + " clips";
+
+    function dismiss() {
+        AppState.confirm-delete-media-open = false;
+    }
+
+    function confirm() {
+        EditorStore.on-media-deleted(AppState.confirm-delete-media-id, true);
+        root.dismiss();
+    }
+
+    // Scrim: absorb every pointer event so the editor underneath is inert.
+    // A click on the backdrop cancels (matches the other modals' Escape).
+    TouchArea {
+        clicked => {
+            root.dismiss();
+        }
+    }
+
+    panel := Rectangle {
+        width: 440px;
+        height: content.preferred-height;
+        background: AppStore.theme.panel.background;
+        border-radius: AppStore.theme.metrics.radius.lg;
+        border-width: 1px;
+        border-color: #ffffff14;
+        drop-shadow-blur: 32px;
+        drop-shadow-color: #00000080;
+        drop-shadow-offset-y: 8px;
+
+        // Keep clicks inside the panel from reaching the scrim above.
+        TouchArea { }
+
+        content := VerticalLayout {
+            padding: AppStore.theme.metrics.spacing.xl;
+            spacing: AppStore.theme.metrics.spacing.lg;
+
+            CutlassText {
+                text: "Remove media from project?";
+                style: AppStore.theme.typography.heading-md;
+            }
+
+            CutlassText {
+                text: "“" + AppState.confirm-delete-media-name + "” is used by "
+                    + root.clip-phrase + " on the timeline. Removing it from the "
+                    + "library deletes " + (AppState.confirm-delete-media-clip-count == 1
+                        ? "that clip" : "those clips") + " too. You can undo this.";
+                wrap: word-wrap;
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.secondary;
+            }
+
+            HorizontalLayout {
+                alignment: end;
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                SubtleButton {
+                    label: "Cancel";
+                    clicked => {
+                        root.dismiss();
+                    }
+                }
+
+                DangerButton {
+                    label: "Delete anyway";
+                    clicked => {
+                        root.confirm();
+                    }
+                }
+            }
+        }
+    }
+}

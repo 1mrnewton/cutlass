@@ -15,6 +15,7 @@ pub mod remove_media;
 pub mod remove_silences;
 pub mod restore_clip;
 pub mod restore_transitions;
+pub mod ripple_cut;
 pub mod ripple_delete;
 pub mod ripple_insert;
 pub mod set_audio;

@@ -190,6 +190,28 @@ and export agree on every one, and each edit is a single undo.
   words"), no linked A/V ripple-together, and you can only delete spans — not
   yet rename/replace a word.
 
+### Cloud transcription fallback
+
+- **Transcription that doesn't need the right hardware.** A `CloudTranscriber`
+  backend speaks the OpenAI-compatible `/audio/transcriptions` API (the same
+  shape OpenAI, Groq, and llama.cpp-server expose), muxing the analysis audio to
+  a 16-bit PCM WAV, uploading it as multipart form data with
+  `response_format=verbose_json`, and folding the word timings back into
+  segments. It's **pure HTTP** — no C/C++ or GPU toolchain — so unlike the local
+  whisper backend it compiles into the **default build** and captions /
+  transcript editing work with no `--features whisper`. Turn it on with
+  `[ml] transcribe_provider = "cloud"` plus `base_url`, `cloud_model`, and an
+  `api_key_env`; the worker picks local vs cloud from that config and panel
+  availability follows either path.
+- **Why it matters now.** Local whisper.cpp currently **fails to encode on M5
+  Apple Silicon + macOS 26** — across its Accelerate/BLAS, Metal, and pure-CPU
+  backends, even on today's whisper.cpp master (the tensor-API probe fix in
+  ggml-org/whisper.cpp#3727 lands but the encode still bails). The cloud
+  provider is the hardware-independent path on such machines; local
+  transcription stays the default and works on M1–M4, and will light up on M5
+  once upstream whisper.cpp supports it. (Local builds also keep the Metal
+  backend on Apple Silicon — faster and the right default once it works.)
+
 ## [alpha-0.4.0] — 2026-06-15
 
 The **Windows & performance alpha**: Windows joins macOS and Linux with

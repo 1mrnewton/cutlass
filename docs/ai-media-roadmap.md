@@ -133,6 +133,18 @@ which is for model-backed inference) plus the existing ripple commands.
       toolchain never touches the default build or CI. The real model registry
       (tiny.en / base.en / small.en, official HF URLs + SHA-256s) lives in
       `models.rs` and feeds the cache.
+- [x] **Cloud transcribe backend** (`CloudTranscriber`, default build): the
+      "never local-only" half of the seam, brought forward from Phase 8. Pure
+      HTTP against an OpenAI-compatible `/audio/transcriptions` endpoint (WAV
+      multipart upload, `verbose_json` → word-timed `Transcript`), so it carries
+      **no native toolchain** and compiles into the default build — the only
+      working path on hardware the local runtime can't serve yet. Selected by
+      `[ml] transcribe_provider = "cloud"`; the worker picks local vs cloud from
+      config. **Local-whisper limitation:** whisper.cpp currently fails to
+      encode on M5 Apple Silicon + macOS 26 (Accelerate/BLAS, Metal, *and* pure
+      CPU, even on whisper.cpp master — the #3727 tensor-probe fix lands but the
+      encode still bails); the cloud backend is the fallback there, and local
+      transcription stays the default and works on M1–M4.
 - [x] **Word-level transcription** (engine): the engine decodes a clip's audio
       to 16 kHz mono, runs `Transcribe`, and maps segment/word stamps to
       timeline ticks — landed via the caption path (`caption.rs`), with an
@@ -229,6 +241,8 @@ bespoke subtitle lane.
 
 ## Phase 8 — Cloud provider expansion
 
+- [x] **Cloud transcribe adapter** (`CloudTranscriber`) — landed early in Phase
+      2 as the hardware-independent fallback (OpenAI-compatible, config-only).
 - [ ] Anthropic/Gemini-native adapters, a provider-picker UI, and per-feature
       provider routing (e.g. local whisper + cloud LLM). Config-only for users.
 

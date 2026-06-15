@@ -15,29 +15,29 @@ import {
     Typography,
 } from "../types/index.slint";
 
-export global DefaultTheme {
+export global DarkBlueTheme {
     private property <Surface> surface: {
-        app-background: #141414,
-        content-background: #000000,
-        divider: #161616,
+        app-background: #12161f,
+        content-background: #080b12,
+        divider: #12161f,
     };
 
     private property <TextColors> text: {
-        primary: #ffffff,
-        secondary: #a3a3a3,
-        muted: #737373,
+        primary: #eef0f4,
+        secondary: #9aa3b5,
+        muted: #5c6578,
     };
 
     private property <Accent> accent: {
-        primary: #00E5C7,
-        hover: #2BEFD6,
-        on-accent: #0A0A0A,
-        gradient-end: #00A3FF,
+        primary: #d4a017,
+        hover: #e6b422,
+        on-accent: #0d0f14,
+        gradient-end: #5b8def,
     };
 
     private property <SplitGrip> split-grip: {
-        normal: #141414,
-        hover: #141414,
+        normal: #12161f,
+        hover: #1c2230,
     };
 
     private property <Typography> typography: {
@@ -91,8 +91,8 @@ export global DefaultTheme {
     };
 
     private property <Panel> panel: {
-        background: #262626,
-        header-background: #303030,
+        background: #1a2030,
+        header-background: #222a3a,
         radius: self.radius.md,
     };
 
@@ -103,18 +103,18 @@ export global DefaultTheme {
         thumb-radius: 1px,
         // Translucent: the bars overlay content (and auto-hide), so the
         // track softens rather than blanks what it covers.
-        track: #2c2c2e99,
-        thumb: #636363e6,
-        thumb-hover: #7a7a7a,
-        thumb-active: #9a9a9a,
+        track: #2a314299,
+        thumb: #5c6578e6,
+        thumb-hover: #748099,
+        thumb-active: #9aa3b5,
     };
 
     private property <TrackLane> track-lane: {
         height: 60px,
-        background: #292929,
+        background: #161c28,
         clip: {
             height: 58px,
-            background: #373737,
+            background: #252d3d,
             radius: 4px,
         },
     };

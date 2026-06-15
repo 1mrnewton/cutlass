@@ -1,8 +1,8 @@
 import { Theme } from "../types/index.slint";
-import { DefaultTheme, EmberTheme } from "../theme/index.slint";
+import { DarkBlueTheme, EmberTheme, DefaultTheme } from "../theme/index.slint";
 
 export global AppStore {
     // Ember is the shipped look; DefaultTheme (cool graphite + teal) stays
     // available — point this binding at it to switch back.
-    in-out property <Theme> theme: DefaultTheme.theme;
+    in-out property <Theme> theme: DarkBlueTheme.theme;
 }

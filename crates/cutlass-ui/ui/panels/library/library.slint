@@ -17,6 +17,7 @@ import { Media, TrackKind, CatalogEntry } from "../../models/index.slint";
 import { EffectsBackend } from "../../lib/index.slint";
 import { MediaTile, GeneratedTile, CatalogTile } from "tiles.slint";
 import { SectionPlaceholder } from "placeholder.slint";
+import { CutlassScrollView } from "../../components/scroll-view.slint";
 
 // Active tab + per-tab section. A global rather than panel state: the panel
 // unmounts while fullscreen preview is up, and the selection should survive
@@ -66,7 +67,7 @@ component LibraryTab inherits Rectangle {
         lbl := CutlassText {
             text: root.label;
             horizontal-alignment: center;
-            style: { size: 12px, weight: 500, italic: false };
+            style: { size: 12px, weight: 600, italic: false };
             foreground: root.ink;
         }
     }
@@ -159,51 +160,58 @@ export component LibraryPanel inherits PanelBase {
         Rectangle {
             height: 52px;
             background: AppStore.theme.panel.header-background;
+            CutlassScrollView {
+                height: parent.height;
+                viewport-width: tabs.preferred-width;
+                viewport-height: self.height;
+                show-horizontal-scrollbar: false;
+                show-vertical-scrollbar: false;
 
-            HorizontalLayout {
-                padding-left: AppStore.theme.metrics.spacing.xs;
-                alignment: start;
-                spacing: AppStore.theme.metrics.spacing.md;
+                tabs := HorizontalLayout {
+                    padding-left: AppStore.theme.metrics.spacing.xs;
+                    alignment: start;
+                    spacing: AppStore.theme.metrics.spacing.md;
 
-                LibraryTab {
-                    tab-id: "media";
-                    icon: @image-url("../../../../../assets/icon/library/media.svg");
-                    label: "Media";
-                }
+                    LibraryTab {
+                        tab-id: "media";
+                        icon: @image-url("../../../../../assets/icon/library/media.svg");
+                        label: "Media";
+                    }
 
-                LibraryTab {
-                    tab-id: "audio";
-                    icon: @image-url("../../../../../assets/icon/library/audio.svg");
-                    label: "Audio";
-                }
+                    LibraryTab {
+                        tab-id: "audio";
+                        icon: @image-url("../../../../../assets/icon/library/audio.svg");
+                        label: "Audio";
+                    }
 
-                LibraryTab {
-                    tab-id: "text";
-                    icon: @image-url("../../../../../assets/icon/library/text.svg");
-                    label: "Text";
-                }
+                    LibraryTab {
+                        tab-id: "text";
+                        icon: @image-url("../../../../../assets/icon/library/text.svg");
+                        label: "Text";
+                    }
 
-                LibraryTab {
-                    tab-id: "stickers";
-                    icon: @image-url("../../../../../assets/icon/library/stickers.svg");
-                    label: "Stickers";
-                }
+                    LibraryTab {
+                        tab-id: "stickers";
+                        icon: @image-url("../../../../../assets/icon/library/stickers.svg");
+                        label: "Stickers";
+                    }
 
-                LibraryTab {
-                    tab-id: "effects";
-                    icon: @image-url("../../../../../assets/icon/library/effects.svg");
-                    label: "Effects";
-                }
+                    LibraryTab {
+                        tab-id: "effects";
+                        icon: @image-url("../../../../../assets/icon/library/effects.svg");
+                        label: "Effects";
+                    }
 
-                LibraryTab {
-                    tab-id: "transitions";
-                    icon: @image-url("../../../../../assets/icon/library/transitions.svg");
-                    label: "Transitions";
-                }
+                    LibraryTab {
+                        tab-id: "transitions";
+                        icon: @image-url("../../../../../assets/icon/library/transitions.svg");
+                        label: "Transitions";
+                    }
 
-                // Filters / Adjustment tabs return when their engines land
+                    // Filters / Adjustment tabs return when their engines land
                 // (v1 roadmap M5). The model's TrackKind catalog keeps those
                 // lanes; the UI hides dead features until then.
+                }
             }
         }
 

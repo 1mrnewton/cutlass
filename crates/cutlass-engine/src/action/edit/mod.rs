@@ -12,6 +12,7 @@ pub mod marker;
 pub mod move_clip;
 pub mod remove_clip;
 pub mod remove_media;
+pub mod remove_silences;
 pub mod restore_clip;
 pub mod restore_transitions;
 pub mod ripple_delete;

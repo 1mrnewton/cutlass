@@ -437,6 +437,21 @@ fn dispatch_edit(
                 Some(inverse),
             ))
         }
+        EditCommand::RemoveSilences {
+            clip,
+            threshold,
+            min_silence,
+            padding,
+        } => {
+            let guard = transitions_guard(ctx);
+            let (track, primary) =
+                edit::remove_silences::remove(ctx, clip, threshold, min_silence, padding)?;
+            let inverse = finalize_structural(ctx, guard, primary);
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::ShiftedTrack(track)),
+                Some(inverse),
+            ))
+        }
         EditCommand::AddMarker { at, name, color } => {
             let (id, inverse) = edit::marker::add(ctx, at, name, color)?;
             Ok((

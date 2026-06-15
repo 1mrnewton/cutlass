@@ -28,7 +28,7 @@ pub mod config;
 pub mod models;
 pub mod transcribe;
 
-pub use backends::StubTranscriber;
+pub use backends::{CloudTranscriber, StubTranscriber};
 #[cfg(feature = "whisper")]
 pub use backends::WhisperTranscriber;
 pub use captions::{CaptionCue, CaptionLayout, plan_captions};

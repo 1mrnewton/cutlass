@@ -1424,6 +1424,7 @@ dependencies = [
  "cutlass-compositor",
  "cutlass-decoder",
  "cutlass-encoder",
+ "cutlass-ml",
  "cutlass-models",
  "cutlass-probe",
  "pollster",

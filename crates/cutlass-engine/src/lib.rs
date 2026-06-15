@@ -1,6 +1,7 @@
 //! Editing engine: project session, inverse-command undo/redo, frame cache.
 
 mod action;
+mod caption;
 mod composite;
 mod decoder_pool;
 mod engine;

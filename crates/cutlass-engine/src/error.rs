@@ -43,4 +43,13 @@ pub enum EngineError {
 
     #[error("export cancelled")]
     ExportCancelled,
+
+    #[error("transcription: {0}")]
+    Transcribe(String),
+}
+
+impl From<cutlass_ml::TranscribeError> for EngineError {
+    fn from(err: cutlass_ml::TranscribeError) -> Self {
+        EngineError::Transcribe(err.to_string())
+    }
 }

@@ -19,9 +19,13 @@ pub fn import_media(path: &Path, cache: &FrameCache) -> Result<MediaSource, Engi
 
     if probed.width > 0 && !probed.is_image {
         let fingerprint = SourceFingerprint::from_path(path)?;
+        // The preview cache stores frames at the reduced preview resolution
+        // (see PREVIEW_MAX_HEIGHT), so the spec must describe *those* dims:
+        // flipping the cap changes the spec and invalidates the stale index.
+        let (width, height) = crate::composite::preview_scaled_dims(probed.width, probed.height);
         let spec = CacheSpec {
-            width: probed.width,
-            height: probed.height,
+            width,
+            height,
             pixfmt: "yuv420p".into(),
         };
         cache

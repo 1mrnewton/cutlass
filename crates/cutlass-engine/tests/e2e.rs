@@ -53,8 +53,9 @@ fn e2e_solid_project_save_load_export() {
     );
 
     let frame = engine.get_frame(rt(0)).expect("preview");
-    assert_eq!(frame.width, 1920);
-    assert_eq!(frame.height, 1080);
+    let (pw, ph) = cutlass_engine::preview_scaled_dims(1920, 1080);
+    assert_eq!(frame.width, pw);
+    assert_eq!(frame.height, ph);
 
     let project_file = dir.path().join("solid.cutlass");
     save_project(&mut engine, &project_file);
@@ -92,8 +93,9 @@ fn e2e_media_import_edit_save_open_export() {
         (media.width, media.height)
     };
     let preview = engine.get_frame(rt(0)).expect("preview");
-    assert_eq!(preview.width, media_w);
-    assert_eq!(preview.height, media_h);
+    let (pw, ph) = cutlass_engine::preview_scaled_dims(media_w, media_h);
+    assert_eq!(preview.width, pw);
+    assert_eq!(preview.height, ph);
 
     let project_file = dir.path().join("media_session.cutlass");
     save_project(&mut engine, &project_file);
@@ -152,7 +154,10 @@ fn e2e_image_still_import_preview_save_reopen_export() {
 
     // Stills aspect-fit the canvas; they don't drive its size.
     let frame = engine.get_frame(rt(60)).expect("mid-still preview");
-    assert_eq!((frame.width, frame.height), (1920, 1080));
+    assert_eq!(
+        (frame.width, frame.height),
+        cutlass_engine::preview_scaled_dims(1920, 1080)
+    );
     assert!(
         frame
             .bytes

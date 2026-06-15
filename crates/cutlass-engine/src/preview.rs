@@ -24,7 +24,6 @@ pub fn get_frame(
     compositor: &mut Compositor,
     time: RationalTime,
     color_convert: ColorConvertPath,
-    preview_max_dim: Option<u32>,
     override_transform: Option<(ClipId, ClipTransform)>,
     override_generator: Option<(ClipId, &Generator)>,
 ) -> Result<RgbaFrame, EngineError> {
@@ -37,7 +36,7 @@ pub fn get_frame(
         .into());
     }
 
-    let config = preview_canvas_config(project, preview_max_dim);
+    let config = preview_canvas_config(project);
 
     // Stage timings (playback roadmap Phase 2): resolve covers decode or
     // cache read; composite covers GPU submit + RGBA readback.
@@ -89,9 +88,8 @@ pub fn prefetch_frame(
     raster: &mut GeneratorRaster,
     time: RationalTime,
     color_convert: ColorConvertPath,
-    preview_max_dim: Option<u32>,
 ) -> Result<(), EngineError> {
-    let config = preview_canvas_config(project, preview_max_dim);
+    let config = preview_canvas_config(project);
     resolve_layers(
         project,
         Some(cache),

@@ -25,9 +25,10 @@ fn get_frame_returns_rgba_for_placed_clip() {
         }))
         .expect("add clip");
 
+    // Preview composites at the reduced preview resolution, not full source.
     let (width, height) = {
         let media = engine.project().media(media_id).expect("media");
-        (media.width, media.height)
+        cutlass_engine::preview_scaled_dims(media.width, media.height)
     };
     let frame = engine.get_frame(rt(0)).expect("get_frame");
 
@@ -80,8 +81,9 @@ fn get_frame_after_split_still_decodes() {
 fn get_frame_returns_black_when_timeline_empty() {
     let (_dir, mut engine) = temp_engine();
     let frame = engine.get_frame(rt(0)).expect("gap frame");
-    assert_eq!(frame.width, 1920);
-    assert_eq!(frame.height, 1080);
+    let (w, h) = cutlass_engine::preview_scaled_dims(1920, 1080);
+    assert_eq!(frame.width, w);
+    assert_eq!(frame.height, h);
     assert!(frame.bytes.chunks_exact(4).all(|p| p == [0, 0, 0, 255]));
 }
 
@@ -101,8 +103,9 @@ fn get_frame_renders_solid_generated_clip() {
         .expect("add solid");
 
     let frame = engine.get_frame(rt(0)).expect("solid frame");
-    assert_eq!(frame.width, 1920);
-    assert_eq!(frame.height, 1080);
+    let (w, h) = cutlass_engine::preview_scaled_dims(1920, 1080);
+    assert_eq!(frame.width, w);
+    assert_eq!(frame.height, h);
     assert!(frame.bytes.chunks_exact(4).all(|p| p == [10, 20, 30, 255]));
 }
 
@@ -141,8 +144,11 @@ fn get_frame_places_transformed_solid() {
         }))
         .expect("set transform");
 
+    // The placement is normalized, so sample points are fractions of the
+    // (preview-scaled) frame, not absolute 1080p pixels. The solid covers the
+    // top-left quadrant: [0, w/2) × [0, h/2).
     let frame = engine.get_frame(rt(0)).expect("transformed frame");
-    assert_eq!((frame.width, frame.height), (1920, 1080));
+    let (w, h) = (frame.width, frame.height);
 
     let pixel = |x: u32, y: u32| {
         let i = ((y * frame.width + x) * 4) as usize;
@@ -153,15 +159,15 @@ fn get_frame_places_transformed_solid() {
             frame.bytes[i + 3],
         ]
     };
-    assert_eq!(pixel(480, 270), [200, 40, 10, 255], "inside placed quad");
+    assert_eq!(pixel(w / 4, h / 4), [200, 40, 10, 255], "inside placed quad");
     assert_eq!(pixel(10, 10), [200, 40, 10, 255], "top-left corner covered");
     assert_eq!(
-        pixel(1440, 810),
+        pixel(3 * w / 4, 3 * h / 4),
         [0, 0, 0, 255],
         "rest of canvas stays black"
     );
     assert_eq!(
-        pixel(1000, 270),
+        pixel(3 * w / 4, h / 4),
         [0, 0, 0, 255],
         "right of the quad is black"
     );
@@ -209,12 +215,18 @@ fn transform_override_previews_without_touching_state() {
             frame.bytes[i + 3],
         ]
     };
+    // Normalized sample points (fractions of the preview-scaled frame).
+    let (w, h) = (frame.width, frame.height);
     assert_eq!(
-        pixel(&frame, 480, 270),
+        pixel(&frame, w / 4, h / 4),
         [200, 40, 10, 255],
         "override placed quad"
     );
-    assert_eq!(pixel(&frame, 1440, 810), [0, 0, 0, 255], "rest stays black");
+    assert_eq!(
+        pixel(&frame, 3 * w / 4, 3 * h / 4),
+        [0, 0, 0, 255],
+        "rest stays black"
+    );
 
     // ...but the project and history never saw it: session state only.
     let committed = &engine.project().clip(clip_id).expect("clip").transform;
@@ -224,8 +236,9 @@ fn transform_override_previews_without_touching_state() {
     // Clearing restores the committed (full-canvas) render.
     engine.set_transform_override(None);
     let frame = engine.get_frame(rt(0)).expect("committed frame");
+    let (w, h) = (frame.width, frame.height);
     assert_eq!(
-        pixel(&frame, 1440, 810),
+        pixel(&frame, 3 * w / 4, 3 * h / 4),
         [200, 40, 10, 255],
         "solid covers canvas again"
     );
@@ -262,8 +275,9 @@ fn get_frame_composites_solid_over_media() {
 
     let frame = engine.get_frame(rt(0)).expect("composite frame");
     let media = engine.project().media(media_id).expect("media");
-    assert_eq!(frame.width, media.width);
-    assert_eq!(frame.height, media.height);
+    let (w, h) = cutlass_engine::preview_scaled_dims(media.width, media.height);
+    assert_eq!(frame.width, w);
+    assert_eq!(frame.height, h);
 
     let mut non_zero = 0usize;
     let mut dark = 0usize;

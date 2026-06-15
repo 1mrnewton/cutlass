@@ -44,12 +44,6 @@ pub struct EngineConfig {
     pub undo_limit: usize,
     /// YUV/RGBA conversion path for preview and export compositing.
     pub color_convert: ColorConvertPath,
-    /// Cap on the preview canvas's longer edge, in pixels. `None` composites
-    /// preview at full footage resolution (same as export); `Some(n)` scales
-    /// the preview render target down so its longer edge is at most `n`,
-    /// shrinking the GPU readback and UI upload for high-res footage. Decode
-    /// and the frame cache are unaffected. Export always uses full resolution.
-    pub preview_max_dim: Option<u32>,
 }
 
 impl Default for EngineConfig {
@@ -59,7 +53,6 @@ impl Default for EngineConfig {
             cache_budget_bytes: DEFAULT_CACHE_BUDGET_BYTES,
             undo_limit: 100,
             color_convert: ColorConvertPath::Gpu,
-            preview_max_dim: None,
         }
     }
 }
@@ -320,7 +313,6 @@ impl Engine {
             &mut self.raster,
             time,
             self.config.color_convert,
-            self.config.preview_max_dim,
         )
     }
 
@@ -335,7 +327,6 @@ impl Engine {
             &mut self.compositor,
             time,
             self.config.color_convert,
-            self.config.preview_max_dim,
             self.transform_override,
             self.generator_override
                 .as_ref()

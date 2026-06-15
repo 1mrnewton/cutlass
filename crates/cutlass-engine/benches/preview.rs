@@ -88,20 +88,11 @@ fn engine_with_solid_clip(frames: i64) -> (tempfile::TempDir, Engine, cutlass_mo
 }
 
 fn engine_with_media(path: &Path, source_frames: i64) -> (tempfile::TempDir, Engine) {
-    engine_with_media_cap(path, source_frames, None)
-}
-
-fn engine_with_media_cap(
-    path: &Path,
-    source_frames: i64,
-    preview_max_dim: Option<u32>,
-) -> (tempfile::TempDir, Engine) {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = EngineConfig {
         cache_dir: dir.path().join("cache"),
         cache_budget_bytes: 512 * 1024 * 1024,
         undo_limit: 8,
-        preview_max_dim,
         ..Default::default()
     };
     let mut engine = Engine::new(config).expect("engine");
@@ -126,14 +117,20 @@ fn engine_with_media_cap(
         o => panic!("{o:?}"),
     };
     // The source window is expressed at the media's own frame rate (which may
-    // not be 24); the timeline start stays at the timeline rate.
-    let media_rate = engine.project().media(media).expect("media").frame_rate;
+    // not be 24); the timeline start stays at the timeline rate. Clamp the
+    // requested span to what the asset actually holds so short clips don't
+    // run off the end of the source.
+    let (media_rate, avail) = {
+        let m = engine.project().media(media).expect("media");
+        (m.frame_rate, m.duration.value)
+    };
+    let frames = source_frames.min(avail.saturating_sub(1)).max(1);
     let tl_rate = engine.project().timeline().frame_rate;
     engine
         .apply(Command::Edit(EditCommand::AddClip {
             track,
             media,
-            source: TimeRange::at_rate(0, source_frames, media_rate),
+            source: TimeRange::at_rate(0, frames, media_rate),
             start: RationalTime::new(0, tl_rate),
         }))
         .expect("clip");
@@ -202,17 +199,16 @@ fn bench_get_frame_media(c: &mut Criterion) {
     });
 
     // Warm cache: same timeline tick, repeated decode skipped via disk cache.
-    // Isolates unpack + GPU upload + composite + RGBA readback — the part a
-    // preview-resolution cap actually shrinks (no decode, no cache write).
-    for (label, cap) in [("warm_full", None), ("warm_cap1080", Some(1920u32))] {
-        let (_d, mut e) = engine_with_media_cap(&path, 120, cap);
-        let r = e.project().timeline().frame_rate;
-        let prime = RationalTime::new(0, r);
-        e.get_frame(prime).expect("prime");
-        group.bench_function(format!("media_{label}"), |b| {
-            b.iter(|| e.get_frame(prime).expect("frame"));
-        });
-    }
+    // Isolates unpack + GPU upload + composite + RGBA readback at the preview
+    // resolution (PREVIEW_MAX_HEIGHT) — no decode, no cache write.
+    let (_d, mut e) = engine_with_media(&path, 120);
+    let r = e.project().timeline().frame_rate;
+    let prime = RationalTime::new(0, r);
+    let warm = e.get_frame(prime).expect("prime");
+    let (pw, ph) = (warm.width, warm.height);
+    group.bench_function(format!("media_warm_{pw}x{ph}"), |b| {
+        b.iter(|| e.get_frame(prime).expect("frame"));
+    });
 
     group.finish();
 }
@@ -235,32 +231,73 @@ fn bench_playback_media(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
     group.sample_size(10);
 
-    // Full footage resolution (today's behavior) vs a 1080p-class preview cap.
-    // Same decode + cache work either way; only the composite render target,
-    // RGBA readback, and (in the app) UI upload shrink under the cap.
-    for (label, cap) in [("full", None), ("cap1080", Some(1920u32))] {
-        let (_dir, mut engine) = engine_with_media_cap(&path, span, cap);
-        let media = engine.project().media_iter().next().expect("media");
-        let (sw, sh) = (media.width, media.height);
-        let rate = engine.project().timeline().frame_rate;
-        let total = engine.project().timeline().duration().value.max(1);
-        // Report the resolution the preview actually composites at.
-        let frame = engine.get_frame(RationalTime::new(0, rate)).expect("frame");
-        let (pw, ph) = (frame.width, frame.height);
+    // Preview composites at PREVIEW_MAX_HEIGHT (decode stays native, then a
+    // single downscale before the cache). The label carries both the source
+    // resolution and what the preview actually composites/reads back, so
+    // flipping the constant produces directly comparable runs.
+    let (_dir, mut engine) = engine_with_media(&path, span);
+    let media = engine.project().media_iter().next().expect("media");
+    let (sw, sh) = (media.width, media.height);
+    let rate = engine.project().timeline().frame_rate;
+    let total = engine.project().timeline().duration().value.max(1);
+    let frame = engine.get_frame(RationalTime::new(0, rate)).expect("frame");
+    let (pw, ph) = (frame.width, frame.height);
 
-        let mut next: i64 = 0;
-        group.bench_function(format!("media_{sw}x{sh}_{label}_{pw}x{ph}"), |b| {
-            b.iter_custom(|iters| {
-                let start = Instant::now();
-                for _ in 0..iters {
-                    let tick = next % total;
-                    next += 1;
-                    let _ = engine.get_frame(RationalTime::new(tick, rate)).expect("frame");
-                }
-                start.elapsed()
-            });
+    let mut next: i64 = 0;
+    group.bench_function(format!("media_{sw}x{sh}_preview_{pw}x{ph}"), |b| {
+        b.iter_custom(|iters| {
+            let start = Instant::now();
+            for _ in 0..iters {
+                let tick = next % total;
+                next += 1;
+                let _ = engine.get_frame(RationalTime::new(tick, rate)).expect("frame");
+            }
+            start.elapsed()
         });
-    }
+    });
+    group.finish();
+}
+
+/// Sequential playback the way the preview worker actually drives it:
+/// render the playhead tick, then read-ahead the next few ticks on the SAME
+/// engine/decoder (mirrors `preview_worker::prefetch_ahead`). This exposes
+/// decoder-position thrash that the prefetch-free `bench_playback_media`
+/// can't see — if a displayed frame misses the cache after read-ahead has
+/// rolled the decoder forward, the re-decode is a backward seek.
+fn bench_playback_prefetch(c: &mut Criterion) {
+    let Some(path) = bench_asset() else {
+        eprintln!("playback_prefetch bench: no asset, skipping");
+        return;
+    };
+    let span = 600;
+    const READ_AHEAD: i64 = 4;
+
+    let mut group = c.benchmark_group("preview/playback_prefetch");
+    group.throughput(Throughput::Elements(1));
+    group.sample_size(10);
+
+    let (_dir, mut engine) = engine_with_media(&path, span);
+    let rate = engine.project().timeline().frame_rate;
+    let total = engine.project().timeline().duration().value.max(1);
+    let frame = engine.get_frame(RationalTime::new(0, rate)).expect("frame");
+    let (pw, ph) = (frame.width, frame.height);
+
+    let mut next: i64 = 0;
+    group.bench_function(format!("media_preview_{pw}x{ph}"), |b| {
+        b.iter_custom(|iters| {
+            let start = Instant::now();
+            for _ in 0..iters {
+                let tick = next % total;
+                next += 1;
+                let _ = engine.get_frame(RationalTime::new(tick, rate)).expect("frame");
+                for ahead in 1..=READ_AHEAD {
+                    let t = (tick + ahead).min(total - 1);
+                    let _ = engine.prefetch(RationalTime::new(t, rate));
+                }
+            }
+            start.elapsed()
+        });
+    });
     group.finish();
 }
 
@@ -268,6 +305,7 @@ criterion_group!(
     benches,
     bench_get_frame_solid,
     bench_get_frame_media,
-    bench_playback_media
+    bench_playback_media,
+    bench_playback_prefetch
 );
 criterion_main!(benches);

@@ -76,44 +76,64 @@ pub fn composite_canvas_size(project: &Project) -> (u32, u32) {
 
 /// The full compositor canvas for a project: derived size plus the
 /// project's background color. Export builds its pass config here; preview
-/// goes through [`preview_canvas_config`], which may scale this down.
+/// goes through [`preview_canvas_config`], which scales this down.
 pub fn composite_canvas_config(project: &Project) -> CompositorConfig {
     let (width, height) = composite_canvas_size(project);
     CompositorConfig::new(width, height).with_background(project.timeline().canvas().background)
 }
 
-/// Preview compositor canvas: [`composite_canvas_config`] optionally scaled
-/// down so the longer edge fits `max_dim` (aspect preserved, even dims).
+/// Preview render-resolution knob — the single source of truth until the UI
+/// drives it. Flip it; everything downstream of decode follows.
 ///
-/// Preview can trade a softer image for a much cheaper frame: the GPU
-/// composites a smaller render target, the RGBA readback shrinks
-/// quadratically, and the UI uploads fewer pixels. Decode and the YUV frame
-/// cache are untouched — they key on source PTS, not canvas size — so a cap
-/// never re-decodes or fragments the cache. Export ignores this and always
-/// composites at full size so the encode keeps the footage's resolution.
+/// `Some(h)` caps the preview pipeline to height `h`: a freshly decoded frame
+/// is downscaled to this height *before* it enters the frame cache, so the
+/// cache stores the smaller frame, the compositor reads and composites it, and
+/// the canvas / RGBA readback / UI upload all shrink with it (~9× fewer bytes
+/// at 720p from 4K). Decode itself still runs at native resolution — the codec
+/// has no cheaper option — and export ignores this entirely (always full
+/// source, see [`composite_canvas_config`] + a `None` cache).
 ///
-/// `None` (or `0`) means no cap: identical to [`composite_canvas_config`].
-pub fn preview_canvas_config(project: &Project, max_dim: Option<u32>) -> CompositorConfig {
-    let (width, height) = composite_canvas_size(project);
-    let (width, height) = scale_within_max_dim(width, height, max_dim);
-    CompositorConfig::new(width, height).with_background(project.timeline().canvas().background)
+/// Flipping it is cache-safe: [`import_media`](crate::import_media) registers
+/// each source's [`CacheSpec`](cutlass_cache::CacheSpec) at the scaled dims, so
+/// a changed height is a changed spec and the stale on-disk index is dropped.
+///
+/// `None` (or `0`) means full-resolution preview (the legacy behavior).
+pub const PREVIEW_MAX_HEIGHT: Option<u32> = Some(720);
+
+/// Scale `width × height` down so its height is at most [`PREVIEW_MAX_HEIGHT`],
+/// preserving aspect ratio and forcing even dimensions (YUV420P / H.264 need
+/// even). Sizes already within the cap (or no cap) pass through unchanged; the
+/// result never goes below 2 and never upscales.
+pub fn preview_scaled_dims(width: u32, height: u32) -> (u32, u32) {
+    scale_to_max_height(width, height, PREVIEW_MAX_HEIGHT)
 }
 
-/// Scale `width × height` down so its longer edge is at most `max_dim`,
-/// preserving aspect ratio and forcing even dimensions. Sizes already within
-/// the cap (or no cap) pass through unchanged; the result never goes below 2.
-fn scale_within_max_dim(width: u32, height: u32, max_dim: Option<u32>) -> (u32, u32) {
-    let Some(cap) = max_dim.filter(|c| *c > 0) else {
-        return (width, height);
+/// Core of [`preview_scaled_dims`], parameterized on the cap for testing.
+fn scale_to_max_height(width: u32, height: u32, max_height: Option<u32>) -> (u32, u32) {
+    let Some(cap) = max_height.filter(|c| *c > 0) else {
+        return (to_even(width), to_even(height));
     };
-    let longest = width.max(height);
-    if longest <= cap {
-        return (width, height);
+    if height <= cap {
+        return (to_even(width), to_even(height));
     }
-    let scale = f64::from(cap) / f64::from(longest);
+    let scale = f64::from(cap) / f64::from(height);
     let w = ((f64::from(width) * scale).round() as u32).max(2);
-    let h = ((f64::from(height) * scale).round() as u32).max(2);
-    (to_even(w), to_even(h))
+    (to_even(w), to_even(cap.max(2)))
+}
+
+/// Preview canvas size: [`composite_canvas_size`] capped by
+/// [`PREVIEW_MAX_HEIGHT`]. The source layers are downscaled to match (see
+/// [`decode_media_frame`]), so the compositor works end-to-end at this size.
+pub fn preview_canvas_size(project: &Project) -> (u32, u32) {
+    let (width, height) = composite_canvas_size(project);
+    preview_scaled_dims(width, height)
+}
+
+/// Preview compositor canvas: [`composite_canvas_config`] scaled to the
+/// preview resolution. Export uses [`composite_canvas_config`] (full source).
+pub fn preview_canvas_config(project: &Project) -> CompositorConfig {
+    let (width, height) = preview_canvas_size(project);
+    CompositorConfig::new(width, height).with_background(project.timeline().canvas().background)
 }
 
 /// Canvas placement for content of `content_w × content_h` under a clip
@@ -621,6 +641,15 @@ fn decode_media_frame(
         source_time.rate.den,
     );
 
+    // Preview (cache = Some) renders at PREVIEW_MAX_HEIGHT; export (cache =
+    // None) keeps full source. The cache stores frames at the preview dims, so
+    // hits unpack at the same size that misses scale down to.
+    let (preview_w, preview_h) = if cache.is_some() {
+        preview_scaled_dims(media.width, media.height)
+    } else {
+        (media.width, media.height)
+    };
+
     let start = Instant::now();
     if let Some(cache) = cache
         && let Some(packed) = cache.get(source_id, target_ticks)
@@ -630,7 +659,7 @@ fn decode_media_frame(
             pts = target_ticks,
             "preview frame cache hit"
         );
-        return crate::frame::unpack_yuv420p(&packed, media.width, media.height);
+        return crate::frame::unpack_yuv420p(&packed, preview_w, preview_h);
     }
 
     let decoded = decoder
@@ -642,10 +671,26 @@ fn decode_media_frame(
         "decoded media frame"
     );
 
+    // Downscale once on the decode miss (native → preview height) so every
+    // later cache hit, GPU upload, composite, and readback is the small size.
+    let decoded = if cache.is_some() && (decoded.width, decoded.height) != (preview_w, preview_h) {
+        cutlass_decoder::scale_yuv420p(&decoded, preview_w, preview_h)?
+    } else {
+        decoded
+    };
+
+    // Cache under the *requested* `target_ticks`, not the decoded frame's
+    // PTS. The reader looks up by `target_ticks`, and a target rarely lands
+    // exactly on a frame's stored PTS (any rate that isn't a clean multiple
+    // of the stream time_base — e.g. 60.03fps media). Keying by PTS made
+    // every revisit miss, and during playback the read-ahead prefetch had
+    // already rolled the decoder *past* the playhead, so each missed frame
+    // re-decoded as a backward seek (≈3fps, plus the `mmco` warning flood).
+    // Same key on both sides ⇒ prefetch warms exactly what the render reads.
     if let Some(cache) = cache
         && let Ok(packed) = crate::frame::pack_yuv420p(&decoded)
     {
-        cache.cache_frame(source_id, decoded.pts_ticks, packed);
+        cache.cache_frame(source_id, target_ticks, packed);
     }
 
     Ok(decoded)
@@ -679,33 +724,45 @@ mod tests {
     }
 
     #[test]
-    fn scale_within_max_dim_no_cap_is_identity() {
-        assert_eq!(scale_within_max_dim(3840, 2160, None), (3840, 2160));
-        assert_eq!(scale_within_max_dim(3840, 2160, Some(0)), (3840, 2160));
+    fn scale_to_max_height_no_cap_is_identity() {
+        assert_eq!(scale_to_max_height(3840, 2160, None), (3840, 2160));
+        assert_eq!(scale_to_max_height(3840, 2160, Some(0)), (3840, 2160));
     }
 
     #[test]
-    fn scale_within_max_dim_passes_through_when_within_cap() {
-        assert_eq!(scale_within_max_dim(1920, 1080, Some(1920)), (1920, 1080));
-        assert_eq!(scale_within_max_dim(1280, 720, Some(1920)), (1280, 720));
+    fn scale_to_max_height_passes_through_when_within_cap() {
+        assert_eq!(scale_to_max_height(1920, 1080, Some(1080)), (1920, 1080));
+        assert_eq!(scale_to_max_height(1280, 720, Some(1080)), (1280, 720));
     }
 
     #[test]
-    fn scale_within_max_dim_scales_landscape_4k_to_1080p() {
-        assert_eq!(scale_within_max_dim(3840, 2160, Some(1920)), (1920, 1080));
+    fn scale_to_max_height_scales_landscape_4k_to_720p() {
+        assert_eq!(scale_to_max_height(3840, 2160, Some(720)), (1280, 720));
     }
 
     #[test]
-    fn scale_within_max_dim_caps_longer_edge_for_portrait() {
-        // Longer edge (height) drops to the cap; width follows, aspect kept.
-        assert_eq!(scale_within_max_dim(2160, 3840, Some(1920)), (1080, 1920));
+    fn scale_to_max_height_scales_portrait_by_height() {
+        // Height drops to the cap; width follows, aspect kept and even.
+        assert_eq!(scale_to_max_height(2160, 3840, Some(720)), (406, 720));
     }
 
     #[test]
-    fn scale_within_max_dim_forces_even_dimensions() {
-        let (w, h) = scale_within_max_dim(1999, 1001, Some(1000));
+    fn scale_to_max_height_forces_even_dimensions() {
+        let (w, h) = scale_to_max_height(1999, 1001, Some(501));
         assert_eq!(h, 502);
         assert!(w.is_multiple_of(2) && h.is_multiple_of(2), "got {w}x{h}");
+    }
+
+    #[test]
+    fn preview_scaled_dims_uses_the_constant() {
+        // Whatever the shipped cap is, a 4K frame must come back capped and even.
+        let (w, h) = preview_scaled_dims(3840, 2160);
+        if let Some(cap) = PREVIEW_MAX_HEIGHT {
+            assert_eq!(h, cap);
+            assert!(w.is_multiple_of(2) && h.is_multiple_of(2), "got {w}x{h}");
+        } else {
+            assert_eq!((w, h), (3840, 2160));
+        }
     }
 
     fn rgba_layer(layer: &CompositeLayer) -> &std::sync::Arc<Vec<u8>> {

@@ -133,8 +133,13 @@ and export agree on every one, and each edit is a single undo.
   weights under `~/.cutlass/models/`, streaming to a `.part` sidecar and
   verifying a SHA-256 before installing atomically — a present, valid file
   costs no network. An `[ml]` config table (mirroring `[ai]`) picks the local
-  whisper model or routes to a cloud provider. (The whisper.cpp backend and
-  word-level transcription land next.)
+  whisper model or routes to a cloud provider.
+- **Local whisper.cpp backend.** `WhisperTranscriber` runs whisper.cpp (via
+  `whisper-rs`) on 16 kHz mono and returns word-timed segments — the substrate
+  for captions and transcript editing. It's behind an opt-in `whisper` feature,
+  so the C/C++ + cmake toolchain never touches the default build; a model
+  registry (tiny/base/small `.en`, official Hugging Face builds verified by
+  SHA-256) feeds the cache. (Engine/worker wiring lands next.)
 
 ## [alpha-0.4.0] — 2026-06-15
 

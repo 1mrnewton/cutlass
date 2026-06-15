@@ -122,10 +122,14 @@ which is for model-backed inference) plus the existing ripple commands.
       `~/.cutlass/config.toml` — pick the local whisper model or route to a
       cloud provider. Local-first: an absent/empty table yields a usable local
       configuration; cloud credentials resolve from the environment.
-- [ ] **Local whisper.cpp backend** (feature-gated): a `Transcribe` impl over
-      `whisper-rs` (the C/C++ build dependency stays opt-in, off the default
-      build), plus the real model registry (URLs + checksums) the cache
-      consumes. *Deferred — the native dependency lands on its own.*
+- [x] **Local whisper.cpp backend** (feature-gated): `WhisperTranscriber`
+      implements `Transcribe` over `whisper-rs` 0.16 — load a ggml model, run
+      the full pipeline on 16 kHz mono, return word-timed segments (per-token
+      `t0`/`t1` → seconds, special tokens dropped), responsive cancel via the
+      abort callback. Behind an opt-in `whisper` feature so the C/C++ + cmake
+      toolchain never touches the default build or CI. The real model registry
+      (tiny.en / base.en / small.en, official HF URLs + SHA-256s) lives in
+      `models.rs` and feeds the cache.
 - [ ] **Word-level transcription** (engine + worker): audio lane → decode at
       16 kHz mono → `Transcribe` → segments + word timestamps mapped to source
       ticks, the substrate both captions (Phase 4) and transcript editing

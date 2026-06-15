@@ -20,6 +20,16 @@ This crate is a workspace member but **not** a default member (like the planned 
 - `TranscribeOptions`: language hint and translate task.
 - `TranscribeError`: distinct failure kinds (not configured / model unavailable / backend / cancelled).
 - `StubTranscriber`: a deterministic backend for tests and headless development.
+- `WhisperTranscriber` (feature `whisper`): local transcription via whisper.cpp.
+- `ModelCache` / `ModelSpec` / `whisper_model`: on-demand, checksummed model weights and the whisper model registry.
+
+## Features
+
+- `whisper` (off by default): builds `WhisperTranscriber` over `whisper-rs`. This pulls a C/C++ + cmake build toolchain (and `whisper-rs-sys`, which needs Rust 1.88+), so it is opt-in and kept out of the default build and CI.
+
+```bash
+cargo build -p cutlass-ml --features whisper
+```
 
 ## Architecture invariants
 

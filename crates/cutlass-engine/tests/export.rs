@@ -275,6 +275,37 @@ fn export_two_track_composite_writes_valid_mp4() {
     assert!(std::fs::metadata(&out).unwrap().len() > 0);
 }
 
+// Two clips of the *same* media on stacked tracks at different offsets — the
+// reported "export is glacially slow" case. Both read the one source file at
+// two different positions every overlapping frame; with a per-media decoder
+// that thrashed on backward seeks. A per-clip decoder keeps both cursors
+// rolling forward. This guards correctness of that path end to end (the
+// speedup itself isn't asserted — it's not a timing test).
+#[test]
+fn export_overlapping_clips_of_same_media_composite_correctly() {
+    let Some(path) = small_video_asset() else {
+        return;
+    };
+    let (dir, mut engine) = temp_engine();
+    let media_id = import_asset(&mut engine, &path);
+    let v1 = add_track(&mut engine, TrackKind::Video, "V1");
+    let v2 = add_track(&mut engine, TrackKind::Video, "V2");
+
+    // Same source on both lanes, offset so they overlap on [12, 24).
+    add_media_clip(&mut engine, v1, media_id, tr(0, 24), rt(0));
+    add_media_clip(&mut engine, v2, media_id, tr(0, 24), rt(12));
+
+    let out = dir.path().join("same_media_overlap_export.mp4");
+    let stats = export_to(&mut engine, &out);
+    let media = engine.project().media(media_id).expect("media");
+    // Latest-ending clip finishes at tick 36.
+    assert_eq!(stats.frames, 36);
+    assert_eq!(stats.width, media.width);
+    assert_eq!(stats.height, media.height);
+    assert!(std::fs::metadata(&out).unwrap().len() > 0);
+    assert_export_duration_near(&out, 36, 24);
+}
+
 #[test]
 fn export_duration_follows_latest_ending_track() {
     let (dir, mut engine) = temp_engine();

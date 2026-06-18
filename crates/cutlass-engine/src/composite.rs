@@ -668,7 +668,7 @@ fn decode_media_frame(
     let fingerprint = SourceFingerprint::from_path(media.path())?;
     let source_id = fingerprint.id();
 
-    let (decoder, index) = pool.decoder_and_index(media_id, media.path())?;
+    let (decoder, index) = pool.decoder_and_index(clip.id, media_id, media.path())?;
     // Exact rational → stream-tick conversion. The old `RationalTime →
     // Duration → ticks` path truncated twice, landing rate-matched targets
     // one tick below the frame's stored PTS — a guaranteed cache miss on

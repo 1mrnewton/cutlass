@@ -587,8 +587,9 @@ fn resolve_clip_layer(
                 Generator::Text { .. } | Generator::Shape { .. } => {
                     match raster.raster_layer(generator, canvas.width, canvas.height) {
                         Some((bytes, raster_w, raster_h)) => {
-                            let placement =
-                                generator_layer_placement(transform, raster_w, raster_h, crop, canvas);
+                            let placement = generator_layer_placement(
+                                transform, raster_w, raster_h, crop, canvas,
+                            );
                             Ok(Some(
                                 CompositeLayer::rgba(bytes, raster_w, raster_h, placement)
                                     .with_uv(uv)

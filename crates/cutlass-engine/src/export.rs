@@ -387,7 +387,11 @@ mod tests {
         // 4K30 lands near the YouTube high-quality upload ballpark, not the
         // 12 Mb/s default that would crush a 4K render.
         assert_eq!(cfg.bitrate, target_bitrate(3840, 2160, Rational::FPS_30));
-        assert!(cfg.bitrate > 30_000_000, "4K30 bitrate too low: {}", cfg.bitrate);
+        assert!(
+            cfg.bitrate > 30_000_000,
+            "4K30 bitrate too low: {}",
+            cfg.bitrate
+        );
     }
 
     #[test]

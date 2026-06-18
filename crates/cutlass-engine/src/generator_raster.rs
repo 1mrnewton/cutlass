@@ -295,7 +295,11 @@ impl GeneratorRaster {
         // so cosmic-text measures the displayed glyphs.
         let shaped = style.case.apply(content);
         if shaped.trim().is_empty() {
-            return (vec![0u8; (width as usize) * (height as usize) * 4], width, height);
+            return (
+                vec![0u8; (width as usize) * (height as usize) * 4],
+                width,
+                height,
+            );
         }
 
         let scale = height as f32 / REFERENCE_HEIGHT;
@@ -465,7 +469,11 @@ impl GeneratorRaster {
         }
 
         let Some((min_x, min_y, max_x, max_y)) = ink.rect() else {
-            return (vec![0u8; (width as usize) * (height as usize) * 4], width, height);
+            return (
+                vec![0u8; (width as usize) * (height as usize) * 4],
+                width,
+                height,
+            );
         };
 
         // Effect passes (outline, drop shadow, background card) spread the
@@ -1178,7 +1186,10 @@ mod tests {
         // The content box (selection/hit-test) now spans the full text, not
         // the clipped-to-canvas remnant.
         let (cw, _) = raster.content_size(&long, 320, 240).unwrap();
-        assert!(cw > 320, "content box should span the overflowing text: {cw}");
+        assert!(
+            cw > 320,
+            "content box should span the overflowing text: {cw}"
+        );
     }
 
     #[test]
@@ -1203,7 +1214,9 @@ mod tests {
         let mut raster = GeneratorRaster::new();
         // Short text well within the frame must not enlarge the buffer (keeps
         // the common case byte-identical to the canvas-sized raster).
-        let (bytes, w, h) = raster.raster_layer(&Generator::text("Hi"), 320, 240).unwrap();
+        let (bytes, w, h) = raster
+            .raster_layer(&Generator::text("Hi"), 320, 240)
+            .unwrap();
         assert_eq!((w, h), (320, 240));
         assert_eq!(bytes.len(), (320 * 240 * 4) as usize);
     }

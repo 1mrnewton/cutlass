@@ -80,9 +80,8 @@ impl DecoderPool {
     ) -> Result<(&mut Decoder, &KeyframeIndex), EngineError> {
         // Build the keyframe index once per media (a full-file demux scan) and
         // share it across every clip that reads this source.
-        if !self.indices.contains_key(&media_id) {
-            let index = Arc::new(KeyframeIndex::build(path)?);
-            self.indices.insert(media_id, index);
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.indices.entry(media_id) {
+            slot.insert(Arc::new(KeyframeIndex::build(path)?));
         }
 
         let stale = self.entries.get(&clip_id).is_none_or(|e| e.path != path);

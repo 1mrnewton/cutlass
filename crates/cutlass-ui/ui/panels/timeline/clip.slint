@@ -62,6 +62,11 @@ export component ClipView inherits Rectangle {
     private property <bool> has-media: model.media-id != "";
     private property <bool> show-filmstrip: has-media && track-kind == TrackKind.video;
     private property <bool> show-waveform: has-media && track-kind == TrackKind.audio;
+    // CapCut keeps a video's sound on the clip itself, so a video clip whose
+    // media carries audio shows a slim waveform band along its bottom edge
+    // (the audio is mixed from this lane — there is no separate audio lane).
+    private property <bool> show-embedded-audio:
+        has-media && track-kind == TrackKind.video && model.has-audio;
     private property <bool> is-text: track-kind == TrackKind.text;
 
     // Visible slice of this clip in 256px buckets of clip-local x, so
@@ -165,6 +170,35 @@ export component ClipView inherits Rectangle {
             image-fit: cover;
             // Leaf element: opacity folds into the draw (no layer texture).
             opacity: root.dimmed ? 0.35 : 1.0;
+        }
+    }
+
+    // Embedded audio (CapCut): a video clip with sound shows a slim
+    // translucent waveform band along its bottom edge, over the filmstrip. The
+    // same off-thread peaks/tiles path as audio lanes, squashed into the band.
+    if show-embedded-audio: Rectangle {
+        y: parent.height - self.height;
+        height: min(26px, parent.height * 0.34);
+        background: #00000038;
+        clip: true;
+        for tile in StripBackend.waveform-tiles(
+            model.media-id,
+            model.source-in-s,
+            model.source-range.duration.value,
+            EditorStore.project.sequence.fps.num,
+            EditorStore.project.sequence.fps.den,
+            model.speed,
+            root.zoom,
+            root.vis-from-bucket,
+            root.vis-to-bucket,
+            StripBackend.generation): Image {
+            x: tile.x;
+            y: 0;
+            width: tile.width;
+            height: parent.height;
+            source: tile.image;
+            image-fit: fill;
+            opacity: root.dimmed ? 0.35 : 0.85;
         }
     }
 

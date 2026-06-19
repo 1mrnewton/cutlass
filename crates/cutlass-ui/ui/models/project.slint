@@ -193,6 +193,10 @@ export struct Clip {
     // run this clip's audio through RNNoise. Meaningful on audio-lane clips;
     // toggled via `InspectorBackend.set-denoise` on the worker.
     denoise: bool,
+    // Whether the source media carries an audio stream. CapCut keeps a video's
+    // sound on the video clip itself, so a video clip with audio draws a slim
+    // waveform band along its bottom edge (the audio is mixed from this lane).
+    has-audio: bool,
     // Text / title generator content. Empty on non-text clips.
     text-content: string,
     // Full visual treatment for text/title clips (font, color, stroke, …).

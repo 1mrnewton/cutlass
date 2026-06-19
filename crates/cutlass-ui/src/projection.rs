@@ -229,6 +229,12 @@ fn clip_to_slint(
         ),
         ClipSource::Generated(_) => (String::new(), 0.0),
     };
+    // Whether the clip's source carries sound — drives the embedded waveform on
+    // video clips (CapCut keeps a video's audio on the clip itself).
+    let has_audio = match &clip.content {
+        ClipSource::Media { media, .. } => project.media(*media).is_some_and(|m| m.has_audio),
+        ClipSource::Generated(_) => false,
+    };
     // Natural content size for preview placement: the media's native pixels
     // (aspect-fit into the canvas), or a generator's drawn-content bounds in
     // canvas px (fit 1:1). 0×0 ⇔ unknown — the selection geometry falls back
@@ -268,6 +274,7 @@ fn clip_to_slint(
         fade_out_s: time_to_seconds(EngineTime::new(clip.fade_out, clip.timeline.start.rate))
             as f32,
         denoise: clip.denoise,
+        has_audio,
         text_content: text_content.into(),
         text_style: clip_text_style(clip),
         generator_kind: generator_kind.into(),

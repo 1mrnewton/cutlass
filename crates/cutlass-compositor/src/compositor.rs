@@ -652,6 +652,10 @@ impl Compositor {
                 pass.draw(0..6, 0..1);
             }
             LayerContent::Yuv420p(yuv) => {
+                // Signal full-range YUV to the shader through the placement
+                // pad slot (unused by the limited-range default path).
+                let mut placement = placement;
+                placement.trans_opacity[3] = if yuv.full_range { 1.0 } else { 0.0 };
                 let uv_w = yuv.width / 2;
                 let uv_h = yuv.height / 2;
                 // Acquire all three planes first: the U and V planes share a

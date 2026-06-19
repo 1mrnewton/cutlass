@@ -11,6 +11,10 @@ pub struct Yuv420pLayer {
     pub u_stride: u32,
     pub v: Vec<u8>,
     pub v_stride: u32,
+    /// Samples are full (JPEG, 0–255) range rather than limited (16–235); the
+    /// GPU YUV→RGB shader picks its matrix from this. Defaults to `false`
+    /// (limited), the standard for video; set true for `yuvj420p` sources.
+    pub full_range: bool,
 }
 
 impl Yuv420pLayer {
@@ -34,7 +38,14 @@ impl Yuv420pLayer {
             u_stride,
             v,
             v_stride,
+            full_range: false,
         }
+    }
+
+    /// Mark these planes as full- or limited-range (builder style).
+    pub fn with_full_range(mut self, full_range: bool) -> Self {
+        self.full_range = full_range;
+        self
     }
 
     /// Copy each row to a tight buffer suitable for `wgpu` texture upload.

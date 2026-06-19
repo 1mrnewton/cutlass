@@ -17,7 +17,8 @@ struct Placement {
     // Columns of the 2x2 linear part mapping unit-quad corners to clip
     // space: (m00, m10, m01, m11).
     linear: vec4<f32>,
-    // Clip-space translation (x, y), layer opacity, pad.
+    // Clip-space translation (x, y), layer opacity, and a full-range flag
+    // (w: 0 = limited/studio 16-235, 1 = full/JPEG 0-255).
     trans_opacity: vec4<f32>,
     // Content UV rect (u0, v0, u1, v1) interpolated across the quad:
     // sub-rects crop, reversed axes mirror (flip H/V).
@@ -59,10 +60,20 @@ fn vs(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-fn yuv_to_rgb(yv: f32, uv: f32, vv: f32) -> vec3<f32> {
-    let y = yv - 16.0;
+fn yuv_to_rgb(yv: f32, uv: f32, vv: f32, full_range: f32) -> vec3<f32> {
     let u = uv - 128.0;
     let v = vv - 128.0;
+    if (full_range > 0.5) {
+        // Full-range (JPEG) BT.601: luma already spans 0..255, no 16/219
+        // rescale. Same matrix basis as the limited path, just unscaled.
+        let y = yv;
+        let r = clamp(y + 1.402 * v, 0.0, 255.0);
+        let g = clamp(y - 0.344136 * u - 0.714136 * v, 0.0, 255.0);
+        let b = clamp(y + 1.772 * u, 0.0, 255.0);
+        return vec3(r, g, b) / 255.0;
+    }
+    // Limited-range (studio) BT.601: y - 16, scaled by 298/256 ≈ 255/219.
+    let y = yv - 16.0;
     let r = clamp((298.0 * y + 409.0 * v + 128.0) / 256.0, 0.0, 255.0);
     let g = clamp((298.0 * y - 100.0 * u - 208.0 * v + 128.0) / 256.0, 0.0, 255.0);
     let b = clamp((298.0 * y + 516.0 * u + 128.0) / 256.0, 0.0, 255.0);
@@ -74,6 +85,6 @@ fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
     let yv = textureSample(y_tex, yuv_sampler, in.uv).r * 255.0;
     let uv = textureSample(u_tex, yuv_sampler, in.uv).r * 255.0;
     let vv = textureSample(v_tex, yuv_sampler, in.uv).r * 255.0;
-    let rgb = yuv_to_rgb(yv, uv, vv);
+    let rgb = yuv_to_rgb(yv, uv, vv, placement.trans_opacity.w);
     return vec4(rgb, placement.trans_opacity.z);
 }

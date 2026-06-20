@@ -147,6 +147,11 @@ jobs:
         with:
           body_path: CHANGELOG.md
           draft: false
-          prerelease: true
+          # Publish as the repo's "Latest" release so the assets are front and
+          # center on the releases page and homepage. Prereleases can't be marked
+          # latest and are hidden from the homepage widget, which buried the
+          # downloads. These are still alpha builds (see the alpha-* tag/name).
+          prerelease: false
+          make_latest: true
           files: artifacts/**/*
           generate_release_notes: false

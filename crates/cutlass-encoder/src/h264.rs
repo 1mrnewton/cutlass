@@ -277,7 +277,6 @@ mod tests {
                     "{} pixel choice disagrees with advertised formats",
                     enc.codec.name(),
                 );
-                break;
             }
         }
     }

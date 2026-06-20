@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [alpha-0.5.0] — 2026-06-20
+
 The **audio alpha** (M8): sound that doesn't need a DAW round-trip. Clip
 volume becomes a keyframable envelope, fades are corner handles, retimed
 clips finally play (pitch-corrected) — including speed ramps — music ducks
@@ -104,6 +106,63 @@ and export agree on every one, and each edit is a single undo.
   index re-anchors each mid-stream seek from the true frame offset instead of
   FFmpeg's estimated PTS, killing the tens-of-ms MP3 seek error noted in the
   previous alpha. MP4/AAC was already sample-accurate.
+
+### Embedded video audio
+
+- **Video clips keep their soundtrack.** Like CapCut, a video clip on a video
+  lane carries its own audio — no forced split onto a separate audio track.
+  Export mixes embedded video-lane audio; volume, fades, and denoise edits
+  route to the clip that actually carries sound, and the agent vocabulary
+  (tool schema v19) steers the same way.
+- **Waveform on video.** Clips with embedded audio draw a waveform band along
+  the bottom edge of the clip body.
+
+### Media pipeline
+
+- **Non-standard YUV inputs.** Sources tagged `yuvj420p` (and other
+  non-standard pixel layouts FFmpeg reports) decode and composite correctly
+  instead of washing out or mis-ranging.
+- **Full-range YUV on GPU.** A dedicated full-range YUV path in the
+  compositor keeps JPEG-style full-swing sources from looking crushed next to
+  limited-range media.
+
+### Fixed
+
+- **Export with stacked same-source clips.** Overlapping clips pointing at the
+  same media no longer re-decode every frame from scratch (#10).
+- **Headless export without CUDA.** When NVENC is listed but CUDA is absent
+  (typical Linux CI), encoder open now falls through to libx264 instead of
+  failing with "Operation not permitted".
+
+### Downloads
+
+| Platform | Artifact |
+| --- | --- |
+| Windows (x64 / arm64) | `Cutlass-*-windows-*-Setup.exe` — run the installer; or the portable `Cutlass-*-windows-*.zip` |
+| macOS (Apple Silicon / Intel) | `Cutlass-*-macos-arm64.zip` / `Cutlass-*-macos-x86_64.zip` — unzip, drag `Cutlass.app` to Applications. **First launch:** right-click → Open (not notarized). See `INSTALL-macos.txt`. |
+| Linux (x86_64) | `Cutlass-*-linux-x86_64.tar.gz` — extract and run `./cutlass-ui`; requires FFmpeg |
+
+### Using the AI agent
+
+The agent needs an LLM endpoint — none is bundled. Point
+`~/.cutlass/config.toml` at any OpenAI-compatible server, local or cloud:
+
+```toml
+[ai]
+base_url = "http://localhost:11434/v1"   # e.g. Ollama
+model = "qwen2.5:14b"
+# api_key = "sk-..."                     # for cloud endpoints
+```
+
+### Known limitations
+
+- **Crop is numeric-only** — no draggable crop-handles mode in the
+  preview yet.
+- **Agent quality tracks the model you give it** — small local models
+  may tool-call poorly; dry-run mode previews every plan before it
+  touches the timeline.
+- **Alpha stability** — crashes and UI polish gaps are expected; please
+  file issues.
 
 ## [alpha-0.4.0] — 2026-06-15
 
@@ -597,6 +656,7 @@ cargo run --release -p cutlass-ui
 
 See [README.md](README.md) for prerequisites and the `cutlass-app` CLI smoke test.
 
+[alpha-0.5.0]: https://github.com/1Mr-Newton/cutlass/releases/tag/alpha-0.5.0
 [alpha-0.4.0]: https://github.com/1Mr-Newton/cutlass/releases/tag/alpha-0.4.0
 [alpha-0.3.0]: https://github.com/1Mr-Newton/cutlass/releases/tag/alpha-0.3.0
 [alpha-0.2.0]: https://github.com/1Mr-Newton/cutlass/releases/tag/alpha-0.2.0

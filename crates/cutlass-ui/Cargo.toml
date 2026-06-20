@@ -19,7 +19,7 @@ cutlass-commands = { path = "../cutlass-commands" }
 crossbeam-channel = "0.5.15"
 serde = { workspace = true }
 serde_json = { workspace = true }
-slint = { version = "1.16", features = [
+slint = { version = "1.16.1", features = [
     "unstable-winit-030",
     "unstable-wgpu-28",
     "renderer-femtovg-wgpu",
@@ -34,7 +34,7 @@ cpal = "0.18.1"
 tempfile = "3"
 
 [build-dependencies]
-slint-build = "1.16"
+slint-build = "1.16.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"

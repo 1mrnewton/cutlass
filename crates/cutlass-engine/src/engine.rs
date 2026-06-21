@@ -198,9 +198,11 @@ impl Engine {
                 // Inverses are written to be infallible once recorded (same
                 // policy as undo); nothing sensible to do beyond stopping.
                 tracing::error!("history group rollback failed; state may be partial");
+                self.reconcile_decoders();
                 return;
             }
         }
+        self.reconcile_decoders();
     }
 
     /// Replace the session with a fresh, empty, unsaved project (File →
@@ -259,6 +261,22 @@ impl Engine {
         Ok(())
     }
 
+    /// Drop decoders for clips that just left the timeline. Run after every
+    /// mutation that can remove a clip (edit, undo, redo, rollback): the
+    /// decoder pool keys by [`ClipId`] and otherwise holds decoders — and the
+    /// FFmpeg buffers behind them — until a New/Open, so deletes, splits, and
+    /// undos would pile up megabytes per dead clip (the empty-timeline-but-GBs
+    /// leak).
+    fn reconcile_decoders(&mut self) {
+        let live: std::collections::HashSet<ClipId> = self
+            .project
+            .timeline()
+            .tracks_ordered()
+            .flat_map(|track| track.clips().map(|clip| clip.id))
+            .collect();
+        self.decoder_pool.retain_clips(&live);
+    }
+
     /// Apply a wire command. On success, pushes the inverse action onto the undo stack.
     pub fn apply(&mut self, command: Command) -> Result<ApplyOutcome, EngineError> {
         if let Command::Project(ProjectCommand::Export { path }) = command {
@@ -289,11 +307,14 @@ impl Engine {
                 self.saved_revision = self.revision;
             }
             ApplyOutcome::Saved => self.saved_revision = self.revision,
+            // Edits and media removal can drop clips off the timeline; free
+            // their now-orphaned decoders instead of holding them till New/Open.
+            ApplyOutcome::Edited(_) | ApplyOutcome::RemovedMedia { .. } => {
+                self.revision += 1;
+                self.reconcile_decoders();
+            }
             // Relink dirties the session: the repaired path needs saving.
-            ApplyOutcome::Imported { .. }
-            | ApplyOutcome::RemovedMedia { .. }
-            | ApplyOutcome::Edited(_)
-            | ApplyOutcome::Relinked { .. } => self.revision += 1,
+            ApplyOutcome::Imported { .. } | ApplyOutcome::Relinked { .. } => self.revision += 1,
             // Export is handled by the early return above.
             ApplyOutcome::Exported { .. } => {}
         }
@@ -380,6 +401,7 @@ impl Engine {
             Ok(inverse) => {
                 self.history.push_redo(inverse);
                 self.revision += 1;
+                self.reconcile_decoders();
                 true
             }
             Err(_) => {
@@ -402,6 +424,7 @@ impl Engine {
             Ok(inverse) => {
                 self.history.push_undo(inverse);
                 self.revision += 1;
+                self.reconcile_decoders();
                 true
             }
             Err(_) => false,

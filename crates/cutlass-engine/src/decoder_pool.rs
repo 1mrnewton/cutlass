@@ -8,7 +8,7 @@
 //! every read cursor rolling forward. The keyframe index *is* shared per media
 //! (built once — it's a full-file demux scan).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -66,6 +66,18 @@ impl DecoderPool {
         self.entries.clear();
         self.indices.clear();
         self.stills.clear();
+    }
+
+    /// Drop the decoder of every clip no longer on the timeline. Decoders are
+    /// keyed by [`ClipId`] and otherwise live for the whole session (only a
+    /// New/Open [`clear`](Self::clear)s them), so a deleted, split, trimmed
+    /// (split mints fresh ids), or undone clip would otherwise leak its
+    /// decoder — and the megabytes of FFmpeg decode/reference buffers behind
+    /// it — until the next project swap. The engine calls this after every
+    /// edit that can remove a clip. Keyframe indices are keyed by media (cheap,
+    /// bounded by distinct sources) and left untouched.
+    pub fn retain_clips(&mut self, live: &HashSet<ClipId>) {
+        self.entries.retain(|clip_id, _| live.contains(clip_id));
     }
 
     /// The decoder dedicated to `clip` and the keyframe index for its backing
@@ -188,6 +200,34 @@ mod tests {
             1,
             "the keyframe index is built once per media and shared"
         );
+    }
+
+    #[test]
+    fn retain_clips_evicts_decoders_for_clips_no_longer_on_the_timeline() {
+        let Some(path) = sample_video() else {
+            return;
+        };
+        let mut pool = DecoderPool::new();
+        let media = MediaId::from_raw(1);
+        let keep = ClipId::from_raw(1);
+        let gone = ClipId::from_raw(2);
+
+        pool.decoder_and_index(keep, media, &path).unwrap();
+        pool.decoder_and_index(gone, media, &path).unwrap();
+        assert_eq!(pool.decoder_count(), 2);
+
+        let live: HashSet<ClipId> = std::iter::once(keep).collect();
+        pool.retain_clips(&live);
+        assert_eq!(
+            pool.decoder_count(),
+            1,
+            "the deleted clip's decoder is dropped, the live one kept"
+        );
+
+        // An empty timeline frees every decoder (the reported leak: GBs held
+        // with nothing on the timeline).
+        pool.retain_clips(&HashSet::new());
+        assert_eq!(pool.decoder_count(), 0);
     }
 
     #[test]

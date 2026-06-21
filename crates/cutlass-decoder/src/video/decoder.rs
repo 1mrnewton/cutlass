@@ -343,8 +343,12 @@ impl Decoder {
             return self.send_packet(packet);
         }
 
-        let mut packet = Packet::empty();
         loop {
+            // Fresh packet per read: non-target (e.g. audio) packets are
+            // dropped at the end of the iteration, which unrefs their payload.
+            // Reusing one packet would leak every skipped packet, since
+            // `Packet::read` does not unref and `Packet` only unrefs on drop.
+            let mut packet = Packet::empty();
             match packet.read(&mut self.input) {
                 Ok(()) => {
                     if packet.stream() == self.stream_index {

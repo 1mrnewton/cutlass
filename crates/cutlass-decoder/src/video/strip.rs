@@ -183,8 +183,11 @@ fn next_frame(
                 if *demuxer_done {
                     return Ok(false);
                 }
-                let mut packet = Packet::empty();
                 loop {
+                    // Fresh packet per read so skipped (non-video) packets unref
+                    // on drop; `Packet::read` never unrefs and reusing one packet
+                    // would leak every packet's payload across the demux.
+                    let mut packet = Packet::empty();
                     match packet.read(input) {
                         Ok(()) if packet.stream() == stream_index => {
                             decoder.send_packet(&packet).map_err(DecodeError::Decode)?;

@@ -77,8 +77,12 @@ impl KeyframeIndex {
 
         let mut keyframes = Vec::new();
         let mut dts_fallbacks = 0usize;
-        let mut packet = Packet::empty();
         loop {
+            // A fresh packet each iteration: `Packet::read` (av_read_frame) does
+            // not unref the previous buffer, and `Packet`'s only unref is on
+            // drop — reusing one packet across the whole file leaks every
+            // packet's payload (GBs on a long, high-bitrate source).
+            let mut packet = Packet::empty();
             match packet.read(&mut input) {
                 Ok(()) => {
                     if packet.stream() == stream_index && packet.is_key() {

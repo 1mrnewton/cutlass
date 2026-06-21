@@ -54,12 +54,13 @@ impl AiSection {
     }
 }
 
-/// `~/.cutlass/config.toml` (HOME-relative; falls back to the working
-/// directory when HOME is unset, mirroring `recent.json` and autosave).
+/// `~/.cutlass/config.toml` — the user's home dir on every platform
+/// (`C:\Users\<name>\.cutlass\config.toml` on Windows, where `HOME` is unset).
+/// Falls back to the temp dir only if the home dir can't be resolved; never
+/// the working directory, which is the read-only install folder on Windows.
 pub fn default_config_path() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
         .join(".cutlass")
         .join("config.toml")
 }

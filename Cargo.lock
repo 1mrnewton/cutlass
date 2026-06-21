@@ -1299,6 +1299,7 @@ dependencies = [
  "cutlass-commands",
  "cutlass-engine",
  "cutlass-models",
+ "dirs",
  "schemars",
  "serde",
  "serde_json",

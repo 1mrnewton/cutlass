@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 cutlass-commands = { path = "../cutlass-commands" }
 cutlass-models = { path = "../cutlass-models" }
+dirs = "6.0.0"
 schemars = "1"
 serde.workspace = true
 serde_json.workspace = true

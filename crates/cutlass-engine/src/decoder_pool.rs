@@ -17,10 +17,22 @@ use cutlass_models::{ClipId, MediaId};
 
 use crate::error::EngineError;
 
+/// Hard cap on simultaneously open per-clip decoders. Reconciling against the
+/// live timeline ([`DecoderPool::retain_clips`]) bounds the pool to the clip
+/// count in normal use; this is the backstop for sessions that touch more
+/// distinct clips between edits than that — e.g. scrubbing a very long
+/// timeline, where every clip passed under the playhead opens a decoder with
+/// no edit in between to trigger reconciliation. Each software decoder holds
+/// tens of MB of FFmpeg buffers, so the cap trades a re-open on the rare
+/// scroll-back for a firm memory ceiling.
+const MAX_DECODERS: usize = 64;
+
 struct Entry {
     path: PathBuf,
     decoder: Decoder,
     index: Arc<KeyframeIndex>,
+    /// Monotonic touch stamp for LRU eviction (see [`DecoderPool::use_tick`]).
+    last_used: u64,
 }
 
 /// One decoded still image, shared by every composite that shows it.
@@ -38,6 +50,9 @@ pub struct DecoderPool {
     indices: HashMap<MediaId, Arc<KeyframeIndex>>,
     stills: HashMap<MediaId, StillEntry>,
     options: DecodeOptions,
+    /// Monotonic counter stamped onto an entry's `last_used` on every access,
+    /// so the smallest stamp is the least-recently-used decoder to evict.
+    use_tick: u64,
 }
 
 impl DecoderPool {
@@ -59,6 +74,7 @@ impl DecoderPool {
             indices: HashMap::new(),
             stills: HashMap::new(),
             options: DecodeOptions::default().hw_accel(hw_accel),
+            use_tick: 0,
         }
     }
 
@@ -106,12 +122,44 @@ impl DecoderPool {
                     path: path.to_path_buf(),
                     decoder,
                     index,
+                    last_used: 0,
                 },
             );
         }
 
+        // Touch first (so the requested clip is the most-recently-used and can
+        // never be the eviction victim), then trim back to the cap.
+        self.use_tick += 1;
+        let tick = self.use_tick;
+        self.entries
+            .get_mut(&clip_id)
+            .expect("just inserted")
+            .last_used = tick;
+        self.evict_over_cap(clip_id);
+
         let entry = self.entries.get_mut(&clip_id).expect("just inserted");
         Ok((&mut entry.decoder, &*entry.index))
+    }
+
+    /// Drop least-recently-used decoders until the pool is back at the cap,
+    /// never evicting `keep` (the clip whose decoder the caller is about to
+    /// use). O(n) per drop with n ≤ [`MAX_DECODERS`]; only runs when the cap is
+    /// already exceeded, so it's off every steady-state hot path.
+    fn evict_over_cap(&mut self, keep: ClipId) {
+        while self.entries.len() > MAX_DECODERS {
+            let victim = self
+                .entries
+                .iter()
+                .filter(|(id, _)| **id != keep)
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(id, _)| *id);
+            match victim {
+                Some(id) => {
+                    self.entries.remove(&id);
+                }
+                None => break,
+            }
+        }
     }
 
     /// The decoded RGBA for a still-image media, decoding on first use
@@ -228,6 +276,40 @@ mod tests {
         // with nothing on the timeline).
         pool.retain_clips(&HashSet::new());
         assert_eq!(pool.decoder_count(), 0);
+    }
+
+    #[test]
+    fn open_decoders_are_capped_keeping_the_most_recent() {
+        let Some(path) = sample_video() else {
+            return;
+        };
+        let mut pool = DecoderPool::new();
+        let media = MediaId::from_raw(1);
+
+        // Touch far more distinct clips than the cap, oldest-id first.
+        let total = MAX_DECODERS as u64 + 16;
+        for i in 0..total {
+            pool.decoder_and_index(ClipId::from_raw(i + 1), media, &path)
+                .unwrap();
+        }
+        assert_eq!(
+            pool.decoder_count(),
+            MAX_DECODERS,
+            "the pool never holds more than the cap"
+        );
+
+        // Re-touching the newest clip is a cache hit (no decoder churn).
+        let newest = ClipId::from_raw(total);
+        pool.decoder_and_index(newest, media, &path).unwrap();
+        assert_eq!(pool.decoder_count(), MAX_DECODERS);
+        assert!(
+            pool.entries.contains_key(&newest),
+            "the most-recently-used clip survives eviction"
+        );
+        assert!(
+            !pool.entries.contains_key(&ClipId::from_raw(1)),
+            "the oldest clip was evicted"
+        );
     }
 
     #[test]

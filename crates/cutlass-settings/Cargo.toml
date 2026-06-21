@@ -1,0 +1,15 @@
+[package]
+name = "cutlass-settings"
+description = "User settings model + format-preserving IO for ~/.cutlass/config.toml"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dirs = "6.0.0"
+toml_edit = "0.22"
+
+[dev-dependencies]
+tempfile = "3"

@@ -10,6 +10,7 @@ members = [
     "crates/cutlass-engine",
     "crates/cutlass-models",
     "crates/cutlass-probe",
+    "crates/cutlass-settings",
     "crates/cutlass-ui",
 ]
 default-members = ["crates/cutlass-ui"]

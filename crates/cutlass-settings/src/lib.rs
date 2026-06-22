@@ -29,10 +29,6 @@
 //! [appearance]
 //! theme = "dark-blue"              # "default" | "ember" | "dark-blue"
 //!
-//! [general]
-//! autosave_enabled = true
-//! autosave_interval_secs = 30
-//!
 //! [cache]
 //! budget_mb = 51200               # 50 GiB
 //! # dir = "/path/to/cache"        # absent ⇒ the OS cache dir
@@ -46,11 +42,6 @@ use toml_edit::{DocumentMut, Item, Table, value};
 /// `cutlass_engine::DEFAULT_CACHE_BUDGET_BYTES` so an unconfigured install
 /// matches the engine default exactly.
 pub const DEFAULT_CACHE_BUDGET_MB: u64 = 50 * 1024;
-
-/// Lower bound on the autosave sweep interval, in seconds. A too-eager sweep
-/// would fight the editor for the worker's message queue; the UI default is
-/// 30s (see `cutlass-ui::autosave::SWEEP_INTERVAL`).
-pub const MIN_AUTOSAVE_INTERVAL_SECS: u64 = 5;
 
 /// Which bundled theme the shell renders. The variant order matches the
 /// `index()` the UI dropdown uses; `DarkBlue` is the shipped default.
@@ -147,24 +138,6 @@ pub struct AppearanceSettings {
     pub theme: ThemeChoice,
 }
 
-/// The `[general]` table: autosave cadence (the only editor-wide knob today).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GeneralSettings {
-    /// Whether the periodic autosave sweep runs at all.
-    pub autosave_enabled: bool,
-    /// Seconds between sweeps, clamped to [`MIN_AUTOSAVE_INTERVAL_SECS`].
-    pub autosave_interval_secs: u64,
-}
-
-impl Default for GeneralSettings {
-    fn default() -> Self {
-        Self {
-            autosave_enabled: true,
-            autosave_interval_secs: 30,
-        }
-    }
-}
-
 /// The `[cache]` table: limits on the on-disk frame cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheSettings {
@@ -188,8 +161,6 @@ impl Default for CacheSettings {
 /// state of a fresh install (no file on disk).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Settings {
-    /// `[general]`.
-    pub general: GeneralSettings,
     /// `[appearance]`.
     pub appearance: AppearanceSettings,
     /// `[ai]`.
@@ -276,16 +247,6 @@ impl Settings {
             }
         }
 
-        if let Some(t) = section(doc, "general") {
-            if let Some(v) = bool_at(t, "autosave_enabled") {
-                s.general.autosave_enabled = v;
-            }
-            if let Some(v) = int_at(t, "autosave_interval_secs") {
-                s.general.autosave_interval_secs =
-                    (v.max(0) as u64).max(MIN_AUTOSAVE_INTERVAL_SECS);
-            }
-        }
-
         if let Some(t) = section(doc, "cache") {
             if let Some(v) = int_at(t, "budget_mb") {
                 s.cache.budget_mb = v.max(0) as u64;
@@ -311,15 +272,6 @@ impl Settings {
             set_str(t, "theme", self.appearance.theme.key());
         }
         {
-            let t = ensure_table(doc, "general");
-            set_bool(t, "autosave_enabled", self.general.autosave_enabled);
-            set_int(
-                t,
-                "autosave_interval_secs",
-                self.general.autosave_interval_secs as i64,
-            );
-        }
-        {
             let dir = self.cache.dir.as_ref().map(|p| p.to_string_lossy());
             let t = ensure_table(doc, "cache");
             set_int(t, "budget_mb", self.cache.budget_mb as i64);
@@ -336,10 +288,6 @@ fn section<'a>(doc: &'a DocumentMut, key: &str) -> Option<&'a Table> {
 
 fn string_at(table: &Table, key: &str) -> Option<String> {
     table.get(key).and_then(Item::as_str).map(str::to_owned)
-}
-
-fn bool_at(table: &Table, key: &str) -> Option<bool> {
-    table.get(key).and_then(Item::as_bool)
 }
 
 fn int_at(table: &Table, key: &str) -> Option<i64> {
@@ -363,12 +311,6 @@ fn ensure_table<'a>(doc: &'a mut DocumentMut, key: &str) -> &'a mut Table {
 /// core of the format-preserving promise.
 fn set_str(table: &mut Table, key: &str, v: &str) {
     if table.get(key).and_then(Item::as_str) != Some(v) {
-        table[key] = value(v);
-    }
-}
-
-fn set_bool(table: &mut Table, key: &str, v: bool) {
-    if table.get(key).and_then(Item::as_bool) != Some(v) {
         table[key] = value(v);
     }
 }
@@ -400,7 +342,6 @@ mod tests {
         assert_eq!(s, Settings::default());
         assert!(!s.ai.is_configured());
         assert_eq!(s.appearance.theme, ThemeChoice::DarkBlue);
-        assert_eq!(s.general.autosave_interval_secs, 30);
         assert_eq!(s.cache.budget_mb, DEFAULT_CACHE_BUDGET_MB);
     }
 
@@ -422,10 +363,6 @@ api_key_env = "OPENAI_API_KEY"
 [appearance]
 theme = "ember"
 
-[general]
-autosave_enabled = false
-autosave_interval_secs = 60
-
 [cache]
 budget_mb = 1024
 dir = "/tmp/cutlass-cache"
@@ -439,8 +376,6 @@ dir = "/tmp/cutlass-cache"
         assert_eq!(s.ai.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
         assert!(s.ai.is_configured());
         assert_eq!(s.appearance.theme, ThemeChoice::Ember);
-        assert!(!s.general.autosave_enabled);
-        assert_eq!(s.general.autosave_interval_secs, 60);
         assert_eq!(s.cache.budget_mb, 1024);
         assert_eq!(
             s.cache.dir.as_deref(),
@@ -511,17 +446,6 @@ dir = "/tmp/cutlass-cache"
         save(&path, &Settings::default()).unwrap();
         assert!(path.exists());
         assert_eq!(load(&path).unwrap(), Settings::default());
-    }
-
-    #[test]
-    fn autosave_interval_clamps_up_to_the_floor() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[general]\nautosave_interval_secs = 1\n").unwrap();
-        assert_eq!(
-            load(&path).unwrap().general.autosave_interval_secs,
-            MIN_AUTOSAVE_INTERVAL_SECS
-        );
     }
 
     #[test]

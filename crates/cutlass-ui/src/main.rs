@@ -819,8 +819,6 @@ fn main() -> Result<(), slint::PlatformError> {
             .unwrap_or_default()
             .into(),
     );
-    settings_backend.set_autosave_enabled(app_settings.general.autosave_enabled);
-    settings_backend.set_autosave_interval_secs(app_settings.general.autosave_interval_secs as i32);
     settings_backend.set_cache_budget_gb(app_settings.cache.budget_mb as f32 / 1024.0);
     settings_backend.set_cache_dir_effective(effective_cache_dir.display().to_string().into());
     app.global::<AppStore>()
@@ -844,9 +842,6 @@ fn main() -> Result<(), slint::PlatformError> {
             s.ai.api_key_env = non_empty(&sb.get_ai_api_key_env());
             s.appearance.theme =
                 cutlass_settings::ThemeChoice::from_index(app.global::<AppStore>().get_theme_id());
-            s.general.autosave_enabled = sb.get_autosave_enabled();
-            s.general.autosave_interval_secs = (sb.get_autosave_interval_secs().max(0) as u64)
-                .max(cutlass_settings::MIN_AUTOSAVE_INTERVAL_SECS);
             s.cache.budget_mb = (sb.get_cache_budget_gb().max(0.0) * 1024.0).round() as u64;
 
             if let Err(e) = cutlass_settings::save(&config_path, &s) {

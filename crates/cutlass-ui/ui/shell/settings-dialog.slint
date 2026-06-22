@@ -121,54 +121,10 @@ component SettingsTextField inherits Rectangle {
     }
 }
 
-// Inline checkbox + label (mirrors the agent panel's preview toggle).
-component Toggle inherits TouchArea {
-    in property <string> label;
-    in-out property <bool> checked: false;
-
-    width: row.preferred-width;
-    height: row.preferred-height;
-    mouse-cursor: pointer;
-    clicked => {
-        root.checked = !root.checked;
-    }
-
-    row := HorizontalLayout {
-        spacing: AppStore.theme.metrics.spacing.sm;
-
-        Rectangle {
-            y: (parent.height - self.height) / 2;
-            width: 14px;
-            height: 14px;
-            border-radius: AppStore.theme.metrics.radius.sm;
-            border-width: 1px;
-            border-color: root.checked ? AppStore.theme.accent.primary : #ffffff33;
-            background: root.checked ? AppStore.theme.accent.primary : transparent;
-
-            if root.checked: CutlassText {
-                width: parent.width;
-                height: parent.height;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                text: "✓";
-                style: AppStore.theme.typography.caption;
-                foreground: #0A0A0A;
-            }
-        }
-
-        CutlassText {
-            vertical-alignment: center;
-            text: root.label;
-            style: AppStore.theme.typography.label;
-            foreground: root.has-hover ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
-        }
-    }
-}
-
 export component SettingsDialog inherits Rectangle {
     background: #000000A0;
 
-    // 0 = AI, 1 = Appearance, 2 = General, 3 = Cache.
+    // 0 = AI, 1 = Appearance, 2 = Cache.
     in-out property <int> section: 0;
 
     property <[string]> theme-names: ["Graphite (default)", "Ember", "Dark blue"];
@@ -261,17 +217,10 @@ export component SettingsDialog inherits Rectangle {
                         }
                     }
                     NavItem {
-                        label: "General";
+                        label: "Cache";
                         selected: root.section == 2;
                         clicked => {
                             root.section = 2;
-                        }
-                    }
-                    NavItem {
-                        label: "Cache";
-                        selected: root.section == 3;
-                        clicked => {
-                            root.section = 3;
                         }
                     }
 
@@ -391,49 +340,8 @@ export component SettingsDialog inherits Rectangle {
                             }
                         }
 
-                        // --- General --------------------------------------
-                        if root.section == 2: VerticalLayout {
-                            spacing: AppStore.theme.metrics.spacing.md;
-
-                            PaneTitle {
-                                text: "General";
-                            }
-                            Hint {
-                                text: "Cutlass autosaves continuously so a crash never loses work. These control the recovery sweep.";
-                            }
-
-                            Toggle {
-                                label: "Autosave (crash recovery)";
-                                checked <=> SettingsBackend.autosave-enabled;
-                            }
-
-                            FieldRow {
-                                label: "Interval";
-
-                                slider := CutlassSlider {
-                                    enabled: SettingsBackend.autosave-enabled;
-                                    minimum: 5;
-                                    maximum: 300;
-                                    step: 5;
-                                    value: SettingsBackend.autosave-interval-secs;
-                                    changed(v) => {
-                                        SettingsBackend.autosave-interval-secs = round(v);
-                                    }
-                                }
-
-                                CutlassText {
-                                    width: 56px;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: right;
-                                    text: SettingsBackend.autosave-interval-secs + "s";
-                                    style: AppStore.theme.typography.caption;
-                                    foreground: AppStore.theme.text.secondary;
-                                }
-                            }
-                        }
-
                         // --- Cache ----------------------------------------
-                        if root.section == 3: VerticalLayout {
+                        if root.section == 2: VerticalLayout {
                             spacing: AppStore.theme.metrics.spacing.md;
 
                             PaneTitle {

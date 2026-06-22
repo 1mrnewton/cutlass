@@ -16,11 +16,6 @@ export global SettingsBackend {
     in-out property <string> ai-api-key;
     in-out property <string> ai-api-key-env;
 
-    // --- General ([general]) -------------------------------------------
-    in-out property <bool> autosave-enabled: true;
-    // Seconds between autosave sweeps (slider-bound; clamped in Rust).
-    in-out property <int> autosave-interval-secs: 30;
-
     // --- Cache ([cache]) -----------------------------------------------
     // LRU eviction budget in GiB (the UI's friendly unit; Rust stores MiB).
     in-out property <float> cache-budget-gb: 50.0;
@@ -38,8 +33,8 @@ export global SettingsBackend {
     in-out property <bool> ai-test-ok: false;
 
     // Persist every value (plus AppStore.theme-id) to config.toml. The Rust
-    // handler also applies the live-settable bits immediately (autosave
-    // cadence, the agent's configured state).
+    // handler also applies the live-settable bits immediately (the agent's
+    // configured state).
     callback save();
     // Probe the endpoint with the *current, unsaved* AI fields and report
     // back through `ai-test-status` / `ai-test-ok`.

@@ -1,11 +1,16 @@
-/// Canvas dimensions + background for a composite pass.
+//! The scene description a composite pass renders: a canvas plus an ordered
+//! stack of placed layers.
+
+use cutlass_core::{RgbaImage, VideoFrame};
+use cutlass_shapes::{SdfShape, Stroke};
+
+/// Canvas dimensions and background for one composite pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompositorConfig {
     pub width: u32,
     pub height: u32,
-    /// Opaque background color (`[r, g, b]`) the canvas clears to before
-    /// layers composite over it.
-    pub background: [u8; 3],
+    /// Opaque background the canvas clears to before layers composite over it.
+    pub background: [u8; 4],
 }
 
 impl CompositorConfig {
@@ -13,39 +18,38 @@ impl CompositorConfig {
         Self {
             width,
             height,
-            background: [0, 0, 0],
+            background: [0, 0, 0, 255],
         }
     }
 
-    pub const fn with_background(mut self, background: [u8; 3]) -> Self {
+    pub const fn with_background(mut self, background: [u8; 4]) -> Self {
         self.background = background;
         self
     }
 }
 
-use std::sync::Arc;
+/// Content UV rect covering the whole visible picture (no crop, no mirror).
+pub const FULL_UV: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
-use crate::yuv::Yuv420pLayer;
-
-/// Where a layer's content lands on the canvas, in canvas pixels.
+/// Where a layer lands on the canvas, in canvas pixels.
 ///
 /// The compositor draws a quad of `size` centered on `center`, rotated by
-/// `rotation`, with content alpha multiplied by `opacity`. The same values
-/// drive preview hit-testing, so picking can never disagree with rendering.
+/// `rotation` (clockwise, +y down), with content alpha scaled by `opacity`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerPlacement {
     /// Content center in canvas pixels (+x right, +y down).
     pub center: [f32; 2],
     /// Pre-rotation content extent (width, height) in canvas pixels.
     pub size: [f32; 2],
-    /// Clockwise rotation about the center, in radians.
+    /// Clockwise rotation about the center, in radians. A frame's *container*
+    /// rotation is added on top of this by the compositor.
     pub rotation: f32,
-    /// Layer opacity, 0.0..=1.0; multiplies the content's alpha.
+    /// Layer opacity in `0.0..=1.0`; multiplies the content's alpha.
     pub opacity: f32,
 }
 
 impl LayerPlacement {
-    /// The pre-transform behavior: content stretched over the whole canvas.
+    /// Stretch content across the whole canvas (the no-transform default).
     pub fn full_canvas(config: &CompositorConfig) -> Self {
         Self {
             center: [config.width as f32 / 2.0, config.height as f32 / 2.0],
@@ -56,103 +60,87 @@ impl LayerPlacement {
     }
 }
 
-/// Content UV rect covering the whole texture (no crop, no mirroring).
-pub const FULL_UV: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
-
-/// A GPU effect applied to a single layer, with its parameters already
-/// resolved to scalars (the engine samples animated `Param`s at the frame
-/// tick before building the layer — the compositor never sees a curve).
+/// A parametric vector shape drawn as a signed-distance field by the shape
+/// pipeline: no texture, no rasterization — geometry parameters ride in the
+/// layer's uniform block, so animated shapes cost a uniform update per frame
+/// and stay crisp at any scale.
 ///
-/// `params` are packed in the effect's declared slot order (see
-/// [`crate::effects::effect_param_index`]); unused slots stay zero. An
-/// `effect_id` the registry doesn't know is skipped.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LayerEffect {
-    pub effect_id: String,
-    pub params: [f32; crate::effects::EFFECT_PARAM_SLOTS],
+/// The shape is evaluated in quad-local pixels centered on the placement.
+/// The placed quad must be at least as large as the shape plus its stroke
+/// overhang plus the anti-alias ramp (`stroke.width / 2 + 2px` per side), or
+/// the ink clips at the quad edge; callers (the renderer's resolver) pad the
+/// placement size accordingly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SdfLayer {
+    /// Half-extents + shape parameters, in canvas pixels.
+    pub shape: SdfShape,
+    /// Straight-alpha fill color; alpha 0 draws no fill (stroke-only).
+    pub fill: [u8; 4],
+    /// Optional centered outline (width in canvas pixels).
+    pub stroke: Option<Stroke>,
 }
 
-impl LayerEffect {
-    pub fn new(effect_id: impl Into<String>) -> Self {
-        Self {
-            effect_id: effect_id.into(),
-            params: [0.0; crate::effects::EFFECT_PARAM_SLOTS],
-        }
-    }
-
-    /// Set one parameter slot (builder style).
-    pub fn with_param(mut self, slot: usize, value: f32) -> Self {
-        if slot < self.params.len() {
-            self.params[slot] = value;
-        }
-        self
-    }
+/// The pixel source for a [`CompositeLayer`].
+///
+/// Frames are borrowed: the engine pulls a [`VideoFrame`] from the decoder for
+/// the current tick and hands it to the compositor without copying the planes.
+pub enum LayerContent<'a> {
+    /// A decoded video frame (CPU planes; GPU-surface import is a follow-up).
+    Frame(&'a VideoFrame),
+    /// A pre-rasterized straight-alpha RGBA bitmap: text, pen-tool shape
+    /// paths, stickers, or a decoded still. The compositor premultiplies it
+    /// on upload so its anti-aliased edges blend cleanly.
+    Rgba(&'a RgbaImage),
+    /// A solid RGBA fill across the placed quad.
+    Solid([u8; 4]),
+    /// A parametric vector shape evaluated in the fragment shader.
+    Sdf(SdfLayer),
 }
 
-/// One layer in bottom-to-top stacking order: pixel content plus where it
-/// lands on the canvas.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CompositeLayer {
-    pub content: LayerContent,
+/// One layer in bottom-to-top stacking order: content plus placement.
+pub struct CompositeLayer<'a> {
+    pub content: LayerContent<'a>,
     pub placement: LayerPlacement,
-    /// Content UV rect `[u0, v0, u1, v1]` sampled across the placed quad:
-    /// `(u0, v0)` lands on the quad's top-left corner, `(u1, v1)` on the
-    /// bottom-right. A sub-rect crops; a reversed axis (`u0 > u1` or
-    /// `v0 > v1`) mirrors. Ignored by solid fills.
+    /// Sampled UV rect `[u0, v0, u1, v1]` across the **visible picture**
+    /// (`(0,0)`=top-left, `(1,1)`=bottom-right of the frame's visible region).
+    /// A sub-rect crops; a reversed axis mirrors. Ignored by solid fills.
     pub uv: [f32; 4],
-    /// Per-layer effect chain, applied in order before the layer composites
-    /// onto the canvas. Empty for the common case (the no-effect render path
-    /// stays a single pass).
-    pub effects: Vec<LayerEffect>,
 }
 
-impl CompositeLayer {
-    pub fn yuv420p(layer: Yuv420pLayer, placement: LayerPlacement) -> Self {
+impl<'a> CompositeLayer<'a> {
+    /// A video-frame layer with no crop/mirror.
+    pub fn frame(frame: &'a VideoFrame, placement: LayerPlacement) -> Self {
         Self {
-            content: LayerContent::Yuv420p(layer),
+            content: LayerContent::Frame(frame),
             placement,
             uv: FULL_UV,
-            effects: Vec::new(),
         }
     }
 
-    pub fn rgba(bytes: Arc<Vec<u8>>, width: u32, height: u32, placement: LayerPlacement) -> Self {
+    /// An RGBA bitmap layer (text/shape/sticker/still) with no crop/mirror.
+    pub fn rgba(image: &'a RgbaImage, placement: LayerPlacement) -> Self {
         Self {
-            content: LayerContent::Rgba {
-                bytes,
-                width,
-                height,
-            },
+            content: LayerContent::Rgba(image),
             placement,
             uv: FULL_UV,
-            effects: Vec::new(),
         }
     }
 
+    /// A solid-color layer.
     pub fn solid(rgba: [u8; 4], placement: LayerPlacement) -> Self {
         Self {
-            content: LayerContent::Solid { rgba },
+            content: LayerContent::Solid(rgba),
             placement,
             uv: FULL_UV,
-            effects: Vec::new(),
         }
     }
 
-    /// An adjustment layer: its `effects` chain applies to the accumulated
-    /// canvas below it (CapCut semantics), not to any content of its own. The
-    /// placement opacity scales how strongly the adjusted result replaces the
-    /// canvas. With an empty chain it is a no-op.
-    pub fn adjustment(effects: Vec<LayerEffect>, opacity: f32) -> Self {
+    /// A parametric shape layer (GPU SDF; UV does not apply).
+    pub fn sdf(shape: SdfLayer, placement: LayerPlacement) -> Self {
         Self {
-            content: LayerContent::Adjustment,
-            placement: LayerPlacement {
-                center: [0.0, 0.0],
-                size: [0.0, 0.0],
-                rotation: 0.0,
-                opacity,
-            },
+            content: LayerContent::Sdf(shape),
+            placement,
             uv: FULL_UV,
-            effects,
         }
     }
 
@@ -161,65 +149,4 @@ impl CompositeLayer {
         self.uv = uv;
         self
     }
-
-    /// Attach an effect chain (applied in order before compositing).
-    pub fn with_effects(mut self, effects: Vec<LayerEffect>) -> Self {
-        self.effects = effects;
-        self
-    }
-
-    /// A transition between two sub-layers blended by `progress` (0..1). Drawn
-    /// full-canvas; the sub-layers carry their own placement and content.
-    pub fn transition(
-        from: CompositeLayer,
-        to: CompositeLayer,
-        transition_id: impl Into<String>,
-        progress: f32,
-    ) -> Self {
-        Self {
-            content: LayerContent::Transition {
-                from: Box::new(from),
-                to: Box::new(to),
-                transition_id: transition_id.into(),
-                progress: progress.clamp(0.0, 1.0),
-            },
-            placement: LayerPlacement {
-                center: [0.0, 0.0],
-                size: [0.0, 0.0],
-                rotation: 0.0,
-                opacity: 1.0,
-            },
-            uv: FULL_UV,
-            effects: Vec::new(),
-        }
-    }
-}
-
-/// Pixel source for a [`CompositeLayer`].
-#[derive(Debug, Clone, PartialEq)]
-pub enum LayerContent {
-    /// Decoder-native YUV420P; converted and scaled on GPU.
-    Yuv420p(Yuv420pLayer),
-    /// RGBA8 (width×height×4) from CPU conversion or generator
-    /// rasterization. Shared via `Arc` so cached rasters (text, shapes) ride
-    /// the per-frame composite path without a copy.
-    Rgba {
-        bytes: Arc<Vec<u8>>,
-        width: u32,
-        height: u32,
-    },
-    /// Solid fill (RGBA 0–255) across the placed quad.
-    Solid { rgba: [u8; 4] },
-    /// An adjustment marker: no pixels of its own. The compositor applies the
-    /// layer's effect chain to the accumulated canvas below it.
-    Adjustment,
-    /// A transition (M4): two full-canvas sub-layers blended by `progress`
-    /// (0 = fully `from`, 1 = fully `to`) via the named transition shader. The
-    /// engine builds this for the window where two abutting clips overlap.
-    Transition {
-        from: Box<CompositeLayer>,
-        to: Box<CompositeLayer>,
-        transition_id: String,
-        progress: f32,
-    },
 }

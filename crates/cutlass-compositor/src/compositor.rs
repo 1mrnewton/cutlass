@@ -1,1433 +1,846 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::sync::mpsc;
+//! The composite pass: scene description in, RGBA canvas out.
+//!
+//! [`Compositor::render`] clears the canvas to the config background, then draws
+//! each layer's placed quad bottom-to-top and reads the result back to an
+//! [`RgbaImage`]. Three layer kinds share one placement model and target:
+//!
+//! - **video frames** — uploaded as planes and converted YUV→RGB on the GPU
+//!   using the frame's own [`cutlass_core::ColorSpace`]; straight-alpha src-over.
+//! - **RGBA bitmaps** — pre-rasterized generators (text/shapes/stickers) or
+//!   stills; premultiplied on upload and composited premultiplied src-over so
+//!   anti-aliased edges stay clean.
+//! - **solid fills** — a fast no-texture path; straight-alpha src-over.
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::effects::EffectRegistry;
+use cutlass_core::{
+    CpuImage, FrameData, MatrixCoefficients, PixelFormat, Plane, RgbaImage, VideoFrame,
+};
+
 use crate::error::CompositorError;
 use crate::gpu::GpuContext;
-use crate::image::RgbaImage;
-use crate::layer::{CompositeLayer, CompositorConfig, LayerContent, LayerEffect, LayerPlacement};
-use crate::transitions::TransitionRegistry;
-use crate::yuv::{Yuv420pImage, Yuv420pLayer};
+use crate::layer::{CompositeLayer, CompositorConfig, LayerContent, LayerPlacement};
 
-const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const R8: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+/// Canvas pixel format. Plain (non-sRGB) `Unorm`: the YUV shader already emits
+/// gamma-encoded R'G'B', so we store those bytes verbatim (display-ready SDR)
+/// and read them straight back into PNG/export without an extra transfer.
+const CANVAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// Shared preamble prepended to every effect fragment shader.
-const EFFECT_HEADER: &str = include_str!("../shaders/effect_header.wgsl");
-
-/// Per-layer quad placement, precomputed to clip space. Mirrors the
-/// `Placement` struct in the WGSL shaders.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct PlacementUniforms {
-    /// Columns of the 2×2 linear part mapping unit-quad corners
-    /// ([-0.5, 0.5]², +y down) to clip space: (m00, m10, m01, m11).
+struct YuvUniforms {
     linear: [f32; 4],
-    /// Clip-space translation (x, y), opacity, pad.
     trans_opacity: [f32; 4],
-    /// Content UV rect (u0, v0, u1, v1) interpolated across the quad:
-    /// sub-rects crop, reversed axes mirror. Unused by the solid shader.
     uv_rect: [f32; 4],
+    /// Kr, Kb, full-range flag, plane mode (0 = planar I420, 1 = biplanar NV12).
+    coeffs: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SolidUniforms {
     color: [f32; 4],
-    placement: PlacementUniforms,
-}
-
-/// Build the unit-quad → clip-space affine for a placement on this canvas.
-fn placement_uniforms(
-    config: &CompositorConfig,
-    p: &LayerPlacement,
-    uv: [f32; 4],
-) -> PlacementUniforms {
-    let (cw, ch) = (config.width as f32, config.height as f32);
-    let (cos, sin) = (p.rotation.cos(), p.rotation.sin());
-    // Canvas space (+y down): pos = center + R·(corner ⊙ size), with R the
-    // clockwise rotation [cos, -sin; sin, cos] in screen coordinates.
-    let a = cos * p.size[0]; // ∂pos.x/∂corner.x
-    let b = sin * p.size[0]; // ∂pos.y/∂corner.x
-    let c = -sin * p.size[1]; // ∂pos.x/∂corner.y
-    let d = cos * p.size[1]; // ∂pos.y/∂corner.y
-    // Canvas px → clip space: x' = 2x/cw − 1, y' = 1 − 2y/ch (flip y).
-    PlacementUniforms {
-        linear: [2.0 * a / cw, -2.0 * b / ch, 2.0 * c / cw, -2.0 * d / ch],
-        trans_opacity: [
-            2.0 * p.center[0] / cw - 1.0,
-            1.0 - 2.0 * p.center[1] / ch,
-            p.opacity,
-            0.0,
-        ],
-        uv_rect: uv,
-    }
+    linear: [f32; 4],
+    trans_opacity: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct RgbaToYuvParams {
-    width: u32,
-    height: u32,
-    y_stride: u32,
-    uv_stride: u32,
+struct RgbaUniforms {
+    linear: [f32; 4],
+    trans_opacity: [f32; 4],
+    uv_rect: [f32; 4],
 }
 
-/// Per-pass uniform for effect fragment shaders. Mirrors `EffectParams` in
-/// `effect_header.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct EffectUniforms {
-    /// (width, height, 1/width, 1/height).
-    resolution: [f32; 4],
-    /// Parameter slots 0..3.
-    p0: [f32; 4],
-    /// Parameter slots 4..7.
-    p1: [f32; 4],
-    /// (pass_index, pass_count, 0, 0).
-    pass_info: [f32; 4],
+struct SdfUniforms {
+    fill: [f32; 4],
+    stroke_color: [f32; 4],
+    linear: [f32; 4],
+    /// Clip translation (x, y), layer opacity (z), stroke width px (w).
+    trans_opacity: [f32; 4],
+    /// Shape half-extents px (x, y), shape kind id (z), corner radius px (w).
+    geo: [f32; 4],
+    /// Star points (x), inner fraction (y); quad half-extents px (z, w).
+    star: [f32; 4],
 }
 
-/// WGPU alpha-over compositor. Layers are composited bottom-to-top with
-/// standard src-over blending onto a single offscreen target.
+/// Which pipeline draws a built layer.
+#[derive(Clone, Copy)]
+enum LayerPipeline {
+    Yuv,
+    Rgba,
+    Solid,
+    Sdf,
+}
+
+/// GPU resources backing one layer for the duration of a render. The bind group
+/// retains its textures/buffer, but we hold them too so the lifetimes are
+/// unmistakable across the pass.
+struct LayerGpu {
+    pipeline: LayerPipeline,
+    bind_group: wgpu::BindGroup,
+    _textures: Vec<wgpu::Texture>,
+    _uniform: wgpu::Buffer,
+    /// Platform keep-alive for zero-copy imported surfaces (e.g. the Apple
+    /// `CVMetalTexture` wrappers a GPU frame's planes are mapped through). Held
+    /// until the layer's GPU resources drop, i.e. after the pass is submitted
+    /// and waited on. `None` for CPU-uploaded and generated layers.
+    _keep_alive: Option<Box<dyn core::any::Any + Send>>,
+}
+
+/// Straight-alpha src-over: the source fragment carries un-premultiplied color,
+/// so the source color is weighted by its own alpha. Used by the solid and YUV
+/// (fully-opaque) pipelines.
+const STRAIGHT_OVER: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::SrcAlpha,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
+/// Premultiplied src-over: the source fragment is already alpha-weighted (the
+/// RGBA pipeline), so the color factor is `One`. Correct for anti-aliased edges.
+const PREMULTIPLIED_OVER: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
+/// A WGPU alpha-over compositor. Build once (pipelines are reused), render many.
 pub struct Compositor {
-    solid_pipeline: wgpu::RenderPipeline,
-    blit_pipeline: wgpu::RenderPipeline,
     yuv_pipeline: wgpu::RenderPipeline,
-    rgba_to_yuv_pipeline: wgpu::ComputePipeline,
-    /// Blits a finished effect scratch onto the canvas (premultiplied blend).
-    composite_pipeline: wgpu::RenderPipeline,
-    solid_bind_layout: wgpu::BindGroupLayout,
-    blit_bind_layout: wgpu::BindGroupLayout,
-    yuv_bind_layout: wgpu::BindGroupLayout,
-    rgba_to_yuv_bind_layout: wgpu::BindGroupLayout,
-    effect_bind_layout: wgpu::BindGroupLayout,
-    effects: EffectRegistry,
-    transitions: TransitionRegistry,
+    rgba_pipeline: wgpu::RenderPipeline,
+    solid_pipeline: wgpu::RenderPipeline,
+    sdf_pipeline: wgpu::RenderPipeline,
+    yuv_layout: wgpu::BindGroupLayout,
+    rgba_layout: wgpu::BindGroupLayout,
+    solid_layout: wgpu::BindGroupLayout,
+    sdf_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    rgba_to_yuv_params: wgpu::Buffer,
-    /// Reused each composite when canvas size matches.
-    target: Option<CachedTarget>,
-    /// Canvas-sized ping-pong targets for effect chains; built on first use
-    /// and reused while the canvas size holds (no allocation when no layer
-    /// carries effects).
-    scratch: Option<ScratchTargets>,
-    /// Per-layer upload textures reused across frames (see [`UploadPool`]).
-    /// `RefCell` because layer encoding runs behind `&self`.
-    upload_pool: RefCell<UploadPool>,
-}
-
-struct CachedTarget {
-    width: u32,
-    height: u32,
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
-    readback: wgpu::Buffer,
-    readback_stride: u32,
-}
-
-/// Three canvas-sized RGBA targets for effect chains: `orig` holds the placed
-/// layer (kept available to combine-style passes), `a`/`b` ping-pong between
-/// passes. All hold premultiplied alpha.
-struct ScratchTargets {
-    width: u32,
-    height: u32,
-    orig: wgpu::TextureView,
-    a: wgpu::TextureView,
-    b: wgpu::TextureView,
-    _textures: [wgpu::Texture; 3],
-}
-
-/// Reusable per-layer upload textures, bucketed by `(format, width, height)`.
-///
-/// Compositing a media layer used to allocate a fresh GPU texture per plane
-/// *every frame* — at 4K that's three ~R8 textures (~12MB) created and dropped
-/// per preview frame, which dominated the per-frame cost on the playback hot
-/// path. Instead we keep textures alive and hand them back out on later frames.
-///
-/// Safety of cross-frame reuse: [`Compositor::composite`] blocks on the readback
-/// map (`device.poll(Wait)`) before returning, so the GPU is idle by the time a
-/// texture is reacquired — no in-flight submit still references it. Within a
-/// single frame, `cursor` hands out a *distinct* texture per `acquire` so two
-/// same-sized layers (e.g. the equal-sized U and V planes) never collide.
-#[derive(Default)]
-struct UploadPool {
-    buckets: HashMap<(wgpu::TextureFormat, u32, u32), Vec<wgpu::Texture>>,
-    cursor: HashMap<(wgpu::TextureFormat, u32, u32), usize>,
-}
-
-impl UploadPool {
-    /// Mark every pooled texture available again for a new frame.
-    fn begin_frame(&mut self) {
-        self.cursor.clear();
-    }
-
-    /// Hand out a texture of the requested shape, creating one only when the
-    /// bucket can't satisfy this frame's demand.
-    fn acquire(
-        &mut self,
-        gpu: &GpuContext,
-        format: wgpu::TextureFormat,
-        width: u32,
-        height: u32,
-    ) -> wgpu::Texture {
-        let key = (format, width, height);
-        let bucket = self.buckets.entry(key).or_default();
-        let idx = self.cursor.entry(key).or_insert(0);
-        if *idx >= bucket.len() {
-            bucket.push(create_upload_texture(gpu, format, width, height));
-        }
-        let texture = bucket[*idx].clone();
-        *idx += 1;
-        texture
-    }
+    /// Maps Apple `CVPixelBuffer` GPU surfaces into `wgpu` textures with no CPU
+    /// copy. `None` when the device isn't a Metal device (e.g. a software
+    /// adapter) — GPU frames then fall back to [`CompositorError::UnsupportedFormat`]
+    /// and the caller can decode in CPU mode instead.
+    #[cfg(target_vendor = "apple")]
+    metal_import: Option<crate::metal_import::MetalSurfaceImporter>,
 }
 
 impl Compositor {
-    pub fn new(gpu: &GpuContext) -> Result<Self, CompositorError> {
-        let blend = src_over_blend();
+    /// Build the compositor's pipelines on an existing GPU context.
+    pub fn new(gpu: &GpuContext) -> Self {
+        let device = &gpu.device;
 
-        let solid_shader = shader(gpu, "solid", include_str!("../shaders/solid.wgsl"));
-        let blit_shader = shader(gpu, "blit", include_str!("../shaders/blit.wgsl"));
-        let yuv_shader = shader(gpu, "yuv_blit", include_str!("../shaders/yuv_blit.wgsl"));
-        let rgba_to_yuv_shader = shader(
-            gpu,
-            "rgba_to_yuv",
-            include_str!("../shaders/rgba_to_yuv.wgsl"),
-        );
+        let yuv_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cutlass.yuv.bgl"),
+            entries: &[
+                plane_tex_entry(0),
+                plane_tex_entry(1),
+                plane_tex_entry(2),
+                sampler_entry(3),
+                uniform_entry(4),
+            ],
+        });
 
-        // Placement matrices live in the vertex stage; opacity in the fragment.
-        let uniform_stages = wgpu::ShaderStages::VERTEX_FRAGMENT;
+        let rgba_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cutlass.rgba.bgl"),
+            entries: &[plane_tex_entry(0), sampler_entry(1), uniform_entry(2)],
+        });
 
-        let solid_bind_layout =
-            gpu.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("solid_bind"),
-                    entries: &[uniform_binding(0, uniform_stages)],
-                });
+        let solid_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cutlass.solid.bgl"),
+            entries: &[uniform_entry(0)],
+        });
 
-        let blit_bind_layout =
-            gpu.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("blit_bind"),
-                    entries: &[
-                        texture_binding(0, wgpu::ShaderStages::FRAGMENT),
-                        sampler_binding(1, wgpu::ShaderStages::FRAGMENT),
-                        uniform_binding(2, uniform_stages),
-                    ],
-                });
+        let sdf_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cutlass.sdf.bgl"),
+            entries: &[uniform_entry(0)],
+        });
 
-        let yuv_bind_layout =
-            gpu.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("yuv_bind"),
-                    entries: &[
-                        texture_binding(0, wgpu::ShaderStages::FRAGMENT),
-                        texture_binding(1, wgpu::ShaderStages::FRAGMENT),
-                        texture_binding(2, wgpu::ShaderStages::FRAGMENT),
-                        sampler_binding(3, wgpu::ShaderStages::FRAGMENT),
-                        uniform_binding(4, uniform_stages),
-                    ],
-                });
+        let yuv_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cutlass.yuv.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/yuv.wgsl").into()),
+        });
+        let rgba_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cutlass.rgba.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/rgba.wgsl").into()),
+        });
+        let solid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cutlass.solid.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/solid.wgsl").into()),
+        });
+        let sdf_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cutlass.shape.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shape.wgsl").into()),
+        });
 
-        let rgba_to_yuv_bind_layout =
-            gpu.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("rgba_to_yuv_bind"),
-                    entries: &[
-                        texture_binding(0, wgpu::ShaderStages::COMPUTE),
-                        storage_binding(1, true),
-                        storage_binding(2, true),
-                        storage_binding(3, true),
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 4,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                    ],
-                });
-
-        let solid_pipeline = render_pipeline(
-            gpu,
-            "solid_pipeline",
-            &solid_shader,
-            &pipeline_layout(gpu, "solid_layout", &solid_bind_layout),
-            blend,
-        );
-        let blit_pipeline = render_pipeline(
-            gpu,
-            "blit_pipeline",
-            &blit_shader,
-            &pipeline_layout(gpu, "blit_layout", &blit_bind_layout),
-            blend,
-        );
-        let yuv_pipeline = render_pipeline(
-            gpu,
-            "yuv_pipeline",
+        // Opaque video and solids use straight-alpha src-over; RGBA bitmaps
+        // (text/shape coverage) are premultiplied for clean edges.
+        let yuv_pipeline = build_pipeline(
+            device,
+            "cutlass.yuv",
+            &yuv_layout,
             &yuv_shader,
-            &pipeline_layout(gpu, "yuv_layout", &yuv_bind_layout),
-            blend,
+            STRAIGHT_OVER,
+        );
+        let rgba_pipeline = build_pipeline(
+            device,
+            "cutlass.rgba",
+            &rgba_layout,
+            &rgba_shader,
+            PREMULTIPLIED_OVER,
+        );
+        let solid_pipeline = build_pipeline(
+            device,
+            "cutlass.solid",
+            &solid_layout,
+            &solid_shader,
+            STRAIGHT_OVER,
+        );
+        // SDF shapes emit straight-alpha fragments (coverage folded into
+        // alpha), like solids.
+        let sdf_pipeline = build_pipeline(
+            device,
+            "cutlass.sdf",
+            &sdf_layout,
+            &sdf_shader,
+            STRAIGHT_OVER,
         );
 
-        // Effect passes: src texture + the untouched placed layer + sampler +
-        // per-pass uniform. The composite step reuses the blit layout.
-        let effect_bind_layout =
-            gpu.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("effect_bind"),
-                    entries: &[
-                        texture_binding(0, wgpu::ShaderStages::FRAGMENT),
-                        texture_binding(1, wgpu::ShaderStages::FRAGMENT),
-                        sampler_binding(2, wgpu::ShaderStages::FRAGMENT),
-                        uniform_binding(3, wgpu::ShaderStages::FRAGMENT),
-                    ],
-                });
-
-        let effects = EffectRegistry::build(
-            &gpu.device,
-            &pipeline_layout(gpu, "effect_layout", &effect_bind_layout),
-            FORMAT,
-            EFFECT_HEADER,
-        );
-
-        // Transitions share the effect bind layout and header (orig_tex =
-        // outgoing frame, src_tex = incoming, progress in fx.p0.x).
-        let transitions = TransitionRegistry::build(
-            &gpu.device,
-            &pipeline_layout(gpu, "transition_layout", &effect_bind_layout),
-            FORMAT,
-            EFFECT_HEADER,
-        );
-
-        let composite_shader = shader(gpu, "composite", include_str!("../shaders/composite.wgsl"));
-        let composite_pipeline = render_pipeline(
-            gpu,
-            "composite_pipeline",
-            &composite_shader,
-            &pipeline_layout(gpu, "composite_layout", &blit_bind_layout),
-            premultiplied_blend(),
-        );
-
-        let rgba_to_yuv_pipeline =
-            gpu.device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("rgba_to_yuv_pipeline"),
-                    layout: Some(&gpu.device.create_pipeline_layout(
-                        &wgpu::PipelineLayoutDescriptor {
-                            label: Some("rgba_to_yuv_layout"),
-                            bind_group_layouts: &[&rgba_to_yuv_bind_layout],
-                            push_constant_ranges: &[],
-                        },
-                    )),
-                    module: &rgba_to_yuv_shader,
-                    entry_point: Some("cs"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                });
-
-        let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("layer_sampler"),
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("cutlass.sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
-        let rgba_to_yuv_params = uniform_buffer(
-            gpu,
-            "rgba_to_yuv_params",
-            &RgbaToYuvParams {
-                width: 0,
-                height: 0,
-                y_stride: 0,
-                uv_stride: 0,
-            },
-        );
-
-        Ok(Self {
-            solid_pipeline,
-            blit_pipeline,
+        Self {
             yuv_pipeline,
-            rgba_to_yuv_pipeline,
-            composite_pipeline,
-            solid_bind_layout,
-            blit_bind_layout,
-            yuv_bind_layout,
-            rgba_to_yuv_bind_layout,
-            effect_bind_layout,
-            effects,
-            transitions,
+            rgba_pipeline,
+            solid_pipeline,
+            sdf_pipeline,
+            yuv_layout,
+            rgba_layout,
+            solid_layout,
+            sdf_layout,
             sampler,
-            rgba_to_yuv_params,
-            target: None,
-            scratch: None,
-            upload_pool: RefCell::new(UploadPool::default()),
-        })
+            #[cfg(target_vendor = "apple")]
+            metal_import: crate::metal_import::MetalSurfaceImporter::new(gpu),
+        }
     }
 
-    /// Composite layers bottom-to-top and read back RGBA8 bytes.
-    ///
-    /// Render and texture→buffer copy share one command encoder and one submit;
-    /// the CPU then blocks on the readback map.
-    pub fn composite(
-        &mut self,
+    /// Composite `layers` (bottom-to-top) onto a fresh canvas and read it back.
+    pub fn render(
+        &self,
         gpu: &GpuContext,
         config: &CompositorConfig,
-        layers: &[CompositeLayer],
+        layers: &[CompositeLayer<'_>],
     ) -> Result<RgbaImage, CompositorError> {
-        validate_layers(config, layers)?;
-        self.ensure_target(gpu, config)?;
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("composite_encoder"),
-            });
-        self.render_layers_into(&mut encoder, gpu, config, layers)?;
-        self.encode_readback_copy(&mut encoder, config);
-        gpu.queue.submit(Some(encoder.finish()));
-        self.map_readback(gpu, config)
-    }
-
-    /// Composite layers, convert the canvas to YUV420P on GPU, and read back.
-    pub fn composite_yuv420p(
-        &mut self,
-        gpu: &GpuContext,
-        config: &CompositorConfig,
-        layers: &[CompositeLayer],
-    ) -> Result<Yuv420pImage, CompositorError> {
-        validate_layers(config, layers)?;
-        self.ensure_target(gpu, config)?;
-
-        let width = config.width;
-        let height = config.height;
-        let y_stride = width;
-        let uv_stride = width / 2;
-        let y_count = (y_stride * height) as u64;
-        let uv_count = (uv_stride * (height / 2)) as u64;
-        let y_buf = storage_buffer(gpu, "y_out", y_count * 4);
-        let u_buf = storage_buffer(gpu, "u_out", uv_count * 4);
-        let v_buf = storage_buffer(gpu, "v_out", uv_count * 4);
-
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("composite_yuv_encoder"),
-            });
-        self.render_layers_into(&mut encoder, gpu, config, layers)?;
-        self.encode_yuv_into(&mut encoder, gpu, config, &y_buf, &u_buf, &v_buf)?;
-        gpu.queue.submit(Some(encoder.finish()));
-
-        let y = read_storage_u8(gpu, &y_buf, y_count as usize)?;
-        let u = read_storage_u8(gpu, &u_buf, uv_count as usize)?;
-        let v = read_storage_u8(gpu, &v_buf, uv_count as usize)?;
-        Ok(Yuv420pImage {
-            width,
-            height,
-            y,
-            u,
-            v,
-        })
-    }
-
-    fn render_layers_into(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        gpu: &GpuContext,
-        config: &CompositorConfig,
-        layers: &[CompositeLayer],
-    ) -> Result<(), CompositorError> {
-        // Reclaim last frame's upload textures for reuse on this one.
-        self.upload_pool.borrow_mut().begin_frame();
-
-        // Effect and transition layers need offscreen ping-pong targets;
-        // allocate them only when something actually needs them.
-        if layers
-            .iter()
-            .any(|l| !l.effects.is_empty() || matches!(l.content, LayerContent::Transition { .. }))
-        {
-            self.ensure_scratch(gpu, config)?;
-        }
-
-        // Consecutive plain layers share one render pass onto the target (the
-        // pre-M4 single-pass behavior). An effect layer renders offscreen and
-        // composites in its own pass, breaking the run. `first` tracks whether
-        // the target still needs its background clear.
-        let mut first = true;
-        let mut i = 0;
-        while i < layers.len() {
-            let layer = &layers[i];
-            if matches!(layer.content, LayerContent::Adjustment) {
-                // An adjustment filters everything below it. Ensure there is a
-                // cleared canvas to work on even when it is the first layer.
-                if first {
-                    self.clear_target(encoder, config);
-                    first = false;
-                }
-                if !layer.effects.is_empty() {
-                    self.apply_adjustment(encoder, gpu, config, layer);
-                }
-                i += 1;
-            } else if matches!(layer.content, LayerContent::Transition { .. }) {
-                self.draw_transition_layer(encoder, gpu, config, layer, first);
-                first = false;
-                i += 1;
-            } else if layer.effects.is_empty() {
-                let start = i;
-                while i < layers.len()
-                    && layers[i].effects.is_empty()
-                    && !matches!(
-                        layers[i].content,
-                        LayerContent::Adjustment | LayerContent::Transition { .. }
-                    )
-                {
-                    i += 1;
-                }
-                self.draw_plain_run(encoder, gpu, config, &layers[start..i], first);
-                first = false;
-            } else {
-                self.draw_effect_layer(encoder, gpu, config, &layers[i], first);
-                first = false;
-                i += 1;
-            }
-        }
-
-        // No layers at all: still clear the canvas to the background once
-        // (empty timeline / fully-disabled tracks show the background color).
-        if first {
-            self.clear_target(encoder, config);
-        }
-
-        Ok(())
-    }
-
-    /// Background clear color for the canvas target.
-    fn clear_color(config: &CompositorConfig) -> wgpu::Color {
-        // The target is Rgba8Unorm (no sRGB encode), so byte/255 lands the
-        // exact color, same as the solid-layer shader.
-        wgpu::Color {
-            r: f64::from(config.background[0]) / 255.0,
-            g: f64::from(config.background[1]) / 255.0,
-            b: f64::from(config.background[2]) / 255.0,
-            a: 1.0,
-        }
-    }
-
-    /// Open a pass that only clears the target to the background (used when
-    /// there are no layers to draw).
-    fn clear_target(&self, encoder: &mut wgpu::CommandEncoder, config: &CompositorConfig) {
-        let target = self.target.as_ref().expect("target initialized");
-        let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("composite_clear"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &target.view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(Self::clear_color(config)),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            occlusion_query_set: None,
-            timestamp_writes: None,
-        });
-    }
-
-    /// Draw a run of plain (no-effect) layers in one render pass onto the
-    /// target. Clears to the background when `first`, otherwise loads.
-    fn draw_plain_run(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        gpu: &GpuContext,
-        config: &CompositorConfig,
-        layers: &[CompositeLayer],
-        first: bool,
-    ) {
-        let target = self.target.as_ref().expect("target initialized");
-        let load = if first {
-            wgpu::LoadOp::Clear(Self::clear_color(config))
-        } else {
-            wgpu::LoadOp::Load
-        };
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("composite_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &target.view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            occlusion_query_set: None,
-            timestamp_writes: None,
-        });
-        for layer in layers {
-            self.encode_layer(&mut pass, gpu, config, layer, layer.placement.opacity);
-        }
-    }
-
-    /// Record one layer's draw into an already-open render pass, with an
-    /// explicit opacity (plain layers pass their own; the effect path renders
-    /// the placed layer at full opacity into scratch and applies opacity at
-    /// the final composite).
-    fn encode_layer(
-        &self,
-        pass: &mut wgpu::RenderPass<'_>,
-        gpu: &GpuContext,
-        config: &CompositorConfig,
-        layer: &CompositeLayer,
-        opacity: f32,
-    ) {
-        // Per-layer uniform buffer: each draw needs its own values alive at
-        // submit time (a single reused buffer would be clobbered by later
-        // `write_buffer` calls in the same pass).
-        let mut placement_in = layer.placement;
-        placement_in.opacity = opacity;
-        let placement = placement_uniforms(config, &placement_in, layer.uv);
-        match &layer.content {
-            LayerContent::Solid { rgba } => {
-                let uniforms = SolidUniforms {
-                    color: [
-                        rgba[0] as f32 / 255.0,
-                        rgba[1] as f32 / 255.0,
-                        rgba[2] as f32 / 255.0,
-                        rgba[3] as f32 / 255.0,
-                    ],
-                    placement,
-                };
-                let buffer = uniform_buffer(gpu, "solid_uniform", &uniforms);
-                let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("solid_bind"),
-                    layout: &self.solid_bind_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buffer.as_entire_binding(),
-                    }],
-                });
-                pass.set_pipeline(&self.solid_pipeline);
-                pass.set_bind_group(0, &bind, &[]);
-                pass.draw(0..6, 0..1);
-            }
-            LayerContent::Rgba {
-                bytes,
-                width,
-                height,
-            } => {
-                let texture = self
-                    .upload_pool
-                    .borrow_mut()
-                    .acquire(gpu, FORMAT, *width, *height);
-                write_rgba_texture(gpu, &texture, bytes, *width, *height);
-                let view = texture.create_view(&Default::default());
-                let buffer = uniform_buffer(gpu, "blit_placement", &placement);
-                let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("blit_bind"),
-                    layout: &self.blit_bind_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: buffer.as_entire_binding(),
-                        },
-                    ],
-                });
-                pass.set_pipeline(&self.blit_pipeline);
-                pass.set_bind_group(0, &bind, &[]);
-                pass.draw(0..6, 0..1);
-            }
-            LayerContent::Yuv420p(yuv) => {
-                // Signal full-range YUV to the shader through the placement
-                // pad slot (unused by the limited-range default path).
-                let mut placement = placement;
-                placement.trans_opacity[3] = if yuv.full_range { 1.0 } else { 0.0 };
-                let uv_w = yuv.width / 2;
-                let uv_h = yuv.height / 2;
-                // Acquire all three planes first: the U and V planes share a
-                // shape, so the pool must hand back distinct textures for them.
-                let (y_tex, u_tex, v_tex) = {
-                    let mut pool = self.upload_pool.borrow_mut();
-                    (
-                        pool.acquire(gpu, R8, yuv.width, yuv.height),
-                        pool.acquire(gpu, R8, uv_w, uv_h),
-                        pool.acquire(gpu, R8, uv_w, uv_h),
-                    )
-                };
-                write_r8_texture(gpu, &y_tex, &yuv.tight_y(), yuv.width, yuv.height);
-                write_r8_texture(gpu, &u_tex, &yuv.tight_u(), uv_w, uv_h);
-                write_r8_texture(gpu, &v_tex, &yuv.tight_v(), uv_w, uv_h);
-                let buffer = uniform_buffer(gpu, "yuv_placement", &placement);
-                let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("yuv_bind"),
-                    layout: &self.yuv_bind_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(
-                                &y_tex.create_view(&Default::default()),
-                            ),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(
-                                &u_tex.create_view(&Default::default()),
-                            ),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::TextureView(
-                                &v_tex.create_view(&Default::default()),
-                            ),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: buffer.as_entire_binding(),
-                        },
-                    ],
-                });
-                pass.set_pipeline(&self.yuv_pipeline);
-                pass.set_bind_group(0, &bind, &[]);
-                pass.draw(0..6, 0..1);
-            }
-            // Adjustment and transition layers carry no directly-encodable
-            // pixels of their own; they are handled out of band in
-            // render_layers_into and never reach a plain run.
-            LayerContent::Adjustment | LayerContent::Transition { .. } => {}
-        }
-    }
-
-    /// Render a layer that carries an effect chain: draw it into the `orig`
-    /// scratch (transparent clear, full opacity → premultiplied content), run
-    /// each effect pass ping-ponging `a`/`b`, then composite the result onto
-    /// the target with the layer's opacity (premultiplied blend).
-    fn draw_effect_layer(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        gpu: &GpuContext,
-        config: &CompositorConfig,
-        layer: &CompositeLayer,
-        first: bool,
-    ) {
-        let scratch = self.scratch.as_ref().expect("scratch initialized");
-
-        // 1. Placed layer → scratch.orig, over a transparent clear.
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("effect_orig"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &scratch.orig,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-            self.encode_layer(&mut pass, gpu, config, layer, 1.0);
-        }
-
-        // 2. Run the effect chain over the placed scratch.
-        let input = self.run_effect_chain(encoder, gpu, config, &layer.effects, scratch);
-
-        // 3. Composite the finished scratch onto the target with the layer
-        // opacity (premultiplied src-over).
-        self.composite_view_to_target(encoder, gpu, config, input, layer.placement.opacity, first);
-    }
-
-    /// Apply an adjustment layer: filter the accumulated canvas through the
-    /// layer's effect chain and write it back (CapCut adjustment-layer
-    /// semantics). The canvas below is copied into `scratch.orig`, run through
-    /// the chain, then composited back over itself — at opacity 1 the adjusted
-    /// result fully replaces the canvas; below 1 it blends for a partial
-    /// strength. Called only with a non-empty chain and after the target has
-    /// been cleared, so there is always content below to adjust.
-    fn apply_adjustment(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        gpu: &GpuContext,
-        config: &CompositorConfig,
-        layer: &CompositeLayer,
-    ) {
-        let scratch = self.scratch.as_ref().expect("scratch initialized");
-
-        // 1. Snapshot the accumulated canvas into scratch.orig (premultiplied
-        // copy over a transparent clear).
-        let target = self.target.as_ref().expect("target initialized");
-        let full = LayerPlacement::full_canvas(config);
-        let placement = placement_uniforms(config, &full, crate::layer::FULL_UV);
-        let buffer = uniform_buffer(gpu, "adjustment_copy", &placement);
-        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("adjustment_copy_bind"),
-            layout: &self.blit_bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&target.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buffer.as_entire_binding(),
-                },
-            ],
-        });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("adjustment_copy_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &scratch.orig,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.composite_pipeline);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.draw(0..6, 0..1);
-        }
-
-        // 2. Run the chain, then 3. composite the result back over the canvas.
-        let input = self.run_effect_chain(encoder, gpu, config, &layer.effects, scratch);
-        self.composite_view_to_target(encoder, gpu, config, input, layer.placement.opacity, false);
-    }
-
-    /// Draw a transition layer: render the outgoing sub-layer into `scratch.orig`
-    /// and the incoming one into `scratch.a`, blend them by progress through the
-    /// transition shader into `scratch.b`, then composite the blend over the
-    /// canvas. An unknown transition id falls back to a hard cut to the
-    /// incoming clip.
-    fn draw_transition_layer(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        gpu: &GpuContext,
-        config: &CompositorConfig,
-        layer: &CompositeLayer,
-        first: bool,
-    ) {
-        let LayerContent::Transition {
-            from,
-            to,
-            transition_id,
-            progress,
-        } = &layer.content
-        else {
-            return;
-        };
-        let scratch = self.scratch.as_ref().expect("scratch initialized");
-
-        // 1. Outgoing → orig, incoming → a (each over a transparent clear, so
-        // the scratch holds premultiplied content).
-        for (target_view, sub) in [(&scratch.orig, from.as_ref()), (&scratch.a, to.as_ref())] {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("transition_side"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-            self.encode_layer(&mut pass, gpu, config, sub, 1.0);
-        }
-
-        let Some(pipeline_idx) = self.transitions.pipeline(transition_id) else {
-            self.composite_view_to_target(encoder, gpu, config, &scratch.a, 1.0, first);
-            return;
-        };
-
-        // 2. Blend orig (from) and a (to) by progress into b.
-        let resolution = [
-            config.width as f32,
-            config.height as f32,
-            1.0 / config.width as f32,
-            1.0 / config.height as f32,
-        ];
-        let uniforms = EffectUniforms {
-            resolution,
-            p0: [*progress, 0.0, 0.0, 0.0],
-            p1: [0.0; 4],
-            pass_info: [0.0, 1.0, 0.0, 0.0],
-        };
-        let buffer = uniform_buffer(gpu, "transition_uniform", &uniforms);
-        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("transition_bind"),
-            layout: &self.effect_bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&scratch.a),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&scratch.orig),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: buffer.as_entire_binding(),
-                },
-            ],
-        });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("transition_blend"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &scratch.b,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.transitions.pipelines[pipeline_idx]);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.draw(0..3, 0..1);
-        }
-
-        // 3. Composite the blend over the canvas below.
-        self.composite_view_to_target(encoder, gpu, config, &scratch.b, 1.0, first);
-    }
-
-    /// Run an effect chain starting from `scratch.orig`, ping-ponging through
-    /// `scratch.a`/`scratch.b`; returns the view holding the final result
-    /// (`scratch.orig` if the chain contributed no pass). `scratch.orig` stays
-    /// bound as `orig_tex` for combine-style passes (e.g. glow).
-    fn run_effect_chain<'s>(
-        &'s self,
-        encoder: &mut wgpu::CommandEncoder,
-        gpu: &GpuContext,
-        config: &CompositorConfig,
-        effects: &[LayerEffect],
-        scratch: &'s ScratchTargets,
-    ) -> &'s wgpu::TextureView {
-        let resolution = [
-            config.width as f32,
-            config.height as f32,
-            1.0 / config.width as f32,
-            1.0 / config.height as f32,
-        ];
-        let mut input = &scratch.orig;
-        let mut use_a = true;
-        for fx in effects {
-            let Some(passes) = self.effects.passes(&fx.effect_id) else {
-                continue;
-            };
-            let pass_count = passes.len();
-            for (pass_index, &pipeline_idx) in passes.iter().enumerate() {
-                let output = if use_a { &scratch.a } else { &scratch.b };
-                let uniforms = EffectUniforms {
-                    resolution,
-                    p0: [fx.params[0], fx.params[1], fx.params[2], fx.params[3]],
-                    p1: [fx.params[4], fx.params[5], fx.params[6], fx.params[7]],
-                    pass_info: [pass_index as f32, pass_count as f32, 0.0, 0.0],
-                };
-                let buffer = uniform_buffer(gpu, "effect_uniform", &uniforms);
-                let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("effect_bind"),
-                    layout: &self.effect_bind_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(input),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&scratch.orig),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: buffer.as_entire_binding(),
-                        },
-                    ],
-                });
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("effect_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: output,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    occlusion_query_set: None,
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.effects.pipelines[pipeline_idx]);
-                pass.set_bind_group(0, &bind, &[]);
-                pass.draw(0..3, 0..1);
-                drop(pass);
-                input = output;
-                use_a = !use_a;
-            }
-        }
-        input
-    }
-
-    /// Composite a full-canvas scratch view onto the target with `opacity`
-    /// (premultiplied src-over). Clears to the background when `first`.
-    fn composite_view_to_target(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        gpu: &GpuContext,
-        config: &CompositorConfig,
-        input: &wgpu::TextureView,
-        opacity: f32,
-        first: bool,
-    ) {
-        let target = self.target.as_ref().expect("target initialized");
-        let mut full = LayerPlacement::full_canvas(config);
-        full.opacity = opacity;
-        let placement = placement_uniforms(config, &full, crate::layer::FULL_UV);
-        let buffer = uniform_buffer(gpu, "composite_placement", &placement);
-        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("composite_bind"),
-            layout: &self.blit_bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(input),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buffer.as_entire_binding(),
-                },
-            ],
-        });
-        let load = if first {
-            wgpu::LoadOp::Clear(Self::clear_color(config))
-        } else {
-            wgpu::LoadOp::Load
-        };
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("effect_composite"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &target.view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            occlusion_query_set: None,
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.composite_pipeline);
-        pass.set_bind_group(0, &bind, &[]);
-        pass.draw(0..6, 0..1);
-    }
-
-    fn ensure_scratch(
-        &mut self,
-        gpu: &GpuContext,
-        config: &CompositorConfig,
-    ) -> Result<(), CompositorError> {
-        let needs_new = self
-            .scratch
-            .as_ref()
-            .is_none_or(|s| s.width != config.width || s.height != config.height);
-        if needs_new {
-            let make = |label: &str| {
-                gpu.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size: wgpu::Extent3d {
-                        width: config.width,
-                        height: config.height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: FORMAT,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                })
-            };
-            let orig_t = make("scratch_orig");
-            let a_t = make("scratch_a");
-            let b_t = make("scratch_b");
-            let orig = orig_t.create_view(&Default::default());
-            let a = a_t.create_view(&Default::default());
-            let b = b_t.create_view(&Default::default());
-            self.scratch = Some(ScratchTargets {
+        if config.width == 0 || config.height == 0 {
+            return Err(CompositorError::InvalidDimensions {
                 width: config.width,
                 height: config.height,
-                orig,
-                a,
-                b,
-                _textures: [orig_t, a_t, b_t],
             });
         }
-        Ok(())
-    }
 
-    fn encode_yuv_into(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        gpu: &GpuContext,
-        config: &CompositorConfig,
-        y_buf: &wgpu::Buffer,
-        u_buf: &wgpu::Buffer,
-        v_buf: &wgpu::Buffer,
-    ) -> Result<(), CompositorError> {
-        let target = self.target.as_ref().expect("target initialized");
-        let width = config.width;
-        let height = config.height;
-        let params = RgbaToYuvParams {
-            width,
-            height,
-            y_stride: width,
-            uv_stride: width / 2,
-        };
-        gpu.queue
-            .write_buffer(&self.rgba_to_yuv_params, 0, bytemuck::bytes_of(&params));
+        let device = &gpu.device;
 
-        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rgba_to_yuv_bind"),
-            layout: &self.rgba_to_yuv_bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&target.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: y_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: u_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: v_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: self.rgba_to_yuv_params.as_entire_binding(),
-                },
-            ],
-        });
-
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("rgba_to_yuv_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.rgba_to_yuv_pipeline);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+        // Build every layer's GPU resources before the pass so they outlive it.
+        let mut built = Vec::with_capacity(layers.len());
+        for layer in layers {
+            built.push(self.build_layer(gpu, config, layer)?);
         }
-        Ok(())
-    }
 
-    /// Record the canvas → readback-buffer copy into the caller's encoder so
-    /// it rides the same submit as the render passes (no second submit).
-    fn encode_readback_copy(&self, encoder: &mut wgpu::CommandEncoder, config: &CompositorConfig) {
-        let target = self.target.as_ref().expect("target initialized");
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &target.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &target.readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(target.readback_stride),
-                    rows_per_image: Some(config.height),
-                },
-            },
-            wgpu::Extent3d {
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cutlass.canvas"),
+            size: wgpu::Extent3d {
                 width: config.width,
                 height: config.height,
                 depth_or_array_layers: 1,
             },
-        );
-    }
-
-    /// Map the already-copied readback buffer (blocks on the GPU) and de-pad
-    /// the aligned rows into a tight RGBA image.
-    fn map_readback(
-        &mut self,
-        gpu: &GpuContext,
-        config: &CompositorConfig,
-    ) -> Result<RgbaImage, CompositorError> {
-        let target = self.target.as_ref().expect("target initialized");
-        let row_bytes = usize::try_from(config.width * 4).expect("width");
-        let padded_row = usize::try_from(target.readback_stride).expect("stride");
-        let height = usize::try_from(config.height).expect("height");
-        let mut tight = vec![0u8; row_bytes * height];
-        map_read_buffer(gpu, &target.readback, |mapped| {
-            for row in 0..height {
-                let src = row * padded_row;
-                let dst = row * row_bytes;
-                tight[dst..dst + row_bytes].copy_from_slice(&mapped[src..src + row_bytes]);
-            }
-        })?;
-        RgbaImage::new(config.width, config.height, tight)
-    }
-
-    fn ensure_target(
-        &mut self,
-        gpu: &GpuContext,
-        config: &CompositorConfig,
-    ) -> Result<(), CompositorError> {
-        let needs_new = self
-            .target
-            .as_ref()
-            .is_none_or(|t| t.width != config.width || t.height != config.height);
-        if needs_new {
-            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("composite_target"),
-                size: wgpu::Extent3d {
-                    width: config.width,
-                    height: config.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::COPY_SRC
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&Default::default());
-            let readback_stride = align_row_bytes(config.width * 4);
-            let readback_size = u64::from(readback_stride) * u64::from(config.height);
-            let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("readback"),
-                size: readback_size,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-            self.target = Some(CachedTarget {
-                width: config.width,
-                height: config.height,
-                texture,
-                view,
-                readback,
-                readback_stride,
-            });
-        }
-        Ok(())
-    }
-}
-
-fn validate_layers(
-    config: &CompositorConfig,
-    layers: &[CompositeLayer],
-) -> Result<(), CompositorError> {
-    validate_config(config)?;
-    for layer in layers {
-        match &layer.content {
-            LayerContent::Rgba {
-                bytes,
-                width,
-                height,
-            } => {
-                let expected = (*width as usize)
-                    .saturating_mul(*height as usize)
-                    .saturating_mul(4);
-                if *width == 0 || *height == 0 || bytes.len() != expected {
-                    return Err(CompositorError::LayerSizeMismatch {
-                        got: bytes.len(),
-                        expected,
-                    });
-                }
-            }
-            LayerContent::Yuv420p(yuv) => validate_yuv_layer(yuv)?,
-            LayerContent::Transition { from, to, .. } => {
-                validate_layers(config, std::slice::from_ref(from.as_ref()))?;
-                validate_layers(config, std::slice::from_ref(to.as_ref()))?;
-            }
-            LayerContent::Solid { .. } | LayerContent::Adjustment => {}
-        }
-    }
-    Ok(())
-}
-
-fn validate_yuv_layer(layer: &Yuv420pLayer) -> Result<(), CompositorError> {
-    if layer.width == 0
-        || layer.height == 0
-        || !layer.width.is_multiple_of(2)
-        || !layer.height.is_multiple_of(2)
-    {
-        return Err(CompositorError::InvalidYuvDimensions {
-            width: layer.width,
-            height: layer.height,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: CANVAS_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
         });
-    }
-    Ok(())
-}
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
-fn validate_config(config: &CompositorConfig) -> Result<(), CompositorError> {
-    if config.width == 0 || config.height == 0 {
-        return Err(CompositorError::InvalidDimensions {
-            width: config.width,
-            height: config.height,
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("cutlass.encoder"),
         });
-    }
-    Ok(())
-}
-
-fn align_row_bytes(bytes_per_row: u32) -> u32 {
-    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    bytes_per_row.div_ceil(align) * align
-}
-
-fn src_over_blend() -> wgpu::BlendState {
-    wgpu::BlendState {
-        color: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::SrcAlpha,
-            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-            operation: wgpu::BlendOperation::Add,
-        },
-        alpha: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-            operation: wgpu::BlendOperation::Add,
-        },
-    }
-}
-
-/// Src-over for sources that are already premultiplied by alpha (the effect
-/// scratch). The exact straight-alpha over-operator without re-multiplying.
-fn premultiplied_blend() -> wgpu::BlendState {
-    wgpu::BlendState {
-        color: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-            operation: wgpu::BlendOperation::Add,
-        },
-        alpha: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-            operation: wgpu::BlendOperation::Add,
-        },
-    }
-}
-
-fn shader(gpu: &GpuContext, label: &str, source: &str) -> wgpu::ShaderModule {
-    gpu.device
-        .create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(label),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
-        })
-}
-
-fn pipeline_layout(
-    gpu: &GpuContext,
-    label: &str,
-    layout: &wgpu::BindGroupLayout,
-) -> wgpu::PipelineLayout {
-    gpu.device
-        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some(label),
-            bind_group_layouts: &[layout],
-            push_constant_ranges: &[],
-        })
-}
-
-fn render_pipeline(
-    gpu: &GpuContext,
-    label: &str,
-    shader: &wgpu::ShaderModule,
-    layout: &wgpu::PipelineLayout,
-    blend: wgpu::BlendState,
-) -> wgpu::RenderPipeline {
-    gpu.device
-        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(layout),
-            vertex: wgpu::VertexState {
-                module: shader,
-                entry_point: Some("vs"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: shader,
-                entry_point: Some("fs"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: FORMAT,
-                    blend: Some(blend),
-                    write_mask: wgpu::ColorWrites::ALL,
+        {
+            let bg = config.background;
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cutlass.pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: f64::from(bg[0]) / 255.0,
+                            g: f64::from(bg[1]) / 255.0,
+                            b: f64::from(bg[2]) / 255.0,
+                            a: f64::from(bg[3]) / 255.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            for layer in &built {
+                let pipeline = match layer.pipeline {
+                    LayerPipeline::Yuv => &self.yuv_pipeline,
+                    LayerPipeline::Rgba => &self.rgba_pipeline,
+                    LayerPipeline::Solid => &self.solid_pipeline,
+                    LayerPipeline::Sdf => &self.sdf_pipeline,
+                };
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &layer.bind_group, &[]);
+                pass.draw(0..6, 0..1);
+            }
+        }
+
+        // Record the readback copy, then submit, *then* map — the copy must
+        // execute on the queue before the buffer holds anything.
+        let (readback, padded) = record_readback(
+            &gpu.device,
+            &mut encoder,
+            &target,
+            config.width,
+            config.height,
+        );
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+        map_readback(gpu, &readback, padded, config.width, config.height)
+    }
+
+    fn build_layer(
+        &self,
+        gpu: &GpuContext,
+        config: &CompositorConfig,
+        layer: &CompositeLayer<'_>,
+    ) -> Result<LayerGpu, CompositorError> {
+        match &layer.content {
+            LayerContent::Solid(rgba) => self.build_solid(gpu, config, &layer.placement, *rgba),
+            LayerContent::Frame(frame) => self.build_frame(gpu, config, layer, frame),
+            LayerContent::Rgba(image) => self.build_rgba(gpu, config, layer, image),
+            LayerContent::Sdf(shape) => self.build_sdf(gpu, config, &layer.placement, shape),
+        }
+    }
+
+    fn build_sdf(
+        &self,
+        gpu: &GpuContext,
+        config: &CompositorConfig,
+        placement: &LayerPlacement,
+        shape: &crate::layer::SdfLayer,
+    ) -> Result<LayerGpu, CompositorError> {
+        use cutlass_shapes::SdfParams;
+
+        let (linear, mut trans) = placement_affine(config, placement, 0.0);
+        let stroke = shape.stroke.filter(|s| s.width > 0.0);
+        trans[3] = stroke.map_or(0.0, |s| s.width);
+
+        let h = shape.shape.half;
+        // Shape kind ids and parameter packing per shape.wgsl's `Sdf` block.
+        let (kind, radius, star) = match shape.shape.params {
+            SdfParams::RoundedRect { radius } => (0.0, radius, [0.0, 0.0]),
+            SdfParams::Ellipse => (1.0, 0.0, [0.0, 0.0]),
+            SdfParams::Star {
+                points,
+                inner,
+                round,
+            } => (2.0, round, [points as f32, inner]),
+            SdfParams::Line => (3.0, 0.0, [0.0, 0.0]),
+            SdfParams::Arrow => (4.0, 0.0, [0.0, 0.0]),
+            SdfParams::Heart => (5.0, 0.0, [0.0, 0.0]),
+        };
+
+        let color = |rgba: [u8; 4]| {
+            [
+                f32::from(rgba[0]) / 255.0,
+                f32::from(rgba[1]) / 255.0,
+                f32::from(rgba[2]) / 255.0,
+                f32::from(rgba[3]) / 255.0,
+            ]
+        };
+        let uniforms = SdfUniforms {
+            fill: color(shape.fill),
+            stroke_color: stroke.map_or([0.0; 4], |s| color(s.rgba)),
+            linear,
+            trans_opacity: trans,
+            geo: [h[0], h[1], kind, radius],
+            star: [
+                star[0],
+                star[1],
+                placement.size[0] * 0.5,
+                placement.size[1] * 0.5,
+            ],
+        };
+        let buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cutlass.sdf.uniforms"),
+                contents: bytemuck::bytes_of(&uniforms),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cutlass.sdf.bg"),
+            layout: &self.sdf_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        Ok(LayerGpu {
+            pipeline: LayerPipeline::Sdf,
+            bind_group,
+            _textures: Vec::new(),
+            _uniform: buffer,
+            _keep_alive: None,
         })
+    }
+
+    fn build_solid(
+        &self,
+        gpu: &GpuContext,
+        config: &CompositorConfig,
+        placement: &LayerPlacement,
+        rgba: [u8; 4],
+    ) -> Result<LayerGpu, CompositorError> {
+        let (linear, trans) = placement_affine(config, placement, 0.0);
+        let uniforms = SolidUniforms {
+            color: [
+                f32::from(rgba[0]) / 255.0,
+                f32::from(rgba[1]) / 255.0,
+                f32::from(rgba[2]) / 255.0,
+                f32::from(rgba[3]) / 255.0,
+            ],
+            linear,
+            trans_opacity: trans,
+        };
+        let buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cutlass.solid.uniforms"),
+                contents: bytemuck::bytes_of(&uniforms),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cutlass.solid.bg"),
+            layout: &self.solid_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        Ok(LayerGpu {
+            pipeline: LayerPipeline::Solid,
+            bind_group,
+            _textures: Vec::new(),
+            _uniform: buffer,
+            _keep_alive: None,
+        })
+    }
+
+    fn build_frame(
+        &self,
+        gpu: &GpuContext,
+        config: &CompositorConfig,
+        layer: &CompositeLayer<'_>,
+        frame: &VideoFrame,
+    ) -> Result<LayerGpu, CompositorError> {
+        let (cw, ch) = frame.coded_size;
+        if cw == 0 || ch == 0 {
+            return Err(CompositorError::MalformedFrame(format!(
+                "coded size is {cw}x{ch}"
+            )));
+        }
+
+        // Acquire the plane textures: CPU frames upload their planes; GPU frames
+        // map their native surface straight into textures with no pixel copy.
+        // `nv12` selects the shader's chroma path; `keep_alive` parks any native
+        // wrappers (e.g. CVMetalTexture) that must outlive the GPU read.
+        let (textures, nv12, keep_alive) = match &frame.data {
+            FrameData::Cpu(image) => {
+                let (textures, nv12) = upload_cpu_planes(gpu, frame, image, cw, ch)?;
+                (textures, nv12, None)
+            }
+            FrameData::Gpu(surface) => self.import_gpu_planes(gpu, frame, surface, cw, ch)?,
+        };
+
+        // For NV12 the V slot is bound to the same CbCr texture (unsampled).
+        let y_view = &textures[0].1;
+        let u_view = &textures[1].1;
+        let v_view = if nv12 { &textures[1].1 } else { &textures[2].1 };
+
+        let resolved = frame.color.resolved();
+        let (kr, kb) = luma_coeffs(resolved.matrix);
+        let full = if resolved.range.is_full() { 1.0 } else { 0.0 };
+        let plane_mode = if nv12 { 1.0 } else { 0.0 };
+
+        // Container rotation rides on top of the placement rotation.
+        let rotation = placement_rotation(layer, frame);
+        let (linear, trans) = placement_affine_rot(config, &layer.placement, rotation);
+        let uv_rect = visible_uv_rect(frame, layer.uv);
+
+        let uniforms = YuvUniforms {
+            linear,
+            trans_opacity: trans,
+            uv_rect,
+            coeffs: [kr, kb, full, plane_mode],
+        };
+        let buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cutlass.yuv.uniforms"),
+                contents: bytemuck::bytes_of(&uniforms),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cutlass.yuv.bg"),
+            layout: &self.yuv_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(y_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(u_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(v_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        Ok(LayerGpu {
+            pipeline: LayerPipeline::Yuv,
+            bind_group,
+            _textures: textures.into_iter().map(|(tex, _)| tex).collect(),
+            _uniform: buffer,
+            _keep_alive: keep_alive,
+        })
+    }
+
+    /// Map a zero-copy [`FrameData::Gpu`] surface into plane textures the YUV
+    /// pipeline can sample. Returns the textures, the NV12 flag, and a native
+    /// keep-alive bundle. On platforms/formats without an import path this is a
+    /// [`CompositorError::UnsupportedFormat`] so the caller can fall back to a
+    /// CPU-mode decode.
+    #[allow(clippy::type_complexity)]
+    fn import_gpu_planes(
+        &self,
+        gpu: &GpuContext,
+        frame: &VideoFrame,
+        surface: &cutlass_core::GpuSurface,
+        cw: u32,
+        ch: u32,
+    ) -> Result<
+        (
+            Vec<(wgpu::Texture, wgpu::TextureView)>,
+            bool,
+            Option<Box<dyn core::any::Any + Send>>,
+        ),
+        CompositorError,
+    > {
+        #[cfg(target_vendor = "apple")]
+        {
+            use cutlass_core::GpuSurfaceKind;
+            match surface.kind() {
+                GpuSurfaceKind::CoreVideoPixelBuffer => {
+                    if frame.format != PixelFormat::Nv12 {
+                        return Err(CompositorError::UnsupportedFormat(format!(
+                            "zero-copy import supports NV12 CoreVideo surfaces; got {:?}",
+                            frame.format
+                        )));
+                    }
+                    let importer = self.metal_import.as_ref().ok_or_else(|| {
+                        CompositorError::UnsupportedFormat(
+                            "Metal surface import is unavailable on this device".into(),
+                        )
+                    })?;
+                    let (textures, keep) = importer.import_nv12(gpu, surface, (cw, ch))?;
+                    Ok((textures, true, Some(Box::new(keep))))
+                }
+                other => Err(CompositorError::UnsupportedFormat(format!(
+                    "GPU surface kind {other:?} import is not implemented yet"
+                ))),
+            }
+        }
+        // Android (`AHardwareBuffer`) and Windows (`D3D11Texture2D`) import are
+        // not wired yet; the decoders deliver CPU planes on those platforms, so
+        // this branch is currently unreachable in practice.
+        //
+        // Android plan: decode into a `Surface`/`ImageReader` to obtain an
+        // `AHardwareBuffer`, then import on the Vulkan backend via
+        // `VK_ANDROID_external_memory_android_hardware_buffer`: create a
+        // `VkImage` with external memory, bind the imported allocation, and
+        // adopt it with `wgpu::hal::vulkan::Device::texture_from_raw`.
+        //
+        // Blocker (researched against wgpu 28, gfx-rs/wgpu#2320 / #3145 / #7324):
+        // robust YCbCr sampling needs a `VkSamplerYcbcrConversion` bound as an
+        // *immutable* sampler, and real devices hand back vendor formats
+        // (`VK_FORMAT_UNDEFINED` + `VkExternalFormatANDROID`, e.g. UBWC) that
+        // *only* resolve through that conversion. wgpu-hal hardcodes
+        // `p_immutable_samplers = null` and its format map rejects
+        // `VK_FORMAT_UNDEFINED`, so neither the immutable-sampler binding nor the
+        // external format is expressible through wgpu's safe API today. The
+        // Metal trick (split planes into R8/RG8 and convert in our shader) does
+        // not carry over: per-plane VkImage aliasing only works for the rare
+        // concrete-format AHBs, not the vendor-tiled ones that dominate.
+        //
+        // So the viable route is a raw-Vulkan YCbCr->RGBA conversion pass on a
+        // device shared with wgpu (own `VkInstance`/`VkDevice` with the AHB +
+        // ycbcr extensions, handed to wgpu per #7324/#7829), writing into an
+        // RGBA `VkImage` that wgpu then samples — GPU-resident throughout, no CPU
+        // copy, but not a single-sample import. Until that lands, Android stays
+        // on the hardware-decode + CPU-plane path (one plane copy/frame), which
+        // is already wired and correct.
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = (gpu, frame, surface, cw, ch);
+            Err(CompositorError::UnsupportedFormat(
+                "zero-copy GPU surface import is not implemented on this platform yet".into(),
+            ))
+        }
+    }
+
+    fn build_rgba(
+        &self,
+        gpu: &GpuContext,
+        config: &CompositorConfig,
+        layer: &CompositeLayer<'_>,
+        image: &RgbaImage,
+    ) -> Result<LayerGpu, CompositorError> {
+        if image.width == 0 || image.height == 0 {
+            return Err(CompositorError::MalformedFrame(format!(
+                "rgba bitmap is {}x{}",
+                image.width, image.height
+            )));
+        }
+        let expected = (image.width as usize)
+            .checked_mul(image.height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| CompositorError::MalformedFrame("rgba bitmap size overflow".into()))?;
+        if image.pixels.len() < expected {
+            return Err(CompositorError::MalformedFrame(format!(
+                "rgba bitmap: {} bytes < {}×{}×4",
+                image.pixels.len(),
+                image.width,
+                image.height
+            )));
+        }
+
+        // Premultiply straight-alpha input so bilinear sampling and src-over
+        // blending don't leak color from transparent texels into glyph edges.
+        let mut premul = vec![0u8; expected];
+        for (dst, src) in premul.chunks_exact_mut(4).zip(image.pixels.chunks_exact(4)) {
+            let a = u16::from(src[3]);
+            dst[0] = ((u16::from(src[0]) * a + 127) / 255) as u8;
+            dst[1] = ((u16::from(src[1]) * a + 127) / 255) as u8;
+            dst[2] = ((u16::from(src[2]) * a + 127) / 255) as u8;
+            dst[3] = src[3];
+        }
+
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cutlass.rgba.tex"),
+            size: wgpu::Extent3d {
+                width: image.width,
+                height: image.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &premul,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(image.width * 4),
+                rows_per_image: Some(image.height),
+            },
+            wgpu::Extent3d {
+                width: image.width,
+                height: image.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let (linear, trans) = placement_affine(config, &layer.placement, 0.0);
+        let uniforms = RgbaUniforms {
+            linear,
+            trans_opacity: trans,
+            uv_rect: layer.uv,
+        };
+        let buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cutlass.rgba.uniforms"),
+                contents: bytemuck::bytes_of(&uniforms),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cutlass.rgba.bg"),
+            layout: &self.rgba_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        Ok(LayerGpu {
+            pipeline: LayerPipeline::Rgba,
+            bind_group,
+            _textures: vec![texture],
+            _uniform: buffer,
+            _keep_alive: None,
+        })
+    }
 }
 
-fn texture_binding(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+/// Record a copy of the canvas into a fresh mappable buffer (rows padded to the
+/// 256-byte copy alignment). Returns the buffer and its padded row pitch.
+fn record_readback(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> (wgpu::Buffer, u32) {
+    let unpadded = width * 4;
+    let padded =
+        unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("cutlass.readback"),
+        size: u64::from(padded) * u64::from(height),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    (buffer, padded)
+}
+
+/// Map the (already-submitted) readback buffer and copy it into a tight
+/// [`RgbaImage`], stripping the per-row copy padding.
+fn map_readback(
+    gpu: &GpuContext,
+    buffer: &wgpu::Buffer,
+    padded: u32,
+    width: u32,
+    height: u32,
+) -> Result<RgbaImage, CompositorError> {
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |res| {
+        let _ = tx.send(res);
+    });
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|_| CompositorError::MapFailed)?;
+    rx.recv()
+        .map_err(|_| CompositorError::MapFailed)?
+        .map_err(|_| CompositorError::MapFailed)?;
+
+    let unpadded = (width * 4) as usize;
+    let mapped = slice.get_mapped_range();
+    let mut pixels = vec![0u8; unpadded * height as usize];
+    for row in 0..height as usize {
+        let src = row * padded as usize;
+        let dst = row * unpadded;
+        pixels[dst..dst + unpadded].copy_from_slice(&mapped[src..src + unpadded]);
+    }
+    drop(mapped);
+    buffer.unmap();
+
+    Ok(RgbaImage::new(width, height, pixels))
+}
+
+fn plane_tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
-        visibility,
+        visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
             view_dimension: wgpu::TextureViewDimension::D2,
@@ -1437,19 +850,19 @@ fn texture_binding(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGr
     }
 }
 
-fn sampler_binding(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
-        visibility,
+        visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
         count: None,
     }
 }
 
-fn uniform_binding(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
-        visibility,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
             has_dynamic_offset: false,
@@ -1459,51 +872,137 @@ fn uniform_binding(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGr
     }
 }
 
-fn storage_binding(binding: u32, read_write: bool) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: if read_write {
-                wgpu::BufferBindingType::Storage { read_only: false }
-            } else {
-                wgpu::BufferBindingType::Storage { read_only: true }
-            },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-fn uniform_buffer<T: Pod>(gpu: &GpuContext, label: &str, value: &T) -> wgpu::Buffer {
-    gpu.device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: bytemuck::bytes_of(value),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        })
-}
-
-fn storage_buffer(gpu: &GpuContext, label: &str, size: u64) -> wgpu::Buffer {
-    gpu.device.create_buffer(&wgpu::BufferDescriptor {
+fn build_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::BindGroupLayout,
+    shader: &wgpu::ShaderModule,
+    blend: wgpu::BlendState,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
-        size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
+        bind_group_layouts: &[layout],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: CANVAS_FORMAT,
+                blend: Some(blend),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        multiview_mask: None,
+        cache: None,
     })
 }
 
-/// Create a bare upload texture (no contents). Pooled by [`UploadPool`] and
-/// filled per frame by [`write_rgba_texture`] / [`write_r8_texture`].
-fn create_upload_texture(
+/// Upload a CPU frame's planes to fresh textures per its pixel layout, honoring
+/// each plane's byte stride. Returns the plane textures and whether the layout
+/// is NV12 (biplanar) — which selects the YUV shader's chroma path.
+fn upload_cpu_planes(
     gpu: &GpuContext,
+    frame: &VideoFrame,
+    image: &CpuImage,
+    cw: u32,
+    ch: u32,
+) -> Result<(Vec<(wgpu::Texture, wgpu::TextureView)>, bool), CompositorError> {
+    match frame.format {
+        PixelFormat::Nv12 => {
+            expect_planes(image.planes.len(), 2, frame.format)?;
+            let y = upload_plane(
+                gpu,
+                "y",
+                wgpu::TextureFormat::R8Unorm,
+                cw,
+                ch,
+                &image.planes[0],
+            )?;
+            let uv = upload_plane(
+                gpu,
+                "uv",
+                wgpu::TextureFormat::Rg8Unorm,
+                cw.div_ceil(2),
+                ch.div_ceil(2),
+                &image.planes[1],
+            )?;
+            Ok((vec![y, uv], true))
+        }
+        PixelFormat::Yuv420p => {
+            expect_planes(image.planes.len(), 3, frame.format)?;
+            let y = upload_plane(
+                gpu,
+                "y",
+                wgpu::TextureFormat::R8Unorm,
+                cw,
+                ch,
+                &image.planes[0],
+            )?;
+            let u = upload_plane(
+                gpu,
+                "u",
+                wgpu::TextureFormat::R8Unorm,
+                cw.div_ceil(2),
+                ch.div_ceil(2),
+                &image.planes[1],
+            )?;
+            let v = upload_plane(
+                gpu,
+                "v",
+                wgpu::TextureFormat::R8Unorm,
+                cw.div_ceil(2),
+                ch.div_ceil(2),
+                &image.planes[2],
+            )?;
+            Ok((vec![y, u, v], false))
+        }
+        other => Err(CompositorError::UnsupportedFormat(format!(
+            "{other:?} is not handled by the compositor yet (8-bit NV12 / I420 only)"
+        ))),
+    }
+}
+
+/// Upload one plane to a fresh texture, honoring its byte stride.
+fn upload_plane(
+    gpu: &GpuContext,
+    label: &str,
     format: wgpu::TextureFormat,
     width: u32,
     height: u32,
-) -> wgpu::Texture {
-    gpu.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("layer_upload"),
+    plane: &Plane,
+) -> Result<(wgpu::Texture, wgpu::TextureView), CompositorError> {
+    let need = plane
+        .stride
+        .checked_mul(height as usize)
+        .ok_or_else(|| CompositorError::MalformedFrame("plane size overflow".into()))?;
+    if plane.data.len() < need {
+        return Err(CompositorError::MalformedFrame(format!(
+            "{label} plane: {} bytes < stride {} × {} rows",
+            plane.data.len(),
+            plane.stride,
+            height
+        )));
+    }
+
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
         size: wgpu::Extent3d {
             width,
             height,
@@ -1515,48 +1014,19 @@ fn create_upload_texture(
         format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
-    })
-}
+    });
 
-fn write_rgba_texture(
-    gpu: &GpuContext,
-    texture: &wgpu::Texture,
-    bytes: &[u8],
-    width: u32,
-    height: u32,
-) {
-    write_texture_rows(gpu, texture, bytes, width * 4, width, height);
-}
-
-fn write_r8_texture(
-    gpu: &GpuContext,
-    texture: &wgpu::Texture,
-    bytes: &[u8],
-    width: u32,
-    height: u32,
-) {
-    write_texture_rows(gpu, texture, bytes, width, width, height);
-}
-
-fn write_texture_rows(
-    gpu: &GpuContext,
-    texture: &wgpu::Texture,
-    bytes: &[u8],
-    bytes_per_row: u32,
-    width: u32,
-    height: u32,
-) {
     gpu.queue.write_texture(
         wgpu::TexelCopyTextureInfo {
-            texture,
+            texture: &texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        bytes,
+        &plane.data,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(bytes_per_row),
+            bytes_per_row: Some(plane.stride as u32),
             rows_per_image: Some(height),
         },
         wgpu::Extent3d {
@@ -1565,53 +1035,84 @@ fn write_texture_rows(
             depth_or_array_layers: 1,
         },
     );
+
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Ok((texture, view))
 }
 
-fn map_read_buffer<F>(gpu: &GpuContext, buffer: &wgpu::Buffer, f: F) -> Result<(), CompositorError>
-where
-    F: FnOnce(&[u8]),
-{
-    let slice = buffer.slice(..);
-    let (tx, rx) = mpsc::sync_channel(1);
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    let _ = gpu.device.poll(wgpu::Maintain::Wait);
-    rx.recv()
-        .map_err(|_| CompositorError::MapFailed)?
-        .map_err(|_| CompositorError::MapFailed)?;
-    let mapped = slice.get_mapped_range();
-    f(&mapped);
-    drop(mapped);
-    buffer.unmap();
-    Ok(())
+fn expect_planes(got: usize, want: usize, format: PixelFormat) -> Result<(), CompositorError> {
+    if got == want {
+        Ok(())
+    } else {
+        Err(CompositorError::MalformedFrame(format!(
+            "{format:?} needs {want} planes, got {got}"
+        )))
+    }
 }
 
-fn read_storage_u8(
-    gpu: &GpuContext,
-    buffer: &wgpu::Buffer,
-    count: usize,
-) -> Result<Vec<u8>, CompositorError> {
-    let byte_len = count * 4;
-    let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("storage_readback"),
-        size: byte_len as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut encoder = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("storage_copy"),
-        });
-    encoder.copy_buffer_to_buffer(buffer, 0, &readback, 0, byte_len as u64);
-    gpu.queue.submit(Some(encoder.finish()));
+/// Luma coefficients (Kr, Kb) for the YUV→RGB matrix. `resolved()` upstream maps
+/// `Unspecified` to BT.709, so only concrete matrices reach here; `Identity` is
+/// degenerate on YUV and falls back to BT.709.
+fn luma_coeffs(matrix: MatrixCoefficients) -> (f32, f32) {
+    match matrix {
+        MatrixCoefficients::Bt601 => (0.299, 0.114),
+        MatrixCoefficients::Bt2020Ncl => (0.2627, 0.0593),
+        _ => (0.2126, 0.0722),
+    }
+}
 
-    let mut out = vec![0u8; count];
-    map_read_buffer(gpu, &readback, |mapped| {
-        for (i, chunk) in mapped.chunks_exact(4).take(count).enumerate() {
-            out[i] = chunk[0];
-        }
-    })?;
-    Ok(out)
+/// Effective clockwise rotation (radians): the placement plus the frame's
+/// container rotation, so sideways-recorded phone video plays upright.
+fn placement_rotation(layer: &CompositeLayer<'_>, frame: &VideoFrame) -> f32 {
+    layer.placement.rotation + (frame.rotation.degrees() as f32).to_radians()
+}
+
+/// Map the layer's UV rect (in visible-picture space) into the coded texture,
+/// since the visible picture may be a sub-rect of a padded decode buffer.
+fn visible_uv_rect(frame: &VideoFrame, uv: [f32; 4]) -> [f32; 4] {
+    let (cw, ch) = (frame.coded_size.0 as f32, frame.coded_size.1 as f32);
+    let vx = frame.visible.x as f32 / cw;
+    let vy = frame.visible.y as f32 / ch;
+    let vw = frame.visible.width as f32 / cw;
+    let vh = frame.visible.height as f32 / ch;
+    [
+        vx + uv[0] * vw,
+        vy + uv[1] * vh,
+        vx + uv[2] * vw,
+        vy + uv[3] * vh,
+    ]
+}
+
+fn placement_affine(
+    config: &CompositorConfig,
+    p: &LayerPlacement,
+    extra_rotation: f32,
+) -> ([f32; 4], [f32; 4]) {
+    placement_affine_rot(config, p, p.rotation + extra_rotation)
+}
+
+/// Build the unit-quad ([-0.5, 0.5]², +y down) → clip-space affine for a
+/// placement, using `rotation` (radians, clockwise) instead of `p.rotation`.
+fn placement_affine_rot(
+    config: &CompositorConfig,
+    p: &LayerPlacement,
+    rotation: f32,
+) -> ([f32; 4], [f32; 4]) {
+    let (cw, ch) = (config.width as f32, config.height as f32);
+    let (cos, sin) = (rotation.cos(), rotation.sin());
+    // Canvas space (+y down): pos = center + R·(corner ⊙ size), R the clockwise
+    // rotation [cos, -sin; sin, cos] in screen coords.
+    let a = cos * p.size[0];
+    let b = sin * p.size[0];
+    let c = -sin * p.size[1];
+    let d = cos * p.size[1];
+    // Canvas px → clip space: x' = 2x/cw − 1, y' = 1 − 2y/ch (flip y).
+    let linear = [2.0 * a / cw, -2.0 * b / ch, 2.0 * c / cw, -2.0 * d / ch];
+    let trans = [
+        2.0 * p.center[0] / cw - 1.0,
+        1.0 - 2.0 * p.center[1] / ch,
+        p.opacity,
+        0.0,
+    ];
+    (linear, trans)
 }

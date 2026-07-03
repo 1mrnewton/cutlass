@@ -1,0 +1,34 @@
+import { Slider } from "std-widgets.slint";
+
+// Slice 1: prove a desktop (Rust/Slint) frontend drives the engine and shows
+// its preview frames. `preview` is fed by `Engine::get_frame`; `scrubbed`
+// re-renders at the slider's time. Editing UI (timeline, tools) comes later.
+export component AppWindow inherits Window {
+    title: "Cutlass";
+    preferred-width: 960px;
+    preferred-height: 620px;
+    background: #14161c;
+
+    in property <image> preview;
+    in property <float> duration-seconds: 1.0;
+    callback scrubbed(/* seconds */ float);
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 12px;
+
+        Image {
+            source: root.preview;
+            image-fit: contain;
+            vertical-stretch: 1;
+        }
+
+        Slider {
+            minimum: 0;
+            maximum: root.duration-seconds;
+            changed(value) => {
+                root.scrubbed(value);
+            }
+        }
+    }
+}

@@ -1,0 +1,27 @@
+[package]
+name = "cutlass-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cutlass desktop editor (Slint) — a native Rust frontend that links the platform-independent engine directly."
+
+[dependencies]
+# Slint on wgpu 28 (matches the workspace `wgpu` pin) so the desktop UI and the
+# compositor share one wgpu version — and, later, one device for zero-copy
+# preview. `unstable-winit-030` exposes the winit backend the app drives.
+slint = { version = "1.16", features = [
+    "unstable-winit-030",
+    "unstable-wgpu-28",
+    "renderer-femtovg-wgpu",
+] }
+# The desktop app is Rust, so it links the engine directly — no C-ABI/JNI bridge
+# like the iOS/Android apps. This is the platform-independence proof: the same
+# `crates/cutlass-engine` drives three unrelated frontends.
+cutlass-engine = { path = "../../crates/cutlass-engine" }
+cutlass-render = { path = "../../crates/cutlass-render" }
+cutlass-models = { path = "../../crates/cutlass-models" }
+
+[build-dependencies]
+slint-build = "1.16"

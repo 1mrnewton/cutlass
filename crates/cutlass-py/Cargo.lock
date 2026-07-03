@@ -300,6 +300,7 @@ dependencies = [
  "cutlass-render",
  "numpy",
  "pyo3",
+ "pyo3-build-config",
 ]
 
 [[package]]

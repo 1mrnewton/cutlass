@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Top-level navigation: Home <-> Editor, with the media picker presented as a
-/// full-screen sheet from either the home screen or an empty editor.
+/// full-screen sheet either to start a project or to append to the timeline.
 struct RootView: View {
     private enum Screen {
         case home
@@ -10,7 +10,7 @@ struct RootView: View {
 
     @State private var screen: Screen = .home
     @State private var pickerPresented = false
-    @State private var editorClips: [MockClip] = []
+    @State private var editorState = EditorState()
 
     /// Dev shortcut: `-startScreen picker|editor` (e.g. via `simctl launch`)
     /// jumps straight to a screen so states deep in the flow are easy to
@@ -25,8 +25,9 @@ struct RootView: View {
         case "picker":
             _pickerPresented = State(initialValue: true)
         case "editor":
-            let items = MockData.libraryItems.prefix(4)
-            _editorClips = State(initialValue: items.map(MockClip.init(from:)))
+            let state = EditorState()
+            state.startProject(with: Array(MockData.libraryItems.prefix(4)))
+            _editorState = State(initialValue: state)
             _screen = State(initialValue: .editor)
         default:
             break
@@ -42,12 +43,16 @@ struct RootView: View {
                 HomeView(
                     onNewProject: { pickerPresented = true },
                     onBlankProject: {
-                        editorClips = []
+                        editorState.startProject(with: [])
                         screen = .editor
                     }
                 )
             case .editor:
-                EditorView(clips: editorClips, onHome: { screen = .home })
+                EditorView(
+                    state: editorState,
+                    onHome: { screen = .home },
+                    onAddMedia: { pickerPresented = true }
+                )
             }
         }
         .preferredColorScheme(.dark)
@@ -62,9 +67,13 @@ struct RootView: View {
         MediaPickerView(
             onCancel: { pickerPresented = false },
             onDone: { items in
-                editorClips = items.map(MockClip.init(from:))
+                if screen == .editor {
+                    editorState.appendMedia(items)
+                } else {
+                    editorState.startProject(with: items)
+                    screen = .editor
+                }
                 pickerPresented = false
-                screen = .editor
             }
         )
     }

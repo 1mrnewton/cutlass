@@ -1,26 +1,78 @@
 import SwiftUI
 
-/// Editor stub; preview, transport, timeline, and toolbars land in later
-/// slices.
+/// The editor screen: top chrome, preview, transport, timeline bed, and the
+/// context-sensitive bottom toolbar.
 struct EditorView: View {
-    var clips: [MockClip]
+    var state: EditorState
     var onHome: () -> Void
+    var onAddMedia: () -> Void
+
+    @State private var exportPresented = false
 
     var body: some View {
-        VStack(spacing: 24) {
-            Text("Editor — \(clips.count) clip(s)")
-                .font(.title3.bold())
+        VStack(spacing: 0) {
+            EditorTopBar(
+                exportEnabled: !state.isEmpty,
+                onHome: onHome,
+                onExport: { exportPresented = true }
+            )
+
+            PreviewCanvas(state: state)
+                .frame(maxHeight: .infinity)
+
+            TransportControls(state: state)
+
+            // Placeholder bed; the scrubbable timeline lands next.
+            Theme.timelineBed
+                .frame(height: 210)
+
+            MediaToolbar(onAddMedia: onAddMedia)
+        }
+        .background(Theme.background)
+        .sheet(isPresented: $exportPresented) {
+            ExportStubSheet(duration: state.duration)
+        }
+    }
+}
+
+/// Mock export sheet; rendering is out of scope for the UI build.
+private struct ExportStubSheet: View {
+    var duration: TimeInterval
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "square.and.arrow.up")
+                .font(.system(size: 34, weight: .medium))
+                .foregroundStyle(Theme.accent)
+
+            Text("Export")
+                .font(.title2.bold())
                 .foregroundStyle(.white)
 
-            Button("Home", action: onHome)
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
+            Text("Exporting a \(duration.timecode) video isn't wired up in this UI preview yet.")
+                .font(.subheadline)
+                .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+
+            Button("Done") { dismiss() }
+                .font(.headline)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 40)
+                .padding(.vertical, 12)
+                .background(Theme.accent, in: Capsule())
+                .buttonStyle(.plain)
+                .padding(.top, 6)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.background)
+        .background(Theme.surface)
+        .presentationDetents([.medium])
     }
 }
 
 #Preview {
-    EditorView(clips: [], onHome: {})
+    let state = EditorState()
+    let _ = state.startProject(with: Array(MockData.libraryItems.prefix(3)))
+    return EditorView(state: state, onHome: {}, onAddMedia: {})
 }

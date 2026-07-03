@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(media.frame_rate, STILL_TICK_RATE);
         assert_eq!(media.duration.value, STILL_DEFAULT_DURATION_TICKS);
         // 5000 ticks at 1000/1 is exactly 5 seconds.
-        let seconds = media.duration.value as f64 * media.duration.rate.seconds_per_frame();
+        let seconds = media.duration.value as f64 * media.duration.rate.seconds_per_unit();
         assert_eq!(seconds, 5.0);
         assert!(!media.is_audio_only());
     }

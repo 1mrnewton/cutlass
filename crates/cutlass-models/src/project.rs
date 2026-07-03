@@ -3,7 +3,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::Map;
-use crate::clip::{Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator, ParamValue};
+use crate::clip::{
+    Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator, ParamValue, Replaceable,
+};
 use crate::effects::EffectInstance;
 use crate::error::ModelError;
 use crate::ids::{ClipId, MediaId, ProjectId, TrackId};
@@ -195,6 +197,7 @@ impl Project {
         if timeline.is_empty() {
             return Err(ModelError::InvalidRange);
         }
+        generator.validate()?;
         let clip = Clip::generated(generator, timeline);
         self.timeline.add_clip(track_id, clip)
     }
@@ -227,6 +230,7 @@ impl Project {
                 kind,
             });
         }
+        generator.validate()?;
         let content = ClipSource::Generated(generator);
         if !kind.accepts_content(&content) {
             return Err(ModelError::IncompatibleTrackKind {
@@ -238,6 +242,97 @@ impl Project {
             .clip_mut(clip_id)
             .ok_or(ModelError::UnknownClip(clip_id))?
             .content = content;
+        Ok(())
+    }
+
+    /// Replace `clip_id`'s content with a trimmed window of `media_id`, keeping
+    /// its timeline placement, speed, transform, and effects. This is the
+    /// primitive behind filling a template slot and re-picking a filled slot's
+    /// in-point (CapCut "tap clip → adjust which part plays"). Validates media
+    /// existence, that the track accepts media content, the source rate, and —
+    /// for non-image media — that the source window lies within the source.
+    pub fn set_clip_media(
+        &mut self,
+        clip_id: ClipId,
+        media_id: MediaId,
+        source: TimeRange,
+    ) -> Result<(), ModelError> {
+        let track_id = self
+            .timeline
+            .track_of(clip_id)
+            .ok_or(ModelError::UnknownClip(clip_id))?;
+        let kind = self
+            .timeline
+            .track(track_id)
+            .ok_or(ModelError::UnknownTrack(track_id))?
+            .kind;
+        let media = self
+            .media
+            .get(&media_id)
+            .ok_or(ModelError::UnknownMedia(media_id))?;
+        check_same_rate(source.start.rate, media.frame_rate)?;
+        if source.is_empty() {
+            return Err(ModelError::InvalidRange);
+        }
+        // Stills repeat one frame for any window; real media must contain the
+        // requested span.
+        if source.start.value < 0 || (!media.is_image && source.end_tick() > media.duration.value) {
+            return Err(ModelError::SourceOutOfBounds);
+        }
+        let content = ClipSource::Media {
+            media: media_id,
+            source,
+        };
+        if !kind.accepts_content(&content) {
+            return Err(ModelError::IncompatibleTrackKind {
+                track: track_id,
+                kind,
+            });
+        }
+        self.timeline
+            .clip_mut(clip_id)
+            .ok_or(ModelError::UnknownClip(clip_id))?
+            .content = content;
+        Ok(())
+    }
+
+    /// Mark (or, with `None`, unmark) a clip as a CapCut-style replaceable
+    /// template slot. The marker is metadata only — it does not change what
+    /// renders — and is what [`Template`](crate::Template) scans to build its
+    /// list of fillable slots. Errors if the clip is unknown.
+    pub fn set_replaceable(
+        &mut self,
+        clip_id: ClipId,
+        replaceable: Option<Replaceable>,
+    ) -> Result<(), ModelError> {
+        self.timeline
+            .clip_mut(clip_id)
+            .ok_or(ModelError::UnknownClip(clip_id))?
+            .replaceable = replaceable;
+        Ok(())
+    }
+
+    /// Mark a text clip's content as user-editable when the project is used as
+    /// a template (the text keeps its style and animation). Errors if the clip
+    /// is unknown or is not a [`Generator::Text`] clip.
+    pub fn set_text_editable(
+        &mut self,
+        clip_id: ClipId,
+        editable: bool,
+    ) -> Result<(), ModelError> {
+        let clip = self
+            .timeline
+            .clip_mut(clip_id)
+            .ok_or(ModelError::UnknownClip(clip_id))?;
+        if !matches!(
+            clip.content,
+            ClipSource::Generated(Generator::Text { .. })
+        ) {
+            return Err(ModelError::InvalidParam(
+                "text editability applies only to text generator clips".into(),
+            ));
+        }
+        clip.text_editable = editable;
         Ok(())
     }
 
@@ -383,6 +478,9 @@ impl Project {
                 let v = scalar_param(value)?;
                 effect_mut(clip, effect)?.set_param_keyframe(param as usize, tick, v, easing)
             }
+            ClipParam::Shape { param } => {
+                generator_mut(clip)?.set_shape_param_keyframe(param, tick, value, easing)
+            }
             _ => clip
                 .transform
                 .set_param_keyframe(param, tick, value, easing),
@@ -423,6 +521,9 @@ impl Project {
             ClipParam::Effect { effect, param } => {
                 effect_mut(clip, effect)?.remove_param_keyframe(param as usize, tick)
             }
+            ClipParam::Shape { param } => {
+                generator_mut(clip)?.remove_shape_param_keyframe(param, tick)
+            }
             _ => clip.transform.remove_param_keyframe(param, tick),
         }
     }
@@ -454,6 +555,9 @@ impl Project {
             ClipParam::Effect { effect, param } => {
                 let v = scalar_param(value)?;
                 effect_mut(clip, effect)?.set_param_constant(param as usize, v)
+            }
+            ClipParam::Shape { param } => {
+                generator_mut(clip)?.set_shape_param_constant(param, value)
             }
             _ => clip.transform.set_param_constant(param, value),
         }
@@ -1287,6 +1391,17 @@ fn effect_mut(clip: &mut Clip, index: u32) -> Result<&mut EffectInstance, ModelE
         .ok_or_else(|| ModelError::InvalidParam(format!("effect index {index} out of range")))
 }
 
+/// A generated clip's generator, or an error for media-backed clips (shape
+/// params route here; the generator itself rejects non-shape kinds).
+fn generator_mut(clip: &mut Clip) -> Result<&mut Generator, ModelError> {
+    match &mut clip.content {
+        ClipSource::Generated(generator) => Ok(generator),
+        ClipSource::Media { .. } => Err(ModelError::InvalidParam(
+            "shape parameters apply only to generated clips".into(),
+        )),
+    }
+}
+
 /// Timeline ticks a retimed clip occupies: `source ÷ (base_speed × average
 /// ramp)`. A flat ramp keeps the exact integer division M1 used (no f64
 /// drift on the common constant-speed path); an active ramp folds in its
@@ -1307,7 +1422,7 @@ fn retimed_duration(src_dur_tl: i64, speed: Rational, average: f64, has_curve: b
 fn scalar_param(value: ParamValue) -> Result<f32, ModelError> {
     match value {
         ParamValue::Scalar(v) => Ok(v),
-        ParamValue::Vec2(_) => Err(ModelError::InvalidParam(
+        ParamValue::Vec2(_) | ParamValue::Color(_) => Err(ModelError::InvalidParam(
             "effect parameters take a scalar value".into(),
         )),
     }
@@ -1344,6 +1459,75 @@ mod tests {
         let media_id = project.add_media(sample_media(R24, duration));
         let track = project.add_track(TrackKind::Video, "V1");
         (project, media_id, track)
+    }
+
+    // --- shape params -------------------------------------------------------
+
+    #[test]
+    fn shape_params_keyframe_through_project_api() {
+        let mut project = Project::new("p", R24);
+        let track = project.add_track(TrackKind::Sticker, "S1");
+        let clip = project
+            .add_generated(
+                track,
+                Generator::shape(Shape::Ellipse, [255, 255, 255, 255]),
+                tr(100, 48),
+            )
+            .unwrap();
+
+        // Keyframe ticks are clip-relative: timeline 100/140 → ticks 0/40.
+        let width = ClipParam::Shape {
+            param: crate::ShapeParam::Width,
+        };
+        project
+            .set_param_keyframe(clip, width, rt(100), ParamValue::Scalar(100.0), Easing::Linear)
+            .unwrap();
+        project
+            .set_param_keyframe(clip, width, rt(140), ParamValue::Scalar(500.0), Easing::Linear)
+            .unwrap();
+        let ClipSource::Generated(Generator::Shape { width: w, .. }) =
+            &project.clip(clip).unwrap().content
+        else {
+            panic!("expected shape");
+        };
+        assert_eq!(w.sample(20), 300.0);
+
+        // Constants flatten; out-of-range and wrong-kind values are rejected
+        // with the clip unchanged.
+        project
+            .set_param_constant(clip, width, ParamValue::Scalar(250.0))
+            .unwrap();
+        assert!(
+            project
+                .set_param_keyframe(clip, width, rt(100), ParamValue::Color([0; 4]), Easing::Linear)
+                .is_err()
+        );
+        assert!(
+            project
+                .set_param_constant(clip, width, ParamValue::Scalar(f32::NAN))
+                .is_err()
+        );
+
+        // Media clips reject shape params outright.
+        let media = project.add_media(sample_media(R24, 500));
+        let vtrack = project.add_track(TrackKind::Video, "V1");
+        let mclip = project.add_clip(vtrack, media, tr(0, 100), rt(0)).unwrap();
+        assert!(
+            project
+                .set_param_constant(mclip, width, ParamValue::Scalar(10.0))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn add_generated_rejects_invalid_shape() {
+        let mut project = Project::new("p", R24);
+        let track = project.add_track(TrackKind::Sticker, "S1");
+        let bad = Generator::shape(Shape::Polygon { sides: 2 }, [255, 255, 255, 255]);
+        assert!(matches!(
+            project.add_generated(track, bad, tr(0, 48)),
+            Err(ModelError::InvalidParam(_))
+        ));
     }
 
     // --- transitions (M4) -------------------------------------------------

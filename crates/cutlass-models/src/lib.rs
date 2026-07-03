@@ -2,8 +2,9 @@
 //!
 //! Design goals:
 //! - **Correct types**: strongly-typed IDs (no mixing a [`TrackId`] with a
-//!   [`ClipId`]), OTIO-style [`RationalTime`] (exact NTSC rates), and explicit
-//!   timeline-vs-source ranges each carrying their own rate.
+//!   [`ClipId`]), OTIO-style [`RationalTime`] (exact NTSC rates) sourced from
+//!   the shared [`cutlass_core`] contract, and explicit timeline-vs-source
+//!   ranges each carrying their own rate.
 //! - **Fast lookup**: entities are stored in hash maps keyed by ID, so finding
 //!   a clip/track/media by ID is O(1). The timeline keeps a `ClipId -> TrackId`
 //!   index so a clip can be located across all tracks without scanning.
@@ -11,6 +12,14 @@
 //!   the model can be exercised in isolation.
 //!
 //! A [`Project`] owns one [`Timeline`] and a media pool of [`MediaSource`]s.
+//!
+//! ## Templates
+//!
+//! A [`Template`] is a finished [`Project`] whose author has marked specific
+//! clips as user-replaceable ([`Replaceable`]), mirroring CapCut: the slot
+//! keeps its sample media (so the template previews), and applying the template
+//! swaps the media while the slot's duration, transform, effects, transitions,
+//! and animations stay locked.
 
 mod clip;
 mod effects;
@@ -23,6 +32,7 @@ mod persist;
 mod project;
 mod schema;
 mod serde_map;
+mod template;
 mod time;
 mod timeline;
 mod track;
@@ -34,23 +44,28 @@ pub type Map<K, V> = rustc_hash::FxHashMap<K, V>;
 
 pub use clip::{
     AnimatedTransform, Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator,
-    MAX_CLIP_VOLUME, MAX_SPEED, MIN_CROP_FRACTION, MIN_SPEED, ParamValue, SHAPE_DROP_HEIGHT,
-    SHAPE_DROP_WIDTH, SPEED_CURVE_SCALE, Shape, TextAlignH, TextAlignV, TextBackground, TextCase,
-    TextShadow, TextStroke, TextStyle, audio_gain_at, speed_curve_integral,
-    speed_curve_source_fraction, speed_preset, validate_speed_curve, validate_volume,
-    validate_volume_envelope,
+    MAX_CLIP_VOLUME, MAX_SHAPE_DIM, MAX_SPEED, MAX_STAR_POINTS, MAX_STROKE_WIDTH,
+    MIN_CROP_FRACTION, MIN_SPEED, ParamValue, Replaceable, SHAPE_DROP_HEIGHT, SHAPE_DROP_WIDTH,
+    SPEED_CURVE_SCALE, Shape, ShapeParam, ShapePath, ShapePathPoint, ShapeStroke, SlotMedia,
+    TextAlignH, TextAlignV, TextBackground, TextCase, TextShadow, TextStroke, TextStyle,
+    audio_gain_at, speed_curve_integral, speed_curve_source_fraction, speed_preset,
+    validate_speed_curve, validate_volume, validate_volume_envelope,
 };
 pub use effects::{EffectInstance, EffectParamSpec, EffectSpec, effect_catalog, effect_spec};
 pub use error::ModelError;
-pub use ids::{ClipId, LinkId, MarkerId, MediaId, ProjectId, TrackId};
+pub use ids::{ClipId, LinkId, MarkerId, MediaId, ProjectId, TemplateId, TrackId};
 pub use media::{MediaKind, MediaSource, STILL_DEFAULT_DURATION_TICKS, STILL_TICK_RATE};
 pub use metadata::ProjectMetadata;
 pub use param::{Easing, Keyframe, Lerp, Param};
 pub use persist::{PROJECT_FILE_EXTENSION, PROJECT_FILE_VERSION};
 pub use project::Project;
 pub use schema::{PROJECT_SCHEMA_KIND, PROJECT_SCHEMA_VERSION, ProjectSchema};
+pub use template::{
+    Pick, TEMPLATE_FILE_EXTENSION, TEMPLATE_SCHEMA_KIND, Template, TemplateCategory, TemplateMeta,
+};
 pub use time::{
-    Rational, RationalTime, TimeRange, check_same_rate, rate_eq, resample, time_add, time_sub,
+    Rational, RationalTime, TimeError, TimeRange, check_same_rate, rate_eq, resample, time_add,
+    time_sub,
 };
 pub use timeline::{CanvasAspect, CanvasSettings, Marker, MarkerColor, Timeline};
 pub use track::{Track, TrackKind};

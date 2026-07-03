@@ -67,6 +67,10 @@ define_id!(
     /// Identifies a [`Marker`](crate::Marker) on the timeline ruler.
     MarkerId
 );
+define_id!(
+    /// Identifies a [`Template`](crate::Template) document.
+    TemplateId
+);
 
 #[cfg(test)]
 mod tests {
@@ -101,6 +105,11 @@ mod tests {
     #[test]
     fn clip_id_from_raw_roundtrips() {
         assert_from_raw_roundtrips!(ClipId::from_raw);
+    }
+
+    #[test]
+    fn template_id_from_raw_roundtrips() {
+        assert_from_raw_roundtrips!(TemplateId::from_raw);
     }
 
     // --- next() allocation ------------------------------------------------
@@ -149,6 +158,7 @@ mod tests {
         assert_eq!(MediaId::from_raw(2).to_string(), "MediaId#2");
         assert_eq!(TrackId::from_raw(3).to_string(), "TrackId#3");
         assert_eq!(ClipId::from_raw(4).to_string(), "ClipId#4");
+        assert_eq!(TemplateId::from_raw(5).to_string(), "TemplateId#5");
     }
 
     // --- Copy / Clone / Eq ------------------------------------------------

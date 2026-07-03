@@ -188,6 +188,21 @@ impl Lerp for [f32; 2] {
     }
 }
 
+/// RGBA colors (shape fill/stroke animation): per-channel lerp in encoded
+/// 8-bit space — what CapCut-class editors do; a perceptual space would be
+/// overkill for UI color fades.
+impl Lerp for [u8; 4] {
+    fn lerp(a: Self, b: Self, t: f32) -> Self {
+        let mut out = [0u8; 4];
+        for (o, (&x, &y)) in out.iter_mut().zip(a.iter().zip(b.iter())) {
+            *o = (f32::from(x) + (f32::from(y) - f32::from(x)) * t)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+        }
+        out
+    }
+}
+
 /// One point on a keyframed curve. `tick` is clip-relative (offset from the
 /// clip's timeline start) at the timeline rate.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

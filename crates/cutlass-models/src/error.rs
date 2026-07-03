@@ -1,8 +1,10 @@
 use thiserror::Error;
 
+use crate::clip::SlotMedia;
 use crate::ids::{ClipId, MarkerId, MediaId, TrackId};
+use crate::media::MediaKind;
 use crate::schema::ProjectSchema;
-use crate::time::Rational;
+use crate::time::{Rational, TimeError};
 use crate::track::TrackKind;
 
 /// Errors from model mutations that would violate a referential or layout
@@ -56,4 +58,30 @@ pub enum ModelError {
 
     #[error("time arithmetic overflow")]
     TimeOverflow,
+
+    // --- templates --------------------------------------------------------
+    #[error("clip {0} is not a replaceable template slot")]
+    NotReplaceable(ClipId),
+
+    #[error("template slot {slot} accepts {accepts:?} but {found:?} media was supplied")]
+    SlotMediaMismatch {
+        slot: ClipId,
+        accepts: SlotMedia,
+        found: MediaKind,
+    },
+
+    #[error("media supplied for template slot {slot} cannot cover its locked duration")]
+    SlotDurationUnmet { slot: ClipId },
+}
+
+/// Bridge the shared `cutlass-core` time errors into [`ModelError`] so model
+/// methods that propagate rational-time arithmetic with `?` keep returning a
+/// single error type.
+impl From<TimeError> for ModelError {
+    fn from(err: TimeError) -> Self {
+        match err {
+            TimeError::RateMismatch { expected, got } => ModelError::RateMismatch { expected, got },
+            TimeError::Overflow => ModelError::TimeOverflow,
+        }
+    }
 }

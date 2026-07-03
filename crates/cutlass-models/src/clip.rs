@@ -35,22 +35,35 @@ pub enum Generator {
     },
     /// A solid fill (RGBA, 0-255).
     SolidColor { rgba: [u8; 4] },
-    /// A centered vector shape (rectangle or ellipse) with a fill color.
+    /// A centered vector shape with a fill color and optional outline.
     ///
     /// `width` and `height` are in *reference pixels* relative to a 1080px-tall
-    /// canvas; the rasterizer scales them by `canvas_height / 1080` (same
+    /// canvas; the renderer scales them by `canvas_height / 1080` (same
     /// convention as [`TextStyle::size`]). Missing fields deserialize to the
     /// legacy centered-50%-of-canvas look; freshly dropped shapes use
     /// [`SHAPE_DROP_WIDTH`] × [`SHAPE_DROP_HEIGHT`].
+    ///
+    /// The geometry and style fields are [`Param`]s (M2 pattern): constants
+    /// serialize as bare values, byte-identical to the pre-shape-animation
+    /// format, and keyframed curves as `{"kf":[...]}`. Keyframe ticks are
+    /// clip-relative, like every other clip param. Never-touched
+    /// `corner_radius`/`stroke` are elided from saves entirely.
     Shape {
         shape: Shape,
         /// Fill color. Old projects without this field default to white.
         #[serde(default = "default_shape_rgba")]
-        rgba: [u8; 4],
+        rgba: Param<[u8; 4]>,
         #[serde(default = "default_shape_width")]
-        width: f32,
+        width: Param<f32>,
         #[serde(default = "default_shape_height")]
-        height: f32,
+        height: Param<f32>,
+        /// Corner rounding in reference pixels. Shapes with corners
+        /// (rectangle, polygon, star) honor it; curved shapes ignore it.
+        #[serde(default = "zero_param", skip_serializing_if = "is_zero_param")]
+        corner_radius: Param<f32>,
+        /// Outline centered on the shape edge (half in, half out).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stroke: Option<ShapeStroke>,
     },
     /// Image or animated sticker (asset wiring TBD).
     Sticker,
@@ -62,31 +75,136 @@ pub enum Generator {
     Adjustment,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The geometry of a [`Generator::Shape`]: parametric figures the compositor
+/// evaluates as GPU signed-distance fields, or a pen-tool bezier
+/// [`ShapePath`] rasterized on the CPU. The legacy `Rectangle`/`Ellipse`
+/// unit variants keep their serialized names, so old projects load
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Shape {
     Rectangle,
     Ellipse,
+    /// Regular polygon (`sides >= 3`; a triangle is `sides: 3`), fit to the
+    /// generator's `width`×`height` box.
+    Polygon { sides: u32 },
+    /// Star with `points` spikes (`>= 3`); `inner_ratio` is the inner-vertex
+    /// radius as a fraction of the outer (`0..=1` — small is spiky, large is
+    /// blunt), animatable.
+    Star {
+        points: u32,
+        #[serde(default = "default_star_inner")]
+        inner_ratio: Param<f32>,
+    },
+    /// A horizontal capsule (round-capped line) spanning the box; the box
+    /// height is the line thickness. Rotate via the clip transform.
+    Line,
+    /// A right-pointing arrow filling the box.
+    Arrow,
+    /// An upright heart fit to the box.
+    Heart,
+    /// A custom pen-tool outline (cubic beziers).
+    Path(ShapePath),
+}
+
+/// A pen-tool outline: anchors with absolute cubic handles, in shape-local
+/// reference pixels around the shape's center (the pen tool normalizes a
+/// committed path so its bounds center the origin — that point lands on the
+/// clip's placed center). Point geometry is edited structurally via
+/// `SetGenerator` (not keyframed); the fill/stroke/transform animate like
+/// any other shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShapePath {
+    pub points: Vec<ShapePathPoint>,
+    /// Closed paths fill; open paths draw stroke only.
+    pub closed: bool,
+}
+
+/// One pen-tool anchor. A handle equal to its anchor makes that side of the
+/// point a sharp corner (the "click without drag" pen gesture).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ShapePathPoint {
+    pub anchor: [f32; 2],
+    /// Control of the segment arriving at this anchor.
+    pub handle_in: [f32; 2],
+    /// Control of the segment leaving this anchor.
+    pub handle_out: [f32; 2],
+}
+
+impl ShapePathPoint {
+    /// A corner point: both handles collapsed onto the anchor.
+    pub fn corner(anchor: [f32; 2]) -> Self {
+        Self {
+            anchor,
+            handle_in: anchor,
+            handle_out: anchor,
+        }
+    }
+}
+
+/// Outline drawn on a shape's edge, centered on it. Color and width are
+/// animatable [`Param`]s (constants serialize bare).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShapeStroke {
+    pub rgba: Param<[u8; 4]>,
+    pub width: Param<f32>,
+}
+
+impl ShapeStroke {
+    /// A constant stroke.
+    pub fn new(rgba: [u8; 4], width: f32) -> Self {
+        Self {
+            rgba: Param::Constant(rgba),
+            width: Param::Constant(width),
+        }
+    }
 }
 
 /// Default fill color for a shape without one (opaque white).
-fn default_shape_rgba() -> [u8; 4] {
-    [255, 255, 255, 255]
+fn default_shape_rgba() -> Param<[u8; 4]> {
+    Param::Constant([255, 255, 255, 255])
 }
 
 /// Default width for shapes missing the field — reproduces the legacy
 /// centered 50%-of-canvas geometry on a 1920×1080 project.
-fn default_shape_width() -> f32 {
-    960.0
+fn default_shape_width() -> Param<f32> {
+    Param::Constant(960.0)
 }
 
 /// Default height for shapes missing the field — same legacy geometry.
-fn default_shape_height() -> f32 {
-    540.0
+fn default_shape_height() -> Param<f32> {
+    Param::Constant(540.0)
+}
+
+fn default_star_inner() -> Param<f32> {
+    Param::Constant(0.5)
+}
+
+fn zero_param() -> Param<f32> {
+    Param::Constant(0.0)
+}
+
+/// A never-touched zero constant — elided from saves. `&` form for serde.
+fn is_zero_param(p: &Param<f32>) -> bool {
+    matches!(p, Param::Constant(v) if *v == 0.0)
 }
 
 /// Size of a freshly dropped shape (reference pixels @ 1080 canvas height).
 pub const SHAPE_DROP_WIDTH: f32 = 200.0;
 pub const SHAPE_DROP_HEIGHT: f32 = 200.0;
+
+/// Largest shape extent / path coordinate magnitude, in reference pixels.
+/// Sanity bound only — SDF shapes are resolution-independent, but a runaway
+/// value would still blow up path rasters and content-box math.
+pub const MAX_SHAPE_DIM: f32 = 8192.0;
+
+/// Most spikes a star (or sides a polygon) may have. Mirrors the evaluator
+/// bound in `cutlass-shapes` (`MAX_STAR_POINTS`), which sizes the fixed
+/// vertex buffers on the CPU and in WGSL; a render-side test pins the two
+/// constants together.
+pub const MAX_STAR_POINTS: u32 = 20;
+
+/// Widest stroke, in reference pixels.
+pub const MAX_STROKE_WIDTH: f32 = 512.0;
 
 impl Generator {
     /// A text generator with the default style. Convenience for the common
@@ -102,11 +220,286 @@ impl Generator {
     pub fn shape(shape: Shape, rgba: [u8; 4]) -> Self {
         Generator::Shape {
             shape,
-            rgba,
-            width: SHAPE_DROP_WIDTH,
-            height: SHAPE_DROP_HEIGHT,
+            rgba: Param::Constant(rgba),
+            width: Param::Constant(SHAPE_DROP_WIDTH),
+            height: Param::Constant(SHAPE_DROP_HEIGHT),
+            corner_radius: zero_param(),
+            stroke: None,
         }
     }
+
+    /// `Ok` iff the generator's content is structurally sound and every
+    /// stored value (constants and keyframes) is in range. Enforced by
+    /// [`crate::Project::add_generated`] / [`crate::Project::set_generator`]
+    /// so a project never holds a shape the renderer would have to clamp.
+    pub fn validate(&self) -> Result<(), ModelError> {
+        let Generator::Shape {
+            shape,
+            rgba,
+            width,
+            height,
+            corner_radius,
+            stroke,
+        } = self
+        else {
+            return Ok(());
+        };
+
+        match shape {
+            Shape::Polygon { sides } => validate_star_points(*sides, "polygon sides")?,
+            Shape::Star {
+                points,
+                inner_ratio,
+            } => {
+                validate_star_points(*points, "star points")?;
+                inner_ratio.validate_shape()?;
+                inner_ratio.for_each_value(|v| validate_unit_fraction(*v, "star inner_ratio"))?;
+            }
+            Shape::Path(path) => path.validate()?,
+            Shape::Rectangle | Shape::Ellipse | Shape::Line | Shape::Arrow | Shape::Heart => {}
+        }
+
+        rgba.validate_shape()?;
+        for p in [width, height] {
+            p.validate_shape()?;
+            p.for_each_value(|v| validate_shape_dim(*v))?;
+        }
+        corner_radius.validate_shape()?;
+        corner_radius.for_each_value(|v| validate_corner_radius(*v))?;
+        if let Some(s) = stroke {
+            s.rgba.validate_shape()?;
+            s.width.validate_shape()?;
+            s.width.for_each_value(|v| validate_stroke_width(*v))?;
+        }
+        Ok(())
+    }
+
+    /// Insert or replace a keyframe on one animatable shape property.
+    /// Errors when the generator is not a shape, the property does not
+    /// apply to its kind (e.g. `InnerRatio` on a rectangle, stroke params
+    /// with no stroke set), or the value is out of range.
+    pub fn set_shape_param_keyframe(
+        &mut self,
+        param: ShapeParam,
+        tick: i64,
+        value: ParamValue,
+        easing: Easing,
+    ) -> Result<(), ModelError> {
+        easing.validate()?;
+        self.with_shape_param(param, |target, kind| match kind {
+            ShapeParamKind::Scalar { validate } => {
+                let v = value.scalar()?;
+                validate(v)?;
+                target.scalar()?.set_keyframe(tick, v, easing);
+                Ok(())
+            }
+            ShapeParamKind::Color => {
+                let v = value.color()?;
+                target.color()?.set_keyframe(tick, v, easing);
+                Ok(())
+            }
+        })
+    }
+
+    /// Remove the keyframe at exactly `tick` on one shape property. Errors
+    /// when no keyframe sits there.
+    pub fn remove_shape_param_keyframe(
+        &mut self,
+        param: ShapeParam,
+        tick: i64,
+    ) -> Result<(), ModelError> {
+        self.with_shape_param(param, |target, kind| {
+            let removed = match kind {
+                ShapeParamKind::Scalar { .. } => target.scalar()?.remove_keyframe(tick),
+                ShapeParamKind::Color => target.color()?.remove_keyframe(tick),
+            };
+            if removed {
+                Ok(())
+            } else {
+                Err(ModelError::InvalidParam(format!(
+                    "no {param:?} keyframe at tick {tick}"
+                )))
+            }
+        })
+    }
+
+    /// Replace one shape property with a constant, dropping its keyframes.
+    pub fn set_shape_param_constant(
+        &mut self,
+        param: ShapeParam,
+        value: ParamValue,
+    ) -> Result<(), ModelError> {
+        self.with_shape_param(param, |target, kind| match kind {
+            ShapeParamKind::Scalar { validate } => {
+                let v = value.scalar()?;
+                validate(v)?;
+                target.scalar()?.set_constant(v);
+                Ok(())
+            }
+            ShapeParamKind::Color => {
+                target.color()?.set_constant(value.color()?);
+                Ok(())
+            }
+        })
+    }
+
+    /// Resolve `param` to the [`Param`] it names on this generator and run
+    /// `f` on it — the single routing point for the three mutators above.
+    fn with_shape_param<R>(
+        &mut self,
+        param: ShapeParam,
+        f: impl FnOnce(ShapeParamTarget<'_>, ShapeParamKind) -> Result<R, ModelError>,
+    ) -> Result<R, ModelError> {
+        let Generator::Shape {
+            shape,
+            rgba,
+            width,
+            height,
+            corner_radius,
+            stroke,
+        } = self
+        else {
+            return Err(ModelError::InvalidParam(
+                "shape parameters apply only to shape generator clips".into(),
+            ));
+        };
+        let scalar = |validate: fn(f32) -> Result<(), ModelError>| ShapeParamKind::Scalar { validate };
+        match param {
+            ShapeParam::Width => f(ShapeParamTarget::Scalar(width), scalar(validate_shape_dim)),
+            ShapeParam::Height => f(ShapeParamTarget::Scalar(height), scalar(validate_shape_dim)),
+            ShapeParam::CornerRadius => f(
+                ShapeParamTarget::Scalar(corner_radius),
+                scalar(validate_corner_radius),
+            ),
+            ShapeParam::Fill => f(ShapeParamTarget::Color(rgba), ShapeParamKind::Color),
+            ShapeParam::InnerRatio => match shape {
+                Shape::Star { inner_ratio, .. } => f(
+                    ShapeParamTarget::Scalar(inner_ratio),
+                    scalar(|v| validate_unit_fraction(v, "star inner_ratio")),
+                ),
+                _ => Err(ModelError::InvalidParam(
+                    "inner_ratio applies only to star shapes".into(),
+                )),
+            },
+            ShapeParam::StrokeWidth | ShapeParam::StrokeColor => match stroke {
+                Some(s) => match param {
+                    ShapeParam::StrokeWidth => f(
+                        ShapeParamTarget::Scalar(&mut s.width),
+                        scalar(validate_stroke_width),
+                    ),
+                    _ => f(ShapeParamTarget::Color(&mut s.rgba), ShapeParamKind::Color),
+                },
+                None => Err(ModelError::InvalidParam(
+                    "shape has no stroke — set one via SetGenerator first".into(),
+                )),
+            },
+        }
+    }
+}
+
+/// A mutable reference to one animatable shape property, typed by value kind.
+enum ShapeParamTarget<'a> {
+    Scalar(&'a mut Param<f32>),
+    Color(&'a mut Param<[u8; 4]>),
+}
+
+impl<'a> ShapeParamTarget<'a> {
+    fn scalar(self) -> Result<&'a mut Param<f32>, ModelError> {
+        match self {
+            ShapeParamTarget::Scalar(p) => Ok(p),
+            ShapeParamTarget::Color(_) => Err(ModelError::InvalidParam(
+                "expected a color value for this shape parameter".into(),
+            )),
+        }
+    }
+
+    fn color(self) -> Result<&'a mut Param<[u8; 4]>, ModelError> {
+        match self {
+            ShapeParamTarget::Color(p) => Ok(p),
+            ShapeParamTarget::Scalar(_) => Err(ModelError::InvalidParam(
+                "expected a scalar value for this shape parameter".into(),
+            )),
+        }
+    }
+}
+
+/// Value kind (and range rule) of one [`ShapeParam`].
+enum ShapeParamKind {
+    Scalar {
+        validate: fn(f32) -> Result<(), ModelError>,
+    },
+    Color,
+}
+
+impl ShapePath {
+    /// `Ok` iff the path is drawable (>= 2 points) with finite, bounded
+    /// coordinates.
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if self.points.len() < 2 {
+            return Err(ModelError::InvalidParam(
+                "shape path needs at least 2 points".into(),
+            ));
+        }
+        for p in &self.points {
+            for v in [p.anchor, p.handle_in, p.handle_out] {
+                if !v.iter().all(|c| c.is_finite() && c.abs() <= MAX_SHAPE_DIM) {
+                    return Err(ModelError::InvalidParam(format!(
+                        "shape path coordinate out of range (|v| <= {MAX_SHAPE_DIM})"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Range check for a shape width/height value.
+fn validate_shape_dim(v: f32) -> Result<(), ModelError> {
+    if !v.is_finite() || v <= 0.0 || v > MAX_SHAPE_DIM {
+        return Err(ModelError::InvalidParam(format!(
+            "shape size must be positive and at most {MAX_SHAPE_DIM} reference px"
+        )));
+    }
+    Ok(())
+}
+
+/// Range check for a corner-radius value.
+fn validate_corner_radius(v: f32) -> Result<(), ModelError> {
+    if !v.is_finite() || !(0.0..=MAX_SHAPE_DIM).contains(&v) {
+        return Err(ModelError::InvalidParam(format!(
+            "corner radius must be in 0..={MAX_SHAPE_DIM} reference px"
+        )));
+    }
+    Ok(())
+}
+
+/// Range check for a stroke-width value (0 = invisible but legal, so a width
+/// animation can ease from nothing).
+fn validate_stroke_width(v: f32) -> Result<(), ModelError> {
+    if !v.is_finite() || !(0.0..=MAX_STROKE_WIDTH).contains(&v) {
+        return Err(ModelError::InvalidParam(format!(
+            "stroke width must be in 0..={MAX_STROKE_WIDTH} reference px"
+        )));
+    }
+    Ok(())
+}
+
+/// Range check for a `0..=1` fraction value.
+fn validate_unit_fraction(v: f32, what: &str) -> Result<(), ModelError> {
+    if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+        return Err(ModelError::InvalidParam(format!("{what} must be in 0..=1")));
+    }
+    Ok(())
+}
+
+/// Range check for star spike / polygon side counts.
+fn validate_star_points(n: u32, what: &str) -> Result<(), ModelError> {
+    if !(3..=MAX_STAR_POINTS).contains(&n) {
+        return Err(ModelError::InvalidParam(format!(
+            "{what} must be in 3..={MAX_STAR_POINTS}"
+        )));
+    }
+    Ok(())
 }
 
 /// Letter-casing transform applied to a title before shaping.
@@ -502,24 +895,58 @@ pub enum ClipParam {
         effect: u32,
         param: u32,
     },
+    /// An animatable property of a [`Generator::Shape`] clip. Routed to the
+    /// generator's own `Param`s instead of the transform, so the same
+    /// keyframe commands animate shape geometry and colors. Scalar
+    /// properties carry [`ParamValue::Scalar`]; `Fill`/`StrokeColor` carry
+    /// [`ParamValue::Color`].
+    Shape {
+        param: ShapeParam,
+    },
+}
+
+/// The animatable properties of a [`Generator::Shape`] (see
+/// [`ClipParam::Shape`]). Structural knobs — the shape kind, polygon sides,
+/// star points, path points — are not animatable; they change through
+/// `SetGenerator`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShapeParam {
+    /// Shape box width (reference px). Scalar.
+    Width,
+    /// Shape box height (reference px). Scalar.
+    Height,
+    /// Corner rounding (reference px). Scalar; rect/polygon/star only honor
+    /// it visually but it may be set on any shape.
+    CornerRadius,
+    /// Star inner-vertex radius fraction. Scalar; star shapes only.
+    InnerRatio,
+    /// Fill color. Color.
+    Fill,
+    /// Stroke color. Color; requires the shape to have a stroke.
+    StrokeColor,
+    /// Stroke width (reference px). Scalar; requires the shape to have a
+    /// stroke.
+    StrokeWidth,
 }
 
 /// A value for a [`ClipParam`]: scalar properties take `Scalar`, `position`
-/// takes `Vec2`. Commands carry this so one command shape serves every
-/// param kind.
+/// takes `Vec2`, color properties (shape fill/stroke) take `Color`. Commands
+/// carry this so one command shape serves every param kind.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParamValue {
     Scalar(f32),
     Vec2([f32; 2]),
+    Color([u8; 4]),
 }
 
 impl ParamValue {
     fn scalar(self) -> Result<f32, ModelError> {
         match self {
             ParamValue::Scalar(v) => Ok(v),
-            ParamValue::Vec2(_) => Err(ModelError::InvalidParam(
-                "expected a scalar value, got a vec2".into(),
+            _ => Err(ModelError::InvalidParam(
+                "expected a scalar value".into(),
             )),
         }
     }
@@ -527,8 +954,17 @@ impl ParamValue {
     fn vec2(self) -> Result<[f32; 2], ModelError> {
         match self {
             ParamValue::Vec2(v) => Ok(v),
-            ParamValue::Scalar(_) => Err(ModelError::InvalidParam(
-                "expected a vec2 value, got a scalar".into(),
+            _ => Err(ModelError::InvalidParam(
+                "expected a vec2 value".into(),
+            )),
+        }
+    }
+
+    fn color(self) -> Result<[u8; 4], ModelError> {
+        match self {
+            ParamValue::Color(v) => Ok(v),
+            _ => Err(ModelError::InvalidParam(
+                "expected a color value".into(),
             )),
         }
     }
@@ -703,7 +1139,7 @@ impl AnimatedTransform {
                 validate_opacity(v)?;
                 self.opacity.set_keyframe(tick, v, easing);
             }
-            ClipParam::Effect { .. } | ClipParam::Speed | ClipParam::Volume => {
+            ClipParam::Effect { .. } | ClipParam::Speed | ClipParam::Volume | ClipParam::Shape { .. } => {
                 return Err(not_a_transform_param());
             }
         }
@@ -719,7 +1155,7 @@ impl AnimatedTransform {
             ClipParam::Scale => self.scale.remove_keyframe(tick),
             ClipParam::Rotation => self.rotation.remove_keyframe(tick),
             ClipParam::Opacity => self.opacity.remove_keyframe(tick),
-            ClipParam::Effect { .. } | ClipParam::Speed | ClipParam::Volume => {
+            ClipParam::Effect { .. } | ClipParam::Speed | ClipParam::Volume | ClipParam::Shape { .. } => {
                 return Err(not_a_transform_param());
             }
         };
@@ -764,7 +1200,7 @@ impl AnimatedTransform {
                 validate_opacity(v)?;
                 self.opacity.set_constant(v);
             }
-            ClipParam::Effect { .. } | ClipParam::Speed | ClipParam::Volume => {
+            ClipParam::Effect { .. } | ClipParam::Speed | ClipParam::Volume | ClipParam::Shape { .. } => {
                 return Err(not_a_transform_param());
             }
         }
@@ -860,6 +1296,89 @@ impl From<ClipTransform> for AnimatedTransform {
             rotation: Param::Constant(t.rotation),
             opacity: Param::Constant(t.opacity),
         }
+    }
+}
+
+/// What kind of media a [`Replaceable`] template slot accepts, mirroring
+/// CapCut's per-clip "video only" / "image only" restriction (plus an audio
+/// variant for marking a swappable music/soundtrack clip).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotMedia {
+    /// Any visual media — a video clip or a still image.
+    #[default]
+    Any,
+    /// Video clips only.
+    VideoOnly,
+    /// Still images only.
+    ImageOnly,
+    /// Audio only — marks a swappable music/soundtrack clip.
+    AudioOnly,
+}
+
+impl SlotMedia {
+    /// Whether a source of `kind` may fill a slot with this restriction.
+    pub fn accepts(self, kind: crate::media::MediaKind) -> bool {
+        use crate::media::MediaKind;
+        match self {
+            SlotMedia::Any => matches!(kind, MediaKind::Video | MediaKind::Image),
+            SlotMedia::VideoOnly => kind == MediaKind::Video,
+            SlotMedia::ImageOnly => kind == MediaKind::Image,
+            SlotMedia::AudioOnly => kind == MediaKind::Audio,
+        }
+    }
+}
+
+/// Marks a [`Clip`] as a user-replaceable template slot (CapCut's "set
+/// replaceable material clips"). The clip keeps its sample media so the
+/// template previews like the author's video; applying the template swaps the
+/// media in slot `order` while the slot's locked timeline duration, transform,
+/// effects, and transitions are preserved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Replaceable {
+    /// Fill order: slots are filled in ascending `order`, matching the
+    /// sequence the user/agent picks media in.
+    pub order: u32,
+    /// Media-type restriction for this slot.
+    #[serde(default)]
+    pub accepts: SlotMedia,
+    /// Optional cap on the source duration a fill may draw (CapCut's per-clip
+    /// "maximum duration" gear option), at the slot clip's timeline rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_duration: Option<RationalTime>,
+    /// Optional author hint shown on the placeholder ("Your clip here"); also
+    /// surfaced to the AI agent when auto-filling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl Replaceable {
+    /// A slot at `order` accepting any visual media, with no duration cap.
+    pub fn new(order: u32) -> Self {
+        Self {
+            order,
+            accepts: SlotMedia::Any,
+            max_duration: None,
+            label: None,
+        }
+    }
+
+    /// Restrict the media type this slot accepts.
+    pub fn with_accepts(mut self, accepts: SlotMedia) -> Self {
+        self.accepts = accepts;
+        self
+    }
+
+    /// Cap the source duration a fill may draw.
+    pub fn with_max_duration(mut self, max: RationalTime) -> Self {
+        self.max_duration = Some(max);
+        self
+    }
+
+    /// Attach an author hint for the placeholder.
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
     }
 }
 
@@ -978,6 +1497,16 @@ pub struct Clip {
     /// absent from saves) until detected, so old files load unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub beats: Vec<i64>,
+    /// CapCut-style replaceable placeholder marker (templates). `None` for an
+    /// ordinary clip; `Some` marks this clip as a user-fillable slot. Absent
+    /// from saves while `None`, so non-template projects stay byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaceable: Option<Replaceable>,
+    /// Whether a viewer may re-word this clip's text when using the project as
+    /// a template (the text keeps its style and animation). Meaningful on
+    /// `Generator::Text` clips; `false` (and absent from saves) otherwise.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub text_editable: bool,
 }
 
 /// Upper bound for [`Clip::volume`] (CapCut's 1000% ceiling).
@@ -1110,6 +1639,8 @@ impl Clip {
             flip_v: false,
             effects: Vec::new(),
             beats: Vec::new(),
+            replaceable: None,
+            text_editable: false,
         }
     }
 
@@ -1134,6 +1665,8 @@ impl Clip {
             flip_v: false,
             effects: Vec::new(),
             beats: Vec::new(),
+            replaceable: None,
+            text_editable: false,
         }
     }
 
@@ -1282,7 +1815,7 @@ impl Clip {
 
     /// Exclusive timeline end.
     pub fn end(&self) -> Result<RationalTime, ModelError> {
-        self.timeline.end()
+        Ok(self.timeline.end()?)
     }
 
     /// The media this clip references, or `None` for generated content.
@@ -2551,12 +3084,189 @@ mod tests {
         }"#;
         let clip: Clip = serde_json::from_str(json).expect("deserialize legacy shape clip");
         match clip.content {
-            ClipSource::Generated(Generator::Shape { width, height, .. }) => {
-                assert_eq!(width, 960.0);
-                assert_eq!(height, 540.0);
+            ClipSource::Generated(Generator::Shape {
+                rgba,
+                width,
+                height,
+                corner_radius,
+                stroke,
+                ..
+            }) => {
+                // Bare legacy values load as constants (the M2 Param trick).
+                assert_eq!(rgba.constant(), Some([255, 0, 0, 255]));
+                assert_eq!(width.constant(), Some(960.0));
+                assert_eq!(height.constant(), Some(540.0));
+                // Fields that postdate the file default to "not set".
+                assert_eq!(corner_radius.constant(), Some(0.0));
+                assert!(stroke.is_none());
             }
             other => panic!("expected shape generator, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn never_touched_shape_serializes_byte_identical_to_legacy() {
+        // A constant shape must not leak the new fields into saves: `Param`
+        // constants serialize bare, corner_radius/stroke are elided.
+        let generator = Generator::shape(Shape::Rectangle, [10, 20, 30, 255]);
+        let json = serde_json::to_value(&generator).unwrap();
+        let obj = &json["Shape"];
+        assert_eq!(obj["rgba"], serde_json::json!([10, 20, 30, 255]));
+        assert_eq!(obj["width"], serde_json::json!(200.0));
+        assert!(
+            obj.get("corner_radius").is_none(),
+            "zero corner radius must be elided: {obj}"
+        );
+        assert!(obj.get("stroke").is_none(), "absent stroke must be elided");
+    }
+
+    #[test]
+    fn new_shape_kinds_roundtrip_with_keyframed_params() {
+        let mut inner = Param::Constant(0.5);
+        inner.set_keyframe(0, 0.2, Easing::Linear);
+        inner.set_keyframe(24, 0.9, Easing::EaseInOut);
+        let generator = Generator::Shape {
+            shape: Shape::Star {
+                points: 5,
+                inner_ratio: inner,
+            },
+            rgba: Param::Constant([255, 0, 0, 255]),
+            width: Param::Constant(300.0),
+            height: Param::Constant(300.0),
+            corner_radius: Param::Constant(4.0),
+            stroke: Some(ShapeStroke::new([0, 0, 0, 255], 8.0)),
+        };
+        generator.validate().expect("valid star");
+        let json = serde_json::to_string(&generator).unwrap();
+        let back: Generator = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, generator);
+
+        let path = Generator::Shape {
+            shape: Shape::Path(ShapePath {
+                points: vec![
+                    ShapePathPoint::corner([-50.0, 0.0]),
+                    ShapePathPoint {
+                        anchor: [50.0, 0.0],
+                        handle_in: [0.0, -60.0],
+                        handle_out: [50.0, 0.0],
+                    },
+                ],
+                closed: false,
+            }),
+            rgba: Param::Constant([255, 255, 255, 255]),
+            width: Param::Constant(100.0),
+            height: Param::Constant(100.0),
+            corner_radius: Param::Constant(0.0),
+            stroke: Some(ShapeStroke::new([255, 255, 255, 255], 4.0)),
+        };
+        path.validate().expect("valid path");
+        let json = serde_json::to_string(&path).unwrap();
+        let back: Generator = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, path);
+    }
+
+    #[test]
+    fn generator_validate_rejects_bad_shapes() {
+        let bad = |shape: Shape| Generator::shape(shape, [255, 255, 255, 255]).validate();
+        assert!(bad(Shape::Polygon { sides: 2 }).is_err());
+        assert!(bad(Shape::Star { points: 99, inner_ratio: Param::Constant(0.5) }).is_err());
+        assert!(
+            bad(Shape::Star { points: 5, inner_ratio: Param::Constant(1.5) }).is_err(),
+            "inner_ratio above 1 must be rejected"
+        );
+        assert!(
+            bad(Shape::Path(ShapePath { points: vec![ShapePathPoint::corner([0.0, 0.0])], closed: true })).is_err(),
+            "single-point path is not drawable"
+        );
+        assert!(
+            bad(Shape::Path(ShapePath {
+                points: vec![
+                    ShapePathPoint::corner([0.0, f32::NAN]),
+                    ShapePathPoint::corner([10.0, 0.0]),
+                ],
+                closed: true,
+            }))
+            .is_err(),
+            "non-finite path coordinate must be rejected"
+        );
+
+        let mut wide = Generator::shape(Shape::Rectangle, [255, 255, 255, 255]);
+        if let Generator::Shape { width, .. } = &mut wide {
+            *width = Param::Constant(MAX_SHAPE_DIM * 2.0);
+        }
+        assert!(wide.validate().is_err(), "oversized width must be rejected");
+
+        let mut hot_stroke = Generator::shape(Shape::Ellipse, [255, 255, 255, 255]);
+        if let Generator::Shape { stroke, .. } = &mut hot_stroke {
+            *stroke = Some(ShapeStroke::new([0, 0, 0, 255], MAX_STROKE_WIDTH + 1.0));
+        }
+        assert!(hot_stroke.validate().is_err());
+    }
+
+    #[test]
+    fn shape_param_routing_sets_and_samples() {
+        let mut g = Generator::shape(Shape::Rectangle, [255, 255, 255, 255]);
+        g.set_shape_param_keyframe(ShapeParam::Width, 0, ParamValue::Scalar(100.0), Easing::Linear)
+            .unwrap();
+        g.set_shape_param_keyframe(ShapeParam::Width, 10, ParamValue::Scalar(300.0), Easing::Linear)
+            .unwrap();
+        g.set_shape_param_keyframe(ShapeParam::Fill, 0, ParamValue::Color([0, 0, 0, 255]), Easing::Linear)
+            .unwrap();
+        g.set_shape_param_keyframe(
+            ShapeParam::Fill,
+            10,
+            ParamValue::Color([255, 0, 0, 255]),
+            Easing::Linear,
+        )
+        .unwrap();
+        let Generator::Shape { width, rgba, .. } = &g else {
+            panic!()
+        };
+        assert_eq!(width.sample(5), 200.0);
+        assert_eq!(rgba.sample(5), [128, 0, 0, 255], "colors lerp per channel");
+
+        // Removing down to zero keyframes collapses to a constant.
+        g.remove_shape_param_keyframe(ShapeParam::Width, 0).unwrap();
+        g.remove_shape_param_keyframe(ShapeParam::Width, 10).unwrap();
+        let Generator::Shape { width, .. } = &g else {
+            panic!()
+        };
+        assert!(!width.is_animated());
+    }
+
+    #[test]
+    fn shape_param_routing_rejects_wrong_targets() {
+        let mut rect = Generator::shape(Shape::Rectangle, [255, 255, 255, 255]);
+        // Star-only param on a rectangle.
+        assert!(
+            rect.set_shape_param_constant(ShapeParam::InnerRatio, ParamValue::Scalar(0.5))
+                .is_err()
+        );
+        // Stroke params with no stroke set.
+        assert!(
+            rect.set_shape_param_constant(ShapeParam::StrokeWidth, ParamValue::Scalar(4.0))
+                .is_err()
+        );
+        // Kind mismatches both ways.
+        assert!(
+            rect.set_shape_param_constant(ShapeParam::Width, ParamValue::Color([0, 0, 0, 255]))
+                .is_err()
+        );
+        assert!(
+            rect.set_shape_param_constant(ShapeParam::Fill, ParamValue::Scalar(1.0))
+                .is_err()
+        );
+        // Out-of-range values are rejected at the routing boundary.
+        assert!(
+            rect.set_shape_param_constant(ShapeParam::Width, ParamValue::Scalar(-5.0))
+                .is_err()
+        );
+        // Non-shape generators reject everything.
+        let mut text = Generator::text("hi");
+        assert!(
+            text.set_shape_param_constant(ShapeParam::Width, ParamValue::Scalar(10.0))
+                .is_err()
+        );
     }
 
     #[test]

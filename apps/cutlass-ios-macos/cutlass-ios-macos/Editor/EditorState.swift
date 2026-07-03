@@ -40,6 +40,13 @@ final class EditorState {
     /// Timeline zoom: how many seconds one point of track width represents.
     var secondsPerPoint: Double = 1.0 / 44.0
 
+    /// Magnet toggle: when on, trims and lane moves lock onto the playhead,
+    /// clip edges, and timeline bounds.
+    var magnetEnabled = true
+    /// Time a live gesture is currently locked onto (drives the yellow
+    /// guide line + snap haptic); nil when not snapped.
+    var activeSnapTime: TimeInterval?
+
     private var undoStack: [TimelineSnapshot] = []
     private var redoStack: [TimelineSnapshot] = []
     private var playbackTask: Task<Void, Never>?
@@ -644,6 +651,66 @@ final class EditorState {
         clips[index].volume = 0
     }
 
+    // MARK: Snap engine
+
+    /// Times a dragged lane edge can lock onto: timeline bounds, the
+    /// playhead, main-track boundaries, and every other lane clip's edges.
+    private func laneSnapCandidates(excluding target: TimelineSelection?) -> [TimeInterval] {
+        var times: [TimeInterval] = [0, playhead]
+        var boundary: TimeInterval = 0
+        for clip in clips {
+            boundary += clip.length
+            times.append(boundary)
+        }
+        for clip in overlayClips where target != .overlay(clip.id) {
+            times.append(clip.start)
+            times.append(clip.start + clip.length)
+        }
+        for clip in effectClips where target != .effect(clip.id) {
+            times.append(clip.start)
+            times.append(clip.start + clip.length)
+        }
+        for clip in audioClips where target != .audio(clip.id) {
+            times.append(clip.start)
+            times.append(clip.start + clip.length)
+        }
+        return times
+    }
+
+    /// Candidates for a main-track trailing trim: boundaries at or after the
+    /// dragged edge shift with the trim, so only earlier ones are stable.
+    private func mainSnapCandidates(beforeClipAt index: Int) -> [TimeInterval] {
+        var times: [TimeInterval] = [0, playhead]
+        var boundary: TimeInterval = 0
+        for clip in clips.prefix(index) {
+            boundary += clip.length
+            times.append(boundary)
+        }
+        for clip in overlayClips {
+            times.append(clip.start)
+            times.append(clip.start + clip.length)
+        }
+        for clip in effectClips {
+            times.append(clip.start)
+            times.append(clip.start + clip.length)
+        }
+        for clip in audioClips {
+            times.append(clip.start)
+            times.append(clip.start + clip.length)
+        }
+        return times
+    }
+
+    /// Nearest candidate within the (zoom-aware) threshold, or nil.
+    private func snapTime(near time: TimeInterval, candidates: [TimeInterval]) -> TimeInterval? {
+        guard magnetEnabled else { return nil }
+        let threshold = 8 * secondsPerPoint
+        guard let best = candidates.min(by: { abs($0 - time) < abs($1 - time) }),
+              abs(best - time) <= threshold
+        else { return nil }
+        return best
+    }
+
     // MARK: Trim / move gestures (main + lane clips)
 
     enum TrimEdge {
@@ -667,6 +734,7 @@ final class EditorState {
             redoStack = []
         }
         gestureSnapshot = nil
+        activeSnapTime = nil
         clampPlayhead()
     }
 
@@ -679,6 +747,9 @@ final class EditorState {
         var clip = anchor
         switch edge {
         case .leading:
+            // The clip's timeline start is pinned by the clips before it, so
+            // there is no stable edge to snap; just clamp to the source.
+            activeSnapTime = nil
             let delta = min(
                 max(deltaSeconds, -anchor.trimStart),
                 anchor.length - MockClip.minDuration
@@ -686,32 +757,64 @@ final class EditorState {
             clip.trimStart = anchor.trimStart + delta
             clip.length = anchor.length - delta
         case .trailing:
+            let start = startTime(of: id)
             let maxLength = anchor.sourceDuration - anchor.trimStart
-            clip.length = min(
+            var newLength = min(
                 max(anchor.length + deltaSeconds, MockClip.minDuration),
                 maxLength
             )
+            if let snapped = snapTime(
+                near: start + newLength,
+                candidates: mainSnapCandidates(beforeClipAt: index)
+            ), snapped - start >= MockClip.minDuration, snapped - start <= maxLength {
+                newLength = snapped - start
+                activeSnapTime = snapped
+            } else {
+                activeSnapTime = nil
+            }
+            clip.length = newLength
         }
         clips[index] = clip
     }
 
     /// Shared trim math for free-floating lane clips: leading trims move the
-    /// start, trailing trims change the length.
+    /// start (end pinned), trailing trims change the length. Both edges
+    /// snap to timeline landmarks when the magnet is on.
     private func trimmedRange(
+        target: TimelineSelection,
         edge: TrimEdge,
         start: TimeInterval,
         length: TimeInterval,
         delta: TimeInterval,
         maxLength: TimeInterval?
     ) -> (start: TimeInterval, length: TimeInterval) {
+        let candidates = laneSnapCandidates(excluding: target)
         switch edge {
         case .leading:
-            let clamped = min(max(delta, -start), length - MockClip.minDuration)
-            return (start + clamped, length - clamped)
+            let end = start + length
+            let minStart = max(0, maxLength.map { end - $0 } ?? 0)
+            let maxStart = end - MockClip.minDuration
+            var newStart = min(max(start + delta, minStart), maxStart)
+            if let snapped = snapTime(near: newStart, candidates: candidates),
+               snapped >= minStart, snapped <= maxStart {
+                newStart = snapped
+                activeSnapTime = snapped
+            } else {
+                activeSnapTime = nil
+            }
+            return (newStart, end - newStart)
         case .trailing:
             var newLength = max(length + delta, MockClip.minDuration)
             if let maxLength {
                 newLength = min(newLength, maxLength)
+            }
+            if let snapped = snapTime(near: start + newLength, candidates: candidates),
+               snapped - start >= MockClip.minDuration,
+               snapped - start <= maxLength ?? .greatestFiniteMagnitude {
+                newLength = snapped - start
+                activeSnapTime = snapped
+            } else {
+                activeSnapTime = nil
             }
             return (start, newLength)
         }
@@ -731,17 +834,17 @@ final class EditorState {
         case .overlay(let id):
             guard let index = overlayClips.firstIndex(where: { $0.id == id }) else { return }
             let limit = overlayClips[index].kind == .pip ? overlayClips[index].sourceDuration : nil
-            let range = trimmedRange(edge: edge, start: anchorStart, length: anchorLength, delta: delta, maxLength: limit)
+            let range = trimmedRange(target: target, edge: edge, start: anchorStart, length: anchorLength, delta: delta, maxLength: limit)
             overlayClips[index].start = range.start
             overlayClips[index].length = range.length
         case .effect(let id):
             guard let index = effectClips.firstIndex(where: { $0.id == id }) else { return }
-            let range = trimmedRange(edge: edge, start: anchorStart, length: anchorLength, delta: delta, maxLength: nil)
+            let range = trimmedRange(target: target, edge: edge, start: anchorStart, length: anchorLength, delta: delta, maxLength: nil)
             effectClips[index].start = range.start
             effectClips[index].length = range.length
         case .audio(let id):
             guard let index = audioClips.firstIndex(where: { $0.id == id }) else { return }
-            let range = trimmedRange(edge: edge, start: anchorStart, length: anchorLength, delta: delta, maxLength: audioClips[index].sourceDuration)
+            let range = trimmedRange(target: target, edge: edge, start: anchorStart, length: anchorLength, delta: delta, maxLength: audioClips[index].sourceDuration)
             audioClips[index].start = range.start
             audioClips[index].length = range.length
         case .main:
@@ -749,12 +852,19 @@ final class EditorState {
         }
     }
 
-    /// Canvas drag of an overlay clip to a new normalized position.
+    /// Canvas drag of an overlay clip to a new normalized position; gently
+    /// snaps to the frame center on each axis.
     func dragOverlay(_ id: UUID, anchorX: Double, anchorY: Double, deltaX: Double, deltaY: Double) {
         guard let index = overlayClips.firstIndex(where: { $0.id == id }) else { return }
         beginGestureIfNeeded()
-        overlayClips[index].posX = min(max(anchorX + deltaX, 0.03), 0.97)
-        overlayClips[index].posY = min(max(anchorY + deltaY, 0.03), 0.97)
+        var x = min(max(anchorX + deltaX, 0.03), 0.97)
+        var y = min(max(anchorY + deltaY, 0.03), 0.97)
+        if magnetEnabled {
+            if abs(x - 0.5) < 0.02 { x = 0.5 }
+            if abs(y - 0.5) < 0.02 { y = 0.5 }
+        }
+        overlayClips[index].posX = x
+        overlayClips[index].posY = y
     }
 
     /// Scale/rotate an overlay from its corner grip.
@@ -765,10 +875,39 @@ final class EditorState {
         overlayClips[index].rotationDegrees = anchorRotation + rotationDelta
     }
 
-    /// Horizontal drag of a lane clip to a new start time.
+    /// Horizontal drag of a lane clip to a new start time; either edge can
+    /// lock onto a snap candidate.
     func moveLaneClip(_ selectionCase: TimelineSelection, anchorStart: TimeInterval, by delta: TimeInterval) {
         beginGestureIfNeeded()
-        let newStart = max(0, anchorStart + delta)
+
+        let length: TimeInterval
+        switch selectionCase {
+        case .overlay(let id):
+            guard let clip = overlayClips.first(where: { $0.id == id }) else { return }
+            length = clip.length
+        case .effect(let id):
+            guard let clip = effectClips.first(where: { $0.id == id }) else { return }
+            length = clip.length
+        case .audio(let id):
+            guard let clip = audioClips.first(where: { $0.id == id }) else { return }
+            length = clip.length
+        case .main:
+            return
+        }
+
+        var newStart = max(0, anchorStart + delta)
+        let candidates = laneSnapCandidates(excluding: selectionCase)
+        if let snapped = snapTime(near: newStart, candidates: candidates) {
+            newStart = snapped
+            activeSnapTime = snapped
+        } else if let snapped = snapTime(near: newStart + length, candidates: candidates),
+                  snapped - length >= 0 {
+            newStart = snapped - length
+            activeSnapTime = snapped
+        } else {
+            activeSnapTime = nil
+        }
+
         switch selectionCase {
         case .overlay(let id):
             if let index = overlayClips.firstIndex(where: { $0.id == id }) {

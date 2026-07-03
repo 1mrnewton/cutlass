@@ -104,6 +104,7 @@ struct TimelineView: View {
                             )
                         }
                     }
+                    .overlay(alignment: .topLeading) { snapGuide }
                     .padding(.horizontal, halfWidth)
                 }
                 .scrollPosition($scrollPosition)
@@ -120,10 +121,14 @@ struct TimelineView: View {
 
                 playheadLine
                 readout
+                magnetToggle
             }
             // Tapping anything that isn't a clip clears the selection.
             .onTapGesture { state.selection = nil }
             .simultaneousGesture(pinchToZoom)
+            .sensoryFeedback(.impact(weight: .light), trigger: state.activeSnapTime) { _, newValue in
+                newValue != nil
+            }
             .onChange(of: state.playhead) {
                 syncScrollToPlayhead()
             }
@@ -414,6 +419,42 @@ struct TimelineView: View {
     }
 
     // MARK: Overlays
+
+    /// Yellow guide line through all lanes while a gesture is locked onto a
+    /// snap candidate.
+    @ViewBuilder
+    private var snapGuide: some View {
+        if let time = state.activeSnapTime {
+            Rectangle()
+                .fill(Color(hex: 0xFACC15))
+                .frame(width: 1.5)
+                .frame(maxHeight: .infinity)
+                .offset(x: time * pointsPerSecond - 0.75)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// Magnet chip pinned to the timeline's corner; accent when snapping is
+    /// on, dim when free-dragging.
+    private var magnetToggle: some View {
+        Button {
+            state.magnetEnabled.toggle()
+        } label: {
+            Image(systemName: state.magnetEnabled ? "dot.squareshape.split.2x2" : "squareshape.split.2x2.dotted")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(state.magnetEnabled ? .white : Theme.textTertiary)
+                .frame(width: 26, height: 26)
+                .background(
+                    state.magnetEnabled ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(Theme.surfaceElevated),
+                    in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                )
+                .shadow(color: .black.opacity(0.35), radius: 3)
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+        .padding(.trailing, 8)
+        .padding(.bottom, 8)
+    }
 
     private var playheadLine: some View {
         RoundedRectangle(cornerRadius: 1)

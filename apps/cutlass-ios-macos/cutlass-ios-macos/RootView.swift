@@ -8,9 +8,23 @@ struct RootView: View {
         case editor
     }
 
+    /// What the picker result should do when it lands.
+    private enum PickerIntent {
+        case newProject
+        case appendToTimeline
+        case replaceSelectedClip
+    }
+
     @State private var screen: Screen = .home
-    @State private var pickerPresented = false
+    @State private var pickerIntent: PickerIntent?
     @State private var editorState = EditorState()
+
+    private var pickerPresented: Binding<Bool> {
+        Binding(
+            get: { pickerIntent != nil },
+            set: { if !$0 { pickerIntent = nil } }
+        )
+    }
 
     /// Dev shortcut: `-startScreen picker|editor` (e.g. via `simctl launch`)
     /// jumps straight to a screen so states deep in the flow are easy to
@@ -23,7 +37,7 @@ struct RootView: View {
 
         switch arguments[flag + 1] {
         case "picker":
-            _pickerPresented = State(initialValue: true)
+            _pickerIntent = State(initialValue: .newProject)
         case "editor":
             let state = EditorState()
             state.startProject(with: Array(MockData.libraryItems.prefix(4)))
@@ -41,7 +55,7 @@ struct RootView: View {
             switch screen {
             case .home:
                 HomeView(
-                    onNewProject: { pickerPresented = true },
+                    onNewProject: { pickerIntent = .newProject },
                     onBlankProject: {
                         editorState.startProject(with: [])
                         screen = .editor
@@ -51,29 +65,35 @@ struct RootView: View {
                 EditorView(
                     state: editorState,
                     onHome: { screen = .home },
-                    onAddMedia: { pickerPresented = true }
+                    onAddMedia: { pickerIntent = .appendToTimeline },
+                    onReplaceMedia: { pickerIntent = .replaceSelectedClip }
                 )
             }
         }
         .preferredColorScheme(.dark)
         #if os(macOS)
-        .sheet(isPresented: $pickerPresented) { picker }
+        .sheet(isPresented: pickerPresented) { picker }
         #else
-        .fullScreenCover(isPresented: $pickerPresented) { picker }
+        .fullScreenCover(isPresented: pickerPresented) { picker }
         #endif
     }
 
     private var picker: some View {
         MediaPickerView(
-            onCancel: { pickerPresented = false },
+            onCancel: { pickerIntent = nil },
             onDone: { items in
-                if screen == .editor {
+                switch pickerIntent {
+                case .appendToTimeline:
                     editorState.appendMedia(items)
-                } else {
+                case .replaceSelectedClip:
+                    if let item = items.first {
+                        editorState.replaceSelected(with: item)
+                    }
+                case .newProject, nil:
                     editorState.startProject(with: items)
                     screen = .editor
                 }
-                pickerPresented = false
+                pickerIntent = nil
             }
         )
     }

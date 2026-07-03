@@ -60,6 +60,8 @@ struct TimelineView: View {
                 playheadLine
                 readout
             }
+            // Tapping anything that isn't a clip clears the selection.
+            .onTapGesture { state.selectedClipID = nil }
             .simultaneousGesture(pinchToZoom)
             .onChange(of: state.playhead) {
                 syncScrollToPlayhead()
@@ -89,7 +91,18 @@ struct TimelineView: View {
     private var track: some View {
         HStack(spacing: 0) {
             ForEach(state.clips) { clip in
-                ClipView(clip: clip, pointsPerSecond: pointsPerSecond)
+                ClipView(
+                    clip: clip,
+                    pointsPerSecond: pointsPerSecond,
+                    isSelected: state.selectedClipID == clip.id,
+                    onTap: {
+                        state.selectedClipID = state.selectedClipID == clip.id ? nil : clip.id
+                    },
+                    onTrim: { edge, anchor, delta in
+                        state.trim(clip.id, edge: edge, anchor: anchor, by: delta)
+                    },
+                    onTrimEnd: { state.endTrim() }
+                )
             }
 
             Button(action: onAddMedia) {

@@ -6,6 +6,7 @@ struct EditorView: View {
     var state: EditorState
     var onHome: () -> Void
     var onAddMedia: () -> Void
+    var onReplaceMedia: () -> Void
 
     @State private var exportPresented = false
 
@@ -20,11 +21,21 @@ struct EditorView: View {
             PreviewCanvas(state: state)
                 .frame(maxHeight: .infinity)
 
-            TransportControls(state: state)
+            TransportControls(state: state, onSplit: { state.splitAtPlayhead() })
 
             TimelineView(state: state, onAddMedia: onAddMedia)
 
-            MediaToolbar(onAddMedia: onAddMedia)
+            if state.selectedClip != nil {
+                ClipToolbar(
+                    onAdd: onAddMedia,
+                    onSplit: { state.splitAtPlayhead() },
+                    onDelete: { state.deleteSelected() },
+                    onDuplicate: { state.duplicateSelected() },
+                    onReplace: onReplaceMedia
+                )
+            } else {
+                MediaToolbar(onAddMedia: onAddMedia)
+            }
         }
         .background(Theme.background)
         .sheet(isPresented: $exportPresented) {
@@ -72,5 +83,5 @@ private struct ExportStubSheet: View {
 #Preview {
     let state = EditorState()
     let _ = state.startProject(with: Array(MockData.libraryItems.prefix(3)))
-    return EditorView(state: state, onHome: {}, onAddMedia: {})
+    return EditorView(state: state, onHome: {}, onAddMedia: {}, onReplaceMedia: {})
 }

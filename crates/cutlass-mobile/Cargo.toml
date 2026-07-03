@@ -1,0 +1,27 @@
+[package]
+name = "cutlass-mobile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Mobile FFI bridge for Cutlass: renders frames for the iOS/Android test apps (C ABI + JNI)."
+
+# `staticlib` for the iOS app (linked into the binary), `cdylib` (.so) for the
+# Android app (loaded at runtime via System.loadLibrary), `rlib` so host
+# integration tests can link the crate. Each platform consumes the one it needs.
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+cutlass-core = { path = "../cutlass-core" }
+cutlass-compositor = { path = "../cutlass-compositor" }
+cutlass-decoder = { path = "../cutlass-decoder" }
+cutlass-models = { path = "../cutlass-models" }
+cutlass-render = { path = "../cutlass-render" }
+log = "0.4"
+
+# Android: JNI entry points the Kotlin app calls. (iOS uses the plain C ABI.)
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+android_logger = "0.14"

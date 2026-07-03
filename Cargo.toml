@@ -11,6 +11,7 @@ members = [
     "crates/cutlass-encoder",
     "crates/cutlass-engine",
     "crates/cutlass-cli",
+    "crates/cutlass-mobile",
 ]
 resolver = "3"
 

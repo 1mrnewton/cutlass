@@ -18,7 +18,13 @@ struct RootView: View {
 
             switch screen {
             case .home:
-                HomeView(onNewProject: { pickerPresented = true })
+                HomeView(
+                    onNewProject: { pickerPresented = true },
+                    onBlankProject: {
+                        editorClips = []
+                        screen = .editor
+                    }
+                )
             case .editor:
                 EditorView(clips: editorClips, onHome: { screen = .home })
             }

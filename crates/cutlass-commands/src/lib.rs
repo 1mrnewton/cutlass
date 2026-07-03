@@ -5,7 +5,7 @@
 
 mod command;
 
-pub use command::{Command, EditCommand, EditOutcome, ProjectCommand};
+pub use command::{Command, EditCommand, EditOutcome, ProjectCommand, TemplatePick};
 pub use cutlass_models::{ClipId, Generator, MediaId, RationalTime, TimeRange, TrackId};
 
 use tracing::info;

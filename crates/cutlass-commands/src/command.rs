@@ -7,8 +7,20 @@ use std::path::PathBuf;
 
 use cutlass_models::{
     CanvasAspect, ClipId, ClipParam, ClipTransform, CropRect, Easing, Generator, MarkerColor,
-    MarkerId, MediaId, Param, ParamValue, Rational, RationalTime, TimeRange, TrackId, TrackKind,
+    MarkerId, MediaId, Param, ParamValue, Rational, RationalTime, Replaceable, TemplateMeta,
+    TimeRange, TrackId, TrackKind,
 };
+
+/// One media choice for [`ProjectCommand::ApplyTemplate`], in slot order: a
+/// file to probe (like `Import`) and an optional in-point into it. `None`
+/// starts from the beginning, matching CapCut ("takes from the start of the
+/// clip"); the slot's locked timeline duration decides how much source is
+/// drawn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplatePick {
+    pub path: PathBuf,
+    pub source_in: Option<RationalTime>,
+}
 
 /// A project-level action (media pool, not timeline placement).
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +47,22 @@ pub enum ProjectCommand {
     RelinkMedia { media: MediaId, path: PathBuf },
     /// Render the timeline to an H.264 MP4 at the project frame rate.
     Export { path: PathBuf },
+    /// Write the current project as a `.cutlasst` template file (CapCut
+    /// "export template"): the finished timeline plus its `Replaceable` /
+    /// text-editable markers, wrapped in `meta` for the gallery. The session
+    /// itself is untouched — no dirty-flag change, no project-path change.
+    SaveTemplate { path: PathBuf, meta: TemplateMeta },
+    /// Replace the session with a `.cutlasst` template filled by `picks`
+    /// (CapCut "use template"). Each pick is probed like `Import` and fills
+    /// the next slot in order; fewer picks than slots keeps sample media in
+    /// the rest (template preview), more is refused. Like `Open`/`Load` the
+    /// history is cleared, but the result is a *new unsaved* project: the
+    /// project path resets and the session reads dirty until saved. Missing
+    /// sample-media paths are tolerated (matches `Load`).
+    ApplyTemplate {
+        path: PathBuf,
+        picks: Vec<TemplatePick>,
+    },
 }
 
 /// A single structured edit against the timeline.
@@ -65,6 +93,30 @@ pub enum EditCommand {
     /// a shape). Rejected for media-backed clips. The inverse restores the
     /// previous generator.
     SetGenerator { clip: ClipId, generator: Generator },
+    /// Replace a clip's content with a trimmed window of pooled media,
+    /// keeping its timeline placement, speed, transform, and effects — the
+    /// primitive behind swapping a template's music and re-picking a filled
+    /// slot's in-point (CapCut "replace"). `source` is at the media's native
+    /// rate and must lie within it (images repeat one frame for any window).
+    /// The inverse restores the previous clip content.
+    SetClipMedia {
+        clip: ClipId,
+        media: MediaId,
+        source: TimeRange,
+    },
+    /// Mark (or with `None` unmark) a media clip as a user-replaceable
+    /// template slot (CapCut "set replaceable material clips"). Template
+    /// authoring metadata only — renders nothing. Validated at mark time:
+    /// the clip must be media-backed and the slot's `accepts` must match the
+    /// lane. The inverse restores the previous marker.
+    SetReplaceable {
+        clip: ClipId,
+        replaceable: Option<Replaceable>,
+    },
+    /// Mark a text clip's wording as user-editable when the project is used
+    /// as a template (the text keeps its style and animation). Rejected on
+    /// non-text clips. The inverse restores the previous flag.
+    SetTextEditable { clip: ClipId, editable: bool },
     /// Set a clip's spatial transform (position/scale/rotation/opacity on
     /// the canvas). Rejected for audio-track clips. The inverse restores the
     /// previous transform.

@@ -61,7 +61,7 @@ struct EditorView: View {
             }
         }
         .sheet(isPresented: $exportPresented) {
-            ExportStubSheet(duration: state.duration)
+            ExportSheet(duration: state.duration)
         }
     }
 
@@ -278,42 +278,6 @@ struct EditorView: View {
         case .transition(let afterID):
             TransitionPanel(state: state, afterClipID: afterID)
         }
-    }
-}
-
-/// Mock export sheet; rendering is out of scope for the UI build.
-private struct ExportStubSheet: View {
-    var duration: TimeInterval
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(spacing: 18) {
-            Image(systemName: "square.and.arrow.up")
-                .font(.system(size: 34, weight: .medium))
-                .foregroundStyle(Theme.accent)
-
-            Text("Export")
-                .font(.title2.bold())
-                .foregroundStyle(.white)
-
-            Text("Exporting a \(duration.timecode) video isn't wired up in this UI preview yet.")
-                .font(.subheadline)
-                .foregroundStyle(Theme.textSecondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-
-            Button("Done") { dismiss() }
-                .font(.headline)
-                .foregroundStyle(.white)
-                .padding(.horizontal, 40)
-                .padding(.vertical, 12)
-                .background(Theme.accent, in: Capsule())
-                .buttonStyle(.plain)
-                .padding(.top, 6)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.surface)
-        .presentationDetents([.medium])
     }
 }
 

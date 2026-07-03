@@ -159,7 +159,13 @@ impl Engine {
             | ApplyOutcome::RemovedMedia { .. }
             | ApplyOutcome::Imported { .. }
             | ApplyOutcome::Relinked { .. } => self.revision += 1,
-            ApplyOutcome::Exported { .. } => {}
+            // Unlike Open/Load, a filled template exists nowhere on disk as a
+            // project file: bump without rebaselining so the session reads
+            // dirty until first saved.
+            ApplyOutcome::AppliedTemplate => self.revision += 1,
+            // Writing a `.cutlasst` (like exporting an MP4) doesn't touch the
+            // session project.
+            ApplyOutcome::Exported { .. } | ApplyOutcome::SavedTemplate => {}
         }
         if let Some(inverse) = inverse {
             self.history.record_do(inverse);

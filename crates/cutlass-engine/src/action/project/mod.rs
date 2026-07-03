@@ -1,4 +1,5 @@
-//! Session-level project commands (Import/RelinkMedia/Save/Open/Load).
+//! Session-level project commands (Import/RelinkMedia/Save/Open/Load and the
+//! template pair SaveTemplate/ApplyTemplate).
 //!
 //! Import and relink probe media through the native, FFmpeg-free decoder
 //! ([`crate::import::import_media`]) — the same codec used for preview/export
@@ -11,11 +12,13 @@ use cutlass_models::Project;
 use crate::action::ApplyContext;
 use crate::error::EngineError;
 
+pub mod apply_template;
 pub mod import;
 pub mod load;
 pub mod open;
 pub mod relink;
 pub mod save;
+pub mod save_template;
 
 /// Replace the session project from a `.cutlass` file. With `strict`, every
 /// referenced media path must exist on disk (Open); otherwise missing media is

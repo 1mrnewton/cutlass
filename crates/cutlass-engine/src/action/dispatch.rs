@@ -48,6 +48,11 @@ pub enum ApplyOutcome {
     Relinked { media: cutlass_models::MediaId },
     /// The timeline was exported to a file; `frames` is the number written.
     Exported { frames: u64 },
+    /// A `.cutlasst` template file was written; the session is unchanged.
+    SavedTemplate,
+    /// The session was replaced with a filled template — a new, unsaved
+    /// project (history cleared, project path reset).
+    AppliedTemplate,
     Edited(EditOutcome),
 }
 
@@ -93,6 +98,14 @@ fn dispatch_project(
         ProjectCommand::Export { .. } => Err(EngineError::Export(
             "export is handled by Engine::apply, not dispatch".into(),
         )),
+        ProjectCommand::SaveTemplate { path, meta } => {
+            project::save_template::execute(ctx, path, meta)?;
+            Ok((ApplyOutcome::SavedTemplate, None))
+        }
+        ProjectCommand::ApplyTemplate { path, picks } => {
+            project::apply_template::execute(ctx, path, picks)?;
+            Ok((ApplyOutcome::AppliedTemplate, None))
+        }
     }
 }
 
@@ -133,6 +146,31 @@ fn dispatch_edit(
         }
         EditCommand::SetGenerator { clip, generator } => {
             let inverse = edit::set_generator::execute(ctx, clip, generator)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(clip)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::SetClipMedia {
+            clip,
+            media,
+            source,
+        } => {
+            let inverse = edit::set_clip_media::execute(ctx, clip, media, source)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(clip)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::SetReplaceable { clip, replaceable } => {
+            let inverse = edit::template_marks::set_replaceable(ctx, clip, replaceable)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(clip)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::SetTextEditable { clip, editable } => {
+            let inverse = edit::template_marks::set_text_editable(ctx, clip, editable)?;
             Ok((
                 ApplyOutcome::Edited(EditOutcome::Updated(clip)),
                 Some(inverse),

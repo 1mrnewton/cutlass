@@ -26,3 +26,4 @@ run.sh
 venv/
 crates/cutlass-py/.venv/
 crates/cutlass-py/examples/trailer.mp4
+trailer.cutlass

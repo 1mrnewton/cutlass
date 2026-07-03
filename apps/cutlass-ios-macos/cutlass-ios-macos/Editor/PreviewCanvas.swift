@@ -5,6 +5,7 @@ import SwiftUI
 /// or solid color). Empty timelines show a black canvas.
 struct PreviewCanvas: View {
     var state: EditorState
+    var onEditText: (UUID) -> Void = { _ in }
 
     var body: some View {
         ZStack {
@@ -35,7 +36,7 @@ struct PreviewCanvas: View {
                 Color.black.opacity(0.6)
             }
         }
-        .overlay { PreviewOverlayLayer(state: state) }
+        .overlay { PreviewOverlayLayer(state: state, onEditText: onEditText) }
         .overlay(alignment: .topLeading) { effectBadge }
     }
 

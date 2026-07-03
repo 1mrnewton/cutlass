@@ -20,8 +20,11 @@ struct EditorView: View {
                 onExport: { exportPresented = true }
             )
 
-            PreviewCanvas(state: state)
-                .frame(maxHeight: .infinity)
+            PreviewCanvas(
+                state: state,
+                onEditText: { id in openPanel(.text(editing: id, tab: 0)) }
+            )
+            .frame(maxHeight: .infinity)
 
             TransportControls(
                 state: state,

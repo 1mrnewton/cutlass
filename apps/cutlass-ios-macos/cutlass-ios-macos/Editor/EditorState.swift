@@ -740,6 +740,22 @@ final class EditorState {
         }
     }
 
+    /// Canvas drag of an overlay clip to a new normalized position.
+    func dragOverlay(_ id: UUID, anchorX: Double, anchorY: Double, deltaX: Double, deltaY: Double) {
+        guard let index = overlayClips.firstIndex(where: { $0.id == id }) else { return }
+        beginGestureIfNeeded()
+        overlayClips[index].posX = min(max(anchorX + deltaX, 0.03), 0.97)
+        overlayClips[index].posY = min(max(anchorY + deltaY, 0.03), 0.97)
+    }
+
+    /// Scale/rotate an overlay from its corner grip.
+    func transformOverlay(_ id: UUID, anchorScale: Double, anchorRotation: Double, scaleFactor: Double, rotationDelta: Double) {
+        guard let index = overlayClips.firstIndex(where: { $0.id == id }) else { return }
+        beginGestureIfNeeded()
+        overlayClips[index].scale = min(max(anchorScale * scaleFactor, 0.25), 4)
+        overlayClips[index].rotationDegrees = anchorRotation + rotationDelta
+    }
+
     /// Horizontal drag of a lane clip to a new start time.
     func moveLaneClip(_ selectionCase: TimelineSelection, anchorStart: TimeInterval, by delta: TimeInterval) {
         beginGestureIfNeeded()

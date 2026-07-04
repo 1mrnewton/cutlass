@@ -1,10 +1,13 @@
 import SwiftUI
 
-/// CapCut-style bottom panel that replaces the toolbar area: grab bar,
-/// title row with optional X (cancel) and check (apply), then content.
-/// The preview and timeline stay visible above it.
+/// CapCut-style bottom panel drawn over the editor chrome: grab bar,
+/// title row with optional X (cancel) and check (apply), then scrollable
+/// content. The preview and timeline stay visible underneath.
 struct PanelSheet<Content: View>: View {
     var title: String
+    @Binding var height: CGFloat
+    var minHeight: CGFloat
+    var maxHeight: CGFloat
     /// Picker-style panels (stickers, audio, ...) apply instantly and only
     /// offer the check button.
     var showsCancel = true
@@ -12,12 +15,28 @@ struct PanelSheet<Content: View>: View {
     var onApply: () -> Void
     @ViewBuilder var content: Content
 
+    @State private var heightAnchor: CGFloat?
+
     var body: some View {
         VStack(spacing: 0) {
             Capsule()
                 .fill(Theme.textTertiary)
                 .frame(width: 34, height: 4)
                 .padding(.top, 8)
+                .frame(maxWidth: .infinity)
+                .frame(height: 24)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 2, coordinateSpace: .global)
+                        .onChanged { value in
+                            let anchor = heightAnchor ?? height
+                            heightAnchor = anchor
+                            height = min(max(anchor - value.translation.height, minHeight), maxHeight)
+                        }
+                        .onEnded { _ in
+                            heightAnchor = nil
+                        }
+                )
 
             ZStack {
                 Text(title)
@@ -47,12 +66,15 @@ struct PanelSheet<Content: View>: View {
                 }
                 .padding(.horizontal, 10)
             }
-            .padding(.top, 4)
+            .padding(.top, 2)
 
-            content
-                .padding(.top, 6)
-                .padding(.bottom, 10)
+            ScrollView {
+                content
+                    .padding(.top, 6)
+                    .padding(.bottom, 10)
+            }
         }
+        .frame(height: height)
         .frame(maxWidth: .infinity)
         .background {
             UnevenRoundedRectangle(
@@ -60,8 +82,10 @@ struct PanelSheet<Content: View>: View {
                 style: .continuous
             )
             .fill(Theme.surface)
+            .shadow(color: .black.opacity(0.45), radius: 16, y: -4)
             .ignoresSafeArea(edges: .bottom)
         }
+        .accessibilityIdentifier("editorPanel")
     }
 }
 
@@ -165,9 +189,10 @@ struct PanelTabs: View {
 }
 
 #Preview {
+    @Previewable @State var height: CGFloat = 320
     VStack {
         Spacer()
-        PanelSheet(title: "Aspect ratio", onCancel: {}, onApply: {}) {
+        PanelSheet(title: "Aspect ratio", height: $height, minHeight: 280, maxHeight: 500, onCancel: {}, onApply: {}) {
             PanelSlider(label: "Intensity", value: .constant(0.8), range: 0...1)
             HStack(spacing: 10) {
                 PresetTile(name: "Vivid", isSelected: true, art: MockData.tileArt(for: "Vivid"), symbol: nil) {}

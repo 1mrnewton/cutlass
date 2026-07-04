@@ -18,55 +18,87 @@ struct EditorView: View {
     @State private var timelineRenderedHeight: CGFloat = TimelineView.minHeight
     /// Anchor captured when a grab-bar drag begins.
     @State private var timelineHeightAnchor: CGFloat?
+    /// Floating panel height (resizable via the grab capsule).
+    @State private var panelHeight: CGFloat = 320
+
+    private static let minPreviewHeight: CGFloat = 160
+    private static let panelMinHeight: CGFloat = 280
+    private static let panelMaxFraction: CGFloat = 0.65
 
     var body: some View {
-        VStack(spacing: 0) {
-            if !fullscreenPreview {
-                EditorTopBar(
-                    exportEnabled: !state.isEmpty,
-                    onHome: onHome,
-                    onFullscreen: { toggleFullscreen() },
-                    onExport: { exportPresented = true }
-                )
-            }
-
-            PreviewCanvas(
-                state: state,
-                onEditText: { id in openPanel(.text(editing: id, tab: 0)) }
+        GeometryReader { geometry in
+            let maxTimelineHeight = max(
+                TimelineView.minHeight,
+                geometry.size.height - chromeHeightExcludingTimeline - Self.minPreviewHeight
             )
-            .frame(maxHeight: .infinity)
-            .overlay(alignment: .topTrailing) {
-                if fullscreenPreview {
-                    fullscreenChrome
+
+            ZStack(alignment: .bottom) {
+                VStack(spacing: 0) {
+                    if !fullscreenPreview {
+                        EditorTopBar(
+                            exportEnabled: !state.isEmpty,
+                            onHome: onHome,
+                            onFullscreen: { toggleFullscreen() },
+                            onExport: { exportPresented = true }
+                        )
+                    }
+
+                    PreviewCanvas(
+                        state: state,
+                        onEditText: { id in openPanel(.text(editing: id, tab: 0)) }
+                    )
+                    .frame(maxHeight: .infinity)
+                    .overlay(alignment: .topTrailing) {
+                        if fullscreenPreview {
+                            fullscreenChrome
+                        }
+                    }
+
+                    if !fullscreenPreview {
+                        timelineHeightHandle
+
+                        TransportControls(
+                            state: state,
+                            canUndo: state.canUndo,
+                            canRedo: state.canRedo,
+                            onSplit: { state.splitAtPlayhead() },
+                            onUndo: { state.undo() },
+                            onRedo: { state.redo() }
+                        )
+
+                        TimelineView(
+                            state: state,
+                            userHeight: timelineUserHeight,
+                            maxTimelineHeight: maxTimelineHeight,
+                            onAddMedia: onAddMedia,
+                            onTransitionTap: { id in openPanel(.transition(after: id)) }
+                        )
+                        .onGeometryChange(for: CGFloat.self) { proxy in
+                            proxy.size.height
+                        } action: { height in
+                            timelineRenderedHeight = height
+                        }
+
+                        bottomToolbar
+                    }
+                }
+
+                if let panel = activePanel, !fullscreenPreview {
+                    PanelSheet(
+                        title: panel.title,
+                        height: $panelHeight,
+                        minHeight: Self.panelMinHeight,
+                        maxHeight: geometry.size.height * Self.panelMaxFraction,
+                        showsCancel: panelShowsCancel(panel),
+                        onCancel: { closePanel(apply: false) },
+                        onApply: { closePanel(apply: true) }
+                    ) {
+                        panelContent(panel)
+                    }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
-
-            if !fullscreenPreview {
-                timelineHeightHandle
-
-                TransportControls(
-                    state: state,
-                    canUndo: state.canUndo,
-                    canRedo: state.canRedo,
-                    onSplit: { state.splitAtPlayhead() },
-                    onUndo: { state.undo() },
-                    onRedo: { state.redo() }
-                )
-
-                TimelineView(
-                    state: state,
-                    userHeight: timelineUserHeight,
-                    onAddMedia: onAddMedia,
-                    onTransitionTap: { id in openPanel(.transition(after: id)) }
-                )
-                .onGeometryChange(for: CGFloat.self) { proxy in
-                    proxy.size.height
-                } action: { height in
-                    timelineRenderedHeight = height
-                }
-
-                bottomArea
-            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .background(Theme.background)
         .onChange(of: state.selection) {
@@ -76,6 +108,32 @@ struct EditorView: View {
         }
         .sheet(isPresented: $exportPresented) {
             ExportSheet(duration: state.duration)
+        }
+    }
+
+    /// Fixed chrome above the timeline (top bar, transport, toolbar).
+    private var chromeHeightExcludingTimeline: CGFloat {
+        // Top bar ~44, height handle 16, transport ~44, toolbar ~72, spacing fudge.
+        248
+    }
+
+    @ViewBuilder
+    private var bottomToolbar: some View {
+        switch state.selection {
+        case .main:
+            ClipToolbar(onAdd: onAddMedia, actions: mainClipActions)
+        case .overlay(let id):
+            LaneToolbar(actions: overlayActions(for: id))
+        case .effect:
+            LaneToolbar(actions: commonLaneActions)
+        case .audio:
+            LaneToolbar(actions: audioActions)
+        case nil:
+            MediaToolbar(
+                onAddMedia: onAddMedia,
+                onAddOverlay: onAddOverlay,
+                onOpenPanel: { openPanel($0) }
+            )
         }
     }
 
@@ -140,40 +198,6 @@ struct EditorView: View {
             .buttonStyle(.plain)
         }
         .padding(14)
-    }
-
-    // MARK: Bottom area (toolbars <-> panels)
-
-    @ViewBuilder
-    private var bottomArea: some View {
-        if let panel = activePanel {
-            PanelSheet(
-                title: panel.title,
-                showsCancel: panelShowsCancel(panel),
-                onCancel: { closePanel(apply: false) },
-                onApply: { closePanel(apply: true) }
-            ) {
-                panelContent(panel)
-            }
-            .transition(.move(edge: .bottom).combined(with: .opacity))
-        } else {
-            switch state.selection {
-            case .main:
-                ClipToolbar(onAdd: onAddMedia, actions: mainClipActions)
-            case .overlay(let id):
-                LaneToolbar(actions: overlayActions(for: id))
-            case .effect:
-                LaneToolbar(actions: commonLaneActions)
-            case .audio:
-                LaneToolbar(actions: audioActions)
-            case nil:
-                MediaToolbar(
-                    onAddMedia: onAddMedia,
-                    onAddOverlay: onAddOverlay,
-                    onOpenPanel: { openPanel($0) }
-                )
-            }
-        }
     }
 
     // MARK: Per-kind lane toolbar actions

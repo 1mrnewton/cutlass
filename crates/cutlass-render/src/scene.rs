@@ -37,6 +37,83 @@ impl Scene {
             layers: Vec::new(),
         }
     }
+
+    /// Uniformly scale the whole scene — canvas and every layer's geometry —
+    /// by `factor`. Content keeps its composition exactly (same relative
+    /// placement, crop, rotation); only the pixel density changes. This is
+    /// how preview renders at fit-to-view size and export renders at a
+    /// non-native resolution without touching the resolver.
+    ///
+    /// Degenerate factors (non-finite or ≤ 0) are ignored.
+    pub fn scale(&mut self, factor: f32) {
+        if !factor.is_finite() || factor <= 0.0 {
+            return;
+        }
+        self.width = scaled_dim(self.width, factor);
+        self.height = scaled_dim(self.height, factor);
+        for layer in &mut self.layers {
+            layer.center = [layer.center[0] * factor, layer.center[1] * factor];
+            layer.size = match layer.size {
+                SizeSpec::Fixed([w, h]) => SizeSpec::Fixed([w * factor, h * factor]),
+                // Text / path bitmaps rasterize at their reference resolution
+                // and ride the quad; scaling the multiplier scales the quad.
+                SizeSpec::BitmapScaled(s) => SizeSpec::BitmapScaled(s * factor),
+            };
+            match &mut layer.source {
+                // SDF stroke width and AA pad are in canvas pixels.
+                LayerSource::Shape { stroke, pad, .. } => {
+                    *pad *= factor;
+                    if let Some(stroke) = stroke {
+                        stroke.width *= factor;
+                    }
+                }
+                // Path strokes live in path-local pixels folded into the
+                // raster, so scaling the raster factor scales them too.
+                LayerSource::PathShape { raster_scale, .. } => *raster_scale *= factor,
+                LayerSource::Media { .. } | LayerSource::Text { .. } | LayerSource::Solid(_) => {}
+            }
+        }
+    }
+
+    /// Scale the scene to fit within `max_width`×`max_height`, preserving
+    /// aspect and never upscaling. The result has no letterbox: the canvas
+    /// itself shrinks to the fitted box.
+    pub fn fit_within(&mut self, max_width: u32, max_height: u32) {
+        if self.width == 0 || self.height == 0 || max_width == 0 || max_height == 0 {
+            return;
+        }
+        let factor = (max_width as f32 / self.width as f32)
+            .min(max_height as f32 / self.height as f32)
+            .min(1.0);
+        if factor < 1.0 {
+            self.scale(factor);
+        }
+    }
+
+    /// Scale the scene to exactly `width`×`height`: uniform aspect-preserving
+    /// scale (up or down), content centered, any aspect mismatch letterboxed
+    /// with the scene background. This is the export path for a requested
+    /// output resolution.
+    pub fn fit_into(&mut self, width: u32, height: u32) {
+        if self.width == 0 || self.height == 0 || width == 0 || height == 0 {
+            return;
+        }
+        let (cw, ch) = (self.width as f32, self.height as f32);
+        let factor = (width as f32 / cw).min(height as f32 / ch);
+        self.scale(factor);
+        let dx = (width as f32 - cw * factor) * 0.5;
+        let dy = (height as f32 - ch * factor) * 0.5;
+        for layer in &mut self.layers {
+            layer.center = [layer.center[0] + dx, layer.center[1] + dy];
+        }
+        self.width = width;
+        self.height = height;
+    }
+}
+
+/// A scaled canvas dimension: rounded, never collapsing to zero.
+fn scaled_dim(dim: u32, factor: f32) -> u32 {
+    ((dim as f32 * factor).round() as u32).max(1)
 }
 
 /// One placed layer: a pixel source plus where it lands on the canvas.
@@ -111,4 +188,146 @@ pub enum LayerSource {
         /// quad via [`SizeSpec::BitmapScaled`]).
         raster_scale: f32,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cutlass_core::Rational;
+
+    fn media_layer(center: [f32; 2], size: [f32; 2]) -> SceneLayer {
+        SceneLayer {
+            source: LayerSource::Media {
+                media: MediaId::from_raw(1),
+                source_time: RationalTime::new(0, Rational::FPS_30),
+            },
+            center,
+            size: SizeSpec::Fixed(size),
+            rotation: 0.5,
+            opacity: 0.8,
+            uv: [0.1, 0.2, 0.9, 0.8],
+        }
+    }
+
+    fn shape_layer() -> SceneLayer {
+        SceneLayer {
+            source: LayerSource::Shape {
+                params: SdfParams::Ellipse,
+                fill: [255, 0, 0, 255],
+                stroke: Some(Stroke {
+                    rgba: [0, 0, 0, 255],
+                    width: 8.0,
+                }),
+                pad: 6.0,
+            },
+            center: [100.0, 100.0],
+            size: SizeSpec::Fixed([212.0, 112.0]),
+            rotation: 0.0,
+            opacity: 1.0,
+            uv: [0.0, 0.0, 1.0, 1.0],
+        }
+    }
+
+    fn text_layer() -> SceneLayer {
+        SceneLayer {
+            source: LayerSource::Text {
+                content: "hi".into(),
+                style: TextStyle::new(48.0),
+            },
+            center: [50.0, 25.0],
+            size: SizeSpec::BitmapScaled(2.0),
+            rotation: 0.0,
+            opacity: 1.0,
+            uv: [0.0, 0.0, 1.0, 1.0],
+        }
+    }
+
+    #[test]
+    fn scale_halves_canvas_and_layer_geometry() {
+        let mut scene = Scene::empty(1920, 1080, [0, 0, 0, 255]);
+        scene.layers.push(media_layer([960.0, 540.0], [1920.0, 1080.0]));
+        scene.layers.push(text_layer());
+        scene.layers.push(shape_layer());
+
+        scene.scale(0.5);
+
+        assert_eq!((scene.width, scene.height), (960, 540));
+        let SizeSpec::Fixed(size) = scene.layers[0].size else {
+            panic!("media layer keeps a fixed size");
+        };
+        assert_eq!(scene.layers[0].center, [480.0, 270.0]);
+        assert_eq!(size, [960.0, 540.0]);
+        // Rotation, opacity, and uv (content-relative) are untouched.
+        assert_eq!(scene.layers[0].rotation, 0.5);
+        assert_eq!(scene.layers[0].opacity, 0.8);
+        assert_eq!(scene.layers[0].uv, [0.1, 0.2, 0.9, 0.8]);
+
+        // Text scales through its bitmap multiplier.
+        assert_eq!(scene.layers[1].size, SizeSpec::BitmapScaled(1.0));
+
+        // SDF stroke width and pad are canvas-pixel quantities.
+        let LayerSource::Shape { stroke, pad, .. } = &scene.layers[2].source else {
+            panic!("shape layer");
+        };
+        assert_eq!(stroke.unwrap().width, 4.0);
+        assert_eq!(*pad, 3.0);
+    }
+
+    #[test]
+    fn scale_ignores_degenerate_factors() {
+        let mut scene = Scene::empty(100, 50, [0, 0, 0, 255]);
+        scene.scale(0.0);
+        scene.scale(-1.0);
+        scene.scale(f32::NAN);
+        assert_eq!((scene.width, scene.height), (100, 50));
+    }
+
+    #[test]
+    fn fit_within_never_upscales() {
+        let mut scene = Scene::empty(640, 360, [0, 0, 0, 255]);
+        scene.fit_within(4000, 4000);
+        assert_eq!((scene.width, scene.height), (640, 360));
+    }
+
+    #[test]
+    fn fit_within_shrinks_to_the_tighter_axis() {
+        let mut scene = Scene::empty(1920, 1080, [0, 0, 0, 255]);
+        scene.fit_within(400, 400);
+        assert_eq!((scene.width, scene.height), (400, 225));
+    }
+
+    #[test]
+    fn fit_within_survives_a_zero_canvas() {
+        let mut scene = Scene::empty(0, 0, [0, 0, 0, 255]);
+        scene.fit_within(100, 100);
+        assert_eq!((scene.width, scene.height), (0, 0));
+    }
+
+    #[test]
+    fn fit_into_letterboxes_an_aspect_mismatch() {
+        // 16:9 content into a square: scaled to 400×225, centered vertically.
+        let mut scene = Scene::empty(1920, 1080, [1, 2, 3, 255]);
+        scene.layers.push(media_layer([960.0, 540.0], [1920.0, 1080.0]));
+
+        scene.fit_into(400, 400);
+
+        assert_eq!((scene.width, scene.height), (400, 400));
+        let SizeSpec::Fixed(size) = scene.layers[0].size else {
+            panic!("media layer keeps a fixed size");
+        };
+        // Content box is 400×225; its center sits at the canvas center.
+        assert!((size[0] - 400.0).abs() < 1e-3);
+        assert!((size[1] - 225.0).abs() < 1e-3);
+        assert!((scene.layers[0].center[0] - 200.0).abs() < 1e-3);
+        assert!((scene.layers[0].center[1] - 200.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn fit_into_upscales_for_export_overrides() {
+        let mut scene = Scene::empty(960, 540, [0, 0, 0, 255]);
+        scene.layers.push(media_layer([480.0, 270.0], [960.0, 540.0]));
+        scene.fit_into(1920, 1080);
+        assert_eq!((scene.width, scene.height), (1920, 1080));
+        assert_eq!(scene.layers[0].center, [960.0, 540.0]);
+    }
 }

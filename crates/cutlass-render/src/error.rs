@@ -42,6 +42,11 @@ pub enum RenderError {
     /// Content or a platform path the current renderer doesn't support yet.
     #[error("unsupported: {0}")]
     Unsupported(String),
+
+    /// An observed export was cancelled by its progress callback. The output
+    /// file was not finalized; callers should treat it as garbage.
+    #[error("export cancelled")]
+    Cancelled,
 }
 
 impl RenderError {

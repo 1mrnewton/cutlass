@@ -74,6 +74,38 @@ impl Renderer {
         self.render_scene(project, &scene)
     }
 
+    /// [`render_frame`](Self::render_frame) scaled to fit within
+    /// `max_width`×`max_height` (aspect preserved, never upscaled) — the
+    /// interactive-preview path, where compositing and reading back a full
+    /// 4K canvas per scrub tick would waste most of its pixels.
+    pub fn render_frame_fit(
+        &mut self,
+        project: &Project,
+        t: RationalTime,
+        max_width: u32,
+        max_height: u32,
+    ) -> Result<RgbaImage, RenderError> {
+        let mut scene = resolve(project, t)?;
+        scene.fit_within(max_width, max_height);
+        self.render_scene(project, &scene)
+    }
+
+    /// [`render_frame`](Self::render_frame) at an exact output size: content
+    /// uniformly scaled (up or down) and centered, aspect mismatches
+    /// letterboxed over the canvas background — the export path for a
+    /// requested resolution.
+    pub fn render_frame_sized(
+        &mut self,
+        project: &Project,
+        t: RationalTime,
+        width: u32,
+        height: u32,
+    ) -> Result<RgbaImage, RenderError> {
+        let mut scene = resolve(project, t)?;
+        scene.fit_into(width, height);
+        self.render_scene(project, &scene)
+    }
+
     /// Composite an already-resolved [`Scene`]. `project` supplies media file
     /// paths for the decoder cache.
     ///

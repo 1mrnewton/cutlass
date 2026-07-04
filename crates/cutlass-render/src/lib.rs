@@ -23,7 +23,10 @@ mod scene;
 
 pub use cutlass_core::RgbaImage;
 pub use error::RenderError;
-pub use export::{PngSequenceEncoder, export, export_config, export_to_file};
+pub use export::{
+    ExportObserver, ExportSettings, PngSequenceEncoder, export, export_config, export_config_with,
+    export_observed, export_to_file, export_to_file_observed,
+};
 pub use export_audio::{EXPORT_AUDIO_CHANNELS, EXPORT_AUDIO_RATE, ExportAudioMixer};
 pub use render::Renderer;
 pub use resolve::{canvas_size, resolve};

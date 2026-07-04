@@ -122,6 +122,87 @@ public struct Command: Sendable {
             ])
     }
 
+    // Clip looks (persist-only this milestone; ids come from `Catalogs`).
+
+    /// Set or clear (`nil`) a clip's mask. Visual clips only.
+    public static func setClipMask(clip: UInt64, mask: UiMask?) -> Command {
+        var fields: [String: JSONValue] = ["clip": .int(Int64(clip))]
+        if let mask {
+            var object: [String: JSONValue] = ["kind": .string(mask.kind)]
+            if mask.feather != 0 { object["feather"] = .number(Double(mask.feather)) }
+            if mask.invert { object["invert"] = .bool(true) }
+            fields["mask"] = .object(object)
+        }
+        return Command(type: "SetClipMask", fields)
+    }
+
+    /// Set or clear (`nil`) green-screen keying. Media-backed visual clips.
+    public static func setClipChroma(clip: UInt64, chroma: UiChromaKey?) -> Command {
+        var fields: [String: JSONValue] = ["clip": .int(Int64(clip))]
+        if let chroma {
+            fields["chroma"] = .object([
+                "rgb": .array(chroma.rgb.map { .int(Int64($0)) }),
+                "strength": .number(Double(chroma.strength)),
+                "shadow": .number(Double(chroma.shadow)),
+            ])
+        }
+        return Command(type: "SetClipChroma", fields)
+    }
+
+    /// Set or clear (`nil`) stabilization. Video-media clips only.
+    /// `level` ∈ `recommended | smooth | max_smooth`.
+    public static func setClipStabilize(clip: UInt64, level: String?) -> Command {
+        var fields: [String: JSONValue] = ["clip": .int(Int64(clip))]
+        if let level { fields["stabilize"] = .string(level) }
+        return Command(type: "SetClipStabilize", fields)
+    }
+
+    /// Set or clear (`nil`) a filter preset. Visual clips only.
+    public static func setClipFilter(clip: UInt64, filter: UiFilter?) -> Command {
+        var fields: [String: JSONValue] = ["clip": .int(Int64(clip))]
+        if let filter {
+            fields["filter"] = .object([
+                "id": .string(filter.id),
+                "intensity": .number(Double(filter.intensity)),
+            ])
+        }
+        return Command(type: "SetClipFilter", fields)
+    }
+
+    /// Write the color-grade sliders (all-neutral = grade off). Visual clips.
+    public static func setClipAdjustments(clip: UInt64, adjust: UiAdjust) -> Command {
+        var object: [String: JSONValue] = [:]
+        if adjust.brightness != 0 { object["brightness"] = .number(Double(adjust.brightness)) }
+        if adjust.contrast != 0 { object["contrast"] = .number(Double(adjust.contrast)) }
+        if adjust.saturation != 0 { object["saturation"] = .number(Double(adjust.saturation)) }
+        if adjust.exposure != 0 { object["exposure"] = .number(Double(adjust.exposure)) }
+        if adjust.temperature != 0 { object["temperature"] = .number(Double(adjust.temperature)) }
+        return Command(
+            type: "SetClipAdjustments",
+            ["clip": .int(Int64(clip)), "adjust": .object(object)])
+    }
+
+    /// Set or clear (`nil`) the animation in one slot. `slot` ∈ `in | out |
+    /// combo`; a combo evicts in/out and vice versa (engine-enforced).
+    public static func setClipAnimation(clip: UInt64, slot: String, animationID: String?)
+        -> Command
+    {
+        var fields: [String: JSONValue] = [
+            "clip": .int(Int64(clip)),
+            "slot": .string(slot),
+        ]
+        if let animationID { fields["animation"] = .object(["id": .string(animationID)]) }
+        return Command(type: "SetClipAnimation", fields)
+    }
+
+    /// Tag or untag (`nil`) an audio-lane clip's role.
+    /// `role` ∈ `music | sfx | voiceover | extracted`.
+    public static func setAudioRole(clip: UInt64, role: String?) -> Command {
+        var fields: [String: JSONValue] = ["clip": .int(Int64(clip))]
+        if let role { fields["role"] = .string(role) }
+        return Command(type: "SetAudioRole", fields)
+    }
+
     private static func time(_ ticks: Int64, _ fps: Fraction) -> JSONValue {
         .object([
             "value": .int(ticks),
@@ -270,9 +351,15 @@ public struct Intent: Sendable {
         Intent("add_pip", ["path": .string(path), "at_seconds": .number(atSeconds)])
     }
 
-    /// Import a file and drop it on an audio lane.
-    public static func addAudio(path: String, atSeconds: Double) -> Intent {
-        Intent("add_audio", ["path": .string(path), "at_seconds": .number(atSeconds)])
+    /// Import a file and drop it on an audio lane. `role` tags the clip with
+    /// the picker tab it came from (`music | sfx | voiceover`).
+    public static func addAudio(path: String, atSeconds: Double, role: String? = nil) -> Intent {
+        var fields: [String: JSONValue] = [
+            "path": .string(path),
+            "at_seconds": .number(atSeconds),
+        ]
+        if let role { fields["role"] = .string(role) }
+        return Intent("add_audio", fields)
     }
 
     /// Duplicate a clip right after itself.
@@ -315,6 +402,14 @@ public struct Intent: Sendable {
                 "speed": .number(speed),
                 "reversed": .bool(reversed),
             ])
+    }
+
+    /// Apply a speed-curve preset from the catalog (`nil` restores constant
+    /// speed). The clip's duration re-derives from the curve in one undo step.
+    public static func setSpeedPreset(clip: UInt64, preset: String?) -> Intent {
+        var fields: [String: JSONValue] = ["clip": .int(Int64(clip))]
+        if let preset { fields["preset"] = .string(preset) }
+        return Intent("set_speed_preset", fields)
     }
 
     /// Volume slider + fade handles. `volume: nil` keeps the current gain.

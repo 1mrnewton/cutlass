@@ -265,6 +265,124 @@ public struct UiClip: Decodable, Sendable, Identifiable {
     public let transitionAfter: UiTransition?
     /// Link-group id (e.g. video + its extracted audio).
     public let link: UInt64?
+
+    // Look properties (persist-only this milestone; absent = unset).
+    public let mask: UiMask?
+    public let chromaKey: UiChromaKey?
+    /// `recommended | smooth | max_smooth`.
+    public let stabilize: String?
+    public let filter: UiFilter?
+    private let adjust: UiAdjust?
+    /// Color grade sliders (neutral when the wire omits the object).
+    public var adjustments: UiAdjust { adjust ?? UiAdjust() }
+    /// Animation catalog ids per slot (a combo excludes in/out).
+    public let animationIn: String?
+    public let animationOut: String?
+    public let animationCombo: String?
+    /// `music | sfx | voiceover | extracted`.
+    public let audioRole: String?
+    /// Speed-preset catalog id when the clip's curve matches one exactly.
+    public let speedPreset: String?
+}
+
+// MARK: - Clip looks
+
+/// A shaped alpha mask over a clip. Fields at their defaults are elided on
+/// the wire, so decoding fills them back in.
+public struct UiMask: Codable, Equatable, Sendable {
+    /// `linear | mirror | circle | rectangle | heart | star`.
+    public var kind: String
+    /// Edge softness, 0 (hard) … 1.
+    public var feather: Float
+    /// Keep the outside instead of the inside.
+    public var invert: Bool
+
+    public init(kind: String, feather: Float = 0, invert: Bool = false) {
+        self.kind = kind
+        self.feather = feather
+        self.invert = invert
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try container.decode(String.self, forKey: .kind)
+        feather = try container.decodeIfPresent(Float.self, forKey: .feather) ?? 0
+        invert = try container.decodeIfPresent(Bool.self, forKey: .invert) ?? false
+    }
+}
+
+/// Green-screen keying: pixels near `rgb` turn transparent.
+public struct UiChromaKey: Codable, Equatable, Sendable {
+    /// Key color, opaque `[r, g, b]`.
+    public var rgb: [UInt8]
+    /// Keying strength (tolerance), 0…1.
+    public var strength: Float
+    /// Shadow retention, 0…1.
+    public var shadow: Float
+
+    public init(rgb: [UInt8], strength: Float = 0, shadow: Float = 0) {
+        self.rgb = rgb
+        self.strength = strength
+        self.shadow = shadow
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        rgb = try container.decode([UInt8].self, forKey: .rgb)
+        strength = try container.decodeIfPresent(Float.self, forKey: .strength) ?? 0
+        shadow = try container.decodeIfPresent(Float.self, forKey: .shadow) ?? 0
+    }
+}
+
+/// A filter preset applied to a clip.
+public struct UiFilter: Codable, Equatable, Sendable {
+    /// Catalog id (`Catalogs.filters`).
+    public var id: String
+    /// Blend over the original, 0…1. The wire omits the default 0.8.
+    public var intensity: Float
+
+    public init(id: String, intensity: Float = 0.8) {
+        self.id = id
+        self.intensity = intensity
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        intensity = try container.decodeIfPresent(Float.self, forKey: .intensity) ?? 0.8
+    }
+}
+
+/// Manual color grade: signed strengths in −1…1, 0 = neutral. Sliders at
+/// neutral are elided on the wire.
+public struct UiAdjust: Codable, Equatable, Sendable {
+    public var brightness: Float
+    public var contrast: Float
+    public var saturation: Float
+    public var exposure: Float
+    public var temperature: Float
+
+    public init(
+        brightness: Float = 0, contrast: Float = 0, saturation: Float = 0,
+        exposure: Float = 0, temperature: Float = 0
+    ) {
+        self.brightness = brightness
+        self.contrast = contrast
+        self.saturation = saturation
+        self.exposure = exposure
+        self.temperature = temperature
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        brightness = try container.decodeIfPresent(Float.self, forKey: .brightness) ?? 0
+        contrast = try container.decodeIfPresent(Float.self, forKey: .contrast) ?? 0
+        saturation = try container.decodeIfPresent(Float.self, forKey: .saturation) ?? 0
+        exposure = try container.decodeIfPresent(Float.self, forKey: .exposure) ?? 0
+        temperature = try container.decodeIfPresent(Float.self, forKey: .temperature) ?? 0
+    }
+
+    public var isNeutral: Bool { self == UiAdjust() }
 }
 
 public struct UiTransform: Decodable, Equatable, Sendable {
@@ -304,6 +422,9 @@ public struct TextStyle: Codable, Equatable, Sendable {
     public var stroke: TextStroke?
     public var background: TextBackground?
     public var shadow: TextShadow?
+    /// Text-effect preset id (`Catalogs.textEffects`). Setting it bakes the
+    /// preset's stroke/shadow/background onto the style engine-side.
+    public var effectPreset: String?
 
     /// The engine's defaults (white 90px system font, centered, wrapping).
     public init() {

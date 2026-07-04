@@ -63,7 +63,7 @@ fn first_frame_composited(
     path: &Path,
     mode: OutputMode,
     gpu: &GpuContext,
-    comp: &Compositor,
+    comp: &mut Compositor,
 ) -> RgbaImage {
     let mut decoder = AvfDecoder::open(path, mode).expect("open decoder");
     let frame = decoder.next_frame().expect("decode").expect("a frame");
@@ -74,7 +74,8 @@ fn first_frame_composited(
 
     let config = CompositorConfig::new(64, 64);
     let layer = CompositeLayer::frame(&frame, LayerPlacement::full_canvas(&config));
-    comp.render(gpu, &config, &[layer]).expect("composite frame")
+    comp.render(gpu, &config, &[layer])
+        .expect("composite frame")
 }
 
 #[test]
@@ -88,13 +89,13 @@ fn gpu_import_matches_cpu_upload() {
         eprintln!("skipping: adapter is not Metal");
         return;
     }
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
 
     let path = temp_mp4();
     export_solid_clip(&path);
 
-    let cpu = first_frame_composited(&path, OutputMode::Cpu, &gpu, &comp);
-    let zero_copy = first_frame_composited(&path, OutputMode::Gpu, &gpu, &comp);
+    let cpu = first_frame_composited(&path, OutputMode::Cpu, &gpu, &mut comp);
+    let zero_copy = first_frame_composited(&path, OutputMode::Gpu, &gpu, &mut comp);
     let _ = std::fs::remove_file(&path);
 
     // Every sampled pixel from the zero-copy import must match the CPU upload

@@ -67,7 +67,7 @@ fn render_demo_rgba(width: u32, height: u32) -> Option<RgbaImage> {
             return None;
         }
     };
-    let compositor = Compositor::new(&gpu);
+    let mut compositor = Compositor::new(&gpu);
 
     let config = CompositorConfig::new(width, height).with_background([18, 22, 30, 255]);
     let (w, h) = (width as f32, height as f32);
@@ -128,7 +128,7 @@ fn fit_within(src: (u32, u32), max: (u32, u32)) -> (u32, u32) {
 /// a canvas that fits within `max`. `None` on any decode/composite failure.
 fn compose_first_frame(
     gpu: &GpuContext,
-    compositor: &Compositor,
+    compositor: &mut Compositor,
     path: &Path,
     mode: OutputMode,
     max: (u32, u32),
@@ -155,11 +155,11 @@ fn render_file_frame_rgba(path: &Path, max_width: u32, max_height: u32) -> Optio
         return None;
     }
     let gpu = GpuContext::new_headless_blocking().ok()?;
-    let compositor = Compositor::new(&gpu);
+    let mut compositor = Compositor::new(&gpu);
     let max = (max_width, max_height);
 
-    compose_first_frame(&gpu, &compositor, path, OutputMode::Gpu, max)
-        .or_else(|| compose_first_frame(&gpu, &compositor, path, OutputMode::Cpu, max))
+    compose_first_frame(&gpu, &mut compositor, path, OutputMode::Gpu, max)
+        .or_else(|| compose_first_frame(&gpu, &mut compositor, path, OutputMode::Cpu, max))
 }
 
 /// An RGBA8 image handed across the C ABI. `data` points at `len`

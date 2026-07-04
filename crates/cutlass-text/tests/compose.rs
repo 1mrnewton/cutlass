@@ -74,6 +74,6 @@ fn comp_render(
     config: &CompositorConfig,
     layers: &[CompositeLayer<'_>],
 ) -> cutlass_compositor::RgbaImage {
-    let comp = Compositor::new(gpu);
+    let mut comp = Compositor::new(gpu);
     comp.render(gpu, config, layers).expect("render")
 }

@@ -113,7 +113,13 @@ fn assert_px(img: &RgbaImage, x: u32, y: u32, expect: [u8; 4], tol: i32) {
 }
 
 /// Render a single full-canvas frame layer and read it back.
-fn render_frame(gpu: &GpuContext, comp: &Compositor, w: u32, h: u32, f: &VideoFrame) -> RgbaImage {
+fn render_frame(
+    gpu: &GpuContext,
+    comp: &mut Compositor,
+    w: u32,
+    h: u32,
+    f: &VideoFrame,
+) -> RgbaImage {
     let config = CompositorConfig::new(w, h);
     let layer = CompositeLayer::frame(f, LayerPlacement::full_canvas(&config));
     comp.render(gpu, &config, &[layer]).expect("render")
@@ -122,7 +128,7 @@ fn render_frame(gpu: &GpuContext, comp: &Compositor, w: u32, h: u32, f: &VideoFr
 #[test]
 fn solid_fill_covers_canvas() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
     let config = CompositorConfig::new(32, 32); // default black background
     let red = CompositeLayer::solid([255, 0, 0, 255], LayerPlacement::full_canvas(&config));
     let img = comp.render(&gpu, &config, &[red]).expect("render");
@@ -135,16 +141,51 @@ fn solid_fill_covers_canvas() {
 #[test]
 fn empty_scene_is_background() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
     let config = CompositorConfig::new(8, 8).with_background([10, 20, 30, 255]);
     let img = comp.render(&gpu, &config, &[]).expect("render");
     assert_px(&img, 4, 4, [10, 20, 30, 255], 1);
 }
 
 #[test]
+fn repeated_renders_reuse_the_cached_target() {
+    // `render` caches the canvas texture + readback buffer across calls (the
+    // preview renders one size every frame). Same-size renders must stay
+    // independent — the pass clears, so no state leaks between frames — and a
+    // size change must rebuild the target at the new dimensions.
+    let gpu = gpu_or_skip!();
+    let mut comp = Compositor::new(&gpu);
+
+    let config = CompositorConfig::new(32, 32).with_background([10, 20, 30, 255]);
+    let first = comp.render(&gpu, &config, &[]).expect("render 1");
+    assert_px(&first, 16, 16, [10, 20, 30, 255], 1);
+
+    // Second render at the same size (cache hit) with different content.
+    let red = CompositeLayer::solid([255, 0, 0, 255], LayerPlacement::full_canvas(&config));
+    let second = comp.render(&gpu, &config, &[red]).expect("render 2");
+    assert_px(&second, 16, 16, [255, 0, 0, 255], 1);
+
+    // Third render back to an empty scene: nothing of the red frame survives.
+    let third = comp.render(&gpu, &config, &[]).expect("render 3");
+    assert_px(&third, 16, 16, [10, 20, 30, 255], 1);
+
+    // Size change (also exercises a non-256-multiple row pitch): the target
+    // is rebuilt and the readback matches the new dimensions.
+    let smaller = CompositorConfig::new(17, 9).with_background([1, 2, 3, 255]);
+    let resized = comp.render(&gpu, &smaller, &[]).expect("render 4");
+    assert_eq!((resized.width, resized.height), (17, 9));
+    assert_px(&resized, 16, 8, [1, 2, 3, 255], 1);
+
+    // And back to the original size.
+    let again = comp.render(&gpu, &config, &[]).expect("render 5");
+    assert_eq!((again.width, again.height), (32, 32));
+    assert_px(&again, 31, 31, [10, 20, 30, 255], 1);
+}
+
+#[test]
 fn solid_placement_lands_in_the_right_quadrant() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
     let config = CompositorConfig::new(100, 100); // black background
 
     // A 20×20 red square centered in the top-left quadrant at (25, 25).
@@ -166,7 +207,7 @@ fn solid_placement_lands_in_the_right_quadrant() {
 #[test]
 fn opacity_blends_over_background() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
     // Opaque blue canvas, half-opacity red on top → ~purple (gamma-space blend).
     let config = CompositorConfig::new(16, 16).with_background([0, 0, 255, 255]);
     let mut placement = LayerPlacement::full_canvas(&config);
@@ -180,34 +221,34 @@ fn opacity_blends_over_background() {
 #[test]
 fn nv12_neutral_is_gray() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
     // Full-range Y=128, neutral chroma → mid gray, alpha opaque.
     let full_gray = ColorSpace {
         range: ColorRange::Full,
         ..ColorSpace::BT709
     };
     let f = nv12_uniform(16, 16, 128, 128, 128, full_gray);
-    let img = render_frame(&gpu, &comp, 16, 16, &f);
+    let img = render_frame(&gpu, &mut comp, 16, 16, &f);
     assert_px(&img, 8, 8, [128, 128, 128, 255], 2);
 }
 
 #[test]
 fn nv12_limited_luma_endpoints() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
 
     // Limited range: Y=16 is black, Y=235 is white (neutral chroma).
     let black = nv12_uniform(16, 16, 16, 128, 128, ColorSpace::BT709);
     let white = nv12_uniform(16, 16, 235, 128, 128, ColorSpace::BT709);
     assert_px(
-        &render_frame(&gpu, &comp, 16, 16, &black),
+        &render_frame(&gpu, &mut comp, 16, 16, &black),
         8,
         8,
         [0, 0, 0, 255],
         2,
     );
     assert_px(
-        &render_frame(&gpu, &comp, 16, 16, &white),
+        &render_frame(&gpu, &mut comp, 16, 16, &white),
         8,
         8,
         [255, 255, 255, 255],
@@ -218,7 +259,7 @@ fn nv12_limited_luma_endpoints() {
 #[test]
 fn nv12_color_matches_cpu_reference() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
 
     // A saturated, non-neutral sample under several color spaces.
     let (y, u, v) = (150u8, 60u8, 200u8);
@@ -236,7 +277,7 @@ fn nv12_color_matches_cpu_reference() {
     ];
     for color in spaces {
         let f = nv12_uniform(16, 16, y, u, v, color);
-        let img = render_frame(&gpu, &comp, 16, 16, &f);
+        let img = render_frame(&gpu, &mut comp, 16, 16, &f);
         let [r, g, b] = yuv_ref(y, u, v, color);
         assert_px(&img, 8, 8, [r, g, b, 255], 2);
     }
@@ -245,12 +286,24 @@ fn nv12_color_matches_cpu_reference() {
 #[test]
 fn nv12_and_i420_agree() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
     let (y, u, v) = (90u8, 200u8, 70u8);
     let color = ColorSpace::BT709;
 
-    let from_nv12 = render_frame(&gpu, &comp, 16, 16, &nv12_uniform(16, 16, y, u, v, color));
-    let from_i420 = render_frame(&gpu, &comp, 16, 16, &i420_uniform(16, 16, y, u, v, color));
+    let from_nv12 = render_frame(
+        &gpu,
+        &mut comp,
+        16,
+        16,
+        &nv12_uniform(16, 16, y, u, v, color),
+    );
+    let from_i420 = render_frame(
+        &gpu,
+        &mut comp,
+        16,
+        16,
+        &i420_uniform(16, 16, y, u, v, color),
+    );
 
     let a = from_nv12.pixel(8, 8);
     assert_px(&from_i420, 8, 8, a, 1);
@@ -261,19 +314,19 @@ fn matrix_choice_actually_changes_output() {
     // Guards against the YUV matrix being hardcoded: BT.601 and BT.709 must
     // produce visibly different RGB for chroma-heavy input.
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
     let (y, u, v) = (128u8, 128u8, 210u8); // strong Cr, neutral Cb
 
     let bt709 = render_frame(
         &gpu,
-        &comp,
+        &mut comp,
         16,
         16,
         &nv12_uniform(16, 16, y, u, v, ColorSpace::BT709),
     );
     let bt601 = render_frame(
         &gpu,
-        &comp,
+        &mut comp,
         16,
         16,
         &nv12_uniform(16, 16, y, u, v, ColorSpace::BT601),
@@ -303,7 +356,7 @@ fn rgba_uniform(w: u32, h: u32, rgba: [u8; 4]) -> RgbaImage {
 #[test]
 fn rgba_opaque_layer_draws_over_background() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
     let config = CompositorConfig::new(16, 16).with_background([0, 0, 0, 255]);
     let bmp = rgba_uniform(16, 16, [10, 200, 60, 255]);
     let layer = CompositeLayer::rgba(&bmp, LayerPlacement::full_canvas(&config));
@@ -314,7 +367,7 @@ fn rgba_opaque_layer_draws_over_background() {
 #[test]
 fn rgba_fully_transparent_shows_background() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
     let config = CompositorConfig::new(16, 16).with_background([7, 8, 9, 255]);
     // Opaque-colored RGB but zero alpha: must not tint the background.
     let bmp = rgba_uniform(16, 16, [255, 0, 0, 0]);
@@ -326,7 +379,7 @@ fn rgba_fully_transparent_shows_background() {
 #[test]
 fn rgba_semi_alpha_blends_premultiplied() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
     // 50%-alpha red over opaque blue → ~half-and-half (premultiplied src-over).
     let config = CompositorConfig::new(16, 16).with_background([0, 0, 255, 255]);
     let bmp = rgba_uniform(16, 16, [255, 0, 0, 128]);
@@ -338,7 +391,7 @@ fn rgba_semi_alpha_blends_premultiplied() {
 #[test]
 fn rgba_layer_opacity_scales_coverage() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
     // Opaque red bitmap, but the *layer* opacity is 0.5 → same as 50% alpha.
     let config = CompositorConfig::new(16, 16).with_background([0, 0, 255, 255]);
     let bmp = rgba_uniform(16, 16, [255, 0, 0, 255]);
@@ -352,7 +405,7 @@ fn rgba_layer_opacity_scales_coverage() {
 #[test]
 fn rgba_placement_lands_in_the_right_quadrant() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
     let config = CompositorConfig::new(100, 100); // black background
 
     let bmp = rgba_uniform(8, 8, [255, 255, 255, 255]);
@@ -373,7 +426,7 @@ fn rgba_placement_lands_in_the_right_quadrant() {
 #[test]
 fn rgba_undersized_bitmap_is_rejected() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
     let config = CompositorConfig::new(8, 8);
     // Claims 4×4 (64 bytes) but only carries 16.
     let bad = RgbaImage::new(4, 4, vec![0u8; 16]);
@@ -394,7 +447,7 @@ use cutlass_shapes::ShapeStyle;
 /// Composite one layer on a small canvas sized to the CPU raster.
 fn render_shape_pair(
     gpu: &GpuContext,
-    comp: &Compositor,
+    comp: &mut Compositor,
     params: SdfParams,
     half: [f32; 2],
     style: ShapeStyle,
@@ -428,7 +481,10 @@ fn render_shape_pair(
 
 #[track_caller]
 fn assert_images_agree(gpu_img: &RgbaImage, cpu_img: &RgbaImage, what: &str, tol: i32) {
-    assert_eq!((gpu_img.width, gpu_img.height), (cpu_img.width, cpu_img.height));
+    assert_eq!(
+        (gpu_img.width, gpu_img.height),
+        (cpu_img.width, cpu_img.height)
+    );
     let mut worst = 0i32;
     let mut worst_at = (0u32, 0u32);
     for y in 0..gpu_img.height {
@@ -463,7 +519,7 @@ fn fill_only(rgba: [u8; 4]) -> ShapeStyle {
 #[test]
 fn sdf_shapes_match_cpu_reference() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
 
     let cases: Vec<(&str, SdfParams, [f32; 2])> = vec![
         ("rect", SdfParams::RoundedRect { radius: 0.0 }, [40.0, 25.0]),
@@ -489,8 +545,14 @@ fn sdf_shapes_match_cpu_reference() {
         ("heart", SdfParams::Heart, [38.0, 36.0]),
     ];
     for (name, params, half) in cases {
-        let (gpu_img, cpu_img) =
-            render_shape_pair(&gpu, &comp, params, half, fill_only([230, 80, 40, 255]), 1.0);
+        let (gpu_img, cpu_img) = render_shape_pair(
+            &gpu,
+            &mut comp,
+            params,
+            half,
+            fill_only([230, 80, 40, 255]),
+            1.0,
+        );
         assert_images_agree(&gpu_img, &cpu_img, name, 4);
     }
 }
@@ -498,7 +560,7 @@ fn sdf_shapes_match_cpu_reference() {
 #[test]
 fn sdf_stroke_and_translucency_match_cpu_reference() {
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
 
     // Fill + stroke.
     let stroked = ShapeStyle {
@@ -508,7 +570,14 @@ fn sdf_stroke_and_translucency_match_cpu_reference() {
             width: 8.0,
         }),
     };
-    let (g, c) = render_shape_pair(&gpu, &comp, SdfParams::Ellipse, [30.0, 30.0], stroked, 1.0);
+    let (g, c) = render_shape_pair(
+        &gpu,
+        &mut comp,
+        SdfParams::Ellipse,
+        [30.0, 30.0],
+        stroked,
+        1.0,
+    );
     assert_images_agree(&g, &c, "stroked ellipse", 4);
 
     // Stroke-only (fill alpha 0) with a translucent stroke.
@@ -521,7 +590,7 @@ fn sdf_stroke_and_translucency_match_cpu_reference() {
     };
     let (g, c) = render_shape_pair(
         &gpu,
-        &comp,
+        &mut comp,
         SdfParams::RoundedRect { radius: 10.0 },
         [30.0, 20.0],
         outline,
@@ -532,7 +601,7 @@ fn sdf_stroke_and_translucency_match_cpu_reference() {
     // Translucent fill under layer opacity.
     let (g, c) = render_shape_pair(
         &gpu,
-        &comp,
+        &mut comp,
         SdfParams::polygon(5, 0.0),
         [30.0, 30.0],
         fill_only([200, 40, 200, 180]),
@@ -547,7 +616,7 @@ fn sdf_quad_padding_keeps_stroke_unclipped() {
     // resolver) pad the quad accordingly. Verify ink reaches beyond the shape
     // box but stays inside the padded quad.
     let gpu = gpu_or_skip!();
-    let comp = Compositor::new(&gpu);
+    let mut comp = Compositor::new(&gpu);
     let style = ShapeStyle {
         fill: Some([255, 0, 0, 255]),
         stroke: Some(Stroke {
@@ -557,7 +626,7 @@ fn sdf_quad_padding_keeps_stroke_unclipped() {
     };
     let (g, _) = render_shape_pair(
         &gpu,
-        &comp,
+        &mut comp,
         SdfParams::RoundedRect { radius: 0.0 },
         [20.0, 15.0],
         style,

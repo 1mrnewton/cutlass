@@ -122,6 +122,20 @@ const PREMULTIPLIED_OVER: wgpu::BlendState = wgpu::BlendState {
     },
 };
 
+/// Canvas texture + readback buffer reused across renders while the size is
+/// stable. Interactive preview (and export) renders the same size every
+/// frame, so recreating these per render is pure allocation overhead on the
+/// hot path; the pass clears the texture, so no state leaks between frames.
+struct TargetCache {
+    width: u32,
+    height: u32,
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    readback: wgpu::Buffer,
+    /// Row pitch of `readback` (256-byte copy alignment).
+    padded_bytes_per_row: u32,
+}
+
 /// A WGPU alpha-over compositor. Build once (pipelines are reused), render many.
 pub struct Compositor {
     yuv_pipeline: wgpu::RenderPipeline,
@@ -133,6 +147,7 @@ pub struct Compositor {
     solid_layout: wgpu::BindGroupLayout,
     sdf_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    target: Option<TargetCache>,
     /// Maps Apple `CVPixelBuffer` GPU surfaces into `wgpu` textures with no CPU
     /// copy. `None` when the device isn't a Metal device (e.g. a software
     /// adapter) — GPU frames then fall back to [`CompositorError::UnsupportedFormat`]
@@ -243,14 +258,64 @@ impl Compositor {
             solid_layout,
             sdf_layout,
             sampler,
+            target: None,
             #[cfg(target_vendor = "apple")]
             metal_import: crate::metal_import::MetalSurfaceImporter::new(gpu),
         }
     }
 
-    /// Composite `layers` (bottom-to-top) onto a fresh canvas and read it back.
+    /// Make `self.target` hold a canvas + readback buffer for `width`×`height`,
+    /// reusing the cached pair when the size already matches.
+    fn ensure_target(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|t| t.width == width && t.height == height)
+        {
+            return;
+        }
+
+        let unpadded = width * 4;
+        let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cutlass.canvas"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: CANVAS_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cutlass.readback"),
+            size: u64::from(padded) * u64::from(height),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        self.target = Some(TargetCache {
+            width,
+            height,
+            texture,
+            view,
+            readback,
+            padded_bytes_per_row: padded,
+        });
+    }
+
+    /// Composite `layers` (bottom-to-top) onto a cleared canvas and read it
+    /// back. The canvas texture and readback buffer are cached on `self` and
+    /// reused while the render size stays the same.
     pub fn render(
-        &self,
+        &mut self,
         gpu: &GpuContext,
         config: &CompositorConfig,
         layers: &[CompositeLayer<'_>],
@@ -270,21 +335,11 @@ impl Compositor {
             built.push(self.build_layer(gpu, config, layer)?);
         }
 
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cutlass.canvas"),
-            size: wgpu::Extent3d {
-                width: config.width,
-                height: config.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: CANVAS_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        self.ensure_target(device, config.width, config.height);
+        let target = self
+            .target
+            .as_ref()
+            .expect("ensure_target populates the cache");
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("cutlass.encoder"),
@@ -294,7 +349,7 @@ impl Compositor {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cutlass.pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target_view,
+                    view: &target.view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -328,15 +383,42 @@ impl Compositor {
 
         // Record the readback copy, then submit, *then* map — the copy must
         // execute on the queue before the buffer holds anything.
-        let (readback, padded) = record_readback(
-            &gpu.device,
-            &mut encoder,
-            &target,
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &target.readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(target.padded_bytes_per_row),
+                    rows_per_image: Some(config.height),
+                },
+            },
+            wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+
+        let result = map_readback(
+            gpu,
+            &target.readback,
+            target.padded_bytes_per_row,
             config.width,
             config.height,
         );
-        gpu.queue.submit(std::iter::once(encoder.finish()));
-        map_readback(gpu, &readback, padded, config.width, config.height)
+        if result.is_err() {
+            // A failed map can leave the buffer in an unmappable state; drop
+            // the cache so the next render starts from fresh resources.
+            self.target = None;
+        }
+        result
     }
 
     fn build_layer(
@@ -755,51 +837,6 @@ impl Compositor {
             _keep_alive: None,
         })
     }
-}
-
-/// Record a copy of the canvas into a fresh mappable buffer (rows padded to the
-/// 256-byte copy alignment). Returns the buffer and its padded row pitch.
-fn record_readback(
-    device: &wgpu::Device,
-    encoder: &mut wgpu::CommandEncoder,
-    target: &wgpu::Texture,
-    width: u32,
-    height: u32,
-) -> (wgpu::Buffer, u32) {
-    let unpadded = width * 4;
-    let padded =
-        unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("cutlass.readback"),
-        size: u64::from(padded) * u64::from(height),
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: target,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buffer,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(height),
-            },
-        },
-        wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
-
-    (buffer, padded)
 }
 
 /// Map the (already-submitted) readback buffer and copy it into a tight

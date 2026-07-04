@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map_or_else(|| PathBuf::from("cutlass-demo.png"), PathBuf::from);
 
     let gpu = GpuContext::new_headless_blocking()?; // bring up a headless GPU
-    let comp = Compositor::new(&gpu); // build pipelines once
+    let mut comp = Compositor::new(&gpu); // build pipelines once
     let config = CompositorConfig::new(WIDTH, HEIGHT).with_background(BACKGROUND_COLOR);
 
     // Text is a generator: it rasterizes to a straight-alpha RgbaImage.

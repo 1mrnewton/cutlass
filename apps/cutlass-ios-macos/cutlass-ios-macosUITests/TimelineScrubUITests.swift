@@ -12,6 +12,13 @@ import XCTest
 
 final class TimelineScrubUITests: XCTestCase {
 
+    private static let rowSpacing: CGFloat = 5
+    private static let rulerHeight: CGFloat = 18
+
+    /// editorLanes seed order (top → bottom): video (pip), main, sticker,
+    /// effect, audio — matches `RootView`'s `-startScreen editorLanes`.
+    private static let editorLaneHeights: [CGFloat] = [44, 66, 30, 30, 30]
+
     override func setUpWithError() throws {
         continueAfterFailure = true
     }
@@ -36,20 +43,52 @@ final class TimelineScrubUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.2)
     }
 
-    /// Default editor (empty effect/overlay bands, one audio row from the
-    /// project's extracted music? none) — regions: ruler, clips, bands.
+    /// Vertical center of a lane row inside the timeline, derived from the
+    /// ordered lane list so coordinates stay honest as rows are added.
+    @MainActor
+    private func rowCenterY(timeline: XCUIElement, rowIndex: Int, heights: [CGFloat]) -> CGFloat {
+        var stackY: CGFloat = 0
+        for index in 0..<rowIndex {
+            stackY += heights[index] + Self.rowSpacing
+        }
+        stackY += heights[rowIndex] / 2
+        return timeline.frame.minY + Self.rulerHeight + Self.rowSpacing + stackY
+    }
+
+    @MainActor
+    private func windowPoint(_ app: XCUIApplication, x: CGFloat, y: CGFloat) -> XCUICoordinate {
+        let window = app.windows.firstMatch
+        return window.coordinate(withNormalizedOffset: CGVector(
+            dx: x,
+            dy: y / window.frame.height
+        ))
+    }
+
+    /// Screen x for a timeline time with the playhead centered (seed uses t=0).
+    @MainActor
+    private func timelineTimeX(_ timeline: XCUIElement, time: TimeInterval) -> CGFloat {
+        timeline.frame.midX + time * 44
+    }
+
+    /// Video-lane PiP bars (kind-preserving cross-lane targets).
+    @MainActor
+    private func videoLaneClips(in timeline: XCUIElement) -> XCUIElementQuery {
+        timeline.descendants(matching: .any).matching(identifier: "videoLaneClip")
+    }
+
+    /// Default editor (main track only): scrubbing must work from the ruler
+    /// and the main clip row.
     @MainActor
     func testScrubFromEveryTimelineRegion() throws {
         let (app, readout) = launchEditor("editor")
 
-        // Rows on a 956pt window: ruler ~710, main track 750-816,
-        // empty overlay band ~830, area below ~860.
+        let timeline = app.otherElements["timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 3), "timeline element should exist")
+
         let regions: [(name: String, y: CGFloat)] = [
-            ("ruler", 710),
-            ("main clip upper", 770),
-            ("main clip waveform", 800),
-            ("empty overlay band", 830),
-            ("below content", 860),
+            ("ruler", timeline.frame.minY + Self.rulerHeight / 2),
+            ("main clip upper", rowCenterY(timeline: timeline, rowIndex: 0, heights: [66])),
+            ("main clip lower", rowCenterY(timeline: timeline, rowIndex: 0, heights: [66]) + 20),
         ]
 
         for region in regions {
@@ -99,97 +138,124 @@ final class TimelineScrubUITests: XCTestCase {
         )
     }
 
-    /// Cross-lane drags: a long-pressed main clip dropped on the overlay
-    /// band becomes a PiP overlay; dragging that PiP up onto the main track
-    /// re-inserts it as a main clip.
+    /// Video-lane PiP clips keep a footage-style duration label (not
+    /// "Overlay"); cross-lane main→video moves are covered by
+    /// `testDropOnOccupiedSpanCreatesNewLane`.
     @MainActor
-    func testCrossLaneDragConversions() throws {
+    func testVideoLaneClipKindPreserved() throws {
         let (app, _) = launchEditor("editorLanes")
 
         let timeline = app.otherElements["timeline"]
         XCTAssertTrue(timeline.waitForExistence(timeout: 3), "timeline element should exist")
-        let frame = timeline.frame
-        let window = app.windows.firstMatch
 
-        // PiP lane bars are labeled "Overlay"; count is the conversion probe.
-        // Scoped to the timeline: the media toolbar below also has an
-        // "Overlay" button, and it swaps away when selection changes.
-        let overlayBars = timeline.staticTexts.matching(NSPredicate(format: "label == 'Overlay'"))
-        let initialCount = overlayBars.count
+        let pip = videoLaneClips(in: timeline).element(boundBy: 0)
+        XCTAssertTrue(pip.waitForExistence(timeout: 4), "seed PiP should exist on the video lane")
+        XCTAssertFalse(pip.label.contains("Overlay"), "video-lane clips must not read as Overlay")
+    }
 
-        func point(_ x: CGFloat, _ y: CGFloat) -> XCUICoordinate {
-            window.coordinate(withNormalizedOffset: CGVector(
-                dx: x,
-                dy: y / window.frame.height
-            ))
-        }
+    /// Dropping onto an occupied span on a same-kind lane inserts a new lane
+    /// at the hovered row instead of nudging or rejecting the drop.
+    @MainActor
+    func testDropOnOccupiedSpanCreatesNewLane() throws {
+        let (app, _) = launchEditor("editorLanes")
 
-        // Row centers (one overlay row at launch): ruler 18+5, effects 30+5,
-        // main 66+5, overlay 30.
-        let mainY = frame.minY + 23 + 35 + 33
-        let overlayY = frame.minY + 23 + 35 + 71 + 15
+        let timeline = app.otherElements["timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 3), "timeline element should exist")
+        let heightBefore = timeline.frame.height
 
-        // 1. Long-press a main clip (right of the centered playhead at t=0)
-        //    and drag it down onto the overlay band.
-        point(0.65, mainY).press(
-            forDuration: 0.7,
-            thenDragTo: point(0.75, overlayY),
-            withVelocity: 100,
-            thenHoldForDuration: 0.4
+        let pip = videoLaneClips(in: timeline).element(boundBy: 0)
+        XCTAssertTrue(pip.waitForExistence(timeout: 2), "seed PiP should exist for overlap targeting")
+
+        let mainY = rowCenterY(timeline: timeline, rowIndex: 1, heights: Self.editorLaneHeights)
+        let pipTarget = pip.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+
+        // Drop a main clip directly onto the existing PiP bar (same span).
+        windowPoint(app, x: 0.62, y: mainY).press(
+            forDuration: 0.8,
+            thenDragTo: pipTarget,
+            withVelocity: 80,
+            thenHoldForDuration: 0.5
         )
         Thread.sleep(forTimeInterval: 1.0)
 
-        XCTAssertEqual(
-            overlayBars.count, initialCount + 1,
-            "dropping a main clip on the overlay band should create a PiP overlay"
-        )
-
-        // 2. Drag the new PiP (the lowest 'Overlay' bar; it packed into a new
-        //    sub-row) up onto the main track band. The timeline grew a row in
-        //    step 1, so the main track's y comes from the fresh frame.
-        var newest = overlayBars.element(boundBy: 0)
-        for index in 0..<overlayBars.count {
-            let candidate = overlayBars.element(boundBy: index)
-            if candidate.frame.minY > newest.frame.minY {
-                newest = candidate
-            }
-        }
-        let freshMainY = timeline.frame.minY + 23 + 35 + 33
-        let from = newest.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        let to = point(0.7, freshMainY)
-        from.press(forDuration: 0.7, thenDragTo: to, withVelocity: 100, thenHoldForDuration: 0.4)
-        Thread.sleep(forTimeInterval: 1.0)
-
-        XCTAssertEqual(
-            overlayBars.count, initialCount,
-            "dropping a PiP overlay on the main track should convert it back to a main clip"
+        XCTAssertGreaterThan(
+            timeline.frame.height, heightBefore + 30,
+            "dropping onto an occupied video-lane span should insert a new lane row"
         )
     }
 
-    /// Fully-populated lanes (effects row above, sticker overlay row and
-    /// audio row below the main track): scrubbing must work when the drag
-    /// starts on lane clips themselves. Rows are derived from the timeline's
-    /// actual frame so the coordinates stay honest as the layout grows.
+    /// Opening a property panel overlays the timeline instead of pushing it
+    /// up — the timeline frame must stay put.
+    @MainActor
+    func testPanelOverlayDoesNotMoveTimeline() throws {
+        let (app, _) = launchEditor("editorLanes")
+
+        let timeline = app.otherElements["timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 3), "timeline element should exist")
+        let frameBefore = timeline.frame
+
+        let stickers = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS 'Stickers'")
+        ).firstMatch
+        if !stickers.waitForExistence(timeout: 2) {
+            app.scrollViews.firstMatch.swipeLeft()
+        }
+        XCTAssertTrue(stickers.waitForExistence(timeout: 2), "Stickers toolbar item should exist")
+        stickers.tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any).matching(identifier: "editorPanel").firstMatch
+                .waitForExistence(timeout: 3),
+            "stickers panel should open as an overlay"
+        )
+
+        Thread.sleep(forTimeInterval: 0.25)
+        let frameAfter = timeline.frame
+        XCTAssertEqual(frameBefore.minY, frameAfter.minY, accuracy: 4)
+        XCTAssertEqual(frameBefore.height, frameAfter.height, accuracy: 4)
+    }
+
+    /// Dragging the timeline height handle up expands past the natural
+    /// content height cap.
+    @MainActor
+    func testTimelineHeightHandleExpandsPastNaturalCap() throws {
+        let (app, _) = launchEditor("editorLanes")
+
+        let timeline = app.otherElements["timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 3), "timeline element should exist")
+        let naturalHeight = timeline.frame.height
+
+        let handle = app.otherElements["timelineHeightHandle"]
+        XCTAssertTrue(handle.exists, "height handle should exist")
+        let start = handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -220)))
+        Thread.sleep(forTimeInterval: 0.6)
+
+        XCTAssertGreaterThan(
+            timeline.frame.height, naturalHeight + 20,
+            "dragging the height handle up should grow the timeline beyond its natural height"
+        )
+    }
+
+    /// Fully-populated lanes: scrubbing must work when the drag starts on
+    /// lane clips themselves. Row centers come from the lane list layout.
     @MainActor
     func testScrubFromPopulatedLanes() throws {
         let (app, readout) = launchEditor("editorLanes")
 
         let timeline = app.otherElements["timeline"]
         XCTAssertTrue(timeline.waitForExistence(timeout: 3), "timeline element should exist")
-        let frame = timeline.frame
 
-        // Rows from the timeline's top edge: ruler 18 + 5 spacing, effects
-        // row 30 + 5, main track 66 + 5, overlay row 30 + 5, audio row 30.
-        let rows: [(name: String, offset: CGFloat)] = [
-            ("effects lane clip", 18 + 5 + 15),
-            ("main clip", 23 + 35 + 33),
-            ("overlay lane clip", 23 + 35 + 71 + 15),
-            ("audio lane clip", 23 + 35 + 71 + 35 + 15),
+        let rows: [(name: String, index: Int)] = [
+            ("video lane clip", 0),
+            ("main clip", 1),
+            ("sticker lane clip", 2),
+            ("effects lane clip", 3),
+            ("audio lane clip", 4),
         ]
 
         for row in rows {
-            let y = frame.minY + row.offset
-            guard y < frame.maxY - 4 else { continue }
+            let y = rowCenterY(timeline: timeline, rowIndex: row.index, heights: Self.editorLaneHeights)
+            guard y < timeline.frame.maxY - 4 else { continue }
             let before = readout.label
             drag(app, y: y)
             XCTAssertNotEqual(

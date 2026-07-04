@@ -45,9 +45,9 @@ struct RootView: View {
             _editorState = State(initialValue: state)
             _screen = State(initialValue: .editor)
         case "editorLanes":
-            // Editor with every lane populated (effects, overlay with a PiP,
-            // audio), used by UI tests to exercise each timeline row and the
-            // cross-lane drag conversions.
+            // Editor with every lane populated (video PiP above main, sticker,
+            // effect, audio at the bottom), used by UI tests to exercise each
+            // timeline row and kind-preserving cross-lane drags.
             let state = EditorState()
             state.startProject(with: Array(MockData.libraryItems.prefix(4)))
             state.addSticker(symbol: "heart.fill")

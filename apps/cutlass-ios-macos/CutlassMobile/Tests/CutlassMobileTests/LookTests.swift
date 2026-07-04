@@ -29,6 +29,26 @@ final class LookTests: XCTestCase {
         return try XCTUnwrap(nil, "clip \(id) not in ui_state")
     }
 
+    /// Mask / stabilize / animation demand a media video clip — the shapes the
+    /// app's clip panels send, end to end into the decoded `UiClip`.
+    func testMediaLookFieldsDecodeFromUiState() async throws {
+        let session = try makeSession()
+        let sample = try XCTUnwrap(
+            Bundle.module.url(forResource: "sample", withExtension: "mp4"),
+            "bundled sample.mp4")
+        let result = try await session.run(.appendMain(paths: [sample.path]))
+        let id = try XCTUnwrap(result.clips.first)
+
+        try await session.apply(.setClipMask(clip: id, mask: UiMask(kind: "circle")))
+        try await session.apply(.setClipStabilize(clip: id, level: "smooth"))
+        try await session.apply(.setClipAnimation(clip: id, slot: "in", animationID: "fade_in"))
+
+        let state = try await clip(session, id)
+        XCTAssertEqual(state.mask?.kind, "circle")
+        XCTAssertEqual(state.stabilize, "smooth")
+        XCTAssertEqual(state.animationIn, "fade_in")
+    }
+
     func testCatalogsLoadFromRust() {
         let catalogs = Catalogs.shared
         XCTAssertFalse(catalogs.masks.isEmpty)

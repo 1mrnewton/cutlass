@@ -15,6 +15,19 @@
 //! Keeping the GPU/compositor work in shared Rust means the on-device harness
 //! exercises the same path as export and the future preview — the only
 //! per-platform code is the marshalling in this crate.
+//!
+//! Beyond the demo/preview surface below, the real editor rides the **session
+//! FFI**: [`session`] owns an engine per open project (commands, undo, save),
+//! [`intents`] turns gesture-level edits into undo-grouped command batches,
+//! [`ui_state`] shapes the project into the lane-stack JSON the UIs render,
+//! and [`wire`] carries it all as JSON strings across the C ABI.
+
+pub mod intents;
+pub mod session;
+pub mod ui_state;
+pub mod wire;
+
+pub use session::CutlassSession;
 
 use std::path::Path;
 

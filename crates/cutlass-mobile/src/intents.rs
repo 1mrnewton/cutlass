@@ -1,0 +1,1420 @@
+//! Gesture-level editor intents, composed into engine command batches.
+//!
+//! The shells speak in gestures ("append these picks", "ripple-trim this main
+//! clip", "drop a text at the playhead"); the engine speaks in atomic
+//! [`EditCommand`]s. The translation — seconds→ticks, host-lane selection,
+//! ripple choreography, undo grouping — is editor *logic* shared by iOS and
+//! Android, so it lives here in Rust. Every multi-command intent runs inside
+//! one history group: it undoes as a single step and rolls back atomically on
+//! mid-flight failure.
+//!
+//! Wire shape: `{"intent": "add_text", ...}` (snake_case tags and fields,
+//! seconds as `f64`). Responses are small JSON objects with the created ids;
+//! shells refresh the full `ui_state` after every intent anyway.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use cutlass_commands::{Command, EditCommand, EditOutcome, ProjectCommand};
+use cutlass_engine::{ApplyOutcome, Engine, EngineError};
+use cutlass_models::{
+    Clip, ClipId, ClipParam, ClipSource, ClipTransform, Easing, Generator, MediaId, ModelError,
+    Param, ParamValue, Project, Rational, RationalTime, TimeRange, TrackId, TrackKind,
+};
+
+/// Which clip edge a trim gesture drags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrimEdge {
+    Leading,
+    Trailing,
+}
+
+/// Lane flavor for generated full-canvas bars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectLaneKind {
+    Effect,
+    Filter,
+    Adjustment,
+}
+
+impl EffectLaneKind {
+    fn track_kind(self) -> TrackKind {
+        match self {
+            EffectLaneKind::Effect => TrackKind::Effect,
+            EffectLaneKind::Filter => TrackKind::Filter,
+            EffectLaneKind::Adjustment => TrackKind::Adjustment,
+        }
+    }
+
+    fn generator(self) -> Generator {
+        match self {
+            EffectLaneKind::Effect => Generator::Effect,
+            EffectLaneKind::Filter => Generator::Filter,
+            EffectLaneKind::Adjustment => Generator::Adjustment,
+        }
+    }
+}
+
+/// A gesture-level operation. See the module docs for the wire shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "intent", rename_all = "snake_case")]
+pub enum Intent {
+    /// Import each file and append it to the end of the main track (creating
+    /// the main track on first use). Audio-only files land on an audio lane
+    /// instead.
+    AppendMain { paths: Vec<PathBuf> },
+    /// Import a file and ripple-insert it at the main-track clip boundary
+    /// nearest `at_seconds` (later clips shift right).
+    InsertMain { path: PathBuf, at_seconds: f64 },
+    /// Split any clip at an absolute timeline position.
+    Split { clip: ClipId, seconds: f64 },
+    /// Trim a *main-track* clip with ripple semantics: the track stays
+    /// gapless, later clips slide. `delta_seconds` is the signed change of
+    /// the dragged edge (leading: + trims content in; trailing: + extends).
+    RippleTrimMain {
+        clip: ClipId,
+        edge: TrimEdge,
+        delta_seconds: f64,
+    },
+    /// Re-place a free lane clip (start and/or length), non-ripple.
+    TrimLane {
+        clip: ClipId,
+        start_seconds: f64,
+        length_seconds: f64,
+    },
+    /// Move a lane clip (or lift a main clip) to a lane at `start_seconds`:
+    /// a specific lane when `track` is given, otherwise the first same-kind
+    /// lane with a free span (a new lane is created when none fits).
+    MoveLane {
+        clip: ClipId,
+        #[serde(default)]
+        track: Option<TrackId>,
+        start_seconds: f64,
+    },
+    /// Insert a clip into the main track at slot `index` (post-removal
+    /// indexing when the clip already lives on main — a reorder).
+    InsertIntoMain { clip: ClipId, index: usize },
+    /// Drop a text clip at the playhead on a text lane.
+    AddText {
+        text: String,
+        at_seconds: f64,
+        #[serde(default = "default_overlay_seconds")]
+        duration_seconds: f64,
+    },
+    /// Drop a sticker clip (asset wiring comes with the sticker catalog).
+    AddSticker {
+        at_seconds: f64,
+        #[serde(default = "default_overlay_seconds")]
+        duration_seconds: f64,
+    },
+    /// Drop an effect / filter / adjustment bar.
+    AddEffect {
+        kind: EffectLaneKind,
+        at_seconds: f64,
+        #[serde(default = "default_overlay_seconds")]
+        duration_seconds: f64,
+    },
+    /// Import a file and drop it as picture-in-picture on an overlay video
+    /// lane (half scale, upper half of the canvas — the CapCut drop pose).
+    AddPip { path: PathBuf, at_seconds: f64 },
+    /// Import a file and drop it on an audio lane.
+    AddAudio { path: PathBuf, at_seconds: f64 },
+    /// Duplicate a clip right after itself (ripple on main, free slot on a
+    /// lane). Copies content, speed, transform, audio mix, crop, and effect
+    /// ids; keyframed animation flattens to its start value for now.
+    Duplicate { clip: ClipId },
+    /// Swap a media clip's source for a new file, keeping its slot. The
+    /// replacement must be at least as long as the clip needs (images are
+    /// exempt: one frame repeats).
+    ReplaceMedia { clip: ClipId, path: PathBuf },
+    /// CapCut "extract audio": place the clip's audio on an audio lane,
+    /// linked to the original (whose own lane goes silent via linkage).
+    ExtractAudio { clip: ClipId },
+    /// Retime a media clip. `speed` is the positive rate multiplier.
+    SetSpeed {
+        clip: ClipId,
+        speed: f64,
+        #[serde(default)]
+        reversed: bool,
+    },
+    /// Volume slider + fade handles. `volume: None` keeps the current gain.
+    SetAudio {
+        clip: ClipId,
+        #[serde(default)]
+        volume: Option<f32>,
+        #[serde(default)]
+        fade_in_seconds: f64,
+        #[serde(default)]
+        fade_out_seconds: f64,
+    },
+    /// Canvas placement in UI coordinates (`pos` 0..1, 0.5 = center). With
+    /// `at_seconds` the edit composes with animation (keyframe write on
+    /// animated properties); without it every property flattens to constant.
+    SetTransform {
+        clip: ClipId,
+        pos_x: f32,
+        pos_y: f32,
+        scale: f32,
+        rotation_degrees: f32,
+        opacity: f32,
+        #[serde(default)]
+        at_seconds: Option<f64>,
+    },
+    /// Stamp (or, when one already sits there, remove) a transform keyframe
+    /// at an absolute timeline position — the timeline's diamond toggle.
+    ToggleTransformKeyframe { clip: ClipId, seconds: f64 },
+    /// Set, change, or clear (`transition_id: None`) the transition at a
+    /// main-track clip's right junction.
+    SetTransition {
+        clip: ClipId,
+        #[serde(default)]
+        transition_id: Option<String>,
+        #[serde(default)]
+        duration_seconds: f64,
+    },
+}
+
+fn default_overlay_seconds() -> f64 {
+    3.0
+}
+
+/// Execute one intent. Multi-command intents run in a history group: one undo
+/// step, atomic rollback on failure. Returns the intent's response payload.
+pub fn run(engine: &mut Engine, intent: Intent) -> Result<serde_json::Value, EngineError> {
+    match intent {
+        Intent::AppendMain { paths } => grouped(engine, |e| append_main(e, &paths)),
+        Intent::InsertMain { path, at_seconds } => {
+            grouped(engine, |e| insert_main(e, &path, at_seconds))
+        }
+        Intent::Split { clip, seconds } => split(engine, clip, seconds),
+        Intent::RippleTrimMain {
+            clip,
+            edge,
+            delta_seconds,
+        } => grouped(engine, |e| ripple_trim_main(e, clip, edge, delta_seconds)),
+        Intent::TrimLane {
+            clip,
+            start_seconds,
+            length_seconds,
+        } => trim_lane(engine, clip, start_seconds, length_seconds),
+        Intent::MoveLane {
+            clip,
+            track,
+            start_seconds,
+        } => grouped(engine, |e| move_lane(e, clip, track, start_seconds)),
+        Intent::InsertIntoMain { clip, index } => {
+            grouped(engine, |e| insert_into_main(e, clip, index))
+        }
+        Intent::AddText {
+            text,
+            at_seconds,
+            duration_seconds,
+        } => grouped(engine, |e| {
+            add_generated(
+                e,
+                TrackKind::Text,
+                Generator::text(text.clone()),
+                at_seconds,
+                duration_seconds,
+            )
+        }),
+        Intent::AddSticker {
+            at_seconds,
+            duration_seconds,
+        } => grouped(engine, |e| {
+            add_generated(
+                e,
+                TrackKind::Sticker,
+                Generator::Sticker,
+                at_seconds,
+                duration_seconds,
+            )
+        }),
+        Intent::AddEffect {
+            kind,
+            at_seconds,
+            duration_seconds,
+        } => grouped(engine, |e| {
+            add_generated(
+                e,
+                kind.track_kind(),
+                kind.generator(),
+                at_seconds,
+                duration_seconds,
+            )
+        }),
+        Intent::AddPip { path, at_seconds } => grouped(engine, |e| add_pip(e, &path, at_seconds)),
+        Intent::AddAudio { path, at_seconds } => {
+            grouped(engine, |e| add_audio(e, &path, at_seconds))
+        }
+        Intent::Duplicate { clip } => grouped(engine, |e| duplicate(e, clip)),
+        Intent::ReplaceMedia { clip, path } => grouped(engine, |e| replace_media(e, clip, &path)),
+        Intent::ExtractAudio { clip } => grouped(engine, |e| extract_audio(e, clip)),
+        Intent::SetSpeed {
+            clip,
+            speed,
+            reversed,
+        } => set_speed(engine, clip, speed, reversed),
+        Intent::SetAudio {
+            clip,
+            volume,
+            fade_in_seconds,
+            fade_out_seconds,
+        } => set_audio(engine, clip, volume, fade_in_seconds, fade_out_seconds),
+        Intent::SetTransform {
+            clip,
+            pos_x,
+            pos_y,
+            scale,
+            rotation_degrees,
+            opacity,
+            at_seconds,
+        } => set_transform(
+            engine,
+            clip,
+            [pos_x, pos_y],
+            scale,
+            rotation_degrees,
+            opacity,
+            at_seconds,
+        ),
+        Intent::ToggleTransformKeyframe { clip, seconds } => {
+            grouped(engine, |e| toggle_transform_keyframe(e, clip, seconds))
+        }
+        Intent::SetTransition {
+            clip,
+            transition_id,
+            duration_seconds,
+        } => grouped(engine, |e| {
+            set_transition(e, clip, transition_id.clone(), duration_seconds)
+        }),
+    }
+}
+
+// --- tick math --------------------------------------------------------------
+
+/// Nearest frame tick at `rate` for a wall-clock position (never negative).
+pub fn frame_tick(seconds: f64, rate: Rational) -> i64 {
+    (seconds.max(0.0) * rate.as_f64()).round() as i64
+}
+
+fn at(seconds: f64, rate: Rational) -> RationalTime {
+    RationalTime::new(frame_tick(seconds, rate), rate)
+}
+
+/// A UI speed multiplier as the exact rational the model stores (milli
+/// precision, clamped to the model's speed range).
+pub fn speed_to_rational(speed: f64) -> Rational {
+    let clamped = speed.clamp(0.05, 100.0);
+    Rational::new((clamped * 1000.0).round() as i32, 1000)
+}
+
+fn invalid(msg: impl Into<String>) -> EngineError {
+    ModelError::InvalidParam(msg.into()).into()
+}
+
+// --- engine plumbing ---------------------------------------------------------
+
+/// Run `f` inside one history group; commit on success, roll back on failure.
+fn grouped<T>(
+    engine: &mut Engine,
+    f: impl FnOnce(&mut Engine) -> Result<T, EngineError>,
+) -> Result<T, EngineError> {
+    engine.begin_group();
+    match f(engine) {
+        Ok(value) => {
+            engine.commit_group();
+            Ok(value)
+        }
+        Err(err) => {
+            engine.rollback_group();
+            Err(err)
+        }
+    }
+}
+
+fn apply_created(engine: &mut Engine, command: EditCommand) -> Result<ClipId, EngineError> {
+    match engine.apply(Command::Edit(command))? {
+        ApplyOutcome::Edited(EditOutcome::Created(id)) => Ok(id),
+        other => Err(invalid(format!("expected a created clip, got {other:?}"))),
+    }
+}
+
+fn apply_created_track(engine: &mut Engine, command: EditCommand) -> Result<TrackId, EngineError> {
+    match engine.apply(Command::Edit(command))? {
+        ApplyOutcome::Edited(EditOutcome::CreatedTrack(id)) => Ok(id),
+        other => Err(invalid(format!("expected a created track, got {other:?}"))),
+    }
+}
+
+fn apply_imported(engine: &mut Engine, path: &std::path::Path) -> Result<MediaId, EngineError> {
+    match engine.apply(Command::Project(ProjectCommand::Import {
+        path: path.to_path_buf(),
+    }))? {
+        ApplyOutcome::Imported { media } => Ok(media),
+        other => Err(invalid(format!(
+            "expected an import outcome, got {other:?}"
+        ))),
+    }
+}
+
+fn clip_snapshot(project: &Project, clip: ClipId) -> Result<(TrackId, Clip), EngineError> {
+    let track = project
+        .timeline()
+        .track_of(clip)
+        .ok_or(ModelError::UnknownClip(clip))?;
+    let snapshot = project
+        .clip(clip)
+        .ok_or(ModelError::UnknownClip(clip))?
+        .clone();
+    Ok((track, snapshot))
+}
+
+// --- lane selection (the shared "host lane" policy) ---------------------------
+
+/// Where a clip of `kind` spanning `range` should land.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HostLanePlan {
+    Existing(TrackId),
+    /// Create a lane at this stack index (`None` = top of the stack).
+    Create {
+        index: Option<usize>,
+    },
+}
+
+/// First non-main lane of `kind` (scanning UI rows top to bottom) whose span
+/// at `range` is free; otherwise a plan to create one at the kind's default
+/// position — video just above main, generated kinds at the bottom of the
+/// overlay block, audio at the bottom of the stack.
+pub fn host_lane_plan(
+    project: &Project,
+    kind: TrackKind,
+    range: TimeRange,
+    exclude: Option<ClipId>,
+) -> Result<HostLanePlan, EngineError> {
+    let main = crate::ui_state::main_track(project);
+    let timeline = project.timeline();
+    for id in crate::ui_state::lane_rows(project) {
+        if Some(id) == main {
+            continue;
+        }
+        let Some(track) = timeline.track(id) else {
+            continue;
+        };
+        if track.kind == kind && !track.has_overlap(range, exclude)? {
+            return Ok(HostLanePlan::Existing(id));
+        }
+    }
+    Ok(HostLanePlan::Create {
+        index: new_lane_index(project, kind),
+    })
+}
+
+/// Stack position (0 = bottom) for a brand-new lane of `kind`, mirroring the
+/// shells' row conventions: video overlays go directly above main; text /
+/// sticker / effect kinds slot in *below* the existing overlay block (bottom
+/// row of that group in the UI); audio appends and the timeline's audio-floor
+/// invariant sinks it.
+fn new_lane_index(project: &Project, kind: TrackKind) -> Option<usize> {
+    let order = project.timeline().order();
+    let position = |id: TrackId| order.iter().position(|t| *t == id);
+    match kind {
+        TrackKind::Video => {
+            let main = crate::ui_state::main_track(project)?;
+            position(main).map(|p| p + 1)
+        }
+        TrackKind::Audio => None,
+        _ => project
+            .timeline()
+            .tracks_ordered()
+            .filter(|t| {
+                matches!(
+                    t.kind,
+                    TrackKind::Text
+                        | TrackKind::Sticker
+                        | TrackKind::Effect
+                        | TrackKind::Filter
+                        | TrackKind::Adjustment
+                )
+            })
+            .filter_map(|t| position(t.id))
+            .min(),
+    }
+}
+
+fn default_lane_name(kind: TrackKind) -> &'static str {
+    match kind {
+        TrackKind::Video => "Overlay",
+        TrackKind::Audio => "Audio",
+        TrackKind::Text => "Text",
+        TrackKind::Sticker => "Sticker",
+        TrackKind::Effect => "Effects",
+        TrackKind::Filter => "Filters",
+        TrackKind::Adjustment => "Adjust",
+    }
+}
+
+/// Resolve a [`host_lane_plan`], creating the lane when needed.
+fn ensure_host_lane(
+    engine: &mut Engine,
+    kind: TrackKind,
+    range: TimeRange,
+    exclude: Option<ClipId>,
+) -> Result<TrackId, EngineError> {
+    match host_lane_plan(engine.project(), kind, range, exclude)? {
+        HostLanePlan::Existing(id) => Ok(id),
+        HostLanePlan::Create { index } => apply_created_track(
+            engine,
+            EditCommand::AddTrack {
+                kind,
+                name: default_lane_name(kind).into(),
+                index,
+            },
+        ),
+    }
+}
+
+/// The main track, created (at the bottom of the stack) on first use.
+fn ensure_main(engine: &mut Engine) -> Result<TrackId, EngineError> {
+    if let Some(main) = crate::ui_state::main_track(engine.project()) {
+        return Ok(main);
+    }
+    apply_created_track(
+        engine,
+        EditCommand::AddTrack {
+            kind: TrackKind::Video,
+            name: "Main".into(),
+            index: Some(0),
+        },
+    )
+}
+
+// --- import + placement intents ----------------------------------------------
+
+fn append_main(engine: &mut Engine, paths: &[PathBuf]) -> Result<serde_json::Value, EngineError> {
+    let main = ensure_main(engine)?;
+    let rate = engine.project().timeline().frame_rate;
+    let mut clips = Vec::new();
+    let mut media_ids = Vec::new();
+
+    for path in paths {
+        let media_id = apply_imported(engine, path)?;
+        media_ids.push(media_id.raw());
+        let media = engine
+            .project()
+            .media(media_id)
+            .ok_or(ModelError::UnknownMedia(media_id))?;
+        let source = media.full_range();
+
+        let clip = if media.is_audio_only() {
+            // Music/voiceover picks can't sit on the main picture track.
+            let main_end = main_track_end(engine.project(), main);
+            let len = cutlass_models::resample(source.duration, rate).value.max(1);
+            let range = TimeRange::at_rate(main_end, len, rate);
+            let lane = ensure_host_lane(engine, TrackKind::Audio, range, None)?;
+            apply_created(
+                engine,
+                EditCommand::AddClip {
+                    track: lane,
+                    media: media_id,
+                    source,
+                    start: RationalTime::new(main_end, rate),
+                },
+            )?
+        } else {
+            let main_end = main_track_end(engine.project(), main);
+            apply_created(
+                engine,
+                EditCommand::AddClip {
+                    track: main,
+                    media: media_id,
+                    source,
+                    start: RationalTime::new(main_end, rate),
+                },
+            )?
+        };
+        clips.push(clip.raw());
+    }
+
+    Ok(serde_json::json!({ "clips": clips, "media": media_ids }))
+}
+
+fn main_track_end(project: &Project, main: TrackId) -> i64 {
+    project
+        .timeline()
+        .track(main)
+        .map(|t| t.content_end())
+        .unwrap_or(0)
+}
+
+/// The main-track clip boundary tick nearest `t` (a ripple insert must land
+/// between clips, never inside one).
+pub fn nearest_main_boundary(project: &Project, main: TrackId, tick: i64) -> i64 {
+    let Some(track) = project.timeline().track(main) else {
+        return 0;
+    };
+    let mut boundaries = vec![0i64];
+    boundaries.extend(track.clips_ordered().iter().map(|c| c.timeline.end_tick()));
+    boundaries
+        .into_iter()
+        .min_by_key(|b| (b - tick).abs())
+        .unwrap_or(0)
+}
+
+fn insert_main(
+    engine: &mut Engine,
+    path: &std::path::Path,
+    at_seconds: f64,
+) -> Result<serde_json::Value, EngineError> {
+    let main = ensure_main(engine)?;
+    let rate = engine.project().timeline().frame_rate;
+    let media_id = apply_imported(engine, path)?;
+    let media = engine
+        .project()
+        .media(media_id)
+        .ok_or(ModelError::UnknownMedia(media_id))?;
+    let source = media.full_range();
+    let tick = nearest_main_boundary(engine.project(), main, frame_tick(at_seconds, rate));
+    let clip = apply_created(
+        engine,
+        EditCommand::RippleInsert {
+            track: main,
+            media: media_id,
+            source,
+            at: RationalTime::new(tick, rate),
+        },
+    )?;
+    Ok(serde_json::json!({ "clip": clip.raw(), "media": media_id.raw() }))
+}
+
+fn add_generated(
+    engine: &mut Engine,
+    kind: TrackKind,
+    generator: Generator,
+    at_seconds: f64,
+    duration_seconds: f64,
+) -> Result<serde_json::Value, EngineError> {
+    let rate = engine.project().timeline().frame_rate;
+    let start = frame_tick(at_seconds, rate);
+    let len = frame_tick(duration_seconds.max(0.1), rate).max(1);
+    let range = TimeRange::at_rate(start, len, rate);
+    let lane = ensure_host_lane(engine, kind, range, None)?;
+    let clip = apply_created(
+        engine,
+        EditCommand::AddGenerated {
+            track: lane,
+            generator,
+            timeline: range,
+        },
+    )?;
+    Ok(serde_json::json!({ "clip": clip.raw(), "track": lane.raw() }))
+}
+
+fn add_pip(
+    engine: &mut Engine,
+    path: &std::path::Path,
+    at_seconds: f64,
+) -> Result<serde_json::Value, EngineError> {
+    let rate = engine.project().timeline().frame_rate;
+    let media_id = apply_imported(engine, path)?;
+    let media = engine
+        .project()
+        .media(media_id)
+        .ok_or(ModelError::UnknownMedia(media_id))?;
+    if media.is_audio_only() {
+        return Err(invalid("picture-in-picture needs visual media"));
+    }
+    let source = media.full_range();
+    let start = frame_tick(at_seconds, rate);
+    let len = cutlass_models::resample(source.duration, rate).value.max(1);
+    let range = TimeRange::at_rate(start, len, rate);
+    let lane = ensure_host_lane(engine, TrackKind::Video, range, None)?;
+    let clip = apply_created(
+        engine,
+        EditCommand::AddClip {
+            track: lane,
+            media: media_id,
+            source,
+            start: RationalTime::new(start, rate),
+        },
+    )?;
+    // The CapCut drop pose: half scale, sitting in the upper half.
+    engine.apply(Command::Edit(EditCommand::SetClipTransform {
+        clip,
+        transform: ClipTransform {
+            position: [0.0, -0.18],
+            anchor_point: [0.5, 0.5],
+            scale: 0.5,
+            rotation: 0.0,
+            opacity: 1.0,
+        },
+        at: None,
+    }))?;
+    Ok(serde_json::json!({ "clip": clip.raw(), "track": lane.raw(), "media": media_id.raw() }))
+}
+
+fn add_audio(
+    engine: &mut Engine,
+    path: &std::path::Path,
+    at_seconds: f64,
+) -> Result<serde_json::Value, EngineError> {
+    let rate = engine.project().timeline().frame_rate;
+    let media_id = apply_imported(engine, path)?;
+    let media = engine
+        .project()
+        .media(media_id)
+        .ok_or(ModelError::UnknownMedia(media_id))?;
+    if !media.has_audio {
+        return Err(invalid("file has no audio stream"));
+    }
+    let source = media.full_range();
+    let start = frame_tick(at_seconds, rate);
+    let len = cutlass_models::resample(source.duration, rate).value.max(1);
+    let range = TimeRange::at_rate(start, len, rate);
+    let lane = ensure_host_lane(engine, TrackKind::Audio, range, None)?;
+    let clip = apply_created(
+        engine,
+        EditCommand::AddClip {
+            track: lane,
+            media: media_id,
+            source,
+            start: RationalTime::new(start, rate),
+        },
+    )?;
+    Ok(serde_json::json!({ "clip": clip.raw(), "track": lane.raw(), "media": media_id.raw() }))
+}
+
+// --- structural intents --------------------------------------------------------
+
+fn split(
+    engine: &mut Engine,
+    clip: ClipId,
+    seconds: f64,
+) -> Result<serde_json::Value, EngineError> {
+    let rate = engine.project().timeline().frame_rate;
+    let new = apply_created(
+        engine,
+        EditCommand::SplitClip {
+            clip,
+            at: at(seconds, rate),
+        },
+    )?;
+    Ok(serde_json::json!({ "clip": new.raw() }))
+}
+
+fn require_main_clip(project: &Project, clip: ClipId) -> Result<(TrackId, Clip), EngineError> {
+    let (track, snapshot) = clip_snapshot(project, clip)?;
+    if Some(track) != crate::ui_state::main_track(project) {
+        return Err(invalid("clip is not on the main track"));
+    }
+    Ok((track, snapshot))
+}
+
+fn ripple_trim_main(
+    engine: &mut Engine,
+    clip: ClipId,
+    edge: TrimEdge,
+    delta_seconds: f64,
+) -> Result<serde_json::Value, EngineError> {
+    let rate = engine.project().timeline().frame_rate;
+    let (track, snapshot) = require_main_clip(engine.project(), clip)?;
+    let s = snapshot.timeline.start.value;
+    let d = snapshot.timeline.duration.value;
+
+    // Clamp shrink so at least one frame survives; growth is validated by
+    // TrimClip against the source window.
+    let dt = frame_tick(delta_seconds.abs(), rate) * delta_seconds.signum() as i64;
+    let dt = match edge {
+        TrimEdge::Leading => dt.min(d - 1),
+        TrimEdge::Trailing => dt.max(-(d - 1)),
+    };
+    if dt == 0 {
+        return Ok(serde_json::json!({ "clip": clip.raw() }));
+    }
+
+    let shift = |from: i64, delta: i64| EditCommand::ShiftClips {
+        track,
+        from: RationalTime::new(from, rate),
+        delta: RationalTime::new(delta, rate),
+    };
+    let trim = |start: i64, len: i64| EditCommand::TrimClip {
+        clip,
+        timeline: TimeRange::at_rate(start, len, rate),
+    };
+
+    // Ordering rule: free space before consuming it. Shrinks trim first and
+    // close the gap after; extensions open space first and trim into it.
+    let commands: [EditCommand; 2] = match (edge, dt > 0) {
+        (TrimEdge::Leading, true) => [trim(s + dt, d - dt), shift(s + dt, -dt)],
+        (TrimEdge::Leading, false) => [shift(s, -dt), trim(s, d - dt)],
+        (TrimEdge::Trailing, true) => [shift(s + d, dt), trim(s, d + dt)],
+        (TrimEdge::Trailing, false) => [trim(s, d + dt), shift(s + d, dt)],
+    };
+    for command in commands {
+        engine.apply(Command::Edit(command))?;
+    }
+    Ok(serde_json::json!({ "clip": clip.raw() }))
+}
+
+fn trim_lane(
+    engine: &mut Engine,
+    clip: ClipId,
+    start_seconds: f64,
+    length_seconds: f64,
+) -> Result<serde_json::Value, EngineError> {
+    let rate = engine.project().timeline().frame_rate;
+    let start = frame_tick(start_seconds, rate);
+    let len = frame_tick(length_seconds, rate).max(1);
+    engine.apply(Command::Edit(EditCommand::TrimClip {
+        clip,
+        timeline: TimeRange::at_rate(start, len, rate),
+    }))?;
+    Ok(serde_json::json!({ "clip": clip.raw() }))
+}
+
+fn move_lane(
+    engine: &mut Engine,
+    clip: ClipId,
+    track: Option<TrackId>,
+    start_seconds: f64,
+) -> Result<serde_json::Value, EngineError> {
+    let rate = engine.project().timeline().frame_rate;
+    let (current_track, snapshot) = clip_snapshot(engine.project(), clip)?;
+    let start = frame_tick(start_seconds, rate);
+    let range = TimeRange::at_rate(start, snapshot.timeline.duration.value.max(1), rate);
+
+    let target = match track {
+        Some(target) => target,
+        None => {
+            let kind = engine
+                .project()
+                .timeline()
+                .track(current_track)
+                .ok_or(ModelError::UnknownTrack(current_track))?
+                .kind;
+            ensure_host_lane(engine, kind, range, Some(clip))?
+        }
+    };
+    engine.apply(Command::Edit(EditCommand::MoveClip {
+        clip,
+        to_track: target,
+        start: RationalTime::new(start, rate),
+    }))?;
+    Ok(serde_json::json!({ "clip": clip.raw(), "track": target.raw() }))
+}
+
+fn insert_into_main(
+    engine: &mut Engine,
+    clip: ClipId,
+    index: usize,
+) -> Result<serde_json::Value, EngineError> {
+    let main = ensure_main(engine)?;
+    let rate = engine.project().timeline().frame_rate;
+    let (current_track, snapshot) = clip_snapshot(engine.project(), clip)?;
+    let len = snapshot.timeline.duration.value;
+
+    let track = engine
+        .project()
+        .timeline()
+        .track(main)
+        .ok_or(ModelError::UnknownTrack(main))?;
+    let on_main = current_track == main;
+
+    // Boundaries of the (post-removal, for reorders) slot layout.
+    let others: Vec<i64> = track
+        .clips_ordered()
+        .iter()
+        .filter(|c| c.id != clip)
+        .map(|c| c.timeline.duration.value)
+        .collect();
+    let index = index.min(others.len());
+    let target: i64 = others.iter().take(index).sum();
+
+    let move_to = |start: i64| EditCommand::MoveClip {
+        clip,
+        to_track: main,
+        start: RationalTime::new(start, rate),
+    };
+    let shift = |from: i64, delta: i64| EditCommand::ShiftClips {
+        track: main,
+        from: RationalTime::new(from, rate),
+        delta: RationalTime::new(delta, rate),
+    };
+
+    if on_main {
+        let s = snapshot.timeline.start.value;
+        if s == target {
+            return Ok(serde_json::json!({ "clip": clip.raw() }));
+        }
+        // Park at the end, close the old gap, open the new slot, land.
+        let park = track.content_end();
+        engine.apply(Command::Edit(move_to(park)))?;
+        engine.apply(Command::Edit(shift(s, -len)))?;
+        engine.apply(Command::Edit(shift(target, len)))?;
+        engine.apply(Command::Edit(move_to(target)))?;
+    } else {
+        engine.apply(Command::Edit(shift(target, len)))?;
+        engine.apply(Command::Edit(move_to(target)))?;
+    }
+    Ok(serde_json::json!({ "clip": clip.raw() }))
+}
+
+// --- clip content intents -------------------------------------------------------
+
+fn duplicate(engine: &mut Engine, clip: ClipId) -> Result<serde_json::Value, EngineError> {
+    let rate = engine.project().timeline().frame_rate;
+    let main = crate::ui_state::main_track(engine.project());
+    let (track_id, snapshot) = clip_snapshot(engine.project(), clip)?;
+    let track_kind = engine
+        .project()
+        .timeline()
+        .track(track_id)
+        .ok_or(ModelError::UnknownTrack(track_id))?
+        .kind;
+
+    let s = snapshot.timeline.start.value;
+    let d = snapshot.timeline.duration.value;
+    let copy_start = s + d;
+
+    let new = match &snapshot.content {
+        ClipSource::Generated(generator) => {
+            let range = TimeRange::at_rate(copy_start, d, rate);
+            let lane = if !engine
+                .project()
+                .timeline()
+                .track(track_id)
+                .ok_or(ModelError::UnknownTrack(track_id))?
+                .has_overlap(range, None)?
+            {
+                track_id
+            } else {
+                ensure_host_lane(engine, track_kind, range, None)?
+            };
+            apply_created(
+                engine,
+                EditCommand::AddGenerated {
+                    track: lane,
+                    generator: generator.clone(),
+                    timeline: range,
+                },
+            )?
+        }
+        ClipSource::Media { media, source } => {
+            // The copy is placed at source-derived length first, then retimed
+            // back to `d`; reserve the larger of the two extents.
+            let placed_len = cutlass_models::resample(source.duration, rate).value.max(1);
+            let reserve = placed_len.max(d);
+
+            let new = if Some(track_id) == main {
+                engine.apply(Command::Edit(EditCommand::ShiftClips {
+                    track: track_id,
+                    from: RationalTime::new(copy_start, rate),
+                    delta: RationalTime::new(reserve, rate),
+                }))?;
+                apply_created(
+                    engine,
+                    EditCommand::AddClip {
+                        track: track_id,
+                        media: *media,
+                        source: *source,
+                        start: RationalTime::new(copy_start, rate),
+                    },
+                )?
+            } else {
+                let range = TimeRange::at_rate(copy_start, reserve, rate);
+                let lane = if !engine
+                    .project()
+                    .timeline()
+                    .track(track_id)
+                    .ok_or(ModelError::UnknownTrack(track_id))?
+                    .has_overlap(range, None)?
+                {
+                    track_id
+                } else {
+                    ensure_host_lane(engine, track_kind, range, None)?
+                };
+                apply_created(
+                    engine,
+                    EditCommand::AddClip {
+                        track: lane,
+                        media: *media,
+                        source: *source,
+                        start: RationalTime::new(copy_start, rate),
+                    },
+                )?
+            };
+
+            // Re-derive the copy's duration (speed / reverse), then trim any
+            // over-reservation back out of the main track.
+            if snapshot.speed != Rational::new(1, 1) || snapshot.reversed {
+                engine.apply(Command::Edit(EditCommand::SetClipSpeed {
+                    clip: new,
+                    speed: snapshot.speed,
+                    reversed: snapshot.reversed,
+                }))?;
+            }
+            if Some(track_id) == main && reserve > d {
+                engine.apply(Command::Edit(EditCommand::ShiftClips {
+                    track: track_id,
+                    from: RationalTime::new(copy_start + reserve, rate),
+                    delta: RationalTime::new(d - reserve, rate),
+                }))?;
+            }
+
+            // Carry the mix + framing over (audio applies to media clips only).
+            engine.apply(Command::Edit(EditCommand::SetClipAudio {
+                clip: new,
+                volume: Some(snapshot.volume.sample(0)),
+                fade_in: RationalTime::new(snapshot.fade_in, rate),
+                fade_out: RationalTime::new(snapshot.fade_out, rate),
+            }))?;
+            if !snapshot.crop.is_full() || snapshot.flip_h || snapshot.flip_v {
+                engine.apply(Command::Edit(EditCommand::SetClipCrop {
+                    clip: new,
+                    crop: snapshot.crop,
+                    flip_h: snapshot.flip_h,
+                    flip_v: snapshot.flip_v,
+                }))?;
+            }
+            new
+        }
+    };
+
+    // Visual placement + effect chain (animation flattens to its start value).
+    if track_kind.is_visual() {
+        let pose = snapshot.transform.sample(0);
+        if !pose.is_identity() {
+            engine.apply(Command::Edit(EditCommand::SetClipTransform {
+                clip: new,
+                transform: pose,
+                at: None,
+            }))?;
+        }
+    }
+    for effect in &snapshot.effects {
+        engine.apply(Command::Edit(EditCommand::AddEffect {
+            clip: new,
+            effect_id: effect.effect_id.clone(),
+        }))?;
+    }
+
+    Ok(serde_json::json!({ "clip": new.raw() }))
+}
+
+fn replace_media(
+    engine: &mut Engine,
+    clip: ClipId,
+    path: &std::path::Path,
+) -> Result<serde_json::Value, EngineError> {
+    let (_, snapshot) = clip_snapshot(engine.project(), clip)?;
+    let ClipSource::Media { .. } = snapshot.content else {
+        return Err(invalid("replace targets a media clip"));
+    };
+
+    let media_id = apply_imported(engine, path)?;
+    let media = engine
+        .project()
+        .media(media_id)
+        .ok_or(ModelError::UnknownMedia(media_id))?;
+
+    // Source ticks the clip consumes at its current speed, at the new media's
+    // native rate.
+    let needed = snapshot
+        .scale_by_speed(
+            cutlass_models::resample(snapshot.timeline.duration, media.frame_rate).value,
+        )
+        .max(1);
+    if !media.is_image && needed > media.duration.value {
+        return Err(EngineError::Import(format!(
+            "replacement media is shorter than the clip needs ({} < {} ticks)",
+            media.duration.value, needed
+        )));
+    }
+    engine.apply(Command::Edit(EditCommand::SetClipMedia {
+        clip,
+        media: media_id,
+        source: TimeRange::at_rate(0, needed, media.frame_rate),
+    }))?;
+    Ok(serde_json::json!({ "clip": clip.raw(), "media": media_id.raw() }))
+}
+
+fn extract_audio(engine: &mut Engine, clip: ClipId) -> Result<serde_json::Value, EngineError> {
+    let rate = engine.project().timeline().frame_rate;
+    let (track_id, snapshot) = clip_snapshot(engine.project(), clip)?;
+    let kind = engine
+        .project()
+        .timeline()
+        .track(track_id)
+        .ok_or(ModelError::UnknownTrack(track_id))?
+        .kind;
+    if kind != TrackKind::Video {
+        return Err(invalid("extract audio targets a video-lane clip"));
+    }
+    let ClipSource::Media { media, source } = snapshot.content else {
+        return Err(invalid("extract audio targets a media clip"));
+    };
+    if !engine.project().media(media).is_some_and(|m| m.has_audio) {
+        return Err(invalid("clip's media has no audio stream"));
+    }
+
+    let s = snapshot.timeline.start.value;
+    let d = snapshot.timeline.duration.value;
+    let placed_len = cutlass_models::resample(source.duration, rate).value.max(1);
+    let reserve = placed_len.max(d);
+    let range = TimeRange::at_rate(s, reserve, rate);
+    let lane = ensure_host_lane(engine, TrackKind::Audio, range, None)?;
+    let audio_clip = apply_created(
+        engine,
+        EditCommand::AddClip {
+            track: lane,
+            media,
+            source,
+            start: RationalTime::new(s, rate),
+        },
+    )?;
+    if snapshot.speed != Rational::new(1, 1) || snapshot.reversed {
+        engine.apply(Command::Edit(EditCommand::SetClipSpeed {
+            clip: audio_clip,
+            speed: snapshot.speed,
+            reversed: snapshot.reversed,
+        }))?;
+    }
+    // Linkage moves the audible half to the audio lane: a video clip with a
+    // linked audio partner goes silent on its own lane by the audibility rule.
+    engine.apply(Command::Edit(EditCommand::LinkClips {
+        clips: vec![clip, audio_clip],
+    }))?;
+    Ok(serde_json::json!({ "clip": audio_clip.raw(), "track": lane.raw() }))
+}
+
+// --- property intents -----------------------------------------------------------
+
+fn set_speed(
+    engine: &mut Engine,
+    clip: ClipId,
+    speed: f64,
+    reversed: bool,
+) -> Result<serde_json::Value, EngineError> {
+    engine.apply(Command::Edit(EditCommand::SetClipSpeed {
+        clip,
+        speed: speed_to_rational(speed),
+        reversed,
+    }))?;
+    Ok(serde_json::json!({ "clip": clip.raw() }))
+}
+
+fn set_audio(
+    engine: &mut Engine,
+    clip: ClipId,
+    volume: Option<f32>,
+    fade_in_seconds: f64,
+    fade_out_seconds: f64,
+) -> Result<serde_json::Value, EngineError> {
+    let rate = engine.project().timeline().frame_rate;
+    engine.apply(Command::Edit(EditCommand::SetClipAudio {
+        clip,
+        volume,
+        fade_in: at(fade_in_seconds, rate),
+        fade_out: at(fade_out_seconds, rate),
+    }))?;
+    Ok(serde_json::json!({ "clip": clip.raw() }))
+}
+
+fn set_transform(
+    engine: &mut Engine,
+    clip: ClipId,
+    pos: [f32; 2],
+    scale: f32,
+    rotation_degrees: f32,
+    opacity: f32,
+    at_seconds: Option<f64>,
+) -> Result<serde_json::Value, EngineError> {
+    let rate = engine.project().timeline().frame_rate;
+    engine.apply(Command::Edit(EditCommand::SetClipTransform {
+        clip,
+        transform: ClipTransform {
+            // UI position is 0..1 with 0.5 at the canvas center; the model
+            // stores an offset from the center.
+            position: [pos[0] - 0.5, pos[1] - 0.5],
+            anchor_point: [0.5, 0.5],
+            scale,
+            rotation: rotation_degrees,
+            opacity,
+        },
+        at: at_seconds.map(|s| at(s, rate)),
+    }))?;
+    Ok(serde_json::json!({ "clip": clip.raw() }))
+}
+
+/// The transform properties the diamond toggle stamps.
+const KEYFRAME_PARAMS: [ClipParam; 4] = [
+    ClipParam::Position,
+    ClipParam::Scale,
+    ClipParam::Rotation,
+    ClipParam::Opacity,
+];
+
+fn toggle_transform_keyframe(
+    engine: &mut Engine,
+    clip: ClipId,
+    seconds: f64,
+) -> Result<serde_json::Value, EngineError> {
+    let rate = engine.project().timeline().frame_rate;
+    let (_, snapshot) = clip_snapshot(engine.project(), clip)?;
+    let tick = frame_tick(seconds, rate);
+    if !snapshot.timeline.contains(RationalTime::new(tick, rate))? {
+        return Err(invalid("keyframe position is outside the clip"));
+    }
+    let rel = tick - snapshot.timeline.start.value;
+
+    let has_kf = |param: &Param<f32>| param.keyframes().iter().any(|kf| kf.tick == rel);
+    let has_kf2 = |param: &Param<[f32; 2]>| param.keyframes().iter().any(|kf| kf.tick == rel);
+
+    let existing: Vec<ClipParam> = KEYFRAME_PARAMS
+        .into_iter()
+        .filter(|param| match param {
+            ClipParam::Position => has_kf2(&snapshot.transform.position),
+            ClipParam::Scale => has_kf(&snapshot.transform.scale),
+            ClipParam::Rotation => has_kf(&snapshot.transform.rotation),
+            ClipParam::Opacity => has_kf(&snapshot.transform.opacity),
+            _ => false,
+        })
+        .collect();
+
+    let position = RationalTime::new(tick, rate);
+    if existing.is_empty() {
+        // Stamp the current pose across all four properties.
+        let pose = snapshot.transform.sample(rel);
+        let stamps: [(ClipParam, ParamValue); 4] = [
+            (ClipParam::Position, ParamValue::Vec2(pose.position)),
+            (ClipParam::Scale, ParamValue::Scalar(pose.scale)),
+            (ClipParam::Rotation, ParamValue::Scalar(pose.rotation)),
+            (ClipParam::Opacity, ParamValue::Scalar(pose.opacity)),
+        ];
+        for (param, value) in stamps {
+            engine.apply(Command::Edit(EditCommand::SetParamKeyframe {
+                clip,
+                param,
+                at: position,
+                value,
+                easing: Easing::Linear,
+            }))?;
+        }
+        Ok(serde_json::json!({ "clip": clip.raw(), "keyframed": true }))
+    } else {
+        for param in existing {
+            engine.apply(Command::Edit(EditCommand::RemoveParamKeyframe {
+                clip,
+                param,
+                at: position,
+            }))?;
+        }
+        Ok(serde_json::json!({ "clip": clip.raw(), "keyframed": false }))
+    }
+}
+
+fn set_transition(
+    engine: &mut Engine,
+    clip: ClipId,
+    transition_id: Option<String>,
+    duration_seconds: f64,
+) -> Result<serde_json::Value, EngineError> {
+    let rate = engine.project().timeline().frame_rate;
+    let (track_id, _) = clip_snapshot(engine.project(), clip)?;
+    let existing = engine
+        .project()
+        .timeline()
+        .track(track_id)
+        .and_then(|t| t.transition_at(clip).map(|t| t.transition_id.clone()));
+
+    match (existing, transition_id) {
+        (Some(_), None) => {
+            engine.apply(Command::Edit(EditCommand::RemoveTransition { clip }))?;
+        }
+        (None, None) => {}
+        (existing, Some(id)) => {
+            if existing.as_deref() != Some(id.as_str()) {
+                if existing.is_some() {
+                    engine.apply(Command::Edit(EditCommand::RemoveTransition { clip }))?;
+                }
+                engine.apply(Command::Edit(EditCommand::AddTransition {
+                    clip,
+                    transition_id: id,
+                }))?;
+            }
+            if duration_seconds > 0.0 {
+                engine.apply(Command::Edit(EditCommand::SetTransition {
+                    clip,
+                    duration: frame_tick(duration_seconds, rate).max(1),
+                }))?;
+            }
+        }
+    }
+    Ok(serde_json::json!({ "clip": clip.raw() }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cutlass_models::MediaSource;
+
+    const FPS: Rational = Rational::FPS_30;
+
+    #[test]
+    fn frame_tick_rounds_to_nearest_frame_and_clamps() {
+        assert_eq!(frame_tick(0.0, FPS), 0);
+        assert_eq!(frame_tick(-2.0, FPS), 0);
+        assert_eq!(frame_tick(1.0, FPS), 30);
+        assert_eq!(frame_tick(0.016, FPS), 0); // 0.48 frames rounds down
+        assert_eq!(frame_tick(0.017, FPS), 1); // 0.51 frames rounds up
+    }
+
+    #[test]
+    fn speed_maps_to_milli_rational_and_clamps() {
+        assert_eq!(speed_to_rational(2.0), Rational::new(2000, 1000));
+        assert_eq!(speed_to_rational(0.3333), Rational::new(333, 1000));
+        assert_eq!(speed_to_rational(0.0), Rational::new(50, 1000));
+        assert_eq!(speed_to_rational(500.0), Rational::new(100_000, 1000));
+    }
+
+    fn project_with_main() -> (Project, TrackId) {
+        let mut project = Project::new("t", FPS);
+        let main = project.add_track(TrackKind::Video, "Main");
+        (project, main)
+    }
+
+    #[test]
+    fn nearest_boundary_snaps_between_clips() {
+        let (mut project, main) = project_with_main();
+        let media = project.add_media(MediaSource::new("/tmp/a.mp4", 640, 360, FPS, 300, false));
+        project
+            .add_clip(
+                main,
+                media,
+                TimeRange::at_rate(0, 60, FPS),
+                RationalTime::new(0, FPS),
+            )
+            .unwrap();
+        project
+            .add_clip(
+                main,
+                media,
+                TimeRange::at_rate(0, 60, FPS),
+                RationalTime::new(60, FPS),
+            )
+            .unwrap();
+
+        assert_eq!(nearest_main_boundary(&project, main, 0), 0);
+        assert_eq!(nearest_main_boundary(&project, main, 25), 0);
+        assert_eq!(nearest_main_boundary(&project, main, 45), 60);
+        assert_eq!(nearest_main_boundary(&project, main, 100), 120);
+        assert_eq!(nearest_main_boundary(&project, main, 10_000), 120);
+    }
+
+    #[test]
+    fn host_lane_prefers_free_existing_lane_of_kind() {
+        let (mut project, _main) = project_with_main();
+        let text = project.add_track(TrackKind::Text, "T1");
+        project
+            .add_generated(
+                text,
+                Generator::text("busy"),
+                TimeRange::at_rate(0, 90, FPS),
+            )
+            .unwrap();
+
+        // Overlapping span → a new lane below the overlay block.
+        let plan = host_lane_plan(
+            &project,
+            TrackKind::Text,
+            TimeRange::at_rate(30, 30, FPS),
+            None,
+        )
+        .unwrap();
+        let text_pos = project.timeline().order().iter().position(|t| *t == text);
+        assert_eq!(plan, HostLanePlan::Create { index: text_pos });
+
+        // A free span reuses the lane.
+        let plan = host_lane_plan(
+            &project,
+            TrackKind::Text,
+            TimeRange::at_rate(90, 30, FPS),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan, HostLanePlan::Existing(text));
+    }
+
+    #[test]
+    fn new_video_lane_goes_directly_above_main() {
+        let (project, main) = project_with_main();
+        let plan = host_lane_plan(
+            &project,
+            TrackKind::Video,
+            TimeRange::at_rate(0, 30, FPS),
+            None,
+        )
+        .unwrap();
+        let main_pos = project
+            .timeline()
+            .order()
+            .iter()
+            .position(|t| *t == main)
+            .unwrap();
+        assert_eq!(
+            plan,
+            HostLanePlan::Create {
+                index: Some(main_pos + 1)
+            }
+        );
+    }
+
+    #[test]
+    fn new_audio_lane_appends_and_sinks_to_the_floor() {
+        let (project, _main) = project_with_main();
+        let plan = host_lane_plan(
+            &project,
+            TrackKind::Audio,
+            TimeRange::at_rate(0, 30, FPS),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan, HostLanePlan::Create { index: None });
+    }
+
+    #[test]
+    fn intent_wire_format_roundtrips() {
+        let json = r#"{"intent":"add_text","text":"Hi","at_seconds":1.5}"#;
+        let intent: Intent = serde_json::from_str(json).unwrap();
+        match &intent {
+            Intent::AddText {
+                text,
+                at_seconds,
+                duration_seconds,
+            } => {
+                assert_eq!(text, "Hi");
+                assert_eq!(*at_seconds, 1.5);
+                assert_eq!(*duration_seconds, 3.0, "duration defaults to 3s");
+            }
+            other => panic!("unexpected intent {other:?}"),
+        }
+
+        let json =
+            r#"{"intent":"ripple_trim_main","clip":7,"edge":"leading","delta_seconds":-0.5}"#;
+        let intent: Intent = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            intent,
+            Intent::RippleTrimMain {
+                edge: TrimEdge::Leading,
+                ..
+            }
+        ));
+
+        let json = r#"{"intent":"move_lane","clip":3,"start_seconds":2.0}"#;
+        let intent: Intent = serde_json::from_str(json).unwrap();
+        assert!(matches!(intent, Intent::MoveLane { track: None, .. }));
+    }
+}

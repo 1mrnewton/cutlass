@@ -15,11 +15,18 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
 cutlass-core = { path = "../cutlass-core" }
+cutlass-commands = { path = "../cutlass-commands" }
 cutlass-compositor = { path = "../cutlass-compositor" }
 cutlass-decoder = { path = "../cutlass-decoder" }
+cutlass-engine = { path = "../cutlass-engine" }
 cutlass-models = { path = "../cutlass-models" }
 cutlass-render = { path = "../cutlass-render" }
 log = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
 
 # Android: JNI entry points the Kotlin app calls. (iOS uses the plain C ABI.)
 [target.'cfg(target_os = "android")'.dependencies]

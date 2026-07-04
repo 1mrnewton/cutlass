@@ -92,6 +92,9 @@ nonisolated struct MockLane: Identifiable, Hashable {
     /// The magnetic sequential track new media appends to; exactly one lane
     /// has this set and it can never be removed.
     var isMain = false
+    /// Rust `TrackId` when this lane mirrors an engine track (nil only for
+    /// lanes created optimistically mid-gesture, before the engine confirms).
+    var engineID: UInt64?
 }
 
 /// A clip on the main (sequential) video track, plus every mock style value
@@ -103,6 +106,10 @@ nonisolated struct MockClip: Identifiable, Hashable {
     static let minDuration: TimeInterval = 0.5
 
     var id = UUID()
+    /// Rust `ClipId` when this clip mirrors an engine clip.
+    var engineID: UInt64?
+    /// Source file backing the clip (engine media path).
+    var mediaPath: String?
     var art: MockArt
     /// Full length of the underlying source media.
     var sourceDuration: TimeInterval
@@ -118,10 +125,20 @@ nonisolated struct MockClip: Identifiable, Hashable {
 
     /// 0...2, 1 = 100%. Zero shows a mute badge on the clip.
     var volume: Double = 1
+    /// Audio fades (engine-backed; no main-clip UI yet, but kept so panel
+    /// commits round-trip the engine values faithfully).
+    var fadeIn: TimeInterval = 0
+    var fadeOut: TimeInterval = 0
     /// 0.1...10, 1 = normal. Changing it rescales `length`.
     var speed: Double = 1
     var speedCurve: String?
     var opacity: Double = 1
+    /// Canvas placement (engine transform; main clips are usually full-frame
+    /// so no UI edits these — carried so opacity edits don't reset them).
+    var posX: Double = 0.5
+    var posY: Double = 0.5
+    var scale: Double = 1
+    var rotationDegrees: Double = 0
     var filterName: String?
     var filterIntensity: Double = 0.8
     var adjust = AdjustValues()
@@ -174,6 +191,8 @@ nonisolated struct MockOverlayClip: Identifiable, Hashable {
     }
 
     var id = UUID()
+    /// Rust `ClipId` when this clip mirrors an engine clip.
+    var engineID: UInt64?
     var kind: Kind
     /// The lane (row) this clip lives on; always a lane of `laneKind`.
     var laneID = UUID()
@@ -212,6 +231,7 @@ nonisolated struct MockOverlayClip: Identifiable, Hashable {
     var posY: Double = 0.5
     var scale: Double = 1
     var rotationDegrees: Double = 0
+    var opacity: Double = 1
 
     var displayLabel: String {
         switch kind {
@@ -232,6 +252,8 @@ nonisolated struct MockEffectClip: Identifiable, Hashable {
     }
 
     var id = UUID()
+    /// Rust `ClipId` when this clip mirrors an engine clip.
+    var engineID: UInt64?
     var kind: Kind
     /// The effect lane (row) this bar lives on.
     var laneID = UUID()
@@ -259,6 +281,8 @@ nonisolated struct MockAudioClip: Identifiable, Hashable {
     }
 
     var id = UUID()
+    /// Rust `ClipId` when this clip mirrors an engine clip.
+    var engineID: UInt64?
     var kind: Kind
     /// The audio lane (row) this clip lives on; audio lanes stay at the
     /// bottom of the stack (audio floor).
@@ -290,14 +314,14 @@ nonisolated struct MockSong: Identifiable, Hashable {
     var duration: TimeInterval
 }
 
-/// Canvas aspect ratio presets (mirrors CanvasSettings in cutlass-models).
+/// Canvas aspect ratio presets — exactly the engine's `CanvasAspect` set
+/// (`original` = the engine's `auto`, following the footage).
 nonisolated enum AspectRatio: String, CaseIterable, Hashable {
     case original = "Original"
     case wide = "16:9"
     case vertical = "9:16"
     case square = "1:1"
     case portrait = "4:5"
-    case classic = "3:4"
     case cinema = "21:9"
 
     /// width / height. `original` follows the mock footage (9:16).
@@ -307,7 +331,6 @@ nonisolated enum AspectRatio: String, CaseIterable, Hashable {
         case .wide: return 16.0 / 9.0
         case .square: return 1
         case .portrait: return 4.0 / 5.0
-        case .classic: return 3.0 / 4.0
         case .cinema: return 21.0 / 9.0
         }
     }
@@ -319,9 +342,18 @@ nonisolated enum AspectRatio: String, CaseIterable, Hashable {
         case .vertical: return "rectangle.portrait"
         case .square: return "square"
         case .portrait: return "rectangle.portrait"
-        case .classic: return "rectangle.portrait"
         case .cinema: return "pano"
         }
+    }
+
+    /// `CanvasAspect` wire name for `SetCanvas`.
+    var wireName: String {
+        self == .original ? "auto" : rawValue
+    }
+
+    /// The preset for a `ui_state` canvas aspect wire name.
+    static func from(wireName: String) -> AspectRatio {
+        allCases.first { $0.wireName == wireName } ?? .original
     }
 }
 

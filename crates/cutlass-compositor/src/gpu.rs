@@ -33,11 +33,14 @@ impl GpuContext {
             .await
             .map_err(|e| CompositorError::NoAdapter(e.to_string()))?;
 
+        // Ask for exactly what the adapter offers rather than wgpu's defaults:
+        // the pipelines are raster-only, and default limits assume compute
+        // support that GLES 3.0 adapters (Android emulator) don't have.
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("cutlass-compositor"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits: adapter.limits(),
                 ..Default::default()
             })
             .await

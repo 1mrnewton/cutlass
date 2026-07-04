@@ -854,19 +854,19 @@ final class EditorState {
 
     // MARK: Project lifecycle
 
-    /// Fresh engine session; media items resolve to their backing files and
-    /// ripple-append onto the main track.
-    func startProject(with items: [MockMediaItem]) {
+    /// Fresh engine session; picked files (staged copies or bundled samples)
+    /// are adopted into the media store and ripple-appended onto main.
+    func startProject(with urls: [URL]) {
         isPlaying = false
         resetSession()
-        let paths = items.compactMap { FixtureLibrary.url(for: $0)?.path }
+        let paths = urls.map { mediaStore.adopt($0).path }
         if !paths.isEmpty {
             runIntent(.appendMain(paths: paths))
         }
     }
 
-    func appendMedia(_ items: [MockMediaItem]) {
-        let paths = items.compactMap { FixtureLibrary.url(for: $0)?.path }
+    func appendMedia(_ urls: [URL]) {
+        let paths = urls.map { mediaStore.adopt($0).path }
         guard !paths.isEmpty else { return }
         runIntent(.appendMain(paths: paths))
     }
@@ -1198,21 +1198,19 @@ final class EditorState {
     }
 
     @discardableResult
-    func addPip(from item: MockMediaItem) -> UUID {
-        let length = item.videoDuration ?? MockClip.photoDefaultDuration
+    func addPip(from url: URL) -> UUID {
+        // Placeholder length is provisional (the engine's refresh lands the
+        // real one); the drop pose matches the engine's PiP placement.
+        let length = MockClip.photoDefaultDuration
         let start = insertionTime
         var clip = MockOverlayClip(kind: .pip, laneID: hostLane(for: .video, start: start, length: length), start: start, length: length)
-        clip.art = item.art
-        clip.sourceDuration = item.videoDuration ?? MockClip.photoMaxDuration
-        clip.pipHasAudio = item.videoDuration != nil
-        // The engine drop pose: half scale, upper half of the canvas.
+        clip.sourceDuration = length
         clip.scale = 0.5
         clip.posY = 0.32
         overlayClips.append(clip)
         selection = .overlay(clip.id)
-        if let url = FixtureLibrary.url(for: item) {
-            runCreateIntent(.addPip(path: url.path, atSeconds: start), placeholder: clip.id)
-        }
+        runCreateIntent(
+            .addPip(path: mediaStore.adopt(url).path, atSeconds: start), placeholder: clip.id)
         return clip.id
     }
 
@@ -1356,13 +1354,11 @@ final class EditorState {
 
     /// Swaps the selected clip's source for a picked library item, keeping
     /// its slot on the timeline. Works for main clips and PiP overlays.
-    func replaceSelected(with item: MockMediaItem) {
-        guard let target = selection, let engineID = engineID(of: target),
-            let url = FixtureLibrary.url(for: item)
-        else { return }
+    func replaceSelected(with url: URL) {
+        guard let target = selection, let engineID = engineID(of: target) else { return }
         switch target {
         case .main, .overlay:
-            runIntent(.replaceMedia(clip: engineID, path: url.path))
+            runIntent(.replaceMedia(clip: engineID, path: mediaStore.adopt(url).path))
         default:
             return
         }

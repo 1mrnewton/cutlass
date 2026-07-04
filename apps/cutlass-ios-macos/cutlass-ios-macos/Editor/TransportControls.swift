@@ -81,7 +81,7 @@ struct TransportControls: View {
 
 #Preview {
     let state = EditorState()
-    let _ = state.startProject(with: Array(MockData.libraryItems.prefix(2)))
+    let _ = state.startProject(with: Array(FixtureLibrary.sampleTimeline.prefix(2)))
     return TransportControls(state: state)
         .background(Theme.background)
 }

@@ -1,21 +1,28 @@
+import PhotosUI
 import SwiftUI
 
-/// Full-screen mock photo-library picker: Cancel/Skip pills, a Photos |
-/// Collections segmented pill, a 3-column grid with ordered multi-select,
-/// and a floating bottom action bar.
+/// Full-screen media picker: the system photo library (inline PhotosPicker)
+/// next to the bundled sample files, both committing as file URLs the engine
+/// imports. Cancel/Skip pills and the floating action bar frame the system
+/// UI so the flow matches the rest of the app.
 struct MediaPickerView: View {
     private enum Tab: String, CaseIterable {
         case photos = "Photos"
-        case collections = "Collections"
+        case samples = "Samples"
     }
 
     var onCancel: () -> Void
-    var onDone: ([MockMediaItem]) -> Void
+    var onDone: ([URL]) -> Void
 
     @State private var tab: Tab = .photos
-    @State private var selection: [MockMediaItem] = []
+    @State private var photoPicks: [PhotosPickerItem] = []
+    @State private var samplePicks: [URL] = []
+    /// True while picks copy out of the photo library.
+    @State private var isStaging = false
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
+
+    private var pickCount: Int { photoPicks.count + samplePicks.count }
 
     var body: some View {
         ZStack {
@@ -26,14 +33,20 @@ struct MediaPickerView: View {
                 segmentedPill
                 switch tab {
                 case .photos:
-                    grid
-                case .collections:
-                    collectionsPlaceholder
+                    photoLibrary
+                case .samples:
+                    samplesGrid
                 }
             }
         }
         .overlay(alignment: .bottom) {
             bottomBar
+        }
+        .disabled(isStaging)
+        .overlay {
+            if isStaging {
+                stagingHUD
+            }
         }
     }
 
@@ -86,28 +99,35 @@ struct MediaPickerView: View {
         .background(Theme.surface, in: Capsule())
     }
 
-    private var grid: some View {
+    /// The system photo grid, embedded inline. Its own selection chrome is
+    /// disabled so the floating "Add N" bar is the single commit point.
+    private var photoLibrary: some View {
+        PhotosPicker(
+            selection: $photoPicks,
+            maxSelectionCount: 20,
+            selectionBehavior: .continuousAndOrdered,
+            matching: .any(of: [.images, .videos]),
+            preferredItemEncoding: .current,
+            photoLibrary: .shared()
+        ) {
+            EmptyView()
+        }
+        .photosPickerStyle(.inline)
+        .photosPickerDisabledCapabilities(.selectionActions)
+        .photosPickerAccessoryVisibility(.hidden, edges: .bottom)
+        .ignoresSafeArea(edges: .bottom)
+    }
+
+    private var samplesGrid: some View {
         ScrollView(showsIndicators: false) {
             LazyVGrid(columns: columns, spacing: 2) {
-                ForEach(MockData.libraryItems) { item in
-                    MediaCell(item: item, selectionIndex: selectionIndex(of: item))
-                        .onTapGesture { toggle(item) }
+                ForEach(FixtureLibrary.samples, id: \.self) { url in
+                    MediaCell(url: url, selectionIndex: sampleIndex(of: url))
+                        .onTapGesture { toggleSample(url) }
                 }
             }
             .padding(.bottom, 110)
         }
-    }
-
-    private var collectionsPlaceholder: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "rectangle.stack")
-                .font(.system(size: 34))
-                .foregroundStyle(Theme.textTertiary)
-            Text("No collections yet")
-                .font(.subheadline)
-                .foregroundStyle(Theme.textSecondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var bottomBar: some View {
@@ -120,15 +140,13 @@ struct MediaPickerView: View {
 
             Spacer()
 
-            if selection.isEmpty {
+            if pickCount == 0 {
                 Text("Select Items")
                     .font(.headline)
                     .foregroundStyle(.white)
             } else {
-                Button {
-                    onDone(selection)
-                } label: {
-                    Text("Add \(selection.count)")
+                Button(action: commit) {
+                    Text("Add \(pickCount)")
                         .font(.headline)
                         .foregroundStyle(.white)
                         .padding(.horizontal, 28)
@@ -150,15 +168,48 @@ struct MediaPickerView: View {
         .padding(.bottom, 8)
     }
 
-    private func selectionIndex(of item: MockMediaItem) -> Int? {
-        selection.firstIndex(of: item).map { $0 + 1 }
+    private var stagingHUD: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.large)
+            Text("Preparing media…")
+                .font(.subheadline)
+                .foregroundStyle(Theme.textSecondary)
+        }
+        .padding(28)
+        .background(Theme.surfaceElevated, in: RoundedRectangle(cornerRadius: 16))
     }
 
-    private func toggle(_ item: MockMediaItem) {
-        if let index = selection.firstIndex(of: item) {
-            selection.remove(at: index)
+    /// Copy library picks to disk, then hand every URL (system picks in
+    /// selection order, then samples) to the caller.
+    private func commit() {
+        isStaging = true
+        let picks = photoPicks
+        let samples = samplePicks
+        Task { @MainActor in
+            var urls: [URL] = []
+            for pick in picks {
+                if let url = await MediaImporter.stage(pick) {
+                    urls.append(url)
+                } else {
+                    print("cutlass: skipped an unloadable library pick")
+                }
+            }
+            urls.append(contentsOf: samples)
+            isStaging = false
+            onDone(urls)
+        }
+    }
+
+    private func sampleIndex(of url: URL) -> Int? {
+        samplePicks.firstIndex(of: url).map { $0 + photoPicks.count + 1 }
+    }
+
+    private func toggleSample(_ url: URL) {
+        if let index = samplePicks.firstIndex(of: url) {
+            samplePicks.remove(at: index)
         } else {
-            selection.append(item)
+            samplePicks.append(url)
         }
     }
 }

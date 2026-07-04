@@ -42,7 +42,7 @@ struct RootView: View {
             _pickerIntent = State(initialValue: .newProject)
         case "editor":
             let state = EditorState()
-            state.startProject(with: Array(MockData.libraryItems.prefix(4)))
+            state.startProject(with: FixtureLibrary.sampleTimeline)
             _editorState = State(initialValue: state)
             _screen = State(initialValue: .editor)
         case "editorLanes":
@@ -52,7 +52,7 @@ struct RootView: View {
             // real engine intents (FIFO, so times are explicit rather than
             // playhead-derived).
             let state = EditorState()
-            state.startProject(with: Array(MockData.libraryItems.prefix(4)))
+            state.startProject(with: FixtureLibrary.sampleTimeline)
             state.seedIntents([
                 .addSticker(atSeconds: 0),
                 .addEffect(kind: "effect", atSeconds: 0),
@@ -61,7 +61,7 @@ struct RootView: View {
                 state.seedIntents([.addAudio(path: audio.path, atSeconds: 0)])
             }
             // Insert past the sticker so the overlay lane stays one row tall.
-            if let pip = FixtureLibrary.photo {
+            if let pip = FixtureLibrary.shortVideo {
                 state.seedIntents([.addPip(path: pip.path, atSeconds: 5)])
             }
             state.selection = nil
@@ -85,8 +85,9 @@ struct RootView: View {
                         screen = .editor
                     },
                     onOpenProject: { _ in
-                        // Mock "reopen": seed the editor with library media.
-                        editorState.startProject(with: Array(MockData.libraryItems.prefix(4)))
+                        // Mock "reopen": seed the editor with sample media
+                        // (the real project store lands with persistence).
+                        editorState.startProject(with: FixtureLibrary.sampleTimeline)
                         screen = .editor
                     }
                 )
@@ -114,20 +115,20 @@ struct RootView: View {
     private var picker: some View {
         MediaPickerView(
             onCancel: { pickerIntent = nil },
-            onDone: { items in
+            onDone: { urls in
                 switch pickerIntent {
                 case .appendToTimeline:
-                    editorState.appendMedia(items)
+                    editorState.appendMedia(urls)
                 case .replaceSelectedClip:
-                    if let item = items.first {
-                        editorState.replaceSelected(with: item)
+                    if let url = urls.first {
+                        editorState.replaceSelected(with: url)
                     }
                 case .addOverlay:
-                    if let item = items.first {
-                        editorState.addPip(from: item)
+                    if let url = urls.first {
+                        editorState.addPip(from: url)
                     }
                 case .newProject, nil:
-                    editorState.startProject(with: items)
+                    editorState.startProject(with: urls)
                     screen = .editor
                 }
                 pickerIntent = nil

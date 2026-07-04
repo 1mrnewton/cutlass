@@ -1125,7 +1125,7 @@ struct TimelineView: View {
 
 #Preview {
     let state = EditorState()
-    let _ = state.startProject(with: Array(MockData.libraryItems.prefix(4)))
+    let _ = state.startProject(with: FixtureLibrary.sampleTimeline)
     let _ = state.addSticker(symbol: "heart.fill")
     let _ = state.addAudio(kind: .music, title: "Slow Morning", duration: 30)
     return TimelineView(state: state, onAddMedia: {})

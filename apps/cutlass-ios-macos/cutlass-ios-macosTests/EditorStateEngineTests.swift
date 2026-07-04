@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import cutlass_ios_macos
@@ -7,16 +8,18 @@ import Testing
 /// asserts on the re-projected view-model arrays (`ui_state` truth).
 ///
 /// Media comes from the bundled fixtures (`demo1.mp4` 4s, `demo2.mp4` 6s,
-/// `tone.m4a` 8s) — the same files the mock picker resolves to.
+/// `photo.png` still, `tone.m4a` 8s) — the same files the picker's Samples
+/// tab offers.
 struct EditorStateEngineTests {
-    /// Photo-flavored item (resolves to demo1.mp4, 4s) and video-flavored
-    /// item (resolves to demo2.mp4, 6s).
-    private var photoItem: MockMediaItem { MockData.libraryItems[0] }
-    private var videoItem: MockMediaItem { MockData.libraryItems[1] }
+    /// 4-second video (`demo1.mp4`) and 6-second video (`demo2.mp4`).
+    private var shortVideo: URL { FixtureLibrary.shortVideo! }
+    private var video: URL { FixtureLibrary.video! }
+    /// Still photo (imports as a 5s image clip).
+    private var photo: URL { FixtureLibrary.photo! }
 
-    private func makeProject(_ items: [MockMediaItem]) async -> EditorState {
+    private func makeProject(_ urls: [URL]) async -> EditorState {
         let state = EditorState()
-        state.startProject(with: items)
+        state.startProject(with: urls)
         await state.waitForEngine()
         return state
     }
@@ -30,7 +33,7 @@ struct EditorStateEngineTests {
     // MARK: Project lifecycle
 
     @Test func startProjectAppendsPicksToMain() async throws {
-        let state = await makeProject([photoItem, videoItem])
+        let state = await makeProject([shortVideo, video])
 
         #expect(state.clips.count == 2)
         #expect(state.clips.allSatisfy { $0.engineID != nil })
@@ -47,16 +50,41 @@ struct EditorStateEngineTests {
     }
 
     @Test func appendMediaExtendsTheTimeline() async throws {
-        let state = await makeProject([photoItem])
-        state.appendMedia([videoItem])
+        let state = await makeProject([shortVideo])
+        state.appendMedia([video])
         await state.waitForEngine()
 
         #expect(state.clips.count == 2)
         #expect(near(state.mainDuration, 10))
     }
 
+    @Test func photoPicksLandAsFiveSecondStills() async throws {
+        let state = await makeProject([photo])
+
+        #expect(state.clips.count == 1)
+        let still = state.clips[0]
+        #expect(near(still.length, 5), "stills use the 5s placement default")
+        #expect(!still.hasAudio)
+        #expect(!still.isFreeze, "photo picks don't wear the freeze badge")
+        #expect(still.mediaPath?.hasSuffix("photo.png") == true)
+    }
+
+    @Test func photoPipLandsOnAVideoLane() async throws {
+        let state = await makeProject([video])
+        state.playhead = 1
+
+        let id = state.addPip(from: photo)
+        await state.waitForEngine()
+
+        let overlay = try #require(state.overlayClips.first { $0.id == id })
+        #expect(overlay.kind == .pip)
+        #expect(overlay.engineID != nil)
+        #expect(near(overlay.length, 5))
+        #expect(!overlay.pipHasAudio)
+    }
+
     @Test func undoToEmptyAndRedoBack() async throws {
-        let state = await makeProject([photoItem])
+        let state = await makeProject([shortVideo])
         #expect(state.clips.count == 1)
 
         state.undo()
@@ -73,7 +101,7 @@ struct EditorStateEngineTests {
     // MARK: Structural ops
 
     @Test func splitAtPlayheadMakesTwoPieces() async throws {
-        let state = await makeProject([photoItem])
+        let state = await makeProject([shortVideo])
         state.playhead = 2
 
         state.splitAtPlayhead()
@@ -94,7 +122,7 @@ struct EditorStateEngineTests {
     }
 
     @Test func rippleTrimTrailingEdge() async throws {
-        let state = await makeProject([photoItem, videoItem])
+        let state = await makeProject([shortVideo, video])
         let anchor = state.clips[0]
 
         state.trim(anchor.id, edge: .trailing, anchor: anchor, by: -1)
@@ -107,7 +135,7 @@ struct EditorStateEngineTests {
     }
 
     @Test func rippleTrimLeadingEdgeConsumesSource() async throws {
-        let state = await makeProject([photoItem])
+        let state = await makeProject([shortVideo])
         let anchor = state.clips[0]
 
         state.trim(anchor.id, edge: .leading, anchor: anchor, by: 1)
@@ -119,7 +147,7 @@ struct EditorStateEngineTests {
     }
 
     @Test func reorderMainClips() async throws {
-        let state = await makeProject([photoItem, videoItem])
+        let state = await makeProject([shortVideo, video])
         let first = state.clips[0].engineID
 
         state.moveClip(fromIndex: 0, toIndex: 1)
@@ -131,7 +159,7 @@ struct EditorStateEngineTests {
     }
 
     @Test func deleteSelectedRipples() async throws {
-        let state = await makeProject([photoItem, videoItem])
+        let state = await makeProject([shortVideo, video])
         state.selection = .main(state.clips[0].id)
 
         state.deleteSelected()
@@ -143,7 +171,7 @@ struct EditorStateEngineTests {
     }
 
     @Test func duplicateSelectsTheCopy() async throws {
-        let state = await makeProject([photoItem])
+        let state = await makeProject([shortVideo])
         state.selection = .main(state.clips[0].id)
 
         state.duplicateSelected()
@@ -156,10 +184,10 @@ struct EditorStateEngineTests {
     }
 
     @Test func replaceSwapsTheSourceKeepingTheSlot() async throws {
-        let state = await makeProject([photoItem, videoItem])
+        let state = await makeProject([shortVideo, video])
         state.selection = .main(state.clips[0].id)
 
-        state.replaceSelected(with: videoItem)
+        state.replaceSelected(with: video)
         await state.waitForEngine()
 
         #expect(state.clips.count == 2)
@@ -171,7 +199,7 @@ struct EditorStateEngineTests {
     // MARK: Lane content
 
     @Test func addTextAdoptsThePlaceholderIdentity() async throws {
-        let state = await makeProject([photoItem])
+        let state = await makeProject([shortVideo])
         let id = state.addTextClip(text: "Hello")
         #expect(state.overlayClips.count == 1, "optimistic placeholder shows now")
         #expect(state.overlayClips[0].engineID == nil)
@@ -187,7 +215,7 @@ struct EditorStateEngineTests {
     }
 
     @Test func addStickerEffectAndAudioLand() async throws {
-        let state = await makeProject([photoItem])
+        let state = await makeProject([shortVideo])
         let sticker = state.addSticker(symbol: "heart.fill")
         let effect = state.addEffectClip(name: "Blur", kind: .effect)
         let audio = state.addAudio(kind: .music, title: "Tone", duration: 8)
@@ -214,9 +242,9 @@ struct EditorStateEngineTests {
     }
 
     @Test func addPipGetsTheDropPose() async throws {
-        let state = await makeProject([videoItem])
+        let state = await makeProject([video])
         state.playhead = 1
-        let id = state.addPip(from: photoItem)
+        let id = state.addPip(from: shortVideo)
         await state.waitForEngine()
 
         #expect(state.overlayClips.count == 1)
@@ -233,7 +261,7 @@ struct EditorStateEngineTests {
     }
 
     @Test func laneTrimAndMoveCommitOnRelease() async throws {
-        let state = await makeProject([videoItem])
+        let state = await makeProject([video])
         let id = state.addAudio(kind: .music, title: "Tone", duration: 8)
         await state.waitForEngine()
         let target = TimelineSelection.audio(id)
@@ -253,7 +281,7 @@ struct EditorStateEngineTests {
     // MARK: Cross-lane moves
 
     @Test func mainClipLiftsToALaneAndBack() async throws {
-        let state = await makeProject([photoItem, videoItem])
+        let state = await makeProject([shortVideo, video])
         let lifted = state.clips[0].id
 
         state.moveMainClipToLane(lifted, at: 8)
@@ -277,7 +305,7 @@ struct EditorStateEngineTests {
     // MARK: Quick ops
 
     @Test func transitionsPersistAndClear() async throws {
-        let state = await makeProject([photoItem, videoItem])
+        let state = await makeProject([shortVideo, video])
         let first = state.clips[0].id
 
         state.setTransition(after: first, MockTransition(style: "Fade", duration: 0.5))
@@ -292,7 +320,7 @@ struct EditorStateEngineTests {
     }
 
     @Test func keyframeToggleStampsAndRemoves() async throws {
-        let state = await makeProject([photoItem])
+        let state = await makeProject([shortVideo])
         state.selection = .main(state.clips[0].id)
         state.playhead = 1
 
@@ -306,7 +334,7 @@ struct EditorStateEngineTests {
     }
 
     @Test func extractAudioLandsALinkedAudioClip() async throws {
-        let state = await makeProject([videoItem])
+        let state = await makeProject([video])
         state.selection = .main(state.clips[0].id)
 
         state.extractAudio()
@@ -320,7 +348,7 @@ struct EditorStateEngineTests {
     }
 
     @Test func freezeFrameSplitsAroundAStill() async throws {
-        let state = await makeProject([photoItem])
+        let state = await makeProject([shortVideo])
         state.selection = .main(state.clips[0].id)
         state.playhead = 2
 
@@ -342,7 +370,7 @@ struct EditorStateEngineTests {
     }
 
     @Test func reverseSelectedRoundTrips() async throws {
-        let state = await makeProject([photoItem])
+        let state = await makeProject([shortVideo])
         state.selection = .main(state.clips[0].id)
 
         state.reverseSelected()
@@ -357,7 +385,7 @@ struct EditorStateEngineTests {
     // MARK: Panel sessions
 
     @Test func panelSpeedCommitRetimesTheClip() async throws {
-        let state = await makeProject([videoItem])
+        let state = await makeProject([video])
         state.selection = .main(state.clips[0].id)
 
         state.beginPanelSession()
@@ -371,7 +399,7 @@ struct EditorStateEngineTests {
     }
 
     @Test func panelVolumeCommitAndCancel() async throws {
-        let state = await makeProject([photoItem])
+        let state = await makeProject([shortVideo])
         state.selection = .main(state.clips[0].id)
 
         // Cancel: local change reverts, engine never sees it.
@@ -395,7 +423,7 @@ struct EditorStateEngineTests {
     }
 
     @Test func panelCanvasAspectCommits() async throws {
-        let state = await makeProject([photoItem])
+        let state = await makeProject([shortVideo])
 
         state.beginPanelSession()
         state.aspect = .vertical
@@ -409,7 +437,7 @@ struct EditorStateEngineTests {
     }
 
     @Test func panelOverlayTransformCommits() async throws {
-        let state = await makeProject([photoItem])
+        let state = await makeProject([shortVideo])
         let id = state.addTextClip(text: "Move me")
         await state.waitForEngine()
         state.selection = .overlay(id)
@@ -434,7 +462,7 @@ struct EditorStateEngineTests {
     // MARK: Gesture transforms
 
     @Test func overlayDragCommitsTheFinalPose() async throws {
-        let state = await makeProject([photoItem])
+        let state = await makeProject([shortVideo])
         let id = state.addTextClip(text: "Drag")
         await state.waitForEngine()
 

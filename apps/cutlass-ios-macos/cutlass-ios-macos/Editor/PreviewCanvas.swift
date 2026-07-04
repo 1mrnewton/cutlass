@@ -72,7 +72,7 @@ struct PreviewCanvas: View {
 
 #Preview {
     let state = EditorState()
-    let _ = state.startProject(with: Array(MockData.libraryItems.prefix(3)))
+    let _ = state.startProject(with: Array(FixtureLibrary.sampleTimeline.prefix(3)))
     return PreviewCanvas(state: state)
         .frame(height: 420)
 }

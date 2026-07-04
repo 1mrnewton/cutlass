@@ -83,16 +83,22 @@ nonisolated enum TransitionMap {
 
 // MARK: - Media fixtures (until the PhotosUI picker lands in Phase E)
 
-/// Real media files bundled with the app that mock picker items resolve to,
-/// so every timeline op runs against actual engine media.
+/// Real media files bundled with the app: the picker's Samples tab, preview
+/// seeds, and tests all import these through the engine.
 nonisolated enum FixtureLibrary {
+    /// 6-second video (AAC audio).
     static var video: URL? {
         Bundle.main.url(forResource: "demo2", withExtension: "mp4")
     }
 
-    /// Stand-in for photo picks until still-image decode lands (Phase E).
-    static var photo: URL? {
+    /// 4-second video (AAC audio).
+    static var shortVideo: URL? {
         Bundle.main.url(forResource: "demo1", withExtension: "mp4")
+    }
+
+    /// Still photo (imports as a 5s image clip).
+    static var photo: URL? {
+        Bundle.main.url(forResource: "photo", withExtension: "png")
     }
 
     /// Audio-only file backing song / sound-effect / voiceover picks.
@@ -100,8 +106,14 @@ nonisolated enum FixtureLibrary {
         Bundle.main.url(forResource: "tone", withExtension: "m4a")
     }
 
-    static func url(for item: MockMediaItem) -> URL? {
-        item.videoDuration == nil ? photo : video
+    /// Default dev/preview timeline: video, video, photo, video.
+    static var sampleTimeline: [URL] {
+        [shortVideo, video, photo, video].compactMap(\.self)
+    }
+
+    /// Everything the picker's Samples tab offers.
+    static var samples: [URL] {
+        [shortVideo, video, photo, audio].compactMap(\.self)
     }
 }
 

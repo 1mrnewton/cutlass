@@ -291,6 +291,21 @@ public struct Intent: Sendable {
         Intent("extract_audio", ["clip": .int(Int64(clip))])
     }
 
+    /// CapCut "freeze": extract the frame under the playhead to `pngPath`,
+    /// import it as a still, and ripple-insert it there (splitting mid-clip).
+    public static func freeze(
+        clip: UInt64, seconds: Double, pngPath: String, durationSeconds: Double = 3
+    ) -> Intent {
+        Intent(
+            "freeze",
+            [
+                "clip": .int(Int64(clip)),
+                "seconds": .number(seconds),
+                "png_path": .string(pngPath),
+                "duration_seconds": .number(durationSeconds),
+            ])
+    }
+
     /// Retime a media clip.
     public static func setSpeed(clip: UInt64, speed: Double, reversed: Bool = false) -> Intent {
         Intent(

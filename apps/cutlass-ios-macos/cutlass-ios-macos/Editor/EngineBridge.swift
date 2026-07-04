@@ -225,7 +225,9 @@ nonisolated enum EngineBridge {
         result.speed = clip.speed
         result.isReversed = clip.reversed
         result.keyframes = clip.keyframes
-        result.isFreeze = clip.isImage
+        // Freeze stills are the images the freeze intent wrote (named by the
+        // media store); ordinary photo picks don't wear the snowflake.
+        result.isFreeze = clip.isImage && clip.label.hasPrefix("freeze-")
         if let transform = clip.transform {
             result.posX = Double(transform.posX)
             result.posY = Double(transform.posY)

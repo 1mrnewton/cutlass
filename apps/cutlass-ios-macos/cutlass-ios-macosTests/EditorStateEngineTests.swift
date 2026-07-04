@@ -319,6 +319,28 @@ struct EditorStateEngineTests {
         #expect(state.clips.count == 1, "original stays on main")
     }
 
+    @Test func freezeFrameSplitsAroundAStill() async throws {
+        let state = await makeProject([photoItem])
+        state.selection = .main(state.clips[0].id)
+        state.playhead = 2
+
+        state.freezeFrame()
+        await state.waitForEngine()
+
+        #expect(state.clips.count == 3, "left half + still + right half")
+        #expect(near(state.clips[0].length, 2))
+        #expect(state.clips[1].isFreeze, "the still wears the snowflake")
+        #expect(near(state.clips[1].length, 3))
+        #expect(!state.clips[1].hasAudio)
+        #expect(near(state.clips[2].length, 2))
+        #expect(near(state.mainDuration, 7))
+
+        state.undo()
+        await state.waitForEngine()
+        #expect(state.clips.count == 1, "the freeze undoes as one step")
+        #expect(near(state.mainDuration, 4))
+    }
+
     @Test func reverseSelectedRoundTrips() async throws {
         let state = await makeProject([photoItem])
         state.selection = .main(state.clips[0].id)

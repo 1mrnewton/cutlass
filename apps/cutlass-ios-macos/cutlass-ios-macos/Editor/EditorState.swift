@@ -121,6 +121,9 @@ final class EditorState {
     @ObservationIgnored private var appliedRevision: UInt64 = 0
     /// Refresh deferred because a live gesture owns the arrays right now.
     @ObservationIgnored private var deferredRefresh: UiState?
+    /// On-disk media home for the current project (picker copies, freeze
+    /// stills). Fresh per session until the project store lands (Phase H).
+    @ObservationIgnored private(set) var mediaStore = ProjectMediaStore(projectID: UUID())
 
     init() {
         createSession()
@@ -888,6 +891,7 @@ final class EditorState {
 
     private func resetSession() {
         createSession()
+        mediaStore = ProjectMediaStore(projectID: UUID())
         idMap = EngineIDMap()
         clipLaneKinds = [:]
         appliedRevision = 0
@@ -1412,9 +1416,22 @@ final class EditorState {
         runIntent(.setSpeed(clip: engineID, speed: clip.speed, reversed: !clip.isReversed))
     }
 
-    /// Freeze frame needs still-image support in the engine; it lands with
-    /// the Phase E stills work. No-op until then.
-    func freezeFrame() {}
+    /// Inserts a 3-second still of the frame under the playhead into the
+    /// selected main clip (split when mid-clip). The engine extracts the
+    /// frame, writes the PNG into the media store, and ripples it in as one
+    /// undo step.
+    func freezeFrame() {
+        guard case .main(let id) = selection,
+            let clip = clips.first(where: { $0.id == id }),
+            let engineID = clip.engineID, !clip.isFreeze
+        else { return }
+        let local = playhead - startTime(of: id)
+        guard local >= -0.001, local <= clip.length + 0.001 else { return }
+        runIntent(
+            .freeze(
+                clip: engineID, seconds: playhead,
+                pngPath: mediaStore.freezeFrameURL().path))
+    }
 
     /// CapCut "extract audio": linked audio clip on an audio lane; the
     /// original's own sound goes silent via the link.

@@ -1,0 +1,38 @@
+// Playback transport math, implemented in Rust (src/transport.rs) — the
+// same pure-callback pattern as the drag/trim resolvers: the UI clock
+// stores an anchor when play starts and asks Rust for the current tick,
+// so rational-rate math runs in exact i64 instead of Slint floats.
+//
+// Phase 3: Rust also owns the audio engine. At speed 1/1 with an output
+// device present, the *audio clock* (consumed device frames) answers
+// playback-tick and the wall-clock anchor args are ignored; shuttle speeds
+// and deviceless machines fall back to scaled wall time, muted.
+
+export global TransportBackend {
+    // Playhead tick after (now-ms − anchor-ms) of playback starting at
+    // anchor-tick, at fps-num/fps-den ticks per second, scaled by
+    // speed-num/speed-den (negative = reverse). Mid-frame time floors;
+    // elapsed time clamps at 0.
+    pure callback playback-tick(
+        anchor-tick: int,
+        anchor-ms: int,
+        now-ms: int,
+        fps-num: int,
+        fps-den: int,
+        speed-num: int,
+        speed-den: int) -> int;
+
+    // Transport intent → the Rust audio engine. Play doubles as the
+    // mid-playback seek (every seek is a re-anchored play); speeds other
+    // than 1/1 silence audio (varispeed audio is a later phase).
+    callback transport-play(tick: int, speed-num: int, speed-den: int);
+    callback transport-pause();
+
+    // End-of-playback auto-stop. Called from `playback-step`, which is the
+    // playback Timer's own `triggered` callback: flipping `TimelineStore.playing`
+    // there (the property the Timer's `running` is bound to) re-enters Slint's
+    // timer machinery and panics with "Recursion in timer code"
+    // (slint-ui/slint#6332). Rust pauses audio immediately and defers the
+    // `playing = false` write to the next event-loop turn, off the callback.
+    callback request-stop();
+}

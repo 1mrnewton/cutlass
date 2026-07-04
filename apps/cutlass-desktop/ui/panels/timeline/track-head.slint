@@ -1,0 +1,104 @@
+import { AppStore, EditorStore, TimelineStore, TimelineActions } from "../../store/index.slint";
+import { Track, TrackKind } from "../../models/index.slint";
+
+// One compact square toggle in a track header. `active` latches the accent
+// when the lane is in its "special" state (hidden / muted / locked).
+component HeadToggle inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+
+    width: 18px;
+    height: 18px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: active ? AppStore.theme.accent.primary.with-alpha(0.13) : ta.has-hover ? #ffffff1a : transparent;
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: label;
+        font-size: 10px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        color: active ? AppStore.theme.accent.primary : AppStore.theme.text.secondary;
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Header for one lane: name plus the CapCut-style visibility/mute/lock
+// toggles. The lane category decides which of the visual (eye) vs audio
+// (speaker + voice tag) toggles show; lock applies to every lane. Each
+// click routes through EditorStore so the worker applies it as an
+// undoable edit.
+export component TrackHead inherits Rectangle {
+    in property <Track> track;
+
+    private property <bool> is-audio: track.kind == TrackKind.audio;
+
+    width: 100%;
+    height: AppStore.theme.track-lane.height;
+    background: AppStore.theme.track-lane.background;
+
+    HorizontalLayout {
+        padding-left: AppStore.theme.metrics.spacing.sm;
+        padding-right: AppStore.theme.metrics.spacing.xs;
+        padding-top: AppStore.theme.metrics.spacing.xs;
+        padding-bottom: AppStore.theme.metrics.spacing.xs;
+        spacing: 2px;
+
+        Text {
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+            overflow: elide;
+            text: root.track.name;
+            font-size: 11px;
+            color: root.track.enabled
+                ? AppStore.theme.text.primary
+                : AppStore.theme.text.secondary;
+        }
+
+        // Visibility (visual lanes) or mute (audio lanes).
+        if !root.is-audio: HeadToggle {
+            label: "V";
+            active: !root.track.enabled;
+            clicked => {
+                EditorStore.on-track-flag-toggled(root.track.id, "enabled", !root.track.enabled);
+            }
+        }
+        if root.is-audio: HeadToggle {
+            label: "M";
+            active: root.track.muted;
+            clicked => {
+                EditorStore.on-track-flag-toggled(root.track.id, "muted", !root.track.muted);
+            }
+        }
+        // Voice-lane tag (audio only): marks this lane as the sidechain
+        // "voice" source so a clip's "duck under voice" gesture knows which
+        // talkers to follow (M8 Phase 4).
+        if root.is-audio: HeadToggle {
+            label: "V";
+            active: root.track.duck-source;
+            clicked => {
+                EditorStore.on-track-flag-toggled(root.track.id, "duck-source", !root.track.duck-source);
+            }
+        }
+
+        HeadToggle {
+            label: "L";
+            active: root.track.locked;
+            clicked => {
+                // Locking a lane that holds the selection clears it (the
+                // locked clip can no longer be edited).
+                if (!root.track.locked && TimelineStore.selected-track-id == root.track.id) {
+                    TimelineActions.clear-selection();
+                }
+                EditorStore.on-track-flag-toggled(root.track.id, "locked", !root.track.locked);
+            }
+        }
+    }
+}

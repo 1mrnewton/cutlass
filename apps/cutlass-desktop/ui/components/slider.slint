@@ -1,0 +1,236 @@
+// `CutlassSlider` — drop-in replacement for the std-widgets `Slider`.
+//
+// The public surface (value / minimum / maximum / step / orientation /
+// enabled / has-focus, `changed` + `released`) and the interaction rules
+// match Slint 1.16's `SliderBase` exactly: clicking the rail jumps to the
+// clicked position then drags relative to it, `changed` fires only from
+// user interaction (so external `value` writes never echo), and `released`
+// fires on pointer-up / key-up. Swapping an import of `Slider` for
+// `CutlassSlider` (or `CutlassSlider as Slider`) needs no other edits.
+//
+// On top of that, the look is themeable per instance: `track-color` (the
+// rail), `progress-color` (the filled part up to the cap), `handle-color`
+// (the cap), plus `track-thickness` / `handle-size` for geometry.
+
+import { AppStore } from "../store/index.slint";
+
+export component CutlassSlider {
+    // std `Slider` API — keep names and semantics identical.
+    in property <Orientation> orientation;
+    in property <float> minimum: 0;
+    in property <float> maximum: 100;
+    in property <float> step: 1;
+    in property <bool> enabled <=> touch-area.enabled;
+    out property <bool> has-focus <=> focus-scope.has-focus;
+    in-out property <float> value: minimum;
+
+    callback changed(value: float);
+    callback released(value: float);
+
+    // Styling knobs.
+    in property <brush> track-color: #ffffff1f;
+    in property <brush> progress-color: AppStore.theme.accent.primary;
+    in property <brush> handle-color: #ffffff;
+    in property <length> track-thickness: 4px;
+    in property <length> handle-size: 14px;
+
+    // Interaction state, exposed for callers that want hover/drag styling.
+    out property <bool> handle-pressed;
+    out property <bool> has-hover <=> touch-area.has-hover;
+    out property <bool> handle-has-hover: touch-area.mouse-x >= handle.x && touch-area.mouse-x <= handle.x + handle.width
+        && touch-area.mouse-y >= handle.y && touch-area.mouse-y <= handle.y + handle.height;
+
+    private property <bool> vertical: root.orientation == Orientation.vertical;
+    private property <length> ref-size: !root.vertical ? handle.width : handle.height;
+    // 0..1 position of the value along the rail, safe on an empty range.
+    private property <float> ratio: root.maximum > root.minimum
+        ? clamp((root.value - root.minimum) / (root.maximum - root.minimum), 0, 1) : 0;
+
+    min-width: root.vertical ? 50px : 0px;
+    min-height: root.vertical ? 0px : 50px;
+    vertical-stretch: root.vertical ? 1 : 0;
+    horizontal-stretch: root.vertical ? 0 : 1;
+    opacity: root.enabled ? 1.0 : 0.4;
+    forward-focus: focus-scope;
+
+    accessible-role: slider;
+    accessible-enabled: root.enabled;
+    accessible-value: root.value;
+    accessible-value-minimum: root.minimum;
+    accessible-value-maximum: root.maximum;
+    accessible-value-step: min(root.step, (root.maximum - root.minimum) / 100);
+    accessible-action-set-value(v) => {
+        if v.is-float() {
+            root.set-value(v.to-float());
+        }
+    }
+    accessible-action-increment => {
+        root.increment();
+    }
+    accessible-action-decrement => {
+        root.decrement();
+    }
+
+    states [
+        pressed when root.handle-pressed: {
+            halo.width: root.handle-size + 12px;
+        }
+        hover when root.handle-has-hover || root.has-focus: {
+            halo.width: root.handle-size + 8px;
+        }
+    ]
+
+    rail := Rectangle {
+        x: root.vertical ? (parent.width - self.width) / 2 : handle.width / 2;
+        y: root.vertical ? handle.height / 2 : (parent.height - self.height) / 2;
+        width: root.vertical ? root.track-thickness : parent.width - handle.width;
+        height: root.vertical ? parent.height - handle.height : root.track-thickness;
+        background: root.track-color;
+        border-radius: root.track-thickness / 2;
+    }
+
+    // Filled portion: minimum side up to the cap center (vertical sliders
+    // grow upward, so it spans from the cap down to the rail bottom).
+    progress := Rectangle {
+        x: root.vertical ? (parent.width - self.width) / 2 : handle.width / 2;
+        y: root.vertical ? handle.y + handle.height / 2 : (parent.height - self.height) / 2;
+        width: root.vertical ? rail.width : handle.x;
+        height: root.vertical ? parent.height - handle.y - handle.height : rail.height;
+        background: root.progress-color;
+        border-radius: rail.border-radius;
+    }
+
+    // Soft halo behind the cap for hover / focus / drag feedback.
+    halo := Rectangle {
+        x: handle.x + (handle.width - self.width) / 2;
+        y: handle.y + (handle.height - self.height) / 2;
+        width: 0px;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: root.handle-color;
+        opacity: 0.15;
+        animate width {
+            duration: 120ms;
+            easing: ease-out;
+        }
+    }
+
+    handle := Rectangle {
+        x: root.vertical ? (parent.width - self.width) / 2 : (parent.width - self.width) * root.ratio;
+        y: root.vertical ? (parent.height - self.height) * (1 - root.ratio) : (parent.height - self.height) / 2;
+        width: root.handle-size;
+        height: root.handle-size;
+        border-radius: self.width / 2;
+        background: root.handle-color;
+        // Hairline edge so a light cap stays visible on light rails.
+        border-width: 1px;
+        border-color: #00000033;
+    }
+
+    touch-area := TouchArea {
+        property <float> pressed-value;
+
+        width: 100%;
+        height: 100%;
+
+        pointer-event(event) => {
+            if (event.button != PointerEventButton.left) {
+                return;
+            }
+            if (event.kind == PointerEventKind.up) {
+                if (root.handle-pressed) {
+                    root.released(root.value);
+                }
+                root.handle-pressed = false;
+                return;
+            }
+            if (event.kind == PointerEventKind.cancel) {
+                root.handle-pressed = false;
+                return;
+            }
+            if (event.kind != PointerEventKind.down) {
+                return;
+            }
+
+            // Pressing the rail jumps to the pointer; pressing the cap
+            // keeps the current value. Either way the drag that follows is
+            // relative to the press point.
+            if (!root.handle-has-hover) {
+                root.set-value((!root.vertical ? root.size-to-value(touch-area.mouse-x, root.width)
+                    : root.size-to-value(root.height - touch-area.mouse-y, root.height)) + root.minimum);
+            }
+            self.pressed-value = root.value;
+            focus-scope.focus();
+            root.handle-pressed = true;
+        }
+
+        moved => {
+            if (!self.enabled) {
+                return;
+            }
+            root.set-value(self.pressed-value + (!root.vertical
+                ? root.size-to-value(touch-area.mouse-x - touch-area.pressed-x, root.width - root.ref-size)
+                : root.size-to-value(touch-area.pressed-y - touch-area.mouse-y, root.height - root.ref-size)));
+        }
+    }
+
+    focus-scope := FocusScope {
+        x: 0;
+        y: 0;
+        width: 0;
+        height: 0;
+        enabled: root.enabled;
+
+        key-pressed(event) => {
+            if (!self.enabled || root.step <= 0) {
+                return reject;
+            }
+            if ((!root.vertical && event.text == Key.RightArrow) || (root.vertical && event.text == Key.UpArrow)) {
+                root.increment();
+                return accept;
+            } else if ((!root.vertical && event.text == Key.LeftArrow) || (root.vertical && event.text == Key.DownArrow)) {
+                root.decrement();
+                return accept;
+            } else if (event.text == Key.Home) {
+                root.set-value(root.minimum);
+                return accept;
+            } else if (event.text == Key.End) {
+                root.set-value(root.maximum);
+                return accept;
+            }
+            reject
+        }
+
+        key-released(event) => {
+            if (!self.enabled) {
+                return reject;
+            }
+            if ((!root.vertical && (event.text == Key.RightArrow || event.text == Key.LeftArrow))
+                || (root.vertical && (event.text == Key.UpArrow || event.text == Key.DownArrow))
+                || event.text == Key.Home || event.text == Key.End) {
+                root.released(root.value);
+            }
+            return accept;
+        }
+    }
+
+    pure function size-to-value(size: length, range: length) -> float {
+        range <= 0px ? 0 : size * (root.maximum - root.minimum) / range;
+    }
+
+    public function set-value(new-value: float) {
+        if (root.value == new-value) {
+            return;
+        }
+        root.value = max(root.minimum, min(root.maximum, new-value));
+        root.changed(root.value);
+    }
+
+    public function increment() {
+        root.set-value(root.value + root.step);
+    }
+
+    public function decrement() {
+        root.set-value(root.value - root.step);
+    }
+}

@@ -1,34 +1,602 @@
-import { Slider } from "std-widgets.slint";
+import {
+    HSplitGripLead,
+    HSplitGripTrail,
+    VSplitGripTimeline,
+} from "components/index.slint";
+import {
+    AgentPanel,
+    InspectorPanel,
+    LibraryPanel,
+    PreviewPanel,
+    TimelinePanel,
+} from "panels/index.slint";
+import {
+    AgentStore,
+    AppStore,
+    EditorStore,
+    PreviewStore,
+    TimelineStore,
+    TimelineActions,
+} from "store/index.slint";
+import { AppState } from "state.slint";
+import { LaunchScreen } from "launch.slint";
+import { FullscreenPreview } from "fullscreen-preview.slint";
+import { TitleBar } from "shell/title-bar.slint";
+import { ExportDialog } from "shell/export-dialog.slint";
+import { CanvasDialog } from "shell/canvas-dialog.slint";
+import { SettingsDialog } from "shell/settings-dialog.slint";
+import { MessageDialog } from "shell/message-dialog.slint";
+import { RelinkDialog } from "shell/relink-dialog.slint";
+import { ConfirmDeleteDialog } from "shell/confirm-delete-dialog.slint";
+import { ExportBackend } from "lib/export-backend.slint";
+import {
+    PreviewBackend,
+    PreviewDragResolution,
+    PreviewView,
+} from "lib/preview-backend.slint";
+import { WindowBackend } from "lib/window-backend.slint";
+import { SettingsBackend } from "lib/settings-backend.slint";
 
-// Slice 1: prove a desktop (Rust/Slint) frontend drives the engine and shows
-// its preview frames. `preview` is fed by `Engine::get_frame`; `scrubbed`
-// re-renders at the slider's time. Editing UI (timeline, tools) comes later.
+// Re-export globals so Slint's codegen generates accessors on `AppWindow`.
+// Slint only exposes globals from the entry file's exports to the host
+// language (Rust here) — transitive imports aren't enough.
+//   https://docs.slint.dev/latest/docs/slint/src/language/syntax/globals
+export { AppState }from "state.slint";
+export {
+    AgentStore,
+    AgentEntry,
+    AppStore,
+    EditorStore,
+    ProjectSummary,
+    TimelineStore,
+    PreviewStore,
+}from "store/index.slint";
+export { TimelineViewState }from "panels/timeline/index.slint";
+export { TimelineLib }from "lib/index.slint";
+export { RulerBackend, RulerTick }from "lib/ruler-backend.slint";
+export {
+    DragBackend,
+    SnapResult,
+    ClipDragResolution,
+    ClipTrimResolution,
+    GroupDragResolution,
+    GroupGhost,
+    ClipMove,
+}from "lib/drag-backend.slint";
+export { SelectionBackend, SelectionUpdate }from "lib/selection-backend.slint";
+export {
+    PreviewBackend,
+    PreviewHit,
+    PreviewSelectionBox,
+    PreviewDragResolution,
+    PreviewView,
+}from "lib/preview-backend.slint";
+export { InspectorBackend, SelectedClipInfo }from "lib/inspector-backend.slint";
+export { KeyframeBackend }from "lib/keyframe-backend.slint";
+export { StripBackend, StripTile }from "lib/strip-backend.slint";
+export { TransportBackend }from "lib/transport-backend.slint";
+export { WindowBackend }from "lib/window-backend.slint";
+export { ExportBackend }from "lib/export-backend.slint";
+export { CanvasBackend }from "lib/canvas-backend.slint";
+export { EffectsBackend }from "lib/effects-backend.slint";
+export { SettingsBackend }from "lib/settings-backend.slint";
+
 export component AppWindow inherits Window {
     title: "Cutlass";
-    preferred-width: 960px;
-    preferred-height: 620px;
-    background: #14161c;
 
-    in property <image> preview;
-    in property <float> duration-seconds: 1.0;
-    callback scrubbed(/* seconds */ float);
+    // Taskbar/window icon on Windows and Linux. macOS ignores this —
+    // the Dock icon is set at runtime in src/main.rs instead.
+    icon: @image-url("../../../assets/icon/cutlass-in-app.png");
 
-    VerticalLayout {
-        padding: 12px;
-        spacing: 12px;
+    // Custom chrome: the TitleBar below stands in for the OS title bar (drag
+    // region, project name, and — off macOS — the minimize/maximize/close
+    // buttons), wired to winit in src/main.rs through WindowBackend. macOS and
+    // Windows keep the OS-drawn frame (rounded corners + shadow + native
+    // resize/snap) and only suppress the caption so the custom bar shows
+    // through (src/window.rs), so `no-frame` stays off there. Only Linux/BSD,
+    // which have no such "frame minus titlebar" mode, go fully frameless.
+    no-frame: AppState.frameless;
 
-        Image {
-            source: root.preview;
-            image-fit: contain;
-            vertical-stretch: 1;
-        }
+    preferred-width: 1280px;
+    preferred-height: 800px;
 
-        Slider {
-            minimum: 0;
-            maximum: root.duration-seconds;
-            changed(value) => {
-                root.scrubbed(value);
+    default-font-size: AppStore.theme.typography.body.size;
+    default-font-weight: AppStore.theme.typography.body.weight;
+
+    full-screen: AppState.preview-maximized;
+
+    in-out property <length> left-pane-width: 350px;
+    in-out property <length> right-pane-width: 350px;
+    in-out property <length> agent-pane-width: 350px;
+    in-out property <length> timeline-height: 400px;
+
+    // Native menu bar — on macOS Slint renders this through muda as the
+    // top-of-screen system menu, so the first menu becomes the bold app
+    // menu. macOS-only: elsewhere the shell is frameless with a custom title
+    // bar, and a Slint-drawn in-window bar would double up on it. The flag is
+    // set once at startup (src/main.rs) before the window shows, so this is
+    // present from the first layout pass rather than toggled at runtime.
+    if AppState.is-macos: MenuBar {
+        Menu {
+            title: "Cutlass";
+            MenuItem {
+                title: "Settings…";
+                activated => {
+                    AppState.settings-open = true;
+                }
             }
         }
+    }
+
+    background: AppState.preview-maximized ? AppStore.theme.panel.background : AppStore.theme.surface.app-background;
+
+    // Window-level editing shortcuts (Phase 5). The scope wraps all
+    // content and holds focus by default (`forward-focus` below), so
+    // shortcuts work immediately; while a text input is focused, keys
+    // go there instead — timeline interactions bump the refocus nonce
+    // (AppState.refocus-shortcuts) to reclaim the keyboard.
+    forward-focus: shortcuts;
+
+    private property <int> focus-nonce: AppState.shortcut-focus-nonce;
+
+    changed focus-nonce => {
+        shortcuts.focus();
+    }
+
+    // Every playhead mutation — ruler scrub, frame-step keys, Home/End,
+    // the playback clock — funnels through this one watcher into a preview
+    // frame request (coalesced to the newest tick on the worker thread).
+    // Window scope, not TimelinePanel: the panel unmounts in fullscreen
+    // preview mode and playback must keep rendering there.
+    private property <int> playhead: TimelineStore.playhead-tick;
+
+    changed playhead => {
+        EditorStore.on-playhead-changed(self.playhead);
+    }
+
+    // The session was replaced wholesale (open / new — lifecycle roadmap
+    // Phase 2): reset UI-side session state. The projection republish
+    // already swapped the project; this clears what rides alongside it.
+    private property <int> session-epoch: EditorStore.session-epoch;
+
+    changed session-epoch => {
+        // A real session just loaded (New / Open / Open Recent / autosave
+        // recovery all bump the epoch; the initial empty-project publish does
+        // not) — leave the start screen and reveal the editor.
+        AppState.launch-visible = false;
+        TimelineActions.pause();
+        TimelineActions.clear-selection();
+        TimelineActions.clear-range();
+        TimelineActions.seek-start();
+        PreviewStore.viewport-zoom = 1.0;
+        PreviewStore.viewport-pan-x = 0px;
+        PreviewStore.viewport-pan-y = 0px;
+        // A running prompt and any parked plan rehearsed against the old
+        // project; cancel/discard them (main.rs forwards to the agent).
+        AgentStore.session-changed();
+        // The opened/restored project has media whose file is gone: offer
+        // the relink dialog (the projection publish that set the count is
+        // ordered before this epoch bump). Mid-session disappearances only
+        // badge the library tiles — no surprise modal while editing.
+        AppState.relink-dialog-open = EditorStore.missing-media-count > 0;
+    }
+
+    // Size the window to the active surface: the launch screen opens at the
+    // window's natural size, entering the editor maximizes, and closing back
+    // to the launch screen restores it. Driven off launch-visible so every
+    // entry path (New / Open / Open Recent / autosave restore) and the
+    // close-to-launch all funnel through one rule (Rust owns the winit call).
+    private property <bool> editor-maximized: !AppState.launch-visible;
+
+    changed editor-maximized => {
+        WindowBackend.set-maximized(self.editor-maximized);
+    }
+
+    // Transform commits are optimistic for a moment: keep the live gesture
+    // values visible until the worker publishes the projection containing the
+    // committed transform, then let the UI read from the model again.
+    private property <int> projection-revision: EditorStore.projection-revision;
+
+    changed projection-revision => {
+        // Selection can go stale when a history step or agent edit removes
+        // clips it points at (timeline roadmap debt) — reconcile the set
+        // against the new projection instead of leaving dead ids behind.
+        TimelineActions.prune-selection();
+        if (PreviewStore.gesture-commit-pending) {
+            PreviewStore.gesture-active = false;
+            PreviewStore.gesture-commit-pending = false;
+        }
+    }
+
+    // Arrow keys nudge the selected visual clip by whole canvas pixels
+    // (preview roadmap Phase 3; CapCut: 1 px, Shift = 10) through the same
+    // commit path as a preview drag — one undoable entry per keypress.
+    // Returns false (so ←/→ fall back to transport frame-stepping) when
+    // nothing is selected or the selection isn't nudgeable (audio clip,
+    // locked or hidden lane).
+    private property <PreviewDragResolution> nudge-res;
+
+    function nudge-selected(dx: float, dy: float) -> bool {
+        if (TimelineStore.selected-clip-id == "") {
+            return false;
+        }
+        self.nudge-res = PreviewBackend.nudge(
+            EditorStore.project.sequence,
+            TimelineStore.selected-clip-id,
+            TimelineStore.playhead-tick,
+            dx,
+            dy);
+        if (!self.nudge-res.valid) {
+            return false;
+        }
+        EditorStore.on-clip-transform-committed(
+            TimelineStore.selected-clip-id,
+            self.nudge-res.position-x,
+            self.nudge-res.position-y,
+            self.nudge-res.anchor-x,
+            self.nudge-res.anchor-y,
+            self.nudge-res.scale,
+            self.nudge-res.rotation,
+            self.nudge-res.opacity,
+            TimelineStore.playhead-tick);
+        return true;
+    }
+
+    // Playback clock (playback roadmap Phase 1). Sub-frame interval so
+    // frame boundaries land within ~8ms at any sequence rate; each step
+    // recomputes the playhead from the wall-clock anchor (TimelineActions
+    // owns the math), so a missed step never slows the transport.
+    playback-timer := Timer {
+        interval: 8ms;
+        running: TimelineStore.playing;
+        triggered => {
+            TimelineActions.playback-step();
+        }
+    }
+
+    shortcuts := FocusScope {
+        key-pressed(event) => {
+            // Settings screen is modal and can sit over the launch screen or
+            // the editor, so it's checked first: Escape dismisses, everything
+            // else is swallowed.
+            if (AppState.settings-open) {
+                if (event.text == Key.Escape) {
+                    // Esc dismisses; persist first so a theme/field change
+                    // made just before closing isn't lost (same as Done/✕).
+                    SettingsBackend.save();
+                    AppState.settings-open = false;
+                }
+                return accept;
+            }
+            // Start screen: only the New / Open project shortcuts make sense
+            // here; swallow everything else so timeline keys never fire under
+            // it. (An open failure can raise the error dialog over the launch
+            // screen — let its Escape/Enter handler below run first.)
+            if (AppState.launch-visible && EditorStore.session-error == "") {
+                if (event.modifiers.control || event.modifiers.meta) {
+                    if (event.text == "n" || event.text == "N") {
+                        EditorStore.on-new-requested();
+                        return accept;
+                    }
+                    if (event.text == "o" || event.text == "O") {
+                        EditorStore.on-open-requested();
+                        return accept;
+                    }
+                }
+                return accept;
+            }
+            // The error dialog is modal: Escape/Enter dismiss, everything
+            // else is swallowed (same policy as the export dialog below).
+            if (EditorStore.session-error != "") {
+                if (event.text == Key.Escape || event.text == Key.Return) {
+                    EditorStore.session-error = "";
+                }
+                return accept;
+            }
+            // Confirm-delete-media dialog is modal and destructive: Escape
+            // cancels, everything else (including Enter) is swallowed so the
+            // delete only fires on an explicit button click.
+            if (AppState.confirm-delete-media-open) {
+                if (event.text == Key.Escape) {
+                    AppState.confirm-delete-media-open = false;
+                }
+                return accept;
+            }
+            // Missing-media relink dialog: Escape/Enter dismiss like Later.
+            if (AppState.relink-dialog-open) {
+                if (event.text == Key.Escape || event.text == Key.Return) {
+                    AppState.relink-dialog-open = false;
+                }
+                return accept;
+            }
+            // The export dialog is modal: swallow timeline shortcuts while
+            // it's up (Space must not start playback under the scrim).
+            // Escape dismisses it unless a job is running — then stopping
+            // must go through the explicit Cancel.
+            if (AppState.export-dialog-open) {
+                if (event.text == Key.Escape && !ExportBackend.running) {
+                    ExportBackend.reset-job-state();
+                    AppState.export-dialog-open = false;
+                }
+                return accept;
+            }
+            // The canvas dialog is modal too; Escape dismisses (changes
+            // committed immediately, so nothing is lost on dismiss).
+            if (AppState.canvas-dialog-open) {
+                if (event.text == Key.Escape) {
+                    AppState.canvas-dialog-open = false;
+                }
+                return accept;
+            }
+            // Accept both Ctrl and Cmd (macOS) as the command modifier.
+            if (event.modifiers.control || event.modifiers.meta) {
+                // Save (app-owned drafts): edits already auto-save, so this is
+                // just an explicit flush-now; `save-as` is ignored (no
+                // user-chosen path in the draft model).
+                if (event.text == "s" || event.text == "S") {
+                    EditorStore.on-save-requested(event.modifiers.shift);
+                    return accept;
+                }
+                // Open file… / New: main.rs flushes the live draft before it
+                // swaps the session (Open imports an external `.cutlass`).
+                if (event.text == "o" || event.text == "O") {
+                    EditorStore.on-open-requested();
+                    return accept;
+                }
+                if (event.text == "n" || event.text == "N") {
+                    EditorStore.on-new-requested();
+                    return accept;
+                }
+                if (event.text == "b" || event.text == "B") {
+                    TimelineActions.split-at-playhead();
+                    return accept;
+                }
+                if ((event.text == "z" || event.text == "Z") && event.modifiers.shift) {
+                    TimelineActions.redo();
+                    return accept;
+                }
+                if (event.text == "z") {
+                    TimelineActions.undo();
+                    return accept;
+                }
+                if (event.text == "c" || event.text == "C") {
+                    TimelineActions.copy-selected();
+                    return accept;
+                }
+                if (event.text == "v" || event.text == "V") {
+                    TimelineActions.paste-at-playhead();
+                    return accept;
+                }
+                if (event.text == "d" || event.text == "D") {
+                    TimelineActions.duplicate-selected();
+                    return accept;
+                }
+                // Loop playback toggle (Phase 4). Plain L is JKL shuttle.
+                if (event.text == "l" || event.text == "L") {
+                    TimelineActions.toggle-loop();
+                    return accept;
+                }
+                return reject;
+            }
+            // Clear the in/out range (Alt+X, Premiere-style).
+            if (event.modifiers.alt && (event.text == "x" || event.text == "X")) {
+                TimelineActions.clear-range();
+                return accept;
+            }
+            if (event.text == Key.Delete || event.text == Key.Backspace) {
+                TimelineActions.delete-selected();
+                return accept;
+            }
+            if (event.text == Key.Escape) {
+                TimelineActions.clear-selection();
+                return accept;
+            }
+            // Playback transport: Space toggles play/pause (CapCut).
+            if (event.text == Key.Space) {
+                TimelineActions.toggle-play();
+                return accept;
+            }
+            // JKL shuttle (Phase 4): J reverse (repeat doubles), K pause,
+            // L forward (repeat doubles). Audio plays at 1x only.
+            if (event.text == "j" || event.text == "J") {
+                TimelineActions.shuttle-reverse();
+                return accept;
+            }
+            if (event.text == "k" || event.text == "K") {
+                TimelineActions.pause();
+                return accept;
+            }
+            if (event.text == "l" || event.text == "L") {
+                TimelineActions.shuttle-forward();
+                return accept;
+            }
+            // In/out range marks at the playhead (Phase 4).
+            if (event.text == "i" || event.text == "I") {
+                TimelineActions.set-range-in();
+                return accept;
+            }
+            if (event.text == "o" || event.text == "O") {
+                TimelineActions.set-range-out();
+                return accept;
+            }
+            // Drop a ruler marker at the playhead (M1 markers).
+            if (event.text == "m" || event.text == "M") {
+                TimelineActions.add-marker-at-playhead();
+                return accept;
+            }
+            // Arrows: nudge the selected clip in the canvas (Shift = 10 px);
+            // with nothing nudgeable selected, ←/→ frame-step the playhead
+            // (Phase 4 transport keys) and ↑/↓ do nothing.
+            if (event.text == Key.LeftArrow) {
+                if (root.nudge-selected(event.modifiers.shift ? -10 : -1, 0)) {
+                    return accept;
+                }
+                TimelineActions.step-playhead(-1);
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                if (root.nudge-selected(event.modifiers.shift ? 10 : 1, 0)) {
+                    return accept;
+                }
+                TimelineActions.step-playhead(1);
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                if (root.nudge-selected(0, event.modifiers.shift ? -10 : -1)) {
+                    return accept;
+                }
+                return reject;
+            }
+            if (event.text == Key.DownArrow) {
+                if (root.nudge-selected(0, event.modifiers.shift ? 10 : 1)) {
+                    return accept;
+                }
+                return reject;
+            }
+            if (event.text == Key.Home) {
+                TimelineActions.seek-start();
+                return accept;
+            }
+            if (event.text == Key.End) {
+                TimelineActions.seek-end();
+                return accept;
+            }
+            reject
+        }
+
+        // Start screen (launch.slint): the full-window home shown before the
+        // editor on a cold start, dismissed by the session-epoch watcher
+        // above once the user creates or opens a project.
+        if AppState.launch-visible: LaunchScreen {
+            width: root.width;
+            height: root.height;
+        }
+
+        if !AppState.launch-visible && AppState.preview-maximized: FullscreenPreview {
+            width: root.width;
+            height: root.height;
+        }
+
+        if !AppState.launch-visible && !AppState.preview-maximized: VerticalLayout {
+            spacing: AppStore.theme.metrics.spacing.none;
+
+            // Edge-to-edge so the drag region reaches the window borders —
+            // the panel padding below must not shrink the grabbable strip.
+            TitleBar { }
+
+            VerticalLayout {
+                padding: AppStore.theme.metrics.spacing.sm;
+                padding-top: AppStore.theme.metrics.spacing.none;
+                spacing: AppStore.theme.metrics.spacing.none;
+
+                HorizontalLayout {
+                    vertical-stretch: 1;
+                    horizontal-stretch: 1;
+                    spacing: AppStore.theme.metrics.spacing.none;
+
+                    LibraryPanel {
+                        width: root.left-pane-width;
+                        vertical-stretch: 1;
+                    }
+
+                    HSplitGripLead {
+                        pane-width <=> root.left-pane-width;
+                        vertical-stretch: 1;
+                    }
+
+                    PreviewPanel {
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+                    }
+
+                    HSplitGripTrail {
+                        pane-width <=> root.right-pane-width;
+                        vertical-stretch: 1;
+                    }
+
+                    InspectorPanel {
+                        width: root.right-pane-width;
+                        vertical-stretch: 1;
+                    }
+
+                    if AppState.agent-panel-open: HSplitGripTrail {
+                        pane-width <=> root.agent-pane-width;
+                        vertical-stretch: 1;
+                    }
+
+                    if AppState.agent-panel-open: AgentPanel {
+                        width: root.agent-pane-width;
+                        vertical-stretch: 1;
+                    }
+                }
+
+                VSplitGripTimeline {
+                    timeline-height <=> root.timeline-height;
+                }
+
+                TimelinePanel {
+                    height: root.timeline-height;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+    }
+
+    // Library drag ghost — must live at window scope so it paints above all
+    // panels. `z` on a nested element only stacks within its parent; PanelBase
+    // also clips children to the panel bounds. Once the cursor enters the
+    // timeline, the panel takes over with an honest snapped/row-aligned landing
+    // ghost (and snap guide), so this window ghost only tracks the loose tile
+    // while it's still outside the timeline.
+    if AppState.library-drag-active && !AppState.library-drag-over-timeline: Rectangle {
+        width: AppState.library-drag-w;
+        height: AppState.library-drag-h;
+        x: AppState.library-drag-cursor-x - AppState.library-drag-tile-anchor-x;
+        y: AppState.library-drag-cursor-y - AppState.library-drag-tile-anchor-y;
+        background: #C83A3A;
+        border-radius: AppStore.theme.track-lane.clip.radius;
+    }
+
+    // Export settings dialog — declared last so the modal paints above
+    // every panel and the title bar.
+    if AppState.export-dialog-open: ExportDialog {
+        width: root.width;
+        height: root.height;
+    }
+
+    // Canvas settings dialog (M1 canvas settings: ratio + background).
+    if AppState.canvas-dialog-open: CanvasDialog {
+        width: root.width;
+        height: root.height;
+    }
+
+    // App settings screen — opened from the native Cutlass menu. Placed with
+    // the other modals so it paints above every panel and the title bar.
+    if AppState.settings-open: SettingsDialog {
+        width: root.width;
+        height: root.height;
+    }
+
+    // Missing-media relink dialog (v1 roadmap M0) — raised after an open /
+    // restore that found dead media paths; above the export dialog, below
+    // the error dialog.
+    if AppState.relink-dialog-open: RelinkDialog {
+        width: root.width;
+        height: root.height;
+    }
+
+    // Confirm-delete-media dialog (library tile → Remove from project on a
+    // source still used by clips). Above the relink dialog, below the
+    // session-error dialog.
+    if AppState.confirm-delete-media-open: ConfirmDeleteDialog {
+        width: root.width;
+        height: root.height;
+    }
+
+    // Session-error dialog (save/open failures) — above even the export
+    // dialog: an error must never hide behind another modal.
+    if EditorStore.session-error != "": MessageDialog {
+        width: root.width;
+        height: root.height;
     }
 }

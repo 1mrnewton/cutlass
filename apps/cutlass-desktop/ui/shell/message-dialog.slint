@@ -1,0 +1,58 @@
+// Session-error dialog (lifecycle roadmap Phase 2): an in-window modal in
+// the export-dialog mold (in-window so it lives inside the frameless shell).
+// Mounted by app.slint while `EditorStore.session-error` is non-empty;
+// dismissing clears the property. Save/open failures land here — the
+// message already names the offending file.
+
+import { CutlassText, AccentButton } from "../components/index.slint";
+import { AppStore, EditorStore } from "../store/index.slint";
+
+export component MessageDialog inherits Rectangle {
+    background: #000000A0;
+
+    // Scrim: absorb every pointer event so the editor underneath is inert.
+    TouchArea { }
+
+    panel := Rectangle {
+        width: 440px;
+        height: content.preferred-height;
+        background: AppStore.theme.panel.background;
+        border-radius: AppStore.theme.metrics.radius.lg;
+        border-width: 1px;
+        border-color: #ffffff14;
+        drop-shadow-blur: 32px;
+        drop-shadow-color: #00000080;
+        drop-shadow-offset-y: 8px;
+
+        // Keep clicks inside the panel from reaching the scrim above.
+        TouchArea { }
+
+        content := VerticalLayout {
+            padding: AppStore.theme.metrics.spacing.xl;
+            spacing: AppStore.theme.metrics.spacing.lg;
+
+            CutlassText {
+                text: "Something went wrong";
+                style: AppStore.theme.typography.heading-md;
+            }
+
+            CutlassText {
+                text: EditorStore.session-error;
+                wrap: word-wrap;
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.secondary;
+            }
+
+            HorizontalLayout {
+                alignment: end;
+
+                AccentButton {
+                    label: "OK";
+                    clicked => {
+                        EditorStore.session-error = "";
+                    }
+                }
+            }
+        }
+    }
+}

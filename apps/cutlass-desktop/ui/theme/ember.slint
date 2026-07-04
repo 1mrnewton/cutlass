@@ -1,0 +1,152 @@
+// Ember — the warm counterpart to the cool default theme. Graphite-brown
+// surfaces (a few degrees toward firelight instead of neutral black) with an
+// amber accent that fades to ember red in the brand gradient. Geometry stays
+// identical to the default theme except for slightly softer corner radii, so
+// switching themes never reflows the layout.
+import {
+    Accent,
+    AgentChat,
+    Layout,
+    Metrics,
+    Panel,
+    Radius,
+    Scrollbar,
+    Spacing,
+    SplitGrip,
+    Stroke,
+    Surface,
+    TextColors,
+    Theme,
+    TrackLane,
+    Typography,
+} from "../types/index.slint";
+
+export global EmberTheme {
+    private property <Surface> surface: {
+        app-background: #191512,
+        content-background: #0B0908,
+        divider: #1E1915,
+    };
+
+    private property <TextColors> text: {
+        primary: #F4EDE3,
+        secondary: #B0A395,
+        muted: #7C7164,
+    };
+
+    private property <Accent> accent: {
+        primary: #FFB454,
+        hover: #FFC878,
+        on-accent: #221405,
+        gradient-end: #FF5E3D,
+    };
+
+    private property <SplitGrip> split-grip: {
+        normal: #191512,
+        hover: #191512,
+    };
+
+    private property <Typography> typography: {
+        font-family: "",
+        font-family-mono: "monospace",
+        body: { size: 13px, weight: 400, italic: false },
+        label: { size: 12px, weight: 500, italic: false },
+        caption: { size: 11px, weight: 400, italic: false },
+        heading-sm: { size: 13px, weight: 600, italic: false },
+        heading-md: { size: 15px, weight: 600, italic: false },
+        mono: { size: 12px, weight: 400, italic: false },
+    };
+
+    private property <Spacing> spacing: {
+        none: 0px,
+        xs: 4px,
+        sm: 8px,
+        md: 10px,
+        lg: 16px,
+        xl: 24px,
+        xxl: 30px,
+    };
+
+    private property <Radius> radius: {
+        none: 0px,
+        sm: 4px,
+        md: 7px,
+        lg: 10px,
+    };
+
+    private property <Stroke> stroke: {
+        hairline: 1px,
+        thin: 2px,
+        medium: 3px,
+    };
+
+    private property <Layout> layout: {
+        split-grip: 5px,
+        toolbar-height: 40px,
+        min-pane-width: 350px,
+        max-pane-width: 800px,
+        min-timeline-height: 280px,
+        max-timeline-height: 800px,
+    };
+
+    private property <Metrics> metrics: {
+        spacing: self.spacing,
+        radius: self.radius,
+        stroke: self.stroke,
+        layout: self.layout,
+    };
+
+    private property <Panel> panel: {
+        background: #241E19,
+        header-background: #2E2620,
+        radius: self.radius.md,
+    };
+
+    private property <Scrollbar> scrollbar: {
+        size: 10px,
+        thumb-inset: 2px,
+        thumb-min: 24px,
+        thumb-radius: 1px,
+        // Translucent: the bars overlay content (and auto-hide), so the
+        // track softens rather than blanks what it covers.
+        track: #322A2399,
+        thumb: #6B5F53E6,
+        thumb-hover: #837567,
+        thumb-active: #A08E7C,
+    };
+
+    private property <TrackLane> track-lane: {
+        height: 60px,
+        background: #272019,
+        clip: {
+            height: 58px,
+            background: #3A3128,
+            radius: 4px,
+        },
+    };
+
+    private property <AgentChat> agent: {
+        input-bg: self.surface.app-background,
+        user-message-bg: #FFB45424,
+        plan-bg: #2A221C,
+        plan-border: #FFB45445,
+        send-disabled-bg: #3D342C,
+        stop-bg: #F4EDE310,
+        stop-bg-hover: #F4EDE31c,
+        error: #FF7A6B,
+        preview-toggle-border: #F4EDE344,
+    };
+
+    out property <Theme> theme: {
+        surface: self.surface,
+        text: self.text,
+        accent: self.accent,
+        split-grip: self.split-grip,
+        typography: self.typography,
+        metrics: self.metrics,
+        panel: self.panel,
+        scrollbar: self.scrollbar,
+        track-lane: self.track-lane,
+        agent: self.agent,
+    };
+}

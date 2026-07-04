@@ -1,0 +1,12 @@
+// Accent palette: the brand color driving selection, focus, playhead, and
+// primary actions. Alpha washes are derived at use sites via `with-alpha` so
+// each theme only picks the base colors.
+export struct Accent {
+    primary: color,
+    // Brighter variant for hovered accent fills.
+    hover: color,
+    // Foreground drawn on top of accent-filled surfaces.
+    on-accent: color,
+    // Second stop of the brand gradient (logo badge); starts at `primary`.
+    gradient-end: color,
+}

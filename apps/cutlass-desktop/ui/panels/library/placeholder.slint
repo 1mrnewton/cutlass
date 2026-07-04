@@ -1,0 +1,54 @@
+// Empty-state body for library sections whose backend doesn't exist yet
+// (stock browsing, AI generation). The section is real navigation — CapCut
+// parity — so it gets an honest "coming soon" card rather than dead controls.
+
+import { CutlassText } from "../../components/index.slint";
+import { AppStore } from "../../store/index.slint";
+
+export component SectionPlaceholder inherits Rectangle {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> message;
+
+    VerticalLayout {
+        alignment: center;
+        padding: AppStore.theme.metrics.spacing.xl;
+        spacing: AppStore.theme.metrics.spacing.sm;
+
+        HorizontalLayout {
+            alignment: center;
+
+            Rectangle {
+                width: 56px;
+                height: 56px;
+                border-radius: self.width / 2;
+                background: #ffffff0a;
+
+                Image {
+                    width: 22px;
+                    height: 22px;
+                    source: root.icon;
+                    colorize: AppStore.theme.text.muted;
+                }
+            }
+        }
+
+        Rectangle {
+            height: AppStore.theme.metrics.spacing.xs;
+        }
+
+        CutlassText {
+            text: root.title;
+            style: AppStore.theme.typography.heading-sm;
+            horizontal-alignment: center;
+        }
+
+        CutlassText {
+            text: root.message;
+            style: AppStore.theme.typography.caption;
+            foreground: AppStore.theme.text.secondary;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+}

@@ -1,0 +1,835 @@
+import {
+    PanelBase,
+    PanelHeader,
+    CutlassScrollView,
+    CutlassDropdown,
+    CutlassText,
+    SubtleButton,
+} from "../../components/index.slint";
+import { AppState } from "../../state.slint";
+import { AppStore, EditorStore, TimelineStore } from "../../store/index.slint";
+import {
+    AudioSample,
+    InspectorBackend,
+    SelectedClipInfo,
+} from "../../lib/inspector-backend.slint";
+import { Clip, TrackKind } from "../../models/index.slint";
+import {
+    InspectorDivider,
+    InspectorTabHeader,
+    SectionHeader,
+    LabelCell,
+    SliderRow,
+} from "inspector-widgets.slint";
+import { TextInspector } from "text-inspector.slint";
+import { TransformInspector } from "transform-inspector.slint";
+import { CropInspector } from "crop-inspector.slint";
+import { EffectsInspector } from "effects-inspector.slint";
+
+struct InspectorField {
+    label: string,
+    value: string,
+}
+
+component ProjectInspector inherits VerticalLayout {
+    in property <[InspectorField]> fields;
+
+    spacing: AppStore.theme.metrics.spacing.none;
+
+    PanelHeader {
+        title: "Inspector";
+    }
+
+    CutlassScrollView {
+        vertical-stretch: 1;
+        viewport-width: root.width;
+        viewport-height: content.preferred-height;
+        show-horizontal-scrollbar: false;
+
+        content := VerticalLayout {
+            width: root.width;
+            spacing: 30px;
+            alignment: LayoutAlignment.start;
+            padding: AppStore.theme.metrics.spacing.lg;
+
+            for field in root.fields: HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.lg;
+
+                Text {
+                    text: field.label;
+                    min-width: 120px;
+                    color: AppStore.theme.text.secondary;
+                    font-size: AppStore.theme.typography.label.size;
+                }
+
+                Text {
+                    text: field.value;
+                    horizontal-stretch: 1;
+                    wrap: TextWrap.char-wrap;
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        height: 40px;
+        background: AppStore.theme.panel.header-background;
+
+        HorizontalLayout {
+            alignment: end;
+            padding: AppStore.theme.metrics.spacing.md;
+
+            Rectangle {
+                width: 70px;
+                height: 20px;
+                border-radius: 5px;
+                background: #666666;
+
+                Text {
+                    text: "Modify";
+                }
+            }
+        }
+    }
+}
+
+component MissingSelectionInspector inherits VerticalLayout {
+    spacing: AppStore.theme.metrics.spacing.none;
+
+    PanelHeader {
+        title: "Inspector";
+    }
+
+    Rectangle {
+        vertical-stretch: 1;
+
+        Text {
+            x: AppStore.theme.metrics.spacing.lg;
+            y: AppStore.theme.metrics.spacing.lg;
+            width: parent.width - 2 * AppStore.theme.metrics.spacing.lg;
+            text: "Selected clip not found";
+            color: AppStore.theme.text.muted;
+            font-size: AppStore.theme.typography.body.size;
+        }
+    }
+}
+
+// Speed & reverse for media-backed clips (CapCut constant speed, M1).
+// Preset rates keep the engine's rational math exact; the engine re-derives
+// the clip's timeline footprint on commit and the projection republish
+// updates everything (duration label, retime badge, filmstrip density).
+// Retimed clips play time-stretched audio (M8 Phase 3); the "Keep pitch"
+// toggle chooses pitch-preserving stretch vs. pitch-follows-speed.
+component SpeedInspector inherits VerticalLayout {
+    in property <Clip> model;
+
+    spacing: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    function commit(num: int, den: int, reversed: bool) {
+        InspectorBackend.set-clip-speed(root.model.id, num, den, reversed);
+    }
+
+    function commit-pitch(preserve: bool) {
+        InspectorBackend.set-clip-pitch(root.model.id, preserve);
+    }
+
+    // Current rational rate, recovered from the projected float. Presets
+    // are the only writers, so an exact match always exists; the fallback
+    // (×100) only fires for projects edited outside the UI.
+    function current-num() -> int {
+        return root.label-of(root.model.speed) == "" ? Math.round(root.model.speed * 100) : root.num-of(root.label-of(root.model.speed));
+    }
+    function current-den() -> int {
+        return root.label-of(root.model.speed) == "" ? 100 : root.den-of(root.label-of(root.model.speed));
+    }
+
+    function label-of(speed: float) -> string {
+        if (Math.abs(speed - 0.25) < 0.001) { return "0.25x"; }
+        if (Math.abs(speed - 0.5) < 0.001) { return "0.5x"; }
+        if (Math.abs(speed - 0.75) < 0.001) { return "0.75x"; }
+        if (Math.abs(speed - 1.0) < 0.001) { return "1x"; }
+        if (Math.abs(speed - 1.5) < 0.001) { return "1.5x"; }
+        if (Math.abs(speed - 2.0) < 0.001) { return "2x"; }
+        if (Math.abs(speed - 3.0) < 0.001) { return "3x"; }
+        if (Math.abs(speed - 4.0) < 0.001) { return "4x"; }
+        return "";
+    }
+    function num-of(label: string) -> int {
+        if (label == "0.25x") { return 1; }
+        if (label == "0.5x") { return 1; }
+        if (label == "0.75x") { return 3; }
+        if (label == "1.5x") { return 3; }
+        if (label == "2x") { return 2; }
+        if (label == "3x") { return 3; }
+        if (label == "4x") { return 4; }
+        return 1;
+    }
+    function den-of(label: string) -> int {
+        if (label == "0.25x") { return 4; }
+        if (label == "0.5x") { return 2; }
+        if (label == "0.75x") { return 4; }
+        if (label == "1.5x") { return 2; }
+        return 1;
+    }
+
+    SectionHeader {
+        title: "Speed";
+    }
+
+    HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+        height: 28px;
+        vertical-stretch: 0;
+
+        LabelCell {
+            label: "Rate";
+        }
+
+        CutlassDropdown {
+            items: ["0.25x", "0.5x", "0.75x", "1x", "1.5x", "2x", "3x", "4x"];
+            current: root.label-of(root.model.speed);
+            placeholder: "Custom";
+            selected(value) => {
+                root.commit(root.num-of(value), root.den-of(value), root.model.reversed);
+            }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+        height: 28px;
+        vertical-stretch: 0;
+
+        LabelCell {
+            label: "Reverse";
+        }
+
+        Rectangle {
+            width: 14px;
+            height: 14px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: root.model.reversed ? AppStore.theme.accent.primary : #ffffff2f;
+            background: root.model.reversed ? AppStore.theme.accent.primary : #ffffff14;
+
+            TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    root.commit(root.current-num(), root.current-den(), !root.model.reversed);
+                    AppState.refocus-shortcuts();
+                }
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+    }
+
+    if root.model.speed-label != "": HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+        height: 28px;
+        vertical-stretch: 0;
+
+        LabelCell {
+            label: "Keep pitch";
+        }
+
+        Rectangle {
+            width: 14px;
+            height: 14px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: root.model.preserve-pitch ? AppStore.theme.accent.primary : #ffffff2f;
+            background: root.model.preserve-pitch ? AppStore.theme.accent.primary : #ffffff14;
+
+            TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    root.commit-pitch(!root.model.preserve-pitch);
+                    AppState.refocus-shortcuts();
+                }
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+    }
+}
+
+// Speed ramp / velocity graph for media-backed clips (CapCut speed curves,
+// M2). Presets drop a ready-made multiplier curve over the clip's normalized
+// span; the engine re-derives the clip's timeline footprint from the ramp's
+// average, the projection republish updates the graph, duration label and
+// timeline badge. Each handle drags vertically to retune one control point.
+// The base "Rate" above multiplies this curve; audio time-stretches along the
+// ramp (M8 Phase 3), pitch-locked per the Speed panel's "Keep pitch" toggle.
+component SpeedRampInspector inherits VerticalLayout {
+    in property <Clip> model;
+
+    // Vertical display window of the velocity graph: 0× at the floor, 4× at
+    // the ceiling (presets top out at 3×). Values outside clamp to the edge.
+    private property <float> disp-max: 4.0;
+    // Drag floor: the engine clamps harder, this just keeps a handle on-graph.
+    private property <float> drag-min: 0.1;
+
+    spacing: AppStore.theme.metrics.spacing.md;
+    alignment: LayoutAlignment.start;
+
+    function key-of(label: string) -> string {
+        if (label == "Ramp up") { return "ramp_up"; }
+        if (label == "Ramp down") { return "ramp_down"; }
+        if (label == "Montage") { return "montage"; }
+        if (label == "Hero") { return "hero"; }
+        if (label == "Bullet") { return "bullet"; }
+        return "";
+    }
+
+    SectionHeader {
+        title: "Speed ramp";
+    }
+
+    HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+        height: 28px;
+        vertical-stretch: 0;
+
+        LabelCell {
+            label: "Preset";
+        }
+
+        CutlassDropdown {
+            items: ["Normal", "Ramp up", "Ramp down", "Montage", "Hero", "Bullet"];
+            current: root.model.has-speed-curve ? "" : "Normal";
+            placeholder: "Custom";
+            selected(value) => {
+                InspectorBackend.set-speed-curve(root.model.id, root.key-of(value));
+                AppState.refocus-shortcuts();
+            }
+        }
+    }
+
+    // Velocity graph: filled silhouette of the eased curve (dense samples)
+    // with a 1× reference line and a draggable handle per control point.
+    graph := Rectangle {
+        height: 104px;
+        vertical-stretch: 0;
+        border-radius: AppStore.theme.metrics.radius.sm;
+        background: #ffffff0a;
+        border-width: 1px;
+        border-color: #ffffff14;
+        clip: true;
+
+        // 1× baseline.
+        Rectangle {
+            x: 0;
+            width: parent.width;
+            height: 1px;
+            y: parent.height * (1 - 1 / root.disp-max);
+            background: #ffffff24;
+        }
+
+        // Eased ramp fill (dense samples projected from the engine). Spacing
+        // matches SPEED_GRAPH_SAMPLES (49 ⇒ 48 gaps) in src/projection.rs.
+        for s[i] in root.model.speed-curve-samples: Rectangle {
+            x: graph.width * i / 48;
+            width: graph.width / 48 + 1px;
+            height: graph.height * min(s, root.disp-max) / root.disp-max;
+            y: graph.height - self.height;
+            background: AppStore.theme.accent.primary.with-alpha(0.22);
+        }
+
+        // Draggable control-point handles. `tick` is 0..=1000 across the span;
+        // dragging vertically retunes that point's multiplier on release.
+        for kf[i] in root.model.kf-speed-curve: Rectangle {
+            property <bool> dragging: false;
+            // Multiplier captured off the pointer while dragging.
+            property <float> drag-value;
+            // Shown multiplier: the pointer's while dragging, else the model's
+            // — the latter binding stays live so a republish moves the dot.
+            property <float> shown: self.dragging ? self.drag-value : kf.value-x;
+
+            width: 12px;
+            height: 12px;
+            border-radius: 6px;
+            x: graph.width * kf.tick / 1000 - self.width / 2;
+            y: graph.height * (1 - min(self.shown, root.disp-max) / root.disp-max) - self.height / 2;
+            background: self.dragging ? AppStore.theme.accent.primary : #ffffff;
+            border-width: 2px;
+            border-color: AppStore.theme.accent.primary;
+
+            ta := TouchArea {
+                mouse-cursor: MouseCursor.ns-resize;
+                moved => {
+                    if (self.pressed) {
+                        parent.dragging = true;
+                        // Pointer y in graph space → multiplier (top = disp-max).
+                        parent.drag-value = clamp(
+                            root.disp-max * (1 - (parent.y + self.mouse-y) / graph.height),
+                            root.drag-min,
+                            root.disp-max);
+                    }
+                }
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.up && parent.dragging) {
+                        parent.dragging = false;
+                        InspectorBackend.set-speed-curve-point(root.model.id, i, parent.drag-value);
+                        AppState.refocus-shortcuts();
+                    }
+                }
+            }
+        }
+
+        if !root.model.has-speed-curve: CutlassText {
+            x: AppStore.theme.metrics.spacing.sm;
+            y: AppStore.theme.metrics.spacing.sm;
+            text: "Pick a preset to add a speed ramp.";
+            style: AppStore.theme.typography.caption;
+            foreground: AppStore.theme.text.muted;
+        }
+    }
+
+    if root.model.has-speed-curve: CutlassText {
+        text: "Effective speed " + Math.round(root.model.speed-curve-avg * 100) / 100 + "×.";
+        style: AppStore.theme.typography.caption;
+        foreground: AppStore.theme.text.muted;
+    }
+}
+
+// Volume + fades for audio-lane clips (CapCut audio mix). Volume is a
+// keyframable gain envelope (M8): the diamond writes automation at the
+// playhead and the slider then sculpts it; a flat clip still rides the M1
+// constant slider. Each commit is one undoable edit; the projection
+// republish re-snapshots the playback mixer, so the change is audible within
+// a buffer block.
+component AudioMixInspector inherits VerticalLayout {
+    in property <Clip> model;
+
+    // Clip length in seconds bounds the fade sliders (the engine rejects
+    // fades longer than the clip). Rates are exact rationals; the float is
+    // only a slider bound.
+    private property <float> duration-s: root.model.source-range.duration.rate.num > 0
+        ? root.model.source-range.duration.value * root.model.source-range.duration.rate.den
+            / root.model.source-range.duration.rate.num
+        : 0;
+    private property <float> fade-max: min(10.0, root.duration-s);
+
+    // Gain sampled at the playhead + the volume envelope's keyframe row
+    // state, recomputed when the playhead or the projected clip changes.
+    private property <AudioSample> sample: InspectorBackend.sample-audio(
+        root.model, TimelineStore.playhead-tick);
+    // Keyframes may only sit inside the clip (engine rule); gate the diamond
+    // rather than letting the command bounce.
+    private property <bool> playhead-inside: TimelineStore.playhead-tick >= root.model.timeline-start.value
+        && TimelineStore.playhead-tick < root.model.timeline-start.value + root.model.source-range.duration.value;
+
+    spacing: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    function commit(volume: float, fade-in: float, fade-out: float) {
+        InspectorBackend.set-clip-audio(root.model.id, volume, fade-in, fade-out);
+    }
+
+    // Diamond toggle: on a keyframe ⇒ remove it; else ⇒ write one at the
+    // playhead holding the value shown, so toggling never jumps the gain.
+    function toggle-kf(on-keyframe: bool, gain: float) {
+        if (on-keyframe) {
+            InspectorBackend.remove-param-keyframe(root.model.id, "volume", TimelineStore.playhead-tick);
+        } else {
+            InspectorBackend.set-param-keyframe(
+                root.model.id, "volume", TimelineStore.playhead-tick, gain, 0, 0);
+        }
+    }
+
+    // Re-ease the keyframe under the playhead (same tick + gain, new curve).
+    function ease-kf(easing: int, gain: float) {
+        InspectorBackend.set-param-keyframe(
+            root.model.id, "volume", TimelineStore.playhead-tick, gain, 0, easing);
+    }
+
+    SectionHeader {
+        title: "Audio";
+    }
+
+    SliderRow {
+        label: "Volume";
+        suffix: "%";
+        // Playhead sample: the constant gain on a flat clip, the envelope
+        // value on an animated one (matches the diamond + the mix).
+        value: root.sample.volume * 100;
+        minimum: 0;
+        maximum: 200;
+        reset-value: 100;
+        kf-visible: true;
+        kf: root.sample.volume-row;
+        kf-can-toggle: root.playhead-inside;
+        // On an envelope the slider sculpts the keyframe at the playhead;
+        // on a flat clip it sets the constant level (CapCut's basic slider).
+        // Animated + playhead outside the clip: leave the envelope alone
+        // rather than flattening it.
+        commit(v) => {
+            if (root.sample.volume-row.animated) {
+                if (root.playhead-inside) {
+                    InspectorBackend.set-param-keyframe(
+                        root.model.id, "volume", TimelineStore.playhead-tick, v / 100, 0, 0);
+                }
+            } else {
+                root.commit(v / 100, root.model.fade-in-s, root.model.fade-out-s);
+            }
+        }
+        kf-toggle => {
+            root.toggle-kf(root.sample.volume-row.on-keyframe, root.sample.volume);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf(e, root.sample.volume);
+        }
+    }
+
+    // Fades route through set-clip-fades, which keeps the gain (a flat level
+    // or a keyframed M8 envelope) and only moves the edge ramps — so a fade
+    // edit never flattens an envelope. They coexist with volume automation.
+    SliderRow {
+        label: "Fade in";
+        suffix: "s";
+        value: root.model.fade-in-s;
+        minimum: 0;
+        maximum: root.fade-max;
+        step: 0.1;
+        decimals: 1;
+        commit(v) => {
+            InspectorBackend.set-clip-fades(root.model.id, v, root.model.fade-out-s);
+        }
+    }
+
+    SliderRow {
+        label: "Fade out";
+        suffix: "s";
+        value: root.model.fade-out-s;
+        minimum: 0;
+        maximum: root.fade-max;
+        step: 0.1;
+        decimals: 1;
+        commit(v) => {
+            InspectorBackend.set-clip-fades(root.model.id, root.model.fade-in-s, v);
+        }
+    }
+
+    // Noise reduction (CapCut "Reduce noise", M8 Phase 5): a single undoable
+    // toggle. The mixers render the clip's audio through RNNoise and cache the
+    // result, so the change is audible within a buffer block of the republish.
+    HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+        height: 28px;
+        vertical-stretch: 0;
+
+        LabelCell {
+            label: "Reduce noise";
+        }
+
+        Rectangle {
+            width: 14px;
+            height: 14px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: root.model.denoise ? AppStore.theme.accent.primary : #ffffff2f;
+            background: root.model.denoise ? AppStore.theme.accent.primary : #ffffff14;
+
+            TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    InspectorBackend.set-denoise(root.model.id, !root.model.denoise);
+                    AppState.refocus-shortcuts();
+                }
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+    }
+
+    // Sidechain ducking (M8 Phase 4): dip this music under the voice lanes.
+    // Shown only when another audio lane is tagged as a voice source (the
+    // track header "V"); the worker resolves which voice clips overlap and
+    // writes the dip as editable volume keyframes — one undoable edit.
+    if InspectorBackend.can-duck-under-voice(EditorStore.project.sequence, TimelineStore.selected-track-id): HorizontalLayout {
+        alignment: LayoutAlignment.start;
+        SubtleButton {
+            label: "Duck under voice";
+            clicked => {
+                InspectorBackend.duck-under-voice(root.model.id);
+            }
+        }
+    }
+
+    // Beat detection (CapCut "Beat", M8 Phase 6): analyze this clip's audio
+    // and drop a beat grid the timeline magnet snaps clip edges to. Re-running
+    // re-detects; "Clear" drops the markers. Both are single undoable edits.
+    HorizontalLayout {
+        alignment: LayoutAlignment.start;
+        spacing: AppStore.theme.metrics.spacing.sm;
+        SubtleButton {
+            label: root.model.beats.length > 0 ? "Re-detect beats" : "Detect beats";
+            clicked => {
+                InspectorBackend.detect-beats(root.model.id);
+            }
+        }
+        if root.model.beats.length > 0: SubtleButton {
+            label: "Clear";
+            clicked => {
+                InspectorBackend.clear-beats(root.model.id);
+            }
+        }
+        if root.model.beats.length > 0: Text {
+            vertical-alignment: TextVerticalAlignment.center;
+            text: root.model.beats.length + " beats";
+            color: AppStore.theme.text.muted;
+            font-size: AppStore.theme.typography.label.size;
+        }
+    }
+}
+
+// CapCut-style property sheet for visual clips that aren't text (video,
+// solids, shapes): transform, crop, speed (media-backed only), and the
+// effect chain — one scrolling sheet, sections split by dividers, all rows
+// on the shared 28px slider/numeric grid (see inspector-widgets.slint).
+component VisualClipInspector inherits VerticalLayout {
+    in property <Clip> model;
+
+    spacing: AppStore.theme.metrics.spacing.none;
+
+    private property <bool> is-shape: model.generator-kind == "rect" || model.generator-kind == "ellipse";
+
+    InspectorTabHeader {
+        tabs: ["Video", "Animation", "Tracking", "Adjustment"];
+        selected: 0;
+    }
+
+    body-scroll := CutlassScrollView {
+        vertical-stretch: 1;
+        viewport-width: root.width;
+        viewport-height: content.preferred-height;
+        show-horizontal-scrollbar: false;
+
+        // Blur catcher: any click that no control claims (labels, dividers,
+        // padding) unfocuses the active text input, which commits its
+        // pending edit.
+        TouchArea {
+            x: 0;
+            y: 0;
+            width: body-scroll.width;
+            height: max(body-scroll.height, content.preferred-height);
+            clicked => {
+                AppState.refocus-shortcuts();
+            }
+        }
+
+        content := VerticalLayout {
+            width: max(0px, root.width - AppStore.theme.scrollbar.size);
+            spacing: AppStore.theme.metrics.spacing.lg;
+            alignment: LayoutAlignment.start;
+            padding: AppStore.theme.metrics.spacing.lg;
+
+            if root.is-shape: SectionHeader {
+                title: "Shape";
+            }
+
+            // `value` tracks the committed projection (only moves on commit);
+            // the slider drives its own value during a drag, so previewing the
+            // dragged dimension reads the *other* one straight from the model
+            // (you can only drag one slider at a time). This honors the
+            // SliderRow contract — writing the bound `value` mid-drag would
+            // fight the slider's internal value.
+            if root.is-shape: SliderRow {
+                label: "Width";
+                suffix: "px";
+                value: model.shape-width;
+                minimum: 8;
+                maximum: 1920;
+                step: 1;
+                decimals: 0;
+                reset-value: 200;
+                preview(v) => {
+                    InspectorBackend.preview-shape-generator(
+                        model.id, v, model.shape-height, TimelineStore.playhead-tick);
+                }
+                commit(v) => {
+                    if (v != model.shape-width) {
+                        InspectorBackend.set-shape-generator(model.id, v, model.shape-height);
+                    } else {
+                        InspectorBackend.clear-shape-generator(TimelineStore.playhead-tick);
+                    }
+                }
+            }
+
+            if root.is-shape: SliderRow {
+                label: "Height";
+                suffix: "px";
+                value: model.shape-height;
+                minimum: 8;
+                maximum: 1920;
+                step: 1;
+                decimals: 0;
+                reset-value: 200;
+                preview(v) => {
+                    InspectorBackend.preview-shape-generator(
+                        model.id, model.shape-width, v, TimelineStore.playhead-tick);
+                }
+                commit(v) => {
+                    if (v != model.shape-height) {
+                        InspectorBackend.set-shape-generator(model.id, model.shape-width, v);
+                    } else {
+                        InspectorBackend.clear-shape-generator(TimelineStore.playhead-tick);
+                    }
+                }
+            }
+
+            if root.is-shape: InspectorDivider { }
+
+            TransformInspector {
+                model: root.model;
+            }
+
+            InspectorDivider { }
+
+            CropInspector {
+                model: root.model;
+            }
+
+            // Speed needs a source to retime: media-backed clips only
+            // (generated solids/shapes have no footage behind them).
+            if root.model.media-id != "": InspectorDivider { }
+
+            if root.model.media-id != "": SpeedInspector {
+                model: root.model;
+            }
+
+            if root.model.media-id != "": SpeedRampInspector {
+                model: root.model;
+            }
+
+            InspectorDivider { }
+
+            // Effect chain (M4): every visual clip can carry effects.
+            EffectsInspector {
+                model: root.model;
+            }
+        }
+    }
+}
+
+component AudioClipInspector inherits VerticalLayout {
+    in property <Clip> model;
+
+    spacing: AppStore.theme.metrics.spacing.none;
+
+    InspectorTabHeader {
+        tabs: ["Audio", "Speech to text"];
+        selected: 0;
+    }
+
+    body-scroll := CutlassScrollView {
+        vertical-stretch: 1;
+        viewport-width: root.width;
+        viewport-height: content.preferred-height;
+        show-horizontal-scrollbar: false;
+
+        TouchArea {
+            x: 0;
+            y: 0;
+            width: body-scroll.width;
+            height: max(body-scroll.height, content.preferred-height);
+            clicked => {
+                AppState.refocus-shortcuts();
+            }
+        }
+
+        content := VerticalLayout {
+            width: max(0px, root.width - AppStore.theme.scrollbar.size);
+            spacing: AppStore.theme.metrics.spacing.lg;
+            alignment: LayoutAlignment.start;
+            padding: AppStore.theme.metrics.spacing.lg;
+
+            // Volume + fades (M1): the audio-lane clip is where sound
+            // lives, so the mix controls sit here.
+            if root.model.media-id != "": AudioMixInspector {
+                model: root.model;
+            }
+
+            if root.model.media-id != "": InspectorDivider { }
+
+            // Same retime control as visual clips — the engine retimes the
+            // waveform window and the audio time-stretches to match (M8 Phase 3).
+            if root.model.media-id != "": SpeedInspector {
+                model: root.model;
+            }
+
+            if root.model.media-id != "": SpeedRampInspector {
+                model: root.model;
+            }
+        }
+    }
+}
+
+export component InspectorPanel inherits PanelBase {
+    private property <bool> has-selection: TimelineStore.selected-clip-id != "";
+
+    private property <SelectedClipInfo> selection: InspectorBackend.resolve-selection(
+        EditorStore.project.sequence,
+        TimelineStore.selected-track-id,
+        TimelineStore.selected-clip-id,
+    );
+    private property <bool> is-text-selection: has-selection
+        && selection.found
+        && selection.track-kind == TrackKind.text;
+
+    private property <[InspectorField]> placeholder-fields: [
+        { label: "Name", value: "dummy project" },
+        {
+            label: "Path",
+            value: "/Users/mrnewton/Downloads/all_media_downloers/mrnewton/Downloads/all_media_downloers/mrnewton/Downloads/all_media_downloers/mrnewton/Downloads/all_media_downloader_2026-05-14_08-49-.mp4" // intentionally long path to test wrapping
+
+        
+        },
+        { label: "Color space", value: "sRGB" },
+        { label: "Imported media", value: "100" },
+        { label: "Proxy", value: "100" },
+        { label: "Timeline name", value: "Main timeline" },
+        { label: "Width", value: "1920" },
+        { label: "Height", value: "1080" },
+        { label: "Frame rate", value: "30" },
+        { label: "Resolution", value: "1920×1080" },
+        { label: "Aspect ratio", value: "16:9" },
+    ];
+
+    if !has-selection: ProjectInspector {
+        width: 100%;
+        height: 100%;
+        fields: root.placeholder-fields;
+    }
+
+    if has-selection && !selection.found: MissingSelectionInspector {
+        width: 100%;
+        height: 100%;
+    }
+
+    if is-text-selection: TextInspector {
+        width: 100%;
+        height: 100%;
+        track-id: TimelineStore.selected-track-id;
+        model: selection.clip;
+    }
+
+    // Every other visual clip kind (video, solid, shapes) gets the transform
+    // block; audio has no spatial properties.
+    if has-selection && selection.found && selection.track-kind != TrackKind.text && selection.track-kind != TrackKind.audio: VisualClipInspector {
+        width: 100%;
+        height: 100%;
+        model: selection.clip;
+    }
+
+    if has-selection && selection.found && selection.track-kind == TrackKind.audio: AudioClipInspector {
+        width: 100%;
+        height: 100%;
+        model: selection.clip;
+    }
+}

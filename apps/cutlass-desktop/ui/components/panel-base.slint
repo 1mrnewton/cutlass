@@ -1,0 +1,7 @@
+import { AppStore } from "../store/index.slint";
+
+export component PanelBase inherits Rectangle {
+    background: AppStore.theme.panel.background;
+    border-radius: AppStore.theme.panel.radius;
+    clip: true;
+}

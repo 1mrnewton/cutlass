@@ -1,3 +1,7 @@
 fn main() {
-    slint_build::compile("ui/app.slint").expect("compile ui/app.slint");
+    // FlexboxLayout is experimental in Slint 1.16.
+    unsafe {
+        std::env::set_var("SLINT_ENABLE_EXPERIMENTAL_FEATURES", "1");
+    }
+    slint_build::compile("ui/app.slint").unwrap();
 }

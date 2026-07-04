@@ -1,0 +1,54 @@
+// Bridge between the timeline ruler component and the Rust mark generator.
+//
+// The Slint side reports the viewport state (scroll offset, width, zoom,
+// project frame rate); Rust returns the *visible* marks, positioned in
+// viewport-local pixel coordinates — CapCut-style adaptive labels with
+// dot subdivisions between them (see `src/ruler.rs` for the ladder).
+//
+// Why a Rust-backed callback and not pure Slint?
+//
+//   * Slint can't construct arrays procedurally — `for` only iterates
+//     models that already exist, so somebody outside Slint has to build
+//     the mark list.
+//   * The adaptive step ladder (nominal-fps divisors, nice-number
+//     second steps, dot subdivision) is integer arithmetic that's
+//     painful in Slint expressions and trivial — and unit-testable —
+//     in Rust.
+//
+// Reactivity model: Slint re-invokes a `pure` callback whenever any
+// property *read to compute its arguments* changes. The ruler declares
+// `for tick in RulerBackend.ticks(scroll, width, zoom, …)` and the
+// mark list refreshes automatically on every scroll, zoom, resize, or
+// fps switch. No manual invalidation.
+
+export struct RulerTick {
+    // Viewport-local x position (already includes the scroll offset).
+    // Rounded to whole logical pixels in Rust so tiny marks don't
+    // smear across two subpixels.
+    x: length,
+
+    // True for labeled positions — CapCut draws the text itself as the
+    // marker (centered on `x`, no tick line). False for the small dot
+    // subdivisions between labels.
+    is-major: bool,
+
+    // Label text for majors, empty for dots. Format adapts to the
+    // step: `MM:SS` / `H:MM:SS` on second boundaries, `Nf` (frame
+    // within the current second) for sub-second labels at frame zoom.
+    label: string,
+}
+
+export global RulerBackend {
+    // Marks visible in the current viewport, in viewport-local
+    // coordinates.
+    //
+    // Arguments (positional — Slint callbacks don't support named args):
+    //   1. scroll-x   — Flickable.viewport-x; negative when scrolled right
+    //   2. viewport-w — width of the ruler in logical px
+    //   3. zoom       — TimelineStore.zoom; px per *frame* of the sequence
+    //   4. fps-num    — sequence frame rate numerator (e.g. 30000 for 29.97)
+    //   5. fps-den    — sequence frame rate denominator (e.g. 1001)
+    //
+    // The handler is installed from Rust in `src/main.rs`.
+    pure callback ticks(length, length, float, int, int) -> [RulerTick];
+}

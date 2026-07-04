@@ -1,0 +1,372 @@
+// Cutlass scroll view.
+//
+// A `Flickable` viewport with overlay scrollbars: proportional thumbs,
+// drag-to-scroll, click-track-to-jump, hover/pressed states, and
+// macOS-style auto-hide. Mouse wheel and touch-drag scrolling come from
+// the underlying `Flickable`.
+//
+// Why not `std-widgets::ScrollView`
+// ---------------------------------
+// The Fluent/Cupertino styling clashes with the dark Cutlass chrome and
+// the std widget doesn't expose track/thumb colors. We also want the
+// view to drive scrollbar metrics from caller-supplied
+// `viewport-width` / `viewport-height` so it composes with `GridView`
+// and other content that knows its own extent.
+//
+// Why a Rectangle wrapper instead of `inherits Flickable`
+// -------------------------------------------------------
+// In Slint, children declared on a `Flickable` (including via
+// `@children`) are placed inside its viewport and scroll with the
+// content. Inheriting `Flickable` would make the scrollbars themselves
+// scroll off-screen. Wrapping a `Flickable` keeps the bars pinned in
+// root coordinates while content flows underneath.
+//
+// Geometry
+// --------
+// `Flickable` clamps `viewport-x` / `viewport-y` to
+// `[-(viewport-* - *), 0]`, so:
+//   overflow   = viewport-extent - visible-extent          (>= 0)
+//   thumb-size = track * visible-extent / viewport-extent  (proportional)
+//   thumb-pos  = (track - thumb-size) * (-viewport) / overflow
+// Thumb-size is clamped to a sensible minimum so it stays grabbable on
+// very tall content. Both bars are instances of the one `ScrollBar`
+// component below — `horizontal` selects which window axis maps to the
+// bar's main axis — so the math exists exactly once.
+//
+// Auto-hide
+// ---------
+// The bars overlay the content and the Flickable clamps scrolling at
+// the content edge, so a permanently visible bar would permanently
+// occlude the last `scrollbar-size` of content along its axis. Instead
+// the bars fade in on scrolling, on content-extent changes, and on
+// pointer-over, then fade out shortly after the last activity — the
+// occlusion is transient.
+//
+// The bars' input areas stay live while faded so that moving the
+// pointer over a bar reveals it before any click lands. The flip side
+// is that the bar footprint swallows clicks even while invisible; that
+// matches the previous always-visible behavior, and the hover-reveal
+// keeps it visually coherent.
+//
+// Usage
+// -----
+//     CutlassScrollView {
+//         viewport-width: content.width;
+//         viewport-height: content.height;
+//
+//         content := VerticalLayout {
+//             for i in 200: Rectangle { height: 24px; /* ... */ }
+//         }
+//     }
+//
+// Callers that already produce their own viewport extent (e.g.
+// `GridView` exposes `content-width` / `content-height`) plug those
+// straight into the matching properties.
+//
+// Accessibility: Slint 1.16 has no `scrollbar` accessible role
+// (`AccessibleRole` offers `slider` at closest, which would misreport
+// the widget), so the bars carry no accessibility annotations yet.
+
+import { AppStore } from "../store/index.slint";
+
+// One overlay scrollbar (track + draggable thumb) for either axis.
+// Geometry is expressed along the bar's main axis; `horizontal` selects
+// which window coordinate maps to it. The parent provides position,
+// size, and `background` (track color) like any Rectangle.
+component ScrollBar inherits Rectangle {
+    // Main-axis extent of the visible area (flick.width / flick.height).
+    in property <length> visible-extent;
+    // Main-axis extent of the content (flick.viewport-width / -height).
+    in property <length> content-extent;
+    // Two-way bound to the Flickable offset; <= 0 when scrolled.
+    in-out property <length> offset;
+    in property <bool> horizontal: false;
+
+    // Lifted interaction state, two-way bound by the parent. The parent
+    // includes these in the bar's `if` condition (so an active drag or
+    // the hover keeping the fade alive can't tear the element down when
+    // overflow disappears) and in its auto-hide logic.
+    in-out property <bool> dragging;
+    in-out property <bool> hovered;
+
+    in property <color> thumb-color;
+    in property <color> thumb-hover-color;
+    in property <color> thumb-active-color;
+    in property <length> thumb-inset;
+    in property <length> thumb-min;
+    in property <length> thumb-radius;
+
+    // ---- Derived metrics --------------------------------------------------
+
+    property <length> track: horizontal ? self.width : self.height;
+    property <length> cross: horizontal ? self.height : self.width;
+
+    // Real scrollable range: 0 when content fits (e.g. the bar is forced
+    // visible by the caller). Used for clamp bounds and interaction
+    // guards so a no-overflow bar is inert instead of scrolling by the
+    // epsilon a clamped denominator would allow.
+    property <length> raw-overflow: max(0px, content-extent - visible-extent);
+    // Denominator-only guard against division by zero.
+    property <length> overflow-div: max(1px, raw-overflow);
+
+    property <length> thumb-len: clamp(
+        track * visible-extent / max(content-extent, 1px),
+        min(thumb-min, track),
+        track,
+    );
+    property <length> thumb-range: max(0px, track - thumb-len);
+    property <length> thumb-pos: thumb-range * (-offset) / overflow-div;
+
+    property <length> mouse-main: horizontal ? ta.mouse-x : ta.mouse-y;
+    // Hover styling applies only while the pointer is over the thumb
+    // itself, not anywhere on the track.
+    property <bool> thumb-hovered: ta.has-hover
+        && mouse-main >= thumb-pos
+        && mouse-main <= thumb-pos + thumb-len;
+
+    // Expand-on-hover: shrink the cross-axis inset while the pointer is
+    // over the track (or mid-drag) so the thumb grows slightly — a
+    // bigger drag target without widening the resting footprint.
+    property <length> live-inset: (ta.has-hover || ta.pressed)
+        ? max(0px, thumb-inset - 1px)
+        : thumb-inset;
+    animate live-inset { duration: 120ms; easing: ease-out; }
+
+    Rectangle {
+        x: root.horizontal ? root.thumb-pos : root.live-inset;
+        y: root.horizontal ? root.live-inset : root.thumb-pos;
+        width: root.horizontal ? root.thumb-len : root.cross - 2 * root.live-inset;
+        height: root.horizontal ? root.cross - 2 * root.live-inset : root.thumb-len;
+        border-radius: root.thumb-radius;
+        background: ta.pressed
+            ? root.thumb-active-color
+            : (root.thumb-hovered ? root.thumb-hover-color : root.thumb-color);
+        animate background { duration: 120ms; easing: ease-out; }
+    }
+
+    ta := TouchArea {
+        // Captured on press so the drag math stays linear in mouse
+        // delta and is unaffected by binding re-evaluation while
+        // `offset` updates each frame.
+        property <length> press-mouse;
+        property <length> press-offset;
+
+        width: 100%;
+        height: 100%;
+
+        changed pressed => { root.dragging = self.pressed; }
+        changed has-hover => { root.hovered = self.has-hover; }
+
+        pointer-event(event) => {
+            if (event.kind != PointerEventKind.down
+                || event.button != PointerEventButton.left
+                || root.thumb-range <= 0px) {
+                return;
+            }
+            // Track click outside the thumb: center the thumb on the
+            // click first, then fall through to drag the newly
+            // positioned thumb.
+            if (root.mouse-main < root.thumb-pos || root.mouse-main > root.thumb-pos + root.thumb-len) {
+                root.offset = clamp(
+                    -(root.mouse-main - root.thumb-len / 2) * root.raw-overflow / root.thumb-range,
+                    -root.raw-overflow,
+                    0px,
+                );
+            }
+            self.press-mouse = root.mouse-main;
+            self.press-offset = root.offset;
+        }
+
+        moved() => {
+            // Only fires while pressed; the guard covers content
+            // shrinking below the visible extent mid-drag.
+            if (root.thumb-range <= 0px) {
+                return;
+            }
+            root.offset = clamp(
+                self.press-offset - (root.mouse-main - self.press-mouse) * root.raw-overflow / root.thumb-range,
+                -root.raw-overflow,
+                0px,
+            );
+        }
+    }
+}
+
+export component CutlassScrollView inherits Rectangle {
+    // ---- Public viewport ----------------------------------------------------
+
+    // Total scrollable extent. Default `0px` means "no scrolling" — the
+    // bars auto-hide via the `show-*-scrollbar` defaults below.
+    in property <length> viewport-width: 0px;
+    in property <length> viewport-height: 0px;
+
+    // Current scroll offset. Two-way bound to the inner `Flickable` so
+    // callers can programmatically scroll (e.g. "reveal selection") and
+    // observe drag/wheel-driven changes.
+    in-out property <length> viewport-x;
+    in-out property <length> viewport-y;
+
+    // Forwarded to the inner Flickable. `false` disables touch-drag
+    // scrolling (mouse-wheel scrolling and the scrollbar thumbs still
+    // work — Flickable exempts wheel events from the `interactive`
+    // gate).
+    in property <bool> interactive: true;
+
+    // ---- Scrollbar configuration --------------------------------------------
+
+    // Auto-instantiate by default: only create a bar when content
+    // actually overflows along that axis. Callers can force a bar into
+    // existence by setting these explicitly, though with no overflow it
+    // renders an inert full-length thumb. Either way the bar only
+    // *paints* during activity (see auto-hide in the header).
+    in property <bool> show-horizontal-scrollbar: viewport-width > self.width;
+    in property <bool> show-vertical-scrollbar: viewport-height > self.height;
+
+    in property <color> scrollbar-track-color: AppStore.theme.scrollbar.track;
+    in property <color> scrollbar-thumb-color: AppStore.theme.scrollbar.thumb;
+    in property <color> scrollbar-thumb-hover-color: AppStore.theme.scrollbar.thumb-hover;
+    in property <color> scrollbar-thumb-active-color: AppStore.theme.scrollbar.thumb-active;
+
+    in property <length> scrollbar-size: AppStore.theme.scrollbar.size;
+    // Inset between the thumb and the track edges along the short axis.
+    in property <length> scrollbar-thumb-inset: AppStore.theme.scrollbar.thumb-inset;
+    // Lower bound on thumb length so it stays draggable when content is
+    // very long relative to the visible area.
+    in property <length> scrollbar-thumb-min: AppStore.theme.scrollbar.thumb-min;
+    in property <length> scrollbar-thumb-radius: AppStore.theme.scrollbar.thumb-radius;
+
+    // ---- Derived metrics ----------------------------------------------------
+
+    // Bar existence latches on `dragging || hovered` so the `if` below
+    // can't destroy a bar mid-drag (or mid-hover, which would cut the
+    // auto-hide fade short) when content shrinks under it.
+    property <bool> v-bar-shown: show-vertical-scrollbar || v-bar-dragging || v-bar-hovered;
+    property <bool> h-bar-shown: show-horizontal-scrollbar || h-bar-dragging || h-bar-hovered;
+
+    // Reserve the opposite bar's footprint so the two tracks meet at a
+    // square corner instead of painting over each other.
+    property <length> reserve-bottom: h-bar-shown ? scrollbar-size : 0px;
+    property <length> reserve-right: v-bar-shown ? scrollbar-size : 0px;
+
+    // ---- Auto-hide ----------------------------------------------------------
+
+    property <bool> v-bar-dragging;
+    property <bool> v-bar-hovered;
+    property <bool> h-bar-dragging;
+    property <bool> h-bar-hovered;
+
+    // True while the pointer is interacting with either bar; holds the
+    // bars visible independently of the idle timer.
+    property <bool> bars-engaged: v-bar-dragging || v-bar-hovered || h-bar-dragging || h-bar-hovered;
+    // Set on scroll/extent activity, cleared by the idle timer.
+    property <bool> bars-poked;
+    property <float> bars-opacity: (bars-poked || bars-engaged) ? 1.0 : 0.0;
+    animate bars-opacity { duration: 200ms; easing: ease-out; }
+
+    function poke-bars() {
+        self.bars-poked = true;
+        hide-delay.restart();
+    }
+
+    changed viewport-x => { poke-bars(); }
+    changed viewport-y => { poke-bars(); }
+    // Also reveal when the scrollable extent changes (content added or
+    // removed, including the initial layout) so overflow is
+    // discoverable without scrolling.
+    changed viewport-width => { poke-bars(); }
+    changed viewport-height => { poke-bars(); }
+
+    hide-delay := Timer {
+        interval: 1100ms;
+        running: false;
+        triggered() => {
+            self.running = false;
+            root.bars-poked = false;
+        }
+    }
+
+    // Children that exceed the viewport should be hidden by the
+    // Flickable's own clip, but clipping the root protects against
+    // sub-pixel rounding leaking content past the scrollbar tracks.
+    clip: true;
+
+    flick := Flickable {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        interactive: root.interactive;
+        viewport-width: root.viewport-width;
+        viewport-height: root.viewport-height;
+        viewport-x <=> root.viewport-x;
+        viewport-y <=> root.viewport-y;
+
+        @children
+    }
+
+    // ---- Scrollbars ----------------------------------------------------------
+
+    if v-bar-shown: ScrollBar {
+        horizontal: false;
+        x: root.width - scrollbar-size;
+        y: 0;
+        width: scrollbar-size;
+        height: root.height - reserve-bottom;
+        background: scrollbar-track-color;
+        opacity: root.bars-opacity;
+
+        visible-extent: flick.height;
+        content-extent: flick.viewport-height;
+        offset <=> flick.viewport-y;
+        dragging <=> root.v-bar-dragging;
+        hovered <=> root.v-bar-hovered;
+
+        thumb-color: scrollbar-thumb-color;
+        thumb-hover-color: scrollbar-thumb-hover-color;
+        thumb-active-color: scrollbar-thumb-active-color;
+        thumb-inset: scrollbar-thumb-inset;
+        thumb-min: scrollbar-thumb-min;
+        thumb-radius: scrollbar-thumb-radius;
+    }
+
+    if h-bar-shown: ScrollBar {
+        horizontal: true;
+        x: 0;
+        y: root.height - scrollbar-size;
+        width: root.width - reserve-right;
+        height: scrollbar-size;
+        background: scrollbar-track-color;
+        opacity: root.bars-opacity;
+
+        visible-extent: flick.width;
+        content-extent: flick.viewport-width;
+        offset <=> flick.viewport-x;
+        dragging <=> root.h-bar-dragging;
+        hovered <=> root.h-bar-hovered;
+
+        thumb-color: scrollbar-thumb-color;
+        thumb-hover-color: scrollbar-thumb-hover-color;
+        thumb-active-color: scrollbar-thumb-active-color;
+        thumb-inset: scrollbar-thumb-inset;
+        thumb-min: scrollbar-thumb-min;
+        thumb-radius: scrollbar-thumb-radius;
+    }
+
+    // ---- Corner cap ---------------------------------------------------------
+    //
+    // Fills the square where the two tracks meet so the underlying
+    // content doesn't peek through while the bars are visible.
+    if v-bar-shown && h-bar-shown: Rectangle {
+        x: root.width - scrollbar-size;
+        y: root.height - scrollbar-size;
+        width: scrollbar-size;
+        height: scrollbar-size;
+        background: scrollbar-track-color;
+        opacity: root.bars-opacity;
+
+        // Rectangles don't participate in hit-testing; without this,
+        // clicks on the corner would fall through to the (visually
+        // hidden) content beneath and activate it.
+        TouchArea { }
+    }
+}

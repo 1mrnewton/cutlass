@@ -1,0 +1,15 @@
+import { AppStore } from "../../store/index.slint";
+import { TrackKind } from "../../models/index.slint";
+
+// Backdrop for one track lane. Clip drag gestures live in `clip.slint`;
+// presses on empty lane space fall through to TimelinePanel's wheel-area,
+// which owns the marquee gesture (click without drag clears the selection).
+export component TrackLane inherits Rectangle {
+    in property <string> track-id;
+    in property <TrackKind> kind;
+
+    horizontal-stretch: 1;
+    height: AppStore.theme.track-lane.height;
+
+    background: AppStore.theme.track-lane.background;
+}

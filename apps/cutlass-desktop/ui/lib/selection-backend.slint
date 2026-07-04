@@ -1,0 +1,39 @@
+import { Sequence } from "../models/index.slint";
+
+// Bridge between selection gestures and the Rust selection helpers
+// (src/selection.rs). Selection is a set of clip ids (engine clip ids are
+// globally unique) plus a primary anchor (track-id, clip-id) that keys the
+// inspector and the single-clip ops (split, copy, duplicate).
+
+// The full result of a selection gesture: the new set plus the primary
+// anchor. Empty `primary-clip-id` ⇔ nothing selected.
+export struct SelectionUpdate {
+    ids: [string],
+    primary-track-id: string,
+    primary-clip-id: string,
+}
+
+export global SelectionBackend {
+    // Membership test for per-clip selection highlights.
+    pure callback contains([string] /* selection */, string /* clip-id */, ) -> bool;
+
+    // Plain click: select the clip — expanded to its link group while
+    // linkage is on (CapCut: grabbing video grabs its audio too).
+    pure callback select-clip(Sequence /* sequence */, string /* track-id */, string /* clip-id */, bool   /* link-enabled */, ) -> SelectionUpdate;
+
+    // Shift-click: toggle the clip (and its link group) in the selection.
+    pure callback toggle-clip(Sequence /* sequence */, [string] /* current selection */, string /* track-id */, string /* clip-id */, bool   /* link-enabled */, ) -> SelectionUpdate;
+
+    // Marquee: every clip intersecting the rect [tick0, tick1] × [row0, row1]
+    // (rows in lane units, top-first; fractional ends include partly covered
+    // lanes). Locked lanes are skipped; link groups join whole.
+    pure callback resolve-marquee(Sequence /* sequence */, int    /* tick0 */, int    /* tick1 */, float  /* row0 */, float  /* row1 */, bool   /* link-enabled */, ) -> SelectionUpdate;
+
+    // Reconcile the selection with a republished projection (undo/redo,
+    // agent edits): drop ids whose clips vanished; the primary follows its
+    // clip's lane or re-anchors on the first surviving member.
+    pure callback prune(Sequence /* sequence */, [string] /* current selection */, string /* primary-clip-id */, ) -> SelectionUpdate;
+
+    // Whether any selected clip carries a link-group id (gates Unlink).
+    pure callback has-link(Sequence /* sequence */, [string] /* selection */, ) -> bool;
+}

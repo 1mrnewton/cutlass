@@ -1,0 +1,33 @@
+import { CatalogEntry }from "../models/index.slint";
+
+// Effects & transitions backend (M4). The Library tabs browse the catalogs,
+// the inspector's Effects section edits a clip's chain, and the timeline's
+// junction pills manage transitions — all routed through here to the engine's
+// undoable commands. Catalogs are filled once at startup from the model
+// catalogs; clip/track state is read from the projection.
+export global EffectsBackend {
+    // Browsable catalogs, populated once at startup.
+    in-out property <[CatalogEntry]> effect-catalog: [];
+    in-out property <[CatalogEntry]> transition-catalog: [];
+
+    // Append `effect-id` to the clip's chain (one undoable edit).
+    callback add-effect(clip-id: string, effect-id: string);
+
+    // Remove the effect at chain `index` from the clip.
+    callback remove-effect(clip-id: string, index: int);
+
+    // Set one effect parameter (addressed by its catalog `param` name) to a
+    // constant. Animated edits go through the keyframe path instead.
+    callback set-effect-param(clip-id: string, index: int, param: string, value: float);
+
+    // Add `transition-id` at the junction after `clip-id` (needs an abutting
+    // right neighbor; the engine rejects otherwise).
+    callback add-transition(clip-id: string, transition-id: string);
+
+    // Remove the transition at the junction after `clip-id`.
+    callback remove-transition(clip-id: string);
+
+    // Set the window length (timeline ticks) of the transition after
+    // `clip-id`.
+    callback set-transition(clip-id: string, duration: int);
+}

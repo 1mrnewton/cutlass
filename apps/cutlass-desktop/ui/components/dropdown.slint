@@ -1,0 +1,161 @@
+// A field that opens a popup list of string options, with an optional search
+// box for long lists (the font picker). Filtering is the caller's job: bind
+// `items` to a filtered expression that reads `self.query`, so the dropdown
+// stays generic (Slint's string type has no `contains`).
+
+import { CutlassText } from "text.slint";
+import { CutlassScrollView } from "scroll-view.slint";
+import { AppStore } from "../store/index.slint";
+import { AppState } from "../state.slint";
+
+export component CutlassDropdown inherits Rectangle {
+    in property <[string]> items;
+    in-out property <string> current;
+    in property <string> placeholder: "Select";
+    in property <bool> searchable: false;
+    // Written by the search box; read by the caller's `items` binding.
+    in-out property <string> query: "";
+
+    callback selected(value: string);
+
+    private property <length> row-height: 26px;
+
+    height: 28px;
+    horizontal-stretch: 1;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: trigger.has-hover ? #232323 : #1a1a1a;
+
+    HorizontalLayout {
+        padding-left: AppStore.theme.metrics.spacing.sm;
+        padding-right: AppStore.theme.metrics.spacing.sm;
+        spacing: AppStore.theme.metrics.spacing.xs;
+
+        CutlassText {
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+            text: root.current == "" ? root.placeholder : root.current;
+            style: AppStore.theme.typography.body;
+            foreground: root.current == "" ? AppStore.theme.text.muted : AppStore.theme.text.primary;
+            overflow: TextOverflow.elide;
+        }
+
+        CutlassText {
+            width: 12px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            text: "v";
+            style: AppStore.theme.typography.caption;
+            foreground: AppStore.theme.text.muted;
+        }
+    }
+
+    trigger := TouchArea {
+        clicked => {
+            root.query = "";
+            popup.show();
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: root.width;
+        height: 260px;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: AppStore.theme.panel.background;
+            border-radius: AppStore.theme.metrics.radius.md;
+            border-width: 1px;
+            border-color: #ffffff1f;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000080;
+            drop-shadow-offset-y: 6px;
+
+            VerticalLayout {
+                padding: AppStore.theme.metrics.spacing.sm;
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                if root.searchable: Rectangle {
+                    height: 26px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: #111111;
+                    border-width: search.has-focus ? 1px : 0px;
+                    border-color: AppStore.theme.accent.primary;
+                    clip: true;
+                    forward-focus: search;
+
+                    search := TextInput {
+                        x: AppStore.theme.metrics.spacing.sm;
+                        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        single-line: true;
+                        color: AppStore.theme.text.primary;
+                        font-size: AppStore.theme.typography.body.size;
+                        selection-background-color: AppStore.theme.accent.primary.with-alpha(0.33);
+                        text <=> root.query;
+                        accessible-role: none;
+                    }
+
+                    placeholder := CutlassText {
+                        x: AppStore.theme.metrics.spacing.sm;
+                        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        text: (root.query == "" && search.preedit-text == "") ? "Search" : "";
+                        style: AppStore.theme.typography.body;
+                        foreground: AppStore.theme.text.muted;
+                        accessible-role: none;
+                    }
+                }
+
+                CutlassScrollView {
+                    vertical-stretch: 1;
+                    viewport-width: self.width;
+                    viewport-height: list.preferred-height;
+                    show-horizontal-scrollbar: false;
+
+                    list := VerticalLayout {
+                        spacing: 0;
+                        alignment: LayoutAlignment.start;
+
+                        for item in root.items: Rectangle {
+                            height: root.row-height;
+                            border-radius: AppStore.theme.metrics.radius.sm;
+                            background: item == root.current
+                                ? AppStore.theme.accent.primary.with-alpha(0.12)
+                                : (row-ta.has-hover ? #ffffff10 : transparent);
+
+                            CutlassText {
+                                x: AppStore.theme.metrics.spacing.sm;
+                                width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+                                height: parent.height;
+                                vertical-alignment: center;
+                                text: item;
+                                style: AppStore.theme.typography.body;
+                                foreground: item == root.current
+                                    ? AppStore.theme.accent.primary
+                                    : AppStore.theme.text.primary;
+                                overflow: TextOverflow.elide;
+                            }
+
+                            row-ta := TouchArea {
+                                clicked => {
+                                    // `current` is owned by the caller (bound to
+                                    // the model); just report the selection and
+                                    // let the commit + republish update it.
+                                    root.selected(item);
+                                    popup.close();
+                                    AppState.refocus-shortcuts();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

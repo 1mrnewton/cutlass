@@ -1,0 +1,100 @@
+import { TrackKind } from "models/index.slint";
+
+// App-wide window/view state. Anything that affects the whole shell
+// (chrome visibility, full-window overlays, …) lives here rather than
+// inside any one panel's state global.
+export global AppState {
+    // Start screen (launch.slint): the full-window home shown before the
+    // editor on a cold start. Dismissed by app.slint's session-epoch watcher
+    // the moment a real session loads (New / Open / Open Recent / autosave
+    // recovery) — the initial empty-project publish does not bump the epoch,
+    // so the launch screen stays up until the user actually picks something.
+    in-out property <bool> launch-visible: true;
+
+    in-out property <bool> preview-maximized: false;
+
+    // True on macOS, where the shell keeps the OS-drawn window frame (rounded
+    // corners, drop shadow, traffic lights) and only hides the titlebar
+    // (src/window.rs). There `no-frame` stays off and the title bar insets
+    // past the traffic lights with no custom caption buttons. Windows does the
+    // same trick with a different mechanism (a Win32 NCCALCSIZE subclass, also
+    // in src/window.rs) but keeps the custom caption buttons. Set once at
+    // startup from src/main.rs.
+    in-out property <bool> is-macos: false;
+
+    // True only where the shell must be fully frameless (`no-frame`) and draw
+    // its own chrome end to end — Linux/BSD, whose Wayland/X11 surfaces have no
+    // "native frame minus titlebar" mode to borrow (unlike macOS and Windows,
+    // which keep the OS frame and only suppress the caption). Set once at
+    // startup from src/main.rs.
+    in-out property <bool> frameless: false;
+
+    // AI assistant chat panel (ai-agent roadmap Phase 4): docked at the
+    // far right, toggled from the title bar.
+    in-out property <bool> agent-panel-open: true;
+
+    // Export settings dialog (modal overlay; see shell/export-dialog.slint).
+    in-out property <bool> export-dialog-open: false;
+
+    // Canvas settings dialog (M1: ratio preset + background; see
+    // shell/canvas-dialog.slint).
+    in-out property <bool> canvas-dialog-open: false;
+
+    // App settings screen (modal overlay; see shell/settings-dialog.slint).
+    // Opened from the native "Cutlass" menu → Settings… on macOS.
+    in-out property <bool> settings-open: false;
+
+    // Missing-media relink dialog (modal overlay; see
+    // shell/relink-dialog.slint). Raised by app.slint when a freshly
+    // opened/restored session has pool entries whose file is gone;
+    // dismissable — the library tiles keep their missing badges.
+    in-out property <bool> relink-dialog-open: false;
+
+    // Confirm-delete-media dialog (modal overlay; see
+    // shell/confirm-delete-dialog.slint). A library tile raises it when the
+    // user deletes a source still used on the timeline; confirming cascades
+    // the referencing clips' removal. The tile fills these before opening.
+    in-out property <bool> confirm-delete-media-open: false;
+    in-out property <string> confirm-delete-media-id: "";
+    in-out property <string> confirm-delete-media-name: "";
+    in-out property <int> confirm-delete-media-clip-count: 0;
+
+    // Bumped to pull keyboard focus back to the window's shortcut
+    // FocusScope (app.slint watches it). Text inputs legitimately take
+    // focus while editing; timeline interactions (clip grab, lane
+    // click, ruler scrub) call this so Delete / Ctrl+B / … always act
+    // on the timeline right after a click — never on a stale text box.
+    in-out property <int> shortcut-focus-nonce: 0;
+
+    public function refocus-shortcuts() {
+        self.shortcut-focus-nonce += 1;
+    }
+
+    // Window-space ghost while dragging a library tile onto the timeline.
+    in-out property <bool> library-drag-active: false;
+    // Identity + length (sequence ticks) of the media being dragged — set at
+    // press, consumed by the timeline's drop handler.
+    in-out property <string> library-drag-media-id: "";
+    in-out property <int> library-drag-duration-ticks: 0;
+    // Lane kind the dragged tile targets: video for media, text/sticker for
+    // generated tiles. Drives the kind-aware drop resolver (src/snap.rs).
+    in-out property <TrackKind> library-drag-lane-kind: TrackKind.video;
+    // Generator catalog key for a generated-tile drag ("text" | "solid" |
+    // "rect" | "ellipse"); "" while dragging imported media. Selects which
+    // drop callback the timeline fires on release.
+    in-out property <string> library-drag-generator: "";
+    in-out property <length> library-drag-w: 0px;
+    in-out property <length> library-drag-h: 0px;
+    // Cursor offset within the library tile at press — used to anchor the square ghost.
+    in-out property <length> library-drag-tile-anchor-x: 0px;
+    in-out property <length> library-drag-tile-anchor-y: 0px;
+
+    // Cursor point in window coords during the drag. Drop targeting keys off
+    // the pointer, not the ghost rectangle's corner.
+    in-out property <length> library-drag-cursor-x: 0px;
+    in-out property <length> library-drag-cursor-y: 0px;
+
+    // Written by TimelinePanel (it knows its own window-space bounds); read by
+    // the library's drop handler and the ghost.
+    in-out property <bool> library-drag-over-timeline: false;
+}

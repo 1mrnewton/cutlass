@@ -1,0 +1,23 @@
+import { Accent } from "accent.slint";
+import { AgentChat } from "agent-chat.slint";
+import { Metrics } from "metrics.slint";
+import { Panel } from "panel.slint";
+import { Scrollbar } from "scrollbar.slint";
+import { SplitGrip } from "split-grip.slint";
+import { Surface } from "surface.slint";
+import { TextColors } from "text-colors.slint";
+import { TrackLane } from "track-lane.slint";
+import { Typography } from "typography.slint";
+
+export struct Theme {
+    surface: Surface,
+    text: TextColors,
+    accent: Accent,
+    split-grip: SplitGrip,
+    typography: Typography,
+    metrics: Metrics,
+    panel: Panel,
+    scrollbar: Scrollbar,
+    track-lane: TrackLane,
+    agent: AgentChat,
+}

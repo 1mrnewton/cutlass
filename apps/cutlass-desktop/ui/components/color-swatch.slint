@@ -1,0 +1,107 @@
+// A color well that opens a popup palette of preset swatches. Picking a
+// swatch fires `changed` with the chosen color. (Free-form hex entry would
+// need a Rust-side parser since Slint can't parse hex at runtime; the curated
+// palette covers the common title-color choices CapCut surfaces.)
+
+import { CutlassText } from "text.slint";
+import { AppStore } from "../store/index.slint";
+import { AppState } from "../state.slint";
+
+export component CutlassColorSwatch inherits Rectangle {
+    in-out property <color> value: #ffffff;
+    in property <bool> enabled: true;
+
+    callback changed(value: color);
+
+    // Eight columns; rows of curated title colors (neutrals, then hues).
+    private property <[[color]]> palette: [
+        [#ffffff, #e0e0e0, #b0b0b0, #808080, #505050, #303030, #1a1a1a, #000000],
+        [#ff3b3b, #ff7a3b, #ffb03b, #ffe23b, #b6ff3b, #3bff6e, #3bffd6, #3bb0ff],
+        [#3b6eff, #6e3bff, #b03bff, #ff3bd6, #ff3b8a, #8b6d4b, #4b6d8b, #f5f5f5],
+    ];
+
+    width: 104px;
+    height: 28px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: #ffffff10;
+    opacity: enabled ? 1.0 : 0.45;
+
+    // Checkerboard would show alpha, but title colors are opaque here, so a
+    // flat fill preview is enough.
+    Rectangle {
+        x: 3px;
+        y: 3px;
+        width: parent.width - 28px;
+        height: parent.height - 6px;
+        border-radius: AppStore.theme.metrics.radius.sm;
+        background: root.value;
+        border-width: 1px;
+        border-color: #ffffff1f;
+    }
+
+    CutlassText {
+        x: parent.width - 22px;
+        width: 18px;
+        height: parent.height;
+        text: "v";
+        style: AppStore.theme.typography.caption;
+        foreground: AppStore.theme.text.muted;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    trigger := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            popup.show();
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: 244px;
+        height: content.preferred-height;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: AppStore.theme.panel.background;
+            border-radius: AppStore.theme.metrics.radius.md;
+            border-width: 1px;
+            border-color: #ffffff1f;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000080;
+            drop-shadow-offset-y: 6px;
+
+            content := VerticalLayout {
+                padding: AppStore.theme.metrics.spacing.md;
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                for row in root.palette: HorizontalLayout {
+                    spacing: AppStore.theme.metrics.spacing.sm;
+
+                    for swatch-color in row: Rectangle {
+                        width: 24px;
+                        height: 24px;
+                        border-radius: AppStore.theme.metrics.radius.sm;
+                        background: swatch-color;
+                        border-width: swatch-color == root.value ? 2px : 1px;
+                        border-color: swatch-color == root.value ? AppStore.theme.accent.primary : #ffffff24;
+
+                        TouchArea {
+                            clicked => {
+                                // `value` is caller-owned (bound to the model);
+                                // report the pick and let the commit update it.
+                                root.changed(swatch-color);
+                                popup.close();
+                                AppState.refocus-shortcuts();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

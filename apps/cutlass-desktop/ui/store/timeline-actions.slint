@@ -1,0 +1,469 @@
+// Timeline edit actions, shared by the toolbar buttons and the window
+// keyboard shortcuts so both paths gate and dispatch identically.
+//
+// Everything here is UI-side orchestration only: read the selection /
+// playhead, gate, then raise the matching `EditorStore` callback. The
+// worker thread parses ids, the engine validates atomically, and the
+// republished projection is what changes on screen — no Slint-side
+// mutation of project state, ever.
+
+import { EditorStore } from "editor-store.slint";
+import { TimelineStore } from "timeline-store.slint";
+import { TimelineViewState } from "../panels/timeline/state.slint";
+import { InspectorBackend, SelectedClipInfo } from "../lib/inspector-backend.slint";
+import { SelectionBackend, SelectionUpdate } from "../lib/selection-backend.slint";
+import { TimelineLib } from "../lib/timeline-lib.slint";
+import { TransportBackend } from "../lib/transport-backend.slint";
+
+export global TimelineActions {
+    // --- selection ---------------------------------------------------
+
+    public pure function has-selection() -> bool {
+        return TimelineStore.selected-clip-id != "";
+    }
+
+    public function clear-selection() {
+        TimelineStore.selected-track-id = "";
+        TimelineStore.selected-clip-id = "";
+        TimelineStore.selected-ids = [];
+    }
+
+    // Resolve the selected clip in the projection (found == false when
+    // nothing is selected or the selection went stale after an edit).
+    public pure function selected-clip() -> SelectedClipInfo {
+        return InspectorBackend.resolve-selection(
+            EditorStore.project.sequence,
+            TimelineStore.selected-track-id,
+            TimelineStore.selected-clip-id);
+    }
+
+    // Scratch slot for prune-selection: the result is read several times and
+    // Slint functions have no local bindings (same trick as pending-tick).
+    private property <SelectionUpdate> pending-prune;
+
+    // Reconcile the selection with a freshly published projection (app.slint
+    // calls this on every projection-revision bump): undo/redo and agent
+    // edits can remove clips the selection still points at — drop those ids
+    // and re-anchor the primary instead of leaving them stale. Selection
+    // only mutates when something actually changed (prune never adds or
+    // reorders, so an equal length ⇔ an identical set).
+    public function prune-selection() {
+        if (TimelineStore.selected-clip-id == "" && TimelineStore.selected-ids.length == 0) {
+            return;
+        }
+        self.pending-prune = SelectionBackend.prune(
+            EditorStore.project.sequence,
+            TimelineStore.selected-ids,
+            TimelineStore.selected-clip-id);
+        if (self.pending-prune.ids.length != TimelineStore.selected-ids.length
+                || self.pending-prune.primary-clip-id != TimelineStore.selected-clip-id
+                || self.pending-prune.primary-track-id != TimelineStore.selected-track-id) {
+            TimelineStore.apply-selection(self.pending-prune);
+        }
+    }
+
+    // --- edit ops ----------------------------------------------------
+
+    public function delete-selected() {
+        if (!self.has-selection()) {
+            return;
+        }
+        // The whole multi-selection goes in one batch (one history entry);
+        // linked partners ride along because selection includes them.
+        EditorStore.on-clips-deleted(TimelineStore.selected-ids);
+        self.clear-selection();
+    }
+
+    // CapCut gates Split on the playhead actually crossing the clip —
+    // splitting at (or outside) an edge is a no-op.
+    public pure function can-split() -> bool {
+        return self.selected-clip().found
+            && TimelineStore.playhead-tick
+                > self.selected-clip().clip.timeline-start.value
+            && TimelineStore.playhead-tick
+                < self.selected-clip().clip.timeline-start.value
+                    + self.selected-clip().clip.source-range.duration.value;
+    }
+
+    public function split-at-playhead() {
+        if (!self.can-split()) {
+            return;
+        }
+        // The head keeps its id, so the selection stays on the left part.
+        EditorStore.on-clip-split(TimelineStore.selected-clip-id, TimelineStore.playhead-tick);
+    }
+
+    // Drop an unnamed marker at the playhead (M key / toolbar). Empty color
+    // cycles the fixed palette on the engine side.
+    public function add-marker-at-playhead() {
+        TimelineStore.on-marker-added(TimelineStore.playhead-tick, "", "");
+    }
+
+    // Remove a ruler marker by id (right-click on the flag).
+    public function remove-marker(marker-id: string) {
+        if (marker-id != "") {
+            TimelineStore.on-marker-removed(marker-id);
+        }
+    }
+
+    // Copy/duplicate act on the whole multi-selection (one block, one
+    // history entry), same as delete — linked partners ride along because
+    // selection includes them.
+    public function copy-selected() {
+        if (self.has-selection()) {
+            EditorStore.on-clips-copied(TimelineStore.selected-ids);
+        }
+    }
+
+    public function paste-at-playhead() {
+        EditorStore.on-paste-at(TimelineStore.playhead-tick);
+    }
+
+    public function duplicate-selected() {
+        if (self.has-selection()) {
+            EditorStore.on-clips-duplicated(TimelineStore.selected-ids);
+        }
+    }
+
+    // Whether the selection touches any link group — gates the toolbar's
+    // Unlink button.
+    public pure function selection-has-link() -> bool {
+        return SelectionBackend.has-link(
+            EditorStore.project.sequence,
+            TimelineStore.selected-ids);
+    }
+
+    // Dissolve the link groups the selection touches (whole groups — the
+    // gesture means "separate this A/V pair", not "detach one member").
+    public function unlink-selected() {
+        if (self.selection-has-link()) {
+            EditorStore.on-clips-unlinked(TimelineStore.selected-ids);
+        }
+    }
+
+    public function undo() {
+        EditorStore.on-undo();
+    }
+
+    public function redo() {
+        EditorStore.on-redo();
+    }
+
+    // Main-track magnet toggle. The worker mirrors the flag (delete/paste/
+    // duplicate policy) and packs the main lane when it turns on.
+    public function toggle-main-magnet() {
+        TimelineStore.main-magnet-enabled = !TimelineStore.main-magnet-enabled;
+        EditorStore.on-main-magnet-changed(TimelineStore.main-magnet-enabled);
+    }
+
+    // CapCut linkage toggle. The worker mirrors the flag (linked drops,
+    // trims, splits); selection expansion reads it UI-side.
+    public function toggle-linkage() {
+        TimelineStore.link-enabled = !TimelineStore.link-enabled;
+        EditorStore.on-linkage-changed(TimelineStore.link-enabled);
+    }
+
+    // --- playhead ----------------------------------------------------
+    // TimelinePanel watches playhead-tick and turns every change into a
+    // (coalesced) preview frame request, so these only set the tick.
+
+    // Confine a manual seek (ruler scrub, frame-step keys, fullscreen
+    // slider) to the sequence. An empty timeline ends at tick 0, so the
+    // clamp pins the playhead there — nothing to seek or scrub past.
+    public pure function clamp-playhead(tick: int) -> int {
+        return clamp(tick, 0, self.sequence-end-tick());
+    }
+
+    public function step-playhead(delta-frames: int) {
+        TimelineStore.playhead-tick = self.clamp-playhead(TimelineStore.playhead-tick + delta-frames);
+    }
+
+    public function seek-start() {
+        TimelineStore.playhead-tick = 0;
+    }
+
+    public function seek-end() {
+        TimelineStore.playhead-tick = self.sequence-end-tick();
+    }
+
+    // --- playback transport (playback roadmap Phases 1, 3, 4) ----------
+    // A window-level Timer (app.slint) calls playback-step, which
+    // *recomputes* the tick from the clock — never tick++ per rendered
+    // frame — so slow decode drops frames (requests coalesce on the
+    // worker) instead of slowing the playhead. At speed 1/1 the clock is
+    // the audio device (TransportBackend routes playback-tick to consumed
+    // device frames); shuttle speeds and deviceless machines fall back to
+    // the scaled wall clock, muted. Scrubs/steps while playing are
+    // detected as external playhead moves and re-anchor both clocks
+    // (seek-and-keep-playing).
+
+    private property <int> anchor-tick;
+    private property <int> anchor-ms;
+    // Last tick playback-step published; a live playhead that differs
+    // means the user moved it (ruler scrub, arrows, Home/End, slider).
+    private property <int> last-step-tick;
+    // Scratch slot: the computed tick is needed twice per step and Slint
+    // functions have no local bindings (same trick as pending-scroll-x).
+    private property <int> pending-tick;
+
+    public pure function sequence-end-tick() -> int {
+        return max(0, TimelineLib.sequence-duration(EditorStore.project.sequence).value);
+    }
+
+    // --- in/out range (Phase 4) ---
+    // Both marks set and ordered ⇒ play/loop confine to [in, out).
+
+    public pure function range-active() -> bool {
+        return TimelineStore.range-in-tick >= 0
+            && TimelineStore.range-out-tick > TimelineStore.range-in-tick;
+    }
+
+    pure function play-start-bound() -> int {
+        return self.range-active() ? TimelineStore.range-in-tick : 0;
+    }
+
+    pure function play-end-bound() -> int {
+        return self.range-active()
+            ? min(TimelineStore.range-out-tick, self.sequence-end-tick())
+            : self.sequence-end-tick();
+    }
+
+    public function set-range-in() {
+        TimelineStore.range-in-tick = TimelineStore.playhead-tick;
+        if (TimelineStore.range-out-tick >= 0
+                && TimelineStore.range-out-tick <= TimelineStore.range-in-tick) {
+            TimelineStore.range-out-tick = -1;
+        }
+    }
+
+    public function set-range-out() {
+        if (TimelineStore.playhead-tick <= 0) {
+            return; // out at 0 can never bound a range
+        }
+        TimelineStore.range-out-tick = TimelineStore.playhead-tick;
+        if (TimelineStore.range-in-tick >= TimelineStore.range-out-tick) {
+            TimelineStore.range-in-tick = -1;
+        }
+    }
+
+    public function clear-range() {
+        TimelineStore.range-in-tick = -1;
+        TimelineStore.range-out-tick = -1;
+    }
+
+    public function toggle-loop() {
+        TimelineStore.loop-enabled = !TimelineStore.loop-enabled;
+    }
+
+    // (Re-)anchor both clocks at the current playhead and run. The single
+    // entry point for starting, seeking while playing, and loop wraps —
+    // every transport state change funnels through here so the audio
+    // engine can never disagree with the UI clock.
+    function start-clock() {
+        self.anchor-tick = TimelineStore.playhead-tick;
+        self.anchor-ms = animation-tick() / 1ms;
+        self.last-step-tick = TimelineStore.playhead-tick;
+        TimelineStore.playing = true;
+        TransportBackend.transport-play(
+            TimelineStore.playhead-tick,
+            TimelineStore.play-speed-num,
+            TimelineStore.play-speed-den);
+    }
+
+    public function play() {
+        if (self.sequence-end-tick() <= 0) {
+            return; // empty timeline: nothing to play
+        }
+        // Plain play is always 1x forward (shuttle speeds are JKL-only).
+        TimelineStore.play-speed-num = 1;
+        TimelineStore.play-speed-den = 1;
+        // CapCut: play at the end restarts from the top (of the range,
+        // when one is set; a playhead outside the range enters it).
+        if (TimelineStore.playhead-tick >= self.play-end-bound()
+                || TimelineStore.playhead-tick < self.play-start-bound()) {
+            TimelineStore.playhead-tick = self.play-start-bound();
+        }
+        self.start-clock();
+    }
+
+    public function pause() {
+        TimelineStore.playing = false;
+        TransportBackend.transport-pause();
+    }
+
+    public function toggle-play() {
+        if (TimelineStore.playing) {
+            self.pause();
+        } else {
+            self.play();
+        }
+    }
+
+    // --- JKL shuttle (Phase 4) ---
+    // L plays forward; L again doubles (×2, ×4, ×8 cap). J mirrors in
+    // reverse. K pauses. Any direction change resets to 1x in the new
+    // direction. Only 1/1 carries audio (transport-play mutes the rest).
+
+    public function shuttle-forward() {
+        if (self.sequence-end-tick() <= 0) {
+            return;
+        }
+        if (TimelineStore.playing && TimelineStore.play-speed-num > 0) {
+            TimelineStore.play-speed-num = min(TimelineStore.play-speed-num * 2, 8);
+        } else {
+            TimelineStore.play-speed-num = 1;
+        }
+        TimelineStore.play-speed-den = 1;
+        if (TimelineStore.playhead-tick >= self.play-end-bound()) {
+            TimelineStore.playhead-tick = self.play-start-bound();
+        }
+        self.start-clock();
+    }
+
+    public function shuttle-reverse() {
+        if (self.sequence-end-tick() <= 0) {
+            return;
+        }
+        if (TimelineStore.playing && TimelineStore.play-speed-num < 0) {
+            TimelineStore.play-speed-num = max(TimelineStore.play-speed-num * 2, -8);
+        } else {
+            TimelineStore.play-speed-num = -1;
+        }
+        TimelineStore.play-speed-den = 1;
+        if (TimelineStore.playhead-tick <= self.play-start-bound()) {
+            // Reversing from the start bound starts at the far end.
+            TimelineStore.playhead-tick = self.play-end-bound();
+        }
+        self.start-clock();
+    }
+
+    // One clock step (sub-frame Timer). Sets the playhead only when the
+    // frame index moved; the window-level playhead watcher turns each
+    // change into a coalesced preview frame request.
+    public function playback-step() {
+        if (!TimelineStore.playing) {
+            return;
+        }
+        if (TimelineStore.playhead-tick != self.last-step-tick) {
+            // External move while playing = seek: continue from there.
+            self.start-clock();
+            return;
+        }
+        self.pending-tick = TransportBackend.playback-tick(
+            self.anchor-tick,
+            self.anchor-ms,
+            animation-tick() / 1ms,
+            EditorStore.project.sequence.fps.num,
+            EditorStore.project.sequence.fps.den,
+            TimelineStore.play-speed-num,
+            TimelineStore.play-speed-den);
+        if (TimelineStore.play-speed-num >= 0
+                && self.pending-tick >= self.play-end-bound()) {
+            // Forward out the end bound: loop wraps to the start bound,
+            // otherwise CapCut end behavior — park on the bound and stop.
+            // (Edits can also shrink the sequence under the playhead.)
+            if (TimelineStore.loop-enabled
+                    && self.play-end-bound() > self.play-start-bound()) {
+                TimelineStore.playhead-tick = self.play-start-bound();
+                self.start-clock();
+                return;
+            }
+            TimelineStore.playhead-tick = self.play-end-bound();
+            self.last-step-tick = TimelineStore.playhead-tick;
+            // Deferred stop: we're inside the playback Timer's own callback,
+            // so flipping `playing` here would re-enter Slint's timer code.
+            TransportBackend.request-stop();
+            return;
+        }
+        if (TimelineStore.play-speed-num < 0
+                && self.pending-tick <= self.play-start-bound()) {
+            // Reverse out the start bound: mirror of the forward case.
+            if (TimelineStore.loop-enabled
+                    && self.play-end-bound() > self.play-start-bound()) {
+                TimelineStore.playhead-tick = self.play-end-bound();
+                self.start-clock();
+                return;
+            }
+            TimelineStore.playhead-tick = self.play-start-bound();
+            self.last-step-tick = TimelineStore.playhead-tick;
+            // Deferred stop (see the forward-bound case above).
+            TransportBackend.request-stop();
+            return;
+        }
+        TimelineStore.playhead-tick = self.pending-tick;
+        self.last-step-tick = self.pending-tick;
+    }
+
+    // --- zoom ----------------------------------------------------------
+    // `zoom` is px per sequence frame. The slider works on a log scale so
+    // each notch feels like the same relative change (CapCut's slider
+    // behaves this way too).
+
+    out property <float> min-zoom: 0.05;
+    out property <float> max-zoom: 40.0;
+
+    public pure function zoom-to-slider(zoom: float) -> float {
+        return 100 * Math.log(zoom / self.min-zoom, self.max-zoom / self.min-zoom);
+    }
+
+    public pure function slider-to-zoom(value: float) -> float {
+        return self.min-zoom * Math.pow(self.max-zoom / self.min-zoom, value / 100);
+    }
+
+    // Anchor tick for zoom changes: the playhead when it's visible in
+    // the viewport, the viewport-center tick otherwise. Anchoring keeps
+    // what the user is looking at stationary while the scale changes.
+    pure function zoom-anchor-tick() -> float {
+        return (TimelineStore.playhead-tick * TimelineStore.zoom * 1px
+                    + TimelineViewState.scroll-x >= 0px
+                && TimelineStore.playhead-tick * TimelineStore.zoom * 1px
+                    + TimelineViewState.scroll-x <= TimelineViewState.viewport-w)
+            ? TimelineStore.playhead-tick * 1.0
+            : (TimelineViewState.viewport-w / 2 - TimelineViewState.scroll-x)
+                / 1px / TimelineStore.zoom;
+    }
+
+    // New scroll-x that keeps `anchor-tick` at the same viewport pixel
+    // once zoom becomes `z1`: scroll' = scroll + anchor·(z0 − z1).
+    pure function scroll-after-zoom(z1: float, anchor-tick: float) -> length {
+        return min(0px, TimelineViewState.scroll-x
+            + anchor-tick * (TimelineStore.zoom - z1) * 1px);
+    }
+
+    // Scratch slot: the corrected scroll must be computed against the
+    // *old* zoom, before TimelineStore.zoom mutates (Slint functions
+    // have no local bindings).
+    private property <length> pending-scroll-x;
+
+    // Zoom while keeping `anchor-tick` pinned to its current viewport pixel.
+    // The toolbar slider anchors on the playhead/center; Ctrl+scroll anchors
+    // on the cursor tick.
+    public function set-zoom-anchored(new-zoom: float, anchor-tick: float) {
+        self.pending-scroll-x =
+            self.scroll-after-zoom(clamp(new-zoom, self.min-zoom, self.max-zoom), anchor-tick);
+        TimelineStore.zoom = clamp(new-zoom, self.min-zoom, self.max-zoom);
+        // TimelinePanel's min-scroll-x watcher clamps the far edge.
+        TimelineViewState.scroll-x = self.pending-scroll-x;
+    }
+
+    public function set-zoom(new-zoom: float) {
+        self.set-zoom-anchored(new-zoom, self.zoom-anchor-tick());
+    }
+
+    // Fit the whole sequence into the lane viewport (CapCut's zoom-to-fit),
+    // with a small tail margin so the last clip isn't flush to the edge.
+    public function zoom-to-fit() {
+        // Empty timeline (or viewport not measured yet): reset to default.
+        if (TimelineLib.sequence-duration(EditorStore.project.sequence).value <= 0
+                || TimelineViewState.viewport-w <= 0px) {
+            TimelineStore.zoom = 3;
+            TimelineViewState.scroll-x = 0px;
+            return;
+        }
+        TimelineStore.zoom = clamp(
+            TimelineViewState.viewport-w / 1px
+                / (TimelineLib.sequence-duration(EditorStore.project.sequence).value * 1.05),
+            self.min-zoom, self.max-zoom);
+        TimelineViewState.scroll-x = 0px;
+    }
+}

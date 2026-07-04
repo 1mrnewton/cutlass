@@ -1,0 +1,292 @@
+// Frameless-window title bar (CapCut layout): brand and the File menu at
+// the left, project title centered, Export and the window controls at the
+// right. The whole strip doubles as the OS drag region — press-and-move
+// anywhere that isn't a button moves the window, double-click toggles
+// maximize. Buttons are declared after the drag TouchArea so they stack
+// above it and keep their clicks.
+
+import { CutlassText, AccentButton, SubtleButton } from "../components/index.slint";
+import { LineTextInput } from "../panels/inspector/inspector-widgets.slint";
+import { AppStore, EditorStore } from "../store/index.slint";
+import { WindowBackend } from "../lib/window-backend.slint";
+import { ExportBackend } from "../lib/export-backend.slint";
+import { AppState } from "../state.slint";
+
+// Caption button (minimize/maximize/close): full-height hover strip, no
+// radius — Windows-style, like CapCut's. `danger` paints the close
+// button's red hover.
+component CaptionButton inherits Rectangle {
+    in property <string> glyph;
+    in property <bool> danger: false;
+    callback clicked();
+
+    width: 44px;
+    background: !ta.has-hover ? transparent
+        : danger ? #E81123
+        : #ffffff14;
+
+    CutlassText {
+        width: parent.width;
+        height: parent.height;
+        text: glyph;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        style: AppStore.theme.typography.label;
+        foreground: ta.has-hover ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component TitleBar inherits Rectangle {
+    height: AppStore.theme.metrics.layout.toolbar-height;
+    background: AppStore.theme.surface.app-background;
+
+    // The committed draft name (projection republishes it after a rename or a
+    // session swap). The edit field seeds off this and the watcher below
+    // re-syncs it after editing drops the seed binding — the same pattern the
+    // inspector's numeric fields use.
+    property <string> committed-title: EditorStore.project.title == ""
+        ? "Untitled project"
+        : EditorStore.project.title;
+    changed committed-title => {
+        name-edit.text = committed-title;
+    }
+
+    drag := TouchArea {
+        moved => {
+            // Small threshold so a stationary double-click never turns
+            // into a 1px system move (which would eat the second click).
+            if (abs(self.mouse-x - self.pressed-x) > 2px || abs(self.mouse-y - self.pressed-y) > 2px) {
+                WindowBackend.begin-move();
+            }
+        }
+        double-clicked => {
+            WindowBackend.toggle-maximize();
+        }
+    }
+
+    // Centered editable draft name (CapCut renames inline from the title).
+    // Declared after the drag TouchArea so it stacks above and keeps its
+    // clicks; the rest of the bar stays draggable. Edits auto-save, so there
+    // is no dirty dot — commit on Enter or blur forwards the trimmed name to
+    // the worker, which renames as one undoable edit (a no-op rename is
+    // dropped worker-side, so a focus-and-leave costs nothing).
+    name-edit := LineTextInput {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 280px;
+        horizontal-alignment: TextHorizontalAlignment.center;
+        text: committed-title;
+        accepted(entered) => {
+            EditorStore.on-rename-project(entered);
+            // Restore the committed name immediately: a rejected (blank) entry
+            // would otherwise leave the box empty, and a valid one round-trips
+            // back through `committed-title` on the next projection republish.
+            self.text = committed-title;
+        }
+    }
+
+    HorizontalLayout {
+        // On macOS the native traffic lights sit at the top-left (the titlebar
+        // is hidden, not removed — see src/window.rs), so the brand insets
+        // clear of them and the custom caption buttons drop out below. Other
+        // platforms keep the flush brand and the full custom chrome.
+        padding-left: AppState.is-macos ? 78px : AppStore.theme.metrics.spacing.md;
+        padding-right: AppState.is-macos ? AppStore.theme.metrics.spacing.sm : AppStore.theme.metrics.spacing.none;
+        spacing: AppStore.theme.metrics.spacing.sm;
+
+        VerticalLayout {
+            alignment: center;
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                Rectangle {
+                    width: 18px;
+                    height: 18px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: @linear-gradient(135deg, AppStore.theme.accent.primary 0%, AppStore.theme.accent.gradient-end 100%);
+
+                    CutlassText {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "C";
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        style: AppStore.theme.typography.heading-sm;
+                        foreground: #0A0A0A;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+
+                    CutlassText {
+                        text: "Cutlass";
+                        style: AppStore.theme.typography.heading-sm;
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            width: AppStore.theme.metrics.spacing.sm;
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            // File menu (app-owned drafts): New starts a fresh draft, Open
+            // file… imports an external `.cutlass` into the project store, and
+            // Save is just an explicit "flush now" — edits already auto-save,
+            // so there is no Save As (no user-chosen path) and no dirty dot.
+            // The launch gallery lists existing projects.
+            file-menu := ContextMenuArea {
+                width: file-button.width;
+                height: file-button.height;
+
+                Menu {
+                    MenuItem {
+                        title: "New Project";
+                        activated => {
+                            EditorStore.on-new-requested();
+                        }
+                    }
+                    MenuItem {
+                        title: "Open file…";
+                        activated => {
+                            EditorStore.on-open-requested();
+                        }
+                    }
+                    MenuSeparator { }
+                    MenuItem {
+                        title: "Save";
+                        activated => {
+                            EditorStore.on-save-requested(false);
+                        }
+                    }
+                    MenuSeparator { }
+                    MenuItem {
+                        title: "Canvas Settings…";
+                        activated => {
+                            AppState.canvas-dialog-open = true;
+                        }
+                    }
+                }
+
+                file-button := SubtleButton {
+                    label: "File";
+                    clicked => {
+                        file-menu.show({ x: 0, y: file-button.height });
+                    }
+                }
+            }
+        }
+
+        // Flexible middle: stays empty (the centered title paints at bar
+        // level) and stays draggable — plain rectangles don't intercept
+        // the drag TouchArea below.
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            // AI assistant dock toggle (ai-agent roadmap Phase 4).
+            SubtleButton {
+                label: AppState.agent-panel-open ? "Hide Assistant" : "Assistant";
+                clicked => {
+                    AppState.agent-panel-open = !AppState.agent-panel-open;
+                }
+            }
+        }
+
+        Rectangle {
+            width: AppStore.theme.metrics.spacing.sm;
+        }
+
+        // Settings — reachable on every platform (the macOS Cutlass menu also
+        // opens it). Gear glyph is a placeholder until the lucide icon lands
+        // (see docs/icons.md).
+        VerticalLayout {
+            alignment: center;
+
+            gear := Rectangle {
+                width: 28px;
+                height: 26px;
+                border-radius: AppStore.theme.metrics.radius.sm;
+                background: gear-ta.has-hover ? #ffffff14 : transparent;
+
+                CutlassText {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "⚙";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    style: AppStore.theme.typography.label;
+                    foreground: gear-ta.has-hover ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
+                }
+
+                gear-ta := TouchArea {
+                    clicked => {
+                        AppState.settings-open = true;
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            width: AppStore.theme.metrics.spacing.sm;
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            // While a job runs the dialog may be reopened from here; the
+            // label doubles as a compact progress readout (CapCut does the
+            // same with its export chip).
+            AccentButton {
+                label: ExportBackend.running
+                    ? "Exporting " + round(clamp(ExportBackend.progress, 0.0, 1.0) * 100) + "%"
+                    : "Export";
+                clicked => {
+                    AppState.export-dialog-open = true;
+                }
+            }
+        }
+
+        Rectangle {
+            width: AppStore.theme.metrics.spacing.md;
+        }
+
+        // Custom window controls — only off macOS, where the native
+        // traffic lights (kept on the hidden titlebar) handle these.
+        if !AppState.is-macos: CaptionButton {
+            glyph: "─";
+            clicked => {
+                WindowBackend.minimize();
+            }
+        }
+
+        if !AppState.is-macos: CaptionButton {
+            glyph: WindowBackend.maximized ? "❐" : "□";
+            clicked => {
+                WindowBackend.toggle-maximize();
+            }
+        }
+
+        if !AppState.is-macos: CaptionButton {
+            glyph: "✕";
+            danger: true;
+            clicked => {
+                WindowBackend.close();
+            }
+        }
+    }
+}

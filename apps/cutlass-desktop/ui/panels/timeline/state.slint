@@ -1,0 +1,71 @@
+// Ephemeral timeline view state (scroll, drag offsets). Domain state lives in TimelineStore.
+export global TimelineViewState {
+    in-out property <length> scroll-x: 0px;
+    in-out property <length> scroll-y: 0px;
+
+    // Width of the lane viewport (the scrolling Flickable), mirrored by
+    // TimelinePanel so zoom anchoring can convert viewport px ↔ ticks.
+    in-out property <length> viewport-w: 0px;
+
+    // Window-space cursor during a clip move/trim gesture (library drags use
+    // AppState.library-drag-cursor-*). Recorded by ClipView; read by the
+    // panel's edge auto-scroll so it can scroll while the cursor sits in the
+    // viewport's edge zone without a fresh pointer-move event.
+    in-out property <length> pointer-window-x: 0px;
+    in-out property <length> pointer-window-y: 0px;
+
+    // --- clip drag gesture ---------------------------------------------
+    // Set by ClipView on grab; TimelinePanel resolves the landing spot each
+    // frame (ghost + guides) and commits on release. Empty clip id ⇔ no drag.
+    in-out property <string> dragging-source-track-id: "";
+    in-out property <string> dragging-clip-id: "";
+
+    // Cursor deltas from the press point (the original clip stays in place,
+    // dimmed; a floating copy follows the cursor).
+    in-out property <length> drag-dx-px: 0px;
+    in-out property <length> drag-dy-px: 0px;
+
+    // Snapshot of the grabbed clip, so drag visuals don't have to search the
+    // sequence model per frame.
+    in-out property <int> dragging-source-row: 0;
+    in-out property <int> dragging-start-value: 0;
+    in-out property <int> dragging-duration-ticks: 0;
+    in-out property <color> dragging-color: transparent;
+    in-out property <string> dragging-name: "";
+
+    // Set by ClipView on pointer-up; TimelinePanel commits the move and then
+    // clears the whole drag state (it owns the resolution, ClipView doesn't).
+    in-out property <bool> drag-released: false;
+
+    // True when the grabbed clip is part of a multi-selection: the panel
+    // resolves the whole set with one group resolution (uniform dx + row
+    // delta) instead of the single-clip resolver.
+    in-out property <bool> drag-is-group: false;
+
+    // --- marquee selection (drag on empty lane space) ---------------------
+    // Anchor + live corner in lane-content space (scroll-independent).
+    // TimelinePanel's wheel-area records the gesture; the live selection is
+    // applied per move via SelectionBackend.resolve-marquee.
+    in-out property <bool> marquee-active: false;
+    in-out property <length> marquee-anchor-x: 0px;
+    in-out property <length> marquee-anchor-y: 0px;
+    in-out property <length> marquee-x: 0px;
+    in-out property <length> marquee-y: 0px;
+
+    // --- clip trim gesture (edge drag) -----------------------------------
+    // Same shape as the move gesture: the edge handle records the press +
+    // cursor delta; TimelinePanel resolves the new extent each frame (live
+    // stretch preview + guide) and commits on release. Empty clip id ⇔ no trim.
+    in-out property <string> trimming-track-id: "";
+    in-out property <string> trimming-clip-id: "";
+    // True when the left (head) edge is grabbed, false for the right (tail).
+    in-out property <bool> trimming-head: false;
+    in-out property <length> trim-dx-px: 0px;
+
+    // Press snapshot, so the preview doesn't search the sequence per frame.
+    in-out property <int> trimming-source-row: 0;
+    in-out property <int> trimming-duration-ticks: 0;
+    in-out property <color> trimming-color: transparent;
+
+    in-out property <bool> trim-released: false;
+}

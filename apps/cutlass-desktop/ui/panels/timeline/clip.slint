@@ -1,0 +1,890 @@
+import { AppStore, EditorStore } from "../../store/index.slint";
+import { Clip, TrackKind } from "../../models/index.slint";
+import { TimelineLib, StripBackend, SelectionBackend, KeyframeBackend, InspectorBackend } from "../../lib/index.slint";
+import { TimelineStore } from "../../store/timeline-store.slint";
+import { TimelineViewState } from "state.slint";
+import { AppState } from "../../state.slint";
+
+// Named `model` because `clip` is a built-in Slint property on visual elements.
+//
+// The drag gesture only records state here (press snapshot + cursor deltas);
+// TimelinePanel owns the resolution, the floating drag visual, the ghost, and
+// the commit — the original clip just stays in place, dimmed, until the
+// engine republishes the projection.
+export component ClipView inherits Rectangle {
+    in property <Clip> model;
+    in property <string> track-id;
+    in property <int> track-row;
+    in property <TrackKind> track-kind;
+    in property <color> track-color;
+    // Lane header flags. Hidden (`!track-enabled`) lanes dim their clips;
+    // locked lanes can't be selected, moved, or trimmed.
+    in property <bool> track-enabled: true;
+    in property <bool> track-locked: false;
+    in property <float> zoom;
+
+    private property <bool> is-active-drag:
+        TimelineViewState.dragging-source-track-id == track-id
+        && TimelineViewState.dragging-clip-id == model.id;
+
+    private property <bool> is-active-trim:
+        TimelineViewState.trimming-track-id == track-id
+        && TimelineViewState.trimming-clip-id == model.id;
+
+    private property <bool> is-selected:
+        SelectionBackend.contains(TimelineStore.selected-ids, model.id);
+
+    // Edge handles cap at a third of the clip so very short clips keep a
+    // grabbable middle for the move gesture.
+    private property <length> handle-width: min(6px, self.width / 3);
+
+    // Selected members of an active group drag / linked trim: their floating
+    // copies (or partner stretch previews) render above, so the originals dim
+    // exactly like the grabbed clip does.
+    private property <bool> rides-along: root.is-selected
+        && ((TimelineViewState.drag-is-group && TimelineViewState.dragging-clip-id != "")
+            || TimelineViewState.trimming-clip-id != "");
+
+    // CapCut dims the source position while the floating copy (move) or the
+    // stretch preview (trim) shows the live result; a hidden lane
+    // (`!track-enabled`) stays dimmed for as long as it's off.
+    //
+    // Dim via per-element colors, NOT the group `opacity` property: opacity on
+    // an element with children makes Slint composite the subtree into an
+    // intermediate GPU texture sized to the element's full geometry. A long
+    // clip at high zoom exceeds the GPU max texture dimension (16384 px) and
+    // aborts the app inside wgpu.
+    private property <bool> dimmed:
+        is-active-drag || is-active-trim || rides-along || !track-enabled;
+
+    // --- Phase 8: clip content (filmstrip / waveform / inline text) ------
+
+    private property <bool> has-media: model.media-id != "";
+    private property <bool> show-filmstrip: has-media && track-kind == TrackKind.video;
+    private property <bool> show-waveform: has-media && track-kind == TrackKind.audio;
+    // CapCut keeps a video's sound on the clip itself, so a video clip whose
+    // media carries audio shows a slim waveform band along its bottom edge
+    // (the audio is mixed from this lane — there is no separate audio lane).
+    private property <bool> show-embedded-audio:
+        has-media && track-kind == TrackKind.video && model.has-audio;
+    private property <bool> is-text: track-kind == TrackKind.text;
+
+    // Visible slice of this clip in 256px buckets of clip-local x, so
+    // scrolling only re-resolves the tile model when a bucket boundary is
+    // crossed (src/strips.rs pads by one tile). scroll-x is the Flickable
+    // viewport-x: ≤ 0 when scrolled right.
+    private property <int> vis-from-bucket: floor(
+        (-TimelineViewState.scroll-x - root.x) / 256px);
+    private property <int> vis-to-bucket: floor(
+        (-TimelineViewState.scroll-x + TimelineViewState.viewport-w - root.x) / 256px);
+
+    // The name/duration row needs space; hide labels on slivers entirely.
+    private property <bool> show-labels: root.width > 40px;
+    private property <length> label-row-h: 14px;
+
+    // Audio badge state (volume/fades): non-default audio earns a chip in
+    // the badge cluster. A keyframed gain (M8) takes precedence and shows its
+    // own envelope chip + on-clip line; otherwise exactly one M1 chip fires:
+    // muted wins, then a changed gain, then fades-only. The fields are engine
+    // defaults on non-audio clips, so in practice this shows on audio lanes.
+    private property <bool> audio-enveloped: model.has-volume-envelope;
+    private property <bool> audio-muted: !audio-enveloped && model.volume == 0.0;
+    private property <bool> audio-gain-changed: !audio-enveloped
+        && model.volume != 1.0 && model.volume != 0.0;
+    private property <bool> audio-faded-only: !audio-enveloped && model.volume == 1.0
+        && (model.fade-in-s > 0 || model.fade-out-s > 0);
+
+    // --- audio fade corner handles (M8 fades) ----------------------------
+    // CapCut-style fade ramps: drag the top corners of an audio clip to set
+    // fade-in (left) / fade-out (right) durations. Geometry maps seconds to
+    // px proportionally against the card width (so it survives zoom and the
+    // retime scale), committing one envelope-preserving set-clip-fades edit
+    // on release. The handle only tracks the gesture; the live width drives
+    // the preview triangle, and the projection republish re-snaps on commit.
+    private property <float> aud-dur-s: root.model.source-range.duration.rate.num > 0
+        ? root.model.source-range.duration.value * root.model.source-range.duration.rate.den
+            / root.model.source-range.duration.rate.num
+        : 0;
+    // 0 idle · 1 dragging fade-in · 2 dragging fade-out.
+    private property <int> fade-drag: 0;
+    private property <length> fade-drag-dx: 0px;
+    private property <length> fade-in-w: root.width * (root.aud-dur-s > 0 ? root.model.fade-in-s / root.aud-dur-s : 0);
+    private property <length> fade-out-w: root.width * (root.aud-dur-s > 0 ? root.model.fade-out-s / root.aud-dur-s : 0);
+    // Live widths during a drag (fade-out grows as the cursor moves left).
+    private property <length> fade-in-w-live: root.fade-drag == 1
+        ? clamp(root.fade-in-w + root.fade-drag-dx, 0px, root.width) : root.fade-in-w;
+    private property <length> fade-out-w-live: root.fade-drag == 2
+        ? clamp(root.fade-out-w - root.fade-drag-dx, 0px, root.width) : root.fade-out-w;
+    private property <float> fade-in-frac: root.width > 0px ? root.fade-in-w-live / root.width : 0;
+    private property <float> fade-out-frac: root.width > 0px ? root.fade-out-w-live / root.width : 0;
+
+    function commit-fade-in() {
+        if (root.width > 0px) {
+            InspectorBackend.set-clip-fades(
+                root.model.id, root.fade-in-w-live / root.width * root.aud-dur-s, root.model.fade-out-s);
+        }
+    }
+    function commit-fade-out() {
+        if (root.width > 0px) {
+            InspectorBackend.set-clip-fades(
+                root.model.id, root.model.fade-in-s, root.fade-out-w-live / root.width * root.aud-dur-s);
+        }
+    }
+
+    x: TimelineLib.rational-to-length(model.timeline-start, zoom);
+
+    width: TimelineLib.clip-timeline-width(model, zoom);
+    height: AppStore.theme.track-lane.clip.height;
+    background: dimmed ? track-color.with-alpha(0.35) : track-color;
+    // Rounded clipping is the same GPU-layer trap as group `opacity` above:
+    // `clip: true` with a non-zero radius composites the subtree into a
+    // texture sized to the full card, which at frame-level zoom exceeds the
+    // 16384px GPU texture limit and aborts in wgpu. Past a few thousand px
+    // the 4px corners are imperceptible anyway — drop the radius so the clip
+    // degrades to a plain scissor rect (no layer allocated at all).
+    border-radius: root.width < 4096px ? AppStore.theme.track-lane.clip.radius : 0;
+    // Tiles are grid-aligned to media time, so the first one usually starts
+    // left of the clip edge — crop everything to the rounded card.
+    clip: true;
+
+    // Filmstrip: sampled source frames, decoded off-thread and cached per
+    // media + power-of-two zoom bucket. Missing tiles draw nothing — the
+    // lane-colored card shows through until the frame lands.
+    if show-filmstrip: Rectangle {
+        for tile in StripBackend.filmstrip-tiles(
+            model.media-id,
+            model.source-in-s,
+            model.source-range.duration.value,
+            EditorStore.project.sequence.fps.num,
+            EditorStore.project.sequence.fps.den,
+            model.speed,
+            root.zoom,
+            root.vis-from-bucket,
+            root.vis-to-bucket,
+            StripBackend.generation): Image {
+            x: tile.x;
+            y: 0;
+            width: tile.width;
+            height: parent.height;
+            source: tile.image;
+            image-fit: cover;
+            // Leaf element: opacity folds into the draw (no layer texture).
+            opacity: root.dimmed ? 0.35 : 1.0;
+        }
+    }
+
+    // Embedded audio (CapCut): a video clip with sound shows a slim
+    // translucent waveform band along its bottom edge, over the filmstrip. The
+    // same off-thread peaks/tiles path as audio lanes, squashed into the band.
+    if show-embedded-audio: Rectangle {
+        y: parent.height - self.height;
+        height: min(26px, parent.height * 0.34);
+        background: #00000038;
+        clip: true;
+        for tile in StripBackend.waveform-tiles(
+            model.media-id,
+            model.source-in-s,
+            model.source-range.duration.value,
+            EditorStore.project.sequence.fps.num,
+            EditorStore.project.sequence.fps.den,
+            model.speed,
+            root.zoom,
+            root.vis-from-bucket,
+            root.vis-to-bucket,
+            StripBackend.generation): Image {
+            x: tile.x;
+            y: 0;
+            width: tile.width;
+            height: parent.height;
+            source: tile.image;
+            image-fit: fill;
+            opacity: root.dimmed ? 0.35 : 0.85;
+        }
+    }
+
+    // Waveform: peak file computed once per media, tiles rasterized per
+    // zoom bucket; the raster stretches to the live tile width (≤ 2×).
+    if show-waveform: Rectangle {
+        for tile in StripBackend.waveform-tiles(
+            model.media-id,
+            model.source-in-s,
+            model.source-range.duration.value,
+            EditorStore.project.sequence.fps.num,
+            EditorStore.project.sequence.fps.den,
+            model.speed,
+            root.zoom,
+            root.vis-from-bucket,
+            root.vis-to-bucket,
+            StripBackend.generation): Image {
+            x: tile.x;
+            y: 0;
+            width: tile.width;
+            height: parent.height;
+            source: tile.image;
+            image-fit: fill;
+            opacity: root.dimmed ? 0.35 : 1.0;
+        }
+    }
+
+    // Volume automation line (M8 volume envelopes): the gain curve drawn over
+    // the waveform with a dot at each keyframe, CapCut-style. Only on audio
+    // clips that actually carry an envelope and are wide enough to read. The
+    // path's normalized viewbox stretches across the card; x runs clip
+    // start→end, y maps the gain 0..200% top-down (so the dot math matches).
+    if root.show-waveform && root.model.has-volume-envelope && root.width > 40px: Rectangle {
+        width: 100%;
+        height: 100%;
+        opacity: root.dimmed ? 0.4 : 0.9;
+
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 1000;
+            viewbox-height: 1000;
+            commands: root.model.volume-path;
+            stroke: #ffffff;
+            stroke-width: 1.5px;
+            fill: transparent;
+        }
+
+        for kf in root.model.kf-volume: Rectangle {
+            x: (kf.tick - root.model.timeline-start.value) * root.zoom * 1px - self.width / 2;
+            y: (1 - clamp(kf.value-x / 2, 0, 1)) * parent.height - self.height / 2;
+            width: 6px;
+            height: 6px;
+            border-radius: 3px;
+            background: AppStore.theme.accent.primary;
+            border-width: 1px;
+            border-color: #ffffff;
+        }
+    }
+
+    // Beat markers (CapCut "Beat", M8 Phase 6): a slim tick per detected beat
+    // along the clip's bottom edge. The model publishes only the beats inside
+    // this clip's current window as absolute sequence ticks, so the same
+    // tick→x mapping as the keyframe dots places them. Shown on any clip that
+    // carries beats (audio lanes, or video clips with detected beats).
+    if root.model.beats.length > 0 && root.width > 24px: Rectangle {
+        width: 100%;
+        height: 100%;
+        opacity: root.dimmed ? 0.4 : 0.95;
+        for beat in root.model.beats: Rectangle {
+            x: (beat - root.model.timeline-start.value) * root.zoom * 1px - self.width / 2;
+            y: parent.height - self.height - 1px;
+            width: 2px;
+            height: 8px;
+            border-radius: 1px;
+            background: #ffd34d;
+        }
+    }
+
+    // Audio fade ramps: a darkening triangle over each attenuated corner with
+    // a bright edge line. Driven by the projected fade-*-s (or the live drag
+    // width); drawn before the labels so the badges stay legible.
+    if root.show-waveform && root.width > 24px && (root.fade-in-w-live > 0.5px || root.fade-drag == 1): Rectangle {
+        width: 100%;
+        height: 100%;
+        opacity: root.dimmed ? 0.4 : 1.0;
+
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            fill: #00000059;
+
+            MoveTo { x: 0; y: 0; }
+            LineTo { x: root.fade-in-frac * 100; y: 0; }
+            LineTo { x: 0; y: 100; }
+            Close { }
+        }
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            stroke: #ffffff;
+            stroke-width: 1px;
+            fill: transparent;
+
+            MoveTo { x: 0; y: 100; }
+            LineTo { x: root.fade-in-frac * 100; y: 0; }
+        }
+    }
+    if root.show-waveform && root.width > 24px && (root.fade-out-w-live > 0.5px || root.fade-drag == 2): Rectangle {
+        width: 100%;
+        height: 100%;
+        opacity: root.dimmed ? 0.4 : 1.0;
+
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            fill: #00000059;
+
+            MoveTo { x: 100; y: 0; }
+            LineTo { x: 100 - root.fade-out-frac * 100; y: 0; }
+            LineTo { x: 100; y: 100; }
+            Close { }
+        }
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            stroke: #ffffff;
+            stroke-width: 1px;
+            fill: transparent;
+
+            MoveTo { x: 100; y: 100; }
+            LineTo { x: 100 - root.fade-out-frac * 100; y: 0; }
+        }
+    }
+
+    // Solid generators paint their fill across the whole card so the timeline
+    // shows the real color, not the lane color.
+    if model.generator-kind == "solid": Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: root.dimmed ? model.fill-color.with-alpha(0.35) : model.fill-color;
+    }
+
+    // Shape generators show a centered swatch (ellipse rounds to a pill) in
+    // the fill color, over the lane-colored card.
+    if model.generator-kind == "rect" || model.generator-kind == "ellipse": Rectangle {
+        width: min(parent.width - 8px, parent.height * 0.7);
+        height: parent.height * 0.6;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: root.dimmed ? model.fill-color.with-alpha(0.35) : model.fill-color;
+        border-radius: model.generator-kind == "ellipse" ? self.height / 2 : 2px;
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        // Locked lanes are read-only: no select / move on their clips.
+        enabled: !root.track-locked;
+
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                // Grabbing a clip reclaims the keyboard so Delete /
+                // Ctrl+B act on this selection, not a stale text box.
+                AppState.refocus-shortcuts();
+
+                // Shift-click toggles this clip (and its link group) in the
+                // multi-selection — selection only, no drag.
+                if (e.modifiers.shift) {
+                    TimelineStore.apply-selection(SelectionBackend.toggle-clip(
+                        EditorStore.project.sequence,
+                        TimelineStore.selected-ids,
+                        track-id,
+                        model.id,
+                        TimelineStore.link-enabled));
+                    return;
+                }
+
+                // Select on grab (CapCut selects the clip the moment you
+                // grab it; linkage pulls the clip's partners in). Grabbing
+                // a clip already inside a multi-selection keeps the set and
+                // re-anchors the primary, so the whole set drags together.
+                if (root.is-selected && TimelineStore.selected-ids.length > 1) {
+                    TimelineStore.selected-track-id = track-id;
+                    TimelineStore.selected-clip-id = model.id;
+                } else {
+                    TimelineStore.apply-selection(SelectionBackend.select-clip(
+                        EditorStore.project.sequence,
+                        track-id,
+                        model.id,
+                        TimelineStore.link-enabled));
+                }
+
+                TimelineViewState.drag-is-group = TimelineStore.selected-ids.length > 1;
+                TimelineViewState.dragging-source-track-id = track-id;
+                TimelineViewState.dragging-clip-id = model.id;
+                TimelineViewState.dragging-source-row = track-row;
+                TimelineViewState.dragging-start-value = model.timeline-start.value;
+                TimelineViewState.dragging-duration-ticks = model.source-range.duration.value;
+                TimelineViewState.dragging-color = track-color;
+                TimelineViewState.dragging-name = model.name;
+                TimelineViewState.drag-dx-px = 0px;
+                TimelineViewState.drag-dy-px = 0px;
+                TimelineViewState.pointer-window-x = self.absolute-position.x + self.mouse-x;
+                TimelineViewState.pointer-window-y = self.absolute-position.y + self.mouse-y;
+            } else if (e.kind == PointerEventKind.up
+                    && e.button == PointerEventButton.left
+                    && is-active-drag) {
+                // TimelinePanel commits (if the drag moved) and clears the state.
+                TimelineViewState.drag-released = true;
+            }
+        }
+
+        moved => {
+            if (!is-active-drag) {
+                return;
+            }
+            // The element itself never moves, so the totals are just the
+            // offsets from the press point.
+            TimelineViewState.drag-dx-px = self.mouse-x - self.pressed-x;
+            TimelineViewState.drag-dy-px = self.mouse-y - self.pressed-y;
+            TimelineViewState.pointer-window-x = self.absolute-position.x + self.mouse-x;
+            TimelineViewState.pointer-window-y = self.absolute-position.y + self.mouse-y;
+        }
+    }
+
+    // Text clips render their generator content inline (Phase 8); the name
+    // row above still identifies the lane kind.
+    if is-text: Text {
+        x: 6px;
+        y: root.show-labels ? root.label-row-h : 0;
+        width: parent.width - 12px;
+        height: parent.height - self.y;
+        text: model.text-content == "" ? model.name : model.text-content;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+        // Leaf element: opacity here is folded into the glyph color (no layer).
+        opacity: dimmed ? 0.35 : 1.0;
+    }
+
+    // Name + duration badge on a thin scrim, CapCut-style — legible over
+    // filmstrip frames, harmless on flat cards. (The root clips the corners.)
+    if show-labels: Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: root.label-row-h;
+        background: dimmed ? #00000020 : #00000059;
+
+        Text {
+            x: 4px;
+            width: min(self.preferred-width,
+                parent.width - (root.width > 90px ? 44px : 8px));
+            height: parent.height;
+            vertical-alignment: center;
+            text: model.name;
+            font-size: 9px;
+            overflow: elide;
+            color: AppStore.theme.text.primary;
+            opacity: dimmed ? 0.35 : 1.0;
+        }
+
+        // Right-aligned badge cluster — the reserved slot from timeline
+        // Phase 8: [audio chip][retime chip][duration]. Chips only appear
+        // on clips wide enough to read them.
+        badges := HorizontalLayout {
+            x: parent.width - self.width - 4px;
+            width: self.preferred-width;
+            height: parent.height;
+            spacing: 4px;
+            padding-top: 2px;
+            padding-bottom: 2px;
+
+            // Audio badge (M1 volume/fades), same chip language as the
+            // retime badge: struck-out speaker when muted, "57%" on a
+            // non-default gain, a fade ramp when only fades are set.
+            if root.audio-muted && root.width > 50px: Rectangle {
+                width: 14px;
+                border-radius: 2px;
+                background: dimmed ? AppStore.theme.accent.primary.with-alpha(0.2) : AppStore.theme.accent.primary.with-alpha(0.33);
+
+                // Speaker pointing right, small X struck beside the cone
+                // (the open subpaths carry no fill; the stroke draws them).
+                Path {
+                    width: 9px;
+                    height: 9px;
+                    viewbox-width: 10;
+                    viewbox-height: 10;
+                    fill: AppStore.theme.text.primary;
+                    stroke: AppStore.theme.text.primary;
+                    stroke-width: 1px;
+                    opacity: root.dimmed ? 0.35 : 1.0;
+
+                    MoveTo { x: 0.8; y: 3.4; }
+                    LineTo { x: 3.0; y: 3.4; }
+                    LineTo { x: 5.8; y: 1.0; }
+                    LineTo { x: 5.8; y: 9.0; }
+                    LineTo { x: 3.0; y: 6.6; }
+                    LineTo { x: 0.8; y: 6.6; }
+                    Close { }
+                    MoveTo { x: 7.0; y: 3.6; }
+                    LineTo { x: 9.4; y: 6.4; }
+                    MoveTo { x: 9.4; y: 3.6; }
+                    LineTo { x: 7.0; y: 6.4; }
+                }
+            }
+            if root.audio-gain-changed && root.width > 50px: Rectangle {
+                width: vol-text.preferred-width + 6px;
+                border-radius: 2px;
+                background: dimmed ? AppStore.theme.accent.primary.with-alpha(0.2) : AppStore.theme.accent.primary.with-alpha(0.33);
+
+                vol-text := Text {
+                    text: (root.model.volume * 100).to-fixed(0) + "%";
+                    font-size: 8px;
+                    font-weight: 700;
+                    color: AppStore.theme.text.primary;
+                    opacity: root.dimmed ? 0.35 : 1.0;
+                }
+            }
+            if root.audio-faded-only && root.width > 50px: Rectangle {
+                width: 14px;
+                border-radius: 2px;
+                background: dimmed ? AppStore.theme.accent.primary.with-alpha(0.2) : AppStore.theme.accent.primary.with-alpha(0.33);
+
+                // Fade ramp: a right triangle rising left-to-right.
+                Path {
+                    width: 9px;
+                    height: 9px;
+                    viewbox-width: 10;
+                    viewbox-height: 10;
+                    fill: AppStore.theme.text.primary;
+                    opacity: root.dimmed ? 0.35 : 1.0;
+
+                    MoveTo { x: 1.0; y: 9.0; }
+                    LineTo { x: 9.0; y: 9.0; }
+                    LineTo { x: 9.0; y: 1.0; }
+                    Close { }
+                }
+            }
+
+            // Envelope chip (M8): a small automation curve, marking a clip
+            // whose gain is keyframed (it also draws the on-clip line above).
+            if root.audio-enveloped && root.width > 50px: Rectangle {
+                width: 14px;
+                border-radius: 2px;
+                background: dimmed ? AppStore.theme.accent.primary.with-alpha(0.2) : AppStore.theme.accent.primary.with-alpha(0.33);
+
+                Path {
+                    width: 10px;
+                    height: 9px;
+                    viewbox-width: 10;
+                    viewbox-height: 10;
+                    stroke: AppStore.theme.text.primary;
+                    stroke-width: 1px;
+                    fill: transparent;
+                    opacity: root.dimmed ? 0.35 : 1.0;
+
+                    MoveTo { x: 0.6; y: 3.0; }
+                    LineTo { x: 3.4; y: 3.0; }
+                    LineTo { x: 6.6; y: 7.5; }
+                    LineTo { x: 9.4; y: 7.5; }
+                }
+            }
+
+            // Retime badge ("2x", "0.5x R", …), CapCut-style accent chip
+            // next to the duration. Only present on retimed clips.
+            if model.speed-label != "" && root.width > 50px: Rectangle {
+                width: badge-text.preferred-width + 6px;
+                border-radius: 2px;
+                background: dimmed ? AppStore.theme.accent.primary.with-alpha(0.2) : AppStore.theme.accent.primary.with-alpha(0.33);
+
+                badge-text := Text {
+                    text: model.speed-label;
+                    font-size: 8px;
+                    font-weight: 700;
+                    color: AppStore.theme.text.primary;
+                    opacity: root.dimmed ? 0.35 : 1.0;
+                }
+            }
+
+            // Duration badge.
+            if root.width > 90px: Text {
+                vertical-alignment: center;
+                text: model.duration-label;
+                font-size: 9px;
+                color: AppStore.theme.text.primary.with-alpha(0.75);
+                opacity: root.dimmed ? 0.35 : 1.0;
+            }
+        }
+    }
+
+    // --- trim handles (declared last ⇒ on top of the move TouchArea) -----
+    // Like the move, the handle only records the gesture; TimelinePanel
+    // resolves the new extent (stretch preview + guide + tooltip) and commits.
+
+    function begin-trim(head: bool) {
+        // Select on grab, like the move gesture (and reclaim the keyboard).
+        // Linkage pulls the partners in, mirroring the trim that will apply
+        // the same edge delta to the whole link group.
+        AppState.refocus-shortcuts();
+        TimelineStore.apply-selection(SelectionBackend.select-clip(
+            EditorStore.project.sequence,
+            track-id,
+            model.id,
+            TimelineStore.link-enabled));
+
+        TimelineViewState.trimming-track-id = track-id;
+        TimelineViewState.trimming-clip-id = model.id;
+        TimelineViewState.trimming-head = head;
+        TimelineViewState.trimming-source-row = track-row;
+        TimelineViewState.trimming-duration-ticks = model.source-range.duration.value;
+        TimelineViewState.trimming-color = track-color;
+        TimelineViewState.trim-dx-px = 0px;
+    }
+
+    head-ta := TouchArea {
+        x: 0;
+        width: root.handle-width;
+        height: parent.height;
+        mouse-cursor: ew-resize;
+        enabled: !root.track-locked;
+
+        changed pressed => {
+            if (self.pressed) {
+                begin-trim(true);
+                TimelineViewState.pointer-window-x = self.absolute-position.x + self.mouse-x;
+                TimelineViewState.pointer-window-y = self.absolute-position.y + self.mouse-y;
+            } else if (is-active-trim) {
+                TimelineViewState.trim-released = true;
+            }
+        }
+
+        moved => {
+            if (is-active-trim) {
+                TimelineViewState.trim-dx-px = self.mouse-x - self.pressed-x;
+                TimelineViewState.pointer-window-x = self.absolute-position.x + self.mouse-x;
+                TimelineViewState.pointer-window-y = self.absolute-position.y + self.mouse-y;
+            }
+        }
+    }
+
+    tail-ta := TouchArea {
+        x: parent.width - root.handle-width;
+        width: root.handle-width;
+        height: parent.height;
+        mouse-cursor: ew-resize;
+        enabled: !root.track-locked;
+
+        changed pressed => {
+            if (self.pressed) {
+                begin-trim(false);
+                TimelineViewState.pointer-window-x = self.absolute-position.x + self.mouse-x;
+                TimelineViewState.pointer-window-y = self.absolute-position.y + self.mouse-y;
+            } else if (is-active-trim) {
+                TimelineViewState.trim-released = true;
+            }
+        }
+
+        moved => {
+            if (is-active-trim) {
+                TimelineViewState.trim-dx-px = self.mouse-x - self.pressed-x;
+                TimelineViewState.pointer-window-x = self.absolute-position.x + self.mouse-x;
+                TimelineViewState.pointer-window-y = self.absolute-position.y + self.mouse-y;
+            }
+        }
+    }
+
+    // CapCut-style bracket bars hinting the grabbable edges.
+    if is-selected || head-ta.has-hover: Rectangle {
+        x: 2px;
+        width: 2px;
+        height: parent.height * 0.5;
+        background: AppStore.theme.text.primary;
+        border-radius: 1px;
+    }
+    if is-selected || tail-ta.has-hover: Rectangle {
+        x: parent.width - 4px;
+        width: 2px;
+        height: parent.height * 0.5;
+        background: AppStore.theme.text.primary;
+        border-radius: 1px;
+    }
+
+    // Audio fade handles (M8): grab dots at the top corners of a selected
+    // audio clip; drag to set the fade durations. Declared after the trim
+    // handles so a corner grab adjusts the fade rather than trimming. The
+    // gesture only records the live width — `commit-fade-*` lands one
+    // envelope-preserving edit on release.
+    if root.show-waveform && is-selected && !dimmed: Rectangle {
+        fade-in-handle := Rectangle {
+            x: root.fade-in-w-live - self.width / 2;
+            y: 1px;
+            width: 14px;
+            height: 14px;
+
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: in-ta.has-hover || root.fade-drag == 1 ? AppStore.theme.accent.primary : #ffffff;
+                border-width: 1px;
+                border-color: #000000a0;
+            }
+
+            in-ta := TouchArea {
+                mouse-cursor: ew-resize;
+                enabled: !root.track-locked;
+
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                        AppState.refocus-shortcuts();
+                        root.fade-drag = 1;
+                        root.fade-drag-dx = 0px;
+                    } else if (e.kind == PointerEventKind.up
+                            && e.button == PointerEventButton.left && root.fade-drag == 1) {
+                        root.commit-fade-in();
+                        root.fade-drag = 0;
+                        root.fade-drag-dx = 0px;
+                    }
+                }
+                moved => {
+                    if (root.fade-drag == 1) {
+                        root.fade-drag-dx = self.mouse-x - self.pressed-x;
+                    }
+                }
+            }
+        }
+
+        fade-out-handle := Rectangle {
+            x: root.width - root.fade-out-w-live - self.width / 2;
+            y: 1px;
+            width: 14px;
+            height: 14px;
+
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: out-ta.has-hover || root.fade-drag == 2 ? AppStore.theme.accent.primary : #ffffff;
+                border-width: 1px;
+                border-color: #000000a0;
+            }
+
+            out-ta := TouchArea {
+                mouse-cursor: ew-resize;
+                enabled: !root.track-locked;
+
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                        AppState.refocus-shortcuts();
+                        root.fade-drag = 2;
+                        root.fade-drag-dx = 0px;
+                    } else if (e.kind == PointerEventKind.up
+                            && e.button == PointerEventButton.left && root.fade-drag == 2) {
+                        root.commit-fade-out();
+                        root.fade-drag = 0;
+                        root.fade-drag-dx = 0px;
+                    }
+                }
+                moved => {
+                    if (root.fade-drag == 2) {
+                        root.fade-drag-dx = self.mouse-x - self.pressed-x;
+                    }
+                }
+            }
+        }
+    }
+
+    // Selection outline, drawn last: a border on the root itself would be
+    // painted *under* the filmstrip/waveform tiles and the label scrim.
+    if is-selected: Rectangle {
+        border-width: 1px;
+        border-color: dimmed
+            ? AppStore.theme.text.primary.with-alpha(0.35)
+            : AppStore.theme.text.primary;
+        border-radius: AppStore.theme.track-lane.clip.radius;
+    }
+
+    // --- keyframe diamonds (keyframes roadmap Phase 2) --------------------
+    // One diamond per merged keyframe tick across all animated properties,
+    // on the selected clip only (CapCut). Drag retimes every property's
+    // keyframe at that tick (the diamonds stay merged); right-click deletes
+    // them. Declared after the trim handles so a diamond near a clip edge
+    // wins the press.
+    //
+    // The diamonds themselves never move during the drag — a moving
+    // TouchArea under a held cursor feeds its own offset back into
+    // `mouse-x` (same trap as the clip move gesture). The grabbed diamond
+    // hides and a root-level ghost tracks the resolved target tick instead;
+    // the commit republishes the projection, which re-evaluates `ticks`.
+
+    private property <int> kf-drag-tick: -1; // grabbed diamond's tick; -1 ⇔ idle
+    private property <length> kf-drag-dx: 0px;
+    // Drag target snapped to whole ticks and clamped inside the clip (the
+    // engine rejects keyframes outside it).
+    private property <int> kf-drag-target: clamp(
+        root.kf-drag-tick + round(root.kf-drag-dx / (root.zoom * 1px)),
+        model.timeline-start.value,
+        model.timeline-start.value + model.source-range.duration.value - 1);
+
+    if is-selected && !dimmed: Rectangle {
+        for tick in KeyframeBackend.ticks(root.model): Rectangle {
+            property <bool> grabbed: root.kf-drag-tick == tick;
+
+            x: (tick - root.model.timeline-start.value) * root.zoom * 1px - self.width / 2;
+            y: (parent.height - self.height) / 2;
+            width: 14px;
+            height: 14px;
+
+            Path {
+                width: 9px;
+                height: 9px;
+                viewbox-width: 10;
+                viewbox-height: 10;
+                visible: !grabbed;
+                fill: AppStore.theme.accent.primary;
+                stroke: kf-ta.has-hover ? #ffffff : #000000a0;
+                stroke-width: 1px;
+
+                MoveTo { x: 5; y: 0.8; }
+                LineTo { x: 9.2; y: 5; }
+                LineTo { x: 5; y: 9.2; }
+                LineTo { x: 0.8; y: 5; }
+                Close { }
+            }
+
+            kf-ta := TouchArea {
+                enabled: !root.track-locked;
+                mouse-cursor: MouseCursor.pointer;
+
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down
+                            && e.button == PointerEventButton.left) {
+                        AppState.refocus-shortcuts();
+                        root.kf-drag-tick = tick;
+                        root.kf-drag-dx = 0px;
+                    } else if (e.kind == PointerEventKind.up
+                            && e.button == PointerEventButton.left
+                            && grabbed) {
+                        if (root.kf-drag-target != tick) {
+                            KeyframeBackend.retime(
+                                root.model.id, tick, root.kf-drag-target);
+                        }
+                        root.kf-drag-tick = -1;
+                        root.kf-drag-dx = 0px;
+                    } else if (e.kind == PointerEventKind.down
+                            && e.button == PointerEventButton.right) {
+                        AppState.refocus-shortcuts();
+                        KeyframeBackend.remove-at(root.model.id, tick);
+                    }
+                }
+
+                moved => {
+                    if (grabbed) {
+                        root.kf-drag-dx = self.mouse-x - self.pressed-x;
+                    }
+                }
+            }
+        }
+    }
+
+    // Ghost of the grabbed diamond at the resolved target tick.
+    if kf-drag-tick >= 0: Path {
+        x: (root.kf-drag-target - model.timeline-start.value) * root.zoom * 1px - self.width / 2;
+        y: (parent.height - self.height) / 2;
+        width: 9px;
+        height: 9px;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        fill: AppStore.theme.accent.primary;
+        stroke: #ffffff;
+        stroke-width: 1px;
+
+        MoveTo { x: 5; y: 0.8; }
+        LineTo { x: 9.2; y: 5; }
+        LineTo { x: 5; y: 9.2; }
+        LineTo { x: 0.8; y: 5; }
+        Close { }
+    }
+}

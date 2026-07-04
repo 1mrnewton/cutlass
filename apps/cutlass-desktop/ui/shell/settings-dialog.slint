@@ -1,0 +1,443 @@
+// App settings screen. Opened from the native "Cutlass" menu → Settings… on
+// macOS and the title-bar gear everywhere. In-window modal like the canvas/
+// export dialogs, with a CapCut-style left rail of sections and a content
+// pane.
+//
+// All editable state lives in SettingsBackend (and the theme in
+// AppStore.theme-id, so it switches live). Fields two-way bind to those
+// globals; dismissing the dialog persists them through SettingsBackend.save
+// (wired in src/main.rs). Theme changes preview instantly; cache changes are
+// labeled as restart-bound.
+
+import {
+    CutlassText,
+    AccentButton,
+    SubtleButton,
+    CutlassDropdown,
+    CutlassSlider,
+    CutlassScrollView,
+} from "../components/index.slint";
+import { AppStore } from "../store/index.slint";
+import { SettingsBackend } from "../lib/settings-backend.slint";
+import { AppState } from "../state.slint";
+
+// One row in the left rail.
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    callback clicked();
+
+    height: 32px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: selected
+        ? AppStore.theme.accent.primary.with-alpha(0.14)
+        : (ta.has-hover ? #ffffff10 : transparent);
+
+    CutlassText {
+        x: AppStore.theme.metrics.spacing.md;
+        width: parent.width - 2 * AppStore.theme.metrics.spacing.md;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.label;
+        style: AppStore.theme.typography.label;
+        foreground: root.selected ? AppStore.theme.accent.primary : AppStore.theme.text.secondary;
+        overflow: elide;
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A section heading inside a pane.
+component PaneTitle inherits CutlassText {
+    style: AppStore.theme.typography.heading-sm;
+}
+
+// Muted explanatory line under a heading or field.
+component Hint inherits CutlassText {
+    wrap: word-wrap;
+    style: AppStore.theme.typography.caption;
+    foreground: AppStore.theme.text.muted;
+}
+
+// Label + control row: a fixed-width label gutter, then the control stretches.
+component FieldRow inherits HorizontalLayout {
+    in property <string> label;
+    spacing: AppStore.theme.metrics.spacing.md;
+
+    CutlassText {
+        width: 112px;
+        vertical-alignment: center;
+        text: root.label;
+        style: AppStore.theme.typography.label;
+        foreground: AppStore.theme.text.secondary;
+    }
+    @children
+}
+
+// A single-line text field styled like the dropdown's search box.
+component SettingsTextField inherits Rectangle {
+    in-out property <string> value;
+    in property <string> placeholder;
+    in property <bool> password: false;
+
+    height: 28px;
+    horizontal-stretch: 1;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: #111111;
+    border-width: input.has-focus ? 1px : 1px;
+    border-color: input.has-focus ? AppStore.theme.accent.primary : #ffffff14;
+    clip: true;
+    forward-focus: input;
+
+    input := TextInput {
+        x: AppStore.theme.metrics.spacing.sm;
+        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+        height: parent.height;
+        vertical-alignment: center;
+        single-line: true;
+        input-type: root.password ? InputType.password : InputType.text;
+        text <=> root.value;
+        color: AppStore.theme.text.primary;
+        font-size: AppStore.theme.typography.body.size;
+        font-family: AppStore.theme.typography.font-family-mono;
+        selection-background-color: AppStore.theme.accent.primary.with-alpha(0.33);
+        selection-foreground-color: AppStore.theme.text.primary;
+        accessible-role: none;
+    }
+
+    if root.value == "" && !input.has-focus: CutlassText {
+        x: AppStore.theme.metrics.spacing.sm;
+        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.placeholder;
+        style: AppStore.theme.typography.body;
+        foreground: AppStore.theme.text.muted;
+        overflow: elide;
+    }
+}
+
+export component SettingsDialog inherits Rectangle {
+    background: #000000A0;
+
+    // 0 = AI, 1 = Appearance, 2 = Cache.
+    in-out property <int> section: 0;
+
+    property <[string]> theme-names: ["Graphite (default)", "Ember", "Dark blue"];
+
+    init => {
+        SettingsBackend.refresh-cache-size();
+    }
+
+    function close() {
+        SettingsBackend.save();
+        AppState.settings-open = false;
+    }
+
+    // Scrim: absorb every pointer event so the editor underneath is inert.
+    TouchArea { }
+
+    panel := Rectangle {
+        width: 760px;
+        height: 540px;
+        background: AppStore.theme.panel.background;
+        border-radius: AppStore.theme.metrics.radius.lg;
+        border-width: 1px;
+        border-color: #ffffff14;
+        drop-shadow-blur: 32px;
+        drop-shadow-color: #00000080;
+        drop-shadow-offset-y: 8px;
+
+        // Keep clicks inside the panel from reaching the scrim above.
+        TouchArea { }
+
+        VerticalLayout {
+            padding: AppStore.theme.metrics.spacing.xl;
+            spacing: AppStore.theme.metrics.spacing.lg;
+
+            // --- header ----------------------------------------------------
+            HorizontalLayout {
+                CutlassText {
+                    text: "Settings";
+                    style: AppStore.theme.typography.heading-md;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                close-button := Rectangle {
+                    width: 26px;
+                    height: 26px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: close-ta.has-hover ? #ffffff14 : transparent;
+
+                    CutlassText {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "✕";
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        style: AppStore.theme.typography.label;
+                        foreground: AppStore.theme.text.secondary;
+                    }
+
+                    close-ta := TouchArea {
+                        clicked => {
+                            root.close();
+                        }
+                    }
+                }
+            }
+
+            // --- rail + content -------------------------------------------
+            HorizontalLayout {
+                vertical-stretch: 1;
+                spacing: AppStore.theme.metrics.spacing.lg;
+
+                // Left rail.
+                VerticalLayout {
+                    width: 168px;
+                    spacing: AppStore.theme.metrics.spacing.xs;
+
+                    NavItem {
+                        label: "AI provider";
+                        selected: root.section == 0;
+                        clicked => {
+                            root.section = 0;
+                        }
+                    }
+                    NavItem {
+                        label: "Appearance";
+                        selected: root.section == 1;
+                        clicked => {
+                            root.section = 1;
+                        }
+                    }
+                    NavItem {
+                        label: "Cache";
+                        selected: root.section == 2;
+                        clicked => {
+                            root.section = 2;
+                        }
+                    }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                    }
+                }
+
+                // Vertical hairline between rail and content.
+                Rectangle {
+                    width: 1px;
+                    background: #ffffff12;
+                }
+
+                // Content pane.
+                CutlassScrollView {
+                    horizontal-stretch: 1;
+                    viewport-width: self.width;
+                    viewport-height: content.preferred-height;
+                    show-horizontal-scrollbar: false;
+
+                    content := VerticalLayout {
+                        width: parent.width;
+                        alignment: start;
+                        spacing: AppStore.theme.metrics.spacing.md;
+
+                        // --- AI provider ----------------------------------
+                        if root.section == 0: VerticalLayout {
+                            spacing: AppStore.theme.metrics.spacing.md;
+
+                            PaneTitle {
+                                text: "AI provider";
+                            }
+                            Hint {
+                                text: "The endpoint the assistant talks to. Works with Ollama, LM Studio, or any OpenAI-compatible server. Changes apply on your next prompt — no restart.";
+                            }
+
+                            FieldRow {
+                                label: "Endpoint";
+                                SettingsTextField {
+                                    value <=> SettingsBackend.ai-base-url;
+                                    placeholder: "http://localhost:11434/v1";
+                                }
+                            }
+                            FieldRow {
+                                label: "Model";
+                                SettingsTextField {
+                                    value <=> SettingsBackend.ai-model;
+                                    placeholder: "qwen3:14b";
+                                }
+                            }
+                            FieldRow {
+                                label: "API key";
+                                SettingsTextField {
+                                    value <=> SettingsBackend.ai-api-key;
+                                    placeholder: "Optional — local servers need none";
+                                    password: true;
+                                }
+                            }
+                            FieldRow {
+                                label: "Key from env";
+                                SettingsTextField {
+                                    value <=> SettingsBackend.ai-api-key-env;
+                                    placeholder: "e.g. OPENAI_API_KEY (overrides the key above)";
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: AppStore.theme.metrics.spacing.md;
+                                alignment: start;
+
+                                SubtleButton {
+                                    label: SettingsBackend.ai-testing ? "Testing…" : "Test connection";
+                                    enabled: !SettingsBackend.ai-testing
+                                        && SettingsBackend.ai-base-url != ""
+                                        && SettingsBackend.ai-model != "";
+                                    clicked => {
+                                        SettingsBackend.test-connection();
+                                    }
+                                }
+
+                                CutlassText {
+                                    vertical-alignment: center;
+                                    text: SettingsBackend.ai-test-status;
+                                    wrap: word-wrap;
+                                    style: AppStore.theme.typography.caption;
+                                    foreground: SettingsBackend.ai-test-ok
+                                        ? AppStore.theme.accent.primary
+                                        : #FF6B6B;
+                                }
+                            }
+                        }
+
+                        // --- Appearance -----------------------------------
+                        if root.section == 1: VerticalLayout {
+                            spacing: AppStore.theme.metrics.spacing.md;
+
+                            PaneTitle {
+                                text: "Appearance";
+                            }
+                            Hint {
+                                text: "Pick the editor theme. Applies instantly.";
+                            }
+
+                            FieldRow {
+                                label: "Theme";
+                                CutlassDropdown {
+                                    current: root.theme-names[AppStore.theme-id];
+                                    items: root.theme-names;
+                                    selected(value) => {
+                                        AppStore.theme-id =
+                                            value == root.theme-names[0] ? 0
+                                            : value == root.theme-names[1] ? 1
+                                            : 2;
+                                    }
+                                }
+                            }
+                        }
+
+                        // --- Cache ----------------------------------------
+                        if root.section == 2: VerticalLayout {
+                            spacing: AppStore.theme.metrics.spacing.md;
+
+                            PaneTitle {
+                                text: "Cache";
+                            }
+                            Hint {
+                                text: "Decoded frames are cached on disk to keep scrubbing fast. Safe to delete — it rebuilds on demand. Location and limit apply on the next launch.";
+                            }
+
+                            FieldRow {
+                                label: "Location";
+
+                                CutlassText {
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                    text: SettingsBackend.cache-dir-effective;
+                                    mono: true;
+                                    overflow: elide;
+                                    style: AppStore.theme.typography.caption;
+                                    foreground: AppStore.theme.text.secondary;
+                                }
+
+                                SubtleButton {
+                                    label: "Reveal";
+                                    clicked => {
+                                        SettingsBackend.reveal-cache();
+                                    }
+                                }
+                            }
+
+                            FieldRow {
+                                label: "On disk";
+                                CutlassText {
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                    text: SettingsBackend.cache-size-text;
+                                    style: AppStore.theme.typography.caption;
+                                    foreground: AppStore.theme.text.secondary;
+                                }
+                            }
+
+                            FieldRow {
+                                label: "Limit";
+
+                                CutlassSlider {
+                                    minimum: 1;
+                                    maximum: 256;
+                                    step: 1;
+                                    value: SettingsBackend.cache-budget-gb;
+                                    changed(v) => {
+                                        SettingsBackend.cache-budget-gb = round(v);
+                                    }
+                                }
+
+                                CutlassText {
+                                    width: 56px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
+                                    text: round(SettingsBackend.cache-budget-gb) + " GB";
+                                    style: AppStore.theme.typography.caption;
+                                    foreground: AppStore.theme.text.secondary;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // --- footer ---------------------------------------------------
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                CutlassText {
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    text: SettingsBackend.config-path;
+                    mono: true;
+                    overflow: elide;
+                    style: AppStore.theme.typography.caption;
+                    foreground: AppStore.theme.text.muted;
+                }
+
+                SubtleButton {
+                    label: "Reveal config";
+                    clicked => {
+                        SettingsBackend.reveal-config();
+                    }
+                }
+
+                AccentButton {
+                    label: "Done";
+                    clicked => {
+                        root.close();
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,238 @@
+// CapCut-style timeline ruler.
+//
+// Visual layout (~30 px strip):
+//
+//   +----------------------------------------------------------------+
+//   |  00:00  ·  ·  ·  ·  ·  ·  ·  00:01  ·  ·  ·  ▼  ·  ·  00:02   |
+//   +-------------------------------------------|--------------------+
+//                                          playhead pin
+//
+//   * Labels are centered on their position; CapCut draws no tick line
+//     under them — the text is the marker.
+//   * Subdivisions are small dots, not hash lines.
+//   * The playhead is a white pin (rounded head + pointer) over a
+//     hairline that continues down through the lanes (drawn there).
+//
+// Coordinate model:
+//
+//   This component lives inside a clipping `Rectangle` in
+//   `timeline.slint` and stays put at x=0 within that container — it
+//   does NOT translate with the scroll. It reads
+//   `TimelineViewState.scroll-x` and passes it to the Rust backend,
+//   which returns marks already positioned in *viewport-local* pixels
+//   (`frame * zoom + scroll-x`). The playhead pin uses the same
+//   projection; scrubbing converts viewport-local `mouse-x` back to
+//   ticks via `(mouse-x - scroll-x) / zoom`.
+//
+// Scrubbing (CapCut behaviour):
+//
+//   Press or drag anywhere on the strip to move the playhead. While
+//   the Snap magnet is on, the playhead magnets to clip edges and
+//   tick 0 — same candidates and threshold as clip drags, through the
+//   same Rust resolver (`DragBackend.snap-clip-start` with a zero-width
+//   "clip").
+
+import { AppStore, TimelineStore, EditorStore, TimelineActions } from "../../store/index.slint";
+import { CutlassText } from "../../components/index.slint";
+import { TimelineViewState } from "state.slint";
+import { RulerBackend, RulerTick } from "../../lib/ruler-backend.slint";
+import { DragBackend } from "../../lib/drag-backend.slint";
+import { AppState } from "../../state.slint";
+
+export component Ruler inherits Rectangle {
+    private property <length> scroll-x: TimelineViewState.scroll-x;
+    private property <float> zoom: TimelineStore.zoom;
+    private property <int> fps-num: EditorStore.project.sequence.fps.num;
+    private property <int> fps-den: EditorStore.project.sequence.fps.den;
+
+    private property <[RulerTick]> tick-model:
+        RulerBackend.ticks(scroll-x, self.width, zoom, fps-num, fps-den);
+
+    private property <length> playhead-x:
+        TimelineStore.playhead-tick * zoom * 1px + scroll-x;
+
+    // CapCut's magnet: ~10 px of pull at the current zoom; 0 ⇔ off.
+    private property <int> snap-threshold-ticks:
+        TimelineStore.snap-enabled ? max(1, round(10 / zoom)) : 0;
+
+    // Move the playhead to the frame under viewport-local `mx`,
+    // magneting to clip edges / tick 0 when the snap toggle is on.
+    // Passing a zero-width span makes the resolver treat the playhead
+    // itself as the dragged edge; playhead-tick is passed as 0 so the
+    // old playhead position is not a magnet candidate (0 already is).
+    // The result is clamped to the sequence so a drag into the padded
+    // scroll region past the last clip can't push the playhead past the
+    // end (and an empty timeline stays parked at 0).
+    function scrub-to(mx: length) {
+        TimelineStore.playhead-tick = TimelineActions.clamp-playhead(DragBackend.snap-clip-start(
+            EditorStore.project.sequence,
+            "",
+            "",
+            max(0, round((mx - scroll-x) / 1px / zoom)),
+            0,
+            snap-threshold-ticks,
+            0).snapped-start-value);
+    }
+
+    // --- in/out playback range (playback roadmap Phase 4) -------------
+    // Drawn under the marks: a translucent band between the in/out marks
+    // (I / O keys at the playhead, Alt+X clears) plus an edge pin per set
+    // mark, in the same accent the toolbar toggles latch with.
+
+    private property <length> range-in-x:
+        TimelineStore.range-in-tick * zoom * 1px + scroll-x;
+    private property <length> range-out-x:
+        TimelineStore.range-out-tick * zoom * 1px + scroll-x;
+
+    if TimelineStore.range-in-tick >= 0
+        && TimelineStore.range-out-tick > TimelineStore.range-in-tick: Rectangle {
+        x: range-in-x;
+        y: 0;
+        width: range-out-x - range-in-x;
+        height: parent.height;
+        background: AppStore.theme.accent.primary.with-alpha(0.1);
+    }
+
+    if TimelineStore.range-in-tick >= 0: Rectangle {
+        x: range-in-x;
+        y: 0;
+        width: 2px;
+        height: parent.height;
+        background: AppStore.theme.accent.primary;
+    }
+
+    if TimelineStore.range-out-tick >= 0: Rectangle {
+        x: range-out-x - 2px;
+        y: 0;
+        width: 2px;
+        height: parent.height;
+        background: AppStore.theme.accent.primary;
+    }
+
+    // One zero-width anchor per mark; the dot or label hangs off it,
+    // centered on the position (children are not clipped to parents).
+    for tick in tick-model: Rectangle {
+        x: tick.x;
+        y: 0;
+        width: 0;
+        height: parent.height;
+
+        // Dot subdivisions: tiny rounded squares — the `· · ·` rhythm
+        // CapCut puts between labels.
+        if !tick.is-major: Rectangle {
+            x: -1px;
+            y: parent.height / 2 - 1px;
+            width: 2px;
+            height: 2px;
+            border-radius: 1px;
+            background: AppStore.theme.text.muted;
+        }
+
+        // Labels, centered (Text defaults to its content size outside
+        // layouts, so `self.width` is the glyph width).
+        if tick.is-major: CutlassText {
+            x: -self.width / 2;
+            y: parent.height / 2 - self.height / 2;
+            text: tick.label;
+            mono: true;
+            style: AppStore.theme.typography.caption;
+            foreground: AppStore.theme.text.secondary;
+        }
+    }
+
+    // M1 ruler markers: colored flags in tick order; right-click removes.
+    for marker in EditorStore.project.sequence.markers: Rectangle {
+        property <length> marker-x: marker.tick * zoom * 1px + scroll-x;
+        x: marker-x;
+        y: 0;
+        width: 0;
+        height: parent.height;
+
+        Rectangle {
+            x: -3px;
+            y: 2px;
+            width: 6px;
+            height: 10px;
+            border-radius: 1px;
+            background: marker.color;
+        }
+
+        if marker.name != "": CutlassText {
+            x: 5px;
+            y: 1px;
+            text: marker.name;
+            style: AppStore.theme.typography.caption;
+            foreground: marker.color;
+        }
+
+        marker-ta := TouchArea {
+            x: -8px;
+            y: 0;
+            width: 16px;
+            height: parent.height;
+            mouse-cursor: MouseCursor.pointer;
+
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down
+                        && e.button == PointerEventButton.right) {
+                    AppState.refocus-shortcuts();
+                    TimelineActions.remove-marker(marker.id);
+                }
+            }
+        }
+    }
+
+    scrub := TouchArea {
+        width: parent.width;
+        height: parent.height;
+
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                // Scrubbing reclaims the keyboard (frame-step arrows
+                // should act on the playhead right after).
+                AppState.refocus-shortcuts();
+                root.scrub-to(self.mouse-x);
+            }
+        }
+
+        moved => {
+            if self.pressed {
+                root.scrub-to(self.mouse-x);
+            }
+        }
+    }
+
+    // --- playhead pin (over the scrub TouchArea: it is part of it) ---
+
+    // Hairline through the ruler strip; the lanes draw their own
+    // content-space line below.
+    Rectangle {
+        x: playhead-x;
+        y: 0;
+        width: 1px;
+        height: parent.height;
+        background: AppStore.theme.text.primary;
+    }
+
+    // Rounded head…
+    Rectangle {
+        x: playhead-x - 4.5px;
+        y: 3px;
+        width: 10px;
+        height: 10px;
+        border-radius: 3px;
+        background: AppStore.theme.text.primary;
+    }
+
+    // …with a pointer toward the timeline (CapCut's pin silhouette).
+    Path {
+        x: playhead-x - 4.5px;
+        y: 12px;
+        width: 10px;
+        height: 5px;
+        viewbox-width: 10;
+        viewbox-height: 5;
+        commands: "M 0 0 L 10 0 L 5 5 Z";
+        fill: AppStore.theme.text.primary;
+    }
+}

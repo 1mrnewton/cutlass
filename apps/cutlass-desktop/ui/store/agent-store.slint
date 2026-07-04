@@ -1,0 +1,51 @@
+// AI assistant state (ai-agent roadmap Phase 4). The transcript and flags
+// are written by the agent worker thread (src/agent.rs) via the event
+// loop; the panel only reads them and fires the callbacks below, which
+// main.rs forwards to the worker.
+
+// One transcript row. `kind` selects the styling:
+//   "user"      — the prompt as sent
+//   "assistant" — model text (streams in)
+//   "action"    — one applied/planned edit, in editor language
+//   "status"    — quiet meta line (plan discarded, …)
+//   "applied"   — edits landed; offers the one-click Undo while fresh
+//   "error"     — abort/rejection surface (nothing was applied)
+export struct AgentEntry {
+    kind: string,
+    text: string,
+}
+
+export global AgentStore {
+    in-out property <[AgentEntry]> transcript: [];
+
+    // True from send until the prompt completes/aborts; gates the
+    // composer (one prompt at a time) and shows the Stop affordance.
+    in-out property <bool> running: false;
+
+    // False when ~/.cutlass/config.toml has no [ai] table — the panel
+    // shows setup instructions instead of pretending to work.
+    in-out property <bool> configured: true;
+    in-out property <string> config-path: "";
+
+    // Preview-before-apply (default on for the first alpha): the prompt
+    // rehearses its edits and parks them as a plan; the panel shows an
+    // Apply / Discard card instead of touching the timeline.
+    in-out property <bool> dry-run: true;
+    in-out property <bool> plan-pending: false;
+    in-out property <[string]> plan-actions: [];
+
+    // One-click undo on the latest applied prompt. Cleared on use and on
+    // the next prompt; it drives plain history undo, so it is only shown
+    // while the agent's group is the newest entry.
+    in-out property <bool> undo-offered: false;
+
+    // → main.rs → agent worker.
+    callback send(prompt: string);
+    callback cancel();
+    callback apply-plan();
+    callback discard-plan();
+    // Session replaced wholesale (open / new / restore): cancel any
+    // running prompt and drop a parked plan — both rehearsed against the
+    // old project. Fired from app.slint's session-epoch watcher.
+    callback session-changed();
+}

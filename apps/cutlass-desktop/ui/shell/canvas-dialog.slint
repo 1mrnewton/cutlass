@@ -1,0 +1,157 @@
+// Canvas settings dialog (M1, CapCut "ratio"): project aspect preset +
+// canvas background color. In-window modal like the export dialog. Every
+// change commits immediately through CanvasBackend (one undoable SetCanvas
+// per change), so the preview behind the scrim updates live; "Done" just
+// closes.
+
+import { CutlassText, AccentButton, CutlassColorSwatch } from "../components/index.slint";
+import { AppStore, EditorStore } from "../store/index.slint";
+import { CanvasBackend } from "../lib/canvas-backend.slint";
+import { AppState } from "../state.slint";
+import { ComboBox } from "std-widgets.slint";
+
+component FieldLabel inherits CutlassText {
+    width: 96px;
+    vertical-alignment: center;
+    style: AppStore.theme.typography.label;
+    foreground: AppStore.theme.text.secondary;
+}
+
+export component CanvasDialog inherits Rectangle {
+    background: #000000A0;
+
+    function close() {
+        AppState.canvas-dialog-open = false;
+    }
+
+    // Scrim: absorb every pointer event so the editor underneath is inert.
+    TouchArea { }
+
+    panel := Rectangle {
+        width: 480px;
+        height: content.preferred-height;
+        background: AppStore.theme.panel.background;
+        border-radius: AppStore.theme.metrics.radius.lg;
+        border-width: 1px;
+        border-color: #ffffff14;
+        drop-shadow-blur: 32px;
+        drop-shadow-color: #00000080;
+        drop-shadow-offset-y: 8px;
+
+        // Keep clicks inside the panel from reaching the scrim above.
+        TouchArea { }
+
+        content := VerticalLayout {
+            padding: AppStore.theme.metrics.spacing.xl;
+            spacing: AppStore.theme.metrics.spacing.lg;
+
+            HorizontalLayout {
+                CutlassText {
+                    text: "Canvas";
+                    style: AppStore.theme.typography.heading-md;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                close-button := Rectangle {
+                    width: 26px;
+                    height: 26px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: close-ta.has-hover ? #ffffff14 : transparent;
+
+                    CutlassText {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "✕";
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        style: AppStore.theme.typography.label;
+                        foreground: AppStore.theme.text.secondary;
+                    }
+
+                    close-ta := TouchArea {
+                        clicked => {
+                            root.close();
+                        }
+                    }
+                }
+            }
+
+            // --- ratio ---------------------------------------------------
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                FieldLabel {
+                    text: "Ratio";
+                }
+
+                ratio := ComboBox {
+                    horizontal-stretch: 1;
+                    // Index-aligned with the model's CanvasAspect::ALL.
+                    model: [
+                        "Auto (match footage)",
+                        "16:9 · Wide",
+                        "9:16 · Vertical",
+                        "1:1 · Square",
+                        "4:5 · Portrait",
+                        "21:9 · Cinematic",
+                    ];
+                    // Seeded once at open; afterwards the dialog is the only
+                    // writer, so it stays in sync with its own commits.
+                    init => {
+                        self.current-index = EditorStore.project.sequence.aspect-index;
+                    }
+                    selected => {
+                        CanvasBackend.set-canvas(
+                            self.current-index,
+                            EditorStore.project.sequence.background);
+                    }
+                }
+            }
+
+            // --- background ----------------------------------------------
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                FieldLabel {
+                    text: "Background";
+                }
+
+                CutlassColorSwatch {
+                    value: EditorStore.project.sequence.background;
+                    changed(value) => {
+                        CanvasBackend.set-canvas(
+                            EditorStore.project.sequence.aspect-index,
+                            value);
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            // Live readout of the resulting composite size (footage tier ×
+            // chosen ratio) — re-projected after every commit.
+            CutlassText {
+                text: "Canvas size · "
+                    + round(EditorStore.project.sequence.width / 1px) + " × "
+                    + round(EditorStore.project.sequence.height / 1px);
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.muted;
+            }
+
+            // --- actions -------------------------------------------------
+            HorizontalLayout {
+                alignment: end;
+
+                AccentButton {
+                    label: "Done";
+                    clicked => {
+                        root.close();
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,251 @@
+import { Clip, Sequence, TrackKind, TextClipStyle } from "../models/index.slint";
+
+export struct SelectedClipInfo {
+    found: bool,
+    track-kind: TrackKind,
+    clip: Clip,
+}
+
+// Keyframe state of one animatable property at the playhead, for the
+// inspector's diamond cluster (keyframes roadmap Phase 1).
+export struct ParamRowState {
+    // The property has at least one keyframe.
+    animated: bool,
+    // The playhead sits exactly on a keyframe (diamond renders filled;
+    // clicking it removes instead of adds).
+    on-keyframe: bool,
+    // Absolute tick of the nearest keyframe strictly before / after the
+    // playhead; -1 when there is none (disables the ◀ / ▶ arrow).
+    prev-tick: int,
+    next-tick: int,
+    // Easing of the keyframe under the playhead (0 linear … 3 ease-in-out,
+    // 4 bezier); only meaningful when `on-keyframe`.
+    easing: int,
+}
+
+export struct TransformSample {
+    position-x: float,
+    position-y: float,
+    anchor-x: float,
+    anchor-y: float,
+    scale: float,
+    rotation: float,
+    opacity: float,
+    position-row: ParamRowState,
+    anchor-row: ParamRowState,
+    scale-row: ParamRowState,
+    rotation-row: ParamRowState,
+    opacity-row: ParamRowState,
+}
+
+// Position that keeps the rendered frame fixed while `anchor-*` moves.
+export struct CompensatedPosition {
+    position-x: float,
+    position-y: float,
+}
+
+// The clip's audio gain sampled at the playhead, plus the volume envelope's
+// keyframe row state — the audio analogue of `TransformSample`, feeding the
+// inspector's volume diamond (M8 volume envelopes).
+export struct AudioSample {
+    volume: float,
+    volume-row: ParamRowState,
+}
+
+// Selection lookup and clip-property writes for the inspector panel.
+// Implemented in Rust (`src/inspector.rs`) so nested model traversal
+// stays out of Slint.
+export global InspectorBackend {
+    pure callback resolve-selection(
+        sequence: Sequence,
+        track-id: string,
+        clip-id: string,
+    ) -> SelectedClipInfo;
+
+    // Sample the clip's animated transform at the playhead and report each
+    // property's keyframe row state. Implemented in Rust over the projected
+    // `kf-*` curves with the engine's own `Param` sampling math, so the
+    // numbers always match the composited frame.
+    pure callback sample-transform(clip: Clip, playhead-tick: int) -> TransformSample;
+
+    // Recompute canvas position so a new in-content anchor leaves pixels
+    // unchanged — the same compensation the preview anchor handle uses.
+    pure callback compensate-anchor-position(
+        clip: Clip,
+        sequence: Sequence,
+        playhead-tick: int,
+        anchor-x: float,
+        anchor-y: float,
+        scale: float,
+        rotation: float,
+    ) -> CompensatedPosition;
+
+    // Sample the clip's volume envelope at the playhead and report its
+    // keyframe row state, mirroring `sample-transform` for the audio sheet
+    // (M8 volume envelopes). Implemented in Rust over the projected
+    // `kf-volume` curve with the engine's `Param` math, so the readout always
+    // matches the mixed gain.
+    pure callback sample-audio(clip: Clip, playhead-tick: int) -> AudioSample;
+
+    // Insert or replace a keyframe on `param` ("position" | "anchor" | "scale" |
+    // "rotation" | "opacity" | "volume") at the absolute sequence tick.
+    // Scalars ride `value-x`; position uses both axes. `easing`: 0 linear,
+    // 1 ease-in, 2 ease-out, 3 ease-in-out. One undoable engine edit.
+    callback set-param-keyframe(
+        clip-id: string,
+        param: string,
+        tick: int,
+        value-x: float,
+        value-y: float,
+        easing: int,
+    );
+
+    // Remove the keyframe sitting exactly at `tick` on `param`. Removing
+    // the last keyframe collapses the property to a constant (engine
+    // semantics). One undoable engine edit.
+    callback remove-param-keyframe(clip-id: string, param: string, tick: int);
+
+    // Retime a media clip (CapCut speed, M1): positive rational `num/den`
+    // playback rate (2/1 = double speed) plus the reverse flag. The engine
+    // keeps the clip's timeline start and source window and re-derives the
+    // timeline duration; with linkage on the clip's link partners retime
+    // too. One undoable edit (the whole link group is one history entry).
+    callback set-clip-speed(
+        clip-id: string,
+        speed-num: int,
+        speed-den: int,
+        reversed: bool,
+    );
+
+    // Toggle pitch preservation on a retimed media clip (CapCut "pitch"
+    // switch, M8 Phase 3): true keeps the original pitch (time-stretch),
+    // false lets pitch follow the speed ("chipmunk"). With linkage on the
+    // clip's audio-lane link partners follow. One undoable edit.
+    callback set-clip-pitch(clip-id: string, preserve: bool);
+
+    // Toggle noise reduction on a media clip (CapCut "Reduce noise", M8
+    // Phase 5): true runs the clip's audio through RNNoise in both mixers. A
+    // video clip carries its own sound, so the edit lands on it directly —
+    // unless its audio was detached to a linked audio lane. One undoable edit.
+    callback set-denoise(clip-id: string, denoise: bool);
+
+    // Apply a named speed-ramp preset to a media clip (CapCut speed curves,
+    // M2): "ramp_up" | "ramp_down" | "montage" | "hero" | "bullet", or ""
+    // (also "none"/"normal") to clear it back to a constant speed. The engine
+    // re-derives the clip's timeline duration from the ramp's average; with
+    // linkage on, link partners ramp too. One undoable edit.
+    callback set-speed-curve(clip-id: string, preset: string);
+
+    // Adjust one existing ramp point's speed multiplier (velocity-graph
+    // drag). The worker reads the clip's current curve, replaces point
+    // `index`'s value, and re-commits. One undoable edit.
+    callback set-speed-curve-point(clip-id: string, index: int, value: float);
+
+    // Set a clip's audio mix (CapCut volume + fades, M1): gain multiplier
+    // (0 mutes, 1 unchanged) plus fade in/out durations in seconds. A video
+    // clip carries its own sound, so the edit lands on it directly — unless its
+    // audio was detached to a linked audio lane. One undoable edit.
+    callback set-clip-audio(
+        clip-id: string,
+        volume: float,
+        fade-in-s: float,
+        fade-out-s: float,
+    );
+
+    // Set only a clip's fades, leaving the gain untouched — a flat level or a
+    // keyframed M8 envelope, which set-clip-audio would flatten. Same linkage
+    // routing as set-clip-audio. One undoable edit.
+    callback set-clip-fades(
+        clip-id: string,
+        fade-in-s: float,
+        fade-out-s: float,
+    );
+
+    // Whether a "duck under voice" gesture is possible for a clip on
+    // `track-id`: true when some *other* audio lane is tagged as a voice
+    // source (the track header "V" toggle, M8 Phase 4). Gates the inspector
+    // button; the worker re-resolves the exact overlapping voice clips.
+    pure callback can-duck-under-voice(sequence: Sequence, track-id: string) -> bool;
+
+    // Duck the given music clip under the voice lanes (M8 Phase 4): the worker
+    // gathers every clip on a voice-tagged audio lane that overlaps this clip
+    // and writes the ducking dip as ordinary volume keyframes — one undoable
+    // edit, editable afterwards through the volume envelope.
+    callback duck-under-voice(clip-id: string);
+
+    // Detect beat markers on a media clip (CapCut "Beat", M8 Phase 6): the
+    // worker decodes the clip's audio, runs onset/tempo analysis, and stores
+    // the beat grid so the timeline magnet snaps clip edges to the music. One
+    // undoable edit; re-running re-detects, and clear-beats removes them.
+    callback detect-beats(clip-id: string);
+
+    // Clear a clip's detected beat markers (M8 Phase 6). One undoable edit.
+    callback clear-beats(clip-id: string);
+
+    // Set a visual clip's crop window + mirroring (CapCut crop, M1):
+    // normalized inset fractions measured in from each content edge
+    // (0,0,0,0 ⇔ uncropped) plus flip flags. main.rs converts insets to the
+    // model's kept-region rect; the engine validates (visual lanes only,
+    // non-degenerate window). One undoable edit.
+    callback set-clip-crop(
+        clip-id: string,
+        left: float,
+        top: float,
+        right: float,
+        bottom: float,
+        flip-h: bool,
+        flip-v: bool,
+    );
+
+    // Fit/fill clip helper (M1 canvas settings): re-place the clip centered
+    // at aspect-fit scale (fill: false) or at the cover scale that fills the
+    // canvas (fill: true). The worker computes the scale from engine state
+    // (media dims × crop vs canvas) and commits one undoable
+    // SetClipTransform that keyframes at `tick` on animated clips.
+    callback fit-clip(clip-id: string, fill: bool, tick: int);
+
+    // Replace a text clip's content and/or styling in one undoable edit. The
+    // inspector always sends the full current style with the single changed
+    // field, so the engine writes one coherent `Generator::Text`.
+    callback set-text-generator(
+        track-id: string,
+        clip-id: string,
+        content: string,
+        style: TextClipStyle,
+    );
+
+    // Live preview of an uncommitted text edit (e.g. dragging the font-size
+    // slider): render `tick` with the clip's generator replaced, no history
+    // entry. The matching `commit`/`clear` arrives on release.
+    callback preview-text-generator(
+        clip-id: string,
+        content: string,
+        style: TextClipStyle,
+        tick: int,
+    );
+
+    // Drop the live preview override and repaint `tick` from committed state
+    // (control released with no net change).
+    callback clear-text-generator(tick: int);
+
+    // Replace a shape clip's reference-pixel size in one undoable edit. The
+    // inspector sends the full current width/height each time.
+    callback set-shape-generator(clip-id: string, width: float, height: float);
+
+    // Live preview of an uncommitted shape resize (slider drag): render `tick`
+    // with the clip's generator replaced, no history entry.
+    callback preview-shape-generator(clip-id: string, width: float, height: float, tick: int);
+
+    // Drop a lingering shape preview override.
+    callback clear-shape-generator(tick: int);
+
+    // Installed font family names for the Font picker, populated once at
+    // startup (system font enumeration is slow, so it runs off the UI thread).
+    in-out property <[string]> font-families: [];
+
+    // Case-insensitive substring filter over `items`, used by the font
+    // dropdown's search box. Implemented in Rust because Slint's string type
+    // has no `contains`. `items` is passed in (rather than read globally) so
+    // the binding re-runs when the font list finishes loading.
+    pure callback filter-fonts(query: string, items: [string]) -> [string];
+}

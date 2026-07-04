@@ -1,0 +1,38 @@
+export struct Spacing {
+    none: length,
+    xs: length,
+    sm: length,
+    md: length,
+    lg: length,
+    xl: length,
+    xxl: length,
+}
+
+export struct Radius {
+    none: length,
+    sm: length,
+    md: length,
+    lg: length,
+}
+
+export struct Stroke {
+    hairline: length,
+    thin: length,
+    medium: length,
+}
+
+export struct Layout {
+    split-grip: length,
+    toolbar-height: length,
+    min-pane-width: length,
+    max-pane-width: length,
+    min-timeline-height: length,
+    max-timeline-height: length,
+}
+
+export struct Metrics {
+    spacing: Spacing,
+    radius: Radius,
+    stroke: Stroke,
+    layout: Layout,
+}

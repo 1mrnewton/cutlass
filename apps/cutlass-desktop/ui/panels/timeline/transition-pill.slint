@@ -1,0 +1,122 @@
+import { CutlassText } from "../../components/index.slint";
+import { AppStore } from "../../store/index.slint";
+import { TimelineStore } from "../../store/timeline-store.slint";
+import { EffectsBackend } from "../../lib/index.slint";
+import { TransitionView } from "../../models/index.slint";
+
+// One transition junction (M4): a pill centered on the cut, spanning the
+// transition window. The body shows the catalog label, a hover × removes it,
+// and the right edge drags to resize the window symmetrically (the cut stays
+// put; both clips give/take equally). The drag is ephemeral local state and
+// commits one undoable `SetTransition` on release; while dragging, the pill
+// previews the new width. Reads `zoom` from the store so it tracks the ruler.
+export component TransitionPill inherits Rectangle {
+    in property <TransitionView> model;
+    // Vertical span of the lane row this pill sits on.
+    in property <length> lane-height;
+
+    private property <float> zoom: TimelineStore.zoom;
+    // The committed window, in ticks, unless a resize drag is previewing.
+    private property <int> live-duration: root.drag-active ? root.preview-duration : root.model.duration-ticks;
+    private property <length> cut-x: root.model.cut-tick * root.zoom * 1px;
+    private property <length> half: root.live-duration / 2 * root.zoom * 1px;
+
+    // Resize-drag state.
+    private property <bool> drag-active: false;
+    private property <int> press-duration;
+    private property <length> press-x;
+    private property <int> preview-duration;
+
+    // Center the pill on the cut; minimum grabbable width.
+    x: root.cut-x - self.width / 2;
+    width: max(18px, 2 * root.half);
+    height: root.lane-height * 0.62;
+    y: (root.lane-height - self.height) / 2;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: #C84A8Fcc;
+    border-width: 1px;
+    border-color: #ffffff66;
+    clip: true;
+
+    body := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+
+        CutlassText {
+            width: 100%;
+            height: 100%;
+            text: root.model.label;
+            style: AppStore.theme.typography.label;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+            overflow: TextOverflow.elide;
+        }
+    }
+
+    // Right-edge resize handle (symmetric: the cut is the anchor, so the new
+    // window is press-duration + 2× the ticks the edge moved).
+    Rectangle {
+        x: parent.width - self.width;
+        width: 7px;
+        height: 100%;
+        background: handle-ta.has-hover || root.drag-active ? #ffffff55 : transparent;
+
+        handle-ta := TouchArea {
+            mouse-cursor: MouseCursor.ew-resize;
+
+            pointer-event(event) => {
+                if event.button != PointerEventButton.left {
+                    return;
+                }
+                if event.kind == PointerEventKind.down {
+                    root.drag-active = true;
+                    root.press-duration = root.model.duration-ticks;
+                    root.preview-duration = root.model.duration-ticks;
+                    root.press-x = self.absolute-position.x + self.mouse-x;
+                }
+                if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
+                    if root.drag-active {
+                        root.drag-active = false;
+                        if root.preview-duration != root.model.duration-ticks {
+                            EffectsBackend.set-transition(root.model.left-clip-id, root.preview-duration);
+                        }
+                    }
+                }
+            }
+
+            moved => {
+                if !root.drag-active {
+                    return;
+                }
+                root.preview-duration = max(1, root.press-duration + round(
+                    2 * (self.absolute-position.x + self.mouse-x - root.press-x) / root.zoom / 1px));
+            }
+        }
+    }
+
+    // Remove control, top-right. Brightens on hover; clicking drops the
+    // junction (one undoable `RemoveTransition`).
+    Rectangle {
+        x: parent.width - self.width - 1px;
+        y: 1px;
+        width: 13px;
+        height: 13px;
+        border-radius: self.width / 2;
+        background: remove-ta.has-hover ? #000000e0 : #00000088;
+
+        CutlassText {
+            width: 100%;
+            height: 100%;
+            text: "×";
+            style: AppStore.theme.typography.label;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        remove-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                EffectsBackend.remove-transition(root.model.left-clip-id);
+            }
+        }
+    }
+}

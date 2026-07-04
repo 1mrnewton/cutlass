@@ -1,0 +1,154 @@
+// CapCut's crop block (M1): trim a percentage off each content edge and
+// mirror the result. Shown for visual clips; commits ride
+// `InspectorBackend.set-clip-crop` → one undoable `SetClipCrop` on the
+// worker. The compositor re-renders from the projection republish, and the
+// preview selection box hugs the cropped quad (`src/preview_select.rs`).
+//
+// Crop is constant per clip (not animatable), so the rows carry no keyframe
+// cluster and no live-preview override — sliders commit on release and the
+// projection republish refreshes the frame.
+
+import { CutlassText } from "../../components/index.slint";
+import { AppStore } from "../../store/index.slint";
+import { Clip } from "../../models/index.slint";
+import { InspectorBackend } from "../../lib/inspector-backend.slint";
+import { SectionHeader, SliderRow } from "inspector-widgets.slint";
+
+// Mirror toggle: quiet bordered chip that fills with the accent when active.
+component FlipToggle inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback toggled();
+
+    width: text.preferred-width + 2 * AppStore.theme.metrics.spacing.lg;
+    height: 26px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: active ? AppStore.theme.accent.primary.with-alpha(0.12) : (ta.has-hover ? #ffffff14 : transparent);
+    border-width: 1px;
+    border-color: active ? AppStore.theme.accent.primary : #ffffff22;
+
+    text := CutlassText {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        style: AppStore.theme.typography.label;
+        foreground: root.active ? AppStore.theme.accent.primary : AppStore.theme.text.primary;
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.toggled();
+        }
+    }
+}
+
+export component CropInspector inherits VerticalLayout {
+    // Named `model` — `clip` is a built-in boolean on Slint elements.
+    in property <Clip> model;
+
+    spacing: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    // Projection rows written before crop existed (and default-constructed
+    // test rows) carry an all-zero rect, which means "no crop".
+    private property <bool> has-window: root.model.crop-w > 0 && root.model.crop-h > 0;
+    // Kept-region rect (model shape) → per-edge insets (control shape).
+    private property <float> left-v: has-window ? root.model.crop-x : 0;
+    private property <float> top-v: has-window ? root.model.crop-y : 0;
+    private property <float> right-v: has-window ? 1 - root.model.crop-x - root.model.crop-w : 0;
+    private property <float> bottom-v: has-window ? 1 - root.model.crop-y - root.model.crop-h : 0;
+
+    // One funnel for every control, in inset fractions. Skips the engine
+    // round-trip when nothing changed (slider released without motion,
+    // Enter on the same value, reset of an uncropped edge). Opposite insets
+    // cap at 49% each so the kept window never collapses (engine floor is
+    // 1%) — the rows clamp typed entries to the same range.
+    function apply(l: float, t: float, r: float, b: float, fh: bool, fv: bool) {
+        if (l == root.left-v
+            && t == root.top-v
+            && r == root.right-v
+            && b == root.bottom-v
+            && fh == root.model.flip-h
+            && fv == root.model.flip-v) {
+            return;
+        }
+        InspectorBackend.set-clip-crop(root.model.id, l, t, r, b, fh, fv);
+    }
+
+    SectionHeader {
+        title: "Crop";
+    }
+
+    SliderRow {
+        label: "Left";
+        suffix: "%";
+        value: root.left-v * 100;
+        minimum: 0;
+        maximum: 49;
+        commit(v) => {
+            root.apply(clamp(v, 0, 49) / 100, root.top-v, root.right-v, root.bottom-v,
+                root.model.flip-h, root.model.flip-v);
+        }
+    }
+
+    SliderRow {
+        label: "Top";
+        suffix: "%";
+        value: root.top-v * 100;
+        minimum: 0;
+        maximum: 49;
+        commit(v) => {
+            root.apply(root.left-v, clamp(v, 0, 49) / 100, root.right-v, root.bottom-v,
+                root.model.flip-h, root.model.flip-v);
+        }
+    }
+
+    SliderRow {
+        label: "Right";
+        suffix: "%";
+        value: root.right-v * 100;
+        minimum: 0;
+        maximum: 49;
+        commit(v) => {
+            root.apply(root.left-v, root.top-v, clamp(v, 0, 49) / 100, root.bottom-v,
+                root.model.flip-h, root.model.flip-v);
+        }
+    }
+
+    SliderRow {
+        label: "Bottom";
+        suffix: "%";
+        value: root.bottom-v * 100;
+        minimum: 0;
+        maximum: 49;
+        commit(v) => {
+            root.apply(root.left-v, root.top-v, root.right-v, clamp(v, 0, 49) / 100,
+                root.model.flip-h, root.model.flip-v);
+        }
+    }
+
+    HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+        alignment: LayoutAlignment.start;
+
+        FlipToggle {
+            label: "Flip H";
+            active: root.model.flip-h;
+            toggled => {
+                root.apply(root.left-v, root.top-v, root.right-v, root.bottom-v,
+                    !root.model.flip-h, root.model.flip-v);
+            }
+        }
+
+        FlipToggle {
+            label: "Flip V";
+            active: root.model.flip-v;
+            toggled => {
+                root.apply(root.left-v, root.top-v, root.right-v, root.bottom-v,
+                    root.model.flip-h, !root.model.flip-v);
+            }
+        }
+    }
+}

@@ -1,0 +1,67 @@
+// Cross-panel timeline state (zoom, playhead, selection). Ephemeral panel
+// view state lives in `TimelineViewState` (`ui/panels/timeline/state.slint`).
+//
+// Selection is a set of clip ids (engine clip ids are globally unique) plus
+// a primary anchor (selected-track-id, selected-clip-id) that keys the
+// inspector and the single-clip ops (split, copy, duplicate). The set always
+// contains the primary; empty primary ⇔ nothing selected.
+
+import { SelectionUpdate } from "../lib/selection-backend.slint";
+
+export global TimelineStore {
+    in-out property <float> zoom: 3;
+    in-out property <int> playhead-tick: 0;
+    // Playback transport (playback roadmap Phase 1): true while the
+    // window-level clock Timer advances the playhead. Session state, not
+    // project state — flip it only through TimelineActions.play/pause so
+    // the clock anchor stays consistent.
+    in-out property <bool> playing: false;
+    // Playback speed as a signed rational (JKL shuttle, Phase 4). 1/1 is
+    // normal forward; negative num is reverse. Audio plays only at 1/1 —
+    // other speeds run muted on the wall clock. Set only through
+    // TimelineActions (play resets it, shuttle-* steps it).
+    in-out property <int> play-speed-num: 1;
+    in-out property <int> play-speed-den: 1;
+    // Loop playback (Phase 4): reaching the end bound jumps back to the
+    // start bound instead of parking-and-pausing.
+    in-out property <bool> loop-enabled: false;
+    // In/out range marks in sequence ticks, -1 = unset (Phase 4). With
+    // both set (in < out), play and loop confine to [in, out).
+    in-out property <int> range-in-tick: -1;
+    in-out property <int> range-out-tick: -1;
+    in-out property <string> selected-track-id: "";
+    in-out property <string> selected-clip-id: "";
+    // Full multi-selection (shift-click, marquee, link groups). Replaced
+    // wholesale on every change so dependent bindings re-evaluate.
+    in-out property <[string]> selected-ids: [];
+
+    // Apply a selection gesture result from SelectionBackend in one step,
+    // keeping the set and the primary anchor consistent.
+    public function apply-selection(upd: SelectionUpdate) {
+        self.selected-ids = upd.ids;
+        self.selected-track-id = upd.primary-track-id;
+        self.selected-clip-id = upd.primary-clip-id;
+    }
+
+    // CapCut's "auto snapping" magnet: drags snap to clip edges on all lanes,
+    // the playhead, and tick 0. Toggled from the timeline toolbar.
+    in-out property <bool> snap-enabled: true;
+    // CapCut's main-track magnet (separate toggle): the bottom video lane
+    // stays gapless — drops/moves insert between clips and shift later ones
+    // right, deletes ripple the gap closed, and enabling packs the lane.
+    // Default on, like CapCut. Off = freeform, same as the other lanes.
+    // Mirrored to the worker via EditorStore.on-main-magnet-changed (paste/
+    // duplicate/delete have no drag resolution, so the worker needs the flag).
+    in-out property <bool> main-magnet-enabled: true;
+    // CapCut's linkage toggle: while on, clips sharing a link group (e.g. a
+    // video and an audio clip that "Separate audio" split apart) select/move/
+    // trim together. A video drop keeps its sound on the clip itself, so it no
+    // longer spawns a linked audio lane. Off = clips act independently (links
+    // persist, dormant). Mirrored to the worker via
+    // EditorStore.on-linkage-changed (trims/splits/selection need the flag).
+    in-out property <bool> link-enabled: true;
+
+    // Ruler marker gestures (M1): wired from main.rs to the preview worker.
+    callback on-marker-added(at-tick: int, name: string, color: string);
+    callback on-marker-removed(marker-id: string);
+}

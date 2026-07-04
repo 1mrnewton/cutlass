@@ -8,20 +8,52 @@ repository.workspace = true
 description = "Cutlass desktop editor (Slint) — a native Rust frontend that links the platform-independent engine directly."
 
 [dependencies]
-# Slint on wgpu 28 (matches the workspace `wgpu` pin) so the desktop UI and the
-# compositor share one wgpu version — and, later, one device for zero-copy
-# preview. `unstable-winit-030` exposes the winit backend the app drives.
-slint = { version = "1.16", features = [
+# Slint pinned to the 1.16 line: 1.17 moved the unstable wgpu interop to
+# wgpu 29, while this workspace (compositor, render) pins wgpu 28 so the
+# desktop UI and the engine can eventually share one device for zero-copy
+# preview. Bump both together when the workspace moves to a newer wgpu.
+slint = { version = "=1.16.1", features = [
     "unstable-winit-030",
     "unstable-wgpu-28",
     "renderer-femtovg-wgpu",
+    "serde",
 ] }
-# The desktop app is Rust, so it links the engine directly — no C-ABI/JNI bridge
-# like the iOS/Android apps. This is the platform-independence proof: the same
-# `crates/cutlass-engine` drives three unrelated frontends.
-cutlass-engine = { path = "../../crates/cutlass-engine" }
-cutlass-render = { path = "../../crates/cutlass-render" }
+# The desktop app is Rust, so it links the engine directly — no C-ABI/JNI
+# bridge like the iOS/Android apps. The same `crates/cutlass-engine` drives
+# three unrelated frontends.
 cutlass-models = { path = "../../crates/cutlass-models" }
+cutlass-settings = { path = "../../crates/cutlass-settings" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rfd = "0.17.2"
+dirs = "6.0.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = [
+    "NSAnimation",
+    "NSAnimationContext",
+    "NSApplication",
+    "NSImage",
+    "NSResponder",
+    "NSWindow",
+    "NSView",
+] }
+objc2-foundation = { version = "0.3.2", features = ["NSData"] }
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle = "0.6"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [build-dependencies]
-slint-build = "1.16"
+slint-build = "=1.16.1"

@@ -1,0 +1,18 @@
+import { Theme } from "../types/index.slint";
+import { DarkBlueTheme, EmberTheme, DefaultTheme } from "../theme/index.slint";
+
+export global AppStore {
+    // The active theme, selected by index so it can switch live from Settings
+    // (the dropdown writes `theme-id`; Rust seeds it at startup from
+    // ~/.cutlass/config.toml and reads it back on save). 0 = graphite+teal
+    // default, 1 = ember, 2 = dark-blue (the shipped look). Indices match
+    // cutlass_settings::ThemeChoice.
+    in-out property <int> theme-id: 2;
+
+    // Derived look the whole shell reads as `AppStore.theme.*`. Recomputed
+    // the instant `theme-id` changes — no republish, no restart.
+    out property <Theme> theme:
+        theme-id == 0 ? DefaultTheme.theme
+        : theme-id == 1 ? EmberTheme.theme
+        : DarkBlueTheme.theme;
+}

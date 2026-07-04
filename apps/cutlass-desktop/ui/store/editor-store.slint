@@ -1,0 +1,210 @@
+import { Project } from "../models/index.slint";
+import { ClipMove } from "../lib/drag-backend.slint";
+
+// One app-owned project draft, for the launch gallery: `name` is the editable
+// display name, `path` the draft's `project.cutlass` (the identity handed back
+// to open / delete callbacks), `modified` a coarse "5 minutes ago" subtitle.
+export struct ProjectSummary {
+    name: string,
+    path: string,
+    modified: string,
+}
+
+// Slint-side view model. This is a read-only projection of the engine's
+// project: the worker thread publishes a fresh `project` (built in
+// `src/projection.rs`) on startup and after every mutation. The default below
+// is just an empty placeholder shown for the brief moment before the first
+// projection arrives — keep `width`/`height` non-zero so preview aspect-ratio
+// math never divides by zero.
+export global EditorStore {
+    // The playhead moved (ruler scrub, frame-step keys, Home/End) —
+    // request a preview frame for `tick`. Requests coalesce to the
+    // newest tick on the worker thread, so this can fire per-frame.
+    callback on-playhead-changed(tick: int);
+    callback on-import-clicked();
+    // A library tile was dropped on the timeline. `track-id` is the video lane
+    // under the cursor, or empty when there is none — the engine then creates
+    // a new video track at `drop-row` (the lane-list row under the cursor; may
+    // be out of range, meaning above/below the existing lanes). Drops that
+    // overlap clips on the targeted lane slide right into the first gap that
+    // fits. `insert` (main-track magnet) ripple-inserts at `start-tick`
+    // instead, shifting later clips right.
+    callback on-clip-dropped(media-id: string, track-id: string, start-tick: int, drop-row: int, insert: bool);
+    // A generated tile (text title, solid color, shape) was dropped on the
+    // timeline. `generator` is the catalog key ("text" | "solid" | "rect" |
+    // "ellipse"); `track-id` names a matching-kind lane, or is empty when the
+    // worker must create one of the generator's kind at `drop-row`. Generated
+    // lanes are never the main track, so there is no insert mode.
+    callback on-generated-dropped(generator: string, track-id: string, start-tick: int, duration-ticks: int, drop-row: int);
+    // A clip drag-move was released. `track-id` names the destination lane,
+    // or is empty when a new lane of the clip's kind must be inserted at
+    // `insert-row` (lane-list row, top-first). The position was already
+    // validated by the drag resolver (no overlap, kind-compatible).
+    // `insert` (main-track magnet) ripple-inserts at `start-tick` on the
+    // main lane — for reorders the tick is in post-close space (the worker
+    // closes the clip's own gap first).
+    callback on-clip-moved(clip-id: string, track-id: string, insert-row: int, start-tick: int, insert: bool);
+    // A multi-selection drag was released: every clip lands on the lane /
+    // start the group resolver validated (uniform dx + row delta, no
+    // conflicts). The worker commits the batch as one history entry.
+    callback on-group-moved(moves: [ClipMove]);
+    // The main-track magnet toggled; the worker mirrors the flag (deletes/
+    // paste/duplicate policy) and packs the main lane when enabling.
+    callback on-main-magnet-changed(enabled: bool);
+    // An edge-trim drag was released: re-place the clip at
+    // `[start-tick, start-tick + duration-ticks)` on its own lane. Already
+    // validated by the trim resolver (neighbors, source headroom, ≥ 1 tick).
+    callback on-clip-trimmed(clip-id: string, start-tick: int, duration-ticks: int);
+
+    // --- selection ops (Phase 5) -----------------------------------------
+    // All raw ids from the projection; the worker parses and validates, the
+    // engine applies atomically, and the projection republish is what makes
+    // the result visible. Gating (selection exists, playhead inside the
+    // clip, …) happens UI-side in `TimelineActions`.
+
+    // Delete the selected clips (Delete/Backspace, toolbar) as one history
+    // entry. Lanes the removals empty are removed too — same policy as
+    // drag-moves.
+    callback on-clips-deleted(clip-ids: [string]);
+    // Split the clip at `at-tick` (Ctrl/Cmd+B, toolbar). Caller guarantees
+    // the tick is strictly inside the clip.
+    callback on-clip-split(clip-id: string, at-tick: int);
+    // Engine history (Ctrl/Cmd+Z / +Shift+Z, toolbar).
+    callback on-undo();
+    callback on-redo();
+    // Clipboard: copy snapshots the selection's content as one block on the
+    // worker (it survives the originals being deleted); paste places the
+    // block at `tick` on the source lanes, keeping relative placement and
+    // sliding the whole block right until every member fits.
+    callback on-clips-copied(clip-ids: [string]);
+    callback on-paste-at(tick: int);
+    // Duplicate: copies of the selection placed right after the block they
+    // form, lanes and relative placement preserved (one history entry).
+    callback on-clips-duplicated(clip-ids: [string]);
+    // Dissolve the link groups the selected clips belong to (whole groups,
+    // selected or not). The worker applies it as one undoable entry.
+    callback on-clips-unlinked(clip-ids: [string]);
+    // A track header toggle was clicked. `flag` is "enabled" | "muted" |
+    // "locked"; `value` is the new state. The worker applies it undoably.
+    callback on-track-flag-toggled(track-id: string, flag: string, value: bool);
+    // The linkage toggle flipped; the worker mirrors the flag so trims/splits/
+    // selection follow existing link groups (a video drop keeps its own sound,
+    // so it no longer creates a linked audio pair).
+    callback on-linkage-changed(enabled: bool);
+
+    // --- preview transform gestures (preview roadmap Phase 3) -------------
+    // Transform values are the `ClipTransform` fields flattened (normalized
+    // position, uniform scale, degrees, opacity); `tick` is the playhead, so
+    // the worker re-renders the frame the user is looking at.
+
+    // Live drag motion: render with an uncommitted override — session state
+    // on the engine, no history entry, no projection republish. Fires at
+    // pointer-move rate; the worker coalesces to the newest value.
+    callback on-preview-transform-overridden(clip-id: string, position-x: float, position-y: float, anchor-x: float, anchor-y: float, scale: float, rotation: float, opacity: float, tick: int);
+    // Gesture ended without a commit (no-op click / cancelled drag): drop
+    // the override and re-render from committed state.
+    callback on-preview-override-cleared(tick: int);
+    // Gesture commit (drag release / arrow nudge): one undoable
+    // SetClipTransform; the worker clears any override in the same step.
+    callback on-clip-transform-committed(clip-id: string, position-x: float, position-y: float, anchor-x: float, anchor-y: float, scale: float, rotation: float, opacity: float, tick: int);
+
+    // --- project lifecycle (app-owned drafts) ------------------------------
+    // Flush the live draft to disk now (Cmd/Ctrl+S). Edits already auto-save,
+    // so this is just an explicit "write now"; `save-as` is ignored (there is
+    // no user-chosen file in the draft model). main.rs forwards it to the
+    // worker.
+    callback on-save-requested(save-as: bool);
+    // Import an external `.cutlass` into a new draft (Open file…, Cmd/Ctrl+O):
+    // main.rs runs the picker and copies the file into the draft store, then
+    // swaps. New (Cmd/Ctrl+N) creates a fresh empty draft. Both flush the
+    // outgoing draft first.
+    callback on-open-requested();
+    callback on-new-requested();
+    // Open an existing draft from the launch gallery, by its `project.cutlass`
+    // path. main.rs flushes the outgoing draft, then swaps.
+    callback on-open-project-requested(path: string);
+    // Delete a draft from the launch gallery (its whole directory), by its
+    // `project.cutlass` path. main.rs removes it and refreshes the gallery.
+    callback on-delete-project-requested(path: string);
+    // Rename the live draft from the title bar. main.rs forwards the trimmed
+    // name to the worker, which applies it as one undoable edit.
+    callback on-rename-project(name: string);
+
+    // --- library asset management ------------------------------------------
+    // Delete a source from the media pool (Library bin right-click → Remove
+    // from project). `force` false removes only an unreferenced source; the
+    // tile raises a confirmation when its `usage-count` is non-zero and then
+    // calls this with `force` true, which cascades the referencing clips'
+    // removal in one undo. The worker validates and republishes.
+    callback on-media-deleted(media-id: string, force: bool);
+
+    // --- missing-media relink (v1 roadmap M0) ------------------------------
+    // "Locate…" was clicked for a pool entry whose file is gone (relink
+    // dialog row or library tile badge). main.rs opens the async file
+    // picker and forwards the choice to the worker, which re-probes, swaps
+    // the entry's path in place, and republishes.
+    callback on-relink-media-requested(media-id: string);
+    // Folder picker: worker tries `folder/<filename>` for each miss.
+    callback on-relink-folder-requested();
+    // How many pool entries currently point at a file that no longer
+    // exists. Republished by the worker with every projection; drives the
+    // relink dialog (raised by app.slint's session-epoch watcher) and its
+    // self-close when the last entry relinks.
+    in-out property <int> missing-media-count: 0;
+
+    // Session save state, republished by the worker with every projection
+    // (engine facts, not UI bookkeeping): whether unsaved edits exist (the
+    // title bar dot), whether the session has a file yet, and that file's
+    // stem for the title (empty before the first save).
+    in-out property <bool> project-dirty: false;
+    in-out property <bool> project-has-path: false;
+    in-out property <string> project-file-name: "";
+    // Full path of the session's file (empty before the first save),
+    // published by the worker alongside the other save-state facts.
+    in-out property <string> project-file-path: "";
+    // Bumped by the worker when the session is replaced wholesale (open /
+    // new) — the app.slint watcher resets UI session state (playback,
+    // playhead, selection, in/out range).
+    in-out property <int> session-epoch: 0;
+    // Non-empty mounts the error dialog (save/open failures); dismissing
+    // clears it. Worker-set, UI-cleared.
+    in-out property <string> session-error: "";
+    // App-owned project drafts, newest-modified first: the launch gallery's
+    // source. Seeded by main.rs at launch and refreshed when returning to the
+    // gallery (close) or after a delete (`drafts::list`).
+    in-out property <[ProjectSummary]> projects: [];
+
+    // Engine history state, republished by the worker after every
+    // mutation — drives the toolbar's undo/redo enabled states.
+    in-out property <bool> can-undo: false;
+    in-out property <bool> can-redo: false;
+
+    // Bumped by the worker when a transform commit wrote keyframes (CapCut
+    // compose semantics: a gesture on an animated clip keyframes at the
+    // playhead instead of flattening). The inspector watches it to flash
+    // its transient "keyframe added" chip.
+    in-out property <int> keyframe-commit-epoch: 0;
+
+    // Incremented after each projection publish. UI-side optimistic gesture
+    // state uses this as the "committed model caught up" signal.
+    in-out property <int> projection-revision: 0;
+
+    in-out property <Project> project: {
+        id: "",
+        title: "",
+        sequence: {
+            id: "",
+            name: "",
+            fps: { num: 24, den: 1 },
+            drop-frame: false,
+            width: 1920px,
+            height: 1080px,
+            tracks: [],
+            markers: [],
+            aspect-index: 0,
+            background: #000000,
+        },
+        media: [],
+        media-audio: [],
+    };
+}

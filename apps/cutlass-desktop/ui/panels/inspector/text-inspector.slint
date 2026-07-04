@@ -1,0 +1,1438 @@
+import {
+    CutlassScrollView,
+    CutlassSlider,
+    CutlassText,
+    CutlassDropdown,
+    CutlassColorSwatch,
+} from "../../components/index.slint";
+import {
+    AppStore,
+    EditorStore,
+    TimelineStore,
+    PreviewStore,
+} from "../../store/index.slint";
+import {
+    InspectorBackend,
+    ParamRowState,
+    TransformSample,
+} from "../../lib/inspector-backend.slint";
+import { Clip, TextClipStyle } from "../../models/index.slint";
+import { AppState } from "../../state.slint";
+import { KeyframeControl } from "keyframe-control.slint";
+import {
+    InspectorDivider,
+    InspectorTabHeader,
+    SectionHeader,
+    LabelCell,
+    LineTextInput,
+    SliderRow,
+} from "inspector-widgets.slint";
+
+component PillTab inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    in property <bool> enabled: true;
+
+    height: 30px;
+    horizontal-stretch: 1;
+    border-radius: AppStore.theme.metrics.radius.md;
+    background: selected ? #444444 : (ta.has-hover && enabled ? #ffffff10 : #1b1b1b);
+    opacity: enabled ? 1.0 : 0.45;
+
+    CutlassText {
+        width: 100%;
+        height: 100%;
+        text: root.label;
+        style: AppStore.theme.typography.label;
+        foreground: selected ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            AppState.refocus-shortcuts();
+        }
+    }
+}
+
+component FakeField inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: false;
+
+    height: 28px;
+    horizontal-stretch: 1;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: #1a1a1a;
+    opacity: enabled ? 1.0 : 0.45;
+
+    CutlassText {
+        x: AppStore.theme.metrics.spacing.sm;
+        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+        height: parent.height;
+        text: root.text;
+        style: AppStore.theme.typography.body;
+        foreground: AppStore.theme.text.secondary;
+        vertical-alignment: TextVerticalAlignment.center;
+        overflow: TextOverflow.elide;
+    }
+}
+
+component MultilineTextInput inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder-text;
+
+    callback edited(text: string);
+    callback commit(text: string);
+
+    private property <length> pad: AppStore.theme.metrics.spacing.md;
+
+    height: 96px;
+    horizontal-stretch: 1;
+    border-radius: AppStore.theme.metrics.radius.md;
+    border-width: input.has-focus ? 1px : 0px;
+    border-color: AppStore.theme.accent.primary;
+    background: input.has-focus ? #202020 : #1a1a1a;
+    clip: true;
+    forward-focus: input;
+
+    animate background {
+        duration: 120ms;
+        easing: ease-out;
+    }
+    animate border-width {
+        duration: 120ms;
+        easing: ease-out;
+    }
+
+    // Clicking the padding ring around the editor focuses it instead of
+    // falling through to the panel's blur catcher.
+    TouchArea {
+        mouse-cursor: MouseCursor.text;
+        clicked => {
+            input.focus();
+        }
+    }
+
+    editor-scroll := CutlassScrollView {
+        x: root.pad;
+        y: root.pad;
+        width: max(0px, root.width - 2 * root.pad);
+        height: max(0px, root.height - 2 * root.pad);
+        viewport-width: self.width;
+        viewport-height: max(self.height, input.preferred-height);
+        show-horizontal-scrollbar: false;
+        show-vertical-scrollbar: input.preferred-height > self.height;
+
+        input := TextInput {
+            width: editor-scroll.width;
+            height: max(editor-scroll.height, self.preferred-height);
+            text <=> root.text;
+            single-line: false;
+            wrap: word-wrap;
+            color: AppStore.theme.text.primary;
+            font-size: AppStore.theme.typography.body.size;
+            font-weight: AppStore.theme.typography.body.weight;
+            selection-background-color: AppStore.theme.accent.primary.with-alpha(0.33);
+            selection-foreground-color: AppStore.theme.text.primary;
+            page-height: editor-scroll.height;
+            accessible-role: none;
+
+            changed has-focus => {
+                if (!self.has-focus) {
+                    root.commit(self.text);
+                }
+            }
+
+            edited => {
+                root.edited(self.text);
+            }
+
+            cursor-position-changed(cpos) => {
+                if (cpos.y + editor-scroll.viewport-y < 8px) {
+                    editor-scroll.viewport-y = min(0px, max(
+                        editor-scroll.height - self.height,
+                        -cpos.y + 8px,
+                    ));
+                } else if (cpos.y + editor-scroll.viewport-y > editor-scroll.height - 24px) {
+                    editor-scroll.viewport-y = min(0px, max(
+                        editor-scroll.height - self.height,
+                        editor-scroll.height - cpos.y - 24px,
+                    ));
+                }
+            }
+        }
+    }
+
+    placeholder := CutlassText {
+        x: root.pad;
+        y: root.pad;
+        width: max(0px, root.width - 2 * root.pad);
+        height: AppStore.theme.typography.body.size + 6px;
+        text: (root.text == "" && input.preedit-text == "") ? root.placeholder-text : "";
+        style: AppStore.theme.typography.body;
+        foreground: AppStore.theme.text.muted;
+        vertical-alignment: TextVerticalAlignment.center;
+        accessible-role: none;
+    }
+}
+
+component IconButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    in property <bool> enabled: false;
+
+    callback clicked();
+
+    width: 32px;
+    height: 28px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: selected
+        ? #4a4a4a
+        : (ta.has-hover && enabled ? #ffffff1c : #ffffff10);
+    opacity: enabled ? 1.0 : 0.45;
+
+    CutlassText {
+        width: 100%;
+        height: 100%;
+        text: root.label;
+        style: AppStore.theme.typography.label;
+        foreground: AppStore.theme.text.primary;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+            AppState.refocus-shortcuts();
+        }
+    }
+}
+
+component PresetStyle inherits Rectangle {
+    in property <string> label: "Aa";
+    in property <color> foreground: #ffffff;
+    in property <color> fill: #4a4a4a;
+    in property <color> outline: transparent;
+    in property <bool> selected: false;
+
+    width: 50px;
+    height: 50px;
+    border-radius: AppStore.theme.metrics.radius.md;
+    background: selected ? #ffffff12 : #ffffff0d;
+    border-width: selected ? 2px : 0px;
+    border-color: AppStore.theme.accent.primary;
+    opacity: 0.65;
+
+    Rectangle {
+        x: 7px;
+        y: 7px;
+        width: parent.width - 14px;
+        height: parent.height - 14px;
+        border-radius: AppStore.theme.metrics.radius.md;
+        background: root.fill;
+    }
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.label;
+        color: root.foreground;
+        font-size: 24px;
+        font-weight: 800;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component DisabledPropertyRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+
+    spacing: AppStore.theme.metrics.spacing.md;
+    height: 28px;
+    vertical-stretch: 0;
+    opacity: 0.55;
+
+    LabelCell {
+        label: root.label;
+    }
+
+    FakeField {
+        text: root.value;
+    }
+}
+
+component NumberBox inherits Rectangle {
+    in property <string> prefix;
+    in property <float> value;
+    callback commit(value: float);
+
+    width: 92px;
+    height: 28px;
+    vertical-stretch: 0;
+
+    changed value => {
+        field.text = Math.round(root.value) + "";
+    }
+
+    field := LineTextInput {
+        width: 100%;
+        height: parent.height;
+        text-padding-left: 24px;
+        text-padding-right: AppStore.theme.metrics.spacing.xs;
+        horizontal-alignment: TextHorizontalAlignment.right;
+        text: Math.round(root.value) + "";
+
+        accepted(entered) => {
+            if (entered.is-float()) {
+                root.commit(entered.to-float());
+            }
+            self.text = Math.round(root.value) + "";
+        }
+    }
+
+    CutlassText {
+        x: AppStore.theme.metrics.spacing.sm;
+        width: 16px;
+        height: 100%;
+        text: root.prefix;
+        style: AppStore.theme.typography.label;
+        foreground: AppStore.theme.text.muted;
+        vertical-alignment: TextVerticalAlignment.center;
+        accessible-role: none;
+    }
+}
+
+component PositionRow inherits HorizontalLayout {
+    in property <string> label: "Position";
+    in property <float> x-value;
+    in property <float> y-value;
+    // A vec2 param (position / anchor): one cluster keyframes both axes.
+    in property <ParamRowState> kf;
+    in property <bool> kf-can-toggle;
+
+    callback commit-x(value: float);
+    callback commit-y(value: float);
+    callback kf-toggle();
+    callback kf-set-easing(easing: int);
+
+    spacing: AppStore.theme.metrics.spacing.md;
+    height: 28px;
+    vertical-stretch: 0;
+
+    LabelCell {
+        label: root.label;
+    }
+
+    NumberBox {
+        prefix: "X";
+        value: root.x-value;
+        commit(v) => {
+            root.commit-x(v);
+        }
+    }
+
+    NumberBox {
+        prefix: "Y";
+        value: root.y-value;
+        commit(v) => {
+            root.commit-y(v);
+        }
+    }
+
+    Rectangle {
+        horizontal-stretch: 1;
+    }
+
+    KeyframeControl {
+        state: root.kf;
+        can-toggle: root.kf-can-toggle;
+        toggle => {
+            root.kf-toggle();
+        }
+        jump(tick) => {
+            TimelineStore.playhead-tick = tick;
+        }
+        set-easing(easing) => {
+            root.kf-set-easing(easing);
+        }
+    }
+}
+
+component ToggleSwitch inherits Rectangle {
+    in property <bool> checked: true;
+    in property <bool> enabled: false;
+
+    width: 42px;
+    height: 22px;
+    vertical-stretch: 0;
+    border-radius: 11px;
+    background: checked ? AppStore.theme.accent.primary : #ffffff1a;
+    opacity: enabled ? 1.0 : 0.7;
+
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        x: root.checked ? parent.width - self.width - 3px : 3px;
+        y: 3px;
+        border-radius: 8px;
+        background: #f7f7f7;
+    }
+}
+
+component DisabledEffectCard inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+
+    width: 78px;
+    height: 78px;
+    border-radius: AppStore.theme.metrics.radius.md;
+    background: #ffffff0a;
+    border-width: selected ? 2px : 0px;
+    border-color: AppStore.theme.accent.primary;
+    opacity: 0.45;
+
+    CutlassText {
+        width: 100%;
+        height: 100%;
+        text: root.label;
+        style: AppStore.theme.typography.heading-md;
+        foreground: AppStore.theme.text.secondary;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// CapCut-inspired property sheet for text / title clips. Only fields backed
+// by the current model are interactive; style/effect controls are shown as
+// disabled placeholders until text generator styling is persisted.
+export component TextInspector inherits VerticalLayout {
+    in property <string> track-id;
+    // Named `model` — `clip` is a built-in boolean on Slint elements.
+    in property <Clip> model;
+
+    spacing: AppStore.theme.metrics.spacing.none;
+
+    private property <string> bound-clip-id: model.id;
+    private property <string> edit-text: model.text-content;
+    // Scratch style used to build an edit: each control seeds it from the
+    // authoritative `model.text-style`, overrides one field, and commits — so
+    // concurrent fields are never stale and we never need to mirror the model.
+    private property <TextClipStyle> style;
+    private property <float> canvas-w: EditorStore.project.sequence.width / 1px;
+    private property <float> canvas-h: EditorStore.project.sequence.height / 1px;
+    // Playhead sample + per-property keyframe row state (keyframes roadmap
+    // Phase 1): value rows track the rendered frame on animated clips.
+    private property <TransformSample> sample: InspectorBackend.sample-transform(
+        root.model, TimelineStore.playhead-tick);
+    private property <bool> playhead-inside: TimelineStore.playhead-tick >= root.model.timeline-start.value
+        && TimelineStore.playhead-tick < root.model.timeline-start.value + root.model.source-range.duration.value;
+    private property <bool> live: PreviewStore.gesture-active
+        && PreviewStore.gesture-clip == model.id
+        && PreviewStore.gesture.valid;
+    private property <float> pos-x: live ? PreviewStore.gesture.position-x : sample.position-x;
+    private property <float> pos-y: live ? PreviewStore.gesture.position-y : sample.position-y;
+    private property <float> anchor-x: live ? PreviewStore.gesture.anchor-x : sample.anchor-x;
+    private property <float> anchor-y: live ? PreviewStore.gesture.anchor-y : sample.anchor-y;
+    private property <float> scale-v: live ? PreviewStore.gesture.scale : sample.scale;
+    private property <float> rot-v: live ? PreviewStore.gesture.rotation : sample.rotation;
+    private property <float> opacity-v: live ? PreviewStore.gesture.opacity : sample.opacity;
+
+    changed bound-clip-id => {
+        edit-text = model.text-content;
+    }
+
+    // Push the current text + scratch style through one undoable engine edit.
+    // Guarded so a control firing with no net change (e.g. a slider released
+    // without moving) doesn't spam the undo history.
+    function commit-style() {
+        if (root.edit-text != model.text-content || root.style != model.text-style) {
+            InspectorBackend.set-text-generator(root.track-id, model.id, root.edit-text, root.style);
+        }
+    }
+
+    // Seed the scratch style from the model, ready for a control to override a
+    // single field before calling `commit-style()`.
+    function begin-edit() {
+        root.style = model.text-style;
+    }
+
+    // Release handler for a control that ran live previews (e.g. the font-size
+    // slider): commit the scratch style if it differs, otherwise drop the
+    // lingering preview override so it can't leak onto later renders.
+    function commit-or-clear-style() {
+        if (root.edit-text != model.text-content || root.style != model.text-style) {
+            InspectorBackend.set-text-generator(root.track-id, model.id, root.edit-text, root.style);
+        } else {
+            InspectorBackend.clear-text-generator(TimelineStore.playhead-tick);
+        }
+    }
+
+    // Push the scratch style through a live, uncommitted preview render at the
+    // playhead — no history entry. Used while dragging a slider.
+    function preview-style() {
+        InspectorBackend.preview-text-generator(model.id, root.edit-text, root.style, TimelineStore.playhead-tick);
+    }
+
+    // Anchor edits compensate position so the rendered text stays put while
+    // the pivot moves (same semantics as the preview anchor handle); position /
+    // scale / rotation / opacity use `apply` directly.
+    function apply-anchor(ax: float, ay: float, commit: bool) {
+        let c = InspectorBackend.compensate-anchor-position(
+            model,
+            EditorStore.project.sequence,
+            TimelineStore.playhead-tick,
+            ax,
+            ay,
+            root.scale-v,
+            root.rot-v);
+        root.apply(c.position-x, c.position-y, ax, ay, root.scale-v, root.rot-v, root.opacity-v, commit);
+    }
+
+    function apply(px: float, py: float, ax: float, ay: float, s: float, r: float, o: float, commit: bool) {
+        if (commit) {
+            // No-op against the playhead sample (what the rows display).
+            if (px == sample.position-x
+                && py == sample.position-y
+                && ax == sample.anchor-x
+                && ay == sample.anchor-y
+                && s == sample.scale
+                && r == sample.rotation
+                && o == sample.opacity) {
+                if (PreviewStore.gesture-active && PreviewStore.gesture-clip == model.id) {
+                    EditorStore.on-preview-override-cleared(TimelineStore.playhead-tick);
+                }
+                PreviewStore.gesture-active = false;
+                PreviewStore.gesture-commit-pending = false;
+            } else {
+                EditorStore.on-clip-transform-committed(
+                    model.id, px, py, ax, ay, s, r, o, TimelineStore.playhead-tick);
+                PreviewStore.gesture-commit-pending = true;
+            }
+        } else {
+            PreviewStore.gesture-clip = model.id;
+            PreviewStore.gesture = {
+                valid: true,
+                moved: true,
+                position-x: px,
+                position-y: py,
+                anchor-x: ax,
+                anchor-y: ay,
+                scale: s,
+                rotation: r,
+                opacity: o,
+                snap-h: false,
+                snap-v: false,
+                guide-x: 0,
+                guide-y: 0,
+            };
+            PreviewStore.gesture-commit-pending = false;
+            PreviewStore.gesture-active = true;
+            EditorStore.on-preview-transform-overridden(
+                model.id, px, py, ax, ay, s, r, o, TimelineStore.playhead-tick);
+        }
+    }
+
+    // Diamond toggle for one property: on a keyframe ⇒ remove it; anywhere
+    // else ⇒ write one at the playhead holding the displayed (sampled)
+    // value, so toggling never visibly changes the frame.
+    function toggle-kf(param: string, on-keyframe: bool, vx: float, vy: float) {
+        if (on-keyframe) {
+            InspectorBackend.remove-param-keyframe(model.id, param, TimelineStore.playhead-tick);
+        } else {
+            InspectorBackend.set-param-keyframe(
+                model.id, param, TimelineStore.playhead-tick, vx, vy, 0);
+        }
+    }
+
+    // Re-ease the keyframe under the playhead: same tick + value, new
+    // outgoing curve.
+    function ease-kf(param: string, easing: int, vx: float, vy: float) {
+        InspectorBackend.set-param-keyframe(
+            model.id, param, TimelineStore.playhead-tick, vx, vy, easing);
+    }
+
+    InspectorTabHeader {
+        tabs: ["Text", "Animation", "Tracking", "Text to speech", "AI avatars"];
+        selected: 0;
+    }
+
+    body-scroll := CutlassScrollView {
+        vertical-stretch: 1;
+        viewport-width: root.width;
+        viewport-height: content.preferred-height;
+        show-horizontal-scrollbar: false;
+
+        // Same blur catcher for the property sheet: any click that no
+        // control claims (labels, dividers, padding) unfocuses the active
+        // text input, which commits its pending edit.
+        TouchArea {
+            x: 0;
+            y: 0;
+            width: body-scroll.width;
+            height: max(body-scroll.height, content.preferred-height);
+            clicked => {
+                AppState.refocus-shortcuts();
+            }
+        }
+
+        content := VerticalLayout {
+            width: max(0px, root.width - AppStore.theme.scrollbar.size);
+            spacing: AppStore.theme.metrics.spacing.lg;
+            alignment: LayoutAlignment.start;
+            padding: AppStore.theme.metrics.spacing.lg;
+
+            HorizontalLayout {
+                spacing: 1px;
+                height: 30px;
+
+                PillTab {
+                    label: "Basic";
+                    selected: true;
+                }
+
+                PillTab {
+                    label: "Bubble";
+                    enabled: false;
+                }
+
+                PillTab {
+                    label: "Effects";
+                    enabled: false;
+                }
+            }
+
+            InspectorDivider { }
+
+            MultilineTextInput {
+                text: root.edit-text;
+                placeholder-text: "Default text";
+
+                // Typing only updates the local field; the engine edit (one undoable
+                // history entry) commits on blur so undo isn't spammed per keystroke
+                // and the projection republish can't fight the box.
+                edited(new-text) => {
+                    root.edit-text = new-text;
+                }
+
+                commit(new-text) => {
+                    root.edit-text = new-text;
+                    root.begin-edit();
+                    root.commit-style();
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Font";
+                }
+
+                font-drop := CutlassDropdown {
+                    searchable: true;
+                    placeholder: "System";
+                    current: model.text-style.font;
+                    items: InspectorBackend.filter-fonts(self.query, InspectorBackend.font-families);
+                    selected(value) => {
+                        root.begin-edit();
+                        root.style.font = value;
+                        root.commit-style();
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Font size";
+                }
+
+                CutlassSlider {
+                    horizontal-stretch: 1;
+                    height: 28px;
+                    vertical-stretch: 0;
+                    minimum: 8;
+                    maximum: 240;
+                    value: clamp(model.text-style.size, 8, 240);
+                    changed(v) => {
+                        // Track the live value while dragging; the model size
+                        // only changes on commit (release).
+                        size-num.text = Math.round(v) + "";
+                        // Live-preview the new size on the canvas without
+                        // committing — seed the scratch style and override size.
+                        root.begin-edit();
+                        root.style.size = v;
+                        root.preview-style();
+                    }
+                    released(v) => {
+                        root.begin-edit();
+                        root.style.size = v;
+                        root.commit-or-clear-style();
+                    }
+                }
+
+                size-num := LineTextInput {
+                    width: 56px;
+                    height: 28px;
+                    vertical-stretch: 0;
+                    horizontal-alignment: TextHorizontalAlignment.right;
+                    text: Math.round(model.text-style.size) + "";
+                    accepted(entered) => {
+                        if (entered.is-float()) {
+                            root.begin-edit();
+                            root.style.size = entered.to-float();
+                            root.commit-style();
+                        }
+                        self.text = Math.round(model.text-style.size) + "";
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Pattern";
+                }
+
+                IconButton {
+                    label: "B";
+                    enabled: true;
+                    selected: model.text-style.bold;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.bold = !model.text-style.bold;
+                        root.commit-style();
+                    }
+                }
+
+                IconButton {
+                    label: "U";
+                    enabled: true;
+                    selected: model.text-style.underline;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.underline = !model.text-style.underline;
+                        root.commit-style();
+                    }
+                }
+
+                IconButton {
+                    label: "I";
+                    enabled: true;
+                    selected: model.text-style.italic;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.italic = !model.text-style.italic;
+                        root.commit-style();
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Case";
+                }
+
+                IconButton {
+                    label: "TT";
+                    enabled: true;
+                    selected: model.text-style.case == 1;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.case = model.text-style.case == 1 ? 0 : 1;
+                        root.commit-style();
+                    }
+                }
+
+                IconButton {
+                    label: "tt";
+                    enabled: true;
+                    selected: model.text-style.case == 2;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.case = model.text-style.case == 2 ? 0 : 2;
+                        root.commit-style();
+                    }
+                }
+
+                IconButton {
+                    label: "Tt";
+                    enabled: true;
+                    selected: model.text-style.case == 3;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.case = model.text-style.case == 3 ? 0 : 3;
+                        root.commit-style();
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Color";
+                }
+
+                CutlassColorSwatch {
+                    value: model.text-style.fill;
+                    changed(c) => {
+                        root.begin-edit();
+                        root.style.fill = c;
+                        root.commit-style();
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Spacing";
+                }
+
+                NumberBox {
+                    prefix: "C";
+                    value: model.text-style.letter-spacing;
+                    commit(v) => {
+                        root.begin-edit();
+                        root.style.letter-spacing = v;
+                        root.commit-style();
+                    }
+                }
+
+                NumberBox {
+                    prefix: "L";
+                    value: model.text-style.line-spacing * 100;
+                    commit(v) => {
+                        root.begin-edit();
+                        root.style.line-spacing = max(v, 10) / 100;
+                        root.commit-style();
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Alignment";
+                }
+
+                IconButton {
+                    label: "|<";
+                    enabled: true;
+                    selected: model.text-style.align-h == 0;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.align-h = 0;
+                        root.commit-style();
+                    }
+                }
+
+                IconButton {
+                    label: "-";
+                    enabled: true;
+                    selected: model.text-style.align-h == 1;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.align-h = 1;
+                        root.commit-style();
+                    }
+                }
+
+                IconButton {
+                    label: ">|";
+                    enabled: true;
+                    selected: model.text-style.align-h == 2;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.align-h = 2;
+                        root.commit-style();
+                    }
+                }
+
+                IconButton {
+                    label: "T";
+                    enabled: true;
+                    selected: model.text-style.align-v == 0;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.align-v = 0;
+                        root.commit-style();
+                    }
+                }
+
+                IconButton {
+                    label: "M";
+                    enabled: true;
+                    selected: model.text-style.align-v == 1;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.align-v = 1;
+                        root.commit-style();
+                    }
+                }
+
+                IconButton {
+                    label: "B";
+                    enabled: true;
+                    selected: model.text-style.align-v == 2;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.align-v = 2;
+                        root.commit-style();
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Wrap";
+                }
+
+                IconButton {
+                    label: model.text-style.wrap ? "On" : "Off";
+                    enabled: true;
+                    selected: model.text-style.wrap;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.wrap = !model.text-style.wrap;
+                        root.commit-style();
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            InspectorDivider { }
+
+            CutlassText {
+                text: "Preset style";
+                style: AppStore.theme.typography.label;
+                foreground: AppStore.theme.text.secondary;
+            }
+
+            CutlassScrollView {
+                width: 100%;
+                height: 50px;
+                viewport-width: preset-styles.preferred-width;
+                viewport-height: self.height;
+                show-horizontal-scrollbar: false;
+                show-vertical-scrollbar: false;
+
+                preset-styles := HorizontalLayout {
+                    spacing: AppStore.theme.metrics.spacing.md;
+
+                    PresetStyle {
+                        label: "/";
+                        selected: true;
+                        foreground: AppStore.theme.text.muted;
+                        fill: #303030;
+                    }
+
+                    PresetStyle {
+                        foreground: #ffffff;
+                        fill: #111111;
+                    }
+
+                    PresetStyle {
+                        foreground: #ffffff;
+                        fill: #3f3f3f;
+                    }
+
+                    PresetStyle {
+                        foreground: #f2f2f2;
+                        fill: #8b6d4b;
+                    }
+
+                    PresetStyle {
+                        foreground: #fff157;
+                        fill: #1d1d1d;
+                    }
+
+                    PresetStyle {
+                        foreground: #ff3b3b;
+                        fill: #f5f5f5;
+                    }
+
+                    PresetStyle {
+                        foreground: #2bbcff;
+                        fill: #e7f5ff;
+                    }
+
+                    PresetStyle {
+                        foreground: #00ef66;
+                        fill: #151515;
+                    }
+                }
+            }
+
+            InspectorDivider { }
+
+            SectionHeader {
+                title: "Transform";
+            }
+
+            SliderRow {
+                label: "Scale";
+                suffix: "%";
+                value: root.scale-v * 100;
+                minimum: 1;
+                maximum: 400;
+                reset-value: 100;
+                kf-visible: true;
+                kf: root.sample.scale-row;
+                kf-can-toggle: root.playhead-inside;
+                preview(v) => {
+                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, max(v, 1) / 100, root.rot-v, root.opacity-v, false);
+                }
+                commit(v) => {
+                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, max(v, 1) / 100, root.rot-v, root.opacity-v, true);
+                }
+                kf-toggle => {
+                    root.toggle-kf("scale", root.sample.scale-row.on-keyframe, root.scale-v, 0);
+                }
+                kf-set-easing(e) => {
+                    root.ease-kf("scale", e, root.scale-v, 0);
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Uniform scale";
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                ToggleSwitch {
+                    checked: true;
+                }
+            }
+
+            PositionRow {
+                x-value: root.pos-x * root.canvas-w;
+                y-value: root.pos-y * root.canvas-h;
+                kf: root.sample.position-row;
+                kf-can-toggle: root.playhead-inside;
+                commit-x(v) => {
+                    root.apply(v / root.canvas-w, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, root.rot-v, root.opacity-v, true);
+                }
+                commit-y(v) => {
+                    root.apply(root.pos-x, v / root.canvas-h, root.anchor-x, root.anchor-y, root.scale-v, root.rot-v, root.opacity-v, true);
+                }
+                kf-toggle => {
+                    root.toggle-kf("position", root.sample.position-row.on-keyframe, root.pos-x, root.pos-y);
+                }
+                kf-set-easing(e) => {
+                    root.ease-kf("position", e, root.pos-x, root.pos-y);
+                }
+            }
+
+            // Anchor as a percentage of the content box (50/50 = center); the
+            // edit keeps pixels fixed via `apply-anchor` so moving the pivot
+            // doesn't shift the title.
+            PositionRow {
+                label: "Anchor";
+                x-value: root.anchor-x * 100;
+                y-value: root.anchor-y * 100;
+                kf: root.sample.anchor-row;
+                kf-can-toggle: root.playhead-inside;
+                commit-x(v) => {
+                    root.apply-anchor(v / 100, root.anchor-y, true);
+                }
+                commit-y(v) => {
+                    root.apply-anchor(root.anchor-x, v / 100, true);
+                }
+                kf-toggle => {
+                    root.toggle-kf("anchor", root.sample.anchor-row.on-keyframe, root.anchor-x, root.anchor-y);
+                }
+                kf-set-easing(e) => {
+                    root.ease-kf("anchor", e, root.anchor-x, root.anchor-y);
+                }
+            }
+
+            SliderRow {
+                label: "Plane rotation";
+                suffix: "deg";
+                value: root.rot-v;
+                minimum: -180;
+                maximum: 180;
+                reset-value: 0;
+                kf-visible: true;
+                kf: root.sample.rotation-row;
+                kf-can-toggle: root.playhead-inside;
+                preview(v) => {
+                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, v, root.opacity-v, false);
+                }
+                commit(v) => {
+                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, v, root.opacity-v, true);
+                }
+                kf-toggle => {
+                    root.toggle-kf("rotation", root.sample.rotation-row.on-keyframe, root.rot-v, 0);
+                }
+                kf-set-easing(e) => {
+                    root.ease-kf("rotation", e, root.rot-v, 0);
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+                opacity: 0.55;
+
+                IconButton {
+                    label: "|<";
+                    selected: true;
+                }
+
+                IconButton {
+                    label: "+";
+                }
+
+                IconButton {
+                    label: ">|";
+                }
+
+                IconButton {
+                    label: "T";
+                }
+
+                IconButton {
+                    label: "B";
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            InspectorDivider { }
+
+            SectionHeader {
+                title: "Blend";
+                active: true;
+                checkable: true;
+            }
+
+            SliderRow {
+                label: "Opacity";
+                suffix: "%";
+                value: root.opacity-v * 100;
+                minimum: 0;
+                maximum: 100;
+                reset-value: 100;
+                kf-visible: true;
+                kf: root.sample.opacity-row;
+                kf-can-toggle: root.playhead-inside;
+                preview(v) => {
+                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, root.rot-v, clamp(v, 0, 100) / 100, false);
+                }
+                commit(v) => {
+                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, root.rot-v, clamp(v, 0, 100) / 100, true);
+                }
+                kf-toggle => {
+                    root.toggle-kf("opacity", root.sample.opacity-row.on-keyframe, root.opacity-v, 0);
+                }
+                kf-set-easing(e) => {
+                    root.ease-kf("opacity", e, root.opacity-v, 0);
+                }
+            }
+
+            InspectorDivider { }
+
+            SectionHeader {
+                title: "Stroke";
+                active: model.text-style.stroke-enabled;
+                checkable: true;
+                interactive: true;
+                toggled => {
+                    root.begin-edit();
+                    root.style.stroke-enabled = !model.text-style.stroke-enabled;
+                    root.commit-style();
+                }
+                reset => {
+                    root.begin-edit();
+                    root.style.stroke-enabled = false;
+                    root.commit-style();
+                }
+            }
+
+            if model.text-style.stroke-enabled: HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Color";
+                }
+
+                CutlassColorSwatch {
+                    value: model.text-style.stroke-color;
+                    changed(c) => {
+                        root.begin-edit();
+                        root.style.stroke-color = c;
+                        root.commit-style();
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            if model.text-style.stroke-enabled: SliderRow {
+                label: "Thickness";
+                suffix: "";
+                value: model.text-style.stroke-width;
+                minimum: 0;
+                maximum: 40;
+                reset-value: 6;
+                commit(v) => {
+                    root.begin-edit();
+                    root.style.stroke-width = v;
+                    root.commit-style();
+                }
+            }
+
+            InspectorDivider { }
+
+            SectionHeader {
+                title: "Background";
+                active: model.text-style.background-enabled;
+                checkable: true;
+                interactive: true;
+                toggled => {
+                    root.begin-edit();
+                    root.style.background-enabled = !model.text-style.background-enabled;
+                    root.commit-style();
+                }
+                reset => {
+                    root.begin-edit();
+                    root.style.background-enabled = false;
+                    root.commit-style();
+                }
+            }
+
+            if model.text-style.background-enabled: HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Color";
+                }
+
+                CutlassColorSwatch {
+                    value: model.text-style.background-color;
+                    changed(c) => {
+                        root.begin-edit();
+                        root.style.background-color = c;
+                        root.commit-style();
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            if model.text-style.background-enabled: SliderRow {
+                label: "Opacity";
+                suffix: "%";
+                value: model.text-style.background-opacity * 100;
+                minimum: 0;
+                maximum: 100;
+                reset-value: 100;
+                commit(v) => {
+                    root.begin-edit();
+                    root.style.background-opacity = clamp(v, 0, 100) / 100;
+                    root.commit-style();
+                }
+            }
+
+            if model.text-style.background-enabled: SliderRow {
+                label: "Rounded";
+                suffix: "%";
+                value: model.text-style.background-radius * 100;
+                minimum: 0;
+                maximum: 100;
+                reset-value: 0;
+                commit(v) => {
+                    root.begin-edit();
+                    root.style.background-radius = clamp(v, 0, 100) / 100;
+                    root.commit-style();
+                }
+            }
+
+            InspectorDivider { }
+
+            SectionHeader {
+                title: "Glow";
+                active: false;
+                checkable: true;
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                DisabledEffectCard {
+                    label: "Aa";
+                    selected: true;
+                }
+
+                DisabledEffectCard {
+                    label: "Aa";
+                }
+            }
+
+            DisabledPropertyRow {
+                label: "Intensity";
+                value: "30";
+            }
+
+            DisabledPropertyRow {
+                label: "Range";
+                value: "20";
+            }
+
+            InspectorDivider { }
+
+            SectionHeader {
+                title: "Shadow";
+                active: model.text-style.shadow-enabled;
+                checkable: true;
+                interactive: true;
+                toggled => {
+                    root.begin-edit();
+                    root.style.shadow-enabled = !model.text-style.shadow-enabled;
+                    root.commit-style();
+                }
+                reset => {
+                    root.begin-edit();
+                    root.style.shadow-enabled = false;
+                    root.commit-style();
+                }
+            }
+
+            if model.text-style.shadow-enabled: HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Color";
+                }
+
+                CutlassColorSwatch {
+                    value: model.text-style.shadow-color;
+                    changed(c) => {
+                        root.begin-edit();
+                        root.style.shadow-color = c;
+                        root.commit-style();
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            if model.text-style.shadow-enabled: SliderRow {
+                label: "Opacity";
+                suffix: "%";
+                value: model.text-style.shadow-opacity * 100;
+                minimum: 0;
+                maximum: 100;
+                reset-value: 90;
+                commit(v) => {
+                    root.begin-edit();
+                    root.style.shadow-opacity = clamp(v, 0, 100) / 100;
+                    root.commit-style();
+                }
+            }
+
+            if model.text-style.shadow-enabled: SliderRow {
+                label: "Blur";
+                suffix: "%";
+                value: model.text-style.shadow-blur * 100;
+                minimum: 0;
+                maximum: 100;
+                reset-value: 15;
+                commit(v) => {
+                    root.begin-edit();
+                    root.style.shadow-blur = clamp(v, 0, 100) / 100;
+                    root.commit-style();
+                }
+            }
+
+            if model.text-style.shadow-enabled: SliderRow {
+                label: "Distance";
+                suffix: "";
+                value: model.text-style.shadow-distance;
+                minimum: 0;
+                maximum: 50;
+                reset-value: 5;
+                commit(v) => {
+                    root.begin-edit();
+                    root.style.shadow-distance = v;
+                    root.commit-style();
+                }
+            }
+
+            HorizontalLayout {
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                Rectangle {
+                    height: 28px;
+                    width: 116px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: AppStore.theme.accent.primary;
+                    opacity: 0.45;
+
+                    CutlassText {
+                        width: 100%;
+                        height: 100%;
+                        text: "Save as preset";
+                        style: AppStore.theme.typography.label;
+                        foreground: #0A0A0A;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

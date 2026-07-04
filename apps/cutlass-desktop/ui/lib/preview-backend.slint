@@ -1,0 +1,140 @@
+import { Sequence } from "../models/index.slint";
+
+// Bridge between preview-viewport gestures and the Rust geometry helpers
+// (src/preview_select.rs). The preview shows the composited canvas
+// aspect-fitted (ImageFit.contain) inside a zoomable/pannable viewport; these
+// callbacks own the viewport mapping and the per-clip placement math — the
+// exact same `layer_placement` the compositor renders with — so picking can
+// never disagree with pixels.
+
+// Result of a preview click: the topmost visible, unlocked clip under the
+// point at the current playhead tick. Empty `clip-id` ⇔ miss (letterbox
+// bar, empty canvas, or only locked/hidden layers there).
+export struct PreviewHit {
+    track-id: string,
+    clip-id: string,
+}
+
+// Selection outline geometry in viewport-element coordinates (logical px
+// as floats; multiply by 1px). The quad is delivered as four corners —
+// clockwise from the content's top-left, rotation already applied — because
+// Slint can't rotate a Rectangle; the panel strokes them with a Path. The
+// corners double as the scale handles; (hx, hy) anchors the rotate
+// affordance, a constant distance below the content's bottom edge (rides
+// the rotation). `visible` is false when nothing is selected, the selected
+// clip isn't under the playhead, or its lane is hidden.
+export struct PreviewSelectionBox {
+    visible: bool,
+    x0: float, y0: float,
+    x1: float, y1: float,
+    x2: float, y2: float,
+    x3: float, y3: float,
+    hx: float, hy: float,
+    // Anchor pivot in viewport coordinates (CapCut crosshair handle).
+    ax: float, ay: float,
+}
+
+// Resolution of a move gesture (resolve-drag) or an arrow-key nudge. One
+// result drives both the live preview (worker transform override) and the
+// release commit, so they can never disagree.
+//
+// `valid` ⇔ the clip is draggable (visual, enabled lane, not locked).
+// `moved` ⇔ the resolved position differs from the committed one — a click
+// without displacement (or a drag the magnet returned home) commits nothing.
+// position is the new normalized `ClipTransform` position; scale/rotation/
+// opacity pass the clip's committed values through for the commit message.
+// snap-h / snap-v light the horizontal / vertical canvas-center guides,
+// drawn at guide-y / guide-x (viewport-element logical px).
+export struct PreviewDragResolution {
+    valid: bool,
+    moved: bool,
+    position-x: float,
+    position-y: float,
+    anchor-x: float,
+    anchor-y: float,
+    scale: float,
+    rotation: float,
+    opacity: float,
+    snap-h: bool,
+    snap-v: bool,
+    guide-x: float,
+    guide-y: float,
+}
+
+// A docked-preview inspect viewport state (zoom + pan). This is UI-only — it
+// changes how the composited frame is viewed, never the project. `zoom` is a
+// multiple of the aspect-fit scale (1 = ImageFit.contain, <1 shrinks, >1
+// magnifies); `pan-x`/`pan-y` are the content center's offset from the
+// viewport center in logical px (0 = centered). Always returned pre-clamped
+// to a renderable state (src/preview_view.rs).
+export struct PreviewView {
+    zoom: float,
+    pan-x: float,
+    pan-y: float,
+}
+
+export global PreviewBackend {
+    // Topmost hit at (x, y) in viewport-element coordinates, given the
+    // viewport's current size and zoom/pan. Locked lanes don't hit-test
+    // (same rule as the timeline); hidden lanes aren't composited so they
+    // can't be hit.
+    pure callback hit-test(Sequence /* sequence */, int    /* playhead-tick */, float  /* x */, float  /* y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, ) -> PreviewHit;
+
+    // Whether (x, y) lands on the selected clip's box, *ignoring* the letterbox
+    // guard the normal hit-test uses. Lets a press on a selected clip whose
+    // content overflows the frame (e.g. a long title) out in the letterbox grab
+    // it to drag, instead of deselecting. (src/preview_select.rs)
+    pure callback selected-contains(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* x */, float  /* y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, ) -> bool;
+
+    // Outline of `clip-id` (the primary selection) at the playhead tick,
+    // mapped into viewport-element coordinates. While a gesture is live the
+    // projection still holds the press-time transform, so the panel passes
+    // the gesture's resolution (`gesture-active` + `gesture`) to keep the
+    // box glued to the moving/scaling/rotating content.
+    pure callback selection-box(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* gesture-active */, PreviewDragResolution /* gesture */, ) -> PreviewSelectionBox;
+
+    // Move gesture (preview roadmap Phase 3): press point + current cursor
+    // (viewport-element px) → new normalized position, center-guide magnet
+    // applied within `snap-tolerance-px`. Called on every pointer move; the
+    // result feeds the live override and the release commit. The playhead
+    // tick anchors animated clips: the gesture starts from the transform the
+    // frame renders (M2), not the clip-start sample.
+    pure callback resolve-drag(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, float  /* snap-tolerance-px */, ) -> PreviewDragResolution;
+
+    // Arrow-key nudge: displace the clip by whole canvas pixels (from its
+    // playhead-sampled position on animated clips). Invalid when the
+    // selected clip isn't draggable — the caller falls through to the
+    // transport frame-step binding.
+    pure callback nudge(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* dx-canvas-px */, float  /* dy-canvas-px */, ) -> PreviewDragResolution;
+
+    // Corner-handle scale gesture (preview roadmap Phase 4): uniform about
+    // the content center, factor = cursor distance ÷ press distance from
+    // the center, clamped at a minimum so the box stays grabbable.
+    pure callback resolve-scale(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, ) -> PreviewDragResolution;
+
+    // Rotate-affordance gesture: cursor angle about the anchor relative to
+    // the press, added to the committed rotation; magnets to the cardinal
+    // angles within `snap-tolerance-deg`. The resolution's `rotation` also
+    // feeds the live degree tooltip.
+    pure callback resolve-rotate(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, float  /* snap-tolerance-deg */, ) -> PreviewDragResolution;
+
+    // Anchor-handle drag: move the pivot within the content while keeping
+    // the rendered frame fixed — updates both anchor and position.
+    pure callback resolve-anchor(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, ) -> PreviewDragResolution;
+
+    // --- inspect viewport zoom/pan (src/preview_view.rs) -------------------
+    // Pure math over (canvas px, viewport px) → a clamped PreviewView. The
+    // panel feeds back the result it gets, so the state can never drift out
+    // of range (e.g. on a panel resize, or a pan past the content edge).
+
+    // Re-normalize a viewport state: clamp zoom into range, then clamp pan to
+    // what that zoom allows. Used on resize and after any external change.
+    pure callback clamp-view(float /* canvas-w */, float /* canvas-h */, float /* view-w */, float /* view-h */, float /* zoom */, float /* pan-x */, float /* pan-y */, ) -> PreviewView;
+
+    // Zoom toward `target-zoom` keeping the canvas point under the cursor
+    // pinned (Ctrl/Cmd-scroll, trackpad pinch). Cursor is viewport px.
+    pure callback zoom-to(float /* canvas-w */, float /* canvas-h */, float /* view-w */, float /* view-h */, float /* zoom */, float /* pan-x */, float /* pan-y */, float /* cursor-x */, float /* cursor-y */, float /* target-zoom */, ) -> PreviewView;
+
+    // Pan by a viewport-px delta (two-finger scroll / drag), clamped to range.
+    pure callback pan-view(float /* canvas-w */, float /* canvas-h */, float /* view-w */, float /* view-h */, float /* zoom */, float /* pan-x */, float /* pan-y */, float /* dx */, float /* dy */, ) -> PreviewView;
+}

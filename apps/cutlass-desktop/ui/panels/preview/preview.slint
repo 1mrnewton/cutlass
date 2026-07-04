@@ -1,0 +1,713 @@
+import { PanelBase, PanelHeader } from "../../components/index.slint";
+import { AppStore } from "../../store/index.slint";
+import { EditorStore, PreviewStore } from "../../store/index.slint";
+import { TimelineLib } from "../../lib/timeline-lib.slint";
+import { TimelineStore, TimelineActions } from "../../store/index.slint";
+import { RationalTime } from "../../models/index.slint";
+import { AppState } from "../../state.slint";
+import { PreviewBackend, PreviewHit, PreviewSelectionBox, PreviewDragResolution, PreviewView } from "../../lib/preview-backend.slint";
+import { SelectionBackend } from "../../lib/selection-backend.slint";
+
+export component PreviewPanel inherits PanelBase {
+    private property <RationalTime> sequence-duration:
+        TimelineLib.sequence-duration(EditorStore.project.sequence);
+
+    VerticalLayout {
+        PanelHeader {
+            title: "Preview";
+        }
+
+        spacing: AppStore.theme.metrics.spacing.none;
+
+        VerticalLayout {
+            padding-left: AppStore.theme.metrics.spacing.md;
+            padding-right: AppStore.theme.metrics.spacing.md;
+            padding-bottom: AppStore.theme.metrics.spacing.md;
+
+            spacing: AppStore.theme.metrics.spacing.xl;
+
+            HorizontalLayout {
+                // The interactive canvas (preview roadmap Phase 2): the
+                // composited frame aspect-fitted in this viewport, a
+                // click-to-select surface over it, and the selection
+                // outline on top. All geometry — the letterbox mapping and
+                // per-clip placement — lives in Rust (src/preview_select.rs),
+                // shared with the compositor so picking matches pixels.
+                viewport := Rectangle {
+                    clip: true;
+
+                    // Transform gestures (preview roadmap Phases 3–4).
+                    // Pressing a clip arms a move; pressing a corner handle
+                    // arms a scale, the affordance below the box a rotation.
+                    // Pointer moves resolve through Rust and render as an
+                    // uncommitted worker override; release commits one
+                    // undoable SetClipTransform. A gesture without effective
+                    // displacement commits nothing.
+                    //
+                    // drag-mode: 0 = idle, 1 = move, 2 = scale, 3 = rotate, 4 = anchor.
+                    // drag-zone: pressed handle (1–4 = corners clockwise
+                    // from the content's top-left, 5 = rotate, 6 = anchor), for cursor
+                    // feedback while the gesture runs.
+                    private property <int> drag-mode: 0;
+                    private property <int> drag-zone: 0;
+                    private property <bool> dragging: false;
+                    private property <string> drag-clip;
+                    private property <float> press-x;
+                    private property <float> press-y;
+                    private property <PreviewDragResolution> drag-res;
+                    private property <PreviewHit> hit;
+                    private property <bool> pan-dragging: false;
+                    private property <float> pan-press-x;
+                    private property <float> pan-press-y;
+                    private property <float> pan-start-x;
+                    private property <float> pan-start-y;
+                    // Inspect zoom captured when a trackpad pinch begins; the
+                    // gesture reports a cumulative factor (1.0 at start), so
+                    // the target zoom is this baseline × that factor.
+                    private property <float> pinch-base-zoom: 1.0;
+
+                    private property <float> sequence-aspect:
+                        EditorStore.project.sequence.width / EditorStore.project.sequence.height;
+                    private property <float> canvas-w: EditorStore.project.sequence.width / 1px;
+                    private property <float> canvas-h: EditorStore.project.sequence.height / 1px;
+                    // Fitted (ImageFit.contain) content size at zoom 1; the
+                    // frame element below is this scaled by the live zoom.
+                    private property <length> fitted-width:
+                        min(self.width, self.height * self.sequence-aspect);
+                    private property <length> fitted-height: self.fitted-width / self.sequence-aspect;
+
+                    // All zoom/pan changes funnel through the Rust math
+                    // (src/preview_view.rs), which returns an already-clamped
+                    // state — so the viewport can never drift past the content
+                    // edges or the zoom limits, even on a panel resize.
+                    function apply-view(v: PreviewView) {
+                        PreviewStore.viewport-zoom = v.zoom;
+                        PreviewStore.viewport-pan-x = v.pan-x * 1px;
+                        PreviewStore.viewport-pan-y = v.pan-y * 1px;
+                    }
+                    function reclamp() {
+                        self.apply-view(PreviewBackend.clamp-view(
+                            self.canvas-w, self.canvas-h, self.width / 1px, self.height / 1px,
+                            PreviewStore.viewport-zoom,
+                            PreviewStore.viewport-pan-x / 1px,
+                            PreviewStore.viewport-pan-y / 1px));
+                    }
+                    function zoom-to(cursor-x: float, cursor-y: float, target: float) {
+                        self.apply-view(PreviewBackend.zoom-to(
+                            self.canvas-w, self.canvas-h, self.width / 1px, self.height / 1px,
+                            PreviewStore.viewport-zoom,
+                            PreviewStore.viewport-pan-x / 1px,
+                            PreviewStore.viewport-pan-y / 1px,
+                            cursor-x, cursor-y, target));
+                    }
+                    function pan-by(dx: float, dy: float) {
+                        self.apply-view(PreviewBackend.pan-view(
+                            self.canvas-w, self.canvas-h, self.width / 1px, self.height / 1px,
+                            PreviewStore.viewport-zoom,
+                            PreviewStore.viewport-pan-x / 1px,
+                            PreviewStore.viewport-pan-y / 1px,
+                            dx, dy));
+                    }
+
+                    // A panel resize changes the fit and the pan limits;
+                    // re-clamp so a frame zoomed/panned at the old size stays
+                    // in range.
+                    changed width => { self.reclamp(); }
+                    changed height => { self.reclamp(); }
+
+                    // Recomputed reactively: follows playhead, edits
+                    // (projection republish), selection, panel resizes, and
+                    // the live gesture (the projection holds the press-time
+                    // transform during one, so the resolution rides along).
+                    // The gesture comes from PreviewStore, not local drag
+                    // state — inspector slider drags move the box too.
+                    private property <PreviewSelectionBox> sel-box: PreviewBackend.selection-box(
+                        EditorStore.project.sequence,
+                        TimelineStore.selected-clip-id,
+                        TimelineStore.playhead-tick,
+                        self.width / 1px,
+                        self.height / 1px,
+                        PreviewStore.viewport-zoom,
+                        PreviewStore.viewport-pan-x / 1px,
+                        PreviewStore.viewport-pan-y / 1px,
+                        PreviewStore.gesture-active
+                            && PreviewStore.gesture-clip == TimelineStore.selected-clip-id
+                            && PreviewStore.gesture.valid,
+                        PreviewStore.gesture);
+
+                    // Which handle sits at (px, py): corners double as scale
+                    // grips, (hx, hy) is the rotate affordance. Generous hit
+                    // radii (squared-distance test, no sqrt) since the
+                    // visuals are small.
+                    function near(px: float, py: float, qx: float, qy: float) -> bool {
+                        return (px - qx) * (px - qx) + (py - qy) * (py - qy) <= 100;
+                    }
+                    function zone-at(px: float, py: float) -> int {
+                        if (!self.sel-box.visible) {
+                            return 0;
+                        }
+                        if (self.near(px, py, self.sel-box.hx, self.sel-box.hy)) {
+                            return 5;
+                        }
+                        if (self.near(px, py, self.sel-box.ax, self.sel-box.ay)) {
+                            return 6;
+                        }
+                        if (self.near(px, py, self.sel-box.x0, self.sel-box.y0)) {
+                            return 1;
+                        }
+                        if (self.near(px, py, self.sel-box.x1, self.sel-box.y1)) {
+                            return 2;
+                        }
+                        if (self.near(px, py, self.sel-box.x2, self.sel-box.y2)) {
+                            return 3;
+                        }
+                        if (self.near(px, py, self.sel-box.x3, self.sel-box.y3)) {
+                            return 4;
+                        }
+                        return 0;
+                    }
+                    function cursor-for(zone: int, active: bool) -> MouseCursor {
+                        if (zone == 1 || zone == 3) {
+                            return MouseCursor.nwse-resize;
+                        }
+                        if (zone == 2 || zone == 4) {
+                            return MouseCursor.nesw-resize;
+                        }
+                        if (zone == 5) {
+                            return active ? MouseCursor.grabbing : MouseCursor.grab;
+                        }
+                        if (zone == 6) {
+                            return active ? MouseCursor.grabbing : MouseCursor.crosshair;
+                        }
+                        return active ? MouseCursor.grabbing : MouseCursor.default;
+                    }
+
+                    function end-drag(commit: bool) {
+                        if (self.dragging && self.drag-res.valid && self.drag-res.moved && commit) {
+                            EditorStore.on-clip-transform-committed(
+                                self.drag-clip,
+                                self.drag-res.position-x,
+                                self.drag-res.position-y,
+                                self.drag-res.anchor-x,
+                                self.drag-res.anchor-y,
+                                self.drag-res.scale,
+                                self.drag-res.rotation,
+                                self.drag-res.opacity,
+                                TimelineStore.playhead-tick);
+                            PreviewStore.gesture-commit-pending = true;
+                        } else if (self.dragging) {
+                            // Snap the frame back to committed state.
+                            EditorStore.on-preview-override-cleared(TimelineStore.playhead-tick);
+                            PreviewStore.gesture-active = false;
+                            PreviewStore.gesture-commit-pending = false;
+                        }
+                        self.drag-mode = 0;
+                        self.drag-zone = 0;
+                        self.dragging = false;
+                    }
+
+                    Image {
+                        x: (viewport.width - self.width) / 2 + PreviewStore.viewport-pan-x;
+                        y: (viewport.height - self.height) / 2 + PreviewStore.viewport-pan-y;
+                        width: viewport.fitted-width * PreviewStore.viewport-zoom;
+                        height: viewport.fitted-height * PreviewStore.viewport-zoom;
+                        source: PreviewStore.frame;
+                        image-fit: ImageFit.contain;
+                    }
+
+                    ta := TouchArea {
+                        mouse-cursor: viewport.pan-dragging
+                            ? MouseCursor.grabbing
+                            : viewport.drag-mode != 0
+                            ? viewport.cursor-for(viewport.drag-zone, true)
+                            : viewport.cursor-for(
+                                self.has-hover ? viewport.zone-at(self.mouse-x / 1px, self.mouse-y / 1px) : 0,
+                                false);
+
+                        pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.down
+                                    && (ev.button == PointerEventButton.right
+                                        || (ev.button == PointerEventButton.left && ev.modifiers.alt))) {
+                                AppState.refocus-shortcuts();
+                                viewport.pan-dragging = true;
+                                viewport.pan-press-x = self.mouse-x / 1px;
+                                viewport.pan-press-y = self.mouse-y / 1px;
+                                viewport.pan-start-x = PreviewStore.viewport-pan-x / 1px;
+                                viewport.pan-start-y = PreviewStore.viewport-pan-y / 1px;
+                                return;
+                            }
+                            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                                viewport.press-x = self.mouse-x / 1px;
+                                viewport.press-y = self.mouse-y / 1px;
+                                viewport.drag-zone = viewport.zone-at(viewport.press-x, viewport.press-y);
+                                if (viewport.drag-zone != 0) {
+                                    // Handle press: scale, rotate, or reposition anchor.
+                                    viewport.drag-mode = viewport.drag-zone == 5 ? 3
+                                        : viewport.drag-zone == 6 ? 4 : 2;
+                                    viewport.drag-clip = TimelineStore.selected-clip-id;
+                                } else {
+                                    viewport.hit = PreviewBackend.hit-test(
+                                        EditorStore.project.sequence,
+                                        TimelineStore.playhead-tick,
+                                        viewport.press-x,
+                                        viewport.press-y,
+                                        viewport.width / 1px,
+                                        viewport.height / 1px,
+                                        PreviewStore.viewport-zoom,
+                                        PreviewStore.viewport-pan-x / 1px,
+                                        PreviewStore.viewport-pan-y / 1px);
+                                    if (viewport.hit.clip-id == "") {
+                                        // Missed every in-frame layer. A
+                                        // selected clip whose content overflows
+                                        // the frame (e.g. a long title) extends
+                                        // into the letterbox — if the press
+                                        // landed on it out there, grab it to
+                                        // drag instead of deselecting.
+                                        if (TimelineStore.selected-clip-id != ""
+                                            && PreviewBackend.selected-contains(
+                                                EditorStore.project.sequence,
+                                                TimelineStore.selected-clip-id,
+                                                TimelineStore.playhead-tick,
+                                                viewport.press-x,
+                                                viewport.press-y,
+                                                viewport.width / 1px,
+                                                viewport.height / 1px,
+                                                PreviewStore.viewport-zoom,
+                                                PreviewStore.viewport-pan-x / 1px,
+                                                PreviewStore.viewport-pan-y / 1px)) {
+                                            viewport.drag-mode = 1;
+                                            viewport.drag-clip = TimelineStore.selected-clip-id;
+                                        } else {
+                                            // Empty canvas or letterbox bar:
+                                            // deselect, CapCut-style.
+                                            TimelineActions.clear-selection();
+                                        }
+                                    } else {
+                                        // Same selection path as a timeline
+                                        // click, so link groups and the
+                                        // inspector stay in sync. CapCut
+                                        // selects on press and the same press
+                                        // starts the move.
+                                        TimelineStore.apply-selection(SelectionBackend.select-clip(
+                                            EditorStore.project.sequence,
+                                            viewport.hit.track-id,
+                                            viewport.hit.clip-id,
+                                            TimelineStore.link-enabled));
+                                        viewport.drag-mode = 1;
+                                        viewport.drag-clip = viewport.hit.clip-id;
+                                    }
+                                }
+                            }
+                            if (ev.kind == PointerEventKind.up && viewport.pan-dragging) {
+                                viewport.pan-dragging = false;
+                                return;
+                            }
+                            if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
+                                viewport.end-drag(true);
+                            }
+                            if (ev.kind == PointerEventKind.cancel) {
+                                viewport.pan-dragging = false;
+                                viewport.end-drag(false);
+                            }
+                        }
+
+                        scroll-event(e) => {
+                            AppState.refocus-shortcuts();
+                            if (e.modifiers.control || e.modifiers.meta) {
+                                // Ctrl/Cmd-scroll zooms, anchored on the cursor
+                                // (CapCut/Figma). A wheel notch or trackpad
+                                // pixels both map through the same exponential.
+                                viewport.zoom-to(
+                                    self.mouse-x / 1px,
+                                    self.mouse-y / 1px,
+                                    PreviewStore.viewport-zoom * Math.pow(1.0015, e.delta-y / 1px));
+                                return accept;
+                            }
+                            // Plain two-finger scroll / wheel pans the frame
+                            // (no-op until zoomed in past the viewport edges).
+                            viewport.pan-by(e.delta-x / 1px, e.delta-y / 1px);
+                            return accept;
+                        }
+
+                        moved => {
+                            if (viewport.pan-dragging) {
+                                viewport.apply-view(PreviewBackend.clamp-view(
+                                    viewport.canvas-w, viewport.canvas-h,
+                                    viewport.width / 1px, viewport.height / 1px,
+                                    PreviewStore.viewport-zoom,
+                                    viewport.pan-start-x + (self.mouse-x / 1px - viewport.pan-press-x),
+                                    viewport.pan-start-y + (self.mouse-y / 1px - viewport.pan-press-y)));
+                                return;
+                            }
+                            if (viewport.drag-mode == 0) {
+                                return;
+                            }
+                            if (viewport.drag-mode == 1) {
+                                viewport.drag-res = PreviewBackend.resolve-drag(
+                                    EditorStore.project.sequence,
+                                    viewport.drag-clip,
+                                    TimelineStore.playhead-tick,
+                                    viewport.press-x,
+                                    viewport.press-y,
+                                    self.mouse-x / 1px,
+                                    self.mouse-y / 1px,
+                                    viewport.width / 1px,
+                                    viewport.height / 1px,
+                                    PreviewStore.viewport-zoom,
+                                    PreviewStore.viewport-pan-x / 1px,
+                                    PreviewStore.viewport-pan-y / 1px,
+                                    6.0);
+                            } else if (viewport.drag-mode == 2) {
+                                viewport.drag-res = PreviewBackend.resolve-scale(
+                                    EditorStore.project.sequence,
+                                    viewport.drag-clip,
+                                    TimelineStore.playhead-tick,
+                                    viewport.press-x,
+                                    viewport.press-y,
+                                    self.mouse-x / 1px,
+                                    self.mouse-y / 1px,
+                                    viewport.width / 1px,
+                                    viewport.height / 1px,
+                                    PreviewStore.viewport-zoom,
+                                    PreviewStore.viewport-pan-x / 1px,
+                                    PreviewStore.viewport-pan-y / 1px);
+                            } else if (viewport.drag-mode == 3) {
+                                viewport.drag-res = PreviewBackend.resolve-rotate(
+                                    EditorStore.project.sequence,
+                                    viewport.drag-clip,
+                                    TimelineStore.playhead-tick,
+                                    viewport.press-x,
+                                    viewport.press-y,
+                                    self.mouse-x / 1px,
+                                    self.mouse-y / 1px,
+                                    viewport.width / 1px,
+                                    viewport.height / 1px,
+                                    PreviewStore.viewport-zoom,
+                                    PreviewStore.viewport-pan-x / 1px,
+                                    PreviewStore.viewport-pan-y / 1px,
+                                    3.0);
+                            } else {
+                                viewport.drag-res = PreviewBackend.resolve-anchor(
+                                    EditorStore.project.sequence,
+                                    viewport.drag-clip,
+                                    TimelineStore.playhead-tick,
+                                    viewport.press-x,
+                                    viewport.press-y,
+                                    self.mouse-x / 1px,
+                                    self.mouse-y / 1px,
+                                    viewport.width / 1px,
+                                    viewport.height / 1px,
+                                    PreviewStore.viewport-zoom,
+                                    PreviewStore.viewport-pan-x / 1px,
+                                    PreviewStore.viewport-pan-y / 1px);
+                            }
+                            if (viewport.drag-res.valid) {
+                                viewport.dragging = true;
+                                // Mirror UI-wide: the selection box and the
+                                // inspector's numbers follow mid-gesture.
+                                PreviewStore.gesture-clip = viewport.drag-clip;
+                                PreviewStore.gesture = viewport.drag-res;
+                                PreviewStore.gesture-commit-pending = false;
+                                PreviewStore.gesture-active = true;
+                                EditorStore.on-preview-transform-overridden(
+                                    viewport.drag-clip,
+                                    viewport.drag-res.position-x,
+                                    viewport.drag-res.position-y,
+                                    viewport.drag-res.anchor-x,
+                                    viewport.drag-res.anchor-y,
+                                    viewport.drag-res.scale,
+                                    viewport.drag-res.rotation,
+                                    viewport.drag-res.opacity,
+                                    TimelineStore.playhead-tick);
+                            }
+                        }
+                    }
+
+                    // CapCut's blue center guides: each axis lights while the
+                    // content center is magneted onto it.
+                    if viewport.dragging && viewport.drag-res.snap-v: Rectangle {
+                        x: viewport.drag-res.guide-x * 1px - 0.5px;
+                        y: 0;
+                        width: 1px;
+                        height: 100%;
+                        background: #3D8BFF;
+                    }
+                    if viewport.dragging && viewport.drag-res.snap-h: Rectangle {
+                        x: 0;
+                        y: viewport.drag-res.guide-y * 1px - 0.5px;
+                        width: 100%;
+                        height: 1px;
+                        background: #3D8BFF;
+                    }
+
+                    // Selection outline: a stroked quad (corners arrive
+                    // pre-rotated from Rust — Slint can't rotate rectangles).
+                    if viewport.sel-box.visible: Path {
+                        width: 100%;
+                        height: 100%;
+                        viewbox-width: viewport.width / 1px;
+                        viewbox-height: viewport.height / 1px;
+                        stroke: #FFFFFF;
+                        stroke-width: 1.5px;
+                        fill: transparent;
+
+                        MoveTo { x: viewport.sel-box.x0; y: viewport.sel-box.y0; }
+                        LineTo { x: viewport.sel-box.x1; y: viewport.sel-box.y1; }
+                        LineTo { x: viewport.sel-box.x2; y: viewport.sel-box.y2; }
+                        LineTo { x: viewport.sel-box.x3; y: viewport.sel-box.y3; }
+                        Close { }
+                    }
+
+                    // Corner scale handles: constant UI size, riding the
+                    // (pre-rotated) quad corners.
+                    if viewport.sel-box.visible: Rectangle {
+                        x: viewport.sel-box.x0 * 1px - 5px;
+                        y: viewport.sel-box.y0 * 1px - 5px;
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: #FFFFFF;
+                        border-width: 1px;
+                        border-color: #00000066;
+                    }
+                    if viewport.sel-box.visible: Rectangle {
+                        x: viewport.sel-box.x1 * 1px - 5px;
+                        y: viewport.sel-box.y1 * 1px - 5px;
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: #FFFFFF;
+                        border-width: 1px;
+                        border-color: #00000066;
+                    }
+                    if viewport.sel-box.visible: Rectangle {
+                        x: viewport.sel-box.x2 * 1px - 5px;
+                        y: viewport.sel-box.y2 * 1px - 5px;
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: #FFFFFF;
+                        border-width: 1px;
+                        border-color: #00000066;
+                    }
+                    if viewport.sel-box.visible: Rectangle {
+                        x: viewport.sel-box.x3 * 1px - 5px;
+                        y: viewport.sel-box.y3 * 1px - 5px;
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: #FFFFFF;
+                        border-width: 1px;
+                        border-color: #00000066;
+                    }
+
+                    // Anchor pivot: crosshair riding the anchor point.
+                    if viewport.sel-box.visible: Path {
+                        width: 100%;
+                        height: 100%;
+                        viewbox-width: viewport.width / 1px;
+                        viewbox-height: viewport.height / 1px;
+                        stroke: AppStore.theme.accent.primary;
+                        stroke-width: 1.5px;
+                        fill: transparent;
+
+                        MoveTo { x: viewport.sel-box.ax - 8; y: viewport.sel-box.ay; }
+                        LineTo { x: viewport.sel-box.ax + 8; y: viewport.sel-box.ay; }
+                        MoveTo { x: viewport.sel-box.ax; y: viewport.sel-box.ay - 8; }
+                        LineTo { x: viewport.sel-box.ax; y: viewport.sel-box.ay + 8; }
+                    }
+                    if viewport.sel-box.visible: Rectangle {
+                        x: viewport.sel-box.ax * 1px - 4px;
+                        y: viewport.sel-box.ay * 1px - 4px;
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: transparent;
+                        border-width: 1.5px;
+                        border-color: AppStore.theme.accent.primary;
+                    }
+
+                    // Rotate affordance: a hollow ring floating below the
+                    // content's bottom edge (follows the box's rotation).
+                    if viewport.sel-box.visible: Rectangle {
+                        x: viewport.sel-box.hx * 1px - 6px;
+                        y: viewport.sel-box.hy * 1px - 6px;
+                        width: 12px;
+                        height: 12px;
+                        border-radius: 6px;
+                        background: transparent;
+                        border-width: 2.5px;
+                        border-color: #FFFFFF;
+                    }
+
+                    // Live degree readout while rotating (CapCut shows the
+                    // angle during the gesture).
+                    if viewport.drag-mode == 3 && viewport.dragging && viewport.drag-res.valid: Rectangle {
+                        x: viewport.sel-box.hx * 1px - self.width / 2;
+                        y: viewport.sel-box.hy * 1px + 12px;
+                        width: deg-label.preferred-width + 12px;
+                        height: deg-label.preferred-height + 6px;
+                        border-radius: 4px;
+                        background: #000000B3;
+
+                        deg-label := Text {
+                            text: round(viewport.drag-res.rotation) + "°";
+                            color: #FFFFFF;
+                            font-size: 11px;
+                            horizontal-alignment: TextHorizontalAlignment.center;
+                            vertical-alignment: TextVerticalAlignment.center;
+                        }
+                    }
+
+                    // Trackpad pinch-to-zoom (precision gesture). `scale` is
+                    // cumulative since the pinch started, anchored on the
+                    // pinch center; non-gesture events fall through to the
+                    // TouchArea below, so clicks/drags are unaffected.
+                    ScaleRotateGestureHandler {
+                        width: 100%;
+                        height: 100%;
+                        started => {
+                            viewport.pinch-base-zoom = PreviewStore.viewport-zoom;
+                        }
+                        updated => {
+                            viewport.zoom-to(
+                                self.center.x / 1px,
+                                self.center.y / 1px,
+                                viewport.pinch-base-zoom * self.scale);
+                        }
+                    }
+
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+                height: 30px;
+                horizontal-stretch: 1;
+
+                Rectangle {
+                    width: 33%;
+                    clip: true;
+
+                    HorizontalLayout {
+
+                        alignment: LayoutAlignment.start;
+                        spacing: AppStore.theme.metrics.spacing.sm;
+
+                        Text {
+                            text: TimelineLib.format-timecode(
+                                TimelineStore.playhead-tick,
+                                EditorStore.project.sequence.fps.num,
+                                EditorStore.project.sequence.fps.den,
+                                EditorStore.project.sequence.drop-frame,
+                            );
+
+                            horizontal-alignment: TextHorizontalAlignment.center;
+                            vertical-alignment: TextVerticalAlignment.center;
+                        }
+
+                        Text {
+                            text: "/";
+                            color: #484848;
+                            font-size: 16px;
+                            font-weight: 700;
+
+                            horizontal-alignment: TextHorizontalAlignment.center;
+                            vertical-alignment: TextVerticalAlignment.center;
+                        }
+
+                        Text {
+                            text: TimelineLib.format-timecode(
+                                root.sequence-duration.value,
+                                root.sequence-duration.rate.num,
+                                root.sequence-duration.rate.den,
+                                EditorStore.project.sequence.drop-frame,
+                            );
+
+                            horizontal-alignment: TextHorizontalAlignment.center;
+                            vertical-alignment: TextVerticalAlignment.center;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: 33%;
+
+                    HorizontalLayout {
+                        alignment: LayoutAlignment.center;
+
+                        // Play/pause: same TimelineActions path as the
+                        // Space shortcut, so gating can never diverge.
+                        Image {
+                            source: TimelineStore.playing
+                                ? @image-url("../../../../../assets/icon/pause.svg")
+                                : @image-url("../../../../../assets/icon/play.svg");
+                            image-fit: ImageFit.contain;
+                            colorize: #ffffff;
+
+                            horizontal-alignment: ImageHorizontalAlignment.center;
+                            vertical-alignment: ImageVerticalAlignment.center;
+
+                            TouchArea {
+                                clicked => {
+                                    TimelineActions.toggle-play();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: 33%;
+                    HorizontalLayout {
+                        alignment: LayoutAlignment.end;
+                        spacing: AppStore.theme.metrics.spacing.sm;
+
+                        Rectangle {
+                            width: 52px;
+                            height: 24px;
+                            border-radius: 4px;
+                            background: abs(PreviewStore.viewport-zoom - 1.0) > 0.001 ? #2A2A2A : transparent;
+                            border-width: 1px;
+                            border-color: #FFFFFF24;
+
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: round(PreviewStore.viewport-zoom * 100) + "%";
+                                color: #DCDCDC;
+                                font-size: 11px;
+                                horizontal-alignment: TextHorizontalAlignment.center;
+                                vertical-alignment: TextVerticalAlignment.center;
+                            }
+
+                            TouchArea {
+                                width: parent.width;
+                                height: parent.height;
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    PreviewStore.viewport-zoom = 1.0;
+                                    PreviewStore.viewport-pan-x = 0px;
+                                    PreviewStore.viewport-pan-y = 0px;
+                                }
+                            }
+                        }
+
+                        Image {
+                            source: @image-url("../../../../../assets/icon/fullscreen.svg");
+                            image-fit: ImageFit.contain;
+                            colorize: #ffffff;
+
+                            TouchArea {
+                                clicked => {
+                                    // AppState.enter-preview-maximized();
+                                    AppState.preview-maximized = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

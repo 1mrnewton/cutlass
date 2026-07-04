@@ -1,0 +1,9 @@
+// Canvas settings backend (M1): the dialog commits through this global and
+// Rust routes the call to the engine's undoable `SetCanvas` command. Current
+// values are read from the projection (`EditorStore.project.sequence`), so
+// the dialog always reflects committed engine state.
+export global CanvasBackend {
+    // `aspect-index` follows the model's `CanvasAspect::ALL` order:
+    // 0 = auto (match footage), then 16:9, 9:16, 1:1, 4:5, 21:9.
+    callback set-canvas(aspect-index: int, background: color);
+}

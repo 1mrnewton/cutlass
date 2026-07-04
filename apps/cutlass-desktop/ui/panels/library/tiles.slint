@@ -1,0 +1,345 @@
+// Draggable library tiles. Both kinds feed the same library-drag state
+// machine (window ghost + timeline landing ghost, see AppState): the payload
+// is either a media-pool id (`MediaTile`) or a generator catalog key
+// (`GeneratedTile`); release over the timeline fires the matching
+// EditorStore drop callback.
+
+import { CutlassText } from "../../components/index.slint";
+import { AppStore, EditorStore } from "../../store/index.slint";
+import { AppState } from "../../state.slint";
+import { Media, TrackKind } from "../../models/index.slint";
+
+// One effect/transition catalog tile (M4). Unlike media/generator tiles these
+// don't drop onto a lane — they apply to the current timeline selection
+// (effects → the selected clip; transitions → that clip's right junction), so
+// a click commits and `enabled` reflects whether a target exists. A gradient
+// swatch keeps the grid lively without per-effect art.
+export component CatalogTile inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <color> swatch: #3A6FC8;
+    callback apply();
+
+    background: AppStore.theme.surface.content-background;
+    border-radius: 4px;
+    clip: true;
+    opacity: root.enabled ? 1.0 : 0.45;
+
+    Rectangle {
+        width: parent.width - 16px;
+        height: parent.height - 16px - 22px;
+        y: 8px;
+        x: 8px;
+        border-radius: 4px;
+        background: @linear-gradient(135deg, root.swatch 0%, root.swatch.darker(0.4) 100%);
+
+        CutlassText {
+            text: "fx";
+            style: { size: 16px, weight: 600, italic: false };
+            foreground: #ffffffcc;
+        }
+    }
+
+    VerticalLayout {
+        alignment: end;
+        Rectangle {
+            height: 22px;
+            background: #000000a0;
+            CutlassText {
+                text: root.label;
+                style: AppStore.theme.typography.label;
+                overflow: elide;
+                x: 4px;
+                width: parent.width - 8px;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+            }
+        }
+    }
+
+    if root.enabled: TouchArea {
+        clicked => {
+            root.apply();
+        }
+    }
+}
+
+// One imported source from the media pool: poster frame / waveform card,
+// duration badge, name strip. Dragging targets a video lane — or an audio
+// lane for audio-only media, so the landing ghost tracks lanes the worker
+// would actually place the clip on.
+export component MediaTile inherits Rectangle {
+    in property <Media> media;
+
+    // Audio tiles show the waveform card color while the waveform image is
+    // still rendering; video tiles stay dark until the poster frame lands.
+    background: media.is-audio ? #2A46C8 : AppStore.theme.surface.content-background;
+    border-radius: 4px;
+    clip: true;
+
+    // Cursor position (tile-local) of the last right-press, used to anchor the
+    // context-menu popup below.
+    property <length> menu-x;
+    property <length> menu-y;
+
+    // Poster frame (video) or waveform card (audio), generated off-thread
+    // after import — empty until ready (see src/thumbnails.rs).
+    if media.thumbnail.width > 0: Image {
+        width: parent.width;
+        height: parent.height;
+        source: media.thumbnail;
+        image-fit: cover;
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                AppState.library-drag-media-id = media.id;
+                AppState.library-drag-generator = "";
+                AppState.library-drag-lane-kind = media.is-audio
+                    ? TrackKind.audio
+                    : TrackKind.video;
+                AppState.library-drag-duration-ticks = media.duration-ticks;
+                AppState.library-drag-w = root.width;
+                AppState.library-drag-h = root.height;
+                AppState.library-drag-tile-anchor-x = self.mouse-x;
+                AppState.library-drag-tile-anchor-y = self.mouse-y;
+                AppState.library-drag-cursor-x = self.absolute-position.x + self.mouse-x;
+                AppState.library-drag-cursor-y = self.absolute-position.y + self.mouse-y;
+                AppState.library-drag-active = true;
+            }
+            // Right-press opens the tile's context menu at the cursor.
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.right {
+                root.menu-x = self.mouse-x;
+                root.menu-y = self.mouse-y;
+                menu-popup.show();
+            }
+            if event.kind == PointerEventKind.up {
+                AppState.library-drag-active = false;
+            }
+        }
+
+        moved => {
+            if !self.pressed || !AppState.library-drag-active {
+                return;
+            }
+            AppState.library-drag-cursor-x = self.absolute-position.x + self.mouse-x;
+            AppState.library-drag-cursor-y = self.absolute-position.y + self.mouse-y;
+        }
+    }
+
+    // Duration badge, top-right like CapCut. Stills badge their kind
+    // instead: the 5s pool duration is a default placement length, not a
+    // property of the file.
+    Rectangle {
+        x: parent.width - self.width - 4px;
+        y: 4px;
+        width: duration-text.preferred-width + 8px;
+        height: duration-text.preferred-height + 4px;
+        background: #000000a0;
+        border-radius: 3px;
+        visible: media.is-image || media.duration-label != "";
+
+        duration-text := CutlassText {
+            x: 4px;
+            y: 2px;
+            text: media.is-image ? "IMG" : media.duration-label;
+            style: AppStore.theme.typography.label;
+        }
+    }
+
+    // Name label strip along the bottom of the tile.
+    VerticalLayout {
+        alignment: end;
+
+        Rectangle {
+            height: 22px;
+            background: #000000a0;
+
+            CutlassText {
+                text: media.name;
+                style: AppStore.theme.typography.label;
+                overflow: elide;
+                x: 4px;
+                width: parent.width - 8px;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    // Missing badge (v1 roadmap M0): the source file is gone — clips stay
+    // but can't decode. Clicking the badge opens the relink picker, the
+    // same flow as the relink dialog's "Locate…" (worker re-probes, swaps
+    // the path, republishes; the badge clears with the next projection).
+    if media.is-missing: Rectangle {
+        x: 4px;
+        y: 4px;
+        width: missing-text.preferred-width + 8px;
+        height: missing-text.preferred-height + 4px;
+        background: #C83A3AE0;
+        border-radius: 3px;
+
+        missing-text := CutlassText {
+            x: 4px;
+            y: 2px;
+            text: "Missing";
+            style: AppStore.theme.typography.label;
+        }
+
+        TouchArea {
+            clicked => {
+                EditorStore.on-relink-media-requested(media.id);
+            }
+        }
+    }
+
+    // Right-click "Remove from project" menu, anchored at the press point.
+    // A plain PopupWindow (close-on-click-outside) rather than a
+    // ContextMenuArea: the area's native right-click gesture was swallowed by
+    // the drag TouchArea above, and a programmatic show() left a stale active
+    // menu that re-opened on the next right-click anywhere. This popup is fully
+    // local — it dismisses on any outside click and never re-triggers itself.
+    // Routing: an unused source deletes straight away; a used one raises the
+    // confirm dialog, which cascades the referencing clips' removal in one undo.
+    menu-popup := PopupWindow {
+        x: root.menu-x;
+        y: root.menu-y;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        Rectangle {
+            width: 184px;
+            height: menu-list.preferred-height;
+            background: AppStore.theme.panel.background;
+            border-radius: AppStore.theme.metrics.radius.md;
+            border-width: 1px;
+            border-color: #ffffff1f;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000080;
+            drop-shadow-offset-y: 6px;
+
+            menu-list := VerticalLayout {
+                padding: AppStore.theme.metrics.spacing.xs;
+                spacing: 0;
+
+                Rectangle {
+                    height: 28px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: remove-ta.has-hover ? #ffffff10 : transparent;
+
+                    CutlassText {
+                        x: AppStore.theme.metrics.spacing.sm;
+                        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        text: "Remove from project";
+                        style: AppStore.theme.typography.body;
+                        foreground: AppStore.theme.text.primary;
+                        overflow: elide;
+                    }
+
+                    remove-ta := TouchArea {
+                        clicked => {
+                            // Reclaim focus so the next Delete/etc. acts on the
+                            // timeline, not a stale text box.
+                            AppState.refocus-shortcuts();
+                            if (root.media.usage-count > 0) {
+                                AppState.confirm-delete-media-id = root.media.id;
+                                AppState.confirm-delete-media-name = root.media.name;
+                                AppState.confirm-delete-media-clip-count = root.media.usage-count;
+                                AppState.confirm-delete-media-open = true;
+                            } else {
+                                EditorStore.on-media-deleted(root.media.id, false);
+                            }
+                            menu-popup.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// One draggable generator tile (text title, solid, shape). The payload
+// carries a generator catalog key instead of a media id, and the commit
+// fires EditorStore.on-generated-dropped.
+export component GeneratedTile inherits Rectangle {
+    // Catalog key: "text" | "solid" | "rect" | "ellipse".
+    in property <string> generator;
+    in property <string> label;
+    // Lane kind this generator lives on (text titles → text, the rest → sticker).
+    in property <TrackKind> lane-kind;
+    // Default placement length in seconds (text 3s, solids/shapes 5s).
+    in property <int> seconds;
+    // Preview swatch fill.
+    in property <color> swatch;
+    // Draw the swatch as an ellipse rather than a rectangle.
+    in property <bool> round-swatch: false;
+
+    property <int> fps-num: EditorStore.project.sequence.fps.num;
+    property <int> fps-den: EditorStore.project.sequence.fps.den;
+
+    background: AppStore.theme.surface.content-background;
+    border-radius: 4px;
+    clip: true;
+
+    Rectangle {
+        width: 44px;
+        height: 44px;
+        y: (parent.height - 22px - self.height) / 2;
+        background: root.swatch;
+        border-radius: root.round-swatch ? self.width / 2 : 4px;
+    }
+
+    VerticalLayout {
+        alignment: end;
+        Rectangle {
+            height: 22px;
+            background: #000000a0;
+            CutlassText {
+                text: root.label;
+                style: AppStore.theme.typography.label;
+                overflow: elide;
+                x: 4px;
+                width: parent.width - 8px;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+            }
+        }
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                AppState.library-drag-media-id = "";
+                AppState.library-drag-generator = root.generator;
+                AppState.library-drag-lane-kind = root.lane-kind;
+                AppState.library-drag-duration-ticks =
+                    max(1, round(root.seconds * root.fps-num / root.fps-den));
+                AppState.library-drag-w = root.width;
+                AppState.library-drag-h = root.height;
+                AppState.library-drag-tile-anchor-x = self.mouse-x;
+                AppState.library-drag-tile-anchor-y = self.mouse-y;
+                AppState.library-drag-cursor-x = self.absolute-position.x + self.mouse-x;
+                AppState.library-drag-cursor-y = self.absolute-position.y + self.mouse-y;
+                AppState.library-drag-active = true;
+            }
+            if event.kind == PointerEventKind.up {
+                AppState.library-drag-active = false;
+            }
+        }
+
+        moved => {
+            if !self.pressed || !AppState.library-drag-active {
+                return;
+            }
+            AppState.library-drag-cursor-x = self.absolute-position.x + self.mouse-x;
+            AppState.library-drag-cursor-y = self.absolute-position.y + self.mouse-y;
+        }
+    }
+}

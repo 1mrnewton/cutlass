@@ -1,0 +1,14 @@
+import { TextStyle } from "../types/index.slint";
+import { AppStore } from "../store/index.slint";
+
+export component CutlassText inherits Text {
+    in property <TextStyle> style: AppStore.theme.typography.body;
+    in property <bool> mono: false;
+    in property <color> foreground: AppStore.theme.text.primary;
+
+    color: foreground;
+    font-family: root.mono ? AppStore.theme.typography.font-family-mono : AppStore.theme.typography.font-family;
+    font-size: style.size;
+    font-weight: style.weight;
+    font-italic: style.italic;
+}

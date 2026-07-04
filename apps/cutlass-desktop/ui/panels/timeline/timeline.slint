@@ -1,0 +1,848 @@
+import {
+    CutlassText,
+    HorizontalDivider,
+    PanelBase,
+    CutlassScrollView,
+    VerticalDivider,
+} from "../../components/index.slint";
+import { AppStore, EditorStore, TimelineStore, TimelineActions } from "../../store/index.slint";
+import { Toolbar } from "toolbar.slint";
+import { TrackLane } from "track-lane.slint";
+import { TrackHead } from "track-head.slint";
+import { Ruler } from "ruler.slint";
+import { ClipView } from "clip.slint";
+import { TransitionPill } from "transition-pill.slint";
+import { TimelineViewState } from "state.slint";
+import { Sequence } from "../../models/index.slint";
+import { TimelineLib } from "../../lib/timeline-lib.slint";
+import { DragBackend, SnapResult, ClipDragResolution, ClipTrimResolution, LibraryDropResolution, GroupDragResolution } from "../../lib/drag-backend.slint";
+import { SelectionBackend } from "../../lib/selection-backend.slint";
+import { AppState } from "../../state.slint";
+
+
+
+component ForceHeadSpace inherits Rectangle {
+
+    height: AppStore.theme.track-lane.height;
+
+    background: transparent;
+}
+
+// CapCut's drag readout bubble: a dark pill that hovers above the dragged
+// edge/clip. Shared by trims (duration + signed delta) and moves/library
+// drops (landing timecode). The caller positions it (usually centered on an
+// edge via `x: edge - self.width / 2`).
+component DragTooltip inherits Rectangle {
+    in property <string> text;
+
+    width: tip-text.preferred-width + 12px;
+    height: tip-text.preferred-height + 6px;
+    background: #000000d0;
+    border-radius: 4px;
+
+    tip-text := Text {
+        color: #ffffff;
+        text: root.text;
+    }
+}
+
+export component TimelinePanel inherits PanelBase {
+
+    // The drag's TouchArea holds the pointer grab, so we never receive pointer
+    // events here — instead hit-test the cursor in window space.
+    private property <bool> library-cursor-inside:
+        AppState.library-drag-cursor-x >= self.absolute-position.x
+        && AppState.library-drag-cursor-x < self.absolute-position.x + self.width
+        && AppState.library-drag-cursor-y >= self.absolute-position.y
+        && AppState.library-drag-cursor-y < self.absolute-position.y + self.height;
+
+    // True while a library tile is being dragged and the cursor is inside this
+    // panel.
+    private property <bool> library-drag-over:
+        AppState.library-drag-active && self.library-cursor-inside;
+
+    // Mirror into AppState so the ghost can react.
+    changed library-drag-over => {
+        AppState.library-drag-over-timeline = self.library-drag-over;
+    }
+
+    // --- library drop targeting --------------------------------------------
+    // All lazy: nothing reads these per drag frame; the drop handler below
+    // pulls them once when the drag ends.
+
+    // Cursor x in lane-content space → sequence tick (scroll-x is the
+    // Flickable viewport-x, ≤ 0 when scrolled right).
+    private property <int> library-drop-cursor-tick: max(0, round(
+        (AppState.library-drag-cursor-x - lanes.absolute-position.x - TimelineViewState.scroll-x)
+        / TimelineStore.zoom / 1px));
+
+    // Lane row under the cursor: row 0 is the ForceHeadSpace spacer, tracks
+    // start at row 1 (same pitch — every row is track-height + spacing tall).
+    private property <int> library-drop-row: floor(
+        (AppState.library-drag-cursor-y - lanes.absolute-position.y - TimelineViewState.scroll-y)
+        / (root.track-height + root.track-spacing)) - 1;
+
+    // Where the drop lands (src/snap.rs): the video lane under the cursor
+    // (or empty ⇒ the worker creates one at the row), position magneted to
+    // clip edges / playhead / tick 0 — or, on the main lane with the magnet
+    // on, an insertion between clips (caret preview below).
+    private property <LibraryDropResolution> library-drop-res: DragBackend.resolve-library-drop(
+        root.sequence,
+        AppState.library-drag-lane-kind,
+        AppState.library-drag-duration-ticks,
+        root.library-drop-cursor-tick,
+        root.library-drop-row,
+        TimelineStore.playhead-tick,
+        root.snap-threshold-ticks,
+        TimelineStore.main-magnet-enabled);
+
+    // Commit the drop when the drag ends with the cursor over this panel. The
+    // pointer-up fires in the library tile's TouchArea (it owns the grab), so
+    // watch the shared drag flag instead of a pointer event.
+    private property <bool> library-drag-live: AppState.library-drag-active;
+    changed library-drag-live => {
+        if (!self.library-drag-live && self.library-cursor-inside) {
+            if (AppState.library-drag-generator != "") {
+                EditorStore.on-generated-dropped(
+                    AppState.library-drag-generator,
+                    self.library-drop-res.target-track-id,
+                    self.library-drop-res.resolved-start,
+                    AppState.library-drag-duration-ticks,
+                    self.library-drop-res.target-row);
+            } else {
+                EditorStore.on-clip-dropped(
+                    AppState.library-drag-media-id,
+                    self.library-drop-res.target-track-id,
+                    self.library-drop-res.resolved-start,
+                    self.library-drop-res.target-row,
+                    self.library-drop-res.is-insert);
+            }
+        }
+    }
+
+    private property <length> track-spacing: AppStore.theme.metrics.spacing.sm;
+    private property <length> track-height: AppStore.theme.track-lane.height;
+    // Lane rows repeat every `row-pitch`; row 0 is the ForceHeadSpace spacer,
+    // lane r starts at (r + 1) * row-pitch.
+    private property <length> row-pitch: track-height + track-spacing;
+    property <Sequence> sequence: EditorStore.project.sequence;
+
+    // CapCut's magnet: ~10px of pull, in ticks at the current zoom; 0 ⇔ off.
+    private property <int> snap-threshold-ticks:
+        TimelineStore.snap-enabled ? max(1, round(10 / TimelineStore.zoom)) : 0;
+
+    // --- clip drag (move on x and y) -----------------------------------------
+    // ClipView records the gesture (press snapshot + cursor deltas); this
+    // panel resolves the landing spot — ghost, guides, and the commit all read
+    // the same resolution, so the preview is exactly what a release does.
+
+    private property <bool> clip-dragging: TimelineViewState.dragging-clip-id != "";
+
+    private property <int> clip-drag-dx-ticks: round(
+        TimelineViewState.drag-dx-px / TimelineStore.zoom / 1px);
+
+    // Lane row under the dragged clip's vertical center (may be out of range:
+    // above the first lane or below the last ⇒ new-lane insertion there).
+    private property <int> clip-drag-hover-row: floor(
+        ((TimelineViewState.dragging-source-row + 1) * row-pitch
+            + TimelineViewState.drag-dy-px
+            + track-height / 2)
+        / row-pitch) - 1;
+
+    private property <ClipDragResolution> clip-drag-res: DragBackend.resolve-clip-drag(
+        root.sequence,
+        TimelineViewState.dragging-source-track-id,
+        TimelineViewState.dragging-clip-id,
+        root.clip-drag-dx-ticks,
+        root.clip-drag-hover-row,
+        TimelineStore.playhead-tick,
+        root.snap-threshold-ticks,
+        TimelineStore.main-magnet-enabled);
+
+    // Multi-selection drag: one resolution for the whole set (uniform dx +
+    // row delta; conflicts with clips outside the set reject the drop —
+    // CapCut's policy). Active when the grabbed clip is part of a
+    // multi-selection (ClipView raises `drag-is-group`).
+    private property <bool> group-dragging:
+        clip-dragging && TimelineViewState.drag-is-group;
+    private property <bool> single-dragging:
+        clip-dragging && !TimelineViewState.drag-is-group;
+
+    private property <GroupDragResolution> group-drag-res: DragBackend.resolve-group-drag(
+        root.sequence,
+        TimelineStore.selected-ids,
+        TimelineViewState.dragging-source-track-id,
+        TimelineViewState.dragging-clip-id,
+        root.clip-drag-dx-ticks,
+        root.clip-drag-hover-row,
+        TimelineStore.playhead-tick,
+        root.snap-threshold-ticks);
+
+    // ClipView raises `drag-released` on pointer-up; the commit needs the
+    // dragging ids, so this panel owns the teardown.
+    private property <bool> clip-drag-released: TimelineViewState.drag-released;
+    changed clip-drag-released => {
+        if (!self.clip-drag-released) {
+            return;
+        }
+        if (TimelineViewState.drag-is-group) {
+            if (self.group-drag-res.valid && !self.group-drag-res.is-noop) {
+                EditorStore.on-group-moved(self.group-drag-res.moves);
+            }
+        } else if (self.clip-drag-res.valid && !self.clip-drag-res.is-noop) {
+            EditorStore.on-clip-moved(
+                TimelineViewState.dragging-clip-id,
+                self.clip-drag-res.target-track-id,
+                self.clip-drag-res.target-row,
+                self.clip-drag-res.resolved-start,
+                self.clip-drag-res.is-insert);
+        }
+        TimelineViewState.dragging-source-track-id = "";
+        TimelineViewState.dragging-clip-id = "";
+        TimelineViewState.drag-is-group = false;
+        TimelineViewState.drag-dx-px = 0;
+        TimelineViewState.drag-dy-px = 0;
+        TimelineViewState.drag-released = false;
+    }
+
+    // --- clip trim (edge drag) -----------------------------------------------
+    // The edge handle records the gesture (press snapshot + cursor delta);
+    // this panel resolves the new extent — the stretch preview, guide,
+    // tooltip, and the commit all read the same resolution.
+
+    private property <bool> clip-trimming: TimelineViewState.trimming-clip-id != "";
+
+    private property <int> clip-trim-dx-ticks: round(
+        TimelineViewState.trim-dx-px / TimelineStore.zoom / 1px);
+
+    private property <ClipTrimResolution> clip-trim-res: DragBackend.resolve-clip-trim(
+        root.sequence,
+        TimelineViewState.trimming-track-id,
+        TimelineViewState.trimming-clip-id,
+        TimelineViewState.trimming-head,
+        root.clip-trim-dx-ticks,
+        TimelineStore.playhead-tick,
+        root.snap-threshold-ticks,
+        TimelineStore.link-enabled,
+        TimelineStore.main-magnet-enabled);
+
+    private property <bool> clip-trim-released: TimelineViewState.trim-released;
+    changed clip-trim-released => {
+        if (!self.clip-trim-released) {
+            return;
+        }
+        if (self.clip-trim-res.valid && !self.clip-trim-res.is-noop) {
+            EditorStore.on-clip-trimmed(
+                TimelineViewState.trimming-clip-id,
+                self.clip-trim-res.new-start,
+                self.clip-trim-res.new-duration);
+        }
+        TimelineViewState.trimming-track-id = "";
+        TimelineViewState.trimming-clip-id = "";
+        TimelineViewState.trim-dx-px = 0;
+        TimelineViewState.trim-released = false;
+    }
+
+    // --- marquee selection (drag on empty lane space) ------------------------
+    // The wheel-area TouchArea is the press target for everything the clip
+    // TouchAreas don't grab, so a press there is by definition on empty
+    // space. Armed on press; a drag past the dead zone becomes a live
+    // marquee (selection re-resolves per move), a plain click clears the
+    // selection (the pre-Phase-10 empty-lane-click behavior).
+    private property <bool> marquee-armed: false;
+
+    // --- edge auto-scroll (drags near the viewport edge) --------------------
+    // CapCut scrolls the timeline under a drag held near an edge. A ~16ms
+    // Timer steps the scroll while the cursor sits in the edge zone; the speed
+    // ramps with depth into the zone. Applies to clip moves, trims (x only),
+    // and library drops. Clip/trim gestures record px deltas in TouchArea-local
+    // space and Slint fires no `moved` while the cursor is still and content
+    // scrolls under it, so each step compensates the recorded deltas by the
+    // actual scroll applied — keeping the ghost glued to the cursor. Library
+    // drops recompute their cursor tick reactively from scroll-x, so they need
+    // no compensation.
+    private property <bool> gesture-active: clip-dragging || clip-trimming || library-drag-over;
+    private property <bool> gesture-vertical: clip-dragging || library-drag-over;
+
+    // Unified window-space cursor for the active gesture.
+    private property <length> gesture-px:
+        library-drag-over ? AppState.library-drag-cursor-x : TimelineViewState.pointer-window-x;
+    private property <length> gesture-py:
+        library-drag-over ? AppState.library-drag-cursor-y : TimelineViewState.pointer-window-y;
+
+    private property <length> autoscroll-margin: 32px;
+    private property <length> autoscroll-max: 16px; // per tick at the edge
+
+    // Per-tick scroll velocity: + pulls toward tick 0 (cursor near the
+    // left/top), − reveals later content (cursor near the right/bottom).
+    private property <length> autoscroll-dx:
+        !gesture-active ? 0px
+        : gesture-px < lanes.absolute-position.x + autoscroll-margin
+            ? autoscroll-max * clamp(
+                (lanes.absolute-position.x + autoscroll-margin - gesture-px) / autoscroll-margin, 0, 1)
+        : gesture-px > lanes.absolute-position.x + lanes.width - autoscroll-margin
+            ? -autoscroll-max * clamp(
+                (gesture-px - (lanes.absolute-position.x + lanes.width - autoscroll-margin)) / autoscroll-margin, 0, 1)
+        : 0px;
+    private property <length> autoscroll-dy:
+        !gesture-active || !gesture-vertical ? 0px
+        : gesture-py < lanes.absolute-position.y + autoscroll-margin
+            ? autoscroll-max * clamp(
+                (lanes.absolute-position.y + autoscroll-margin - gesture-py) / autoscroll-margin, 0, 1)
+        : gesture-py > lanes.absolute-position.y + lanes.height - autoscroll-margin
+            ? -autoscroll-max * clamp(
+                (gesture-py - (lanes.absolute-position.y + lanes.height - autoscroll-margin)) / autoscroll-margin, 0, 1)
+        : 0px;
+
+    autoscroll-timer := Timer {
+        interval: 16ms;
+        running: gesture-active && (autoscroll-dx != 0px || autoscroll-dy != 0px);
+        triggered => {
+            // Clamp to the scroll bounds and measure what actually moved, so
+            // the delta compensation matches the real scroll (no drift at the
+            // far edges).
+            root.autoscroll-applied-x =
+                clamp(TimelineViewState.scroll-x + root.autoscroll-dx, root.min-scroll-x, 0px)
+                    - TimelineViewState.scroll-x;
+            root.autoscroll-applied-y =
+                clamp(TimelineViewState.scroll-y + root.autoscroll-dy, root.min-scroll-y, 0px)
+                    - TimelineViewState.scroll-y;
+            TimelineViewState.scroll-x += root.autoscroll-applied-x;
+            TimelineViewState.scroll-y += root.autoscroll-applied-y;
+            if (clip-dragging) {
+                TimelineViewState.drag-dx-px -= root.autoscroll-applied-x;
+                TimelineViewState.drag-dy-px -= root.autoscroll-applied-y;
+            }
+            if (clip-trimming) {
+                TimelineViewState.trim-dx-px -= root.autoscroll-applied-x;
+            }
+        }
+    }
+
+    private property <length> autoscroll-applied-x;
+    private property <length> autoscroll-applied-y;
+
+    // Available height for the scrolling rows (everything below toolbar+ruler).
+    // Both flickables below share this — it's the row's own `height`.
+    private property <length> row-height: root.height - tb.height - rl.height;
+
+    // Total intrinsic height of the track content. The `+1` mirrors the
+    // `ForceHeadSpace` row at the top of both flickables so heads and lanes
+    // stay vertically aligned.
+    private property <length> content-height: TimelineLib.calc-viewport-height(
+        sequence.tracks.length + 1,
+        track-height,
+        track-spacing,
+    );
+    private property <length> content-width: TimelineLib.calc-viewport-width(
+        sequence,
+        TimelineStore.zoom,
+    );
+
+    // The Flickable's clamp range is `[row-height - content-height, 0]` (or
+    // `[0, 0]` when content fits). Flickable re-clamps `viewport-y` on user
+    // interaction but NOT on container resize. Without the `changed` hook
+    // below, dragging the splitter taller while scrolled to the bottom
+    // leaves a stale `scroll-y` past the new lower bound, which renders as
+    // empty space below the last track until the next scroll event snaps
+    // it back. Watching the bound (not just `row-height`) also covers
+    // future track-count / track-height / spacing changes.
+    private property <length> min-scroll-y: min(0px, row-height - content-height);
+
+    changed min-scroll-y => {
+        TimelineViewState.scroll-y = clamp(TimelineViewState.scroll-y, min-scroll-y, 0px);
+    }
+
+    // Same stale-scroll hazard on the x axis, now reachable through the
+    // toolbar zoom slider: zooming out shrinks `content-width`, and a
+    // viewport scrolled far right would keep a `scroll-x` past the new
+    // bound (blank timeline until the next user scroll snaps it back).
+    private property <length> min-scroll-x: min(0px, lanes.width - content-width);
+
+    changed min-scroll-x => {
+        TimelineViewState.scroll-x = clamp(TimelineViewState.scroll-x, min-scroll-x, 0px);
+    }
+
+    // Mirror the lane viewport width so zoom anchoring (TimelineActions
+    // .set-zoom) can keep the playhead / view center stationary.
+    private property <length> lanes-width: lanes.width;
+
+    changed lanes-width => {
+        TimelineViewState.viewport-w = self.lanes-width;
+    }
+
+    init => {
+        TimelineViewState.viewport-w = lanes.width;
+    }
+
+    // The playhead → preview-frame-request watcher lives at window scope
+    // (app.slint), not here: this panel unmounts in fullscreen preview
+    // mode and playback must keep rendering there.
+
+    VerticalLayout {
+
+        spacing: AppStore.theme.metrics.spacing.none;
+
+        tb := Toolbar {
+            height: AppStore.theme.metrics.layout.toolbar-height;
+        }
+
+        rl := HorizontalLayout {
+            height: 30px;
+            spacing: 60px;
+
+            Rectangle { //head space
+                width: 100px;
+            }
+
+            Rectangle { // ruler container — clip so marks that scroll into the head column are hidden.
+                clip: true;
+                Ruler { }
+            }
+        }
+
+        // A `Flickable`'s preferred-height equals its `viewport-height`
+        // (see Slint docs). That propagates up through `HorizontalLayout`
+        // and makes this row claim the full panel height instead of just
+        // the remainder after toolbar+ruler — overflowing the panel and
+        // leaving no scroll range. Pin the row to the leftover space.
+        HorizontalLayout {
+
+            height: row-height;
+            spacing: 60px;
+            Rectangle {
+                height: 100%;
+                width: 100px;
+
+                Flickable {
+                    viewport-y <=> TimelineViewState.scroll-y;
+
+                    viewport-height: max(self.height, content-height);
+
+                    VerticalLayout {
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+                        spacing: track-spacing;
+
+                        ForceHeadSpace { }
+
+                        for t in sequence.tracks: TrackHead {
+                            track: t;
+                        }
+                    }
+                }
+
+                VerticalDivider {
+                    x: parent.width - self.width;
+                    width: AppStore.theme.metrics.stroke.thin;
+                }
+            }
+
+            // Wraps the lanes so wheel/trackpad scroll has somewhere to land:
+            // the lane Flickable is `interactive: false` (it would fight clip
+            // drags), and scroll events bubble out of the clip TouchAreas to
+            // this ancestor. Plain wheel scrolls the lanes; Ctrl/Cmd+wheel
+            // zooms anchored on the cursor tick. Pointer grabs still go to the
+            // innermost clip/lane TouchArea, so dragging is unaffected.
+            wheel-area := TouchArea {
+                horizontal-stretch: 1;
+
+                changed pressed => {
+                    if (self.pressed) {
+                        AppState.refocus-shortcuts();
+                        root.marquee-armed = true;
+                        TimelineViewState.marquee-anchor-x = self.mouse-x - TimelineViewState.scroll-x;
+                        TimelineViewState.marquee-anchor-y = self.mouse-y - TimelineViewState.scroll-y;
+                        TimelineViewState.marquee-x = TimelineViewState.marquee-anchor-x;
+                        TimelineViewState.marquee-y = TimelineViewState.marquee-anchor-y;
+                    } else {
+                        if (!TimelineViewState.marquee-active && root.marquee-armed) {
+                            // Click without drag: clear the selection.
+                            TimelineActions.clear-selection();
+                        }
+                        root.marquee-armed = false;
+                        TimelineViewState.marquee-active = false;
+                    }
+                }
+
+                moved => {
+                    if (!root.marquee-armed) {
+                        return;
+                    }
+                    TimelineViewState.marquee-x = self.mouse-x - TimelineViewState.scroll-x;
+                    TimelineViewState.marquee-y = self.mouse-y - TimelineViewState.scroll-y;
+                    if (!TimelineViewState.marquee-active
+                            && (abs((TimelineViewState.marquee-x - TimelineViewState.marquee-anchor-x) / 1px) > 3
+                                || abs((TimelineViewState.marquee-y - TimelineViewState.marquee-anchor-y) / 1px) > 3)) {
+                        TimelineViewState.marquee-active = true;
+                    }
+                    if (TimelineViewState.marquee-active) {
+                        // Live selection, CapCut-style: re-resolve the set on
+                        // every move. Rows are lane units (row r = lane r).
+                        TimelineStore.apply-selection(SelectionBackend.resolve-marquee(
+                            root.sequence,
+                            round(min(TimelineViewState.marquee-anchor-x, TimelineViewState.marquee-x)
+                                / TimelineStore.zoom / 1px),
+                            round(max(TimelineViewState.marquee-anchor-x, TimelineViewState.marquee-x)
+                                / TimelineStore.zoom / 1px),
+                            min(TimelineViewState.marquee-anchor-y, TimelineViewState.marquee-y)
+                                / root.row-pitch - 1,
+                            max(TimelineViewState.marquee-anchor-y, TimelineViewState.marquee-y)
+                                / root.row-pitch - 1,
+                            TimelineStore.link-enabled));
+                    }
+                }
+
+                scroll-event(e) => {
+                    if (e.modifiers.control || e.modifiers.meta) {
+                        // Cursor-anchored zoom in log/slider space.
+                        TimelineActions.set-zoom-anchored(
+                            TimelineActions.slider-to-zoom(clamp(
+                                TimelineActions.zoom-to-slider(TimelineStore.zoom)
+                                    + e.delta-y / 1px * 0.15,
+                                0, 100)),
+                            (self.mouse-x - TimelineViewState.scroll-x) / 1px / TimelineStore.zoom);
+                        return accept;
+                    }
+                    // Shift (or a horizontal trackpad swipe) scrolls the
+                    // timeline sideways; otherwise the wheel scrolls lanes.
+                    if (e.modifiers.shift) {
+                        TimelineViewState.scroll-x = clamp(
+                            TimelineViewState.scroll-x + e.delta-y, root.min-scroll-x, 0px);
+                    } else if (abs(e.delta-x / 1px) > abs(e.delta-y / 1px)) {
+                        TimelineViewState.scroll-x = clamp(
+                            TimelineViewState.scroll-x + e.delta-x, root.min-scroll-x, 0px);
+                    } else {
+                        TimelineViewState.scroll-y = clamp(
+                            TimelineViewState.scroll-y + e.delta-y, root.min-scroll-y, 0px);
+                    }
+                    return accept;
+                }
+
+                lanes := Flickable {
+                    width: 100%;
+                    height: 100%;
+                    interactive: false;
+                    viewport-width: max(content-width, self.width);
+                    viewport-height: max(self.height, content-height);
+
+                    viewport-y <=> TimelineViewState.scroll-y;
+                    viewport-x <=> TimelineViewState.scroll-x;
+
+                    VerticalLayout {
+                    vertical-stretch: 1;
+                    horizontal-stretch: 1;
+                    spacing: track-spacing;
+
+                    ForceHeadSpace { }
+
+                    for t[lane-idx] in sequence.tracks: TrackLane {
+                        track-id: t.id;
+                        kind: t.kind;
+                        for c in t.clips: ClipView {
+                            model: c;
+                            track-id: t.id;
+                            track-row: lane-idx;
+                            track-kind: t.kind;
+                            track-color: t.color;
+                            track-enabled: t.enabled;
+                            track-locked: t.locked;
+                            height: parent.height - 5px;
+                            zoom: TimelineStore.zoom;
+                        }
+                    }
+                }
+
+                // --- transition junction pills (M4, above the clips) ---------
+                // One overlay band per lane; each transition pill is centered
+                // on its cut tick in content space and resizes / removes the
+                // junction in place.
+                for t[lane-idx] in sequence.tracks: Rectangle {
+                    x: 0;
+                    y: (lane-idx + 1) * row-pitch;
+                    width: max(parent.width, content-width);
+                    height: track-height - 5px;
+                    for tr in t.transitions: TransitionPill {
+                        model: tr;
+                        lane-height: parent.height;
+                    }
+                }
+
+                // --- clip drag visuals (content space, above the lanes) ------
+
+                // Landing ghost on an existing lane: exactly where a release
+                // puts the clip. (Insert mode renders a caret instead.)
+                if single-dragging && clip-drag-res.valid && !clip-drag-res.is-new-lane && !clip-drag-res.is-insert: Rectangle {
+                    x: clip-drag-res.resolved-start * TimelineStore.zoom * 1px;
+                    y: (clip-drag-res.target-row + 1) * row-pitch;
+                    width: clip-drag-res.duration-ticks * TimelineStore.zoom * 1px;
+                    height: track-height - 5px;
+                    background: TimelineViewState.dragging-color.with-alpha(0.3);
+                    border-width: 1px;
+                    border-color: #ffffff;
+                    border-radius: AppStore.theme.track-lane.clip.radius;
+                }
+
+                // New-lane insertion: horizontal guide across the gap where
+                // the lane appears, with a slim ghost riding on it.
+                if single-dragging && clip-drag-res.valid && clip-drag-res.is-new-lane: Rectangle {
+                    x: 0;
+                    y: (clip-drag-res.target-row + 1) * row-pitch - track-spacing / 2 - self.height / 2;
+                    width: max(parent.width, content-width);
+                    height: 2px;
+                    background: AppStore.theme.accent.primary;
+                }
+                if single-dragging && clip-drag-res.valid && clip-drag-res.is-new-lane: Rectangle {
+                    x: clip-drag-res.resolved-start * TimelineStore.zoom * 1px;
+                    y: (clip-drag-res.target-row + 1) * row-pitch - track-spacing / 2 - self.height / 2;
+                    width: clip-drag-res.duration-ticks * TimelineStore.zoom * 1px;
+                    height: (track-height - 5px) * 0.5;
+                    background: TimelineViewState.dragging-color.with-alpha(0.3);
+                    border-width: 1px;
+                    border-color: AppStore.theme.accent.primary;
+                    border-radius: AppStore.theme.track-lane.clip.radius;
+                }
+
+                // Main-track magnet: insertion caret between clips instead
+                // of a landing ghost — the commit shifts later clips right
+                // to open the hole exactly here.
+                if single-dragging && clip-drag-res.valid && clip-drag-res.is-insert: Rectangle {
+                    x: clip-drag-res.caret-tick * TimelineStore.zoom * 1px - self.width / 2;
+                    y: (clip-drag-res.target-row + 1) * row-pitch - 2px;
+                    width: 3px;
+                    height: track-height - 1px;
+                    background: AppStore.theme.accent.primary;
+                }
+
+                // Same insertion caret for library drags over the main lane.
+                if library-drag-over && library-drop-res.is-insert: Rectangle {
+                    x: library-drop-res.caret-tick * TimelineStore.zoom * 1px - self.width / 2;
+                    y: (library-drop-res.target-row + 1) * row-pitch - 2px;
+                    width: 3px;
+                    height: track-height - 1px;
+                    background: AppStore.theme.accent.primary;
+                }
+
+                // Honest landing ghost for a freeform library drop: the snapped,
+                // row-aligned spot the drop actually commits to (the window-level
+                // ghost in app.slint hides while over the timeline).
+                if library-drag-over && !library-drop-res.is-insert: Rectangle {
+                    x: library-drop-res.resolved-start * TimelineStore.zoom * 1px;
+                    y: (library-drop-res.target-row + 1) * row-pitch;
+                    width: AppState.library-drag-duration-ticks * TimelineStore.zoom * 1px;
+                    height: track-height - 5px;
+                    background: AppStore.theme.accent.primary.with-alpha(0.3);
+                    border-width: 1px;
+                    border-color: AppStore.theme.accent.primary;
+                    border-radius: AppStore.theme.track-lane.clip.radius;
+                }
+
+                // Vertical magnet guide for library drags (mirrors clip drags).
+                if library-drag-over && library-drop-res.has-snap: Rectangle {
+                    x: library-drop-res.snap-line-tick * TimelineStore.zoom * 1px;
+                    y: 0;
+                    width: 1px;
+                    height: max(parent.height, content-height);
+                    background: AppStore.theme.accent.primary;
+                }
+
+                // Vertical magnet guide at the snapped edge (CapCut-style).
+                if single-dragging && clip-drag-res.valid && clip-drag-res.has-snap: Rectangle {
+                    x: clip-drag-res.snap-line-tick * TimelineStore.zoom * 1px;
+                    y: 0;
+                    width: 1px;
+                    height: max(parent.height, content-height);
+                    background: AppStore.theme.accent.primary;
+                }
+
+                // --- group drag visuals (multi-selection) ---------------------
+
+                // Landing ghosts: one per selected clip, exactly where a
+                // release puts the set. Hidden while the resolution is
+                // invalid (the floating copies flag the conflict instead).
+                if group-dragging && group-drag-res.valid: Rectangle {
+                    for g in group-drag-res.ghosts: Rectangle {
+                        x: g.start-tick * TimelineStore.zoom * 1px;
+                        y: (g.row + 1) * row-pitch;
+                        width: g.duration-ticks * TimelineStore.zoom * 1px;
+                        height: track-height - 5px;
+                        background: g.color.with-alpha(0.3);
+                        border-width: 1px;
+                        border-color: #ffffff;
+                        border-radius: AppStore.theme.track-lane.clip.radius;
+                    }
+                }
+
+                // Same magnet guide as single drags, driven by the group
+                // resolution (snapped on the grabbed clip's edges).
+                if group-dragging && group-drag-res.valid && group-drag-res.has-snap: Rectangle {
+                    x: group-drag-res.snap-line-tick * TimelineStore.zoom * 1px;
+                    y: 0;
+                    width: 1px;
+                    height: max(parent.height, content-height);
+                    background: AppStore.theme.accent.primary;
+                }
+
+                // Floating copies of every selected clip, following the
+                // cursor on both axes. A red outline means the set has no
+                // valid landing here (release commits nothing).
+                if group-dragging: Rectangle {
+                    for f in DragBackend.group-floaters(root.sequence, TimelineStore.selected-ids): Rectangle {
+                        x: f.start-tick * TimelineStore.zoom * 1px + TimelineViewState.drag-dx-px;
+                        y: (f.row + 1) * row-pitch + TimelineViewState.drag-dy-px;
+                        width: f.duration-ticks * TimelineStore.zoom * 1px;
+                        height: track-height - 5px;
+                        background: f.color.with-alpha(0.85);
+                        border-width: 1px;
+                        border-color: group-drag-res.valid ? #ffffff : #FF5555;
+                        border-radius: AppStore.theme.track-lane.clip.radius;
+                    }
+                }
+
+                // Landing timecode of the grabbed clip, above its floater.
+                if group-dragging && group-drag-res.valid: DragTooltip {
+                    x: (TimelineViewState.dragging-start-value * TimelineStore.zoom * 1px
+                            + TimelineViewState.drag-dx-px) + self.width / 2;
+                    y: (TimelineViewState.dragging-source-row + 1) * row-pitch
+                        + TimelineViewState.drag-dy-px - self.height - 4px;
+                    text: TimelineLib.format-timecode(
+                        TimelineViewState.dragging-start-value + group-drag-res.resolved-dx-ticks,
+                        sequence.fps.num,
+                        sequence.fps.den,
+                        sequence.drop-frame);
+                }
+
+                // --- clip trim visuals ----------------------------------------
+
+                // Live stretch: the clip's post-trim extent, opaque over the
+                // dimmed original so it reads as the clip resizing in place.
+                if clip-trimming && clip-trim-res.valid: Rectangle {
+                    x: clip-trim-res.new-start * TimelineStore.zoom * 1px;
+                    y: (TimelineViewState.trimming-source-row + 1) * row-pitch;
+                    width: clip-trim-res.new-duration * TimelineStore.zoom * 1px;
+                    height: track-height - 5px;
+                    background: TimelineViewState.trimming-color.with-alpha(0.9);
+                    border-width: 1px;
+                    border-color: TimelineViewState.trimming-head ? transparent : #ffffff;
+                    border-radius: AppStore.theme.track-lane.clip.radius;
+
+                    // Dragged-edge accent.
+                    Rectangle {
+                        x: TimelineViewState.trimming-head ? 0 : parent.width - self.width;
+                        y: 0;
+                        width: 2px;
+                        height: parent.height;
+                        background: #ffffff;
+                    }
+                }
+
+                // CapCut detail: duration + delta readout above the dragged edge.
+                if clip-trimming && clip-trim-res.valid: DragTooltip {
+                    x: (TimelineViewState.trimming-head
+                            ? clip-trim-res.new-start
+                            : clip-trim-res.new-start + clip-trim-res.new-duration)
+                        * TimelineStore.zoom * 1px - self.width / 2;
+                    y: (TimelineViewState.trimming-source-row + 1) * row-pitch - self.height - 4px;
+                    text: TimelineLib.format-timecode(
+                            clip-trim-res.new-duration,
+                            sequence.fps.num,
+                            sequence.fps.den,
+                            sequence.drop-frame)
+                        + "  "
+                        + (clip-trim-res.new-duration >= TimelineViewState.trimming-duration-ticks ? "+" : "")
+                        + (clip-trim-res.new-duration - TimelineViewState.trimming-duration-ticks);
+                }
+
+                // Linked partners' stretch previews: the same edge delta the
+                // dragged clip previews, applied to each link-group member.
+                if clip-trimming && clip-trim-res.valid: Rectangle {
+                    for g in clip-trim-res.ghosts: Rectangle {
+                        x: g.start-tick * TimelineStore.zoom * 1px;
+                        y: (g.row + 1) * row-pitch;
+                        width: g.duration-ticks * TimelineStore.zoom * 1px;
+                        height: track-height - 5px;
+                        background: g.color.with-alpha(0.9);
+                        border-width: 1px;
+                        border-color: #ffffff;
+                        border-radius: AppStore.theme.track-lane.clip.radius;
+                    }
+                }
+
+                // Same magnet guide as the move, driven by the trim resolution.
+                if clip-trimming && clip-trim-res.valid && clip-trim-res.has-snap: Rectangle {
+                    x: clip-trim-res.snap-line-tick * TimelineStore.zoom * 1px;
+                    y: 0;
+                    width: 1px;
+                    height: max(parent.height, content-height);
+                    background: AppStore.theme.accent.primary;
+                }
+
+                // Floating copy of the grabbed clip, following the cursor on
+                // both axes (the original stays in place, dimmed).
+                if single-dragging: Rectangle {
+                    x: TimelineViewState.dragging-start-value * TimelineStore.zoom * 1px
+                        + TimelineViewState.drag-dx-px;
+                    y: (TimelineViewState.dragging-source-row + 1) * row-pitch
+                        + TimelineViewState.drag-dy-px;
+                    width: TimelineViewState.dragging-duration-ticks * TimelineStore.zoom * 1px;
+                    height: track-height - 5px;
+                    background: TimelineViewState.dragging-color.with-alpha(0.85);
+                    border-width: 1px;
+                    border-color: #ffffff;
+                    border-radius: AppStore.theme.track-lane.clip.radius;
+
+                    Text {
+                        text: TimelineViewState.dragging-name;
+                    }
+                }
+
+                // Landing timecode above the moved clip (insert mode reads the
+                // caret slot, otherwise the resolved start).
+                if single-dragging && clip-drag-res.valid: DragTooltip {
+                    x: (TimelineViewState.dragging-start-value * TimelineStore.zoom * 1px
+                            + TimelineViewState.drag-dx-px) + self.width / 2;
+                    y: (TimelineViewState.dragging-source-row + 1) * row-pitch
+                        + TimelineViewState.drag-dy-px - self.height - 4px;
+                    text: TimelineLib.format-timecode(
+                        clip-drag-res.is-insert ? clip-drag-res.caret-tick : clip-drag-res.resolved-start,
+                        sequence.fps.num,
+                        sequence.fps.den,
+                        sequence.drop-frame);
+                }
+
+                // Landing timecode for a library drag (above the ghost / caret).
+                if library-drag-over: DragTooltip {
+                    x: (library-drop-res.is-insert ? library-drop-res.caret-tick : library-drop-res.resolved-start)
+                        * TimelineStore.zoom * 1px - self.width / 2;
+                    y: (library-drop-res.target-row + 1) * row-pitch - self.height - 4px;
+                    text: TimelineLib.format-timecode(
+                        library-drop-res.is-insert ? library-drop-res.caret-tick : library-drop-res.resolved-start,
+                        sequence.fps.num,
+                        sequence.fps.den,
+                        sequence.drop-frame);
+                }
+
+                // Marquee rectangle (content space, above everything).
+                if TimelineViewState.marquee-active: Rectangle {
+                    x: min(TimelineViewState.marquee-anchor-x, TimelineViewState.marquee-x);
+                    y: min(TimelineViewState.marquee-anchor-y, TimelineViewState.marquee-y);
+                    width: max(TimelineViewState.marquee-anchor-x, TimelineViewState.marquee-x) - self.x;
+                    height: max(TimelineViewState.marquee-anchor-y, TimelineViewState.marquee-y) - self.y;
+                    background: AppStore.theme.accent.primary.with-alpha(0.1);
+                    border-width: 1px;
+                    border-color: AppStore.theme.accent.primary;
+                }
+
+                // Playhead line — content-space x; scrolls with the lanes.
+                Rectangle {
+                    x: TimelineStore.playhead-tick * TimelineStore.zoom * 1px;
+                    y: 0;
+                    width: 1px;
+                    height: max(parent.height, content-height);
+                    background: #ffffff;
+                }
+                }
+            }
+        }
+    }
+}

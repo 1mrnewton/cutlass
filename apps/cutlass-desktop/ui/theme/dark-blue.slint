@@ -1,0 +1,147 @@
+import {
+    Accent,
+    AgentChat,
+    Layout,
+    Metrics,
+    Panel,
+    Radius,
+    Scrollbar,
+    Spacing,
+    SplitGrip,
+    Stroke,
+    Surface,
+    TextColors,
+    Theme,
+    TrackLane,
+    Typography,
+} from "../types/index.slint";
+
+export global DarkBlueTheme {
+    private property <Surface> surface: {
+        app-background: #12161f,
+        content-background: #080b12,
+        divider: #12161f,
+    };
+
+    private property <TextColors> text: {
+        primary: #eef0f4,
+        secondary: #9aa3b5,
+        muted: #5c6578,
+    };
+
+    private property <Accent> accent: {
+        primary: #d4a017,
+        hover: #e6b422,
+        on-accent: #0d0f14,
+        gradient-end: #5b8def,
+    };
+
+    private property <SplitGrip> split-grip: {
+        normal: #12161f,
+        hover: #1c2230,
+    };
+
+    private property <Typography> typography: {
+        font-family: "",
+        font-family-mono: "monospace",
+        body: { size: 13px, weight: 400, italic: false },
+        label: { size: 12px, weight: 500, italic: false },
+        caption: { size: 11px, weight: 400, italic: false },
+        heading-sm: { size: 13px, weight: 600, italic: false },
+        heading-md: { size: 15px, weight: 600, italic: false },
+        mono: { size: 12px, weight: 400, italic: false },
+    };
+
+    private property <Spacing> spacing: {
+        none: 0px,
+        xs: 4px,
+        sm: 8px,
+        md: 10px,
+        lg: 16px,
+        xl: 24px,
+        xxl: 30px,
+    };
+
+    private property <Radius> radius: {
+        none: 0px,
+        sm: 3px,
+        md: 6px,
+        lg: 8px,
+    };
+
+    private property <Stroke> stroke: {
+        hairline: 1px,
+        thin: 2px,
+        medium: 3px,
+    };
+
+    private property <Layout> layout: {
+        split-grip: 5px,
+        toolbar-height: 40px,
+        min-pane-width: 350px,
+        max-pane-width: 800px,
+        min-timeline-height: 280px,
+        max-timeline-height: 800px,
+    };
+
+    private property <Metrics> metrics: {
+        spacing: self.spacing,
+        radius: self.radius,
+        stroke: self.stroke,
+        layout: self.layout,
+    };
+
+    private property <Panel> panel: {
+        background: #1a2030,
+        header-background: #222a3a,
+        radius: self.radius.md,
+    };
+
+    private property <Scrollbar> scrollbar: {
+        size: 10px,
+        thumb-inset: 2px,
+        thumb-min: 24px,
+        thumb-radius: 1px,
+        // Translucent: the bars overlay content (and auto-hide), so the
+        // track softens rather than blanks what it covers.
+        track: #2a314299,
+        thumb: #5c6578e6,
+        thumb-hover: #748099,
+        thumb-active: #9aa3b5,
+    };
+
+    private property <TrackLane> track-lane: {
+        height: 60px,
+        background: #161c28,
+        clip: {
+            height: 58px,
+            background: #252d3d,
+            radius: 4px,
+        },
+    };
+
+    private property <AgentChat> agent: {
+        input-bg: self.surface.app-background,
+        user-message-bg: #12161f,
+        plan-bg: #151a26,
+        plan-border: #d4a01745,
+        send-disabled-bg: #2a3142,
+        stop-bg: #eef0f410,
+        stop-bg-hover: #eef0f41c,
+        error: #FF6B6B,
+        preview-toggle-border: #eef0f444,
+    };
+
+    out property <Theme> theme: {
+        surface: self.surface,
+        text: self.text,
+        accent: self.accent,
+        split-grip: self.split-grip,
+        typography: self.typography,
+        metrics: self.metrics,
+        panel: self.panel,
+        scrollbar: self.scrollbar,
+        track-lane: self.track-lane,
+        agent: self.agent,
+    };
+}

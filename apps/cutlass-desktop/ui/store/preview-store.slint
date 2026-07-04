@@ -1,0 +1,25 @@
+import { PreviewDragResolution } from "../lib/preview-backend.slint";
+
+export global PreviewStore {
+    in-out property <image> frame;
+
+    // Docked preview viewport state. This is UI-only: it changes how the
+    // composited frame is inspected, not the project canvas or clip transforms.
+    in-out property <float> viewport-zoom: 1.0;
+    in-out property <length> viewport-pan-x: 0px;
+    in-out property <length> viewport-pan-y: 0px;
+
+    // Live transform gesture (preview roadmap Phases 3–5): the uncommitted
+    // resolution of whatever gesture is in flight — a preview move/scale/
+    // rotate drag or an inspector slider — mirrored UI-wide. The projection
+    // stays frozen at committed values during a gesture by design (the live
+    // value is a worker-side render override), so the selection box and the
+    // inspector's numbers read this instead to follow mid-gesture.
+    in-out property <bool> gesture-active: false;
+    // A transform commit was sent while the projection still contains the
+    // press-time values. Keep the live gesture visible until the next
+    // projection publish swaps in the committed transform.
+    in-out property <bool> gesture-commit-pending: false;
+    in-out property <string> gesture-clip;
+    in-out property <PreviewDragResolution> gesture;
+}

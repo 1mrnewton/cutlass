@@ -1,0 +1,435 @@
+// Time model is OpenTimelineIO-aligned:
+//   RationalTime { value, rate } means `value` ticks at `rate` ticks-per-second.
+//   e.g. { value: 24, rate: { num: 24, den: 1 } } == 1 second.
+//
+// `rate` is itself rational so we can represent NTSC rates exactly
+// (e.g. 23.976 fps == 24000/1001) without float drift.
+
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct Rational {
+    num: int,
+    den: int,
+}
+
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct RationalTime {
+    value: int,
+    rate: Rational,
+}
+
+// OTIO-style range: start time + duration (exclusive end == start + duration).
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+    export struct TimeRange {
+    start: RationalTime,
+    duration: RationalTime,
+}
+
+// Visual treatment of a text/title clip, mirroring the engine's `TextStyle`.
+// Sizes are in reference pixels (1080px-tall canvas). Enum-like fields are
+// encoded as ints to keep the Slint <-> Rust bridge trivial:
+//   case:    0 normal, 1 UPPER, 2 lower, 3 Title
+//   align-h: 0 left, 1 center, 2 right
+//   align-v: 0 top, 1 middle, 2 bottom
+// Effect sections carry an `*-enabled` flag (the section checkbox) plus their
+// parameters. Background/shadow opacity is a separate 0..=1 control; the swatch
+// colors are opaque so the picker preview reads cleanly.
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct TextClipStyle {
+    font: string,
+    size: float,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    case: int,
+    fill: color,
+    letter-spacing: float,
+    line-spacing: float,
+    align-h: int,
+    align-v: int,
+    wrap: bool,
+    stroke-enabled: bool,
+    stroke-color: color,
+    stroke-width: float,
+    background-enabled: bool,
+    background-color: color,
+    background-opacity: float,
+    background-radius: float,
+    shadow-enabled: bool,
+    shadow-color: color,
+    shadow-opacity: float,
+    shadow-blur: float,
+    shadow-distance: float,
+}
+
+// One keyframe of an animatable clip property, projected for the inspector
+// and timeline keyframe UI (M2). `tick` is the ABSOLUTE sequence tick (clip
+// start + clip-relative offset) so playhead math needs no conversions.
+// Scalar properties carry their value in `value-x` (`value-y` unused);
+// position carries both axes. `easing` mirrors the engine enum:
+//   0 linear, 1 ease-in, 2 ease-out, 3 ease-in-out, 4 bezier
+// with the bezier control points in `bez-*` (zero otherwise) so UI-side
+// sampling reproduces the engine curve exactly.
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct ParamKeyframe {
+    tick: int,
+    value-x: float,
+    value-y: float,
+    easing: int,
+    bez-x1: float,
+    bez-y1: float,
+    bez-x2: float,
+    bez-y2: float,
+}
+
+// One scalar parameter of a clip effect (M4), projected for the inspector
+// Effects section. `value` is the current (clip-start) sample; `min`/`max`
+// bound the slider per the catalog.
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct EffectParamView {
+    name: string,
+    label: string,
+    value: float,
+    min: float,
+    max: float,
+}
+
+// One effect on a clip's chain (M4). The chain index is the position in the
+// owning clip's `effects` list — `remove_effect` / `set_effect_param` address
+// it by that index.
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct EffectView {
+    effect-id: string,
+    label: string,
+    params: [EffectParamView],
+}
+
+// A transition at a clip junction (M4), projected onto its track. `cut-tick`
+// is the absolute sequence tick of the cut (the left clip's end); the window
+// of `duration-ticks` is centered on it.
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct TransitionView {
+    left-clip-id: string,
+    transition-id: string,
+    label: string,
+    duration-ticks: int,
+    cut-tick: int,
+}
+
+// A browsable catalog entry (effect or transition) for the Library tabs.
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct CatalogEntry {
+    id: string,
+    label: string,
+}
+
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct Clip {
+    id: string,
+    name: string,
+    // Where the clip plays on the sequence timeline.
+    //
+    // Advances under head-trim (the visible content starts later on the
+    // sequence). Unchanged under tail-trim.
+    timeline-start: RationalTime,
+    // Window into the source media (in/out points):
+    //   .start    = source in-point (offset into the underlying media)
+    //   .duration = how much of the source plays
+    //
+    // This is the SINGLE source of truth for clip extent. Effective timeline
+    // duration == source-range.duration under 1:1 playback (no time-remap),
+    // so the clip occupies the timeline interval
+    //   [timeline-start, timeline-start + source-range.duration).
+    //
+    // Trim semantics — both edges are expressed by mutating this field; there
+    // is intentionally no second "timeline-duration" to keep in sync.
+    //
+    //   head-trim by Δ (drag left edge right by Δ):
+    //     timeline-start         += Δ
+    //     source-range.start     += Δ
+    //     source-range.duration  -= Δ
+    //
+    //   tail-trim by Δ (drag right edge left by Δ):
+    //     source-range.duration  -= Δ
+    //     (timeline-start and source-range.start unchanged)
+    //
+    // Why no separate `timeline-duration`: under cut/trim the two would
+    // always be equal, so storing both invites silent drift. The only thing
+    // that breaks the invariant is speed change / time-remap, which should
+    // be modelled as an EXPLICIT warp factor or curve — not as two durations
+    // whose ratio implicitly encodes speed (OTIO does the same: `LinearTimeWarp`
+    // / `FreezeFrame` effects on top of a single `source_range`).
+    source-range: TimeRange,
+    // Media-pool id of the underlying source ("" for generated clips).
+    // Keys the filmstrip / waveform tile lookups (src/strips.rs).
+    media-id: string,
+    // The clip's in-point in *media time*, as seconds into the source file.
+    // Anchors the filmstrip/waveform sampling grid to the media (not the
+    // timeline), so trims and moves slide the strip under the clip window
+    // instead of resampling it. 0 for generated clips.
+    source-in-s: float,
+    // Timeline length as "3.4s" / "M:SS", for the clip badge.
+    duration-label: string,
+    // Playback rate (CapCut speed, M1): 1.0 ⇔ normal. The exact value lives
+    // in the engine as a rational; this float is for display and for
+    // scaling the filmstrip/waveform tile grids (px per source second).
+    speed: float,
+    // Source window plays backward (timeline forward ⇒ source backward).
+    reversed: bool,
+    // Retime badge: "2x", "0.5x", "2x R", "R", … — "" when the clip plays
+    // forward at 1× (no badge). Built in src/projection.rs.
+    speed-label: string,
+    // Preserve pitch while retimed (CapCut "pitch" switch, M8 Phase 3): true
+    // time-stretches so the audio keeps its original pitch, false lets pitch
+    // ride the speed ("chipmunk"). Only meaningful on retimed media clips.
+    preserve-pitch: bool,
+    // Audio mix (CapCut volume + fades, M1). Gain multiplier 1.0 ⇔ as
+    // recorded, 0.0 ⇔ muted; fades as seconds of linear ramp anchored at
+    // the clip edges. Meaningful on audio-lane clips; defaults elsewhere.
+    // Edits go through `InspectorBackend.set-clip-audio` on the worker.
+    volume: float,
+    fade-in-s: float,
+    fade-out-s: float,
+    // Noise reduction (CapCut "Reduce noise", M8 Phase 5): true ⇒ the mixers
+    // run this clip's audio through RNNoise. Meaningful on audio-lane clips;
+    // toggled via `InspectorBackend.set-denoise` on the worker.
+    denoise: bool,
+    // Whether the source media carries an audio stream. CapCut keeps a video's
+    // sound on the video clip itself, so a video clip with audio draws a slim
+    // waveform band along its bottom edge (the audio is mixed from this lane).
+    has-audio: bool,
+    // Text / title generator content. Empty on non-text clips.
+    text-content: string,
+    // Full visual treatment for text/title clips (font, color, stroke, …).
+    // Default-valued for non-text clips. Edits round-trip through
+    // `InspectorBackend.set-text-generator`.
+    text-style: TextClipStyle,
+    // Generator kind for synthetic clips: "" (media), "text", "solid",
+    // "rect", or "ellipse". Drives the timeline card's preview rendering.
+    generator-kind: string,
+    // Fill color for solid / shape generators (transparent otherwise), so the
+    // timeline card shows the clip's actual color instead of the lane color.
+    fill-color: color,
+    // Shape generator size in reference pixels (1080px-tall canvas).
+    // Default-valued for non-shape clips. Edits go through
+    // `InspectorBackend.set-shape-generator`.
+    shape-width: float,
+    shape-height: float,
+    // How far (sequence ticks) each edge can EXTEND beyond the current
+    // placement before running out of source media: head = lowering
+    // `timeline-start`, tail = raising the end. Shrinking is always allowed
+    // (down to 1 tick). Generated clips are unbounded (large sentinel).
+    // Computed rate-safely in src/projection.rs so the engine can never
+    // reject an extension the UI offered.
+    head-room-ticks: int,
+    tail-room-ticks: int,
+    // Link group (CapCut linkage). Clips sharing a non-empty link-id are
+    // selected / moved / trimmed together while the Link toggle is on —
+    // e.g. the video+audio pair from one media drop. "" ⇔ unlinked.
+    link-id: string,
+    // Natural content dimensions for preview placement geometry: the source
+    // media's pixel size (aspect-fit into the canvas), or a generator's
+    // drawn-content bounds in canvas px (fit 1:1, measured from its raster).
+    // 0×0 ⇔ unknown — selection geometry falls back to a canvas-sized box.
+    // Keys the placement math in src/preview_select.rs.
+    media-width: int,
+    media-height: int,
+    // Spatial transform (preview roadmap Phase 1), mirroring the engine's
+    // `ClipTransform`: content-center offset from canvas center normalized
+    // to canvas dimensions (+y down), uniform scale (1.0 = aspect-fit),
+    // rotation in degrees clockwise, opacity 0..=1. Projected read-only —
+    // edits go through `EditCommand::SetClipTransform` on the worker.
+    //
+    // These are the CLIP-START sample of the animated transform. For an
+    // animated property the playhead-accurate value comes from sampling the
+    // matching `kf-*` curve UI-side (src/params.rs) — that's how the
+    // inspector rows and the preview selection geometry stay glued to the
+    // rendered frame without a projection republish per playhead tick.
+    transform-position-x: float,
+    transform-position-y: float,
+    transform-anchor-x: float,
+    transform-anchor-y: float,
+    transform-scale: float,
+    transform-rotation: float,
+    transform-opacity: float,
+    // Framing (M1 crop): the normalized kept-region window into the
+    // content (x/y top-left corner, w/h extent; 0,0,1,1 ⇔ uncropped) plus
+    // mirroring. Projected read-only — edits go through
+    // `EditCommand::SetClipCrop` on the worker. Constant per clip (not
+    // animatable), unlike the transform above.
+    crop-x: float,
+    crop-y: float,
+    crop-w: float,
+    crop-h: float,
+    flip-h: bool,
+    flip-v: bool,
+    // Keyframe curves per animatable property (M2), in tick order with
+    // ABSOLUTE sequence ticks. Empty ⇔ the property is a constant (read it
+    // from `transform-*` above). Edits go through
+    // `InspectorBackend.set/remove-param-keyframe` on the worker.
+    kf-position: [ParamKeyframe],
+    kf-anchor: [ParamKeyframe],
+    kf-scale: [ParamKeyframe],
+    kf-rotation: [ParamKeyframe],
+    kf-opacity: [ParamKeyframe],
+    // Playback-rate ramp (M2 speed curves): the speed-multiplier curve over
+    // the clip's NORMALIZED span — `tick` is 0..=1000 (0 = clip start, 1000 =
+    // clip end), `value-x` the multiplier. Empty ⇔ a flat constant-speed
+    // clip. Edits go through `InspectorBackend.set-speed-curve*`.
+    kf-speed-curve: [ParamKeyframe],
+    // True ⇔ the clip carries a non-flat speed ramp (drives the inspector's
+    // ramp state and the timeline badge).
+    has-speed-curve: bool,
+    // Average multiplier of the ramp over the clip (1.0 when flat) — the
+    // inspector shows it as the effective speed.
+    speed-curve-avg: float,
+    // Dense, evenly-spaced samples of the ramp's multiplier across the
+    // clip's normalized span (engine `Param` math, easing included), for the
+    // inspector velocity graph. Empty ⇔ flat — the graph draws a 1.0× line.
+    speed-curve-samples: [float],
+    // Volume automation (M8 volume envelopes): the gain curve as ABSOLUTE
+    // sequence-tick keyframes (clip start + clip-relative offset), exactly
+    // like the transform `kf-*` curves. Empty ⇔ a constant gain (read it from
+    // `volume`). Edits ride `InspectorBackend.set/remove-param-keyframe` with
+    // param "volume".
+    kf-volume: [ParamKeyframe],
+    // True ⇔ the clip's gain is a non-constant envelope — drives the
+    // inspector's diamond state and the on-clip automation line + badge.
+    has-volume-envelope: bool,
+    // The volume envelope as an SVG path-commands string in a normalized
+    // 1000×1000 viewbox (x = clip start→end, y = gain 0..200% top-down,
+    // densely sampled so easing curvature shows). "" ⇔ a flat clip, so no
+    // automation line is drawn. Built in src/projection.rs.
+    volume-path: string,
+    // Visual effect chain (M4), in order. The index of each entry is what
+    // remove-effect / set-effect-param address. Empty ⇔ no effects.
+    effects: [EffectView],
+    // Detected beat positions (CapCut "Beat", M8 Phase 6) as ABSOLUTE
+    // sequence ticks, in order — only the beats inside the clip's current
+    // window. The timeline draws a dot per beat and the magnet snaps clip
+    // edges to them. Empty ⇔ no beats detected. Filled by
+    // `EditCommand::DetectBeats` on the worker.
+    beats: [int],
+}
+
+// Drives lane ordering, drag targeting (same-kind blocks), and which
+// clip types each lane accepts once edit commands are wired.
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export enum TrackKind {
+    video,
+    audio,
+    text,
+    sticker,
+    effect,
+    filter,
+    adjustment,
+}
+
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct Track {
+    id: string,
+    name: string,
+    kind: TrackKind,
+    // Single source of truth for clip color on this lane. Set
+    // per-lane (not per-clip) so the "one lane, one color" invariant
+    // is structural — a clip's color simply changes the moment it
+    // moves to a different lane.
+    color: color,
+    clips: [Clip],
+    // Track header flags (engine state, projected read-only). `enabled`:
+    // a visual track contributes to the composite (the eye toggle).
+    // `muted`: an audio track is silenced. `locked`: clips can't be
+    // selected / moved / trimmed (drags resolve past the lane).
+    // `duck-source`: an audio lane tagged as a sidechain "voice" source —
+    // its clips drive the "duck under voice" gesture (M8 Phase 4).
+    enabled: bool,
+    muted: bool,
+    locked: bool,
+    duck-source: bool,
+    // Transitions at this track's clip junctions (M4), keyed by the left
+    // (outgoing) clip. Empty ⇔ none.
+    transitions: [TransitionView],
+}
+
+// A named, colored anchor on the timeline ruler (M1 markers).
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct TimelineMarker {
+    id: string,
+    tick: int,
+    name: string,
+    color: color,
+}
+
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct Sequence {
+    id: string,
+    name: string,
+    fps: Rational,
+    // SMPTE drop-frame timecode display flag. Only meaningful for NTSC
+    // rates (29.97 == 30000/1001, 59.94 == 60000/1001) — for everything
+    // else the ruler / timecode formatter ignores it. This is a *display*
+    // setting, not a rate change: the underlying frame indices are the
+    // same; we only relabel them so the displayed timecode tracks
+    // wall-clock time. (For 23.976 there is no standard drop scheme;
+    // by convention 23.976 projects are always non-drop and accept the
+    // ~3.6s/hour drift.)
+    drop-frame: bool,
+    tracks: [Track],
+    // Ruler markers in tick order (M1). Empty when none are placed.
+    markers: [TimelineMarker],
+    width: length,
+    height: length,
+    // Canvas settings (M1): preset index in `CanvasAspect::ALL` order
+    // (0 = auto / match footage) and the opaque canvas background.
+    aspect-index: int,
+    background: color,
+}
+
+// An imported source in the project's media pool (the Library bin). This is the
+// asset, not a placement — projected from the engine's `MediaSource`.
+//
+// No serde derive: `thumbnail` is a live texture, not serializable state.
+export struct Media {
+    id: string,
+    name: string,
+    // Full path of the source file — the relink dialog shows where a
+    // missing file used to live.
+    path: string,
+    // The backing file is gone (moved/deleted since the project was saved).
+    // Computed worker-side per projection publish; drives the tile badge
+    // and the relink dialog rows (v1 roadmap M0 missing-media relink).
+    is-missing: bool,
+    width: int,
+    height: int,
+    has-audio: bool,
+    // Full length of the source, resampled to sequence-rate ticks. Drives the
+    // drag ghost width and the default placement length when dropped.
+    duration-ticks: int,
+    // Audio-only source (no video stream): the tile shows a waveform card
+    // instead of a poster frame.
+    is-audio: bool,
+    // Still image (PNG/JPEG/WebP): the duration is the default placement
+    // length, not an intrinsic property; the tile badges the kind instead.
+    is-image: bool,
+    // Source length as "MM:SS" (or "H:MM:SS"), for the tile badge.
+    duration-label: string,
+    // How many timeline clips currently reference this source. Drives the
+    // delete flow: 0 removes straight away, > 0 raises the "used by N clips"
+    // confirmation before cascading the clip removals.
+    usage-count: int,
+    // Poster frame (video) or rendered waveform (audio). Generated off-thread
+    // after import; empty until ready (see src/thumbnails.rs).
+    thumbnail: image,
+}
+
+// No serde derive: contains `Media` (see above).
+export struct Project {
+    id: string,
+    title: string,
+    // A project has exactly one sequence at this stage. Future may allow multiple.
+    sequence: Sequence,
+    // Imported media pool, shown in the Library panel.
+    media: [Media],
+    // Audio-only subset of `media`, projected separately because Slint's
+    // `for` can't filter a model — feeds the Audio tab's Local section.
+    media-audio: [Media],
+}

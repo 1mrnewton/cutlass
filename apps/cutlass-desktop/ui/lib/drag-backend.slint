@@ -1,0 +1,125 @@
+import { Sequence, TrackKind } from "../models/index.slint";
+
+// Bridge between timeline drag gestures and the Rust placement helpers
+// (src/snap.rs). Pure callbacks re-invoke whenever arguments change during a
+// drag, so the ghost preview and the commit on release share one resolution
+// and can never disagree.
+
+export struct SnapResult {
+    has-snap: bool,
+    snapped-start-value: int,
+    snap-line-tick: int,
+}
+
+// Where a dragged clip would land if released right now (CapCut policy:
+// same-kind lanes only; conflicts and foreign rows insert a new lane; with
+// the main-track magnet on, the bottom video lane takes insertions only).
+export struct ClipDragResolution {
+    valid: bool,
+    // Landing: an existing lane (`target-track-id` at `target-row`) or a new
+    // lane inserted at `target-row` (pushing the current row down).
+    is-new-lane: bool,
+    target-track-id: string,
+    target-row: int,
+    resolved-start: int,
+    duration-ticks: int,
+    // Magnet guide: vertical line at `snap-line-tick` while snapped.
+    has-snap: bool,
+    snap-line-tick: int,
+    // Release would land exactly where the clip already is — skip the commit.
+    is-noop: bool,
+    // Main-track magnet: release *inserts* at `resolved-start`, shifting
+    // later clips right (`resolved-start` is in post-close space for
+    // reorders). The caret renders at `caret-tick` (current visual space)
+    // instead of a landing ghost.
+    is-insert: bool,
+    caret-tick: int,
+}
+
+// Where a library tile dropped right now would land. `target-track-id` is
+// the video lane under the cursor, or empty when there is none (the worker
+// then creates a new video lane at `target-row`). With the main-track magnet
+// on, dropping on the main lane resolves to an insertion between clips.
+export struct LibraryDropResolution {
+    target-track-id: string,
+    target-row: int,
+    resolved-start: int,
+    is-insert: bool,
+    caret-tick: int,
+    // Magnet guide: vertical line at `snap-line-tick` while snapped (freeform
+    // drops only; insertion mode shows a caret instead).
+    has-snap: bool,
+    snap-line-tick: int,
+}
+
+// One clip's rectangle in lane space (row is the lane-list row, top-first).
+// Used for group-drag landing ghosts / floating copies and for the stretch
+// previews of linked trim partners.
+export struct GroupGhost {
+    row: int,
+    start-tick: int,
+    duration-ticks: int,
+    color: color,
+}
+
+// One clip's resolved landing inside a group-move commit.
+export struct ClipMove {
+    clip-id: string,
+    track-id: string,
+    start-tick: int,
+}
+
+// Where a multi-selection dragged by (dx, hover-row) would land. One uniform
+// dx and row delta for the whole set; collisions with clips outside the set
+// (or rows of the wrong kind) make the resolution invalid — release commits
+// nothing (CapCut's reject policy).
+export struct GroupDragResolution {
+    valid: bool,
+    is-noop: bool,
+    // dx after clamping to tick 0 and snapping the grabbed clip's edges.
+    resolved-dx-ticks: int,
+    row-delta: int,
+    // Magnet guide: vertical line at `snap-line-tick` while snapped.
+    has-snap: bool,
+    snap-line-tick: int,
+    // Per-clip landings, handed to the commit verbatim.
+    moves: [ClipMove],
+    // Landing previews (only meaningful while `valid`).
+    ghosts: [GroupGhost],
+}
+
+// Where a trimmed clip edge would settle if released right now. The dragged
+// edge magnets like a move, then clamps to the lane's neighbor clips, the
+// source media headroom (`Clip.head/tail-room-ticks`), tick 0, and a 1-tick
+// minimum duration — so the live stretch is exactly what the engine accepts.
+// With the Link toggle on, the clamp is intersected across the clip's link
+// group (the same edge delta applies to every linked clip on release).
+export struct ClipTrimResolution {
+    valid: bool,
+    new-start: int,
+    new-duration: int,
+    // Magnet guide: vertical line at `snap-line-tick` while snapped.
+    has-snap: bool,
+    snap-line-tick: int,
+    // Release would leave the clip exactly as it is — skip the commit.
+    is-noop: bool,
+    // Post-trim extents of the linked partners (excludes the dragged clip),
+    // for partner stretch previews.
+    ghosts: [GroupGhost],
+}
+
+export global DragBackend {
+    pure callback snap-clip-start(Sequence /* sequence */, string /* dragging-source-track-id */, string /* dragging-clip-id */, int    /* cursor-start-value */, int    /* clip-duration-ticks */, int    /* snap-threshold-ticks */, int    /* playhead-tick */, ) -> SnapResult;
+
+    pure callback resolve-clip-drag(Sequence /* sequence */, string /* source-track-id */, string /* dragging-clip-id */, int    /* dx-ticks */, int    /* hover-row */, int    /* playhead-tick */, int    /* snap-threshold-ticks */, bool   /* main-magnet */, ) -> ClipDragResolution;
+
+    pure callback resolve-library-drop(Sequence /* sequence */, TrackKind /* lane-kind */, int    /* duration-ticks */, int    /* cursor-tick */, int    /* drop-row */, int    /* playhead-tick */, int    /* snap-threshold-ticks */, bool   /* main-magnet */, ) -> LibraryDropResolution;
+
+    pure callback resolve-clip-trim(Sequence /* sequence */, string /* track-id */, string /* clip-id */, bool   /* trim-head (left edge) */, int    /* dx-ticks */, int    /* playhead-tick */, int    /* snap-threshold-ticks */, bool   /* link-enabled */, bool   /* main-magnet */, ) -> ClipTrimResolution;
+
+    pure callback resolve-group-drag(Sequence /* sequence */, [string] /* selected clip ids */, string /* anchor track-id */, string /* anchor clip-id */, int    /* dx-ticks */, int    /* hover-row (under the anchor) */, int    /* playhead-tick */, int    /* snap-threshold-ticks */, ) -> GroupDragResolution;
+
+    // Press-time rectangles of the selected clips, for the floating copies
+    // that follow the cursor during a group drag.
+    pure callback group-floaters(Sequence /* sequence */, [string] /* selected clip ids */, ) -> [GroupGhost];
+}

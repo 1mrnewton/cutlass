@@ -1,0 +1,503 @@
+// AI assistant chat panel (ai-agent roadmap Phase 4). Prompt box at the
+// bottom, transcript above it, with a plan card (Apply / Discard) when
+// preview-before-apply is on. All state lives in AgentStore; the agent
+// worker thread streams entries in and main.rs forwards the callbacks.
+
+import {
+    PanelBase,
+    PanelHeader,
+    CutlassScrollView,
+    CutlassText,
+    AccentButton,
+    SubtleButton,
+} from "../../components/index.slint";
+import {
+    AgentStore,
+    AgentEntry,
+    AppStore,
+    TimelineActions,
+} from "../../store/index.slint";
+
+// Circular send/stop affordance pinned inside the composer (ChatGPT-style).
+component ComposerAction inherits Rectangle {
+    in property <image> icon;
+    in property <bool> enabled: true;
+    in property <bool> accent: true;
+    callback clicked();
+
+    width: 28px;
+    height: 28px;
+    border-radius: self.width / 2;
+    background: accent
+        ? (enabled ? AppStore.theme.accent.primary : AppStore.theme.agent.send-disabled-bg)
+        : (ta.has-hover && enabled ? AppStore.theme.agent.stop-bg-hover : AppStore.theme.agent.stop-bg);
+    opacity: enabled ? 1.0 : 0.55;
+
+    Image {
+        width: 16px;
+        height: 16px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        image-fit: ImageFit.contain;
+        colorize: accent ? AppStore.theme.accent.on-accent : AppStore.theme.text.primary;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// The prompt composer: multi-line input styled like the inspector's
+// text fields (focus ring in the accent teal). Grows with content up to
+// a cap, then scrolls. Enter sends; Shift+Enter inserts a newline. Send
+// and stop sit inside the field at the bottom-right.
+component PromptInput inherits Rectangle {
+    in-out property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> running: false;
+    callback accepted(text: string);
+    callback stop();
+
+    private property <length> pad-y: AppStore.theme.metrics.spacing.sm;
+    private property <length> pad-x: AppStore.theme.metrics.spacing.md;
+    private property <length> action-size: 28px;
+    private property <length> action-gap: AppStore.theme.metrics.spacing.sm;
+    private property <length> text-inset-right: action-size + action-gap;
+    private property <length> composer-min-h: action-size + 2 * self.pad-y;
+    private property <length> editor-area-h: max(0px, root.height - 2 * self.pad-y);
+    private property <length> text-block-h: input.preferred-height;
+    private property <bool> scrolls: text-block-h > editor-area-h;
+
+    height: clamp(max(input.preferred-height + 2 * self.pad-y, self.composer-min-h), self.composer-min-h, 110px);
+    horizontal-stretch: 1;
+    border-radius: AppStore.theme.metrics.radius.md;
+    background: AppStore.theme.agent.input-bg;
+    opacity: enabled ? 1.0 : 0.55;
+    clip: true;
+    forward-focus: input;
+
+    animate background {
+        duration: 120ms;
+        easing: ease-out;
+    }
+
+    TouchArea {
+        mouse-cursor: MouseCursor.text;
+        clicked => {
+            input.focus();
+        }
+    }
+
+    if root.text == "" && !input.has-focus: CutlassText {
+        x: root.pad-x;
+        width: max(0px, parent.width - root.pad-x - root.pad-x - root.text-inset-right);
+        height: parent.height;
+        vertical-alignment: center;
+        text: "Describe an edit...";
+        style: AppStore.theme.typography.body;
+        foreground: AppStore.theme.text.muted;
+        overflow: elide;
+    }
+
+    editor-scroll := CutlassScrollView {
+        x: root.pad-x;
+        y: root.scrolls ? root.pad-y : root.pad-y + (root.editor-area-h - root.text-block-h) / 2;
+        width: max(0px, root.width - 2 * root.pad-x - root.text-inset-right);
+        height: root.scrolls ? root.editor-area-h : root.text-block-h;
+        viewport-width: self.width;
+        viewport-height: max(self.height, input.preferred-height);
+        show-horizontal-scrollbar: false;
+        show-vertical-scrollbar: false;
+
+        input := TextInput {
+            width: editor-scroll.width;
+            height: root.scrolls ? max(editor-scroll.height, self.preferred-height) : self.preferred-height;
+            single-line: false;
+            wrap: word-wrap;
+            enabled: root.enabled;
+            text <=> root.text;
+            color: AppStore.theme.text.primary;
+            font-size: AppStore.theme.typography.body.size;
+            font-weight: AppStore.theme.typography.body.weight;
+            selection-background-color: AppStore.theme.accent.primary.with-alpha(0.33);
+            selection-foreground-color: AppStore.theme.text.primary;
+            page-height: editor-scroll.height;
+            accessible-role: none;
+            key-pressed(event) => {
+                if (event.text == Key.Return && !event.modifiers.shift) {
+                    root.accepted(root.text);
+                    return accept;
+                }
+                // Never let Slint's built-in text undo/redo run here: its
+                // undo stack records byte offsets that our programmatic
+                // clear-on-send invalidates, and replaying one against the
+                // emptied input panics (upstream Slint bug). Routing the
+                // shortcuts to timeline history is also what Cmd+Z means
+                // right after "Applied N edits" — undo the edit, not the
+                // typing.
+                if ((event.text == "z" || event.text == "Z") && (event.modifiers.control || event.modifiers.meta)) {
+                    if (event.modifiers.shift) {
+                        TimelineActions.redo();
+                    } else {
+                        TimelineActions.undo();
+                    }
+                    return accept;
+                }
+                if ((event.text == "y" || event.text == "Y") && (event.modifiers.control || event.modifiers.meta)) {
+                    TimelineActions.redo();
+                    return accept;
+                }
+                reject
+            }
+
+            cursor-position-changed(cpos) => {
+                if (!root.scrolls) {
+                    return;
+                }
+                if (cpos.y + editor-scroll.viewport-y < 8px) {
+                    editor-scroll.viewport-y = min(0px, max(
+                        editor-scroll.height - self.height,
+                        -cpos.y + 8px,
+                    ));
+                } else if (cpos.y + editor-scroll.viewport-y > editor-scroll.height - 24px) {
+                    editor-scroll.viewport-y = min(0px, max(
+                        editor-scroll.height - self.height,
+                        editor-scroll.height - cpos.y - 24px,
+                    ));
+                }
+            }
+        }
+    }
+
+    if !root.running: ComposerAction {
+        x: root.width - root.pad-x - root.action-size;
+        y: root.scrolls
+            ? root.height - root.pad-y - root.action-size
+            : (root.height - root.action-size) / 2;
+        icon: @image-url("../../../../../assets/icon/chat/send.svg");
+        accent: true;
+        enabled: root.text != "";
+        clicked => {
+            root.accepted(root.text);
+        }
+    }
+
+    if root.running: ComposerAction {
+        x: root.width - root.pad-x - root.action-size;
+        y: root.scrolls
+            ? root.height - root.pad-y - root.action-size
+            : (root.height - root.action-size) / 2;
+        icon: @image-url("../../../../../assets/icon/chat/stop.svg");
+        accent: false;
+        enabled: true;
+        clicked => {
+            root.stop();
+        }
+    }
+}
+
+// One transcript row, styled by kind (see AgentEntry in agent-store.slint).
+component TranscriptEntry inherits VerticalLayout {
+    in property <AgentEntry> entry;
+    in property <bool> offer-undo: false;
+    callback undo-clicked();
+
+    padding-top: AppStore.theme.metrics.spacing.xs;
+    padding-bottom: AppStore.theme.metrics.spacing.xs;
+
+    // The user's prompt: right-aligned bubble, like every chat app.
+    if entry.kind == "user": HorizontalLayout {
+        alignment: end;
+
+        Rectangle {
+            background: AppStore.theme.agent.user-message-bg;
+            border-radius: AppStore.theme.metrics.radius.md;
+            width: min(user-text.preferred-width + 2 * AppStore.theme.metrics.spacing.md, parent.width);
+            height: user-text.preferred-height + 2 * AppStore.theme.metrics.spacing.sm;
+
+            user-text := CutlassText {
+                x: AppStore.theme.metrics.spacing.md;
+                y: AppStore.theme.metrics.spacing.sm;
+                width: parent.width - 2 * AppStore.theme.metrics.spacing.md;
+                text: entry.text;
+                wrap: word-wrap;
+                style: AppStore.theme.typography.body;
+            }
+        }
+    }
+
+    if entry.kind == "assistant": CutlassText {
+        text: entry.text;
+        wrap: word-wrap;
+        style: AppStore.theme.typography.body;
+        foreground: AppStore.theme.text.secondary;
+    }
+
+    // One edit line: accent tick so applied work scans at a glance.
+    if entry.kind == "action": HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.sm;
+
+        Rectangle {
+            width: 2px;
+            background: AppStore.theme.accent.primary;
+            border-radius: 1px;
+        }
+
+        CutlassText {
+            horizontal-stretch: 1;
+            text: entry.text;
+            wrap: word-wrap;
+            style: AppStore.theme.typography.caption;
+            foreground: AppStore.theme.text.secondary;
+        }
+    }
+
+    if entry.kind == "status": CutlassText {
+        text: entry.text;
+        wrap: word-wrap;
+        style: AppStore.theme.typography.caption;
+        foreground: AppStore.theme.text.muted;
+    }
+
+    if entry.kind == "applied": HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.sm;
+        alignment: start;
+
+        CutlassText {
+            vertical-alignment: center;
+            text: entry.text;
+            wrap: word-wrap;
+            style: AppStore.theme.typography.caption;
+            foreground: AppStore.theme.accent.primary;
+        }
+
+        if offer-undo: SubtleButton {
+            label: "Undo";
+            clicked => {
+                root.undo-clicked();
+            }
+        }
+    }
+
+    if entry.kind == "error": CutlassText {
+        text: entry.text;
+        wrap: word-wrap;
+        style: AppStore.theme.typography.caption;
+        foreground: AppStore.theme.agent.error;
+    }
+}
+
+export component AgentPanel inherits PanelBase {
+    VerticalLayout {
+        spacing: AppStore.theme.metrics.spacing.none;
+
+        PanelHeader {
+            title: "Assistant";
+        }
+
+        // Not configured: setup instructions instead of a dead chat box.
+        if !AgentStore.configured: VerticalLayout {
+            padding: AppStore.theme.metrics.spacing.lg;
+            spacing: AppStore.theme.metrics.spacing.sm;
+
+            CutlassText {
+                text: "Connect an AI provider";
+                style: AppStore.theme.typography.heading-sm;
+            }
+
+            CutlassText {
+                text: "Add an [ai] table to:";
+                wrap: word-wrap;
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.secondary;
+            }
+
+            CutlassText {
+                text: AgentStore.config-path;
+                wrap: word-wrap;
+                mono: true;
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.secondary;
+            }
+
+            CutlassText {
+                text: "[ai]\nbase_url = \"http://localhost:11434/v1\"\nmodel = \"qwen3:14b\"\n# api_key_env = \"OPENAI_API_KEY\"";
+                wrap: word-wrap;
+                mono: true;
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.muted;
+            }
+
+            CutlassText {
+                text: "Works with Ollama, LM Studio, or any OpenAI-compatible endpoint. Edits apply on your next prompt — no restart needed.";
+                wrap: word-wrap;
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.muted;
+            }
+        }
+
+        transcript-scroll := CutlassScrollView {
+            vertical-stretch: 1;
+            viewport-width: self.width;
+            viewport-height: transcript-content.preferred-height;
+            show-horizontal-scrollbar: false;
+
+            // Pin to the newest entry as text streams in. Assigning in a
+            // change handler (not a binding) keeps wheel scrolling free
+            // between updates.
+            private property <length> content-h: transcript-content.preferred-height;
+
+            changed content-h => {
+                self.viewport-y = min(0px, self.height - self.content-h);
+            }
+
+            transcript-content := VerticalLayout {
+                width: transcript-scroll.width;
+                alignment: start;
+                padding: AppStore.theme.metrics.spacing.md;
+
+                if AgentStore.transcript.length == 0 && AgentStore.configured: CutlassText {
+                    text: "Ask for an edit — \"trim the selected clip to 4 seconds\", \"add a title INTRO at the start\" — and it lands on the timeline as one undoable step.";
+                    wrap: word-wrap;
+                    style: AppStore.theme.typography.caption;
+                    foreground: AppStore.theme.text.muted;
+                }
+
+                for e[idx] in AgentStore.transcript: TranscriptEntry {
+                    entry: e;
+                    offer-undo: AgentStore.undo-offered && idx == AgentStore.transcript.length - 1;
+                    undo-clicked => {
+                        AgentStore.undo-offered = false;
+                        TimelineActions.undo();
+                    }
+                }
+
+                if AgentStore.running: CutlassText {
+                    text: "Thinking…";
+                    style: AppStore.theme.typography.caption;
+                    foreground: AppStore.theme.text.muted;
+                }
+            }
+        }
+
+        // The rehearsed plan, waiting on the user (preview-before-apply).
+        if AgentStore.plan-pending: Rectangle {
+            background: AppStore.theme.agent.plan-bg;
+            border-width: 1px;
+            border-color: AppStore.theme.agent.plan-border;
+            border-radius: AppStore.theme.metrics.radius.md;
+
+            VerticalLayout {
+                padding: AppStore.theme.metrics.spacing.md;
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                CutlassText {
+                    text: AgentStore.plan-actions.length == 1
+                        ? "1 planned edit"
+                        : AgentStore.plan-actions.length + " planned edits";
+                    style: AppStore.theme.typography.label;
+                }
+
+                for action in AgentStore.plan-actions: CutlassText {
+                    text: "• " + action;
+                    wrap: word-wrap;
+                    style: AppStore.theme.typography.caption;
+                    foreground: AppStore.theme.text.secondary;
+                }
+
+                HorizontalLayout {
+                    spacing: AppStore.theme.metrics.spacing.sm;
+                    alignment: start;
+
+                    AccentButton {
+                        label: "Apply";
+                        clicked => {
+                            AgentStore.apply-plan();
+                        }
+                    }
+
+                    SubtleButton {
+                        label: "Discard";
+                        clicked => {
+                            AgentStore.discard-plan();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Composer + the preview-before-apply toggle.
+        VerticalLayout {
+            padding: AppStore.theme.metrics.spacing.md;
+            spacing: AppStore.theme.metrics.spacing.sm;
+
+            prompt-input := PromptInput {
+                enabled: !AgentStore.running;
+                running: AgentStore.running;
+                accepted(text) => {
+                    root.submit(text);
+                }
+                stop => {
+                    AgentStore.cancel();
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+                alignment: start;
+
+                toggle := TouchArea {
+                    width: toggle-row.preferred-width;
+                    height: toggle-row.preferred-height;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        AgentStore.dry-run = !AgentStore.dry-run;
+                    }
+
+                    toggle-row := HorizontalLayout {
+                        spacing: AppStore.theme.metrics.spacing.xs;
+
+                        Rectangle {
+                            y: (parent.height - self.height) / 2;
+                            width: 12px;
+                            height: 12px;
+                            border-radius: AppStore.theme.metrics.radius.sm;
+                            border-width: 1px;
+                            border-color: AgentStore.dry-run ? AppStore.theme.accent.primary : AppStore.theme.agent.preview-toggle-border;
+                            background: AgentStore.dry-run ? AppStore.theme.accent.primary : transparent;
+
+                            if AgentStore.dry-run: CutlassText {
+                                width: parent.width;
+                                height: parent.height;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                text: "✓";
+                                style: AppStore.theme.typography.caption;
+                                foreground: #0A0A0A;
+                            }
+                        }
+
+                        CutlassText {
+                            text: "Preview before applying";
+                            style: AppStore.theme.typography.caption;
+                            foreground: toggle.has-hover ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    function submit(text: string) {
+        if (text == "" || AgentStore.running) {
+            return;
+        }
+        AgentStore.send(text);
+        prompt-input.text = "";
+    }
+}

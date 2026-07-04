@@ -1,0 +1,47 @@
+// App settings plumbing, implemented in Rust (src/main.rs loads the values
+// at startup and wires the callbacks). The settings screen (shell/
+// settings-dialog.slint) two-way binds these properties to its fields and
+// calls `save` to persist them to ~/.cutlass/config.toml via the
+// cutlass-settings crate.
+//
+// The theme is the one setting that lives elsewhere (AppStore.theme-id), so
+// it can drive the live theme binding the whole shell reads; `save` folds it
+// in from there. Everything that needs a restart to take effect (cache dir
+// and budget) is labeled as such in the UI — it's persisted now, applied on
+// the next launch.
+export global SettingsBackend {
+    // --- AI provider ([ai]) --------------------------------------------
+    in-out property <string> ai-base-url;
+    in-out property <string> ai-model;
+    in-out property <string> ai-api-key;
+    in-out property <string> ai-api-key-env;
+
+    // --- Cache ([cache]) -----------------------------------------------
+    // LRU eviction budget in GiB (the UI's friendly unit; Rust stores MiB).
+    in-out property <float> cache-budget-gb: 50.0;
+    // Resolved cache directory, for display + Reveal.
+    in-out property <string> cache-dir-effective;
+    // Human-readable on-disk size, recomputed off-thread ("—" until known).
+    in-out property <string> cache-size-text: "—";
+
+    // The config file path, shown at the foot of the screen.
+    in-out property <string> config-path;
+
+    // --- Test connection feedback (set by Rust) ------------------------
+    in-out property <bool> ai-testing: false;
+    in-out property <string> ai-test-status;
+    in-out property <bool> ai-test-ok: false;
+
+    // Persist every value (plus AppStore.theme-id) to config.toml. The Rust
+    // handler also applies the live-settable bits immediately (the agent's
+    // configured state).
+    callback save();
+    // Probe the endpoint with the *current, unsaved* AI fields and report
+    // back through `ai-test-status` / `ai-test-ok`.
+    callback test-connection();
+    // Recompute `cache-size-text` from disk (off-thread).
+    callback refresh-cache-size();
+    // Reveal the config file / cache directory in the OS file browser.
+    callback reveal-config();
+    callback reveal-cache();
+}

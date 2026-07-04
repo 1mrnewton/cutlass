@@ -1,0 +1,59 @@
+import { CutlassGridView } from "components/index.slint";
+
+// Smoke test for `CutlassGridView` (and, transitively,
+// `CutlassScrollView`). Produces a grid large enough to overflow both
+// axes so we can exercise the vertical bar, horizontal bar, corner
+// cap, drag-to-scroll, click-track jumping, and mouse-wheel scrolling.
+//
+// Note the bars auto-hide: they appear briefly on launch (initial
+// extent change), then fade out ~1s after the last scroll unless the
+// pointer is over a bar. Hovering the faded bar area reveals it, and
+// the thumb widens slightly on hover.
+export component TestApp inherits Window {
+    title: "Test App — CutlassGridView";
+
+    preferred-width: 1280px;
+    min-width: 640px;
+
+    preferred-height: 800px;
+    min-height: 480px;
+
+    background: #1c1c1e;
+
+    in property <int> columns: 8;
+    in property <int> total-items: 320;
+
+    grid := CutlassGridView {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+
+        columns: root.columns;
+        cell-width: 120px;
+        cell-height: 120px;
+        spacing: 10px;
+        inset: 12px;
+        item-count: total-items;
+
+        for _[i] in total-items: Rectangle {
+            x: grid.cell-x(i);
+            y: grid.cell-y(i);
+            width: grid.cell-width;
+            height: grid.cell-height;
+            border-radius: 6px;
+            // Stable per-cell color so scrolling visibly shifts content.
+            background: hsv(mod(i * 37, 360), 0.45, 0.85);
+
+            Text {
+                text: "\{i}";
+                color: #111;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                width: 100%;
+                height: 100%;
+                font-size: 14px;
+            }
+        }
+    }
+}

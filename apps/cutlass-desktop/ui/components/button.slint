@@ -1,0 +1,65 @@
+// Shared button widgets, sized to their label. `AccentButton` is the filled
+// primary action (title bar Export, dialog confirm); `SubtleButton` is the
+// quiet secondary (cancel/close) with a hover wash only.
+
+import { CutlassText } from "text.slint";
+import { AppStore } from "../store/index.slint";
+
+export component AccentButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: text.preferred-width + 2 * AppStore.theme.metrics.spacing.lg;
+    height: 26px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: ta.has-hover && enabled ? AppStore.theme.accent.hover : AppStore.theme.accent.primary;
+    opacity: enabled ? 1.0 : 0.35;
+
+    text := CutlassText {
+        width: parent.width;
+        height: parent.height;
+        text: label;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        style: AppStore.theme.typography.label;
+        foreground: AppStore.theme.accent.on-accent;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component SubtleButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: text.preferred-width + 2 * AppStore.theme.metrics.spacing.lg;
+    height: 26px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: ta.has-hover && enabled ? #ffffff14 : transparent;
+    border-width: 1px;
+    border-color: #ffffff22;
+    opacity: enabled ? 1.0 : 0.35;
+
+    text := CutlassText {
+        width: parent.width;
+        height: parent.height;
+        text: label;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        style: AppStore.theme.typography.label;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}

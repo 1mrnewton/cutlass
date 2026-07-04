@@ -1,0 +1,59 @@
+import { RationalTime, Clip, Sequence } from "../models/index.slint";
+
+export global TimelineLib {
+
+    // OTIO-style: seconds = value / rate = value * rate.den / rate.num
+    public pure function to-seconds(rt: RationalTime) -> float {
+        return rt.value * rt.rate.den / rt.rate.num;
+    }
+
+    // Effective duration of a clip on the sequence timeline.
+    // Today this is just the source-range duration (1:1 playback).
+    // When time-remap lands, divide by the warp factor here — call sites
+    // do not change.
+    public pure function clip-timeline-duration(c: Clip) -> RationalTime {
+        return c.source-range.duration;
+    }
+
+    // Sequence duration is the latest clip end across all tracks:
+    // max(clip.timeline-start + clip-timeline-duration(clip)).
+    // Implemented in Rust because Slint functions cannot reduce nested
+    // models procedurally.
+    pure callback sequence-duration(sequence: Sequence) -> RationalTime;
+
+    // SMPTE timecode for transport / preview readouts. Implemented in
+    // Rust (`src/timecode.rs`) so preview, ruler, inspector, and export
+    // share one formatter (including drop-frame NTSC).
+    pure callback format-timecode(int, int, int, bool) -> string;
+
+    // Timeline projection: 1 tick == `zoom` logical pixels.
+    // Zoom is owned by `TimelineStore.zoom` rather than the time model, so
+    // the same clip can render at any scale without mutating its
+    // `RationalTime`.
+    public pure function rational-to-length(rt: RationalTime, zoom: float) -> length {
+        return rt.value * zoom * 1px;
+    }
+
+    // Convenience composite for clip rendering. Kept in lock-step with
+    // `clip-timeline-duration` so the call site never has to compose two
+    // helpers (and so the time-remap change later only touches this file).
+    public pure function clip-timeline-width(c: Clip, zoom: float) -> length {
+        return c.source-range.duration.value * zoom * 1px;
+    }
+
+    public pure function calc-viewport-height(track-count: int, track-height: length, spacing: length, ) -> length {
+        let content_height = (track-count * track_height) + ((track-count - 1) * spacing);
+        return content_height;
+    }
+
+    // Horizontal scroll extent for the track-lane Flickable: sequence
+    // duration projected at the current zoom (1 tick == `zoom` px), plus
+    // trailing edit headroom so the last clip isn't flush against the
+    // scroll edge.
+    public pure function calc-viewport-width(sequence: Sequence, zoom: float) -> length {
+        let duration = TimelineLib.sequence-duration(sequence);
+        let pad-seconds = 5.0;
+        let pad-ticks = pad-seconds * sequence.fps.num / sequence.fps.den;
+        return (duration.value + pad-ticks) * zoom * 1px;
+    }
+}

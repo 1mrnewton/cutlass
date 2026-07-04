@@ -1,0 +1,596 @@
+// Library panel, CapCut-shaped: a tab strip across the top (Media / Audio /
+// Text / Stickers), a section sidebar under it, and the active section's
+// content filling the rest. Sections without a backend yet (stock browsing,
+// AI generation) are honest "coming soon" placeholders so the navigation
+// already has its final shape.
+
+import {
+    CutlassGridView,
+    CutlassText,
+    SubtleButton,
+    PanelBase,
+    VerticalDivider,
+    HorizontalDivider,
+} from "../../components/index.slint";
+import { AppStore, EditorStore, TimelineStore } from "../../store/index.slint";
+import { Media, TrackKind, CatalogEntry } from "../../models/index.slint";
+import { EffectsBackend } from "../../lib/index.slint";
+import { MediaTile, GeneratedTile, CatalogTile } from "tiles.slint";
+import { SectionPlaceholder } from "placeholder.slint";
+import { CutlassScrollView } from "../../components/scroll-view.slint";
+
+// Active tab + per-tab section. A global rather than panel state: the panel
+// unmounts while fullscreen preview is up, and the selection should survive
+// the round trip.
+global LibraryState {
+    in-out property <string> active-tab: "media";
+    in-out property <string> media-section: "local";
+    in-out property <string> audio-section: "local";
+}
+
+// Shared accent for active tab / section labels (same accent as AccentButton).
+global LibraryStyle {
+    out property <color> accent: AppStore.theme.accent.primary;
+}
+
+// One top tab: icon over label, CapCut-style (active = teal, no underline).
+// Width hugs the label (CapCut-tight) so all eight tabs fit the panel's
+// 350px minimum width.
+component LibraryTab inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <string> tab-id;
+
+    property <bool> active: LibraryState.active-tab == root.tab-id;
+    property <color> ink: root.active ? LibraryStyle.accent
+        : ta.has-hover ? AppStore.theme.text.primary
+        : AppStore.theme.text.secondary;
+
+    width: max(38px, lbl.preferred-width + 10px);
+    background: transparent;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 5px;
+
+        HorizontalLayout {
+            alignment: center;
+
+            Image {
+                width: 20px;
+                height: 20px;
+                source: root.icon;
+                colorize: root.ink;
+            }
+        }
+
+        lbl := CutlassText {
+            text: root.label;
+            horizontal-alignment: center;
+            style: { size: 12px, weight: 600, italic: false };
+            foreground: root.ink;
+        }
+    }
+
+    ta := TouchArea {
+        clicked => {
+            LibraryState.active-tab = root.tab-id;
+        }
+    }
+}
+
+// One sidebar entry of the active tab's section list.
+component SectionItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback activate();
+
+    height: 28px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: root.active ? #ffffff14
+        : ta.has-hover ? #ffffff0a
+        : transparent;
+
+    CutlassText {
+        x: AppStore.theme.metrics.spacing.sm;
+        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+        height: parent.height;
+        text: root.label;
+        style: AppStore.theme.typography.label;
+        foreground: root.active ? LibraryStyle.accent
+            : ta.has-hover ? AppStore.theme.text.primary
+            : AppStore.theme.text.secondary;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.activate();
+        }
+    }
+}
+
+component SectionList inherits VerticalLayout {
+    in property <[{ id: string, label: string }]> sections;
+    in property <string> active;
+    callback select(id: string);
+
+    // Narrow side padding buys label room ("Sound effects" must not elide
+    // at the default pane width).
+    padding-left: AppStore.theme.metrics.spacing.xs;
+    padding-right: AppStore.theme.metrics.spacing.xs;
+    padding-top: AppStore.theme.metrics.spacing.sm;
+    padding-bottom: AppStore.theme.metrics.spacing.sm;
+    spacing: AppStore.theme.metrics.spacing.xs;
+    alignment: start;
+
+    for s in root.sections: SectionItem {
+        label: s.label;
+        active: root.active == s.id;
+        activate => {
+            root.select(s.id);
+        }
+    }
+}
+
+// Import row shown atop the Local sections (media + audio share the same
+// picker; main.rs owns the async dialog).
+component ImportToolbar inherits HorizontalLayout {
+    padding: AppStore.theme.metrics.spacing.sm;
+    alignment: start;
+
+    SubtleButton {
+        label: "+  Import";
+        clicked => {
+            EditorStore.on-import-clicked();
+        }
+    }
+}
+
+export component LibraryPanel inherits PanelBase {
+    // Read-only projections of the engine media pool (see src/projection.rs).
+    property <[Media]> media: EditorStore.project.media;
+    property <[Media]> audio-media: EditorStore.project.media-audio;
+
+    VerticalLayout {
+        spacing: AppStore.theme.metrics.spacing.none;
+
+        // ---- Tab strip ----------------------------------------------------
+        Rectangle {
+            height: 52px;
+            background: AppStore.theme.panel.header-background;
+            CutlassScrollView {
+                height: parent.height;
+                viewport-width: tabs.preferred-width;
+                viewport-height: self.height;
+                show-horizontal-scrollbar: false;
+                show-vertical-scrollbar: false;
+
+                tabs := HorizontalLayout {
+                    padding-left: AppStore.theme.metrics.spacing.xs;
+                    alignment: start;
+                    spacing: AppStore.theme.metrics.spacing.md;
+
+                    LibraryTab {
+                        tab-id: "media";
+                        icon: @image-url("../../../../../assets/icon/library/media.svg");
+                        label: "Media";
+                    }
+
+                    LibraryTab {
+                        tab-id: "audio";
+                        icon: @image-url("../../../../../assets/icon/library/audio.svg");
+                        label: "Audio";
+                    }
+
+                    LibraryTab {
+                        tab-id: "text";
+                        icon: @image-url("../../../../../assets/icon/library/text.svg");
+                        label: "Text";
+                    }
+
+                    LibraryTab {
+                        tab-id: "stickers";
+                        icon: @image-url("../../../../../assets/icon/library/stickers.svg");
+                        label: "Stickers";
+                    }
+
+                    LibraryTab {
+                        tab-id: "effects";
+                        icon: @image-url("../../../../../assets/icon/library/effects.svg");
+                        label: "Effects";
+                    }
+
+                    LibraryTab {
+                        tab-id: "transitions";
+                        icon: @image-url("../../../../../assets/icon/library/transitions.svg");
+                        label: "Transitions";
+                    }
+
+                    // Filters / Adjustment tabs return when their engines land
+                // (v1 roadmap M5). The model's TrackKind catalog keeps those
+                // lanes; the UI hides dead features until then.
+                }
+            }
+        }
+
+        HorizontalDivider { }
+
+        // ---- Sidebar + content ---------------------------------------------
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: AppStore.theme.metrics.spacing.none;
+
+            Rectangle {
+                width: 112px;
+
+                if LibraryState.active-tab == "media": SectionList {
+                    width: parent.width;
+                    sections: [
+                        { id: "local", label: "Local" },
+                        { id: "stock", label: "Stock" },
+                        { id: "ai", label: "AI media" },
+                    ];
+                    active: LibraryState.media-section;
+                    select(id) => {
+                        LibraryState.media-section = id;
+                    }
+                }
+
+                if LibraryState.active-tab == "audio": SectionList {
+                    width: parent.width;
+                    sections: [
+                        { id: "local", label: "Local" },
+                        { id: "sfx", label: "Sound effects" },
+                        { id: "stock", label: "Stock music" },
+                        { id: "ai", label: "AI generated" },
+                    ];
+                    active: LibraryState.audio-section;
+                    select(id) => {
+                        LibraryState.audio-section = id;
+                    }
+                }
+
+                if LibraryState.active-tab == "text": SectionList {
+                    width: parent.width;
+                    sections: [{ id: "titles", label: "Add text" }];
+                    active: "titles";
+                }
+
+                if LibraryState.active-tab == "stickers": SectionList {
+                    width: parent.width;
+                    sections: [{ id: "shapes", label: "Shapes" }];
+                    active: "shapes";
+                }
+
+                if LibraryState.active-tab == "effects": SectionList {
+                    width: parent.width;
+                    sections: [{ id: "all", label: "All effects" }];
+                    active: "all";
+                }
+
+                if LibraryState.active-tab == "transitions": SectionList {
+                    width: parent.width;
+                    sections: [{ id: "all", label: "All transitions" }];
+                    active: "all";
+                }
+            }
+
+            VerticalDivider { }
+
+            Rectangle {
+                horizontal-stretch: 1;
+
+                // ---- Media > Local ------------------------------------------
+                if LibraryState.active-tab == "media" && LibraryState.media-section == "local": VerticalLayout {
+                    spacing: AppStore.theme.metrics.spacing.none;
+
+                    ImportToolbar { }
+
+                    media-grid := CutlassGridView {
+                        show-horizontal-scrollbar: false;
+                        show-vertical-scrollbar: false;
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+
+                        // As many 100px columns as the pane width allows.
+                        columns: max(1, floor((self.width - AppStore.theme.metrics.spacing.md)
+                            / (100px + AppStore.theme.metrics.spacing.md)));
+                        cell-width: 100px;
+                        cell-height: 100px;
+                        spacing: AppStore.theme.metrics.spacing.md;
+                        inset: AppStore.theme.metrics.spacing.md;
+                        item-count: root.media.length;
+
+                        for m[i] in root.media: MediaTile {
+                            x: media-grid.cell-x(i);
+                            y: media-grid.cell-y(i);
+                            width: media-grid.cell-width;
+                            height: media-grid.cell-height;
+                            media: m;
+                        }
+                    }
+                }
+
+                // ---- Media > Stock / AI -------------------------------------
+                if LibraryState.active-tab == "media" && LibraryState.media-section == "stock": SectionPlaceholder {
+                    width: parent.width;
+                    height: parent.height;
+                    icon: @image-url("../../../../../assets/icon/library/stock.svg");
+                    title: "Stock library";
+                    message: "Royalty-free clips and backgrounds, browsable without leaving the editor. Coming soon.";
+                }
+
+                if LibraryState.active-tab == "media" && LibraryState.media-section == "ai": SectionPlaceholder {
+                    width: parent.width;
+                    height: parent.height;
+                    icon: @image-url("../../../../../assets/icon/library/ai.svg");
+                    title: "AI media";
+                    message: "Generate images and video clips from a prompt, straight into the library. Coming soon.";
+                }
+
+                // ---- Audio > Local ------------------------------------------
+                if LibraryState.active-tab == "audio" && LibraryState.audio-section == "local": VerticalLayout {
+                    spacing: AppStore.theme.metrics.spacing.none;
+
+                    ImportToolbar { }
+
+                    if root.audio-media.length == 0: VerticalLayout {
+                        vertical-stretch: 1;
+                        alignment: center;
+                        padding: AppStore.theme.metrics.spacing.xl;
+                        spacing: AppStore.theme.metrics.spacing.sm;
+
+                        CutlassText {
+                            text: "No audio yet";
+                            style: AppStore.theme.typography.heading-sm;
+                            horizontal-alignment: center;
+                        }
+
+                        CutlassText {
+                            text: "Audio files you import show up here, ready to drag onto the timeline.";
+                            style: AppStore.theme.typography.caption;
+                            foreground: AppStore.theme.text.secondary;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    if root.audio-media.length > 0: audio-grid := CutlassGridView {
+                        show-horizontal-scrollbar: false;
+                        show-vertical-scrollbar: false;
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+
+                        columns: max(1, floor((self.width - AppStore.theme.metrics.spacing.md)
+                            / (100px + AppStore.theme.metrics.spacing.md)));
+                        cell-width: 100px;
+                        cell-height: 100px;
+                        spacing: AppStore.theme.metrics.spacing.md;
+                        inset: AppStore.theme.metrics.spacing.md;
+                        item-count: root.audio-media.length;
+
+                        for m[i] in root.audio-media: MediaTile {
+                            x: audio-grid.cell-x(i);
+                            y: audio-grid.cell-y(i);
+                            width: audio-grid.cell-width;
+                            height: audio-grid.cell-height;
+                            media: m;
+                        }
+                    }
+                }
+
+                // ---- Audio > SFX / Stock / AI -------------------------------
+                if LibraryState.active-tab == "audio" && LibraryState.audio-section == "sfx": SectionPlaceholder {
+                    width: parent.width;
+                    height: parent.height;
+                    icon: @image-url("../../../../../assets/icon/library/sfx.svg");
+                    title: "Sound effects";
+                    message: "A built-in pack of whooshes, dings, and ambience. Coming soon.";
+                }
+
+                if LibraryState.active-tab == "audio" && LibraryState.audio-section == "stock": SectionPlaceholder {
+                    width: parent.width;
+                    height: parent.height;
+                    icon: @image-url("../../../../../assets/icon/library/audio.svg");
+                    title: "Stock music";
+                    message: "Royalty-free tracks to score your edit. Coming soon.";
+                }
+
+                if LibraryState.active-tab == "audio" && LibraryState.audio-section == "ai": SectionPlaceholder {
+                    width: parent.width;
+                    height: parent.height;
+                    icon: @image-url("../../../../../assets/icon/library/ai.svg");
+                    title: "AI generated";
+                    message: "Generate music and voice-overs from a prompt. Coming soon.";
+                }
+
+                // ---- Text ---------------------------------------------------
+                if LibraryState.active-tab == "text": text-grid := CutlassGridView {
+                    width: parent.width;
+                    height: parent.height;
+                    show-horizontal-scrollbar: false;
+                    show-vertical-scrollbar: false;
+
+                    columns: max(1, floor((self.width - AppStore.theme.metrics.spacing.md)
+                        / (100px + AppStore.theme.metrics.spacing.md)));
+                    cell-width: 100px;
+                    cell-height: 100px;
+                    spacing: AppStore.theme.metrics.spacing.md;
+                    inset: AppStore.theme.metrics.spacing.md;
+                    item-count: 1;
+
+                    GeneratedTile {
+                        x: text-grid.cell-x(0);
+                        y: text-grid.cell-y(0);
+                        width: text-grid.cell-width;
+                        height: text-grid.cell-height;
+                        generator: "text";
+                        label: "Default text";
+                        lane-kind: TrackKind.text;
+                        seconds: 3;
+                        swatch: #3A6FC8;
+                    }
+                }
+
+                // ---- Stickers (shapes) --------------------------------------
+                if LibraryState.active-tab == "stickers": shape-grid := CutlassGridView {
+                    width: parent.width;
+                    height: parent.height;
+                    show-horizontal-scrollbar: false;
+                    show-vertical-scrollbar: false;
+
+                    columns: max(1, floor((self.width - AppStore.theme.metrics.spacing.md)
+                        / (100px + AppStore.theme.metrics.spacing.md)));
+                    cell-width: 100px;
+                    cell-height: 100px;
+                    spacing: AppStore.theme.metrics.spacing.md;
+                    inset: AppStore.theme.metrics.spacing.md;
+                    item-count: 3;
+
+                    GeneratedTile {
+                        x: shape-grid.cell-x(0);
+                        y: shape-grid.cell-y(0);
+                        width: shape-grid.cell-width;
+                        height: shape-grid.cell-height;
+                        generator: "solid";
+                        label: "Solid";
+                        lane-kind: TrackKind.sticker;
+                        seconds: 5;
+                        swatch: #1E1E1E;
+                    }
+
+                    GeneratedTile {
+                        x: shape-grid.cell-x(1);
+                        y: shape-grid.cell-y(1);
+                        width: shape-grid.cell-width;
+                        height: shape-grid.cell-height;
+                        generator: "rect";
+                        label: "Rectangle";
+                        lane-kind: TrackKind.sticker;
+                        seconds: 5;
+                        swatch: #E0E0E0;
+                    }
+
+                    GeneratedTile {
+                        x: shape-grid.cell-x(2);
+                        y: shape-grid.cell-y(2);
+                        width: shape-grid.cell-width;
+                        height: shape-grid.cell-height;
+                        generator: "ellipse";
+                        label: "Ellipse";
+                        lane-kind: TrackKind.sticker;
+                        seconds: 5;
+                        swatch: #E0E0E0;
+                        round-swatch: true;
+                    }
+                }
+
+                // ---- Effects ------------------------------------------------
+                // Click applies to the selected clip (no lane drop — effects
+                // ride a clip's chain). Disabled tiles when nothing's selected.
+                if LibraryState.active-tab == "effects": VerticalLayout {
+                    spacing: AppStore.theme.metrics.spacing.none;
+
+                    Rectangle {
+                        height: 34px;
+                        background: AppStore.theme.panel.header-background;
+                        CutlassText {
+                            x: AppStore.theme.metrics.spacing.md;
+                            width: parent.width - 2 * AppStore.theme.metrics.spacing.md;
+                            height: parent.height;
+                            vertical-alignment: center;
+                            text: TimelineStore.selected-clip-id == ""
+                                ? "Select a clip to add an effect"
+                                : "Click an effect to add it to the selected clip";
+                            style: AppStore.theme.typography.caption;
+                            foreground: AppStore.theme.text.secondary;
+                            overflow: elide;
+                        }
+                    }
+
+                    effects-grid := CutlassGridView {
+                        show-horizontal-scrollbar: false;
+                        show-vertical-scrollbar: false;
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+
+                        columns: max(1, floor((self.width - AppStore.theme.metrics.spacing.md)
+                            / (100px + AppStore.theme.metrics.spacing.md)));
+                        cell-width: 100px;
+                        cell-height: 100px;
+                        spacing: AppStore.theme.metrics.spacing.md;
+                        inset: AppStore.theme.metrics.spacing.md;
+                        item-count: EffectsBackend.effect-catalog.length;
+
+                        for fx[i] in EffectsBackend.effect-catalog: CatalogTile {
+                            x: effects-grid.cell-x(i);
+                            y: effects-grid.cell-y(i);
+                            width: effects-grid.cell-width;
+                            height: effects-grid.cell-height;
+                            label: fx.label;
+                            swatch: #6C4AC8;
+                            enabled: TimelineStore.selected-clip-id != "";
+                            apply => {
+                                EffectsBackend.add-effect(TimelineStore.selected-clip-id, fx.id);
+                            }
+                        }
+                    }
+                }
+
+                // ---- Transitions --------------------------------------------
+                // Click applies at the selected clip's right junction; the
+                // engine rejects when there's no abutting neighbor.
+                if LibraryState.active-tab == "transitions": VerticalLayout {
+                    spacing: AppStore.theme.metrics.spacing.none;
+
+                    Rectangle {
+                        height: 34px;
+                        background: AppStore.theme.panel.header-background;
+                        CutlassText {
+                            x: AppStore.theme.metrics.spacing.md;
+                            width: parent.width - 2 * AppStore.theme.metrics.spacing.md;
+                            height: parent.height;
+                            vertical-alignment: center;
+                            text: TimelineStore.selected-clip-id == ""
+                                ? "Select a clip to add a transition after it"
+                                : "Click to add a transition at the selected clip's end";
+                            style: AppStore.theme.typography.caption;
+                            foreground: AppStore.theme.text.secondary;
+                            overflow: elide;
+                        }
+                    }
+
+                    transitions-grid := CutlassGridView {
+                        show-horizontal-scrollbar: false;
+                        show-vertical-scrollbar: false;
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+
+                        columns: max(1, floor((self.width - AppStore.theme.metrics.spacing.md)
+                            / (100px + AppStore.theme.metrics.spacing.md)));
+                        cell-width: 100px;
+                        cell-height: 100px;
+                        spacing: AppStore.theme.metrics.spacing.md;
+                        inset: AppStore.theme.metrics.spacing.md;
+                        item-count: EffectsBackend.transition-catalog.length;
+
+                        for tr[i] in EffectsBackend.transition-catalog: CatalogTile {
+                            x: transitions-grid.cell-x(i);
+                            y: transitions-grid.cell-y(i);
+                            width: transitions-grid.cell-width;
+                            height: transitions-grid.cell-height;
+                            label: tr.label;
+                            swatch: #C84A8F;
+                            enabled: TimelineStore.selected-clip-id != "";
+                            apply => {
+                                EffectsBackend.add-transition(TimelineStore.selected-clip-id, tr.id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

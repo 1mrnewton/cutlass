@@ -1,0 +1,137 @@
+// Cutlass grid view.
+//
+// A scrollable, fixed-cell grid built on `CutlassScrollView`. Callers
+// set `columns`, `cell-width`, `cell-height`, and mirror their model
+// length via `item-count`; per-tile placement uses the pure helpers
+// `cell-x(i)` / `cell-y(i)` directly off the grid alias.
+//
+// Why not std `GridLayout`
+// ------------------------
+// `GridLayout` propagates child size constraints up to its window — a
+// `for` loop of fixed-height tiles collapses the parent to that height
+// and refuses to resize because min == max. It also panics with
+// `RepeatedItemTree::grid_layout_input_data() not implemented for …
+// InnerComponent__Opacity_N` whenever a repeated child's root has an
+// `opacity` / `clip` / `transform` binding (anything you'd reasonably
+// want for "loading" or "selected" states). We sidestep both by
+// placing children absolutely inside a `CutlassScrollView` and driving
+// the scrollable extent from `item-count` rather than from child
+// constraint propagation.
+//
+// Why no `CutlassGridCell` wrapper
+// --------------------------------
+// We tried one. Slint can't reach the grid via `parent` from inside a
+// child placed through `@children` (the chain resolves into the inner
+// `Flickable`), so the wrapper had to take a `metrics` struct that
+// re-bundled values the caller had already given the grid. Net cost
+// per tile worked out to the same line count as binding `x` / `y` /
+// `width` / `height` directly, with an extra component layer and one
+// more concept. Direct helpers win on both ergonomics and call-site
+// clarity.
+//
+// Why `item-count` is explicit
+// ----------------------------
+// `@children` exposes neither a row count nor the iterated model.
+// Mirroring `model.length` in one extra binding buys us stable layout
+// (the parent never collapses around the grid's content) and lets the
+// scrollable extent be known before the first frame of `for`-loop
+// instantiation. The footgun (item-count drifting from the for-loop
+// length) goes away naturally once `item-count: model.length` and
+// `for x in model:` source from the same model.
+//
+// Usage
+// -----
+//     grid := CutlassGridView {
+//         columns: 3;
+//         cell-width: 100px;
+//         cell-height: 100px;
+//         spacing: 10px;
+//         inset: 12px;
+//         item-count: AppState.media-bin.length;
+//
+//         for source[i] in AppState.media-bin: LibraryTile {
+//             x: grid.cell-x(i);
+//             y: grid.cell-y(i);
+//             width: grid.cell-width;
+//             height: grid.cell-height;
+//             source: source;
+//         }
+//     }
+//
+// Bind via the element alias (`grid := …`) rather than `parent.*` —
+// repeated children placed through `@children` resolve `parent` to the
+// inner Flickable, not the GridView, so `parent.cell-x(i)` would fail
+// to compile. The alias is unambiguous and reads well.
+
+import { CutlassScrollView } from "scroll-view.slint";
+
+export component CutlassGridView inherits Rectangle {
+    // ---- Public layout configuration ---------------------------------------
+
+    in property <int> columns: 3;
+    in property <length> cell-width: 100px;
+    in property <length> cell-height: 100px;
+    in property <length> spacing: 0px;
+    // Named `inset` rather than `padding` because Rectangle reserves
+    // `padding` for layout-engine use and refuses to be overridden.
+    in property <length> inset: 0px;
+
+    // Mirror of the caller's model length (see file header).
+    in property <int> item-count: 0;
+
+    // Forwarded to the inner `CutlassScrollView`. Defaults auto-hide
+    // each bar when content fits along that axis; callers can pin a
+    // bar visible (or hide it permanently) by setting these
+    // explicitly.
+    in property <bool> show-horizontal-scrollbar: content-width > self.width;
+    in property <bool> show-vertical-scrollbar: content-height > self.height;
+
+    // ---- Derived geometry --------------------------------------------------
+
+    // Ceiling division so a partial last row still counts. Exposed so
+    // callers can hang scrollbar overlays, "X of Y" counters, etc., off
+    // the same value the view uses internally.
+    out property <int> row-count:
+        columns > 0 ? floor((max(item-count, 0) + columns - 1) / columns) : 0;
+
+    out property <length> content-width:
+        columns <= 0 ? 0px : columns * cell-width + (columns - 1) * spacing + 2 * inset;
+
+    out property <length> content-height:
+        row-count <= 0 ? 0px : row-count * cell-height + (row-count - 1) * spacing + 2 * inset;
+
+    // ---- Public placement helpers ------------------------------------------
+    //
+    // Pure, so Slint can inline them at every for-loop instantiation
+    // without tracking dependencies beyond the inputs. `max(columns, 1)`
+    // guards against divide-by-zero during the brief window where the
+    // caller is still wiring properties.
+
+    public pure function cell-x(i: int) -> length {
+        inset + mod(i, max(columns, 1)) * (cell-width + spacing)
+    }
+    public pure function cell-y(i: int) -> length {
+        inset + floor(i / max(columns, 1)) * (cell-height + spacing)
+    }
+
+    // ---- Layout ------------------------------------------------------------
+
+    // Fill by default — most call sites want the grid to take the
+    // whole panel and let the scroll view handle overflow.
+    horizontal-stretch: 1;
+    vertical-stretch: 1;
+    background: transparent;
+
+    CutlassScrollView {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        viewport-width: root.content-width;
+        viewport-height: root.content-height;
+        show-horizontal-scrollbar: root.show-horizontal-scrollbar;
+        show-vertical-scrollbar: root.show-vertical-scrollbar;
+
+        @children
+    }
+}

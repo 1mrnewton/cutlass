@@ -1,0 +1,233 @@
+// Timeline toolbar (CapCut layout): edit actions on the left, magnet
+// toggle and zoom control on the right, SMPTE transport readout
+// in between. Every button routes through `TimelineActions`, the same
+// functions the keyboard shortcuts call, so gating can never diverge.
+
+import { CutlassText, HorizontalDivider } from "../../components/index.slint";
+import { AppStore, EditorStore, TimelineStore, TimelineActions } from "../../store/index.slint";
+import { TimelineLib } from "../../lib/timeline-lib.slint";
+import { Slider } from "std-widgets.slint";
+
+// Compact text button. `active` renders the pressed/latched accent
+// (used by the Snap magnet); `enabled` dims and mutes the click.
+component ToolButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> active: false;
+    callback clicked();
+
+    width: text.preferred-width + 2 * AppStore.theme.metrics.spacing.sm;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: active
+        ? AppStore.theme.accent.primary.with-alpha(0.2)
+        : ta.has-hover && enabled ? #ffffff14 : transparent;
+    border-width: active ? 1px : 0px;
+    border-color: AppStore.theme.accent.primary;
+    opacity: enabled ? 1.0 : 0.35;
+
+    text := CutlassText {
+        width: parent.width;
+        height: parent.height;
+        text: label;
+        style: AppStore.theme.typography.label;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        foreground: active ? AppStore.theme.accent.primary : AppStore.theme.text.primary;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component Toolbar inherits Rectangle {
+    height: AppStore.theme.metrics.layout.toolbar-height;
+
+    // Initialized from the current zoom; afterwards the slider owns the
+    // value and pushes changes through TimelineActions.set-zoom (which
+    // anchors the view on the playhead / viewport center).
+    property <float> zoom-slider-value: TimelineActions.zoom-to-slider(TimelineStore.zoom);
+
+    function nudge-zoom(delta: float) {
+        self.zoom-slider-value = clamp(self.zoom-slider-value + delta, 0, 100);
+        TimelineActions.set-zoom(TimelineActions.slider-to-zoom(self.zoom-slider-value));
+    }
+
+    HorizontalLayout {
+        padding-left: AppStore.theme.metrics.spacing.md;
+        padding-right: AppStore.theme.metrics.spacing.md;
+        padding-top: AppStore.theme.metrics.spacing.sm;
+        padding-bottom: AppStore.theme.metrics.spacing.sm;
+        spacing: AppStore.theme.metrics.spacing.xs;
+
+        ToolButton {
+            label: "Undo";
+            enabled: EditorStore.can-undo;
+            clicked => {
+                TimelineActions.undo();
+            }
+        }
+
+        ToolButton {
+            label: "Redo";
+            enabled: EditorStore.can-redo;
+            clicked => {
+                TimelineActions.redo();
+            }
+        }
+
+        Rectangle {
+            width: AppStore.theme.metrics.spacing.sm;
+        }
+
+        ToolButton {
+            label: "Split";
+            enabled: TimelineActions.can-split();
+            clicked => {
+                TimelineActions.split-at-playhead();
+            }
+        }
+
+        ToolButton {
+            label: "Marker";
+            clicked => {
+                TimelineActions.add-marker-at-playhead();
+            }
+        }
+
+        ToolButton {
+            label: "Delete";
+            enabled: TimelineActions.has-selection();
+            clicked => {
+                TimelineActions.delete-selected();
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+
+            // Transport readout — the ruler's compact labels don't show
+            // full SMPTE, this does: playhead / sequence duration.
+            CutlassText {
+                width: parent.width;
+                height: parent.height;
+                mono: true;
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.secondary;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                text: TimelineLib.format-timecode(
+                        TimelineStore.playhead-tick,
+                        EditorStore.project.sequence.fps.num,
+                        EditorStore.project.sequence.fps.den,
+                        EditorStore.project.sequence.drop-frame)
+                    + " / "
+                    + TimelineLib.format-timecode(
+                        TimelineLib.sequence-duration(EditorStore.project.sequence).value,
+                        EditorStore.project.sequence.fps.num,
+                        EditorStore.project.sequence.fps.den,
+                        EditorStore.project.sequence.drop-frame);
+            }
+        }
+
+        // Loop playback (playback roadmap Phase 4): reaching the end (or
+        // the out-mark) wraps to the start instead of pausing. Cmd/Ctrl+L.
+        ToolButton {
+            label: "Loop";
+            active: TimelineStore.loop-enabled;
+            clicked => {
+                TimelineActions.toggle-loop();
+            }
+        }
+
+        // CapCut's main-track magnet: the bottom video lane stays gapless
+        // (drops/moves insert, deletes ripple). Separate from Snap, as in
+        // CapCut; routed through TimelineActions so the worker can mirror
+        // the flag and pack the lane on enable.
+        ToolButton {
+            label: "Magnet";
+            active: TimelineStore.main-magnet-enabled;
+            clicked => {
+                TimelineActions.toggle-main-magnet();
+            }
+        }
+
+        // CapCut's auto-snapping magnet toggle: latched while active.
+        ToolButton {
+            label: "Snap";
+            active: TimelineStore.snap-enabled;
+            clicked => {
+                TimelineStore.snap-enabled = !TimelineStore.snap-enabled;
+            }
+        }
+
+        // CapCut's linkage toggle: linked video+audio pairs select, move,
+        // and trim together while on; drops of media with audio create
+        // linked pairs. Routed through TimelineActions so the worker
+        // mirrors the flag.
+        ToolButton {
+            label: "Link";
+            active: TimelineStore.link-enabled;
+            clicked => {
+                TimelineActions.toggle-linkage();
+            }
+        }
+
+        // Dissolve the selection's link groups (CapCut's right-click
+        // unlink): the A/V pair separates for good, not just while the
+        // Link toggle is off. Undoable; enabled only when the selection
+        // actually touches a link group.
+        ToolButton {
+            label: "Unlink";
+            enabled: TimelineActions.selection-has-link();
+            clicked => {
+                TimelineActions.unlink-selected();
+            }
+        }
+
+        Rectangle {
+            width: AppStore.theme.metrics.spacing.sm;
+        }
+
+        // Fit the whole sequence into the viewport (CapCut's zoom-to-fit).
+        ToolButton {
+            label: "Fit";
+            clicked => {
+                TimelineActions.zoom-to-fit();
+            }
+        }
+
+        // Zoom: − / slider / + (log scale; see TimelineActions).
+        ToolButton {
+            label: "−";
+            clicked => {
+                root.nudge-zoom(-8);
+            }
+        }
+
+        Slider {
+            width: 110px;
+            minimum: 0;
+            maximum: 100;
+            value <=> root.zoom-slider-value;
+
+            changed(value) => {
+                TimelineActions.set-zoom(TimelineActions.slider-to-zoom(value));
+            }
+        }
+
+        ToolButton {
+            label: "+";
+            clicked => {
+                root.nudge-zoom(8);
+            }
+        }
+    }
+
+    HorizontalDivider {
+        y: parent.height - self.height;
+    }
+}

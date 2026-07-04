@@ -1,0 +1,655 @@
+// Start screen — the full-window home shown on a cold start, before the
+// editor (app.slint gates it on AppState.launch-visible and dismisses it
+// from the session-epoch watcher once a real session loads).
+//
+// Design intent — "editorial workstation": a calm, structural project
+// manager, not a consumer-app splash. Deliberately steers clear of the
+// generic AI-launch look:
+//   · no blue→purple gradient hero wash — the brand teal appears only on the
+//     small mark + functional state, never as a full-surface gradient;
+//   · structure comes from hairline borders and a compact 3-level elevation
+//     (page #141414 → tile #262626 → hover #303030), not drop shadows or
+//     glass/blur;
+//   · the create row is asymmetric (one dominant action), not an even card
+//     grid; copy is plain and task-first.
+// All colour/spacing/type comes from AppStore.theme tokens.
+
+import { CutlassText } from "components/index.slint";
+import { AppStore, EditorStore } from "store/index.slint";
+import { AppState } from "state.slint";
+import { WindowBackend } from "lib/window-backend.slint";
+
+// Frameless-window caption button (mirrors title-bar.slint's CaptionButton):
+// the launch screen has no editor TitleBar, so it carries its own window
+// controls and drag strip.
+component WinButton inherits Rectangle {
+    in property <string> glyph;
+    in property <bool> danger: false;
+    callback clicked();
+
+    width: 44px;
+    background: !ta.has-hover ? transparent
+        : danger ? #E81123
+        : #ffffff14;
+
+    CutlassText {
+        width: parent.width;
+        height: parent.height;
+        text: glyph;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        style: AppStore.theme.typography.label;
+        foreground: ta.has-hover ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Left-rail navigation row. `active` is the current screen (Home); disabled
+// rows (enabled:false) are roadmap entries flagged with a "Soon" tag — quiet
+// and clearly not-yet-live rather than fake working links.
+component RailNav inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    in property <string> tag: "";
+    callback clicked();
+
+    height: 34px;
+    border-radius: AppStore.theme.metrics.radius.md;
+    background: root.active ? #ffffff12
+        : (root.enabled && ta.has-hover) ? #ffffff0a
+        : transparent;
+
+    VerticalLayout {
+        alignment: center;
+
+        HorizontalLayout {
+            padding-left: AppStore.theme.metrics.spacing.md;
+            padding-right: AppStore.theme.metrics.spacing.md;
+            spacing: AppStore.theme.metrics.spacing.sm;
+
+            CutlassText {
+                text: root.label;
+                vertical-alignment: center;
+                style: AppStore.theme.typography.label;
+                foreground: root.active ? AppStore.theme.accent.primary
+                    : root.enabled ? AppStore.theme.text.primary
+                    : AppStore.theme.text.muted;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            if root.tag != "": Rectangle {
+                width: tag-text.preferred-width + 2 * AppStore.theme.metrics.spacing.sm;
+                background: #ffffff0f;
+                border-radius: AppStore.theme.metrics.radius.sm;
+
+                tag-text := CutlassText {
+                    text: root.tag;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    style: AppStore.theme.typography.caption;
+                    foreground: AppStore.theme.text.muted;
+                }
+            }
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A primary create/open action. `primary` marks the dominant action (filled
+// accent mark + brighter keyline); the secondary draws a hairline folder
+// glyph. The mark/title/subtitle sit bottom-anchored for an editorial feel.
+component ActionCard inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> primary: false;
+    callback clicked();
+
+    border-radius: AppStore.theme.metrics.radius.lg;
+    border-width: AppStore.theme.metrics.stroke.hairline;
+    background: ta.has-hover ? AppStore.theme.panel.header-background : AppStore.theme.panel.background;
+    border-color: root.primary
+        ? (ta.has-hover ? AppStore.theme.accent.primary : #ffffff24)
+        : (ta.has-hover ? #ffffff33 : #ffffff14);
+
+    VerticalLayout {
+        padding: AppStore.theme.metrics.spacing.lg;
+        spacing: AppStore.theme.metrics.spacing.xs;
+
+        // Mark.
+        Rectangle {
+            width: 40px;
+            height: 40px;
+            border-radius: AppStore.theme.metrics.radius.md;
+            background: root.primary ? AppStore.theme.accent.primary : #ffffff12;
+
+            if root.primary: CutlassText {
+                width: parent.width;
+                height: parent.height;
+                text: "+";
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                style: { size: 24px, weight: 600, italic: false };
+                foreground: AppStore.theme.accent.on-accent;
+            }
+
+            // Folder silhouette (placeholder for lucide `folder-open`).
+            if !root.primary: Rectangle {
+                width: 20px;
+                height: 16px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2 + 1px;
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: 9px;
+                    height: 5px;
+                    border-radius: 1px;
+                    background: AppStore.theme.text.secondary;
+                }
+
+                Rectangle {
+                    x: 0;
+                    y: 4px;
+                    width: parent.width;
+                    height: 12px;
+                    border-radius: 2px;
+                    background: AppStore.theme.text.secondary;
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        CutlassText {
+            text: root.title;
+            style: AppStore.theme.typography.heading-md;
+        }
+
+        CutlassText {
+            text: root.subtitle;
+            style: AppStore.theme.typography.caption;
+            foreground: AppStore.theme.text.secondary;
+            wrap: word-wrap;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A row in the project gallery. The thumb is an honest placeholder (a neutral
+// frame chip with a play mark) — not a fabricated preview frame, as a draft
+// summary only carries name + modified time. A delete affordance stacks above
+// the row's click target so removing a draft never also opens it.
+component ProjectRow inherits Rectangle {
+    in property <string> name;
+    in property <string> modified;
+    callback open();
+    callback remove();
+
+    height: 52px;
+    // Fill the list width so the whole row is a hover/click target (Slint
+    // would otherwise size the row to its text content).
+    max-width: 100000px;
+    border-radius: AppStore.theme.metrics.radius.md;
+    background: ta.has-hover || del.has-hover ? #ffffff0a : transparent;
+
+    HorizontalLayout {
+        padding-left: AppStore.theme.metrics.spacing.sm;
+        padding-right: AppStore.theme.metrics.spacing.md;
+        spacing: AppStore.theme.metrics.spacing.md;
+
+        VerticalLayout {
+            alignment: center;
+
+            Rectangle {
+                width: 56px;
+                height: 34px;
+                border-radius: AppStore.theme.metrics.radius.sm;
+                background: #1c1c1c;
+                border-width: AppStore.theme.metrics.stroke.hairline;
+                border-color: #ffffff14;
+
+                CutlassText {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "▶";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    style: AppStore.theme.typography.caption;
+                    foreground: AppStore.theme.text.muted;
+                }
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            max-width: 100000px;
+            alignment: center;
+            spacing: 2px;
+
+            CutlassText {
+                text: root.name;
+                style: AppStore.theme.typography.body;
+                overflow: elide;
+            }
+
+            CutlassText {
+                text: root.modified;
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.muted;
+                overflow: elide;
+            }
+        }
+
+        // Reserve the slot the delete button overlays so the open hint never
+        // sits under it.
+        Rectangle {
+            width: 64px;
+
+            CutlassText {
+                width: parent.width;
+                height: parent.height;
+                text: "Open";
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                style: AppStore.theme.typography.label;
+                foreground: AppStore.theme.accent.primary;
+                opacity: ta.has-hover && !del.has-hover ? 1.0 : 0.0;
+            }
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.open();
+        }
+    }
+
+    // Delete affordance: declared after `ta` so it stacks above and keeps its
+    // own clicks (deleting a draft must never also open it). Shown only while
+    // the row or the button itself is hovered.
+    del := TouchArea {
+        width: 64px;
+        height: 28px;
+        x: parent.width - self.width - AppStore.theme.metrics.spacing.md;
+        y: (parent.height - self.height) / 2;
+        visible: ta.has-hover || self.has-hover;
+        mouse-cursor: pointer;
+        clicked => {
+            root.remove();
+        }
+
+        Rectangle {
+            border-radius: AppStore.theme.metrics.radius.sm;
+            background: del.has-hover ? #E8112333 : transparent;
+
+            CutlassText {
+                width: parent.width;
+                height: parent.height;
+                text: "Delete";
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                style: AppStore.theme.typography.label;
+                foreground: del.has-hover ? #ff6b6b : AppStore.theme.text.muted;
+            }
+        }
+    }
+}
+
+export component LaunchScreen inherits Rectangle {
+    background: AppStore.theme.surface.app-background;
+
+    VerticalLayout {
+        spacing: AppStore.theme.metrics.spacing.none;
+
+        // Window drag strip + caption controls (frameless window). Buttons
+        // are declared after the drag TouchArea so they stack above it and
+        // keep their clicks; the empty stretch has no TouchArea, so presses
+        // there fall through to the drag region.
+        Rectangle {
+            height: AppStore.theme.metrics.layout.toolbar-height;
+            background: AppStore.theme.surface.app-background;
+
+            drag := TouchArea {
+                moved => {
+                    if (abs(self.mouse-x - self.pressed-x) > 2px || abs(self.mouse-y - self.pressed-y) > 2px) {
+                        WindowBackend.begin-move();
+                    }
+                }
+                double-clicked => {
+                    WindowBackend.toggle-maximize();
+                }
+            }
+
+            HorizontalLayout {
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                // Custom controls only off macOS — there the native traffic
+                // lights (kept on the hidden titlebar) sit over the empty left
+                // of this drag strip.
+                if !AppState.is-macos: WinButton {
+                    glyph: "─";
+                    clicked => {
+                        WindowBackend.minimize();
+                    }
+                }
+
+                if !AppState.is-macos: WinButton {
+                    glyph: WindowBackend.maximized ? "❐" : "□";
+                    clicked => {
+                        WindowBackend.toggle-maximize();
+                    }
+                }
+
+                if !AppState.is-macos: WinButton {
+                    glyph: "✕";
+                    danger: true;
+                    clicked => {
+                        WindowBackend.close();
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: AppStore.theme.metrics.spacing.none;
+
+            // ---- Left rail: brand · nav · footer -------------------------
+            Rectangle {
+                width: 252px;
+                background: AppStore.theme.surface.app-background;
+
+                // Hairline seam between rail and content.
+                Rectangle {
+                    x: parent.width - self.width;
+                    width: AppStore.theme.metrics.stroke.hairline;
+                    background: #ffffff12;
+                }
+
+                VerticalLayout {
+                    padding: AppStore.theme.metrics.spacing.xl;
+                    padding-top: AppStore.theme.metrics.spacing.sm;
+                    spacing: AppStore.theme.metrics.spacing.lg;
+
+                    // Brand lockup.
+                    HorizontalLayout {
+                        spacing: AppStore.theme.metrics.spacing.sm;
+
+                        VerticalLayout {
+                            alignment: center;
+
+                            // Brand mark — the Cutlass wordmark logo (the
+                            // sword fills the square canvas, so it sits in the
+                            // mark box), replacing the earlier "C" placeholder.
+                            Image {
+                                width: 28px;
+                                height: 28px;
+                                source: @image-url("../../../assets/icon/cutlass-in-app.png");
+                                image-fit: contain;
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 0px;
+
+                            CutlassText {
+                                text: "Cutlass";
+                                style: AppStore.theme.typography.heading-md;
+                            }
+
+                            CutlassText {
+                                text: "Prompt-to-edit video";
+                                style: AppStore.theme.typography.caption;
+                                foreground: AppStore.theme.text.muted;
+                            }
+                        }
+                    }
+
+                    // Nav.
+                    VerticalLayout {
+                        spacing: 2px;
+
+                        RailNav {
+                            label: "Home";
+                            active: true;
+                        }
+
+                        RailNav {
+                            label: "Templates";
+                            enabled: false;
+                            tag: "Soon";
+                        }
+
+                        RailNav {
+                            label: "Learn";
+                            enabled: false;
+                            tag: "Soon";
+                        }
+                    }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                    }
+
+                    // Footer: honest local-workspace status.
+                    VerticalLayout {
+                        spacing: AppStore.theme.metrics.spacing.sm;
+
+                        Rectangle {
+                            height: AppStore.theme.metrics.stroke.hairline;
+                            background: #ffffff12;
+                        }
+
+                        HorizontalLayout {
+                            spacing: AppStore.theme.metrics.spacing.sm;
+
+                            VerticalLayout {
+                                alignment: center;
+
+                                Rectangle {
+                                    width: 7px;
+                                    height: 7px;
+                                    border-radius: 3.5px;
+                                    background: AppStore.theme.accent.primary;
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 1px;
+
+                                CutlassText {
+                                    text: "Local workspace";
+                                    style: AppStore.theme.typography.label;
+                                }
+
+                                CutlassText {
+                                    text: "Runs on-device · open source";
+                                    style: AppStore.theme.typography.caption;
+                                    foreground: AppStore.theme.text.muted;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- Main content: greeting · create row · recents ----------
+            Rectangle {
+                horizontal-stretch: 1;
+                background: AppStore.theme.surface.app-background;
+
+                VerticalLayout {
+                    // Cap the content column so rows stay readable on a wide,
+                    // maximized window; a layout child of a plain Rectangle
+                    // pins to the left, so this keeps the home left-set rather
+                    // than stranded mid-screen. (max-width is a static
+                    // constraint — no parent.width binding loop.)
+                    max-width: 1040px;
+                    padding-left: AppStore.theme.metrics.spacing.xxl;
+                    padding-right: AppStore.theme.metrics.spacing.xxl;
+                    padding-top: AppStore.theme.metrics.spacing.lg;
+                    padding-bottom: AppStore.theme.metrics.spacing.xl;
+                    spacing: AppStore.theme.metrics.spacing.xl;
+
+                    // Greeting.
+                    VerticalLayout {
+                        spacing: AppStore.theme.metrics.spacing.xs;
+
+                        CutlassText {
+                            text: "Start a project";
+                            style: { size: 22px, weight: 600, italic: false };
+                        }
+
+                        CutlassText {
+                            text: "Create a new edit, or pick up where you left off.";
+                            style: AppStore.theme.typography.body;
+                            foreground: AppStore.theme.text.secondary;
+                        }
+                    }
+
+                    // Create row — asymmetric: one dominant action.
+                    HorizontalLayout {
+                        height: 156px;
+                        spacing: AppStore.theme.metrics.spacing.md;
+
+                        ActionCard {
+                            // Dominant action. The explicit max-width lifts the
+                            // implicit text-driven cap so the card actually
+                            // stretches to fill the row (Slint sizes a
+                            // text-only container to its content otherwise).
+                            horizontal-stretch: 1;
+                            max-width: 700px;
+                            primary: true;
+                            title: "New project";
+                            subtitle: "Start with a blank timeline.";
+                            clicked => {
+                                EditorStore.on-new-requested();
+                            }
+                        }
+
+                        ActionCard {
+                            width: 320px;
+                            title: "Open file…";
+                            subtitle: "Import a .cutlass into your projects.";
+                            clicked => {
+                                EditorStore.on-open-requested();
+                            }
+                        }
+                    }
+
+                    // Project gallery.
+                    VerticalLayout {
+                        vertical-stretch: 1;
+                        spacing: AppStore.theme.metrics.spacing.sm;
+
+                        HorizontalLayout {
+                            spacing: AppStore.theme.metrics.spacing.sm;
+
+                            CutlassText {
+                                text: "Your projects";
+                                vertical-alignment: center;
+                                style: AppStore.theme.typography.heading-sm;
+                            }
+
+                            if EditorStore.projects.length > 0: Rectangle {
+                                width: count-text.preferred-width + 2 * AppStore.theme.metrics.spacing.sm;
+                                background: #ffffff0f;
+                                border-radius: AppStore.theme.metrics.radius.sm;
+
+                                count-text := CutlassText {
+                                    text: "\{EditorStore.projects.length}";
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    style: AppStore.theme.typography.caption;
+                                    foreground: AppStore.theme.text.secondary;
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                        }
+
+                        // Empty state — covered explicitly so a fresh install
+                        // reads as intentional, not broken.
+                        if EditorStore.projects.length == 0: Rectangle {
+                            vertical-stretch: 1;
+                            border-radius: AppStore.theme.metrics.radius.lg;
+                            border-width: AppStore.theme.metrics.stroke.hairline;
+                            border-color: #ffffff12;
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: AppStore.theme.metrics.spacing.xs;
+
+                                CutlassText {
+                                    text: "No projects yet";
+                                    horizontal-alignment: center;
+                                    style: AppStore.theme.typography.body;
+                                    foreground: AppStore.theme.text.secondary;
+                                }
+
+                                CutlassText {
+                                    text: "New projects you create are saved automatically and appear here.";
+                                    horizontal-alignment: center;
+                                    style: AppStore.theme.typography.caption;
+                                    foreground: AppStore.theme.text.muted;
+                                }
+                            }
+                        }
+
+                        if EditorStore.projects.length > 0: VerticalLayout {
+                            vertical-stretch: 1;
+                            spacing: 2px;
+
+                            for entry in EditorStore.projects: ProjectRow {
+                                name: entry.name;
+                                modified: entry.modified;
+                                open => {
+                                    EditorStore.on-open-project-requested(entry.path);
+                                }
+                                remove => {
+                                    EditorStore.on-delete-project-requested(entry.path);
+                                }
+                            }
+
+                            Rectangle {
+                                vertical-stretch: 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

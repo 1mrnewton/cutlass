@@ -37,21 +37,41 @@ public enum CutlassMobile {
         return renderFileFrame(path: url.path, maxWidth: maxWidth, maxHeight: maxHeight)
     }
 
-    /// Copy a native RGBA buffer into a `CGImage`, then release the buffer.
-    /// Safe to call with a failed (null) image — returns `nil`.
+    /// Wrap a native RGBA buffer in a `CGImage` without copying: the data
+    /// provider takes ownership and releases the buffer through
+    /// `cutlass_image_free` once CoreGraphics is done with it (any thread —
+    /// the native free is thread-safe). Safe to call with a failed (null)
+    /// image — returns `nil`.
     static func makeImage(_ image: CutlassImage) -> CGImage? {
-        guard let data = image.data, image.len > 0 else {
+        let w = Int(image.width)
+        let h = Int(image.height)
+        guard let data = image.data, image.len > 0, w > 0, h > 0, image.len == w * h * 4 else {
             cutlass_image_free(image)
             return nil
         }
-        let pixels = Data(bytes: data, count: image.len)
-        cutlass_image_free(image)
 
-        let w = Int(image.width)
-        let h = Int(image.height)
-        guard w > 0, h > 0, pixels.count == w * h * 4,
-              let provider = CGDataProvider(data: pixels as CFData)
-        else { return nil }
+        // The release callback is a C function pointer and can't capture, so
+        // the original struct rides along in a heap box as the provider's
+        // `dataInfo` and is handed back to `cutlass_image_free` verbatim.
+        let owner = UnsafeMutablePointer<CutlassImage>.allocate(capacity: 1)
+        owner.initialize(to: image)
+        let release: CGDataProviderReleaseDataCallback = { info, _, _ in
+            guard let owner = info?.assumingMemoryBound(to: CutlassImage.self) else { return }
+            cutlass_image_free(owner.pointee)
+            owner.deinitialize(count: 1)
+            owner.deallocate()
+        }
+        guard let provider = CGDataProvider(
+            dataInfo: owner,
+            data: data,
+            size: image.len,
+            releaseData: release
+        ) else {
+            owner.deinitialize(count: 1)
+            owner.deallocate()
+            cutlass_image_free(image)
+            return nil
+        }
 
         let bitmapInfo = CGBitmapInfo(
             rawValue: CGImageAlphaInfo.premultipliedLast.rawValue

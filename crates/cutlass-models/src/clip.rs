@@ -228,6 +228,30 @@ impl Generator {
         }
     }
 
+    /// Resolve catalog presets into concrete fields — currently the text
+    /// style's `effect_preset`: validate the id and bake the catalog's
+    /// stroke / shadow / background onto the style (preset-owned while a
+    /// preset is selected; shells clear the id before manual treatment
+    /// edits). No-op for other generators and preset-less styles. Called by
+    /// [`crate::Project::add_generated`] / [`crate::Project::set_generator`]
+    /// so every platform gets identical baked fields from one source of
+    /// truth.
+    pub fn resolve_presets(&mut self) -> Result<(), ModelError> {
+        let Generator::Text { style, .. } = self else {
+            return Ok(());
+        };
+        let Some(preset) = &style.effect_preset else {
+            return Ok(());
+        };
+        let spec = crate::look::text_effect_spec(preset).ok_or_else(|| {
+            ModelError::InvalidParam(format!("unknown text effect '{preset}'"))
+        })?;
+        style.stroke = spec.stroke;
+        style.shadow = spec.shadow;
+        style.background = spec.background;
+        Ok(())
+    }
+
     /// `Ok` iff the generator's content is structurally sound and every
     /// stored value (constants and keyframes) is in range. Enforced by
     /// [`crate::Project::add_generated`] / [`crate::Project::set_generator`]
@@ -672,6 +696,14 @@ pub struct TextStyle {
     /// Optional drop shadow.
     #[serde(default)]
     pub shadow: Option<TextShadow>,
+    /// Text effect preset id (see [`crate::look::text_effect_catalog`]), the
+    /// UI's selected chip. Setting a style with a preset **bakes** the
+    /// catalog's stroke / shadow / background onto these fields (see
+    /// [`Generator::resolve_presets`]), so files stay self-describing;
+    /// `None` leaves the manual treatments alone. Absent from saves while
+    /// unset, so old files load unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_preset: Option<String>,
 }
 
 /// Default font size in reference pixels — matches the legacy `height / 12`
@@ -714,6 +746,7 @@ impl Default for TextStyle {
             stroke: None,
             background: None,
             shadow: None,
+            effect_preset: None,
         }
     }
 }
@@ -1486,6 +1519,47 @@ pub struct Clip {
     /// absent from saves) until detected, so old files load unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub beats: Vec<i64>,
+    /// Shaped alpha mask (CapCut mask, Phase I): persisted + validated now,
+    /// rendered later (documented render gap, like stickers). Meaningful on
+    /// media-backed visual clips; `None` (and absent from saves) otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<crate::look::Mask>,
+    /// Chroma keying (CapCut chroma key, Phase I): render-neutral this
+    /// milestone. Media-backed visual clips only; absent while `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chroma_key: Option<crate::look::ChromaKey>,
+    /// Stabilization strength (CapCut stabilize, Phase I): render-neutral
+    /// this milestone. Media-backed *video* clips only (stills have no
+    /// motion); absent while `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stabilize: Option<crate::look::StabilizeLevel>,
+    /// Color-grade filter preset (CapCut filters, Phase I): render-neutral
+    /// this milestone. Visual clips — including `Generator::Filter` lane
+    /// bars, whose picked preset lives here; absent while `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<crate::look::Filter>,
+    /// Manual color grade (CapCut adjust, Phase I): render-neutral this
+    /// milestone. Visual clips — including `Generator::Adjustment` lane
+    /// bars; neutral (and absent from saves) when never touched.
+    #[serde(default, skip_serializing_if = "crate::look::ColorAdjustments::is_neutral")]
+    pub adjust: crate::look::ColorAdjustments,
+    /// Entrance animation preset (CapCut animation In tab, Phase I):
+    /// render-neutral this milestone. Visual clips; mutually exclusive with
+    /// `animation_combo` (enforced by [`crate::Project::set_clip_animation`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_in: Option<crate::look::AnimationRef>,
+    /// Exit animation preset (CapCut animation Out tab, Phase I).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_out: Option<crate::look::AnimationRef>,
+    /// Looping presence animation (CapCut animation Combo tab, Phase I):
+    /// replaces both entrance and exit while set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_combo: Option<crate::look::AnimationRef>,
+    /// What this audio-lane clip *is* (music / sound FX / voiceover /
+    /// extracted, Phase I): badges and future mixing defaults. Audio-track
+    /// clips only; absent while `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_role: Option<crate::look::AudioRole>,
     /// CapCut-style replaceable placeholder marker (templates). `None` for an
     /// ordinary clip; `Some` marks this clip as a user-fillable slot. Absent
     /// from saves while `None`, so non-template projects stay byte-identical.
@@ -1628,6 +1702,15 @@ impl Clip {
             flip_v: false,
             effects: Vec::new(),
             beats: Vec::new(),
+            mask: None,
+            chroma_key: None,
+            stabilize: None,
+            filter: None,
+            adjust: crate::look::ColorAdjustments::default(),
+            animation_in: None,
+            animation_out: None,
+            animation_combo: None,
+            audio_role: None,
             replaceable: None,
             text_editable: false,
         }
@@ -1654,6 +1737,15 @@ impl Clip {
             flip_v: false,
             effects: Vec::new(),
             beats: Vec::new(),
+            mask: None,
+            chroma_key: None,
+            stabilize: None,
+            filter: None,
+            adjust: crate::look::ColorAdjustments::default(),
+            animation_in: None,
+            animation_out: None,
+            animation_combo: None,
+            audio_role: None,
             replaceable: None,
             text_editable: false,
         }
@@ -1967,10 +2059,71 @@ pub fn validate_speed_curve(curve: &Param<f32>) -> Result<(), ModelError> {
     })
 }
 
+/// One speed-ramp preset catalog entry (id + display label; the curve comes
+/// from [`speed_preset`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeedPresetSpec {
+    pub id: &'static str,
+    pub label: &'static str,
+}
+
+const SPEED_PRESETS: &[SpeedPresetSpec] = &[
+    SpeedPresetSpec {
+        id: "ramp_up",
+        label: "Ramp up",
+    },
+    SpeedPresetSpec {
+        id: "ramp_down",
+        label: "Ramp down",
+    },
+    SpeedPresetSpec {
+        id: "montage",
+        label: "Montage",
+    },
+    SpeedPresetSpec {
+        id: "hero",
+        label: "Hero",
+    },
+    SpeedPresetSpec {
+        id: "bullet",
+        label: "Bullet",
+    },
+    SpeedPresetSpec {
+        id: "jump_cut",
+        label: "Jump cut",
+    },
+    SpeedPresetSpec {
+        id: "flash_in",
+        label: "Flash in",
+    },
+    SpeedPresetSpec {
+        id: "flash_out",
+        label: "Flash out",
+    },
+];
+
+/// Every speed-ramp preset (UI browsing order). Each id resolves through
+/// [`speed_preset`]; the drift is locked by a test.
+pub fn speed_preset_catalog() -> &'static [SpeedPresetSpec] {
+    SPEED_PRESETS
+}
+
+/// The catalog id whose curve equals `curve`, or `None` for a flat ramp or a
+/// hand-edited curve. How the shells highlight the active preset tile: curves
+/// are normalized over `0..=`[`SPEED_CURVE_SCALE`], so a preset's shape (and
+/// this match) survives trims and base-speed changes.
+pub fn speed_preset_id(curve: &Param<f32>) -> Option<&'static str> {
+    SPEED_PRESETS
+        .iter()
+        .find(|spec| speed_preset(spec.id).as_ref() == Some(curve))
+        .map(|spec| spec.id)
+}
+
 /// Built-in speed-ramp presets (M2 speed curves, "presets as data"). Each is
 /// a normalized [`Param`] over `0..=`[`SPEED_CURVE_SCALE`] of multipliers on
-/// the clip's base speed. Shared by the inspector buttons and the agent's
-/// `set_speed_curve` tool. Returns `None` for an unknown name.
+/// the clip's base speed. Shared by the inspector buttons, the mobile speed
+/// panel, and the agent's `set_speed_curve` tool. Returns `None` for an
+/// unknown name; the ids are cataloged in [`speed_preset_catalog`].
 pub fn speed_preset(name: &str) -> Option<Param<f32>> {
     let s = SPEED_CURVE_SCALE;
     let kf = |frac: f64, value: f32, easing: Easing| Keyframe {
@@ -2000,6 +2153,26 @@ pub fn speed_preset(name: &str) -> Option<Param<f32>> {
             kf(0.0, 3.0, Easing::EaseInOut),
             kf(0.4, 0.25, Easing::EaseInOut),
             kf(0.6, 0.25, Easing::EaseInOut),
+            kf(1.0, 3.0, Easing::Linear),
+        ],
+        // Alternating normal / triple-speed bursts — jump-cut energy.
+        "jump_cut" => vec![
+            kf(0.0, 1.0, Easing::Linear),
+            kf(0.25, 3.0, Easing::Linear),
+            kf(0.5, 1.0, Easing::Linear),
+            kf(0.75, 3.0, Easing::Linear),
+            kf(1.0, 1.0, Easing::Linear),
+        ],
+        // Blast in fast, settle to normal.
+        "flash_in" => vec![
+            kf(0.0, 3.0, Easing::EaseOut),
+            kf(0.3, 1.0, Easing::Linear),
+            kf(1.0, 1.0, Easing::Linear),
+        ],
+        // Hold normal, accelerate out.
+        "flash_out" => vec![
+            kf(0.0, 1.0, Easing::Linear),
+            kf(0.7, 1.0, Easing::EaseIn),
             kf(1.0, 3.0, Easing::Linear),
         ],
         _ => return None,
@@ -3286,6 +3459,7 @@ mod tests {
                 blur: 0.25,
                 distance: 12.0,
             }),
+            effect_preset: None,
         };
         let clip = Clip::generated(
             Generator::Text {

@@ -209,6 +209,13 @@ impl Engine {
         self.generator_override = value;
     }
 
+    /// True while a live gesture override (transform or generator) is set:
+    /// frames rendered now show session-only state that no project revision
+    /// describes, so revision-keyed frame caches must skip them.
+    pub fn has_live_overrides(&self) -> bool {
+        self.transform_override.is_some() || self.generator_override.is_some()
+    }
+
     /// Tight size (canvas px, at transform scale 1.0) of the content
     /// `generator` draws on the current canvas — what a preview selection box
     /// should hug, since text/path rasters are mostly transparent padding.

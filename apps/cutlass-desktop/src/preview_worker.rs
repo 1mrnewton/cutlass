@@ -6,7 +6,7 @@
 //! export, and live gesture/generator overrides. Still pending: the AI agent
 //! bridge (separate port).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,6 +23,7 @@ use cutlass_models::{
     RationalTime, TimeRange, Track, TrackId, TrackKind, resample,
 };
 use cutlass_render::{ExportSettings, RenderError, Renderer};
+use slint::{Rgba8Pixel, SharedPixelBuffer};
 use tracing::{debug, error, info, warn};
 
 use crate::strips::StripHandle;
@@ -1041,6 +1042,11 @@ fn worker_loop(
     // Fit bound + quality ladder for every preview render (the PreviewFeed
     // model). `Cell`s because the `mutate` closure repaints too.
     let fit = FrameFit::default();
+    // Composited frames already delivered this session, keyed by
+    // (tick, revision, fit bound) — re-visited scrub positions and hover
+    // jitter become buffer clones instead of decode + composite + readback.
+    // Interior mutability for the same reason as `fit`.
+    let cache = FrameCache::default();
     // Debounced auto-save: an edit arms a deadline; once the worker has been
     // idle of further work for `PERSIST_DEBOUNCE` the dirty draft is written
     // to its `project.cutlass`. Scrub/seek `Frame`s deliberately don't push
@@ -1146,7 +1152,7 @@ fn worker_loop(
             } => {
                 if let Some(generator) = shape_size_from_engine(engine, &clip, width, height) {
                     apply_generator_override(engine, &clip, generator);
-                    render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                    render_frame(engine, tl_rate, &preview_weak, tick, &fit, &cache);
                 }
             }
             WorkerMsg::SetClipSpeed {
@@ -1210,11 +1216,11 @@ fn worker_loop(
             } => set_canvas_and_publish(engine, aspect_index, background, &ui),
             WorkerMsg::ClearTransformOverride { tick } => {
                 engine.set_transform_override(None);
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit, &cache);
             }
             WorkerMsg::ClearGeneratorOverride { tick } => {
                 engine.set_generator_override(None);
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit, &cache);
             }
             // Only reached if a generator-override burst interleaves with
             // another coalesced gesture's drain (practically impossible — you
@@ -1226,7 +1232,7 @@ fn worker_loop(
                 tick,
             } => {
                 apply_generator_override(engine, &clip, generator);
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit, &cache);
             }
             WorkerMsg::SetTransform {
                 clip,
@@ -1242,11 +1248,11 @@ fn worker_loop(
                 // flattened (M2 compose semantics).
                 let at = RationalTime::new(tick, tl_rate);
                 set_transform_and_publish(engine, &clip, transform, at, &ui);
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit, &cache);
             }
             WorkerMsg::FitClip { clip, fill, tick } => {
                 fit_clip_and_publish(engine, &clip, fill, tick, tl_rate, &ui);
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit, &cache);
             }
             WorkerMsg::SetParamKeyframe {
                 clip,
@@ -1381,7 +1387,7 @@ fn worker_loop(
                     }
                 }
                 last_tick = tick;
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit, &cache);
             }
             // Drag-gesture overrides arrive at pointer-move rate; render only
             // the newest one (same coalescing as scrub frames) so a fast drag
@@ -1430,7 +1436,7 @@ fn worker_loop(
                 if pending {
                     apply_transform_override(engine, &clip, transform);
                 }
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit, &cache);
             }
             // Live inspector edits (font-size drag) arrive at pointer-move
             // rate; coalesce to the newest like transform overrides do.
@@ -1474,7 +1480,7 @@ fn worker_loop(
                 if pending {
                     apply_generator_override(engine, &clip, generator);
                 }
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit, &cache);
             }
             // Shape resize drags (width/height sliders) arrive at pointer-move
             // rate; coalesce to the newest like the generator/transform
@@ -1526,14 +1532,14 @@ fn worker_loop(
                 {
                     apply_generator_override(engine, &clip, generator);
                 }
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit, &cache);
             }
             // The preview panel resized (or first laid out): renders now fit
             // the new bound. Repaint the current frame only when the bucketed
             // size actually changed — live window resizes report every frame.
             WorkerMsg::Viewport { width, height } => {
                 if fit.set_viewport(width, height) {
-                    render_frame(engine, tl_rate, &preview_weak, last_tick, &fit);
+                    render_frame(engine, tl_rate, &preview_weak, last_tick, &fit, &cache);
                 }
             }
             other => {
@@ -1548,7 +1554,7 @@ fn worker_loop(
                 // Edits otherwise only repaint when the playhead moves; refresh
                 // the current frame so the change is visible immediately.
                 if redraw {
-                    render_frame(engine, tl_rate, &preview_weak, last_tick, &fit);
+                    render_frame(engine, tl_rate, &preview_weak, last_tick, &fit, &cache);
                 }
             }
         }
@@ -4866,32 +4872,165 @@ impl FrameFit {
     }
 }
 
+/// Byte cap for [`FrameCache`]: at a typical fit size (~1280×720 RGBA,
+/// ~3.7 MB) this holds ~70 recently displayed frames — several seconds of
+/// scrub-back headroom — while staying far below what decode already uses.
+const FRAME_CACHE_BYTES: usize = 256 << 20;
+
+/// What a composited preview frame was rendered *from*: any difference in
+/// these means the pixels may differ.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct FrameKey {
+    /// Timeline tick (the playhead).
+    tick: i64,
+    /// [`Engine::revision`] — bumped by every project mutation, so an edit,
+    /// undo, or session swap can never serve pre-edit pixels.
+    revision: u64,
+    /// The fit bound the render was requested at (`None` = full canvas).
+    /// Captures the bucketed viewport, quality tier, and long-side cap in
+    /// one value — exactly what changes the output resolution.
+    bound: Option<(u32, u32)>,
+}
+
+struct CacheEntry {
+    buffer: SharedPixelBuffer<Rgba8Pixel>,
+    /// Logical timestamp of the last hit/insert (LRU order).
+    used: u64,
+}
+
+/// LRU cache of delivered preview frames. Holding the [`SharedPixelBuffer`]
+/// itself is cheap: it's refcounted, and the UI holds a clone of the same
+/// allocation anyway. Hits make hover jitter and re-visited scrub ground
+/// free — the only realistic fix for backward scrubbing over long-GOP
+/// sources short of proxy media (100–320 ms per re-composite today).
+///
+/// Interior mutability so the worker loop and its `mutate` closure can share
+/// it like [`FrameFit`]; single-threaded access (worker thread only).
+#[derive(Default)]
+struct FrameCache {
+    entries: RefCell<HashMap<FrameKey, CacheEntry>>,
+    bytes: Cell<usize>,
+    clock: Cell<u64>,
+}
+
+impl FrameCache {
+    fn get(&self, key: &FrameKey) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+        let mut entries = self.entries.borrow_mut();
+        let entry = entries.get_mut(key)?;
+        self.clock.set(self.clock.get() + 1);
+        entry.used = self.clock.get();
+        Some(entry.buffer.clone())
+    }
+
+    fn insert(&self, key: FrameKey, buffer: SharedPixelBuffer<Rgba8Pixel>) {
+        let mut entries = self.entries.borrow_mut();
+        self.clock.set(self.clock.get() + 1);
+        let bytes = buffer.as_bytes().len();
+        if let Some(old) = entries.insert(
+            key,
+            CacheEntry {
+                buffer,
+                used: self.clock.get(),
+            },
+        ) {
+            self.bytes.set(self.bytes.get() - old.buffer.as_bytes().len());
+        }
+        self.bytes.set(self.bytes.get() + bytes);
+
+        // Evict least-recently-used until under budget. The scan is O(n) but
+        // runs only on inserts that overflow, over at most a few hundred
+        // entries — noise next to the composite that preceded it.
+        while self.bytes.get() > FRAME_CACHE_BYTES && entries.len() > 1 {
+            let Some(oldest) = entries
+                .iter()
+                .min_by_key(|(_, e)| e.used)
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            if let Some(evicted) = entries.remove(&oldest) {
+                self.bytes
+                    .set(self.bytes.get() - evicted.buffer.as_bytes().len());
+            }
+        }
+    }
+}
+
 fn render_frame(
     engine: &mut Engine,
     tl_rate: Rational,
     preview_weak: &slint::Weak<PreviewStore<'static>>,
     tick: i64,
     fit: &FrameFit,
+    cache: &FrameCache,
 ) {
+    if let Some(buffer) = render_frame_buffer(engine, tl_rate, tick, fit, cache) {
+        deliver_frame(preview_weak, buffer);
+    }
+}
+
+/// Produce the composited frame at `tick` — from the cache when the same
+/// (tick, revision, fit) was already rendered, otherwise by rendering and
+/// caching. Cache hits don't feed the quality ladder (nothing was rendered).
+/// Frames rendered under a live gesture override belong to no revision, so
+/// they bypass the cache in both directions.
+fn render_frame_buffer(
+    engine: &mut Engine,
+    tl_rate: Rational,
+    tick: i64,
+    fit: &FrameFit,
+    cache: &FrameCache,
+) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+    let bound = fit.fit_bound();
+    let cacheable = !engine.has_live_overrides();
+    let key = FrameKey {
+        tick,
+        revision: engine.revision(),
+        bound,
+    };
+    if cacheable && let Some(buffer) = cache.get(&key) {
+        return Some(buffer);
+    }
+
     let at = RationalTime::new(tick, tl_rate);
     let started = Instant::now();
-    let result = match fit.fit_bound() {
+    let result = match bound {
         Some((max_w, max_h)) => engine.get_frame_fit(at, max_w, max_h),
         None => engine.get_frame(at),
     };
     match result {
         Ok(frame) => {
             fit.note_render_cost(started.elapsed());
-            let weak = preview_weak.clone();
-            if let Err(e) = slint::invoke_from_event_loop(move || {
-                if let Some(store) = weak.upgrade() {
-                    store.set_frame(crate::preview::to_slint_image(frame));
-                }
-            }) {
-                error!("failed to deliver preview frame to UI: {e}");
+            let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                &frame.pixels,
+                frame.width,
+                frame.height,
+            );
+            if cacheable {
+                cache.insert(key, buffer.clone());
             }
+            Some(buffer)
         }
-        Err(e) => error!(tick, "preview frame failed: {e}"),
+        Err(e) => {
+            error!(tick, "preview frame failed: {e}");
+            None
+        }
+    }
+}
+
+/// Hand `buffer` to the preview panel. The buffer is refcounted, so the
+/// event-loop hop and the `Image` wrapper share the worker's allocation.
+fn deliver_frame(
+    preview_weak: &slint::Weak<PreviewStore<'static>>,
+    buffer: SharedPixelBuffer<Rgba8Pixel>,
+) {
+    let weak = preview_weak.clone();
+    if let Err(e) = slint::invoke_from_event_loop(move || {
+        if let Some(store) = weak.upgrade() {
+            store.set_frame(slint::Image::from_rgba8(buffer));
+        }
+    }) {
+        error!("failed to deliver preview frame to UI: {e}");
     }
 }
 

@@ -4,7 +4,6 @@ mod inspector;
 mod params;
 mod paths;
 mod placement;
-mod preview;
 mod preview_gesture;
 mod preview_select;
 mod preview_view;

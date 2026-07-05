@@ -21,8 +21,12 @@ slint = { version = "=1.16.1", features = [
 # The desktop app is Rust, so it links the engine directly — no C-ABI/JNI
 # bridge like the iOS/Android apps. The same `crates/cutlass-engine` drives
 # three unrelated frontends.
+cutlass-commands = { path = "../../crates/cutlass-commands" }
+cutlass-engine = { path = "../../crates/cutlass-engine" }
 cutlass-models = { path = "../../crates/cutlass-models" }
+cutlass-render = { path = "../../crates/cutlass-render" }
 cutlass-settings = { path = "../../crates/cutlass-settings" }
+crossbeam-channel = "0.5"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

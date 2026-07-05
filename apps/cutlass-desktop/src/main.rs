@@ -4,6 +4,9 @@ mod drafts;
 #[allow(dead_code)]
 mod params;
 mod paths;
+mod preview;
+mod preview_worker;
+mod projection;
 mod ruler;
 mod selection;
 mod snap;
@@ -12,7 +15,9 @@ mod timeline;
 mod transport;
 mod window;
 
+use cutlass_engine::EngineConfig;
 use slint::BackendSelector;
+use slint::Global;
 use slint::Model;
 use slint::ModelRc;
 use slint::SharedString;
@@ -23,12 +28,29 @@ use tracing_subscriber::EnvFilter;
 
 slint::include_modules!();
 
-// PORT IN PROGRESS (from main's crates/cutlass-ui): this shell is Phase 0 of
-// the desktop-editor port — window chrome, launch gallery, drafts, settings,
-// and the pure timeline/selection/snap backends are live; everything that
-// needs the engine (preview worker, edits, audio, thumbnails, export, agent)
-// arrives in later phases. Engine-facing callbacks are stubbed here and noted
+// PORT IN PROGRESS (from main's crates/cutlass-ui): Phases 0–1 of the
+// desktop-editor port are live — window chrome, launch gallery, drafts,
+// settings, the pure timeline/selection/snap backends, and the engine worker
+// (project sessions, imports, clip drops, fit-sized preview frames,
+// autosave). The rest of the edit surface, audio, thumbnails, export, and
+// the agent arrive in later phases; their callbacks are stubbed and noted
 // inline.
+
+/// Library palette key → engine generator, for drag-drops from the Library's
+/// Titles/Shapes tabs. Content and size are placeholders the user edits next
+/// (via the inspector); `None` for unknown keys.
+fn generator_from_key(key: &str) -> Option<cutlass_models::Generator> {
+    use cutlass_models::{Generator, Shape};
+    Some(match key {
+        "text" => Generator::text("Title"),
+        "solid" => Generator::SolidColor {
+            rgba: [30, 30, 30, 255],
+        },
+        "rect" => Generator::shape(Shape::Rectangle, [255, 255, 255, 255]),
+        "ellipse" => Generator::shape(Shape::Ellipse, [255, 255, 255, 255]),
+        _ => return None,
+    })
+}
 
 /// Run `f` on the next event-loop turn, outside whatever callback is
 /// currently executing. Used to flip Timer-bound state (see `request-stop`)
@@ -46,6 +68,23 @@ fn defer_main_thread(f: impl FnOnce() + Send + 'static) {
 // during which Slint's display-link tick re-enters timer processing and
 // aborts with "Recursion in timer code".
 
+async fn pick_import_path() -> Option<std::path::PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .add_filter(
+            "Media",
+            &[
+                "mp4", "mov", "mkv", "webm", "m4v", "mp3", "wav", "m4a", "aac", "flac", "ogg",
+                "png", "jpg", "jpeg", "webp",
+            ],
+        )
+        .add_filter("Video", &["mp4", "mov", "mkv", "webm", "m4v"])
+        .add_filter("Audio", &["mp3", "wav", "m4a", "aac", "flac", "ogg"])
+        .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+        .pick_file()
+        .await
+        .map(|file| file.path().to_path_buf())
+}
+
 /// File picker for Open file… — choose an external `.cutlass` to import into
 /// a new draft (the app-owned store; see [`drafts`]).
 async fn pick_open_path() -> Option<std::path::PathBuf> {
@@ -56,21 +95,86 @@ async fn pick_open_path() -> Option<std::path::PathBuf> {
         .map(|file| file.path().to_path_buf())
 }
 
+async fn pick_relink_path() -> Option<std::path::PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .add_filter(
+            "Media",
+            &[
+                "mp4", "mov", "mkv", "webm", "m4v", "mp3", "wav", "m4a", "aac", "flac", "ogg",
+                "png", "jpg", "jpeg", "webp",
+            ],
+        )
+        .add_filter("Video", &["mp4", "mov", "mkv", "webm", "m4v"])
+        .add_filter("Audio", &["mp3", "wav", "m4a", "aac", "flac", "ogg"])
+        .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+        .pick_file()
+        .await
+        .map(|file| file.path().to_path_buf())
+}
+
+async fn pick_relink_folder() -> Option<std::path::PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .pick_folder()
+        .await
+        .map(|file| file.path().to_path_buf())
+}
+
 // --- session lifecycle: app-owned drafts, auto-saved (CapCut-style) -------
 //
 // Cutlass owns every project as a draft under the per-user data dir (see the
-// `drafts` module). Once the engine worker lands (Phase 1) it auto-saves the
-// live draft after every edit; for now the stubs below only create/import
-// the draft directories and flip the shell into the (empty) editor by
-// bumping `session-epoch` — the same signal the worker will send when a real
-// session loads.
+// `drafts` module); the worker auto-saves the live draft after every edit, so
+// the user never saves by hand and a clean exit loses nothing. Switching the
+// live session — New, opening another draft, importing a file — flushes the
+// outgoing draft first (an ordered `SaveProject` on the worker's queue), then
+// swaps. Closing is handled separately (`request_close`): the editor returns
+// to the launch gallery, the gallery quits the app.
 
-/// Enter the editor: bump `EditorStore.session-epoch`, which app.slint's
-/// watcher answers by hiding the launch screen. The worker will own this
-/// signal once sessions really load (Phase 1).
-fn enter_editor(app: &AppWindow) {
-    let editor = app.global::<EditorStore>();
-    editor.set_session_epoch(editor.get_session_epoch() + 1);
+enum SessionChange {
+    /// Create a fresh, empty draft and switch to it.
+    New,
+    /// Pick an external `.cutlass` file and import it into a new draft.
+    Import,
+    /// Open an existing draft by its `project.cutlass` path (gallery card).
+    OpenDraft(std::path::PathBuf),
+}
+
+/// Flush the outgoing draft (a no-op when nothing is bound yet), then replace
+/// the session. The flush and the swap are ordered on the worker's single
+/// message queue, so the flush always captures the draft we're leaving.
+fn change_session(handle: &preview_worker::WorkerHandle, change: SessionChange) {
+    match change {
+        SessionChange::New => match drafts::create() {
+            Ok(path) => {
+                handle.save_project(None);
+                handle.new_project();
+                handle.save_project(Some(path));
+            }
+            Err(e) => tracing::error!("couldn't create a new project: {e}"),
+        },
+        SessionChange::OpenDraft(path) => {
+            handle.save_project(None);
+            handle.open_project(path);
+        }
+        SessionChange::Import => {
+            let handle = handle.clone();
+            let task = slint::spawn_local(async move {
+                if let Some(source) = pick_open_path().await {
+                    match drafts::import_external(&source) {
+                        Ok(path) => {
+                            handle.save_project(None);
+                            handle.open_project(path);
+                        }
+                        Err(e) => {
+                            tracing::error!("couldn't import {}: {e}", source.display())
+                        }
+                    }
+                }
+            });
+            if let Err(e) = task {
+                tracing::error!("failed to open import dialog: {e}");
+            }
+        }
+    }
 }
 
 /// Republish the launch gallery from the draft store, newest first.
@@ -88,17 +192,18 @@ fn refresh_projects(app: &AppWindow) {
 }
 
 /// The window close button, context-aware (CapCut-style). In the editor it
-/// returns to the launch gallery (refreshed) — once auto-save lands the work
-/// is already flushed, so there's no prompt and the app stays open; on the
+/// flushes the draft and returns to the launch gallery (refreshed) — the work
+/// is already auto-saved, so there's no prompt and the app stays open; on the
 /// gallery there's nothing left to return to, so it quits. Wired to both the
 /// custom caption ✕ and the OS close request (the macOS traffic light).
-fn request_close(app_weak: &slint::Weak<AppWindow>) {
+fn request_close(app_weak: &slint::Weak<AppWindow>, handle: &preview_worker::WorkerHandle) {
     let Some(app) = app_weak.upgrade() else {
         return;
     };
     if app.global::<AppState>().get_launch_visible() {
         let _ = slint::quit_event_loop();
     } else {
+        handle.save_project(None);
         refresh_projects(&app);
         app.global::<AppState>().set_launch_visible(true);
     }
@@ -277,31 +382,92 @@ fn main() -> Result<(), slint::PlatformError> {
     let editor = app.global::<EditorStore>();
 
     // ENGINE WIRING (Phase 1+): playhead → frame requests, clip drops,
-    // import, media delete/relink, magnet, and every edit callback bind to
-    // the preview worker when it lands; until then those callbacks are
-    // Slint-side no-ops.
+    // import, media delete/relink, magnet, and the session flows bind to the
+    // preview worker below; the remaining edit callbacks (trim/move/split,
+    // inspector commits, clipboard, tracks…) wire up in Phase 2.
 
-    // --- project lifecycle: app-owned drafts ------------------------------
+    // --- engine service (preview worker thread) ---------------------------
 
-    // Open file… (Open card / Cmd+O / File ▸ Open file…): import an external
-    // `.cutlass` into a new draft. Loading it into an engine session is
-    // Phase 1; for now the draft is created and the empty editor opens.
-    let open_weak = app.as_weak();
-    editor.on_on_open_requested(move || {
-        let open_weak = open_weak.clone();
+    // The worker thread owns the Engine (decoders aren't Send); the UI talks
+    // to it through a message queue and it answers with projection publishes
+    // and preview frames via invoke_from_event_loop.
+    let preview_store_weak = app.global::<PreviewStore>().as_weak();
+    let editor_store_weak = app.global::<EditorStore>().as_weak();
+
+    let (preview_worker, session) = preview_worker::PreviewWorker::spawn(
+        EngineConfig::default(),
+        preview_store_weak,
+        editor_store_weak,
+    )
+    .map_err(slint::PlatformError::Other)?;
+    tracing::debug!(
+        duration_ticks = session.duration_ticks,
+        "engine session ready"
+    );
+
+    // Playhead moves (ruler scrub, frame-step keys, Home/End) become preview
+    // frame requests; the worker coalesces a burst to the newest tick.
+    // (Scrub audio joins in Phase 3.)
+    let frame_handle = preview_worker.handle();
+    editor.on_on_playhead_changed(move |tick| {
+        frame_handle.request_frame(i64::from(tick));
+    });
+
+    // Preview surface size (docked panel or fullscreen) → render fit bound.
+    // Slint reports logical px; the worker wants physical so a Retina preview
+    // doesn't render at half resolution.
+    let viewport_handle = preview_worker.handle();
+    let viewport_weak = app.as_weak();
+    app.global::<PreviewStore>()
+        .on_viewport_changed(move |width, height| {
+            let scale = viewport_weak
+                .upgrade()
+                .map(|app| app.window().scale_factor())
+                .unwrap_or(1.0);
+            let w = (width * scale).round().max(0.0) as u32;
+            let h = (height * scale).round().max(0.0) as u32;
+            viewport_handle.set_viewport(w, h);
+        });
+
+    let drop_handle = preview_worker.handle();
+    editor.on_on_clip_dropped(move |media_id, track_id, start_tick, drop_row, insert| {
+        drop_handle.add_clip(
+            media_id.to_string(),
+            track_id.to_string(),
+            i64::from(start_tick),
+            i64::from(drop_row),
+            insert,
+        );
+    });
+
+    let generated_drop_handle = preview_worker.handle();
+    editor.on_on_generated_dropped(
+        move |generator, track_id, start_tick, duration_ticks, drop_row| {
+            let Some(generator) = generator_from_key(generator.as_str()) else {
+                tracing::warn!(%generator, "ignoring drop of unknown generator key");
+                return;
+            };
+            generated_drop_handle.add_generated(
+                generator,
+                track_id.to_string(),
+                i64::from(start_tick),
+                i64::from(duration_ticks),
+                i64::from(drop_row),
+            );
+        },
+    );
+
+    let magnet_handle = preview_worker.handle();
+    editor.on_on_main_magnet_changed(move |enabled| {
+        magnet_handle.set_main_magnet(enabled);
+    });
+
+    let import_handle = preview_worker.handle();
+    editor.on_on_import_clicked(move || {
+        let import_handle = import_handle.clone();
         let task = slint::spawn_local(async move {
-            if let Some(source) = pick_open_path().await {
-                match drafts::import_external(&source) {
-                    Ok(path) => {
-                        tracing::info!(draft = %path.display(), "imported external project");
-                        if let Some(app) = open_weak.upgrade() {
-                            enter_editor(&app);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("couldn't import {}: {e}", source.display())
-                    }
-                }
+            if let Some(path) = pick_import_path().await {
+                import_handle.import(path);
             }
         });
         if let Err(e) = task {
@@ -309,28 +475,87 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // New (New card / Cmd+N / File ▸ New): a fresh draft.
-    let new_weak = app.as_weak();
-    editor.on_on_new_requested(move || {
-        match drafts::create() {
-            Ok(path) => {
-                tracing::info!(draft = %path.display(), "created draft");
-                if let Some(app) = new_weak.upgrade() {
-                    enter_editor(&app);
-                }
+    // Library asset delete: right-click a media tile → Remove from project.
+    // `force` is decided UI-side (unused tile deletes straight away; a used
+    // one confirms first, then sends force=true to cascade the clip removals).
+    let delete_media_handle = preview_worker.handle();
+    editor.on_on_media_deleted(move |media_id, force| {
+        delete_media_handle.remove_media(media_id.to_string(), force);
+    });
+
+    // Missing-media relink: "Locate…" in the relink dialog or on a tile's
+    // missing badge. Same media picker as import; the worker re-probes the
+    // chosen file and swaps the entry's path in place.
+    let relink_handle = preview_worker.handle();
+    editor.on_on_relink_media_requested(move |media_id| {
+        let relink_handle = relink_handle.clone();
+        let media_id = media_id.to_string();
+        let task = slint::spawn_local(async move {
+            if let Some(path) = pick_relink_path().await {
+                relink_handle.relink_media(media_id, path);
             }
-            Err(e) => tracing::error!("couldn't create a new project: {e}"),
+        });
+        if let Err(e) = task {
+            tracing::error!("failed to open relink dialog: {e}");
         }
     });
 
-    // Launch gallery card → open that draft by its project path (the load
-    // itself is Phase 1).
-    let open_draft_weak = app.as_weak();
-    editor.on_on_open_project_requested(move |path| {
-        tracing::info!(draft = path.as_str(), "opening draft");
-        if let Some(app) = open_draft_weak.upgrade() {
-            enter_editor(&app);
+    let relink_folder_handle = preview_worker.handle();
+    editor.on_on_relink_folder_requested(move || {
+        let handle = relink_folder_handle.clone();
+        let task = slint::spawn_local(async move {
+            if let Some(folder) = pick_relink_folder().await {
+                handle.relink_folder(folder);
+            }
+        });
+        if let Err(e) = task {
+            tracing::error!("failed to open relink folder dialog: {e}");
         }
+    });
+
+    // Undo/redo (toolbar buttons, Cmd/Ctrl+Z / Shift+Z): the worker replays
+    // history and republishes the projection.
+    let undo_handle = preview_worker.handle();
+    editor.on_on_undo(move || {
+        undo_handle.undo();
+    });
+
+    let redo_handle = preview_worker.handle();
+    editor.on_on_redo(move || {
+        redo_handle.redo();
+    });
+
+    // --- project lifecycle: app-owned drafts, auto-saved -----------------
+
+    // Cmd/Ctrl+S has no separate "save" in the draft model — every edit is
+    // already auto-saved. Keep the shortcut as an explicit "flush now" so the
+    // habit still works and a draft about to close is written immediately;
+    // the `save-as` argument is ignored (there are no user files to save as).
+    let save_handle = preview_worker.handle();
+    editor.on_on_save_requested(move |_save_as| {
+        save_handle.save_project(None);
+    });
+
+    // Open file… (Open card / Cmd+O / File ▸ Open file…): import an external
+    // `.cutlass` into a new draft. New (New card / Cmd+N / File ▸ New): a
+    // fresh draft. Both flush the outgoing draft before swapping.
+    let open_handle = preview_worker.handle();
+    editor.on_on_open_requested(move || {
+        change_session(&open_handle, SessionChange::Import);
+    });
+
+    let new_handle = preview_worker.handle();
+    editor.on_on_new_requested(move || {
+        change_session(&new_handle, SessionChange::New);
+    });
+
+    // Launch gallery card → open that draft by its project path.
+    let open_draft_handle = preview_worker.handle();
+    editor.on_on_open_project_requested(move |path| {
+        change_session(
+            &open_draft_handle,
+            SessionChange::OpenDraft(std::path::PathBuf::from(path.as_str())),
+        );
     });
 
     // Launch gallery → delete a draft (its whole directory), then refresh.
@@ -342,20 +567,32 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // Title-bar rename → one undoable edit on the worker; the next auto-save
+    // writes the new name into the draft's project file and meta sidecar.
+    let rename_handle = preview_worker.handle();
+    editor.on_on_rename_project(move |name| {
+        let name = name.trim().to_string();
+        if !name.is_empty() {
+            rename_handle.rename_project(name);
+        }
+    });
+
     // Seed the launch gallery from the draft store.
     refresh_projects(&app);
 
     // Window close — the title-bar ✕ and the OS close request both go through
-    // the context-aware close: from the editor it returns to the launch
-    // gallery, from the gallery it quits.
+    // the context-aware close: from the editor it flushes the draft and
+    // returns to the launch gallery, from the gallery it quits.
+    let close_handle = preview_worker.handle();
     let app_weak = app.as_weak();
     app.global::<WindowBackend>().on_close(move || {
-        request_close(&app_weak);
+        request_close(&app_weak, &close_handle);
     });
 
+    let close_handle = preview_worker.handle();
     let app_weak = app.as_weak();
     app.window().on_close_requested(move || {
-        request_close(&app_weak);
+        request_close(&app_weak, &close_handle);
         slint::CloseRequestResponse::KeepWindowShown
     });
 

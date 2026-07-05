@@ -9,6 +9,12 @@ export global PreviewStore {
     in-out property <length> viewport-pan-x: 0px;
     in-out property <length> viewport-pan-y: 0px;
 
+    // The preview area's on-screen size (logical px), reported by whichever
+    // preview surface is live (docked panel or fullscreen). The engine worker
+    // fits every render inside it so scrubbing pays for view-sized pixels
+    // instead of the full canvas.
+    callback viewport-changed(width: length, height: length);
+
     // Live transform gesture (preview roadmap Phases 3–5): the uncommitted
     // resolution of whatever gesture is in flight — a preview move/scale/
     // rotate drag or an inspector slider — mirrored UI-wide. The projection

@@ -1166,7 +1166,11 @@ dependencies = [
 name = "cutlass-desktop"
 version = "0.5.3-alpha.0"
 dependencies = [
+ "crossbeam-channel",
+ "cutlass-commands",
+ "cutlass-engine",
  "cutlass-models",
+ "cutlass-render",
  "cutlass-settings",
  "dirs",
  "objc2 0.6.4",

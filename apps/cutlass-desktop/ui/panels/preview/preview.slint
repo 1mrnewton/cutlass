@@ -36,6 +36,15 @@ export component PreviewPanel inherits PanelBase {
                 viewport := Rectangle {
                     clip: true;
 
+                    // Tell the engine worker how big the preview is on screen
+                    // so renders can stop at view-sized pixels. Fired on mount
+                    // and on every panel resize (see the changed-size handlers
+                    // below); the worker buckets the values to keep re-renders
+                    // rare.
+                    init => {
+                        PreviewStore.viewport-changed(self.width, self.height);
+                    }
+
                     // Transform gestures (preview roadmap Phases 3–4).
                     // Pressing a clip arms a move; pressing a corner handle
                     // arms a scale, the affordance below the box a rotation.
@@ -111,9 +120,15 @@ export component PreviewPanel inherits PanelBase {
 
                     // A panel resize changes the fit and the pan limits;
                     // re-clamp so a frame zoomed/panned at the old size stays
-                    // in range.
-                    changed width => { self.reclamp(); }
-                    changed height => { self.reclamp(); }
+                    // in range, and tell the worker the new render fit bound.
+                    changed width => {
+                        self.reclamp();
+                        PreviewStore.viewport-changed(self.width, self.height);
+                    }
+                    changed height => {
+                        self.reclamp();
+                        PreviewStore.viewport-changed(self.width, self.height);
+                    }
 
                     // Recomputed reactively: follows playhead, edits
                     // (projection republish), selection, panel resizes, and

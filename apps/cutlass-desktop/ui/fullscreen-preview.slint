@@ -92,6 +92,19 @@ export component FullscreenPreview inherits Rectangle {
         y: (parent.height - self.height) / 2;
         background: black;
 
+        // Report the fullscreen surface so frames render at screen size;
+        // leaving fullscreen recreates the docked panel, which re-reports
+        // its own (smaller) viewport.
+        init => {
+            PreviewStore.viewport-changed(self.width, self.height);
+        }
+        changed width => {
+            PreviewStore.viewport-changed(self.width, self.height);
+        }
+        changed height => {
+            PreviewStore.viewport-changed(self.width, self.height);
+        }
+
         // Live preview frames — the same worker-delivered image as the
         // docked panel (the playhead → frame-request watcher lives at
         // window scope, so playback keeps rendering in fullscreen).

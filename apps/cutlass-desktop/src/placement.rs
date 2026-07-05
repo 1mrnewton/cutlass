@@ -8,17 +8,17 @@
 //! from these functions therefore agree with rendered pixels.
 //!
 //! The anchor helpers implement the model's documented `anchor_point`
-//! semantics (pivot within the content bounds) for gesture math. The
-//! renderer currently assumes the default center anchor ("non-center
-//! anchors are a follow-up" in resolve.rs); for center anchors the two are
-//! identical, and PORT (Phase 6) threads real anchor placement through the
-//! engine's resolver together with the transform overrides.
+//! semantics (pivot within the content bounds): the anchor sits at
+//! `canvas_center + position · canvas` and the quad center offsets from it
+//! by the rotated anchor→center vector — the same math the resolver now
+//! applies via `SceneLayer::quad_center`, so gesture boxes and rendered
+//! pixels agree for any anchor.
 //!
-//! PORT (Phase 6): main's engine also re-fit *cropped* media to the canvas
-//! (kept region cut out and aspect-fit — CapCut semantics). This branch's
-//! resolver keeps the full-frame quad and stretches the kept region across
-//! it via UV, so placement here deliberately ignores the crop; revisit with
-//! the engine-side placement work.
+//! Crop: main's engine re-fit *cropped* media to the canvas (kept region cut
+//! out and aspect-fit — CapCut semantics). This branch's resolver keeps the
+//! full-frame quad and stretches the kept region across it via UV, so
+//! placement here deliberately ignores the crop; revisit if the resolver
+//! ever adopts kept-region re-fit.
 
 use cutlass_compositor::{CompositorConfig, LayerPlacement};
 use cutlass_models::ClipTransform;
@@ -62,10 +62,9 @@ pub(crate) fn generator_layer_placement(
 }
 
 /// Shared geometry: place content of size `w × h` at `fit · transform.scale`,
-/// centered on the canvas and offset/rotated by the transform. Matches the
-/// resolver for center anchors; non-center anchors offset the quad so the
-/// anchor stays at the transform's position (the model's documented
-/// semantics, honored by the renderer from Phase 6).
+/// centered on the canvas and offset/rotated by the transform. Non-center
+/// anchors offset the quad so the anchor stays at the transform's position —
+/// the same derivation as the renderer's `SceneLayer::quad_center`.
 fn placement_from_size(
     transform: &ClipTransform,
     w: f32,

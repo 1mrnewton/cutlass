@@ -95,16 +95,15 @@ pub(crate) fn clip_transform(clip: &Clip) -> ClipTransform {
 /// Media clips use the shared placement helper (native size aspect-fit into
 /// the canvas) — identical to what the render resolver places. The crop does
 /// not shrink the quad on this branch: the compositor stretches the kept
-/// region across the full-frame quad via UV (PORT (Phase 6): CapCut's
-/// kept-region re-fit lands with the engine-side placement work). Generators
-/// raster at canvas pixel scale (fit 1:1) with their content centered, so
-/// the placement is computed the same way and then the size is shrunk to the
-/// drawn-content bounds the projection measured — the selection box and
-/// hit-test hug the shape/text, not the transparent raster (CapCut). Those
-/// bounds can exceed the canvas for text that overflows the frame, so the box
-/// extends past the frame too. Unknown bounds (0×0, e.g. empty text or the
-/// pre-Phase-6 projection, which doesn't measure generator rasters yet) keep
-/// the canvas-sized box.
+/// region across the full-frame quad via UV (CapCut's kept-region re-fit
+/// would land engine-side, if ever). Generators raster at canvas pixel scale
+/// (fit 1:1) and hug the drawn-content bounds the projection measured — the
+/// selection box and hit-test wrap the shape/text, not its transparent
+/// raster (CapCut). Those bounds can exceed the canvas for text that
+/// overflows the frame, so the box extends past the frame too. Cropped
+/// generators and unknown bounds (0×0, e.g. empty text or a stale
+/// projection) keep the full-canvas quad. Content size feeds the placement
+/// math itself so non-center anchors pivot exactly like the renderer.
 pub(crate) fn clip_placement(clip: &Clip, canvas: &CompositorConfig) -> LayerPlacement {
     let transform = clip_transform(clip);
     let has_size = clip.media_width > 0 && clip.media_height > 0;
@@ -119,17 +118,12 @@ pub(crate) fn clip_placement(clip: &Clip, canvas: &CompositorConfig) -> LayerPla
     }
     // Generators raster at canvas pixel scale (1:1), so their placement never
     // aspect-fits — same as the resolver's generator path.
-    let mut placement = generator_layer_placement(&transform, canvas.width, canvas.height, canvas);
-    if has_size && clip_crop(clip).is_full() {
-        // Uncropped generators hug their drawn-content bounds — including text
-        // that overflows the frame, whose measured bounds now exceed the
-        // canvas. A cropped generator keeps the full-raster quad instead.
-        placement.size = [
-            clip.media_width as f32 * transform.scale,
-            clip.media_height as f32 * transform.scale,
-        ];
-    }
-    placement
+    let (w, h) = if has_size && clip_crop(clip).is_full() {
+        (clip.media_width as u32, clip.media_height as u32)
+    } else {
+        (canvas.width, canvas.height)
+    };
+    generator_layer_placement(&transform, w, h, canvas)
 }
 
 /// The clip's crop window. Projections written before crop existed (and

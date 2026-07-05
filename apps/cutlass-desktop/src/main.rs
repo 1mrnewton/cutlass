@@ -1423,16 +1423,27 @@ fn main() -> Result<(), slint::PlatformError> {
         },
     );
 
-    // Gestures are commit-on-release in this phase: the selection box tracks
-    // the drag UI-side, and release lands one undoable SetClipTransform.
-    // PORT (Phase 6): main previewed the drag in the rendered frame through
-    // engine-side transform overrides; these two stay inert until the
-    // override APIs return.
+    let override_handle = preview_worker.handle();
     editor.on_on_preview_transform_overridden(
-        move |_clip_id, _pos_x, _pos_y, _anchor_x, _anchor_y, _scale, _rotation, _opacity, _tick| {
+        move |clip_id, pos_x, pos_y, anchor_x, anchor_y, scale, rotation, opacity, tick| {
+            override_handle.transform_override(
+                clip_id.to_string(),
+                cutlass_models::ClipTransform {
+                    position: [pos_x, pos_y],
+                    anchor_point: [anchor_x, anchor_y],
+                    scale,
+                    rotation,
+                    opacity,
+                },
+                i64::from(tick),
+            );
         },
     );
-    editor.on_on_preview_override_cleared(move |_tick| {});
+
+    let override_clear_handle = preview_worker.handle();
+    editor.on_on_preview_override_cleared(move |tick| {
+        override_clear_handle.clear_transform_override(i64::from(tick));
+    });
 
     let transform_commit_handle = preview_worker.handle();
     editor.on_on_clip_transform_committed(
@@ -1614,13 +1625,27 @@ fn main() -> Result<(), slint::PlatformError> {
         },
     );
 
-    // Live text/shape preview during slider drags rides the engine's
-    // generator override — PORT (Phase 6). Until then these are inert and
-    // the control commits on release via set-text/shape-generator.
+    let preview_text_handle = preview_worker.handle();
+    app.global::<InspectorBackend>().on_preview_text_generator(
+        move |clip_id, content, style, tick| {
+            // Live, uncommitted preview (e.g. font-size drag): render the clip
+            // from this generator without touching history. Release commits.
+            preview_text_handle.generator_override(
+                clip_id.to_string(),
+                cutlass_models::Generator::Text {
+                    content: content.to_string(),
+                    style: inspector::text_style_from_ui(&style),
+                },
+                i64::from(tick),
+            );
+        },
+    );
+
+    let clear_text_handle = preview_worker.handle();
     app.global::<InspectorBackend>()
-        .on_preview_text_generator(move |_clip_id, _content, _style, _tick| {});
-    app.global::<InspectorBackend>()
-        .on_clear_text_generator(move |_tick| {});
+        .on_clear_text_generator(move |tick| {
+            clear_text_handle.clear_generator_override(i64::from(tick));
+        });
 
     let set_shape_handle = preview_worker.handle();
     app.global::<InspectorBackend>()
@@ -1628,10 +1653,23 @@ fn main() -> Result<(), slint::PlatformError> {
             set_shape_handle.set_shape_size(clip_id.to_string(), width, height);
         });
 
+    let preview_shape_handle = preview_worker.handle();
+    app.global::<InspectorBackend>().on_preview_shape_generator(
+        move |clip_id, width, height, tick| {
+            preview_shape_handle.preview_shape_size(
+                clip_id.to_string(),
+                width,
+                height,
+                i64::from(tick),
+            );
+        },
+    );
+
+    let clear_shape_handle = preview_worker.handle();
     app.global::<InspectorBackend>()
-        .on_preview_shape_generator(move |_clip_id, _width, _height, _tick| {});
-    app.global::<InspectorBackend>()
-        .on_clear_shape_generator(move |_tick| {});
+        .on_clear_shape_generator(move |tick| {
+            clear_shape_handle.clear_generator_override(i64::from(tick));
+        });
 
     app.global::<InspectorBackend>()
         .on_filter_fonts(|query, items| {

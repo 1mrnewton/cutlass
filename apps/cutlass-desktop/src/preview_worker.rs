@@ -1,11 +1,10 @@
 //! Background preview rendering: engine and decode/composite stay off the UI thread.
 //!
-//! PORT IN PROGRESS (from main's crates/cutlass-ui): this is the slim Phase 1
-//! worker — engine ownership, the full edit/project message set, debounced
-//! autosave, and the fit-sized preview pump. Deferred to later phases and
-//! noted inline: audio snapshots (Phase 3), thumbnail/strip registration
-//! (Phase 4), export (Phase 5), live gesture overrides + generator content
-//! sizes (Phase 6), and the AI agent bridge (separate port).
+//! Ported from main's crates/cutlass-ui onto this branch's engine: engine
+//! ownership, the full edit/project message set, debounced autosave, the
+//! fit-sized preview pump, audio snapshots, thumbnail/strip registration,
+//! export, and live gesture/generator overrides. Still pending: the AI agent
+//! bridge (separate port).
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -128,14 +127,21 @@ enum WorkerMsg {
     },
     /// Resize a shape clip's reference-pixel dimensions. Preserves shape kind
     /// and fill from the committed generator.
-    ///
-    /// PORT (Phase 6): main also had a `PreviewShapeSize` live-drag variant
-    /// riding the engine's generator override; it returns with the override
-    /// APIs. Until then the slider commits on release only.
     SetShapeSize {
         clip: String,
         width: f32,
         height: f32,
+    },
+    /// Live shape-resize drag (width/height sliders): rebuild the generator
+    /// from committed state at the new dimensions and ride the engine's
+    /// generator override — no history entry until `SetShapeSize` commits.
+    /// Coalesces to the newest like `Frame` so a fast drag can't back the
+    /// queue up.
+    PreviewShapeSize {
+        clip: String,
+        width: f32,
+        height: f32,
+        tick: i64,
     },
     /// Retime a media clip (CapCut speed, M1): positive rational `num/den`
     /// playback rate plus the reverse flag. The engine re-derives the
@@ -264,13 +270,36 @@ enum WorkerMsg {
         fill: bool,
         tick: i64,
     },
-    /// Commit a transform gesture as one undoable `SetClipTransform`, then
-    /// re-render `tick` so the committed placement is visible immediately.
-    ///
-    /// PORT (Phase 6): main previewed the drag live through engine-side
-    /// `TransformOverride` / `GeneratorOverride` session state; those
-    /// messages return with the override APIs. Until then gestures are
-    /// commit-on-release (the mobile pattern).
+    /// Live drag override: render `tick` with `clip`'s transform replaced —
+    /// session state on the engine, no history entry, no projection
+    /// republish. Bursts coalesce to the newest value like `Frame` requests.
+    TransformOverride {
+        clip: String,
+        transform: ClipTransform,
+        tick: i64,
+    },
+    /// Drop the gesture override (no-op release / cancelled drag) and
+    /// re-render `tick` from committed state.
+    ClearTransformOverride {
+        tick: i64,
+    },
+    /// Live inspector edit preview (e.g. font-size slider drag): render `tick`
+    /// with `clip`'s generator replaced — session state on the engine, no
+    /// history entry, no projection republish. Coalesces with `Frame`/itself
+    /// like `TransformOverride` so a fast drag can't back the queue up.
+    GeneratorOverride {
+        clip: String,
+        generator: Generator,
+        tick: i64,
+    },
+    /// Drop the generator override (control released with no net change) and
+    /// re-render `tick` from committed state.
+    ClearGeneratorOverride {
+        tick: i64,
+    },
+    /// Commit a transform gesture: clear any override and apply one undoable
+    /// `SetClipTransform`, then re-render `tick` (a nudge has no preceding
+    /// override, so the frame must refresh here).
     SetTransform {
         clip: String,
         transform: ClipTransform,
@@ -812,6 +841,39 @@ impl WorkerHandle {
         });
     }
 
+    pub fn transform_override(&self, clip: String, transform: ClipTransform, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::TransformOverride {
+            clip,
+            transform,
+            tick,
+        });
+    }
+
+    pub fn clear_transform_override(&self, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::ClearTransformOverride { tick });
+    }
+
+    pub fn generator_override(&self, clip: String, generator: Generator, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::GeneratorOverride {
+            clip,
+            generator,
+            tick,
+        });
+    }
+
+    pub fn clear_generator_override(&self, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::ClearGeneratorOverride { tick });
+    }
+
+    pub fn preview_shape_size(&self, clip: String, width: f32, height: f32, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::PreviewShapeSize {
+            clip,
+            width,
+            height,
+            tick,
+        });
+    }
+
     pub fn undo(&self) {
         let _ = self.tx.send(WorkerMsg::Undo);
     }
@@ -1073,6 +1135,20 @@ fn worker_loop(
                     set_generator_and_publish(engine, &clip, generator, &ui);
                 }
             }
+            // Only reached when a shape-resize burst interleaves with another
+            // coalesced gesture's drain (practically impossible — one slider at
+            // a time). The dedicated loop arm coalesces the common case.
+            WorkerMsg::PreviewShapeSize {
+                clip,
+                width,
+                height,
+                tick,
+            } => {
+                if let Some(generator) = shape_size_from_engine(engine, &clip, width, height) {
+                    apply_generator_override(engine, &clip, generator);
+                    render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                }
+            }
             WorkerMsg::SetClipSpeed {
                 clip,
                 num,
@@ -1132,11 +1208,35 @@ fn worker_loop(
                 aspect_index,
                 background,
             } => set_canvas_and_publish(engine, aspect_index, background, &ui),
+            WorkerMsg::ClearTransformOverride { tick } => {
+                engine.set_transform_override(None);
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+            }
+            WorkerMsg::ClearGeneratorOverride { tick } => {
+                engine.set_generator_override(None);
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+            }
+            // Only reached if a generator-override burst interleaves with
+            // another coalesced gesture's drain (practically impossible — you
+            // can't drag two controls at once). The dedicated loop arm handles
+            // the common case with coalescing.
+            WorkerMsg::GeneratorOverride {
+                clip,
+                generator,
+                tick,
+            } => {
+                apply_generator_override(engine, &clip, generator);
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+            }
             WorkerMsg::SetTransform {
                 clip,
                 transform,
                 tick,
             } => {
+                // The override previewed this exact transform; clearing it as
+                // the command lands means the next render is identical — no
+                // flicker between gesture end and commit.
+                engine.set_transform_override(None);
                 // The gesture happened at the visible frame: pass the playhead
                 // so animated properties get a keyframe there instead of being
                 // flattened (M2 compose semantics).
@@ -1238,6 +1338,9 @@ fn worker_loop(
             WorkerMsg::NewProject => new_project_and_publish(engine, &ui),
             WorkerMsg::RenameProject { name } => rename_project_and_publish(engine, name, &ui),
             WorkerMsg::Frame(_) => unreachable!("frames are handled by the drain below"),
+            WorkerMsg::TransformOverride { .. } => {
+                unreachable!("overrides are handled by the drain below")
+            }
         }
     };
 
@@ -1260,6 +1363,14 @@ fn worker_loop(
                 while let Ok(next) = req_rx.try_recv() {
                     match next {
                         WorkerMsg::Frame(latest) => tick = latest,
+                        WorkerMsg::TransformOverride {
+                            clip,
+                            transform,
+                            tick: at,
+                        } => {
+                            apply_transform_override(engine, &clip, transform);
+                            tick = at;
+                        }
                         other => mutate(
                             engine,
                             &mut clipboard,
@@ -1270,6 +1381,151 @@ fn worker_loop(
                     }
                 }
                 last_tick = tick;
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+            }
+            // Drag-gesture overrides arrive at pointer-move rate; render only
+            // the newest one (same coalescing as scrub frames) so a fast drag
+            // can't back the queue up behind stale composites.
+            WorkerMsg::TransformOverride {
+                mut clip,
+                mut transform,
+                mut tick,
+            } => {
+                // Queue order must hold against drained mutations: the
+                // release's SetTransform often lands right behind the last
+                // pointer-move, and it commits + clears the override. Apply
+                // the coalesced override *before* such a mutation and never
+                // after it, or the stale gesture override outlives the commit
+                // and pins the clip's transform on every later frame
+                // (keyframed animation freezes in preview until re-cleared).
+                let mut pending = true;
+                while let Ok(next) = req_rx.try_recv() {
+                    match next {
+                        WorkerMsg::Frame(latest) => tick = latest,
+                        WorkerMsg::TransformOverride {
+                            clip: c,
+                            transform: t,
+                            tick: at,
+                        } => {
+                            clip = c;
+                            transform = t;
+                            tick = at;
+                            pending = true;
+                        }
+                        other => {
+                            if std::mem::take(&mut pending) {
+                                apply_transform_override(engine, &clip, transform);
+                            }
+                            mutate(
+                                engine,
+                                &mut clipboard,
+                                &mut main_magnet,
+                                &mut linkage,
+                                other,
+                            )
+                        }
+                    }
+                }
+                last_tick = tick;
+                if pending {
+                    apply_transform_override(engine, &clip, transform);
+                }
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+            }
+            // Live inspector edits (font-size drag) arrive at pointer-move
+            // rate; coalesce to the newest like transform overrides do.
+            WorkerMsg::GeneratorOverride {
+                mut clip,
+                mut generator,
+                mut tick,
+            } => {
+                // Same ordering rule as TransformOverride above: a drained
+                // mutation (the release's SetGenerator / ClearGeneratorOverride)
+                // must not be followed by a re-apply of the override it ended.
+                let mut pending = true;
+                while let Ok(next) = req_rx.try_recv() {
+                    match next {
+                        WorkerMsg::Frame(latest) => tick = latest,
+                        WorkerMsg::GeneratorOverride {
+                            clip: c,
+                            generator: g,
+                            tick: at,
+                        } => {
+                            clip = c;
+                            generator = g;
+                            tick = at;
+                            pending = true;
+                        }
+                        other => {
+                            if std::mem::take(&mut pending) {
+                                apply_generator_override(engine, &clip, generator.clone());
+                            }
+                            mutate(
+                                engine,
+                                &mut clipboard,
+                                &mut main_magnet,
+                                &mut linkage,
+                                other,
+                            )
+                        }
+                    }
+                }
+                last_tick = tick;
+                if pending {
+                    apply_generator_override(engine, &clip, generator);
+                }
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+            }
+            // Shape resize drags (width/height sliders) arrive at pointer-move
+            // rate; coalesce to the newest like the generator/transform
+            // overrides so a fast drag can't back the render queue up. The
+            // override generator is rebuilt from committed engine state, so the
+            // drained-mutation ordering rule (above) applies unchanged.
+            WorkerMsg::PreviewShapeSize {
+                mut clip,
+                mut width,
+                mut height,
+                mut tick,
+            } => {
+                let mut pending = true;
+                while let Ok(next) = req_rx.try_recv() {
+                    match next {
+                        WorkerMsg::Frame(latest) => tick = latest,
+                        WorkerMsg::PreviewShapeSize {
+                            clip: c,
+                            width: w,
+                            height: h,
+                            tick: at,
+                        } => {
+                            clip = c;
+                            width = w;
+                            height = h;
+                            tick = at;
+                            pending = true;
+                        }
+                        other => {
+                            if std::mem::take(&mut pending)
+                                && let Some(generator) =
+                                    shape_size_from_engine(engine, &clip, width, height)
+                            {
+                                apply_generator_override(engine, &clip, generator);
+                            }
+                            mutate(
+                                engine,
+                                &mut clipboard,
+                                &mut main_magnet,
+                                &mut linkage,
+                                other,
+                            )
+                        }
+                    }
+                }
+                last_tick = tick;
+                if pending
+                    && let Some(generator) = shape_size_from_engine(engine, &clip, width, height)
+                {
+                    apply_generator_override(engine, &clip, generator);
+                }
                 render_frame(engine, tl_rate, &preview_weak, tick, &fit);
             }
             // The preview panel resized (or first laid out): renders now fit
@@ -1494,6 +1750,26 @@ fn set_transform_and_publish(
             error!(%clip_id, "set transform failed: {e}");
             publish_projection(engine, ui);
         }
+    }
+}
+
+/// Point the engine's transform override at `clip` (raw id) for the next
+/// renders — the live preview of an in-flight gesture. Unparsable ids are
+/// dropped (stale projection race).
+fn apply_transform_override(engine: &mut Engine, clip: &str, transform: ClipTransform) {
+    match parse_raw_id(clip).map(ClipId::from_raw) {
+        Some(id) => engine.set_transform_override(Some((id, transform))),
+        None => error!(clip, "transform override ignored: unparsable clip id"),
+    }
+}
+
+/// Point the engine's generator override at `clip` (raw id) for the next
+/// renders — the live preview of an uncommitted inspector edit. Unparsable
+/// ids are dropped (stale projection race), same as the transform override.
+fn apply_generator_override(engine: &mut Engine, clip: &str, generator: Generator) {
+    match parse_raw_id(clip).map(ClipId::from_raw) {
+        Some(id) => engine.set_generator_override(Some((id, generator))),
+        None => error!(clip, "generator override ignored: unparsable clip id"),
     }
 }
 
@@ -2825,6 +3101,10 @@ fn shape_size_from_engine(
 /// Replace a generated clip's content (inspector title edit). One history
 /// entry per committed edit; the engine rejects non-generated clips.
 fn set_generator_and_publish(engine: &mut Engine, clip: &str, generator: Generator, ui: &UiSink) {
+    // A live font-size drag may have left an override in place; the commit is
+    // the authoritative value, so clear it (the next render is identical — no
+    // flicker between drag end and commit, mirroring `SetTransform`).
+    engine.set_generator_override(None);
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-generator ignored: unparsable clip id");
         return;
@@ -4457,14 +4737,29 @@ fn publish_session_error(ui: &UiSink, message: String) {
 
 /// Drawn-content size (canvas px) for every generated clip, keyed by raw clip
 /// id — the preview's selection box and hit-test hug what the generator
-/// actually draws instead of its full-canvas raster.
-///
-/// PORT (Phase 6): served from the engine's raster cache on main
-/// (`Engine::generator_content_size`), which this branch doesn't expose yet.
-/// Empty means the selection geometry falls back to canvas-sized boxes —
-/// functional, just looser around text/shapes.
-fn generator_content_sizes(_engine: &mut Engine) -> HashMap<u64, (i32, i32)> {
-    HashMap::new()
+/// actually draws instead of its full-canvas raster. Served from the engine's
+/// raster caches; clips the compositor doesn't draw are absent (the UI falls
+/// back to canvas size). Animated params are sampled at the clip's first
+/// frame — the projection republishes per edit, not per playhead move, so a
+/// single representative size is all it can carry.
+fn generator_content_sizes(engine: &mut Engine) -> HashMap<u64, (i32, i32)> {
+    let generators: Vec<(u64, Generator)> = engine
+        .project()
+        .timeline()
+        .tracks_ordered()
+        .flat_map(|track| track.clips())
+        .filter_map(|clip| match &clip.content {
+            ClipSource::Generated(generator) => Some((clip.id.raw(), generator.clone())),
+            ClipSource::Media { .. } => None,
+        })
+        .collect();
+    generators
+        .into_iter()
+        .filter_map(|(id, generator)| {
+            let (w, h) = engine.generator_content_size(&generator, 0)?;
+            Some((id, (w as i32, h as i32)))
+        })
+        .collect()
 }
 
 // PORT (Phase 3): main built the playback mixer's `AudioSnapshot` here (every

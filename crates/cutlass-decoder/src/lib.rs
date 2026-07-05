@@ -35,6 +35,10 @@ pub use apple_audio::AvfAudioReader;
 mod wmf;
 #[cfg(target_os = "windows")]
 pub use wmf::WmfDecoder;
+/// Fragmented-MP4 duration recovery, for demuxers that report none
+/// (Media Foundation today; usable by any backend with the same gap).
+#[cfg(target_os = "windows")]
+mod mp4_duration;
 
 #[cfg(target_os = "android")]
 mod android;

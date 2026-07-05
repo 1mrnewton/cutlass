@@ -13,8 +13,10 @@
 //! - Reads each sample's [`IMFMediaBuffer`] stride-aware (via [`IMF2DBuffer`]
 //!   when available, falling back to a flat `Lock`) into [`FrameData::Cpu`].
 //! - Probes size / rotation / frame-rate / colorimetry from the negotiated
-//!   output [`IMFMediaType`] and duration from the presentation descriptor
-//!   (`MF_PD_DURATION`), and seeks with `SetCurrentPosition` (100-ns units).
+//!   output [`IMFMediaType`], duration from the presentation descriptor
+//!   (`MF_PD_DURATION`) with a fragmented-MP4 fallback
+//!   ([`crate::mp4_duration`]), and seeks with `SetCurrentPosition` (100-ns
+//!   units).
 //! - Answers [`VideoDecoder::frame_at`] with the shared roll-forward policy
 //!   ([`crate::seek`]) so sequential playback / forward scrubbing never pays a
 //!   seek-plus-GOP-re-decode per frame.
@@ -136,7 +138,7 @@ impl WmfDecoder {
                 })?;
         }
 
-        let info = probe(&reader, stream)?;
+        let info = probe(&reader, stream, Some(path))?;
 
         Ok(Self {
             reader,
@@ -234,9 +236,11 @@ impl VideoDecoder for WmfDecoder {
 
             // The decoder renegotiated (resolution / format / color changed
             // mid-stream); re-probe so frames after the change are described
-            // correctly.
+            // correctly. The duration is already known, so no path is needed.
             if stream_flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32 != 0 {
-                self.info = probe(&self.reader, self.stream)?;
+                let duration = self.info.duration;
+                self.info = probe(&self.reader, self.stream, None)?;
+                self.info.duration = self.info.duration.or(duration);
             }
 
             if stream_flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
@@ -354,17 +358,34 @@ fn reader_from_byte_stream(
 /// Source duration from the presentation descriptor (`MF_PD_DURATION`, a
 /// `VT_UI8` count of 100-ns units), or `None` when the container doesn't
 /// report one.
-fn probe_duration(reader: &IMFSourceReader) -> Option<RationalTime> {
-    let value = unsafe {
+///
+/// **Fragmented MP4s report no duration here.** MF's MPEG-4 media source only
+/// surfaces `MF_PD_DURATION` from the `moov/mvhd` movie header; fragmented
+/// files (common for downloaded/streamed footage) declare `0` there and carry
+/// real timing in per-fragment `moof` boxes, so the attribute is simply
+/// absent. For those, fall back to scanning the container's metadata boxes
+/// ourselves ([`crate::mp4_duration`]) — without a duration the editor would
+/// treat the source as zero-length and reject every clip placement.
+fn probe_duration(reader: &IMFSourceReader, path: Option<&Path>) -> Option<RationalTime> {
+    let from_source = unsafe {
         reader.GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
     }
-    .ok()?;
-    let hns = u64::try_from(&value).ok()?;
-    (hns > 0).then(|| RationalTime::new(hns as i64, Rational::new(HNS_PER_SEC as i32, 1)))
+    .ok()
+    .and_then(|value| u64::try_from(&value).ok())
+    .filter(|hns| *hns > 0)
+    .map(|hns| RationalTime::new(hns as i64, Rational::new(HNS_PER_SEC as i32, 1)));
+    from_source.or_else(|| crate::mp4_duration::duration_from_file(path?))
 }
 
 /// Read static source properties from the reader's negotiated output type.
-fn probe(reader: &IMFSourceReader, stream: u32) -> Result<SourceInfo, DecodeError> {
+///
+/// `path` (when available) feeds the fragmented-MP4 duration fallback; pass
+/// `None` for mid-stream re-probes where the duration is already known.
+fn probe(
+    reader: &IMFSourceReader,
+    stream: u32,
+    path: Option<&Path>,
+) -> Result<SourceInfo, DecodeError> {
     let media_type = unsafe { reader.GetCurrentMediaType(stream) }.map_err(open_err)?;
 
     // FRAME_SIZE packs width in the high 32 bits, height in the low 32.
@@ -401,7 +422,7 @@ fn probe(reader: &IMFSourceReader, stream: u32) -> Result<SourceInfo, DecodeErro
         color,
         frame_rate,
         time_base: Rational::new(HNS_PER_SEC as i32, 1),
-        duration: probe_duration(reader),
+        duration: probe_duration(reader, path),
     })
 }
 

@@ -6,15 +6,13 @@
 // All editable state lives in SettingsBackend (and the theme in
 // AppStore.theme-id, so it switches live). Fields two-way bind to those
 // globals; dismissing the dialog persists them through SettingsBackend.save
-// (wired in src/main.rs). Theme changes preview instantly; cache changes are
-// labeled as restart-bound.
+// (wired in src/main.rs). Theme changes preview instantly.
 
 import {
     CutlassText,
     AccentButton,
     SubtleButton,
     CutlassDropdown,
-    CutlassSlider,
     CutlassScrollView,
 } from "../components/index.slint";
 import { AppStore } from "../store/index.slint";
@@ -124,14 +122,10 @@ component SettingsTextField inherits Rectangle {
 export component SettingsDialog inherits Rectangle {
     background: #000000A0;
 
-    // 0 = AI, 1 = Appearance, 2 = Cache.
+    // 0 = AI, 1 = Appearance.
     in-out property <int> section: 0;
 
     property <[string]> theme-names: ["Graphite (default)", "Ember", "Dark blue"];
-
-    init => {
-        SettingsBackend.refresh-cache-size();
-    }
 
     function close() {
         SettingsBackend.save();
@@ -214,13 +208,6 @@ export component SettingsDialog inherits Rectangle {
                         selected: root.section == 1;
                         clicked => {
                             root.section = 1;
-                        }
-                    }
-                    NavItem {
-                        label: "Cache";
-                        selected: root.section == 2;
-                        clicked => {
-                            root.section = 2;
                         }
                     }
 
@@ -340,72 +327,6 @@ export component SettingsDialog inherits Rectangle {
                             }
                         }
 
-                        // --- Cache ----------------------------------------
-                        if root.section == 2: VerticalLayout {
-                            spacing: AppStore.theme.metrics.spacing.md;
-
-                            PaneTitle {
-                                text: "Cache";
-                            }
-                            Hint {
-                                text: "Decoded frames are cached on disk to keep scrubbing fast. Safe to delete — it rebuilds on demand. Location and limit apply on the next launch.";
-                            }
-
-                            FieldRow {
-                                label: "Location";
-
-                                CutlassText {
-                                    horizontal-stretch: 1;
-                                    vertical-alignment: center;
-                                    text: SettingsBackend.cache-dir-effective;
-                                    mono: true;
-                                    overflow: elide;
-                                    style: AppStore.theme.typography.caption;
-                                    foreground: AppStore.theme.text.secondary;
-                                }
-
-                                SubtleButton {
-                                    label: "Reveal";
-                                    clicked => {
-                                        SettingsBackend.reveal-cache();
-                                    }
-                                }
-                            }
-
-                            FieldRow {
-                                label: "On disk";
-                                CutlassText {
-                                    horizontal-stretch: 1;
-                                    vertical-alignment: center;
-                                    text: SettingsBackend.cache-size-text;
-                                    style: AppStore.theme.typography.caption;
-                                    foreground: AppStore.theme.text.secondary;
-                                }
-                            }
-
-                            FieldRow {
-                                label: "Limit";
-
-                                CutlassSlider {
-                                    minimum: 1;
-                                    maximum: 256;
-                                    step: 1;
-                                    value: SettingsBackend.cache-budget-gb;
-                                    changed(v) => {
-                                        SettingsBackend.cache-budget-gb = round(v);
-                                    }
-                                }
-
-                                CutlassText {
-                                    width: 56px;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: right;
-                                    text: round(SettingsBackend.cache-budget-gb) + " GB";
-                                    style: AppStore.theme.typography.caption;
-                                    foreground: AppStore.theme.text.secondary;
-                                }
-                            }
-                        }
                     }
                 }
             }

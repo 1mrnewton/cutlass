@@ -9,6 +9,10 @@ use std::path::Path;
 
 use cutlass_core::{DecodeError, Rational, SourceInfo, VideoDecoder, resample};
 
+// Only the native `open()` variants (Apple / Windows / Android) construct a
+// decoder with an `OutputMode`; the fallback for platforms without a backend
+// (e.g. Linux CI) doesn't, so the import would be unused there.
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "android"))]
 use crate::OutputMode;
 
 /// Static metadata for a media file, read without decoding any frames.

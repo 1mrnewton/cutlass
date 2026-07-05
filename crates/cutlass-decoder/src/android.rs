@@ -151,6 +151,8 @@ pub struct MediaCodecDecoder {
     /// PTS of the last emitted frame — the [`crate::seek`] roll-forward anchor.
     /// Cleared on [`VideoDecoder::seek`] (decode position moved).
     last_pts: Option<RationalTime>,
+    /// Observed seek/decode costs driving the adaptive roll window.
+    seek_stats: crate::seek::SeekStats,
 }
 
 // SAFETY: the extractor and codec are owned and touched by a single thread at a
@@ -249,6 +251,7 @@ impl MediaCodecDecoder {
             input_done: false,
             eos: false,
             last_pts: None,
+            seek_stats: Default::default(),
         };
         // Ownership transferred to `decoder`; don't let the guard tear it down.
         core::mem::forget(guard);
@@ -434,7 +437,12 @@ impl VideoDecoder for MediaCodecDecoder {
 
     fn frame_at(&mut self, target: RationalTime) -> Result<Option<VideoFrame>, DecodeError> {
         let last_pts = self.last_pts;
-        crate::seek::frame_at_rolling(self, last_pts, target)
+        // Copied out and written back: `frame_at_rolling` borrows `self` for
+        // the decode walk, so it can't also borrow the field.
+        let mut stats = self.seek_stats;
+        let result = crate::seek::frame_at_rolling(self, last_pts, &mut stats, target);
+        self.seek_stats = stats;
+        result
     }
 }
 

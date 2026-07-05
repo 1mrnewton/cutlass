@@ -18,24 +18,86 @@
 //! waste more than a window of decode) while comfortably covering the
 //! sequential case (gaps of one frame). One second ≈ a typical mobile-capture
 //! GOP.
+//!
+//! ## Tick-truncation slack
+//!
+//! The walk treats a frame as satisfying the target when its PTS is within
+//! **one tick** of the frame's own time base *before* it ([`frame_covers`]),
+//! not only at/after it. Backends whose native clocks are integer ticks —
+//! Media Foundation's 100-ns units, MediaCodec's microseconds — **truncate**
+//! frame times that aren't representable: at 30000/1001 fps frame 1's true
+//! time 333 666.⅔ hns arrives as 333 666. Under an exact comparison that
+//! frame sits *before* its own rational target, so `frame_at(i)` returns
+//! frame `i + 1`, and the off-by-one compounds: targets that exactly equal a
+//! truncated PTS (1 in 3 at NTSC rates) then compare `Equal` to `last_pts`,
+//! fall off the roll path, and pay a full seek + GOP re-decode *during
+//! ordinary sequential playback*. One tick of slack returns the intended
+//! frame and keeps playback on the roll path, while being far too small to
+//! ever skip a real frame — as a guard for hypothetical frame-granular time
+//! bases the slack is additionally capped at half a frame period. Exact-clock
+//! backends (Apple's rational `CMTime`) are unaffected: their neighboring
+//! frames sit whole periods apart, never within a tick.
 
 use core::cmp::Ordering;
 
-use cutlass_core::{DecodeError, RationalTime, VideoDecoder, VideoFrame};
+use cutlass_core::{DecodeError, Rational, RationalTime, VideoDecoder, VideoFrame};
 
 /// How far ahead of the last emitted frame a target may lie and still be
 /// reached by decoding forward rather than seeking, in seconds.
 const ROLL_FORWARD_WINDOW_SECS: i64 = 1;
 
-/// True when `target` is strictly after `last_pts` by no more than the roll
-/// window, i.e. the decoder should keep pulling frames instead of seeking.
+/// `sec(a) − sec(b)`, exactly, scaled by the (positive) product of both rate
+/// numerators: positive iff `a` is later. `i128` keeps the triple products
+/// exact (values ≤ 2⁶³, rate parts ≤ 2³¹ ⇒ products < 2¹²⁵).
+fn scaled_delta(a: RationalTime, b: RationalTime) -> i128 {
+    i128::from(a.value) * i128::from(a.rate.den) * i128::from(b.rate.num)
+        - i128::from(b.value) * i128::from(b.rate.den) * i128::from(a.rate.num)
+}
+
+/// The tick-truncation slack: whether `delta` — a non-negative
+/// [`scaled_delta`] between a requested time and a decoded PTS on
+/// `tick_rate`, with `scale = other_num · tick_rate.num` — is at most **one
+/// tick** of `tick_rate`, additionally capped at **half a frame period** so a
+/// coarse time base (ticks ≈ frames) can never absorb a real frame.
 ///
-/// Exact cross-rate arithmetic in `i128` (values ≤ 2⁶³, rate parts ≤ 2³¹, so
-/// the triple products stay below 2¹²⁵): with `sec(t) = value·den/num`,
-/// `sec(target) − sec(last) ≤ W` cross-multiplied by both (positive)
-/// numerators becomes the comparison below. Invalid rates disable rolling —
-/// a seek is always correct.
-pub(crate) fn should_roll_forward(last_pts: Option<RationalTime>, target: RationalTime) -> bool {
+/// One tick in the scaled units is `tick_rate.den · other_num` (a tick is
+/// `den/num` seconds; the scale contributes `num · other_num`). The
+/// half-frame cap compares `delta / scale ≤ fr.den / (2·fr.num)`
+/// cross-multiplied; `checked_mul` guards the one product that can exceed
+/// `i128`, which is unambiguously "way more than half a frame". An invalid
+/// `frame_rate` skips the cap (the tick bound alone still applies).
+fn within_tick_slack(
+    delta: i128,
+    tick_rate: Rational,
+    other_num: i32,
+    scale: i128,
+    frame_rate: Rational,
+) -> bool {
+    debug_assert!(delta >= 0 && scale > 0);
+    if delta > i128::from(tick_rate.den) * i128::from(other_num) {
+        return false;
+    }
+    if !frame_rate.is_valid() {
+        return true;
+    }
+    let rhs = scale * i128::from(frame_rate.den);
+    match delta.checked_mul(2 * i128::from(frame_rate.num)) {
+        Some(lhs) => lhs <= rhs,
+        None => false,
+    }
+}
+
+/// True when the decoder should keep pulling frames instead of seeking:
+/// `target` lies after `last_pts` by no more than the roll window, and by
+/// more than the truncation slack — a target within one tick of the last
+/// emitted frame *is* that frame (see the module docs), and re-emitting it
+/// takes a seek, not a roll. Invalid rates disable rolling — a seek is
+/// always correct.
+pub(crate) fn should_roll_forward(
+    last_pts: Option<RationalTime>,
+    target: RationalTime,
+    frame_rate: Rational,
+) -> bool {
     let Some(last) = last_pts else {
         return false;
     };
@@ -45,12 +107,32 @@ pub(crate) fn should_roll_forward(last_pts: Option<RationalTime>, target: Ration
     if target.compare(last) != Ordering::Greater {
         return false;
     }
-    let ahead = i128::from(target.value) * i128::from(target.rate.den) * i128::from(last.rate.num)
-        - i128::from(last.value) * i128::from(last.rate.den) * i128::from(target.rate.num);
-    let window = i128::from(ROLL_FORWARD_WINDOW_SECS)
-        * i128::from(target.rate.num)
-        * i128::from(last.rate.num);
-    ahead <= window
+    let ahead = scaled_delta(target, last);
+    let scale = i128::from(target.rate.num) * i128::from(last.rate.num);
+    let window = i128::from(ROLL_FORWARD_WINDOW_SECS) * scale;
+    if ahead > window {
+        return false;
+    }
+    !within_tick_slack(ahead, last.rate, target.rate.num, scale, frame_rate)
+}
+
+/// Whether the decoded frame at `frame_pts` satisfies a request for `target`:
+/// at/after it, or before it by no more than the truncation slack (see the
+/// module docs).
+pub(crate) fn frame_covers(
+    frame_pts: RationalTime,
+    target: RationalTime,
+    frame_rate: Rational,
+) -> bool {
+    if frame_pts.compare(target) != Ordering::Less {
+        return true;
+    }
+    if !frame_pts.rate.is_valid() || !target.rate.is_valid() {
+        return false;
+    }
+    let behind = scaled_delta(target, frame_pts);
+    let scale = i128::from(target.rate.num) * i128::from(frame_pts.rate.num);
+    within_tick_slack(behind, frame_pts.rate, target.rate.num, scale, frame_rate)
 }
 
 /// [`VideoDecoder::frame_at`] with the roll-forward fast path.
@@ -65,11 +147,12 @@ pub(crate) fn frame_at_rolling<D: VideoDecoder + ?Sized>(
     last_pts: Option<RationalTime>,
     target: RationalTime,
 ) -> Result<Option<VideoFrame>, DecodeError> {
-    if !should_roll_forward(last_pts, target) {
+    let frame_rate = decoder.info().frame_rate;
+    if !should_roll_forward(last_pts, target, frame_rate) {
         decoder.seek(target)?;
     }
     while let Some(frame) = decoder.next_frame()? {
-        if frame.pts.compare(target) != Ordering::Less {
+        if frame_covers(frame.pts, target, frame_rate) {
             return Ok(Some(frame));
         }
     }
@@ -91,25 +174,25 @@ mod tests {
 
     #[test]
     fn no_last_pts_never_rolls() {
-        assert!(!should_roll_forward(None, rt(5, R30)));
+        assert!(!should_roll_forward(None, rt(5, R30), R30));
     }
 
     #[test]
     fn backward_and_repeated_targets_never_roll() {
         let last = Some(rt(10, R30));
-        assert!(!should_roll_forward(last, rt(9, R30)));
-        assert!(!should_roll_forward(last, rt(10, R30)));
+        assert!(!should_roll_forward(last, rt(9, R30), R30));
+        assert!(!should_roll_forward(last, rt(10, R30), R30));
     }
 
     #[test]
     fn rolls_within_the_window() {
         let last = Some(rt(10, R30));
         // One frame ahead — the sequential-playback case.
-        assert!(should_roll_forward(last, rt(11, R30)));
+        assert!(should_roll_forward(last, rt(11, R30), R30));
         // Exactly one second ahead is still inside the (inclusive) window.
-        assert!(should_roll_forward(last, rt(40, R30)));
+        assert!(should_roll_forward(last, rt(40, R30), R30));
         // Just past the window falls back to a seek.
-        assert!(!should_roll_forward(last, rt(41, R30)));
+        assert!(!should_roll_forward(last, rt(41, R30), R30));
     }
 
     #[test]
@@ -117,23 +200,54 @@ mod tests {
         // Last frame on an NTSC stream time base, target at plain 30 fps.
         let last = Some(rt(0, Rational::FPS_29_97));
         // 29/30 s ahead: inside the window.
-        assert!(should_roll_forward(last, rt(29, R30)));
+        assert!(should_roll_forward(last, rt(29, R30), Rational::FPS_29_97));
         // 31/30 s ahead: outside.
-        assert!(!should_roll_forward(last, rt(31, R30)));
+        assert!(!should_roll_forward(last, rt(31, R30), Rational::FPS_29_97));
         // Stream-tick time bases (large numerators) stay exact too.
         let last_ticks = Some(rt(90_000, Rational::new(90_000, 1))); // t = 1 s
-        assert!(should_roll_forward(last_ticks, rt(60, R30))); // 2 s
-        assert!(!should_roll_forward(last_ticks, rt(61, R30))); // 2 s + 1 frame
+        assert!(should_roll_forward(last_ticks, rt(60, R30), R30)); // 2 s
+        assert!(!should_roll_forward(last_ticks, rt(61, R30), R30)); // 2 s + 1 frame
     }
 
     #[test]
     fn invalid_rates_never_roll() {
         let last = Some(rt(10, Rational::new(0, 1)));
-        assert!(!should_roll_forward(last, rt(11, R30)));
+        assert!(!should_roll_forward(last, rt(11, R30), R30));
         assert!(!should_roll_forward(
             Some(rt(10, R30)),
-            rt(11, Rational::new(30, 0))
+            rt(11, Rational::new(30, 0)),
+            R30
         ));
+    }
+
+    /// The Media Foundation shape: PTS on a fine integer tick base (100-ns)
+    /// that *truncates* the rational frame times of an NTSC stream.
+    #[test]
+    fn truncated_tick_pts_counts_as_its_own_frame() {
+        const HNS: Rational = Rational::new(10_000_000, 1);
+        const NTSC: Rational = Rational::FPS_29_97;
+        // Frame 1 at 30000/1001 fps is 333_666.6̅ hns; MF delivers 333_666.
+        let pts = rt(333_666, HNS);
+        let target = rt(1, NTSC);
+        // The truncated frame satisfies its own (slightly later) target...
+        assert!(frame_covers(pts, target, NTSC));
+        // ...but not the next frame's target.
+        assert!(!frame_covers(pts, rt(2, NTSC), NTSC));
+        // Requesting the frame just emitted (within a tick) is not a roll
+        // (the decoder is already past it)...
+        assert!(!should_roll_forward(Some(pts), target, NTSC));
+        // ...while the *next* frame rolls instead of seeking.
+        assert!(should_roll_forward(Some(pts), rt(2, NTSC), NTSC));
+    }
+
+    /// On a frame-granular tick base (PTS ticks == frames), the slack must
+    /// never swallow a whole frame: exact behavior is preserved.
+    #[test]
+    fn slack_never_absorbs_a_real_frame_on_coarse_tick_bases() {
+        assert!(!frame_covers(rt(9, R30), rt(10, R30), R30));
+        assert!(frame_covers(rt(10, R30), rt(10, R30), R30));
+        // One frame ahead still rolls (the slack is capped below one frame).
+        assert!(should_roll_forward(Some(rt(10, R30)), rt(11, R30), R30));
     }
 
     /// A decoder over `count` synthetic 30 fps frames with a keyframe only at

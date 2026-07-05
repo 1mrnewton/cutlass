@@ -37,13 +37,15 @@ use std::path::Path;
 use std::sync::Once;
 
 use windows::Win32::Media::MediaFoundation::{
-    IMF2DBuffer, IMFMediaBuffer, IMFMediaType, IMFSample, IMFSourceReader, MF_MT_FRAME_RATE,
-    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION,
-    MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES, MF_MT_VIDEO_ROTATION, MF_MT_YUV_MATRIX,
+    IMF2DBuffer, IMFAttributes, IMFByteStream, IMFMediaBuffer, IMFMediaType, IMFSample,
+    IMFSourceReader, MF_ACCESSMODE_READ, MF_FILEFLAGS_NONE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE,
+    MF_MT_VIDEO_PRIMARIES, MF_MT_VIDEO_ROTATION, MF_MT_YUV_MATRIX, MF_OPENMODE_FAIL_IF_NOT_EXIST,
     MF_PD_DURATION, MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
     MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_MEDIASOURCE,
     MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION,
-    MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video, MFNominalRange_0_255,
+    MFCreateFile, MFCreateMediaType, MFCreateSourceReaderFromByteStream,
+    MFCreateSourceReaderFromURL, MFMediaType_Video, MFNominalRange_0_255,
     MFSTARTUP_FULL, MFStartup, MFVideoFormat_NV12, MFVideoFormat_P010,
     MFVideoPrimaries_BT470_2_SysBG, MFVideoPrimaries_BT709, MFVideoPrimaries_BT2020,
     MFVideoPrimaries_DCI_P3, MFVideoPrimaries_SMPTE170M, MFVideoTransFunc_709,
@@ -102,14 +104,8 @@ impl WmfDecoder {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
 
-        let url = path
-            .to_str()
-            .ok_or_else(|| DecodeError::Open("path is not valid UTF-8".into()))?;
-        let url = HSTRING::from(url);
-
-        // `&HSTRING: Param<PCWSTR>` and `None: Param<IMFAttributes>` (default
-        // source-reader configuration).
-        let reader = unsafe { MFCreateSourceReaderFromURL(&url, None) }.map_err(open_err)?;
+        // `None: Param<IMFAttributes>` — default source-reader configuration.
+        let reader = open_source_reader(path, None)?;
 
         let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 
@@ -293,11 +289,7 @@ pub(crate) fn has_audio_track(path: &Path) -> bool {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
-    let Some(url) = path.to_str() else {
-        return false;
-    };
-    let url = HSTRING::from(url);
-    let Ok(reader) = (unsafe { MFCreateSourceReaderFromURL(&url, None) }) else {
+    let Ok(reader) = open_source_reader(path, None) else {
         return false;
     };
     unsafe {
@@ -305,6 +297,58 @@ pub(crate) fn has_audio_track(path: &Path) -> bool {
             .GetNativeMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32, 0)
             .is_ok()
     }
+}
+
+/// Open a Media Foundation source reader for the local file at `path`,
+/// optionally with reader-configuration `attributes`.
+///
+/// Prefers a **self-opened byte stream** over [`MFCreateSourceReaderFromURL`].
+/// Once the process brings up a Direct3D device (wgpu, in the desktop app),
+/// MF's URL *source resolver* starts failing local-file opens with
+/// `ERROR_BAD_NETPATH` (`0x80070035`) — it misroutes a plain `C:\…` path as if
+/// it were a UNC/network path. Opening the file ourselves with [`MFCreateFile`]
+/// and resolving the source from that byte stream sidesteps the URL resolver
+/// entirely (plain file I/O is unaffected by the D3D init). The URL path stays
+/// as a fallback for the pre-D3D case and anything the byte-stream resolver
+/// can't handle (e.g. non-`file:` URLs, should we ever pass one).
+pub(crate) fn open_source_reader(
+    path: &Path,
+    attributes: Option<&IMFAttributes>,
+) -> Result<IMFSourceReader, DecodeError> {
+    let url = path
+        .to_str()
+        .ok_or_else(|| DecodeError::Open("path is not valid UTF-8".into()))?;
+    let url = HSTRING::from(url);
+
+    match reader_from_byte_stream(&url, attributes) {
+        Ok(reader) => Ok(reader),
+        // `&HSTRING: Param<PCWSTR>`.
+        Err(stream_err) => {
+            unsafe { MFCreateSourceReaderFromURL(&url, attributes) }.map_err(|url_err| {
+                DecodeError::Open(format!(
+                    "byte-stream open failed ({stream_err}); URL open failed ({url_err})"
+                ))
+            })
+        }
+    }
+}
+
+/// Open `url` as a file byte stream and build a source reader from it, so the
+/// source is resolved via `CreateObjectFromByteStream` rather than the URL
+/// resolver. See [`open_source_reader`] for why this is preferred.
+fn reader_from_byte_stream(
+    url: &HSTRING,
+    attributes: Option<&IMFAttributes>,
+) -> Result<IMFSourceReader, windows::core::Error> {
+    let stream: IMFByteStream = unsafe {
+        MFCreateFile(
+            MF_ACCESSMODE_READ,
+            MF_OPENMODE_FAIL_IF_NOT_EXIST,
+            MF_FILEFLAGS_NONE,
+            url,
+        )
+    }?;
+    unsafe { MFCreateSourceReaderFromByteStream(&stream, attributes) }
 }
 
 /// Source duration from the presentation descriptor (`MF_PD_DURATION`, a

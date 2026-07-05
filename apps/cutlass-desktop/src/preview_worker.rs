@@ -1566,6 +1566,12 @@ fn worker_loop(
 const PERSIST_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// What the worker should do next (see [`next_message`]).
+///
+/// `Message` dwarfs the marker variants (a `WorkerMsg` carries whole
+/// generators), but a `Wake` only ever lives on the stack between
+/// `next_message` and the match on it — boxing would add a heap round-trip
+/// per message on the edit path to save nothing.
+#[allow(clippy::large_enum_variant)]
 enum Wake {
     /// A request arrived; process it.
     Message(WorkerMsg),

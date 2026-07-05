@@ -3258,8 +3258,10 @@ mod tests {
         let mut project = Project::new("t", R24);
         let track = project.add_track(TrackKind::Text, "T1");
 
-        let mut style = crate::TextStyle::default();
-        style.effect_preset = Some("neon".into());
+        let style = crate::TextStyle {
+            effect_preset: Some("neon".into()),
+            ..Default::default()
+        };
         let clip = project
             .add_generated(
                 track,
@@ -3283,8 +3285,10 @@ mod tests {
         assert_eq!(style.background, spec.background);
 
         // Unknown presets are rejected at the door.
-        let mut bad = crate::TextStyle::default();
-        bad.effect_preset = Some("nope".into());
+        let bad = crate::TextStyle {
+            effect_preset: Some("nope".into()),
+            ..Default::default()
+        };
         assert!(
             project
                 .set_generator(
@@ -3298,12 +3302,14 @@ mod tests {
         );
 
         // Clearing the preset keeps whatever treatments the style carries.
-        let mut manual = crate::TextStyle::default();
-        manual.effect_preset = None;
-        manual.stroke = Some(crate::TextStroke {
-            rgba: [1, 2, 3, 255],
-            width: 2.0,
-        });
+        let manual = crate::TextStyle {
+            effect_preset: None,
+            stroke: Some(crate::TextStroke {
+                rgba: [1, 2, 3, 255],
+                width: 2.0,
+            }),
+            ..Default::default()
+        };
         project
             .set_generator(
                 clip,

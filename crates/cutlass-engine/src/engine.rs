@@ -120,7 +120,16 @@ impl Engine {
     /// Abort the open group: revert its commands in reverse, restoring the
     /// pre-group state. History is left untouched.
     pub fn rollback_group(&mut self) {
-        for inverse in self.history.take_group().into_iter().rev() {
+        let inverses = self.history.take_group();
+        if inverses.is_empty() {
+            return;
+        }
+        // The rollback mutates the project again after the group's commands
+        // already bumped `revision`: bump once more so revision-keyed
+        // observers (the preview frame cache) can never confuse mid-group
+        // frames with the restored state.
+        self.revision += 1;
+        for inverse in inverses.into_iter().rev() {
             if self.run_action(inverse).is_err() {
                 tracing::error!("history group rollback failed; state may be partial");
                 return;

@@ -870,12 +870,12 @@ mod tests {
 
     #[test]
     fn set_project_name_inverse_oscillates() {
-        let (_dir, mut project, cache) = setup();
+        let mut project = setup();
         assert_eq!(project.name, "test");
 
         let mut project_path = None;
         let mut history = History::new(32);
-        let mut ctx = test_ctx(&mut project, &cache, &mut project_path, &mut history);
+        let mut ctx = test_ctx(&mut project, &mut project_path, &mut history);
 
         let inv1 = set_project_name::set_project_name(&mut ctx, "renamed".to_string()).unwrap();
         assert_eq!(ctx.project.name, "renamed");

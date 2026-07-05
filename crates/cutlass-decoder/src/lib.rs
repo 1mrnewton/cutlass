@@ -35,6 +35,10 @@ pub use apple_audio::AvfAudioReader;
 mod wmf;
 #[cfg(target_os = "windows")]
 pub use wmf::WmfDecoder;
+#[cfg(target_os = "windows")]
+mod wmf_audio;
+#[cfg(target_os = "windows")]
+pub use wmf_audio::WmfAudioReader;
 /// Fragmented-MP4 duration recovery, for demuxers that report none
 /// (Media Foundation today; usable by any backend with the same gap).
 #[cfg(target_os = "windows")]
@@ -111,13 +115,21 @@ pub fn open_audio_reader(
     {
         Ok(Box::new(AvfAudioReader::open(path, out_rate, channels)?))
     }
+    #[cfg(target_os = "windows")]
+    {
+        Ok(Box::new(WmfAudioReader::open(path, out_rate, channels)?))
+    }
     #[cfg(target_os = "android")]
     {
         Ok(Box::new(MediaCodecAudioReader::open(
             path, out_rate, channels,
         )?))
     }
-    #[cfg(not(any(target_vendor = "apple", target_os = "android")))]
+    #[cfg(not(any(
+        target_vendor = "apple",
+        target_os = "windows",
+        target_os = "android"
+    )))]
     {
         let _ = (path, out_rate, channels);
         Err(DecodeError::unsupported(

@@ -168,7 +168,12 @@ fn audio_track_duration(path: &Path) -> Option<cutlass_core::RationalTime> {
     crate::apple::audio_track_duration(path)
 }
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(target_os = "windows")]
+fn audio_track_duration(path: &Path) -> Option<cutlass_core::RationalTime> {
+    crate::wmf::audio_track_duration(path)
+}
+
+#[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
 fn audio_track_duration(_path: &Path) -> Option<cutlass_core::RationalTime> {
     None
 }

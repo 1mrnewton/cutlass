@@ -68,11 +68,11 @@ use cutlass_core::{
 use crate::OutputMode;
 
 /// Media Foundation's timestamp tick rate: 100-nanosecond units per second.
-const HNS_PER_SEC: i64 = 10_000_000;
+pub(crate) const HNS_PER_SEC: i64 = 10_000_000;
 
 /// Upper bound on consecutive empty `ReadSample` returns (stream ticks / gaps)
 /// before we give up, so a pathological source can't hang the decode worker.
-const MAX_EMPTY_READS: usize = 1024;
+pub(crate) const MAX_EMPTY_READS: usize = 1024;
 
 /// A pull-based decoder over one video file, backed by Media Foundation.
 pub struct WmfDecoder {
@@ -275,7 +275,7 @@ impl VideoDecoder for WmfDecoder {
 /// Start the Media Foundation platform once per process. The matching
 /// `MFShutdown` is intentionally skipped: the platform lives for the process
 /// (like a global logger), and decoders open/close freely against it.
-fn ensure_mf_platform() {
+pub(crate) fn ensure_mf_platform() {
     static MF_PLATFORM: Once = Once::new();
     MF_PLATFORM.call_once(|| unsafe {
         let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
@@ -301,6 +301,23 @@ pub(crate) fn has_audio_track(path: &Path) -> bool {
             .GetNativeMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32, 0)
             .is_ok()
     }
+}
+
+/// Duration of the first audio track of `path`, for the audio-only probe
+/// fallback (music/voiceover files with no video stream). `None` when the
+/// file has no audio track or reports no duration.
+pub(crate) fn audio_track_duration(path: &Path) -> Option<RationalTime> {
+    ensure_mf_platform();
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+    let reader = open_source_reader(path, None).ok()?;
+    unsafe {
+        reader
+            .GetNativeMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32, 0)
+            .ok()?;
+    }
+    probe_duration(&reader, Some(path))
 }
 
 /// Open a Media Foundation source reader for the local file at `path`,
@@ -366,7 +383,10 @@ fn reader_from_byte_stream(
 /// absent. For those, fall back to scanning the container's metadata boxes
 /// ourselves ([`crate::mp4_duration`]) — without a duration the editor would
 /// treat the source as zero-length and reject every clip placement.
-fn probe_duration(reader: &IMFSourceReader, path: Option<&Path>) -> Option<RationalTime> {
+pub(crate) fn probe_duration(
+    reader: &IMFSourceReader,
+    path: Option<&Path>,
+) -> Option<RationalTime> {
     let from_source = unsafe {
         reader.GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
     }
@@ -604,15 +624,15 @@ fn map_range(value: u32) -> ColorRange {
     }
 }
 
-fn open_err(error: windows::core::Error) -> DecodeError {
+pub(crate) fn open_err(error: windows::core::Error) -> DecodeError {
     DecodeError::Open(error.to_string())
 }
 
-fn decode_err(error: windows::core::Error) -> DecodeError {
+pub(crate) fn decode_err(error: windows::core::Error) -> DecodeError {
     DecodeError::Decode(error.to_string())
 }
 
-fn seek_err(error: windows::core::Error) -> DecodeError {
+pub(crate) fn seek_err(error: windows::core::Error) -> DecodeError {
     DecodeError::Seek(error.to_string())
 }
 

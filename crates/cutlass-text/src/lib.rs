@@ -43,6 +43,21 @@ use cutlass_core::RgbaImage;
 
 pub use style::{FontFamily, TextAlign, TextStyle};
 
+/// Enumerate installed font family names (deduped, sorted) for a font picker.
+/// Scanning the system font directories is slow (hundreds of ms), so callers
+/// should run this off the UI thread once and reuse the result.
+pub fn system_font_families() -> Vec<String> {
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_system_fonts();
+    let mut names: Vec<String> = db
+        .faces()
+        .filter_map(|face| face.families.first().map(|(name, _)| name.clone()))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
 /// A text run shaped and rasterized as individually placeable pieces — the
 /// substrate for character-level animation (typewriter, per-char fade, wave).
 ///

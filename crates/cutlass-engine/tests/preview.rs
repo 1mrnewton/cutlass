@@ -320,3 +320,24 @@ fn new_session_clears_overrides() {
         "committed solid covers the whole canvas — no stale override applied"
     );
 }
+
+#[test]
+fn media_proxy_registry_sets_clears_and_dies_with_the_session() {
+    use cutlass_models::MediaId;
+    use std::path::{Path, PathBuf};
+
+    let (_dir, mut engine) = temp_engine();
+    let media = MediaId::from_raw(7);
+
+    engine.set_media_proxy(media, PathBuf::from("proxy.mp4"));
+    assert_eq!(engine.media_proxy(media), Some(Path::new("proxy.mp4")));
+
+    engine.clear_media_proxy(media);
+    assert_eq!(engine.media_proxy(media), None);
+
+    // Media ids persist in project files: a fresh session must not inherit
+    // the old session's substitutions (id 7 could name a different file).
+    engine.set_media_proxy(media, PathBuf::from("proxy.mp4"));
+    engine.new_session();
+    assert_eq!(engine.media_proxy(media), None);
+}

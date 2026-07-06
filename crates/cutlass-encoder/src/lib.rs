@@ -9,9 +9,11 @@
 //! export path.
 //!
 //! The **Apple** backend ([`AvfEncoder`]) uses `AVAssetWriter` (VideoToolbox
-//! H.264 + AAC, mp4 mux); the **Android** backend ([`MediaCodecEncoder`]) uses
-//! MediaCodec (H.264 + AAC) with `AMediaMuxer`. Other platforms return
-//! [`EncodeError::Unsupported`] from [`open_encoder`] until their backends land.
+//! H.264 + AAC, mp4 mux); the **Windows** backend ([`WmfEncoder`]) uses Media
+//! Foundation's `IMFSinkWriter` (H.264 + AAC, mp4 mux); the **Android**
+//! backend ([`MediaCodecEncoder`]) uses MediaCodec (H.264 + AAC) with
+//! `AMediaMuxer`. Other platforms return [`EncodeError::Unsupported`] from
+//! [`open_encoder`] until their backends land.
 
 use std::path::Path;
 
@@ -22,20 +24,25 @@ mod apple;
 #[cfg(target_vendor = "apple")]
 pub use apple::AvfEncoder;
 
+#[cfg(target_os = "windows")]
+mod wmf;
+#[cfg(target_os = "windows")]
+pub use wmf::WmfEncoder;
+
 #[cfg(target_os = "android")]
 mod android;
 #[cfg(target_os = "android")]
 pub use android::MediaCodecEncoder;
 
-// RGBA→I420 conversion lives outside the Android cfg so it's unit-testable on
-// the host; the Android backend is its only consumer today.
+// RGBA→YUV conversion lives outside the platform cfgs so it's unit-testable
+// on any host; the Android (I420) and Windows (NV12) backends consume it.
 mod yuv;
 
 /// Open the platform's native encoder for `path` with `config`, returning it
 /// behind the [`VideoEncoder`] trait so the export loop is platform-agnostic.
 ///
 /// The container is inferred from the path extension by the backend (`.mp4` on
-/// Apple). Any existing file at `path` is overwritten.
+/// Apple and Windows). Any existing file at `path` is overwritten.
 pub fn open_encoder(
     path: &Path,
     config: EncoderConfig,
@@ -44,11 +51,15 @@ pub fn open_encoder(
     {
         Ok(Box::new(AvfEncoder::open(path, config)?))
     }
+    #[cfg(target_os = "windows")]
+    {
+        Ok(Box::new(WmfEncoder::open(path, config)?))
+    }
     #[cfg(target_os = "android")]
     {
         Ok(Box::new(MediaCodecEncoder::open(path, config)?))
     }
-    #[cfg(not(any(target_vendor = "apple", target_os = "android")))]
+    #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "android")))]
     {
         let _ = (path, config);
         Err(EncodeError::unsupported(

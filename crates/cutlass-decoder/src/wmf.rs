@@ -420,6 +420,17 @@ impl VideoDecoder for WmfDecoder {
         self.seek_stats = stats;
         result
     }
+
+    fn frame_at_nearest(
+        &mut self,
+        target: RationalTime,
+    ) -> Result<Option<VideoFrame>, DecodeError> {
+        let last_pts = self.last_pts;
+        let mut stats = self.seek_stats;
+        let result = crate::seek::frame_at_nearest_rolling(self, last_pts, &mut stats, target);
+        self.seek_stats = stats;
+        result
+    }
 }
 
 /// Start the Media Foundation platform once per process. The matching

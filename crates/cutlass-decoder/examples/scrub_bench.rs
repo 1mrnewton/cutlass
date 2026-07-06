@@ -15,6 +15,11 @@
 //! - **random seek**: uniformly random targets across the clip (clicking
 //!   around the timeline).
 //!
+//! The backward-drag and random patterns run twice: exact (`frame_at`, what
+//! a settled preview pays) and keyframe-snapped (`frame_at_nearest`, what a
+//! mid-drag scrub pays) — the gap between them is the GOP-prefix re-decode
+//! that snap-scrubbing skips.
+//!
 //! Run:
 //!   `cargo run --release -p cutlass-decoder --example scrub_bench -- <media> [targets-per-pattern]`
 
@@ -58,30 +63,77 @@ fn main() {
 
         for step in [2i64, 8, 30] {
             let name = format!("forward drag (+{step}/target)");
-            bench_pattern(&mut *dec, &name, forward(frames, step, targets), fps);
+            bench_pattern(
+                &mut *dec,
+                &name,
+                forward(frames, step, targets),
+                fps,
+                Seek::Exact,
+            );
         }
         for step in [2i64, 8, 30] {
             let name = format!("backward drag (-{step}/target)");
-            bench_pattern(&mut *dec, &name, backward(frames, step, targets), fps);
+            bench_pattern(
+                &mut *dec,
+                &name,
+                backward(frames, step, targets),
+                fps,
+                Seek::Exact,
+            );
+        }
+        for step in [2i64, 8, 30] {
+            let name = format!("backward snap (-{step}/target)");
+            bench_pattern(
+                &mut *dec,
+                &name,
+                backward(frames, step, targets),
+                fps,
+                Seek::Nearest,
+            );
         }
         bench_pattern(
             &mut *dec,
             "jitter around hover point",
             jitter(frames, targets),
             fps,
+            Seek::Exact,
         );
         bench_pattern(
             &mut *dec,
             "random seek (whole clip)",
             random(frames, targets),
             fps,
+            Seek::Exact,
+        );
+        bench_pattern(
+            &mut *dec,
+            "random snap (whole clip)",
+            random(frames, targets),
+            fps,
+            Seek::Nearest,
         );
         println!();
     }
 }
 
-/// Time `frame_at` over `targets` (frame indices), reporting latency stats.
-fn bench_pattern(dec: &mut dyn VideoDecoder, label: &str, targets: Vec<i64>, fps: Rational) {
+/// Which decoder positioning API a pattern exercises.
+#[derive(Clone, Copy, PartialEq)]
+enum Seek {
+    /// `frame_at`: the exact frame (settled preview, export).
+    Exact,
+    /// `frame_at_nearest`: keyframe-snapped (mid-drag scrubbing).
+    Nearest,
+}
+
+/// Time exact or snapped positioning over `targets` (frame indices),
+/// reporting latency stats.
+fn bench_pattern(
+    dec: &mut dyn VideoDecoder,
+    label: &str,
+    targets: Vec<i64>,
+    fps: Rational,
+    seek: Seek,
+) {
     // Park the decoder at a known spot so patterns don't inherit the decode
     // position of the previous one.
     let _ = dec.frame_at(RationalTime::new(0, fps));
@@ -90,7 +142,11 @@ fn bench_pattern(dec: &mut dyn VideoDecoder, label: &str, targets: Vec<i64>, fps
     let total = Instant::now();
     for frame in targets {
         let start = Instant::now();
-        match dec.frame_at(RationalTime::new(frame, fps)) {
+        let result = match seek {
+            Seek::Exact => dec.frame_at(RationalTime::new(frame, fps)),
+            Seek::Nearest => dec.frame_at_nearest(RationalTime::new(frame, fps)),
+        };
+        match result {
             Ok(Some(_)) => samples.push(start.elapsed().as_secs_f64() * 1000.0),
             Ok(None) => continue, // duration overshoot near EOF: skip sample
             Err(e) => panic!("frame_at({frame}) failed: {e}"),

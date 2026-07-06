@@ -30,16 +30,24 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use cutlass_decoder::{AudioPeaks, audio_peaks_per_second};
 use cutlass_models::{MediaSource, Project, Rational, RationalTime, TimeRange, TrackKind};
 use cutlass_render::Renderer;
 use slint::{Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 use tracing::{error, info};
 
+use crate::interaction::InteractionGate;
 use crate::{StripBackend, StripTile};
+
+/// While the interaction gate is closed, poll for new requests at this
+/// cadence instead of decoding tiles — the backlog waits, registrations
+/// still apply immediately.
+const GATE_POLL: Duration = Duration::from_millis(100);
 
 /// Filmstrip tile width range on screen: `[MIN, 2·MIN)` px. The power-of-two
 /// time interval per tile is the smallest one at least `MIN` px wide.
@@ -412,6 +420,10 @@ pub fn waveform_tiles(
 enum StripMsg {
     /// Media imported: remember its path (requests only carry the id).
     Register { media_id: u64, path: PathBuf },
+    /// A preview proxy landed for `media_id`: decode *future filmstrip
+    /// frames* from this smaller short-GOP file instead of the original.
+    /// Waveforms are untouched — proxies carry no audio.
+    Proxy { media_id: u64, path: PathBuf },
     /// Decode the frames at `times_us` (media time, grid-aligned).
     Filmstrip { media_id: u64, times_us: Vec<i64> },
     /// Rasterize the waveform tiles starting at `times_us`, each spanning
@@ -435,6 +447,11 @@ impl StripHandle {
         let _ = self.tx.send(StripMsg::Register { media_id, path });
     }
 
+    /// Point future filmstrip decodes for `media_id` at its preview proxy.
+    pub fn register_proxy(&self, media_id: u64, path: PathBuf) {
+        let _ = self.tx.send(StripMsg::Proxy { media_id, path });
+    }
+
     fn request_filmstrip(&self, media_id: u64, times_us: Vec<i64>) {
         let _ = self.tx.send(StripMsg::Filmstrip { media_id, times_us });
     }
@@ -454,11 +471,14 @@ pub struct StripWorker {
 }
 
 impl StripWorker {
-    pub fn spawn(backend: slint::Weak<StripBackend<'static>>) -> Result<Self, String> {
+    pub fn spawn(
+        backend: slint::Weak<StripBackend<'static>>,
+        gate: Arc<InteractionGate>,
+    ) -> Result<Self, String> {
         let (tx, rx) = unbounded::<StripMsg>();
         let join = std::thread::Builder::new()
             .name("cutlass-strips".into())
-            .spawn(move || worker_loop(&rx, &backend))
+            .spawn(move || worker_loop(&rx, &backend, &gate))
             .map_err(|e| e.to_string())?;
 
         Ok(Self {
@@ -482,6 +502,10 @@ struct ScratchClip {
 
 struct WorkerState {
     paths: HashMap<u64, PathBuf>,
+    /// Preview-proxy overrides for *frame* decode: when present, the scratch
+    /// clip opens this file instead of `paths[id]`. Audio peaks always read
+    /// `paths` — proxies are video-only.
+    proxies: HashMap<u64, PathBuf>,
     /// Private renderer for frame tiles (own GPU queue + per-media decoder
     /// cache, so ascending same-media targets roll forward, never contending
     /// with the preview renderer). Lazy: brought up on first frame demand.
@@ -498,10 +522,18 @@ struct WorkerState {
 
 /// Newest-first work loop: registrations apply immediately, tile work is
 /// processed LIFO so the zoom level / viewport the user is looking at *now*
-/// fills in before stale requests from half a second ago.
-fn worker_loop(rx: &Receiver<StripMsg>, backend: &slint::Weak<StripBackend<'static>>) {
+/// fills in before stale requests from half a second ago. While the
+/// interaction gate reports scrub/playback the backlog holds — tile decode
+/// and composite would contend with the preview for the same decode engine
+/// and iGPU (field logs: ~100 ms composites for 228×128 tiles under load).
+fn worker_loop(
+    rx: &Receiver<StripMsg>,
+    backend: &slint::Weak<StripBackend<'static>>,
+    gate: &InteractionGate,
+) {
     let mut state = WorkerState {
         paths: HashMap::new(),
+        proxies: HashMap::new(),
         renderer: None,
         scratch: HashMap::new(),
         frames_failed: HashSet::new(),
@@ -520,6 +552,17 @@ fn worker_loop(rx: &Receiver<StripMsg>, backend: &slint::Weak<StripBackend<'stat
         while let Ok(msg) = rx.try_recv() {
             triage(msg, &mut state, &mut backlog);
         }
+        // Defer (never drop) tile work while the user scrubs or plays:
+        // the UI-side pending sets stay valid because every deferred
+        // request is still eventually processed and delivered.
+        if gate.busy() {
+            match rx.recv_timeout(GATE_POLL) {
+                Ok(msg) => triage(msg, &mut state, &mut backlog),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+            continue;
+        }
         if let Some(work) = backlog.pop() {
             match work {
                 StripMsg::Filmstrip { media_id, times_us } => {
@@ -532,7 +575,9 @@ fn worker_loop(rx: &Receiver<StripMsg>, backend: &slint::Weak<StripBackend<'stat
                 } => {
                     process_waveform(&mut state, media_id, k, &times_us, backend);
                 }
-                StripMsg::Register { .. } => unreachable!("registrations apply in triage"),
+                StripMsg::Register { .. } | StripMsg::Proxy { .. } => {
+                    unreachable!("registrations apply in triage")
+                }
             }
         }
     }
@@ -543,14 +588,26 @@ fn triage(msg: StripMsg, state: &mut WorkerState, backlog: &mut Vec<StripMsg>) {
         StripMsg::Register { media_id, path } => {
             info!(media_id, path = %path.display(), "strip worker registered media");
             // Re-registration (relink) invalidates the cached scratch clip
-            // and failure latches so the new file gets a fresh chance.
+            // and failure latches so the new file gets a fresh chance — and
+            // the old file's proxy, which no longer matches the content.
             if state.paths.get(&media_id) != Some(&path) {
+                state.proxies.remove(&media_id);
                 state.scratch.remove(&media_id);
                 state.peaks.remove(&media_id);
                 state.frames_failed.remove(&media_id);
                 state.peaks_failed.remove(&media_id);
             }
             state.paths.insert(media_id, path);
+        }
+        StripMsg::Proxy { media_id, path } => {
+            info!(media_id, proxy = %path.display(), "strip worker switched to proxy");
+            // Tiles already delivered stay (same content); the dropped
+            // scratch clip makes every *future* decode open the proxy.
+            if state.proxies.get(&media_id) != Some(&path) {
+                state.scratch.remove(&media_id);
+                state.frames_failed.remove(&media_id);
+                state.proxies.insert(media_id, path);
+            }
         }
         work => backlog.push(work),
     }
@@ -578,14 +635,20 @@ fn process_filmstrip(
     deliver_frames(media_id, results, backend);
 }
 
-/// Fit-render the media's frame at `t_us` through its scratch clip. `None`
-/// (a placeholder tile) when the media can't be probed or rendered.
+/// Fit-render the media's frame at `t_us` through its scratch clip — built
+/// over the preview proxy when one has registered (same content, far
+/// cheaper decode). `None` (a placeholder tile) when the media can't be
+/// probed or rendered.
 fn render_strip_frame(state: &mut WorkerState, media_id: u64, t_us: i64) -> Option<RgbaImage> {
     if state.frames_failed.contains(&media_id) {
         return None;
     }
     if !state.scratch.contains_key(&media_id) {
-        let Some(path) = state.paths.get(&media_id) else {
+        let Some(path) = state
+            .proxies
+            .get(&media_id)
+            .or_else(|| state.paths.get(&media_id))
+        else {
             error!(media_id, "filmstrip request for unregistered media");
             state.frames_failed.insert(media_id);
             return None;

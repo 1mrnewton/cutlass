@@ -119,6 +119,30 @@ pub trait VideoDecoder: Send {
         }
         Ok(None)
     }
+
+    /// Decode *a* frame near `target`, trading exactness for speed — the
+    /// keyframe-snap primitive for interactive scrubbing. Where
+    /// [`frame_at`](VideoDecoder::frame_at) pays a keyframe-prefix walk
+    /// (potentially a whole GOP — hundreds of decodes on long-GOP sources)
+    /// to land exactly, this seeks (landing on the sync frame at or before
+    /// `target`) and decodes exactly one frame.
+    ///
+    /// The returned frame's PTS is therefore usually *before* `target`, by
+    /// up to a GOP. Callers own the follow-up exact decode once the
+    /// interaction settles, and must not cache the result under the exact
+    /// target. `Ok(None)` means the seek landed at/past end of stream.
+    ///
+    /// Backends with roll-forward state should override this to delegate to
+    /// `frame_at` when the target is just ahead of the last emitted frame
+    /// (inside the roll window) — there the exact walk is cheaper than a
+    /// container seek *and* lands exactly.
+    fn frame_at_nearest(
+        &mut self,
+        target: RationalTime,
+    ) -> Result<Option<VideoFrame>, DecodeError> {
+        self.seek(target)?;
+        self.next_frame()
+    }
 }
 
 #[cfg(test)]

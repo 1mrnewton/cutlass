@@ -115,7 +115,11 @@ impl SeekStats {
     fn roll_window_us(&self, frame_rate: Rational) -> i64 {
         let fps = if frame_rate.is_valid() {
             let fps = f64::from(frame_rate.num) / f64::from(frame_rate.den);
-            if fps.is_finite() && fps > 0.0 { fps } else { FALLBACK_FPS }
+            if fps.is_finite() && fps > 0.0 {
+                fps
+            } else {
+                FALLBACK_FPS
+            }
         } else {
             FALLBACK_FPS
         };
@@ -237,7 +241,12 @@ pub(crate) fn frame_at_rolling<D: VideoDecoder + ?Sized>(
     target: RationalTime,
 ) -> Result<Option<VideoFrame>, DecodeError> {
     let frame_rate = decoder.info().frame_rate;
-    let rolling = should_roll_forward(last_pts, target, frame_rate, stats.roll_window_us(frame_rate));
+    let rolling = should_roll_forward(
+        last_pts,
+        target,
+        frame_rate,
+        stats.roll_window_us(frame_rate),
+    );
     let start = Instant::now();
     if !rolling {
         decoder.seek(target)?;
@@ -256,6 +265,35 @@ pub(crate) fn frame_at_rolling<D: VideoDecoder + ?Sized>(
         }
     }
     Ok(None)
+}
+
+/// [`VideoDecoder::frame_at_nearest`] with the same roll-forward fast path
+/// as [`frame_at_rolling`]: a target just ahead of the last emitted frame
+/// (inside the adaptive window) takes the exact walk — a couple of
+/// `next_frame`s are cheaper than a container seek *and* land exactly.
+/// Every other target seeks and decodes a single frame, snapping to the
+/// sync point at or before `target`.
+///
+/// The snap path deliberately does **not** feed `stats`: its cost (one
+/// decode) says nothing about a full exact `frame_at`, and folding it into
+/// the seek EMA would shrink the roll window that exact calls rely on.
+pub(crate) fn frame_at_nearest_rolling<D: VideoDecoder + ?Sized>(
+    decoder: &mut D,
+    last_pts: Option<RationalTime>,
+    stats: &mut SeekStats,
+    target: RationalTime,
+) -> Result<Option<VideoFrame>, DecodeError> {
+    let frame_rate = decoder.info().frame_rate;
+    if should_roll_forward(
+        last_pts,
+        target,
+        frame_rate,
+        stats.roll_window_us(frame_rate),
+    ) {
+        return frame_at_rolling(decoder, last_pts, stats, target);
+    }
+    decoder.seek(target)?;
+    decoder.next_frame()
 }
 
 #[cfg(test)]
@@ -316,8 +354,18 @@ mod tests {
         ));
         // Stream-tick time bases (large numerators) stay exact too.
         let last_ticks = Some(rt(90_000, Rational::new(90_000, 1))); // t = 1 s
-        assert!(should_roll_forward(last_ticks, rt(60, R30), R30, ONE_SEC_US)); // 2 s
-        assert!(!should_roll_forward(last_ticks, rt(61, R30), R30, ONE_SEC_US)); // 2 s + 1 frame
+        assert!(should_roll_forward(
+            last_ticks,
+            rt(60, R30),
+            R30,
+            ONE_SEC_US
+        )); // 2 s
+        assert!(!should_roll_forward(
+            last_ticks,
+            rt(61, R30),
+            R30,
+            ONE_SEC_US
+        )); // 2 s + 1 frame
     }
 
     #[test]
@@ -368,7 +416,10 @@ mod tests {
             stats.observe_seek(60_000.0);
             stats.observe_roll_frame(0.01);
         }
-        assert_eq!(stats.roll_window_us(R30), (MAX_ROLL_WINDOW_SECS * 1e6) as i64);
+        assert_eq!(
+            stats.roll_window_us(R30),
+            (MAX_ROLL_WINDOW_SECS * 1e6) as i64
+        );
     }
 
     /// The Media Foundation shape: PTS on a fine integer tick base (100-ns)
@@ -388,7 +439,12 @@ mod tests {
         // (the decoder is already past it)...
         assert!(!should_roll_forward(Some(pts), target, NTSC, ONE_SEC_US));
         // ...while the *next* frame rolls instead of seeking.
-        assert!(should_roll_forward(Some(pts), rt(2, NTSC), NTSC, ONE_SEC_US));
+        assert!(should_roll_forward(
+            Some(pts),
+            rt(2, NTSC),
+            NTSC,
+            ONE_SEC_US
+        ));
     }
 
     /// On a frame-granular tick base (PTS ticks == frames), the slack must
@@ -479,6 +535,17 @@ mod tests {
             self.stats = stats;
             result
         }
+
+        fn frame_at_nearest(
+            &mut self,
+            target: RationalTime,
+        ) -> Result<Option<VideoFrame>, DecodeError> {
+            let last = self.last_pts;
+            let mut stats = self.stats;
+            let result = frame_at_nearest_rolling(self, last, &mut stats, target);
+            self.stats = stats;
+            result
+        }
     }
 
     #[test]
@@ -518,5 +585,29 @@ mod tests {
         // Within the roll window but past the last frame.
         assert!(dec.frame_at(rt(12, R30)).unwrap().is_none());
         assert_eq!(dec.seeks, 1, "the roll path must not seek");
+    }
+
+    /// A far target snaps: one seek, one decode, and the frame is the sync
+    /// point at/before the target (frame 0 here — the mock's only keyframe),
+    /// not the exact target. That single decode replacing the GOP-prefix
+    /// walk is the whole point of the API.
+    #[test]
+    fn nearest_far_target_snaps_to_sync_frame_with_one_decode() {
+        let mut dec = MockDecoder::new(120);
+        let f = dec.frame_at_nearest(rt(100, R30)).unwrap().unwrap();
+        assert_eq!(f.pts.value, 0, "snap lands on the keyframe, not target");
+        assert_eq!(dec.seeks, 1);
+        assert_eq!(dec.cursor, 1, "exactly one frame decoded");
+    }
+
+    /// A target just ahead of the last emitted frame stays on the exact
+    /// roll path: no seek, and the frame is the exact target.
+    #[test]
+    fn nearest_target_just_ahead_rolls_exactly() {
+        let mut dec = MockDecoder::new(60);
+        dec.frame_at(rt(10, R30)).unwrap().unwrap();
+        let f = dec.frame_at_nearest(rt(12, R30)).unwrap().unwrap();
+        assert_eq!(f.pts.value, 12, "roll-window targets land exactly");
+        assert_eq!(dec.seeks, 1, "the nearest roll path must not seek");
     }
 }

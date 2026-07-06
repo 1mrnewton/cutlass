@@ -6,7 +6,7 @@
 //! re-initializing the GPU or re-opening decoders.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use cutlass_compositor::{
@@ -27,6 +27,55 @@ use crate::scene::{LayerSource, Scene, SizeSpec};
 /// (default-visible): interactive preview budgets a few frames of latency,
 /// and anything past this is worth attributing to decode vs GPU work.
 const SLOW_FRAME_LOG_MS: f64 = 150.0;
+
+/// Per-stage timing of the most recent successful frame render.
+///
+/// Callers that adapt render *resolution* to cost (the preview quality
+/// ladder) need the split, not the total: decode runs at the source's native
+/// size no matter how small the output canvas is, so only
+/// [`scaled_cost_ms`](Self::scaled_cost_ms) responds to rendering smaller.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FrameStats {
+    /// Media decode time summed across layers (resolution-independent).
+    pub decode_ms: f64,
+    /// Text/shape/still realize time (raster caches, still decodes).
+    pub raster_ms: f64,
+    /// GPU composite + readback — scales with output pixels.
+    pub composite_ms: f64,
+}
+
+impl FrameStats {
+    /// The portion of the frame cost that shrinks with output resolution
+    /// (composite + raster) — what a quality ladder can actually buy back.
+    pub fn scaled_cost_ms(&self) -> f64 {
+        self.raster_ms + self.composite_ms
+    }
+
+    /// Whole-frame cost (decode + raster + composite).
+    pub fn total_ms(&self) -> f64 {
+        self.decode_ms + self.raster_ms + self.composite_ms
+    }
+}
+
+/// How media decoders are positioned when realizing a frame.
+///
+/// `Exact` is correctness (export, settled preview); `NearestSync` is the
+/// scrub-latency escape hatch: on long-GOP sources an exact mid-GOP target
+/// costs a keyframe-prefix walk of hundreds of decodes, where the nearest
+/// sync frame costs one. Frames rendered under `NearestSync` may show
+/// content up to a GOP *before* the requested time — callers own the
+/// follow-up exact render and must never cache snapped output under an
+/// exact key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SeekPolicy {
+    /// Decode the exact frame covering each layer's source time.
+    #[default]
+    Exact,
+    /// Snap to the cheapest frame near the target: one decode from the
+    /// sync point at/before it (or a short exact roll when the target is
+    /// just ahead of the decoder's position).
+    NearestSync,
+}
 
 /// Renders project frames on a headless (or shared) GPU.
 pub struct Renderer {
@@ -58,6 +107,21 @@ pub struct Renderer {
     /// GPU without NV12 texture support), the renderer permanently falls back
     /// to [`OutputMode::Cpu`] and retries.
     decode_mode: OutputMode,
+    /// Runtime-only substitute decode paths (preview proxies): when present
+    /// (and [`use_proxies`](Self::use_proxies) holds), decoders for a media
+    /// id open this file instead of the project's. Session state — never
+    /// serialized, cleared when the session's media-id space changes
+    /// (open/load/relink). Content must match the original frame-for-frame;
+    /// only resolution/GOP may differ, so placement geometry (driven by the
+    /// model's dimensions) stays valid and normalized UVs sample correctly.
+    proxies: HashMap<MediaId, PathBuf>,
+    /// Whether [`decode`](Self::decode) honors `proxies`. Preview leaves
+    /// this on; full-quality paths sharing this renderer (the engine's
+    /// export command) flip it off for the pass. Toggling drops the
+    /// proxied media's open decoders so no cursor outlives its file.
+    use_proxies: bool,
+    /// Stage timings of the last successful render (see [`FrameStats`]).
+    last_stats: FrameStats,
 }
 
 impl Renderer {
@@ -75,7 +139,71 @@ impl Renderer {
             decoders: HashMap::new(),
             stills: HashMap::new(),
             decode_mode: default_decode_mode(),
+            proxies: HashMap::new(),
+            use_proxies: true,
+            last_stats: FrameStats::default(),
         })
+    }
+
+    /// Stage timings of the most recent successful render — how the last
+    /// frame's cost split between decode, raster, and composite. Zeroed
+    /// until the first render completes.
+    pub fn last_frame_stats(&self) -> FrameStats {
+        self.last_stats
+    }
+
+    /// Decode `media` from the file at `path` (a preview proxy) instead of
+    /// the project's own path, from the next frame on. Drops the media's
+    /// open decoders so no cursor keeps reading the original.
+    pub fn set_proxy(&mut self, media: MediaId, path: PathBuf) {
+        self.proxies.insert(media, path);
+        self.drop_decoders_for(media);
+    }
+
+    /// Remove `media`'s proxy substitution (e.g. the media was relinked to a
+    /// new file), returning decode to the project's path.
+    pub fn clear_proxy(&mut self, media: MediaId) {
+        if self.proxies.remove(&media).is_some() {
+            self.drop_decoders_for(media);
+        }
+    }
+
+    /// Remove every proxy substitution — required when the session swaps
+    /// projects: media ids persist in project files, so an id from the old
+    /// registry can name a different file in the new one.
+    pub fn clear_proxies(&mut self) {
+        let stale: Vec<MediaId> = self.proxies.keys().copied().collect();
+        self.proxies.clear();
+        for media in stale {
+            self.drop_decoders_for(media);
+        }
+    }
+
+    /// The proxy path registered for `media`, if any (regardless of
+    /// [`set_use_proxies`](Self::set_use_proxies)).
+    pub fn proxy_for(&self, media: MediaId) -> Option<&Path> {
+        self.proxies.get(&media).map(PathBuf::as_path)
+    }
+
+    /// Turn proxy substitution on/off for subsequent decodes. Off renders
+    /// full quality from the originals (the engine's in-place export);
+    /// proxied media's open decoders drop on every change of state so a
+    /// stale cursor can never serve the wrong file.
+    pub fn set_use_proxies(&mut self, on: bool) {
+        if self.use_proxies == on {
+            return;
+        }
+        self.use_proxies = on;
+        let proxied: Vec<MediaId> = self.proxies.keys().copied().collect();
+        for media in proxied {
+            self.drop_decoders_for(media);
+        }
+    }
+
+    /// Drop every open decoder slot for `media` (see `decoders` — one entry
+    /// per on-screen occurrence).
+    fn drop_decoders_for(&mut self, media: MediaId) {
+        self.decoders.retain(|(id, _), _| *id != media);
     }
 
     /// Add a font face (TTF/OTF bytes) for deterministic text rendering. Without
@@ -143,22 +271,27 @@ impl Renderer {
 
     /// [`render_frame_with`](Self::render_frame_with) writing the composited
     /// rows directly into `sink`-provided storage (see
-    /// [`render_scene_into`](Self::render_scene_into)).
+    /// [`render_scene_into`](Self::render_scene_into)), decoding under
+    /// `policy` — the interactive-preview entry point, where a scrub drag
+    /// passes [`SeekPolicy::NearestSync`].
     pub fn render_frame_into_with(
         &mut self,
         project: &Project,
         t: RationalTime,
         overrides: ResolveOverrides<'_>,
+        policy: SeekPolicy,
         sink: &mut dyn FrameSink,
     ) -> Result<(), RenderError> {
         let scene = resolve_with(project, t, overrides)?;
-        self.render_scene_into(project, &scene, sink)
+        self.render_scene_into_policy(project, &scene, sink, policy)
     }
 
     /// [`render_frame_fit_with`](Self::render_frame_fit_with) writing the
     /// composited rows directly into `sink`-provided storage — the
     /// interactive-preview path, which hands the pixels straight to the UI's
     /// frame buffer instead of round-tripping through an [`RgbaImage`].
+    /// Decodes under `policy` (see [`render_frame_into_with`](Self::render_frame_into_with)).
+    #[allow(clippy::too_many_arguments)] // the preview call: bound + overrides + policy are all load-bearing
     pub fn render_frame_fit_into_with(
         &mut self,
         project: &Project,
@@ -166,11 +299,12 @@ impl Renderer {
         max_width: u32,
         max_height: u32,
         overrides: ResolveOverrides<'_>,
+        policy: SeekPolicy,
         sink: &mut dyn FrameSink,
     ) -> Result<(), RenderError> {
         let mut scene = resolve_with(project, t, overrides)?;
         scene.fit_within(max_width, max_height);
-        self.render_scene_into(project, &scene, sink)
+        self.render_scene_into_policy(project, &scene, sink, policy)
     }
 
     /// [`render_frame`](Self::render_frame) at an exact output size: content
@@ -217,7 +351,17 @@ impl Renderer {
         scene: &Scene,
         sink: &mut dyn FrameSink,
     ) -> Result<(), RenderError> {
-        match self.render_scene_once(project, scene, sink) {
+        self.render_scene_into_policy(project, scene, sink, SeekPolicy::Exact)
+    }
+
+    fn render_scene_into_policy(
+        &mut self,
+        project: &Project,
+        scene: &Scene,
+        sink: &mut dyn FrameSink,
+        policy: SeekPolicy,
+    ) -> Result<(), RenderError> {
+        match self.render_scene_once(project, scene, sink, policy) {
             Err(RenderError::Compositor(CompositorError::UnsupportedFormat(_)))
                 if self.decode_mode == OutputMode::Gpu =>
             {
@@ -226,7 +370,7 @@ impl Renderer {
                 // decoders reopen in CPU mode on the next decode.
                 self.decode_mode = OutputMode::Cpu;
                 self.decoders.clear();
-                self.render_scene_once(project, scene, sink)
+                self.render_scene_once(project, scene, sink, policy)
             }
             other => other,
         }
@@ -237,6 +381,7 @@ impl Renderer {
         project: &Project,
         scene: &Scene,
         sink: &mut dyn FrameSink,
+        policy: SeekPolicy,
     ) -> Result<(), RenderError> {
         let realize_started = Instant::now();
         // Decode time accumulated across media layers — on weak machines this
@@ -285,7 +430,7 @@ impl Renderer {
                 LayerSource::Media { media, source_time } => {
                     let slot = occurrence.entry(*media).or_insert(0);
                     let decode_started = Instant::now();
-                    let frame = self.decode(project, *media, *slot, *source_time)?;
+                    let frame = self.decode(project, *media, *slot, *source_time, policy)?;
                     decode_ms += decode_started.elapsed().as_secs_f64() * 1000.0;
                     *slot += 1;
                     let size = fixed_size(layer.size, [scene.width as f32, scene.height as f32]);
@@ -393,6 +538,11 @@ impl Renderer {
         let composite_ms = composite_started.elapsed().as_secs_f64() * 1000.0;
         let raster_ms = (realize_ms - decode_ms).max(0.0);
         let total_ms = realize_ms + composite_ms;
+        self.last_stats = FrameStats {
+            decode_ms,
+            raster_ms,
+            composite_ms,
+        };
         if total_ms > SLOW_FRAME_LOG_MS {
             tracing::info!(
                 decode_ms = %format_args!("{decode_ms:.1}"),
@@ -416,25 +566,44 @@ impl Renderer {
     }
 
     /// Decode the frame of `media` at `source_time`, opening (and caching) a
-    /// decoder for this `(media, slot)` use on first sight.
+    /// decoder for this `(media, slot)` use on first sight — over the
+    /// media's proxy file when one is registered (see
+    /// [`set_proxy`](Self::set_proxy)). Under [`SeekPolicy::NearestSync`]
+    /// the frame may be the sync point before `source_time` rather than the
+    /// exact frame (see [`SeekPolicy`]).
     fn decode(
         &mut self,
         project: &Project,
         media: MediaId,
         slot: u32,
         source_time: RationalTime,
+        policy: SeekPolicy,
     ) -> Result<VideoFrame, RenderError> {
         let mode = self.decode_mode;
+        let proxy = self.use_proxies.then(|| self.proxies.get(&media)).flatten();
         let decoder = match self.decoders.entry((media, slot)) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => {
                 let src = project
                     .media(media)
                     .ok_or(RenderError::MissingMedia(media))?;
-                e.insert(open_decoder(src.path(), mode)?)
+                let path = proxy.map(PathBuf::as_path).unwrap_or_else(|| src.path());
+                e.insert(open_decoder(path, mode)?)
             }
         };
-        decoder.frame_at(source_time)?.ok_or(RenderError::NoFrame {
+        let mut frame = match policy {
+            SeekPolicy::Exact => decoder.frame_at(source_time)?,
+            SeekPolicy::NearestSync => decoder.frame_at_nearest(source_time)?,
+        };
+        // Proxies run a frame short by construction (generation drops the
+        // container-reported tail, which routinely over-counts by one): an
+        // exact target at the media's very end can overshoot the proxy's
+        // EOF. Show the nearest decodable frame instead of failing the
+        // whole composite over the final tick.
+        if frame.is_none() && proxy.is_some() {
+            frame = decoder.frame_at_nearest(source_time)?;
+        }
+        frame.ok_or(RenderError::NoFrame {
             media,
             time: source_time,
         })

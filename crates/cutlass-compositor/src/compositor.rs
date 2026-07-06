@@ -52,9 +52,11 @@ impl ImageSink {
 
 impl FrameSink for ImageSink {
     fn pixels(&mut self, width: u32, height: u32) -> &mut [u8] {
-        let image = self
-            .0
-            .insert(RgbaImage::new(width, height, vec![0; (width as usize) * (height as usize) * 4]));
+        let image = self.0.insert(RgbaImage::new(
+            width,
+            height,
+            vec![0; (width as usize) * (height as usize) * 4],
+        ));
         &mut image.pixels
     }
 }

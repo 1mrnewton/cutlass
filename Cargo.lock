@@ -1238,6 +1238,7 @@ dependencies = [
  "cutlass-commands",
  "cutlass-compositor",
  "cutlass-decoder",
+ "cutlass-encoder",
  "cutlass-engine",
  "cutlass-models",
  "cutlass-render",
@@ -1272,6 +1273,7 @@ dependencies = [
  "objc2-core-media",
  "objc2-core-video",
  "objc2-foundation 0.3.2",
+ "windows 0.62.2",
 ]
 
 [[package]]

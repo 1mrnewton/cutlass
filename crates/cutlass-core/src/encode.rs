@@ -49,6 +49,12 @@ pub struct EncoderConfig {
     /// Audio track configuration. `None` ⇒ a video-only file (the encoder adds
     /// no audio track and [`push_audio`](VideoEncoder::push_audio) is unused).
     pub audio: Option<AudioEncoderConfig>,
+    /// Maximum keyframe (sync-point) spacing in frames. `None` leaves the
+    /// codec's default GOP policy (typically seconds-long for delivery).
+    /// Preview proxies set a short interval (~15) so scrub seeks decode at
+    /// most a few frames to reach any target.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub keyframe_interval: Option<u32>,
 }
 
 impl EncoderConfig {
@@ -59,12 +65,19 @@ impl EncoderConfig {
             frame_rate,
             color,
             audio: None,
+            keyframe_interval: None,
         }
     }
 
     /// Add an audio track to this config.
     pub fn with_audio(mut self, audio: AudioEncoderConfig) -> Self {
         self.audio = Some(audio);
+        self
+    }
+
+    /// Cap the keyframe (sync-point) spacing at `frames`.
+    pub fn with_keyframe_interval(mut self, frames: u32) -> Self {
+        self.keyframe_interval = Some(frames);
         self
     }
 }

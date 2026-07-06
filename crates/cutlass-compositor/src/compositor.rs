@@ -27,6 +27,40 @@ use crate::layer::{CompositeLayer, CompositorConfig, LayerContent, LayerPlacemen
 /// and read them straight back into PNG/export without an extra transfer.
 const CANVAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// Caller-provided destination for a composited frame's pixels, so a render
+/// can write its readback rows straight into storage the caller owns (a UI
+/// framebuffer) instead of allocating an [`RgbaImage`] and copying again.
+pub trait FrameSink {
+    /// Called **once per successful render**, after the GPU work and buffer
+    /// map succeeded, with the output dimensions. Must return exactly
+    /// `width * height * 4` bytes; the compositor fills them with tightly
+    /// packed row-major RGBA. A failed render never calls this.
+    fn pixels(&mut self, width: u32, height: u32) -> &mut [u8];
+}
+
+/// The [`FrameSink`] behind the [`RgbaImage`]-returning render paths: it
+/// allocates the image at the reported size and hands out its bytes.
+#[derive(Default)]
+pub struct ImageSink(Option<RgbaImage>);
+
+impl ImageSink {
+    /// The rendered image; `None` until a render succeeded into this sink.
+    pub fn into_image(self) -> Option<RgbaImage> {
+        self.0
+    }
+}
+
+impl FrameSink for ImageSink {
+    fn pixels(&mut self, width: u32, height: u32) -> &mut [u8] {
+        let image = self.0.insert(RgbaImage::new(
+            width,
+            height,
+            vec![0; (width as usize) * (height as usize) * 4],
+        ));
+        &mut image.pixels
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct YuvUniforms {
@@ -154,6 +188,13 @@ pub struct Compositor {
     /// and the caller can decode in CPU mode instead.
     #[cfg(target_vendor = "apple")]
     metal_import: Option<crate::metal_import::MetalSurfaceImporter>,
+    /// Maps Windows shared D3D11 NV12 textures into `wgpu` textures with no
+    /// CPU copy. `None` when the device isn't the D3D12 backend or lacks
+    /// `TEXTURE_FORMAT_NV12` — GPU frames then fall back to
+    /// [`CompositorError::UnsupportedFormat`] and the caller can decode in CPU
+    /// mode instead.
+    #[cfg(target_os = "windows")]
+    dx12_import: Option<crate::dx12_import::Dx12SurfaceImporter>,
 }
 
 impl Compositor {
@@ -261,6 +302,8 @@ impl Compositor {
             target: None,
             #[cfg(target_vendor = "apple")]
             metal_import: crate::metal_import::MetalSurfaceImporter::new(gpu),
+            #[cfg(target_os = "windows")]
+            dx12_import: crate::dx12_import::Dx12SurfaceImporter::new(gpu),
         }
     }
 
@@ -320,6 +363,24 @@ impl Compositor {
         config: &CompositorConfig,
         layers: &[CompositeLayer<'_>],
     ) -> Result<RgbaImage, CompositorError> {
+        let mut sink = ImageSink::default();
+        self.render_into(gpu, config, layers, &mut sink)?;
+        Ok(sink
+            .into_image()
+            .expect("render_into fills the sink on success"))
+    }
+
+    /// [`render`](Self::render) writing the readback rows directly into
+    /// `sink`-provided storage — the interactive-preview path, where the
+    /// tight `Vec` this would otherwise allocate is immediately copied into
+    /// a UI pixel buffer and dropped.
+    pub fn render_into(
+        &mut self,
+        gpu: &GpuContext,
+        config: &CompositorConfig,
+        layers: &[CompositeLayer<'_>],
+        sink: &mut dyn FrameSink,
+    ) -> Result<(), CompositorError> {
         if config.width == 0 || config.height == 0 {
             return Err(CompositorError::InvalidDimensions {
                 width: config.width,
@@ -412,6 +473,7 @@ impl Compositor {
             target.padded_bytes_per_row,
             config.width,
             config.height,
+            sink,
         );
         if result.is_err() {
             // A failed map can leave the buffer in an unmappable state; drop
@@ -686,9 +748,37 @@ impl Compositor {
                 ))),
             }
         }
-        // Android (`AHardwareBuffer`) and Windows (`D3D11Texture2D`) import are
-        // not wired yet; the decoders deliver CPU planes on those platforms, so
-        // this branch is currently unreachable in practice.
+        #[cfg(target_os = "windows")]
+        {
+            use cutlass_core::GpuSurfaceKind;
+            match surface.kind() {
+                GpuSurfaceKind::D3D11Texture2D => {
+                    if frame.format != PixelFormat::Nv12 {
+                        return Err(CompositorError::UnsupportedFormat(format!(
+                            "zero-copy import supports NV12 D3D11 surfaces; got {:?}",
+                            frame.format
+                        )));
+                    }
+                    let importer = self.dx12_import.as_ref().ok_or_else(|| {
+                        CompositorError::UnsupportedFormat(
+                            "D3D12 surface import is unavailable on this device".into(),
+                        )
+                    })?;
+                    let textures = importer.import_nv12(gpu, surface, (cw, ch))?;
+                    // No compositor-side keep-alive needed: the wgpu texture
+                    // holds the opened ID3D12Resource, and the decoder-side
+                    // pool slot rides in the *frame's* keep-alive, which the
+                    // renderer holds until the pass completes.
+                    Ok((textures, true, None))
+                }
+                other => Err(CompositorError::UnsupportedFormat(format!(
+                    "GPU surface kind {other:?} import is not implemented yet"
+                ))),
+            }
+        }
+        // Android (`AHardwareBuffer`) import is not wired yet; the decoder
+        // delivers CPU planes there, so this branch is currently unreachable
+        // in practice.
         //
         // Android plan: decode into a `Surface`/`ImageReader` to obtain an
         // `AHardwareBuffer`, then import on the Vulkan backend via
@@ -715,7 +805,7 @@ impl Compositor {
         // copy, but not a single-sample import. Until that lands, Android stays
         // on the hardware-decode + CPU-plane path (one plane copy/frame), which
         // is already wired and correct.
-        #[cfg(not(target_vendor = "apple"))]
+        #[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
         {
             let _ = (gpu, frame, surface, cw, ch);
             Err(CompositorError::UnsupportedFormat(
@@ -839,15 +929,17 @@ impl Compositor {
     }
 }
 
-/// Map the (already-submitted) readback buffer and copy it into a tight
-/// [`RgbaImage`], stripping the per-row copy padding.
+/// Map the (already-submitted) readback buffer and copy its rows — stripped
+/// of the per-row copy padding — into `sink`-provided storage. The sink is
+/// only consulted once the map succeeded.
 fn map_readback(
     gpu: &GpuContext,
     buffer: &wgpu::Buffer,
     padded: u32,
     width: u32,
     height: u32,
-) -> Result<RgbaImage, CompositorError> {
+    sink: &mut dyn FrameSink,
+) -> Result<(), CompositorError> {
     let slice = buffer.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |res| {
@@ -862,7 +954,8 @@ fn map_readback(
 
     let unpadded = (width * 4) as usize;
     let mapped = slice.get_mapped_range();
-    let mut pixels = vec![0u8; unpadded * height as usize];
+    let pixels = sink.pixels(width, height);
+    debug_assert_eq!(pixels.len(), unpadded * height as usize);
     for row in 0..height as usize {
         let src = row * padded as usize;
         let dst = row * unpadded;
@@ -871,7 +964,7 @@ fn map_readback(
     drop(mapped);
     buffer.unmap();
 
-    Ok(RgbaImage::new(width, height, pixels))
+    Ok(())
 }
 
 fn plane_tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {

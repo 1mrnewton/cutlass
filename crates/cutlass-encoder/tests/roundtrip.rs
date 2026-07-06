@@ -1,7 +1,7 @@
 //! Hermetic round-trip: encode synthetic RGBA frames to an mp4 with the native
 //! encoder, then decode the file back with the native decoder.
 
-#![cfg(target_vendor = "apple")]
+#![cfg(any(target_vendor = "apple", target_os = "windows"))]
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,8 +9,17 @@ use cutlass_core::{
     AudioEncoderConfig, ColorSpace, CpuImage, EncoderConfig, FrameData, PixelFormat, Plane,
     Rational, RationalTime, Rect, Rotation, VideoDecoder, VideoEncoder, VideoFrame,
 };
-use cutlass_decoder::{AvfDecoder, OutputMode, open_audio_reader, probe};
-use cutlass_encoder::AvfEncoder;
+use cutlass_decoder::{OutputMode, open_audio_reader, probe};
+
+#[cfg(target_vendor = "apple")]
+use cutlass_decoder::AvfDecoder as NativeDecoder;
+#[cfg(target_vendor = "apple")]
+use cutlass_encoder::AvfEncoder as NativeEncoder;
+
+#[cfg(target_os = "windows")]
+use cutlass_decoder::WmfDecoder as NativeDecoder;
+#[cfg(target_os = "windows")]
+use cutlass_encoder::WmfEncoder as NativeEncoder;
 
 fn temp_mp4(tag: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -44,7 +53,7 @@ fn encodes_an_mp4_that_decodes_back() {
     let path = temp_mp4("roundtrip");
 
     let config = EncoderConfig::new((width, height), rate, ColorSpace::BT709);
-    let mut encoder = AvfEncoder::open(&path, config).expect("open encoder");
+    let mut encoder = NativeEncoder::open(&path, config).expect("open encoder");
     for i in 0..6 {
         encoder
             .push(&solid_rgba_frame(width, height, i, rate))
@@ -56,13 +65,47 @@ fn encodes_an_mp4_that_decodes_back() {
     assert!(meta.len() > 0, "encoded file is empty");
 
     // Decode it back through the platform decoder.
-    let mut decoder = AvfDecoder::open(&path, OutputMode::Cpu).expect("open decoder");
+    let mut decoder = NativeDecoder::open(&path, OutputMode::Cpu).expect("open decoder");
     assert_eq!(decoder.info().display_size, (width, height));
     let frame = decoder
         .next_frame()
         .expect("decode")
         .expect("at least one frame");
     assert_eq!((frame.width(), frame.height()), (width, height));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The short-GOP config proxies use: every frame must still decode back, and
+/// a mid-file `frame_at` must land (proxy scrubbing relies on dense sync
+/// points making those seeks cheap).
+#[test]
+fn encodes_a_short_gop_mp4_that_seeks() {
+    let (width, height) = (320u32, 240u32);
+    let rate = Rational::FPS_30;
+    let path = temp_mp4("shortgop");
+
+    let config =
+        EncoderConfig::new((width, height), rate, ColorSpace::BT709).with_keyframe_interval(15);
+    let mut encoder = NativeEncoder::open(&path, config).expect("open encoder");
+    let frames = 60;
+    for i in 0..frames {
+        encoder
+            .push(&solid_rgba_frame(width, height, i, rate))
+            .expect("push frame");
+    }
+    encoder.finish().expect("finish");
+
+    let mut decoder = NativeDecoder::open(&path, OutputMode::Cpu).expect("open decoder");
+    let frame = decoder
+        .frame_at(RationalTime::new(45, rate))
+        .expect("seek decode")
+        .expect("frame at 45 exists");
+    assert!(
+        frame.pts.seconds() >= 44.0 / 30.0,
+        "landed at {:?}, expected ~45/30s",
+        frame.pts
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -89,7 +132,7 @@ fn encodes_an_mp4_with_an_aac_audio_track() {
 
     let config = EncoderConfig::new((width, height), rate, ColorSpace::BT709)
         .with_audio(AudioEncoderConfig::new(audio_rate, 2));
-    let mut encoder = AvfEncoder::open(&path, config).expect("open encoder");
+    let mut encoder = NativeEncoder::open(&path, config).expect("open encoder");
 
     // 12 frames @ 30 fps = 0.4 s; each frame owns 48000/30 = 1600 sample frames.
     let frames = 12i64;

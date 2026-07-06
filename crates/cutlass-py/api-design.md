@@ -130,7 +130,7 @@ Project.load(path) -> Project
 | `p.canvas` | Aspect preset, get/set: `"auto"`, `"16:9"`, `"9:16"`, `"1:1"`, `"4:5"`, `"21:9"`. |
 | `p.background` | Canvas color, get/set. |
 | `p.get_frame(t) -> numpy.ndarray` | Composite frame at timeline `t`, `(H, W, 4)` RGBA uint8. |
-| `p.export(path) -> int` | Encode the whole timeline (video + mixed audio on Apple); returns frames written. |
+| `p.export(path) -> int` | Encode the whole timeline (video + mixed audio; native encoder on Apple and Windows); returns frames written. |
 | `p.save(path)` / `Project.load(path)` | Cutlass JSON project documents. |
 | `p.load_font(path)` | Register a TTF/OTF for deterministic text. |
 | `p.duration`, `p.size`, `p.fps` | Read-only, as today. |

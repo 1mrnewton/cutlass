@@ -38,10 +38,21 @@ pub fn compute_drag_snap(
     let cursor_end = cursor_start_value.saturating_add(clip_duration_ticks);
     let mut best: Option<(i32, i32, i32)> = None;
 
+    // A clip shorter than two thresholds has overlapping edge zones: both
+    // edges pinning means a candidate (say the playhead) holds the clip
+    // continuously across a span wider than the clip itself, with no free
+    // placement anywhere near it — a tiny clip feels stuck. Snap such clips
+    // by their leading edge only. (Duration 0 — the trim resolvers'
+    // single-point snap — is unaffected: both edges coincide.)
+    let consider_trailing = clip_duration_ticks >= 2 * snap_threshold_ticks;
+
     let mut consider = |candidate: i32| {
         let d_leading = (candidate - cursor_start_value).abs();
         if d_leading <= snap_threshold_ticks && best.is_none_or(|(d, _, _)| d_leading < d) {
             best = Some((d_leading, candidate, candidate));
+        }
+        if !consider_trailing {
+            return;
         }
         let d_trailing = (candidate - cursor_end).abs();
         if d_trailing <= snap_threshold_ticks && best.is_none_or(|(d, _, _)| d_trailing < d) {
@@ -825,6 +836,30 @@ mod tests {
         assert!(r.has_snap);
         assert_eq!(r.snapped_start_value, 50);
         assert_eq!(r.snap_line_tick, 100);
+    }
+
+    #[test]
+    fn short_clips_snap_by_leading_edge_only() {
+        let seq = sample_sequence();
+
+        // Duration 6 < 2×5: the trailing edge stops magneting. Dragged so
+        // its *end* (196) is within threshold of the playhead (200), the
+        // clip stays where the cursor put it instead of double-pinning.
+        let r = compute_drag_snap(&seq, "1", "1", 190, 6, 5, 200);
+        assert!(!r.has_snap);
+        assert_eq!(r.snapped_start_value, 190);
+
+        // Its leading edge still magnets normally.
+        let r = compute_drag_snap(&seq, "1", "1", 197, 6, 5, 200);
+        assert!(r.has_snap);
+        assert_eq!(r.snapped_start_value, 200);
+        assert_eq!(r.snap_line_tick, 200);
+
+        // Control: at duration 12 ≥ 2×5 the trailing edge snaps as before.
+        let r = compute_drag_snap(&seq, "1", "1", 190, 12, 5, 200);
+        assert!(r.has_snap);
+        assert_eq!(r.snapped_start_value, 188);
+        assert_eq!(r.snap_line_tick, 200);
     }
 
     // --- resolve_clip_drag --------------------------------------------------

@@ -17,22 +17,24 @@
 //!
 //! - Inputs: 8-bit **NV12** and **I420** CPU video frames, straight-alpha
 //!   **RGBA** bitmap layers (text/shape/sticker generators, stills), solid
-//!   fills, and — on Apple — zero-copy NV12 `CVPixelBuffer` GPU surfaces mapped
-//!   straight into `wgpu` textures via `CVMetalTextureCache` (see
-//!   [`metal_import`]).
+//!   fills, and zero-copy NV12 GPU surfaces — on Apple, `CVPixelBuffer`s
+//!   mapped via `CVMetalTextureCache` (see [`metal_import`]); on Windows,
+//!   shared D3D11 textures opened on the D3D12 device as `wgpu` NV12 plane
+//!   views (see [`dx12_import`]).
 //! - 10-bit/HDR (P010, PQ/HLG tone-mapping), packed-RGB *video frames*, and
-//!   GPU-surface import on non-Apple backends (Android `AHardwareBuffer`,
-//!   Windows D3D11) are recognized but not yet handled — they surface as
-//!   [`CompositorError::UnsupportedFormat`].
+//!   GPU-surface import on Android (`AHardwareBuffer`) are recognized but not
+//!   yet handled — they surface as [`CompositorError::UnsupportedFormat`].
 
 mod compositor;
+#[cfg(target_os = "windows")]
+mod dx12_import;
 mod error;
 mod gpu;
 mod layer;
 #[cfg(target_vendor = "apple")]
 mod metal_import;
 
-pub use compositor::Compositor;
+pub use compositor::{Compositor, FrameSink, ImageSink};
 pub use cutlass_core::RgbaImage;
 pub use cutlass_shapes::{SdfParams, SdfShape, Stroke};
 pub use error::CompositorError;

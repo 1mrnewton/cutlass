@@ -44,7 +44,7 @@ use cutlass_core::{
     VideoFrame,
 };
 
-use crate::yuv::rgba_to_i420;
+use crate::yuv::{YuvMatrix, matrix_for, rgba_to_i420};
 
 /// MediaCodec/MediaExtractor timestamp tick rate.
 const US_PER_SEC: i64 = 1_000_000;
@@ -92,6 +92,8 @@ pub struct MediaCodecEncoder {
     audio_codec: *mut AMediaCodec,
     audio: Option<AudioEncoderConfig>,
     size: (u32, u32),
+    /// RGB→YUV coefficients for the I420 conversion, from `config.color`.
+    matrix: YuvMatrix,
     /// Muxer track indices, `-1` until each codec's format is added.
     video_track: isize,
     audio_track: isize,
@@ -174,6 +176,7 @@ impl MediaCodecEncoder {
             audio_codec,
             audio: config.audio,
             size: (width, height),
+            matrix: matrix_for(&config.color),
             video_track: -1,
             audio_track: -1,
             muxer_started: false,
@@ -401,10 +404,12 @@ impl VideoEncoder for MediaCodecEncoder {
         // RGBA in, BGRA gets swapped to RGBA order first so luma/chroma math is
         // correct regardless of the source channel order.
         let rgba = match frame.format {
-            PixelFormat::Rgba8 => rgba_to_i420(&plane.data, width, height, plane.stride),
+            PixelFormat::Rgba8 => {
+                rgba_to_i420(&plane.data, width, height, plane.stride, self.matrix)
+            }
             PixelFormat::Bgra8 => {
                 let swapped = swap_bgra_to_rgba(&plane.data, width, height, plane.stride);
-                rgba_to_i420(&swapped, width, height, (width * 4) as usize)
+                rgba_to_i420(&swapped, width, height, (width * 4) as usize, self.matrix)
             }
             other => {
                 return Err(EncodeError::unsupported(format!(

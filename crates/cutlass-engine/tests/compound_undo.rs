@@ -112,6 +112,42 @@ fn empty_group_is_noop() {
     assert!(!engine.undo());
 }
 
+/// Every project mutation must move `revision()` forward — it keys the
+/// preview worker's composited-frame cache, so a state change under an
+/// unchanged revision would serve stale frames.
+#[test]
+fn revision_advances_with_every_mutation() {
+    let (_dir, mut engine) = temp_engine();
+    let r0 = engine.revision();
+
+    let t1 = add_track(&mut engine, TrackKind::Text, "T1");
+    assert!(engine.revision() > r0, "apply bumps the revision");
+    add_generated(&mut engine, t1, text("a"), tr(0, 24));
+    let after_edits = engine.revision();
+
+    assert!(engine.undo());
+    assert!(engine.revision() > after_edits, "undo bumps the revision");
+    let after_undo = engine.revision();
+    assert!(engine.redo());
+    assert!(engine.revision() > after_undo, "redo bumps the revision");
+
+    // A rolled-back gesture restores pre-group *state* under a *new*
+    // revision: frames rendered mid-group must not alias the restored state.
+    let before_group = engine.revision();
+    engine.begin_group();
+    add_track(&mut engine, TrackKind::Text, "T2");
+    let mid_group = engine.revision();
+    assert!(mid_group > before_group);
+    engine.rollback_group();
+    assert!(engine.revision() > mid_group, "rollback bumps the revision");
+
+    // An empty group's rollback mutated nothing: no bump.
+    let idle = engine.revision();
+    engine.begin_group();
+    engine.rollback_group();
+    assert_eq!(engine.revision(), idle);
+}
+
 #[test]
 fn rollback_restores_state_and_preserves_redo() {
     let (_dir, mut engine) = temp_engine();

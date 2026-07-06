@@ -6,7 +6,7 @@
 //! export, and live gesture/generator overrides. Still pending: the AI agent
 //! bridge (separate port).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,15 +16,17 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, unbounded};
 use cutlass_commands::{Command, EditCommand, EditOutcome, ProjectCommand};
-use cutlass_engine::{ApplyOutcome, Engine, EngineConfig};
+use cutlass_engine::{ApplyOutcome, Engine, EngineConfig, SeekPolicy};
 use cutlass_models::{
     AnimatedTransform, ClipId, ClipParam, ClipSource, ClipTransform, CropRect, Easing, Generator,
     LinkId, MAX_SPEED, MIN_SPEED, MarkerColor, MarkerId, MediaId, Param, ParamValue, Rational,
     RationalTime, TimeRange, Track, TrackId, TrackKind, resample,
 };
 use cutlass_render::{ExportSettings, RenderError, Renderer};
+use slint::{Rgba8Pixel, SharedPixelBuffer};
 use tracing::{debug, error, info, warn};
 
+use crate::proxy::ProxyHandle;
 use crate::strips::StripHandle;
 use crate::thumbnails::{ThumbKind, ThumbnailHandle};
 use crate::{EditorStore, ExportBackend, PreviewStore};
@@ -44,6 +46,9 @@ struct UiSink {
     /// media for library thumbnails and filmstrip/waveform decode.
     thumbs: ThumbnailHandle,
     strips: StripHandle,
+    /// Preview-proxy generator: large video sources queue a background
+    /// re-encode; results come back as [`WorkerMsg::ProxyReady`].
+    proxy: ProxyHandle,
 }
 
 pub struct PreviewSession {
@@ -64,6 +69,16 @@ enum WorkerMsg {
         height: u32,
     },
     Import(PathBuf),
+    /// A preview proxy for pool media `media_id` is ready at `proxy`
+    /// (from the proxy worker thread). `source` is the file the job was
+    /// keyed to; the handler binds the proxy only while the pool entry
+    /// still names that exact path (media ids persist in project files and
+    /// across relinks, so the id alone can go stale in flight).
+    ProxyReady {
+        media_id: u64,
+        source: PathBuf,
+        proxy: PathBuf,
+    },
     /// Place the full range of `media` (raw id from the Slint projection) at
     /// `start_tick` sequence ticks. `track` is the targeted video lane's raw
     /// id, or empty to create a new video lane at `drop_row` (the lane-list
@@ -534,6 +549,16 @@ impl WorkerHandle {
         let _ = self.tx.send(WorkerMsg::Import(path));
     }
 
+    /// A preview proxy landed for pool media `media_id` (raw id), generated
+    /// from the source file at `source`. Called from the proxy worker thread.
+    pub fn proxy_ready(&self, media_id: u64, source: PathBuf, proxy: PathBuf) {
+        let _ = self.tx.send(WorkerMsg::ProxyReady {
+            media_id,
+            source,
+            proxy,
+        });
+    }
+
     pub fn save_project(&self, path: Option<PathBuf>) {
         let _ = self.tx.send(WorkerMsg::SaveProject { path });
     }
@@ -927,6 +952,7 @@ impl PreviewWorker {
         audio: crate::audio::AudioHandle,
         thumbs: ThumbnailHandle,
         strips: StripHandle,
+        proxy: ProxyHandle,
     ) -> Result<(Self, PreviewSession), String> {
         let (ready_tx, ready_rx) = bounded(1);
         let (req_tx, req_rx) = unbounded();
@@ -942,6 +968,7 @@ impl PreviewWorker {
                     audio,
                     thumbs,
                     strips,
+                    proxy,
                     req_rx,
                     ready_tx,
                 ) {
@@ -979,6 +1006,7 @@ fn worker_main(
     audio: crate::audio::AudioHandle,
     thumbs: ThumbnailHandle,
     strips: StripHandle,
+    proxy: ProxyHandle,
     req_rx: Receiver<WorkerMsg>,
     ready_tx: Sender<Result<PreviewSession, String>>,
 ) -> Result<(), String> {
@@ -1010,6 +1038,7 @@ fn worker_main(
         audio,
         thumbs,
         strips,
+        proxy,
     };
     publish_projection(&mut engine, &ui);
 
@@ -1041,6 +1070,11 @@ fn worker_loop(
     // Fit bound + quality ladder for every preview render (the PreviewFeed
     // model). `Cell`s because the `mutate` closure repaints too.
     let fit = FrameFit::default();
+    // Composited frames already delivered this session, keyed by
+    // (tick, revision, fit bound) — re-visited scrub positions and hover
+    // jitter become buffer clones instead of decode + composite + readback.
+    // Interior mutability for the same reason as `fit`.
+    let cache = FrameCache::default();
     // Debounced auto-save: an edit arms a deadline; once the worker has been
     // idle of further work for `PERSIST_DEBOUNCE` the dirty draft is written
     // to its `project.cutlass`. Scrub/seek `Frame`s deliberately don't push
@@ -1052,6 +1086,18 @@ fn worker_loop(
     // it current; edits re-render here so the composite reflects a delete,
     // generator change, etc. without waiting for the user to move the playhead.
     let mut last_tick: i64 = 0;
+    // A post-edit repaint owed but deferred: with more requests already
+    // queued, rendering between messages would serialize one slow composite
+    // per edit behind a rapid burst (multi-second stalls on weak iGPUs).
+    // Deferred repaints run once, when the queue drains; any arm that
+    // renders the current state on its own settles the debt too.
+    let mut pending_redraw = false;
+    // An exact render of `last_tick` owed after a keyframe-snapped scrub
+    // frame (see the `Frame` arm): armed to a short deadline after each
+    // snapped render, re-armed while the drag keeps producing, fired once
+    // the queue stays idle past it. Cleared by any arm that renders
+    // `last_tick` exactly on its own.
+    let mut settle_deadline: Option<Instant> = None;
     // One export job at a time. `active` outlives jobs (the export thread
     // clears it when it exits); `cancel` flags the running job to stop.
     let export_state = ExportJobState::default();
@@ -1068,6 +1114,11 @@ fn worker_loop(
                 fit.set_viewport(width, height);
             }
             WorkerMsg::Import(path) => import_and_publish(engine, &path, &ui),
+            WorkerMsg::ProxyReady {
+                media_id,
+                source,
+                proxy,
+            } => bind_media_proxy(engine, media_id, &source, proxy, &cache, &ui),
             WorkerMsg::AddClip {
                 media,
                 track,
@@ -1146,7 +1197,15 @@ fn worker_loop(
             } => {
                 if let Some(generator) = shape_size_from_engine(engine, &clip, width, height) {
                     apply_generator_override(engine, &clip, generator);
-                    render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                    render_frame(
+                        engine,
+                        tl_rate,
+                        &preview_weak,
+                        tick,
+                        &fit,
+                        &cache,
+                        SeekPolicy::Exact,
+                    );
                 }
             }
             WorkerMsg::SetClipSpeed {
@@ -1210,11 +1269,27 @@ fn worker_loop(
             } => set_canvas_and_publish(engine, aspect_index, background, &ui),
             WorkerMsg::ClearTransformOverride { tick } => {
                 engine.set_transform_override(None);
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
             }
             WorkerMsg::ClearGeneratorOverride { tick } => {
                 engine.set_generator_override(None);
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
             }
             // Only reached if a generator-override burst interleaves with
             // another coalesced gesture's drain (practically impossible — you
@@ -1226,7 +1301,15 @@ fn worker_loop(
                 tick,
             } => {
                 apply_generator_override(engine, &clip, generator);
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
             }
             WorkerMsg::SetTransform {
                 clip,
@@ -1242,11 +1325,27 @@ fn worker_loop(
                 // flattened (M2 compose semantics).
                 let at = RationalTime::new(tick, tl_rate);
                 set_transform_and_publish(engine, &clip, transform, at, &ui);
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
             }
             WorkerMsg::FitClip { clip, fill, tick } => {
                 fit_clip_and_publish(engine, &clip, fill, tick, tl_rate, &ui);
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
             }
             WorkerMsg::SetParamKeyframe {
                 clip,
@@ -1345,12 +1444,46 @@ fn worker_loop(
     };
 
     loop {
-        let msg = match next_message(&req_rx, persist_deadline) {
+        // Settle a deferred post-edit repaint once the burst has drained —
+        // exactly one composite per burst instead of one per edit. The
+        // render is exact at `last_tick`, so it also pays off any pending
+        // snap-settle debt.
+        if pending_redraw && req_rx.is_empty() {
+            render_frame(
+                engine,
+                tl_rate,
+                &preview_weak,
+                last_tick,
+                &fit,
+                &cache,
+                SeekPolicy::Exact,
+            );
+            pending_redraw = false;
+            settle_deadline = None;
+        }
+        let msg = match next_message(&req_rx, persist_deadline, settle_deadline) {
             Wake::Stop => break,
             // The debounce elapsed: write the dirty draft to its project file.
             Wake::Persist => {
                 save_project_and_publish(engine, None, &ui);
                 persist_deadline = None;
+                continue;
+            }
+            // The drag paused with a snapped (approximate) frame on screen:
+            // replace it with the exact frame. A read, like `Frame` — the
+            // persist debounce is deliberately not reset.
+            Wake::Settle => {
+                settle_deadline = None;
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    last_tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+                pending_redraw = false;
                 continue;
             }
             Wake::Message(msg) => msg,
@@ -1360,9 +1493,16 @@ fn worker_loop(
         let resets_deadline = !matches!(msg, WorkerMsg::Frame(_));
         match msg {
             WorkerMsg::Frame(mut tick) => {
+                // Frame requests coalesced away right here: when > 0 the UI
+                // is producing playhead moves faster than we can render —
+                // the signature of an active scrub drag on slow media.
+                let mut coalesced = 0usize;
                 while let Ok(next) = req_rx.try_recv() {
                     match next {
-                        WorkerMsg::Frame(latest) => tick = latest,
+                        WorkerMsg::Frame(latest) => {
+                            tick = latest;
+                            coalesced += 1;
+                        }
                         WorkerMsg::TransformOverride {
                             clip,
                             transform,
@@ -1380,8 +1520,49 @@ fn worker_loop(
                         ),
                     }
                 }
-                last_tick = tick;
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                let prev_tick = std::mem::replace(&mut last_tick, tick);
+                // Mid-drag (requests outpacing renders): snap to the nearest
+                // sync frame — one decode instead of a GOP-prefix walk, so
+                // the preview tracks the drag instead of freezing. The exact
+                // frame lands via the settle pass once the queue goes idle.
+                let dragging = coalesced > 0 || !req_rx.is_empty();
+                let policy = if dragging {
+                    SeekPolicy::NearestSync
+                } else {
+                    SeekPolicy::Exact
+                };
+                render_frame(engine, tl_rate, &preview_weak, tick, &fit, &cache, policy);
+                // This render displayed post-edit state at the current tick,
+                // covering any repaint a drained mutation deferred.
+                pending_redraw = false;
+                if policy == SeekPolicy::NearestSync {
+                    // Owe an exact render of this tick once the drag pauses.
+                    settle_deadline = Some(Instant::now() + SNAP_SETTLE_DELAY);
+                } else {
+                    settle_deadline = None;
+                    // Steady forward motion (playback, frame-stepping, a slow
+                    // forward drag) requests evenly spaced ticks: with nothing
+                    // else queued, render the predicted next tick into the cache
+                    // now. Its decode overlaps the UI's display time of `tick`,
+                    // so the request that follows is a hit; if playback skips
+                    // ahead instead, the work still advanced the decoder's
+                    // roll-forward cursor, so nothing is lost. Gestures render
+                    // uncacheable override state — never speculate under one.
+                    let delta = tick - prev_tick;
+                    if (1..=MAX_SPECULATIVE_STEP).contains(&delta)
+                        && req_rx.is_empty()
+                        && !engine.has_live_overrides()
+                    {
+                        let _ = render_frame_buffer(
+                            engine,
+                            tl_rate,
+                            tick + delta,
+                            &fit,
+                            &cache,
+                            SeekPolicy::Exact,
+                        );
+                    }
+                }
             }
             // Drag-gesture overrides arrive at pointer-move rate; render only
             // the newest one (same coalescing as scrub frames) so a fast drag
@@ -1430,7 +1611,17 @@ fn worker_loop(
                 if pending {
                     apply_transform_override(engine, &clip, transform);
                 }
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+                pending_redraw = false;
+                settle_deadline = None;
             }
             // Live inspector edits (font-size drag) arrive at pointer-move
             // rate; coalesce to the newest like transform overrides do.
@@ -1474,7 +1665,17 @@ fn worker_loop(
                 if pending {
                     apply_generator_override(engine, &clip, generator);
                 }
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+                pending_redraw = false;
+                settle_deadline = None;
             }
             // Shape resize drags (width/height sliders) arrive at pointer-move
             // rate; coalesce to the newest like the generator/transform
@@ -1526,14 +1727,34 @@ fn worker_loop(
                 {
                     apply_generator_override(engine, &clip, generator);
                 }
-                render_frame(engine, tl_rate, &preview_weak, tick, &fit);
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+                pending_redraw = false;
+                settle_deadline = None;
             }
             // The preview panel resized (or first laid out): renders now fit
             // the new bound. Repaint the current frame only when the bucketed
             // size actually changed — live window resizes report every frame.
             WorkerMsg::Viewport { width, height } => {
                 if fit.set_viewport(width, height) {
-                    render_frame(engine, tl_rate, &preview_weak, last_tick, &fit);
+                    render_frame(
+                        engine,
+                        tl_rate,
+                        &preview_weak,
+                        last_tick,
+                        &fit,
+                        &cache,
+                        SeekPolicy::Exact,
+                    );
+                    pending_redraw = false;
+                    settle_deadline = None;
                 }
             }
             other => {
@@ -1545,10 +1766,14 @@ fn worker_loop(
                     &mut linkage,
                     other,
                 );
-                // Edits otherwise only repaint when the playhead moves; refresh
-                // the current frame so the change is visible immediately.
+                // Edits otherwise only repaint when the playhead moves; owe a
+                // repaint so the change becomes visible. The loop-top flush
+                // renders it as soon as the queue is idle — immediately for a
+                // lone edit, once per burst for rapid ones instead of one
+                // composite per edit (each is a multi-second stall on weak
+                // iGPUs).
                 if redraw {
-                    render_frame(engine, tl_rate, &preview_weak, last_tick, &fit);
+                    pending_redraw = true;
                 }
             }
         }
@@ -1565,6 +1790,12 @@ fn worker_loop(
 /// slider) into one write, short enough that work is never far from disk.
 const PERSIST_DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// Idle gap after a keyframe-snapped scrub frame before the exact frame is
+/// rendered in its place. Longer than the lull between pointer-move events
+/// in an ongoing drag (so a slow drag doesn't stall on mid-drag exact
+/// renders), short enough that the sharp frame feels immediate on release.
+const SNAP_SETTLE_DELAY: Duration = Duration::from_millis(250);
+
 /// What the worker should do next (see [`next_message`]).
 ///
 /// `Message` dwarfs the marker variants (a `WorkerMsg` carries whole
@@ -1577,23 +1808,42 @@ enum Wake {
     Message(WorkerMsg),
     /// The debounce elapsed with the draft dirty; write it.
     Persist,
+    /// The snap-settle delay elapsed with an approximate frame on screen;
+    /// render the exact frame.
+    Settle,
     /// The request channel closed; the loop should exit.
     Stop,
 }
 
-/// Block for the next request, waking to auto-save when `deadline` passes.
-/// With no edit pending (`deadline` is `None`) it's a plain blocking receive.
-fn next_message(req_rx: &Receiver<WorkerMsg>, deadline: Option<Instant>) -> Wake {
+/// Block for the next request, waking for the earlier of the auto-save and
+/// snap-settle deadlines when one passes. With neither pending it's a plain
+/// blocking receive. A settle/persist tie goes to settle — it repaints what
+/// the user is looking at, and the persist deadline fires on the next turn.
+fn next_message(
+    req_rx: &Receiver<WorkerMsg>,
+    persist: Option<Instant>,
+    settle: Option<Instant>,
+) -> Wake {
+    let deadline = match (persist, settle) {
+        (None, None) => None,
+        (Some(p), None) => Some((p, Wake::Persist)),
+        (None, Some(s)) => Some((s, Wake::Settle)),
+        (Some(p), Some(s)) => Some(if s <= p {
+            (s, Wake::Settle)
+        } else {
+            (p, Wake::Persist)
+        }),
+    };
     match deadline {
         None => match req_rx.recv() {
             Ok(msg) => Wake::Message(msg),
             Err(_) => Wake::Stop,
         },
-        Some(deadline) => {
+        Some((deadline, wake)) => {
             let timeout = deadline.saturating_duration_since(Instant::now());
             match req_rx.recv_timeout(timeout) {
                 Ok(msg) => Wake::Message(msg),
-                Err(RecvTimeoutError::Timeout) => Wake::Persist,
+                Err(RecvTimeoutError::Timeout) => wake,
                 Err(RecvTimeoutError::Disconnected) => Wake::Stop,
             }
         }
@@ -1647,6 +1897,9 @@ fn mutation_redraws_preview(msg: &WorkerMsg) -> bool {
             // Relinked media decodes again — refresh the stale composite.
             | WorkerMsg::RelinkMedia { .. }
             | WorkerMsg::RelinkFolder { .. }
+            // A bound proxy swaps the decode source; repaint through it so
+            // the (cleared) frame cache refills at the cheap decode cost.
+            | WorkerMsg::ProxyReady { .. }
             // A forced library delete removes the source's clips too; an
             // unreferenced delete touches nothing on the canvas.
             | WorkerMsg::RemoveMedia { force: true, .. }
@@ -2249,6 +2502,46 @@ fn register_media_with_workers(media: &cutlass_models::MediaSource, ui: &UiSink)
     // the clip's filmstrip tiles.
     ui.strips
         .register_media(media.id.raw(), media.path().to_path_buf());
+    // Large video sources get a preview proxy encoded in the background
+    // (or re-bound instantly when one is already on disk); the worker
+    // skips sources small enough to decode comfortably.
+    if media.kind() == cutlass_models::MediaKind::Video {
+        ui.proxy.request(
+            media.id.raw(),
+            media.path().to_path_buf(),
+            media.width,
+            media.height,
+        );
+    }
+}
+
+/// Bind a finished preview proxy to its pool media — only while the pool
+/// entry still names `source`, the file the job was keyed to (a relink or
+/// session swap in flight makes the id stale; the registries the engine
+/// clears on those paths must never be repopulated with old files). On a
+/// match the engine decodes the proxy from the next frame; delivered
+/// frames composited from the original are dropped so the repaint (owed
+/// via [`mutation_redraws_preview`]) and everything after render through
+/// the proxy, and the strip worker re-points future filmstrip decodes.
+fn bind_media_proxy(
+    engine: &mut Engine,
+    media_id: u64,
+    source: &Path,
+    proxy: PathBuf,
+    cache: &FrameCache,
+    ui: &UiSink,
+) {
+    let media = MediaId::from_raw(media_id);
+    match engine.project().media(media) {
+        Some(m) if m.path() == source => {
+            info!(%media, proxy = %proxy.display(), "preview proxy bound");
+            engine.set_media_proxy(media, proxy.clone());
+            cache.clear();
+            ui.strips.register_proxy(media_id, proxy);
+        }
+        Some(_) => info!(%media, "proxy ignored: media was relinked while it generated"),
+        None => info!(%media, "proxy ignored: media left the pool while it generated"),
+    }
 }
 
 /// Replace the session with a fresh, empty project (the launch screen's New,
@@ -4778,25 +5071,67 @@ fn generator_content_sizes(engine: &mut Engine) -> HashMap<u64, (i32, i32)> {
 /// The preview fit bound + quality ladder (the Swift `PreviewFeed` model,
 /// worker-side): renders fit inside the reported viewport, and a slow run of
 /// renders steps the resolution down a tier so scrubbing stays interactive.
+///
+/// The ladder is fed the **resolution-dependent** share of each render
+/// (raster + composite + readback, [`cutlass_engine::FrameStats`]), never the
+/// decode time: decode runs at the source's native size whatever the output
+/// bound is, so dropping tiers can't buy decode time back — it would only
+/// blur the preview while staying just as slow (the field failure mode this
+/// replaces: 4K long-GOP seeks flooring the tier over and over).
 /// `Cell`s because the coalescing loop and the `mutate` closure both repaint.
 struct FrameFit {
     /// Bucketed viewport (physical px); `(0, 0)` until the panel reports.
     viewport: Cell<(u32, u32)>,
-    /// EMA of recent render costs, milliseconds.
+    /// EMA of recent scaled (resolution-dependent) render costs, milliseconds.
     avg_ms: Cell<f64>,
     /// Index into [`QUALITY_LADDER`].
     tier: Cell<usize>,
+    /// Evidence window backing tier *raises* (reset on every tier change and
+    /// every [`RAISE_WINDOW_SAMPLES`] renders): how many renders it spans,
+    /// the worst cost seen, and when the tier was last changed. Field logs
+    /// showed why raises must demand more than a fast EMA: sequential-decode
+    /// frames render in ~15ms even while seeks cost whole seconds, so one
+    /// cheap frame right after a drop re-raised the tier and the next seek
+    /// slammed it back down — a resolution pop plus a wasted slow frame per
+    /// cycle.
+    samples: Cell<u32>,
+    max_ms: Cell<f64>,
+    changed_at: Cell<Instant>,
 }
 
 /// Resolution multipliers, best first. Tier moves down when renders run slow
-/// and back up when they're comfortably fast.
-const QUALITY_LADDER: [f64; 3] = [1.0, 0.7, 0.5];
+/// and back up when they're comfortably fast. The 0.35 floor exists for weak
+/// iGPUs (128MB-class shared-memory parts): decode cost is resolution-fixed,
+/// but composite + readback scale with output pixels, and at the floor
+/// they're a rounding error next to the decode.
+const QUALITY_LADDER: [f64; 4] = [1.0, 0.7, 0.5, 0.35];
 /// Never request more than this many pixels on the long side — retina
 /// monitors ask for huge viewports whose cost buys invisible detail.
 const MAX_LONG_SIDE: f64 = 1440.0;
-/// EMA above this drops a tier; below `RAISE_BELOW_MS` climbs back.
+/// Fit bound used until the panel reports its size: full HD keeps the launch
+/// frame cheap on 4K-canvas projects (a full-canvas composite + readback of
+/// 3840×2160 was the first-frame stall) while staying sharper than any
+/// realistic panel needs before layout settles.
+const UNREPORTED_VIEWPORT_BOUND: (u32, u32) = (1280, 720);
+/// Scaled-cost EMA above this drops a tier; below `RAISE_BELOW_MS` climbs
+/// back. Thresholds gate on the resolution-dependent share of the render
+/// (raster + composite + readback) — see [`FrameFit`].
 const DROP_ABOVE_MS: f64 = 45.0;
 const RAISE_BELOW_MS: f64 = 18.0;
+/// A single render whose *scaled* cost is this far past budget skips the EMA
+/// and drops straight to the bottom tier: walking down one tier per render
+/// costs one multi-second frame per step on the machines that need the floor
+/// most.
+const HARD_DROP_MS: f64 = 360.0;
+/// Raising a tier requires all of: this long at the current tier, at least
+/// [`RAISE_MIN_SAMPLES`] renders folded in, and no single render in the
+/// evidence window over [`DROP_ABOVE_MS`]. Drops stay immediate — the
+/// asymmetry trades a possibly-conservative resolution for never popping.
+const RAISE_MIN_DWELL: Duration = Duration::from_secs(3);
+const RAISE_MIN_SAMPLES: u32 = 8;
+/// The evidence window turns over after this many renders, so one old spike
+/// can't veto raises forever (e.g. after an export or a burst of seeks).
+const RAISE_WINDOW_SAMPLES: u32 = 32;
 /// Viewport reports quantize to this grid so a live window resize (a report
 /// per frame) doesn't churn re-renders for sub-bucket changes.
 const VIEWPORT_BUCKET: u32 = 64;
@@ -4807,6 +5142,9 @@ impl Default for FrameFit {
             viewport: Cell::new((0, 0)),
             avg_ms: Cell::new(0.0),
             tier: Cell::new(0),
+            samples: Cell::new(0),
+            max_ms: Cell::new(0.0),
+            changed_at: Cell::new(Instant::now()),
         }
     }
 }
@@ -4824,12 +5162,14 @@ impl FrameFit {
 
     /// The `(max_width, max_height)` to request for the next render: the
     /// viewport scaled by the current quality tier, capped at
-    /// [`MAX_LONG_SIDE`]. `None` until the viewport is known (render at full
-    /// canvas size — the launch state before the panel lays out).
+    /// [`MAX_LONG_SIDE`]. Before the panel reports its size, a conservative
+    /// [`UNREPORTED_VIEWPORT_BOUND`] — never the full canvas, which on a 4K
+    /// project made the launch frame composite + read back 8.3 MP for pixels
+    /// the panel can't show.
     fn fit_bound(&self) -> Option<(u32, u32)> {
         let (w, h) = self.viewport.get();
         if w == 0 || h == 0 {
-            return None;
+            return Some(UNREPORTED_VIEWPORT_BOUND);
         }
         let mut scale = QUALITY_LADDER[self.tier.get()];
         let long_side = f64::from(w.max(h)) * scale;
@@ -4840,11 +5180,25 @@ impl FrameFit {
         Some((dim(w), dim(h)))
     }
 
-    /// Fold one render's cost into the EMA and step the quality tier: slow
-    /// renders drop a tier immediately (their cost dominates the average),
-    /// sustained fast ones climb back up.
-    fn note_render_cost(&self, elapsed: Duration) {
-        let ms = elapsed.as_secs_f64() * 1000.0;
+    /// Fold one render's **scaled cost** — the resolution-dependent share
+    /// (raster + composite + readback), *not* the whole-frame time — into the
+    /// EMA and step the quality tier: slow renders drop a tier immediately
+    /// (their cost dominates the average), a catastrophically slow one jumps
+    /// straight to the floor, and only *sustained, uniformly fast* evidence
+    /// climbs back up (dwell + sample floor + no spike in the window — see
+    /// the struct field docs for the thrash this prevents). Decode time is
+    /// deliberately excluded: it doesn't respond to resolution, so folding it
+    /// in floored the tier on every long-GOP seek without making anything
+    /// faster. Tier changes log at `info` — they are rare, and on slow
+    /// machines they're the trace of the ladder doing its job.
+    fn note_render_cost(&self, scaled_ms: f64) {
+        // Fresh evidence window past the turnover point (tier unchanged).
+        if self.samples.get() >= RAISE_WINDOW_SAMPLES {
+            self.samples.set(0);
+            self.max_ms.set(0.0);
+        }
+
+        let ms = scaled_ms;
         let avg = self.avg_ms.get();
         let next = if avg == 0.0 {
             ms
@@ -4852,16 +5206,147 @@ impl FrameFit {
             avg * 0.75 + ms * 0.25
         };
         self.avg_ms.set(next);
+        self.samples.set(self.samples.get() + 1);
+        self.max_ms.set(self.max_ms.get().max(ms));
 
         let tier = self.tier.get();
-        if next > DROP_ABOVE_MS && tier + 1 < QUALITY_LADDER.len() {
-            self.tier.set(tier + 1);
-            self.avg_ms.set(0.0);
-            debug!(tier = tier + 1, avg_ms = next, "preview quality tier down");
-        } else if next < RAISE_BELOW_MS && tier > 0 {
-            self.tier.set(tier - 1);
-            self.avg_ms.set(0.0);
-            debug!(tier = tier - 1, avg_ms = next, "preview quality tier up");
+        let bottom = QUALITY_LADDER.len() - 1;
+        if ms > HARD_DROP_MS && tier < bottom {
+            self.change_tier(bottom);
+            info!(
+                tier = bottom,
+                scaled_ms = %format_args!("{ms:.0}"),
+                "preview quality floored by a very slow composite"
+            );
+        } else if next > DROP_ABOVE_MS && tier + 1 < QUALITY_LADDER.len() {
+            self.change_tier(tier + 1);
+            info!(
+                tier = tier + 1,
+                avg_ms = %format_args!("{next:.0}"),
+                "preview quality tier down"
+            );
+        } else if next < RAISE_BELOW_MS
+            && tier > 0
+            && self.samples.get() >= RAISE_MIN_SAMPLES
+            && self.max_ms.get() < DROP_ABOVE_MS
+            && self.changed_at.get().elapsed() >= RAISE_MIN_DWELL
+        {
+            self.change_tier(tier - 1);
+            info!(
+                tier = tier - 1,
+                avg_ms = %format_args!("{next:.0}"),
+                "preview quality tier up"
+            );
+        }
+    }
+
+    /// Move to `tier` and restart the cost average and the raise-evidence
+    /// window: costs at the old resolution say nothing about the new one.
+    fn change_tier(&self, tier: usize) {
+        self.tier.set(tier);
+        self.avg_ms.set(0.0);
+        self.samples.set(0);
+        self.max_ms.set(0.0);
+        self.changed_at.set(Instant::now());
+    }
+}
+
+/// A preview render slower than this logs a `warn` (default-visible): at
+/// this point the frame is why the app feels stuck after an edit, so leave
+/// a breadcrumb attributing it (the renderer's stage log tells the rest).
+const SLOW_PREVIEW_WARN_MS: f64 = 250.0;
+
+/// Byte cap for [`FrameCache`]: at a typical fit size (~1280×720 RGBA,
+/// ~3.7 MB) this holds ~70 recently displayed frames — several seconds of
+/// scrub-back headroom — while staying far below what decode already uses.
+const FRAME_CACHE_BYTES: usize = 256 << 20;
+
+/// Largest per-request tick step still treated as steady forward motion
+/// worth speculating one step past (1 = real-time playback and stepping;
+/// larger = fast-forward playback or a brisk forward drag). Beyond this the
+/// pattern is a jump, and predicting the next target is a coin flip.
+const MAX_SPECULATIVE_STEP: i64 = 8;
+
+/// What a composited preview frame was rendered *from*: any difference in
+/// these means the pixels may differ.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct FrameKey {
+    /// Timeline tick (the playhead).
+    tick: i64,
+    /// [`Engine::revision`] — bumped by every project mutation, so an edit,
+    /// undo, or session swap can never serve pre-edit pixels.
+    revision: u64,
+    /// The fit bound the render was requested at (`None` = full canvas).
+    /// Captures the bucketed viewport, quality tier, and long-side cap in
+    /// one value — exactly what changes the output resolution.
+    bound: Option<(u32, u32)>,
+}
+
+struct CacheEntry {
+    buffer: SharedPixelBuffer<Rgba8Pixel>,
+    /// Logical timestamp of the last hit/insert (LRU order).
+    used: u64,
+}
+
+/// LRU cache of delivered preview frames. Holding the [`SharedPixelBuffer`]
+/// itself is cheap: it's refcounted, and the UI holds a clone of the same
+/// allocation anyway. Hits make hover jitter and re-visited scrub ground
+/// free — the only realistic fix for backward scrubbing over long-GOP
+/// sources short of proxy media (100–320 ms per re-composite today).
+///
+/// Interior mutability so the worker loop and its `mutate` closure can share
+/// it like [`FrameFit`]; single-threaded access (worker thread only).
+#[derive(Default)]
+struct FrameCache {
+    entries: RefCell<HashMap<FrameKey, CacheEntry>>,
+    bytes: Cell<usize>,
+    clock: Cell<u64>,
+}
+
+impl FrameCache {
+    /// Drop every delivered frame — for state changes the revision key
+    /// doesn't cover (a proxy binding swaps decode sources without touching
+    /// the project).
+    fn clear(&self) {
+        self.entries.borrow_mut().clear();
+        self.bytes.set(0);
+    }
+
+    fn get(&self, key: &FrameKey) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+        let mut entries = self.entries.borrow_mut();
+        let entry = entries.get_mut(key)?;
+        self.clock.set(self.clock.get() + 1);
+        entry.used = self.clock.get();
+        Some(entry.buffer.clone())
+    }
+
+    fn insert(&self, key: FrameKey, buffer: SharedPixelBuffer<Rgba8Pixel>) {
+        let mut entries = self.entries.borrow_mut();
+        self.clock.set(self.clock.get() + 1);
+        let bytes = buffer.as_bytes().len();
+        if let Some(old) = entries.insert(
+            key,
+            CacheEntry {
+                buffer,
+                used: self.clock.get(),
+            },
+        ) {
+            self.bytes
+                .set(self.bytes.get() - old.buffer.as_bytes().len());
+        }
+        self.bytes.set(self.bytes.get() + bytes);
+
+        // Evict least-recently-used until under budget. The scan is O(n) but
+        // runs only on inserts that overflow, over at most a few hundred
+        // entries — noise next to the composite that preceded it.
+        while self.bytes.get() > FRAME_CACHE_BYTES && entries.len() > 1 {
+            let Some(oldest) = entries.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| *k) else {
+                break;
+            };
+            if let Some(evicted) = entries.remove(&oldest) {
+                self.bytes
+                    .set(self.bytes.get() - evicted.buffer.as_bytes().len());
+            }
         }
     }
 }
@@ -4872,26 +5357,115 @@ fn render_frame(
     preview_weak: &slint::Weak<PreviewStore<'static>>,
     tick: i64,
     fit: &FrameFit,
+    cache: &FrameCache,
+    policy: SeekPolicy,
 ) {
+    if let Some(buffer) = render_frame_buffer(engine, tl_rate, tick, fit, cache, policy) {
+        deliver_frame(preview_weak, buffer);
+    }
+}
+
+/// Allocates the UI pixel buffer at the size the renderer reports and lets
+/// the compositor's readback write de-padded rows straight into it — the
+/// single CPU copy between the mapped GPU buffer and the pixels Slint
+/// displays. A fresh buffer per rendered frame is deliberate: the cache and
+/// the UI keep refcounted clones of it, so reusing one would silently
+/// copy-on-write.
+#[derive(Default)]
+struct SlintFrameSink {
+    buffer: Option<SharedPixelBuffer<Rgba8Pixel>>,
+}
+
+impl cutlass_render::FrameSink for SlintFrameSink {
+    fn pixels(&mut self, width: u32, height: u32) -> &mut [u8] {
+        self.buffer
+            .insert(SharedPixelBuffer::new(width, height))
+            .make_mut_bytes()
+    }
+}
+
+/// Produce the composited frame at `tick` — from the cache when the same
+/// (tick, revision, fit) was already rendered, otherwise by rendering and
+/// caching. Cache hits don't feed the quality ladder (nothing was rendered).
+/// Frames rendered under a live gesture override belong to no revision, and
+/// frames rendered under [`SeekPolicy::NearestSync`] are approximations
+/// (the keyframe near `tick`, not the frame *at* it) — both bypass the
+/// cache in both directions so wrong pixels are never stored under an
+/// exact key.
+fn render_frame_buffer(
+    engine: &mut Engine,
+    tl_rate: Rational,
+    tick: i64,
+    fit: &FrameFit,
+    cache: &FrameCache,
+    policy: SeekPolicy,
+) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+    let bound = fit.fit_bound();
+    let cacheable = !engine.has_live_overrides() && policy == SeekPolicy::Exact;
+    let key = FrameKey {
+        tick,
+        revision: engine.revision(),
+        bound,
+    };
+    if cacheable && let Some(buffer) = cache.get(&key) {
+        return Some(buffer);
+    }
+
     let at = RationalTime::new(tick, tl_rate);
     let started = Instant::now();
-    let result = match fit.fit_bound() {
-        Some((max_w, max_h)) => engine.get_frame_fit(at, max_w, max_h),
-        None => engine.get_frame(at),
+    let mut sink = SlintFrameSink::default();
+    let result = match bound {
+        Some((max_w, max_h)) => engine.get_frame_fit_into(at, max_w, max_h, policy, &mut sink),
+        None => engine.get_frame_into(at, policy, &mut sink),
     };
     match result {
-        Ok(frame) => {
-            fit.note_render_cost(started.elapsed());
-            let weak = preview_weak.clone();
-            if let Err(e) = slint::invoke_from_event_loop(move || {
-                if let Some(store) = weak.upgrade() {
-                    store.set_frame(crate::preview::to_slint_image(frame));
-                }
-            }) {
-                error!("failed to deliver preview frame to UI: {e}");
+        Ok(()) => {
+            let elapsed = started.elapsed();
+            // The ladder sees only the resolution-dependent share of the
+            // cost (raster + composite + readback): decode is native-size
+            // work no tier change can reduce, so it must not drop quality.
+            fit.note_render_cost(engine.last_frame_stats().scaled_cost_ms());
+            // Total preview latency for this frame (decode + composite +
+            // readback + copy). The renderer logs the per-stage split; this
+            // warn is the default-visible "the preview is why edits feel
+            // slow" breadcrumb, with the fit state that produced it.
+            let ms = elapsed.as_secs_f64() * 1000.0;
+            if ms > SLOW_PREVIEW_WARN_MS {
+                warn!(
+                    tick,
+                    ?bound,
+                    tier = fit.tier.get(),
+                    "slow preview render: {ms:.0} ms"
+                );
+            } else {
+                debug!(tick, ?bound, "preview render: {ms:.1} ms");
             }
+            let buffer = sink.buffer.expect("successful render fills the sink");
+            if cacheable {
+                cache.insert(key, buffer.clone());
+            }
+            Some(buffer)
         }
-        Err(e) => error!(tick, "preview frame failed: {e}"),
+        Err(e) => {
+            error!(tick, "preview frame failed: {e}");
+            None
+        }
+    }
+}
+
+/// Hand `buffer` to the preview panel. The buffer is refcounted, so the
+/// event-loop hop and the `Image` wrapper share the worker's allocation.
+fn deliver_frame(
+    preview_weak: &slint::Weak<PreviewStore<'static>>,
+    buffer: SharedPixelBuffer<Rgba8Pixel>,
+) {
+    let weak = preview_weak.clone();
+    if let Err(e) = slint::invoke_from_event_loop(move || {
+        if let Some(store) = weak.upgrade() {
+            store.set_frame(slint::Image::from_rgba8(buffer));
+        }
+    }) {
+        error!("failed to deliver preview frame to UI: {e}");
     }
 }
 
@@ -4899,6 +5473,69 @@ fn render_frame(
 mod tests {
     use super::*;
     use cutlass_models::Project;
+
+    /// The ladder drops on one slow render but climbs back only on
+    /// sustained, uniformly fast evidence: dwell elapsed, enough samples,
+    /// and no spike in the window. Guards against the tier-thrash seen in
+    /// field logs (a lone fast sequential-decode frame re-raising the tier
+    /// right before a seek slams it back down). Costs fed here are the
+    /// *scaled* (resolution-dependent) share of each render.
+    #[test]
+    fn quality_ladder_raises_only_on_sustained_fast_evidence() {
+        let bottom = QUALITY_LADDER.len() - 1;
+        let fit = FrameFit::default();
+
+        // One catastrophically slow composite floors the ladder immediately.
+        fit.note_render_cost(500.0);
+        assert_eq!(fit.tier.get(), bottom);
+
+        // A burst of fast renders alone doesn't raise: dwell hasn't passed.
+        for _ in 0..RAISE_MIN_SAMPLES {
+            fit.note_render_cost(5.0);
+        }
+        assert_eq!(fit.tier.get(), bottom);
+
+        // With the dwell behind it, the same sustained-fast evidence raises.
+        fit.changed_at.set(Instant::now() - RAISE_MIN_DWELL);
+        for _ in 0..RAISE_MIN_SAMPLES {
+            fit.note_render_cost(5.0);
+        }
+        assert_eq!(fit.tier.get(), bottom - 1);
+
+        // A single mid-window spike (not slow enough to move the EMA past
+        // the drop bound) vetoes raising even after the EMA looks fast
+        // again…
+        for _ in 0..3 {
+            fit.note_render_cost(5.0);
+        }
+        fit.note_render_cost(100.0);
+        assert_eq!(fit.tier.get(), bottom - 1, "spike must not drop the tier");
+        fit.changed_at.set(Instant::now() - RAISE_MIN_DWELL);
+        for _ in 0..RAISE_MIN_SAMPLES {
+            fit.note_render_cost(5.0);
+        }
+        assert_eq!(fit.tier.get(), bottom - 1);
+
+        // …until the evidence window turns over: a fresh uniformly fast
+        // window raises again (and the raise re-arms the dwell, so exactly
+        // one step happens here).
+        for _ in 0..(RAISE_WINDOW_SAMPLES + RAISE_MIN_SAMPLES) {
+            fit.note_render_cost(5.0);
+        }
+        assert_eq!(fit.tier.get(), bottom - 2);
+    }
+
+    /// Before the panel reports a viewport the fit bound is the conservative
+    /// default, never `None` (which meant "composite the full canvas" — an
+    /// 8.3 MP readback on a 4K project's launch frame).
+    #[test]
+    fn fit_bound_defaults_before_viewport_reports() {
+        let fit = FrameFit::default();
+        assert_eq!(fit.fit_bound(), Some(UNREPORTED_VIEWPORT_BOUND));
+
+        fit.set_viewport(800, 600);
+        assert_ne!(fit.fit_bound(), Some(UNREPORTED_VIEWPORT_BOUND));
+    }
 
     /// `keyframes_at` slices one merged timeline diamond: only the
     /// properties keyframed exactly at the tick, each with its own value

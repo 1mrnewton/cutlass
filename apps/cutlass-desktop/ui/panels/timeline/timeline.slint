@@ -603,24 +603,74 @@ export component TimelinePanel inherits PanelBase {
                     border-radius: AppStore.theme.track-lane.clip.radius;
                 }
 
-                // Main-track magnet: insertion caret between clips instead
-                // of a landing ghost — the commit shifts later clips right
-                // to open the hole exactly here.
+                // Main-track magnet: insertion between clips instead of a
+                // free landing — the commit shifts later clips right to open
+                // the hole at the caret. A clip-sized slot ghost previews the
+                // inserted span so the landing is unmistakable, and a no-op
+                // slot (the clip's own position — e.g. the only clip on the
+                // main lane) renders muted so the release reads as "nothing
+                // will change" instead of a silent snap-back.
                 if single-dragging && clip-drag-res.valid && clip-drag-res.is-insert: Rectangle {
-                    x: clip-drag-res.caret-tick * TimelineStore.zoom * 1px - self.width / 2;
-                    y: (clip-drag-res.target-row + 1) * row-pitch - 2px;
-                    width: 3px;
-                    height: track-height - 1px;
-                    background: AppStore.theme.accent.primary;
+                    // Slot ghost: the span the clip occupies after the shift.
+                    Rectangle {
+                        x: clip-drag-res.caret-tick * TimelineStore.zoom * 1px;
+                        y: (clip-drag-res.target-row + 1) * row-pitch;
+                        width: clip-drag-res.duration-ticks * TimelineStore.zoom * 1px;
+                        height: track-height - 5px;
+                        background: clip-drag-res.is-noop
+                            ? #9aa0a633 : AppStore.theme.accent.primary.with-alpha(0.28);
+                        border-width: 1px;
+                        border-color: clip-drag-res.is-noop
+                            ? #9aa0a6 : AppStore.theme.accent.primary;
+                        border-radius: AppStore.theme.track-lane.clip.radius;
+                    }
+                    // Caret glow + core at the insertion boundary.
+                    Rectangle {
+                        x: clip-drag-res.caret-tick * TimelineStore.zoom * 1px - self.width / 2;
+                        y: (clip-drag-res.target-row + 1) * row-pitch - 2px;
+                        width: 9px;
+                        height: track-height - 1px;
+                        border-radius: 4.5px;
+                        background: clip-drag-res.is-noop
+                            ? #9aa0a64d : AppStore.theme.accent.primary.with-alpha(0.35);
+                    }
+                    Rectangle {
+                        x: clip-drag-res.caret-tick * TimelineStore.zoom * 1px - self.width / 2;
+                        y: (clip-drag-res.target-row + 1) * row-pitch - 2px;
+                        width: 3px;
+                        height: track-height - 1px;
+                        background: clip-drag-res.is-noop
+                            ? #9aa0a6 : AppStore.theme.accent.primary;
+                    }
                 }
 
-                // Same insertion caret for library drags over the main lane.
+                // Same insertion preview for library drags over the main lane.
                 if library-drag-over && library-drop-res.is-insert: Rectangle {
-                    x: library-drop-res.caret-tick * TimelineStore.zoom * 1px - self.width / 2;
-                    y: (library-drop-res.target-row + 1) * row-pitch - 2px;
-                    width: 3px;
-                    height: track-height - 1px;
-                    background: AppStore.theme.accent.primary;
+                    Rectangle {
+                        x: library-drop-res.caret-tick * TimelineStore.zoom * 1px;
+                        y: (library-drop-res.target-row + 1) * row-pitch;
+                        width: AppState.library-drag-duration-ticks * TimelineStore.zoom * 1px;
+                        height: track-height - 5px;
+                        background: AppStore.theme.accent.primary.with-alpha(0.28);
+                        border-width: 1px;
+                        border-color: AppStore.theme.accent.primary;
+                        border-radius: AppStore.theme.track-lane.clip.radius;
+                    }
+                    Rectangle {
+                        x: library-drop-res.caret-tick * TimelineStore.zoom * 1px - self.width / 2;
+                        y: (library-drop-res.target-row + 1) * row-pitch - 2px;
+                        width: 9px;
+                        height: track-height - 1px;
+                        border-radius: 4.5px;
+                        background: AppStore.theme.accent.primary.with-alpha(0.35);
+                    }
+                    Rectangle {
+                        x: library-drop-res.caret-tick * TimelineStore.zoom * 1px - self.width / 2;
+                        y: (library-drop-res.target-row + 1) * row-pitch - 2px;
+                        width: 3px;
+                        height: track-height - 1px;
+                        background: AppStore.theme.accent.primary;
+                    }
                 }
 
                 // Honest landing ghost for a freeform library drop: the snapped,

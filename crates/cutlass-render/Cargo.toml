@@ -16,6 +16,7 @@ cutlass-encoder = { path = "../cutlass-encoder" }
 cutlass-shapes = { path = "../cutlass-shapes" }
 cutlass-text = { path = "../cutlass-text" }
 thiserror.workspace = true
+tracing.workspace = true
 png = "0.17"
 
 [dev-dependencies]

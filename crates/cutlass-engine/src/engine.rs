@@ -7,8 +7,10 @@
 use std::path::PathBuf;
 
 use cutlass_commands::{Command, ProjectCommand};
-use cutlass_models::{ClipId, ClipTransform, Generator, Project, Rational, RationalTime};
-use cutlass_render::{Renderer, ResolveOverrides, RgbaImage, export_to_file};
+use cutlass_models::{ClipId, ClipTransform, Generator, MediaId, Project, Rational, RationalTime};
+use cutlass_render::{
+    FrameSink, Renderer, ResolveOverrides, RgbaImage, SeekPolicy, export_to_file,
+};
 
 use crate::action::{ApplyContext, ApplyOutcome, EditAction, History, dispatch};
 use crate::error::EngineError;
@@ -120,7 +122,16 @@ impl Engine {
     /// Abort the open group: revert its commands in reverse, restoring the
     /// pre-group state. History is left untouched.
     pub fn rollback_group(&mut self) {
-        for inverse in self.history.take_group().into_iter().rev() {
+        let inverses = self.history.take_group();
+        if inverses.is_empty() {
+            return;
+        }
+        // The rollback mutates the project again after the group's commands
+        // already bumped `revision`: bump once more so revision-keyed
+        // observers (the preview frame cache) can never confuse mid-group
+        // frames with the restored state.
+        self.revision += 1;
+        for inverse in inverses.into_iter().rev() {
             if self.run_action(inverse).is_err() {
                 tracing::error!("history group rollback failed; state may be partial");
                 return;
@@ -141,6 +152,9 @@ impl Engine {
         self.project_path = None;
         self.transform_override = None;
         self.generator_override = None;
+        // Media ids persist in project files: an id in the proxy registry
+        // can name a different file in the incoming project.
+        self.renderer.clear_proxies();
         self.revision += 1;
         self.saved_revision = self.revision;
     }
@@ -148,8 +162,13 @@ impl Engine {
     /// Apply a wire command. On success, pushes the inverse onto the undo stack.
     pub fn apply(&mut self, command: Command) -> Result<ApplyOutcome, EngineError> {
         if let Command::Project(ProjectCommand::Export { path }) = &command {
-            let frames = export_to_file(&mut self.renderer, &self.project, path)?;
-            return Ok(ApplyOutcome::Exported { frames });
+            // Export must render full quality from the originals; this
+            // renderer doubles as the preview's, so suspend its proxy
+            // substitutions for the pass.
+            self.renderer.set_use_proxies(false);
+            let result = export_to_file(&mut self.renderer, &self.project, path);
+            self.renderer.set_use_proxies(true);
+            return Ok(ApplyOutcome::Exported { frames: result? });
         }
 
         let mut ctx = ApplyContext {
@@ -160,20 +179,31 @@ impl Engine {
         let (outcome, inverse) = dispatch(command, &mut ctx)?;
         match outcome {
             ApplyOutcome::Opened | ApplyOutcome::Loaded => {
+                // Same media-id hazard as `reset_project`: the incoming
+                // file's ids owe nothing to the outgoing registry.
+                self.renderer.clear_proxies();
                 // The session now mirrors the file it came from: rebaseline as
                 // clean (revision still bumps so observers see a change).
                 self.revision += 1;
                 self.saved_revision = self.revision;
             }
             ApplyOutcome::Saved => self.saved_revision = self.revision,
+            // The media now names a different file: its proxy (keyed to the
+            // old file's content) is stale until the worker re-generates.
+            ApplyOutcome::Relinked { media } => {
+                self.renderer.clear_proxy(media);
+                self.revision += 1;
+            }
             ApplyOutcome::Edited(_)
             | ApplyOutcome::RemovedMedia { .. }
-            | ApplyOutcome::Imported { .. }
-            | ApplyOutcome::Relinked { .. } => self.revision += 1,
+            | ApplyOutcome::Imported { .. } => self.revision += 1,
             // Unlike Open/Load, a filled template exists nowhere on disk as a
             // project file: bump without rebaselining so the session reads
             // dirty until first saved.
-            ApplyOutcome::AppliedTemplate => self.revision += 1,
+            ApplyOutcome::AppliedTemplate => {
+                self.renderer.clear_proxies();
+                self.revision += 1;
+            }
             // Writing a `.cutlasst` (like exporting an MP4) doesn't touch the
             // session project.
             ApplyOutcome::Exported { .. } | ApplyOutcome::SavedTemplate => {}
@@ -198,6 +228,40 @@ impl Engine {
     /// [`set_transform_override`](Self::set_transform_override).
     pub fn set_generator_override(&mut self, value: Option<(ClipId, Generator)>) {
         self.generator_override = value;
+    }
+
+    /// True while a live gesture override (transform or generator) is set:
+    /// frames rendered now show session-only state that no project revision
+    /// describes, so revision-keyed frame caches must skip them.
+    pub fn has_live_overrides(&self) -> bool {
+        self.transform_override.is_some() || self.generator_override.is_some()
+    }
+
+    /// Stage timings of the most recent successful preview/export render:
+    /// how the frame's cost split between decode, raster, and composite.
+    /// The preview quality ladder keys off the resolution-dependent share.
+    pub fn last_frame_stats(&self) -> cutlass_render::FrameStats {
+        self.renderer.last_frame_stats()
+    }
+
+    /// Decode `media` from `path` (a preview proxy: same content, smaller /
+    /// short-GOP) instead of the pool file, starting with the next frame.
+    /// Session-only state — the project, history, and saves are untouched,
+    /// and the engine's own export command always renders the originals.
+    /// The registry clears on session swaps and per-media on relink; the
+    /// caller owns re-requesting generation then.
+    pub fn set_media_proxy(&mut self, media: MediaId, path: PathBuf) {
+        self.renderer.set_proxy(media, path);
+    }
+
+    /// Remove `media`'s proxy substitution, returning decode to the pool file.
+    pub fn clear_media_proxy(&mut self, media: MediaId) {
+        self.renderer.clear_proxy(media);
+    }
+
+    /// The proxy path registered for `media`, if any.
+    pub fn media_proxy(&self, media: MediaId) -> Option<&std::path::Path> {
+        self.renderer.proxy_for(media)
     }
 
     /// Tight size (canvas px, at transform scale 1.0) of the content
@@ -247,6 +311,52 @@ impl Engine {
             max_width,
             max_height,
             overrides,
+        )?)
+    }
+
+    /// [`get_frame`](Self::get_frame) writing the composited rows directly
+    /// into `sink`-provided storage: the preview worker hands its UI pixel
+    /// buffer in, so the mapped GPU readback is the only CPU copy. `policy`
+    /// selects exact or keyframe-snapped decode (see [`SeekPolicy`]); every
+    /// non-interactive caller wants [`SeekPolicy::Exact`].
+    pub fn get_frame_into(
+        &mut self,
+        time: RationalTime,
+        policy: SeekPolicy,
+        sink: &mut dyn FrameSink,
+    ) -> Result<(), EngineError> {
+        let overrides = ResolveOverrides {
+            transform: self.transform_override,
+            generator: self.generator_override.as_ref().map(|(id, g)| (*id, g)),
+        };
+        Ok(self
+            .renderer
+            .render_frame_into_with(&self.project, time, overrides, policy, sink)?)
+    }
+
+    /// [`get_frame_fit`](Self::get_frame_fit) writing the composited rows
+    /// directly into `sink`-provided storage (see
+    /// [`get_frame_into`](Self::get_frame_into)).
+    pub fn get_frame_fit_into(
+        &mut self,
+        time: RationalTime,
+        max_width: u32,
+        max_height: u32,
+        policy: SeekPolicy,
+        sink: &mut dyn FrameSink,
+    ) -> Result<(), EngineError> {
+        let overrides = ResolveOverrides {
+            transform: self.transform_override,
+            generator: self.generator_override.as_ref().map(|(id, g)| (*id, g)),
+        };
+        Ok(self.renderer.render_frame_fit_into_with(
+            &self.project,
+            time,
+            max_width,
+            max_height,
+            overrides,
+            policy,
+            sink,
         )?)
     }
 

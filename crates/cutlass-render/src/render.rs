@@ -6,11 +6,12 @@
 //! re-initializing the GPU or re-opening decoders.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use cutlass_compositor::{
-    CompositeLayer, Compositor, CompositorConfig, CompositorError, GpuContext, LayerPlacement,
-    RgbaImage, SdfLayer,
+    CompositeLayer, Compositor, CompositorConfig, CompositorError, FrameSink, GpuContext,
+    ImageSink, LayerPlacement, RgbaImage, SdfLayer,
 };
 use cutlass_core::{RationalTime, VideoDecoder, VideoFrame};
 use cutlass_decoder::OutputMode;
@@ -22,6 +23,60 @@ use crate::error::RenderError;
 use crate::resolve::{ResolveOverrides, resolve, resolve_with};
 use crate::scene::{LayerSource, Scene, SizeSpec};
 
+/// A composited frame slower than this logs its stage breakdown at `info`
+/// (default-visible): interactive preview budgets a few frames of latency,
+/// and anything past this is worth attributing to decode vs GPU work.
+const SLOW_FRAME_LOG_MS: f64 = 150.0;
+
+/// Per-stage timing of the most recent successful frame render.
+///
+/// Callers that adapt render *resolution* to cost (the preview quality
+/// ladder) need the split, not the total: decode runs at the source's native
+/// size no matter how small the output canvas is, so only
+/// [`scaled_cost_ms`](Self::scaled_cost_ms) responds to rendering smaller.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FrameStats {
+    /// Media decode time summed across layers (resolution-independent).
+    pub decode_ms: f64,
+    /// Text/shape/still realize time (raster caches, still decodes).
+    pub raster_ms: f64,
+    /// GPU composite + readback — scales with output pixels.
+    pub composite_ms: f64,
+}
+
+impl FrameStats {
+    /// The portion of the frame cost that shrinks with output resolution
+    /// (composite + raster) — what a quality ladder can actually buy back.
+    pub fn scaled_cost_ms(&self) -> f64 {
+        self.raster_ms + self.composite_ms
+    }
+
+    /// Whole-frame cost (decode + raster + composite).
+    pub fn total_ms(&self) -> f64 {
+        self.decode_ms + self.raster_ms + self.composite_ms
+    }
+}
+
+/// How media decoders are positioned when realizing a frame.
+///
+/// `Exact` is correctness (export, settled preview); `NearestSync` is the
+/// scrub-latency escape hatch: on long-GOP sources an exact mid-GOP target
+/// costs a keyframe-prefix walk of hundreds of decodes, where the nearest
+/// sync frame costs one. Frames rendered under `NearestSync` may show
+/// content up to a GOP *before* the requested time — callers own the
+/// follow-up exact render and must never cache snapped output under an
+/// exact key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SeekPolicy {
+    /// Decode the exact frame covering each layer's source time.
+    #[default]
+    Exact,
+    /// Snap to the cheapest frame near the target: one decode from the
+    /// sync point at/before it (or a short exact roll when the target is
+    /// just ahead of the decoder's position).
+    NearestSync,
+}
+
 /// Renders project frames on a headless (or shared) GPU.
 pub struct Renderer {
     gpu: GpuContext,
@@ -30,20 +85,43 @@ pub struct Renderer {
     /// Pen-path rasterizer (memoized, like `text`). Parametric shapes never
     /// touch it — they realize as GPU SDF layers.
     paths: PathRaster,
-    /// One open decoder per media source, reused across frames. Decoders are
-    /// stateful (seek + walk), so keeping them warm makes sequential export and
-    /// nearby scrubbing cheap.
-    decoders: HashMap<MediaId, Box<dyn VideoDecoder>>,
+    /// One open decoder per **on-screen use** of a media source, reused
+    /// across frames. Decoders are stateful (seek + walk), so keeping them
+    /// warm makes sequential export and nearby scrubbing cheap. Keyed by
+    /// `(media, occurrence slot)` — the per-scene index of that media in the
+    /// layer walk — because two simultaneously visible clips of the same
+    /// file sit at *different* source times: sharing one decoder cursor
+    /// would ping-pong it between them, paying a seek plus GOP-prefix
+    /// re-decode per layer per frame. Slots are stable while the stack is
+    /// (same walk order), so each clip keeps its warm decoder.
+    decoders: HashMap<(MediaId, u32), Box<dyn VideoDecoder>>,
     /// Decode-once cache for still images: one straight-alpha RGBA bitmap per
     /// media source, reused for every frame the still is on screen. Bounded by
     /// the project's still count, with each entry capped at
     /// [`cutlass_decoder::image::MAX_DECODE_DIMENSION`] on the long side.
     stills: HashMap<MediaId, RgbaImage>,
-    /// Preferred decoder output mode. Apple starts in [`OutputMode::Gpu`] so
-    /// hardware-decoded `CVPixelBuffer`s import into the compositor with no CPU
-    /// copy; if a produced surface can't be imported (e.g. 10-bit/HDR), the
-    /// renderer permanently falls back to [`OutputMode::Cpu`] and retries.
+    /// Preferred decoder output mode. Apple and Windows start in
+    /// [`OutputMode::Gpu`] so hardware-decoded surfaces (`CVPixelBuffer` /
+    /// shared D3D11 NV12 textures) import into the compositor with no CPU
+    /// copy; if a produced surface can't be imported (e.g. 10-bit/HDR, or a
+    /// GPU without NV12 texture support), the renderer permanently falls back
+    /// to [`OutputMode::Cpu`] and retries.
     decode_mode: OutputMode,
+    /// Runtime-only substitute decode paths (preview proxies): when present
+    /// (and [`use_proxies`](Self::use_proxies) holds), decoders for a media
+    /// id open this file instead of the project's. Session state — never
+    /// serialized, cleared when the session's media-id space changes
+    /// (open/load/relink). Content must match the original frame-for-frame;
+    /// only resolution/GOP may differ, so placement geometry (driven by the
+    /// model's dimensions) stays valid and normalized UVs sample correctly.
+    proxies: HashMap<MediaId, PathBuf>,
+    /// Whether [`decode`](Self::decode) honors `proxies`. Preview leaves
+    /// this on; full-quality paths sharing this renderer (the engine's
+    /// export command) flip it off for the pass. Toggling drops the
+    /// proxied media's open decoders so no cursor outlives its file.
+    use_proxies: bool,
+    /// Stage timings of the last successful render (see [`FrameStats`]).
+    last_stats: FrameStats,
 }
 
 impl Renderer {
@@ -61,7 +139,71 @@ impl Renderer {
             decoders: HashMap::new(),
             stills: HashMap::new(),
             decode_mode: default_decode_mode(),
+            proxies: HashMap::new(),
+            use_proxies: true,
+            last_stats: FrameStats::default(),
         })
+    }
+
+    /// Stage timings of the most recent successful render — how the last
+    /// frame's cost split between decode, raster, and composite. Zeroed
+    /// until the first render completes.
+    pub fn last_frame_stats(&self) -> FrameStats {
+        self.last_stats
+    }
+
+    /// Decode `media` from the file at `path` (a preview proxy) instead of
+    /// the project's own path, from the next frame on. Drops the media's
+    /// open decoders so no cursor keeps reading the original.
+    pub fn set_proxy(&mut self, media: MediaId, path: PathBuf) {
+        self.proxies.insert(media, path);
+        self.drop_decoders_for(media);
+    }
+
+    /// Remove `media`'s proxy substitution (e.g. the media was relinked to a
+    /// new file), returning decode to the project's path.
+    pub fn clear_proxy(&mut self, media: MediaId) {
+        if self.proxies.remove(&media).is_some() {
+            self.drop_decoders_for(media);
+        }
+    }
+
+    /// Remove every proxy substitution — required when the session swaps
+    /// projects: media ids persist in project files, so an id from the old
+    /// registry can name a different file in the new one.
+    pub fn clear_proxies(&mut self) {
+        let stale: Vec<MediaId> = self.proxies.keys().copied().collect();
+        self.proxies.clear();
+        for media in stale {
+            self.drop_decoders_for(media);
+        }
+    }
+
+    /// The proxy path registered for `media`, if any (regardless of
+    /// [`set_use_proxies`](Self::set_use_proxies)).
+    pub fn proxy_for(&self, media: MediaId) -> Option<&Path> {
+        self.proxies.get(&media).map(PathBuf::as_path)
+    }
+
+    /// Turn proxy substitution on/off for subsequent decodes. Off renders
+    /// full quality from the originals (the engine's in-place export);
+    /// proxied media's open decoders drop on every change of state so a
+    /// stale cursor can never serve the wrong file.
+    pub fn set_use_proxies(&mut self, on: bool) {
+        if self.use_proxies == on {
+            return;
+        }
+        self.use_proxies = on;
+        let proxied: Vec<MediaId> = self.proxies.keys().copied().collect();
+        for media in proxied {
+            self.drop_decoders_for(media);
+        }
+    }
+
+    /// Drop every open decoder slot for `media` (see `decoders` — one entry
+    /// per on-screen occurrence).
+    fn drop_decoders_for(&mut self, media: MediaId) {
+        self.decoders.retain(|(id, _), _| *id != media);
     }
 
     /// Add a font face (TTF/OTF bytes) for deterministic text rendering. Without
@@ -127,6 +269,44 @@ impl Renderer {
         self.render_scene(project, &scene)
     }
 
+    /// [`render_frame_with`](Self::render_frame_with) writing the composited
+    /// rows directly into `sink`-provided storage (see
+    /// [`render_scene_into`](Self::render_scene_into)), decoding under
+    /// `policy` — the interactive-preview entry point, where a scrub drag
+    /// passes [`SeekPolicy::NearestSync`].
+    pub fn render_frame_into_with(
+        &mut self,
+        project: &Project,
+        t: RationalTime,
+        overrides: ResolveOverrides<'_>,
+        policy: SeekPolicy,
+        sink: &mut dyn FrameSink,
+    ) -> Result<(), RenderError> {
+        let scene = resolve_with(project, t, overrides)?;
+        self.render_scene_into_policy(project, &scene, sink, policy)
+    }
+
+    /// [`render_frame_fit_with`](Self::render_frame_fit_with) writing the
+    /// composited rows directly into `sink`-provided storage — the
+    /// interactive-preview path, which hands the pixels straight to the UI's
+    /// frame buffer instead of round-tripping through an [`RgbaImage`].
+    /// Decodes under `policy` (see [`render_frame_into_with`](Self::render_frame_into_with)).
+    #[allow(clippy::too_many_arguments)] // the preview call: bound + overrides + policy are all load-bearing
+    pub fn render_frame_fit_into_with(
+        &mut self,
+        project: &Project,
+        t: RationalTime,
+        max_width: u32,
+        max_height: u32,
+        overrides: ResolveOverrides<'_>,
+        policy: SeekPolicy,
+        sink: &mut dyn FrameSink,
+    ) -> Result<(), RenderError> {
+        let mut scene = resolve_with(project, t, overrides)?;
+        scene.fit_within(max_width, max_height);
+        self.render_scene_into_policy(project, &scene, sink, policy)
+    }
+
     /// [`render_frame`](Self::render_frame) at an exact output size: content
     /// uniformly scaled (up or down) and centered, aspect mismatches
     /// letterboxed over the canvas background — the export path for a
@@ -146,15 +326,42 @@ impl Renderer {
     /// Composite an already-resolved [`Scene`]. `project` supplies media file
     /// paths for the decoder cache.
     ///
-    /// When decoding zero-copy (Apple's [`OutputMode::Gpu`]) produces a surface
-    /// the compositor can't import, this falls back to CPU decode once and
-    /// retries, so unusual formats (10-bit/HDR) still render.
+    /// When decoding zero-copy ([`OutputMode::Gpu`] on Apple/Windows) produces
+    /// a surface the compositor can't import, this falls back to CPU decode
+    /// once and retries, so unusual formats (10-bit/HDR) still render.
     pub fn render_scene(
         &mut self,
         project: &Project,
         scene: &Scene,
     ) -> Result<RgbaImage, RenderError> {
-        match self.render_scene_once(project, scene) {
+        let mut sink = ImageSink::default();
+        self.render_scene_into(project, scene, &mut sink)?;
+        Ok(sink
+            .into_image()
+            .expect("render_scene_into fills the sink on success"))
+    }
+
+    /// [`render_scene`](Self::render_scene) writing the composited rows
+    /// directly into `sink`-provided storage. The sink is consulted only
+    /// after the GPU work succeeded, so the CPU-decode fallback retry can
+    /// reuse it — at most one attempt ever writes.
+    pub fn render_scene_into(
+        &mut self,
+        project: &Project,
+        scene: &Scene,
+        sink: &mut dyn FrameSink,
+    ) -> Result<(), RenderError> {
+        self.render_scene_into_policy(project, scene, sink, SeekPolicy::Exact)
+    }
+
+    fn render_scene_into_policy(
+        &mut self,
+        project: &Project,
+        scene: &Scene,
+        sink: &mut dyn FrameSink,
+        policy: SeekPolicy,
+    ) -> Result<(), RenderError> {
+        match self.render_scene_once(project, scene, sink, policy) {
             Err(RenderError::Compositor(CompositorError::UnsupportedFormat(_)))
                 if self.decode_mode == OutputMode::Gpu =>
             {
@@ -163,7 +370,7 @@ impl Renderer {
                 // decoders reopen in CPU mode on the next decode.
                 self.decode_mode = OutputMode::Cpu;
                 self.decoders.clear();
-                self.render_scene_once(project, scene)
+                self.render_scene_once(project, scene, sink, policy)
             }
             other => other,
         }
@@ -173,11 +380,20 @@ impl Renderer {
         &mut self,
         project: &Project,
         scene: &Scene,
-    ) -> Result<RgbaImage, RenderError> {
+        sink: &mut dyn FrameSink,
+        policy: SeekPolicy,
+    ) -> Result<(), RenderError> {
+        let realize_started = Instant::now();
+        // Decode time accumulated across media layers — on weak machines this
+        // is where whole-frame seconds hide, so the stage log splits it out.
+        let mut decode_ms = 0.0f64;
         // First pass: decode/rasterize each layer into owned pixels and a final
         // placement. Held in `realized` so the borrowed `CompositeLayer`s built
         // below stay valid through the composite call.
         let mut realized: Vec<Realized> = Vec::with_capacity(scene.layers.len());
+        // Per-scene occurrence index of each media source: the decoder-cache
+        // slot for repeated uses of one file (see `decoders`).
+        let mut occurrence: HashMap<MediaId, u32> = HashMap::new();
         for layer in &scene.layers {
             // The layer carries the anchor position; the quad center falls out
             // of the final pixel size (bitmap sizes only exist after raster).
@@ -212,7 +428,11 @@ impl Renderer {
                     });
                 }
                 LayerSource::Media { media, source_time } => {
-                    let frame = self.decode(project, *media, *source_time)?;
+                    let slot = occurrence.entry(*media).or_insert(0);
+                    let decode_started = Instant::now();
+                    let frame = self.decode(project, *media, *slot, *source_time, policy)?;
+                    decode_ms += decode_started.elapsed().as_secs_f64() * 1000.0;
+                    *slot += 1;
                     let size = fixed_size(layer.size, [scene.width as f32, scene.height as f32]);
                     realized.push(Realized::Frame {
                         frame,
@@ -306,28 +526,84 @@ impl Renderer {
 
         let config =
             CompositorConfig::new(scene.width, scene.height).with_background(scene.background);
-        Ok(self.compositor.render(&self.gpu, &config, &layers)?)
+        let realize_ms = realize_started.elapsed().as_secs_f64() * 1000.0;
+        let composite_started = Instant::now();
+        self.compositor
+            .render_into(&self.gpu, &config, &layers, sink)?;
+
+        // Stage breakdown per frame: decode (media layers), raster (text/
+        // shape/still realize minus decode), composite (GPU submit + mapped
+        // readback). Slow frames surface at `info` so a default-filtered log
+        // shows where the seconds go on decode- or GPU-bound machines.
+        let composite_ms = composite_started.elapsed().as_secs_f64() * 1000.0;
+        let raster_ms = (realize_ms - decode_ms).max(0.0);
+        let total_ms = realize_ms + composite_ms;
+        self.last_stats = FrameStats {
+            decode_ms,
+            raster_ms,
+            composite_ms,
+        };
+        if total_ms > SLOW_FRAME_LOG_MS {
+            tracing::info!(
+                decode_ms = %format_args!("{decode_ms:.1}"),
+                raster_ms = %format_args!("{raster_ms:.1}"),
+                composite_ms = %format_args!("{composite_ms:.1}"),
+                layers = layers.len(),
+                width = scene.width,
+                height = scene.height,
+                "slow frame render: {total_ms:.0} ms"
+            );
+        } else {
+            tracing::trace!(
+                decode_ms = %format_args!("{decode_ms:.1}"),
+                raster_ms = %format_args!("{raster_ms:.1}"),
+                composite_ms = %format_args!("{composite_ms:.1}"),
+                layers = layers.len(),
+                "frame render: {total_ms:.1} ms"
+            );
+        }
+        Ok(())
     }
 
     /// Decode the frame of `media` at `source_time`, opening (and caching) a
-    /// decoder for the source on first use.
+    /// decoder for this `(media, slot)` use on first sight — over the
+    /// media's proxy file when one is registered (see
+    /// [`set_proxy`](Self::set_proxy)). Under [`SeekPolicy::NearestSync`]
+    /// the frame may be the sync point before `source_time` rather than the
+    /// exact frame (see [`SeekPolicy`]).
     fn decode(
         &mut self,
         project: &Project,
         media: MediaId,
+        slot: u32,
         source_time: RationalTime,
+        policy: SeekPolicy,
     ) -> Result<VideoFrame, RenderError> {
         let mode = self.decode_mode;
-        let decoder = match self.decoders.entry(media) {
+        let proxy = self.use_proxies.then(|| self.proxies.get(&media)).flatten();
+        let decoder = match self.decoders.entry((media, slot)) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => {
                 let src = project
                     .media(media)
                     .ok_or(RenderError::MissingMedia(media))?;
-                e.insert(open_decoder(src.path(), mode)?)
+                let path = proxy.map(PathBuf::as_path).unwrap_or_else(|| src.path());
+                e.insert(open_decoder(path, mode)?)
             }
         };
-        decoder.frame_at(source_time)?.ok_or(RenderError::NoFrame {
+        let mut frame = match policy {
+            SeekPolicy::Exact => decoder.frame_at(source_time)?,
+            SeekPolicy::NearestSync => decoder.frame_at_nearest(source_time)?,
+        };
+        // Proxies run a frame short by construction (generation drops the
+        // container-reported tail, which routinely over-counts by one): an
+        // exact target at the media's very end can overshoot the proxy's
+        // EOF. Show the nearest decodable frame instead of failing the
+        // whole composite over the final tick.
+        if frame.is_none() && proxy.is_some() {
+            frame = decoder.frame_at_nearest(source_time)?;
+        }
+        frame.ok_or(RenderError::NoFrame {
             media,
             time: source_time,
         })
@@ -437,33 +713,30 @@ fn fixed_size(size: SizeSpec, canvas: [f32; 2]) -> [f32; 2] {
     }
 }
 
-/// The renderer's starting decode mode: zero-copy GPU surfaces on Apple (with a
-/// CPU fallback in [`Renderer::render_scene`]), CPU planes elsewhere until those
-/// backends grow a zero-copy import path.
-#[cfg(target_vendor = "apple")]
+/// The renderer's starting decode mode: zero-copy GPU surfaces on Apple and
+/// Windows (with a CPU fallback in [`Renderer::render_scene`]), CPU planes
+/// elsewhere until those backends grow a zero-copy import path.
+#[cfg(any(target_vendor = "apple", target_os = "windows"))]
 fn default_decode_mode() -> OutputMode {
     OutputMode::Gpu
 }
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
 fn default_decode_mode() -> OutputMode {
     OutputMode::Cpu
 }
 
-/// Open the platform's native decoder for `path` in `mode`. Only Apple has a
-/// zero-copy import path today, so the other backends always decode to CPU
-/// planes regardless of the requested mode.
+/// Open the platform's native decoder for `path` in `mode`. Only Apple and
+/// Windows have a zero-copy import path today, so the other backends always
+/// decode to CPU planes regardless of the requested mode.
 #[cfg(target_vendor = "apple")]
 fn open_decoder(path: &Path, mode: OutputMode) -> Result<Box<dyn VideoDecoder>, RenderError> {
     Ok(Box::new(cutlass_decoder::AvfDecoder::open(path, mode)?))
 }
 
 #[cfg(target_os = "windows")]
-fn open_decoder(path: &Path, _mode: OutputMode) -> Result<Box<dyn VideoDecoder>, RenderError> {
-    Ok(Box::new(cutlass_decoder::WmfDecoder::open(
-        path,
-        OutputMode::Cpu,
-    )?))
+fn open_decoder(path: &Path, mode: OutputMode) -> Result<Box<dyn VideoDecoder>, RenderError> {
+    Ok(Box::new(cutlass_decoder::WmfDecoder::open(path, mode)?))
 }
 
 #[cfg(target_os = "android")]

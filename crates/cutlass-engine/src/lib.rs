@@ -14,5 +14,6 @@ mod import;
 
 pub use action::ApplyOutcome;
 pub use cutlass_commands::{Command, EditCommand, EditOutcome, ProjectCommand};
+pub use cutlass_render::{FrameStats, SeekPolicy};
 pub use engine::{Engine, EngineConfig};
 pub use error::EngineError;

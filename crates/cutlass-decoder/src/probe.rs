@@ -29,9 +29,9 @@ pub struct MediaProbe {
     /// when the container reports no duration (and always for stills, whose
     /// placement length is a policy of the media pool, not the file).
     pub frame_count: i64,
-    /// Whether the source carries an audio track, detected per-platform
-    /// ([`has_audio_track`]). The [`VideoDecoder`] surfaces only the video
-    /// track, so audio presence is queried from the demuxer separately.
+    /// Whether the source carries an audio track, detected per-platform at
+    /// probe time. The [`VideoDecoder`] surfaces only the video track, so
+    /// audio presence is answered by the demuxer.
     pub has_audio: bool,
     /// Still image (PNG/JPEG/HEIC/WebP/...): one frame, no timebase.
     /// Detected by magic bytes before the video probe runs.
@@ -89,13 +89,13 @@ pub fn probe(path: &Path) -> Result<MediaProbe, DecodeError> {
             is_image: true,
         });
     }
-    let decoder = match open(path) {
-        Ok(decoder) => decoder,
+    let (decoder, has_audio) = match open(path) {
+        Ok(opened) => opened,
         Err(video_err) => {
             return audio_only_probe(path).ok_or(video_err);
         }
     };
-    Ok(MediaProbe::from_info(decoder.info(), has_audio_track(path)))
+    Ok(MediaProbe::from_info(decoder.info(), has_audio))
 }
 
 /// Probe for sources with no decodable video stream. `Some` iff the demuxer
@@ -112,52 +112,37 @@ fn audio_only_probe(path: &Path) -> Option<MediaProbe> {
     })
 }
 
+// Each platform's `open` also answers "does the source carry audio?", so a
+// backend whose reader can report both (Windows) opens the file **once**;
+// the others ask their demuxer separately. A missing audio track is never
+// fatal to probing — the separate checks return `false` on any error.
+
 #[cfg(target_vendor = "apple")]
-fn open(path: &Path) -> Result<Box<dyn VideoDecoder>, DecodeError> {
-    Ok(Box::new(crate::AvfDecoder::open(path, OutputMode::Cpu)?))
+fn open(path: &Path) -> Result<(Box<dyn VideoDecoder>, bool), DecodeError> {
+    let decoder = crate::AvfDecoder::open(path, OutputMode::Cpu)?;
+    Ok((Box::new(decoder), crate::apple::has_audio_track(path)))
 }
 
 #[cfg(target_os = "windows")]
-fn open(path: &Path) -> Result<Box<dyn VideoDecoder>, DecodeError> {
-    Ok(Box::new(crate::WmfDecoder::open(path, OutputMode::Cpu)?))
+fn open(path: &Path) -> Result<(Box<dyn VideoDecoder>, bool), DecodeError> {
+    // The audio-track check reads the open reader's presentation descriptor
+    // — no second open of the file.
+    let decoder = crate::WmfDecoder::open(path, OutputMode::Cpu)?;
+    let has_audio = decoder.has_audio_track();
+    Ok((Box::new(decoder), has_audio))
 }
 
 #[cfg(target_os = "android")]
-fn open(path: &Path) -> Result<Box<dyn VideoDecoder>, DecodeError> {
-    Ok(Box::new(crate::MediaCodecDecoder::open(
-        path,
-        OutputMode::Cpu,
-    )?))
+fn open(path: &Path) -> Result<(Box<dyn VideoDecoder>, bool), DecodeError> {
+    let decoder = crate::MediaCodecDecoder::open(path, OutputMode::Cpu)?;
+    Ok((Box::new(decoder), crate::android::has_audio_track(path)))
 }
 
 #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "android")))]
-fn open(_path: &Path) -> Result<Box<dyn VideoDecoder>, DecodeError> {
+fn open(_path: &Path) -> Result<(Box<dyn VideoDecoder>, bool), DecodeError> {
     Err(DecodeError::unsupported(
         "no native video decoder for this platform",
     ))
-}
-
-/// Whether `path` has at least one audio track, queried from the platform
-/// demuxer. `false` on any error or on platforms without a backend — a missing
-/// audio track is never fatal to probing.
-#[cfg(target_vendor = "apple")]
-fn has_audio_track(path: &Path) -> bool {
-    crate::apple::has_audio_track(path)
-}
-
-#[cfg(target_os = "windows")]
-fn has_audio_track(path: &Path) -> bool {
-    crate::wmf::has_audio_track(path)
-}
-
-#[cfg(target_os = "android")]
-fn has_audio_track(path: &Path) -> bool {
-    crate::android::has_audio_track(path)
-}
-
-#[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "android")))]
-fn has_audio_track(_path: &Path) -> bool {
-    false
 }
 
 /// Duration of the first audio track, for the audio-only fallback probe.
@@ -168,7 +153,12 @@ fn audio_track_duration(path: &Path) -> Option<cutlass_core::RationalTime> {
     crate::apple::audio_track_duration(path)
 }
 
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(target_os = "windows")]
+fn audio_track_duration(path: &Path) -> Option<cutlass_core::RationalTime> {
+    crate::wmf::audio_track_duration(path)
+}
+
+#[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
 fn audio_track_duration(_path: &Path) -> Option<cutlass_core::RationalTime> {
     None
 }

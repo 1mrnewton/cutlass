@@ -49,7 +49,9 @@ pub use audio::{AudioEncoderConfig, AudioReader};
 pub use color::{ColorPrimaries, ColorRange, ColorSpace, MatrixCoefficients, TransferFunction};
 pub use decode::{DecodeError, SourceInfo, VideoDecoder};
 pub use encode::{EncodeError, EncoderConfig, VideoEncoder};
-pub use frame::{CpuImage, FrameData, GpuSurface, GpuSurfaceKind, Plane, VideoFrame};
+pub use frame::{
+    CpuImage, D3d11SharedSurface, FrameData, GpuSurface, GpuSurfaceKind, Plane, VideoFrame,
+};
 pub use geometry::{Rect, Rotation};
 pub use image::RgbaImage;
 pub use pixel::{ChromaSubsampling, PixelFormat};

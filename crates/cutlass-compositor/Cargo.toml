@@ -23,5 +23,16 @@ tracing = { workspace = true }
 [target.'cfg(target_vendor = "apple")'.dependencies]
 metal = "0.33"
 
+# Windows zero-copy import: open the decoder's shared D3D11 NV12 textures on
+# wgpu's D3D12 device (OpenSharedHandle) and adopt them via wgpu-hal's dx12
+# interop. Pinned to the same `windows` 0.62 crate wgpu-hal 28 links, so the
+# `ID3D12Resource` we hand to `texture_from_raw` is the exact type it expects
+# (cargo unifies the two).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D12",
+] }
+
 [dev-dependencies]
 pollster = { workspace = true }

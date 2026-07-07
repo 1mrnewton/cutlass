@@ -29,6 +29,8 @@ mod compositor;
 mod error;
 mod gpu;
 mod layer;
+mod passes;
+mod passes;
 #[cfg(target_vendor = "apple")]
 mod metal_import;
 
@@ -39,4 +41,8 @@ pub use error::CompositorError;
 pub use gpu::GpuContext;
 pub use layer::{
     CompositeLayer, CompositorConfig, FULL_UV, LayerContent, LayerPlacement, SdfLayer,
+};
+pub use passes::{
+    PassCoverage, PassDescriptor, PassInstance, effect_coverage, effect_descriptors,
+    transition_coverage, transition_ids,
 };

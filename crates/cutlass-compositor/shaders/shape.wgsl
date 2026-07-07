@@ -237,8 +237,6 @@ fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Stroke ring over fill, straight alpha — mirrors `shade` in sdf.rs.
     let sw = s.trans_opacity.w;
-    let fill_rgb = apply_grade(s.fill.rgb, s.grade0, s.grade1);
-    let stroke_rgb = apply_grade(s.stroke_color.rgb, s.grade0, s.grade1);
     let fill_cov = coverage(d) * s.fill.a;
     var stroke_cov = 0.0;
     if sw > 0.0 {

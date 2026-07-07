@@ -638,3 +638,63 @@ fn sdf_quad_padding_keeps_stroke_unclipped() {
     // At the canvas corner: untouched background.
     assert_px(&g, 0, 0, [40, 60, 80, 255], 1);
 }
+
+// --- effects (M4) -------------------------------------------------------
+
+use cutlass_compositor::PassInstance;
+
+#[test]
+fn vignette_darkens_corners_vs_center() {
+    let gpu = gpu_or_skip!();
+    let mut comp = Compositor::new(&gpu);
+    let config = CompositorConfig::new(64, 64).with_background([0, 0, 0, 255]);
+    let white = CompositeLayer::solid([255, 255, 255, 255], LayerPlacement::full_canvas(&config));
+    let baseline = comp.render(&gpu, &config, &[white]).expect("baseline");
+
+    let vignette = PassInstance {
+        id: "vignette",
+        params: &[0.8],
+    };
+    let effects = [vignette];
+    let effected = CompositeLayer::solid([255, 255, 255, 255], LayerPlacement::full_canvas(&config))
+        .with_effects(&effects);
+    let dark = comp.render(&gpu, &config, &[effected]).expect("vignette");
+
+    let center = baseline.pixel(32, 32);
+    let corner = dark.pixel(2, 2);
+    assert!(corner[0] < center[0] - 20, "corner should darken: {corner:?} vs {center:?}");
+}
+
+#[test]
+fn pixelate_produces_uniform_blocks() {
+    let gpu = gpu_or_skip!();
+    let mut comp = Compositor::new(&gpu);
+    let config = CompositorConfig::new(64, 64);
+    // Horizontal gradient bitmap.
+    let mut pixels = Vec::with_capacity(64 * 64 * 4);
+    for y in 0..64 {
+        for x in 0..64 {
+            let v = (x * 4) as u8;
+            pixels.extend_from_slice(&[v, v, v, 255]);
+        }
+    }
+    let bmp = RgbaImage::new(64, 64, pixels);
+    let smooth = CompositeLayer::rgba(&bmp, LayerPlacement::full_canvas(&config));
+    let smooth_img = comp.render(&gpu, &config, &[smooth]).expect("smooth");
+
+    let pixelate = PassInstance {
+        id: "pixelate",
+        params: &[8.0],
+    };
+    let effects = [pixelate];
+    let blocky_layer =
+        CompositeLayer::rgba(&bmp, LayerPlacement::full_canvas(&config)).with_effects(&effects);
+    let blocky = comp.render(&gpu, &config, &[blocky_layer]).expect("pixelate");
+
+    // Within an 8px block, colors should match after pixelate.
+    let a = blocky.pixel(10, 10);
+    let b = blocky.pixel(11, 10);
+    assert_eq!(a, b, "pixelate should flatten local variation");
+    // And differ from the smooth original at the same coords.
+    assert_ne!(smooth_img.pixel(10, 10), a);
+}

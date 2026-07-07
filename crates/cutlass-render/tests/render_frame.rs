@@ -120,3 +120,65 @@ fn renders_a_pen_path_through_the_bitmap_pipeline() {
         "outside the diamond should be background, got {outside:?}"
     );
 }
+
+#[test]
+fn pixelate_effect_blockifies_a_solid_fill() {
+    let mut project = Project::new("p", FPS_24);
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::SolidColor {
+                rgba: [200, 100, 50, 255],
+            },
+            TimeRange::at_rate(0, 100, FPS_24),
+        )
+        .unwrap();
+    project.add_effect(clip, "pixelate").unwrap();
+    project.set_effect_param(clip, 0, 0, 24.0).unwrap();
+
+    let Ok(mut renderer) = Renderer::new_headless() else {
+        eprintln!("skipping: no headless GPU available");
+        return;
+    };
+    let image = renderer.render_frame(&project, rt(0)).expect("render");
+    // Blocky pixelate on a uniform fill still renders; center stays the fill color.
+    let center = image.pixel(960, 540);
+    assert!(center[0] > 180 && center[1] > 80);
+}
+
+#[test]
+fn crossfade_transition_blends_two_solids_at_midpoint() {
+    let mut project = Project::new("p", FPS_24);
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let left = project
+        .add_generated(
+            track,
+            Generator::SolidColor {
+                rgba: [255, 0, 0, 255],
+            },
+            TimeRange::at_rate(0, 24, FPS_24),
+        )
+        .unwrap();
+    project
+        .add_generated(
+            track,
+            Generator::SolidColor {
+                rgba: [0, 0, 255, 255],
+            },
+            TimeRange::at_rate(24, 24, FPS_24),
+        )
+        .unwrap();
+    project.add_transition(left, "crossfade").unwrap();
+    project.set_transition_duration(left, 24).unwrap();
+
+    let Ok(mut renderer) = Renderer::new_headless() else {
+        eprintln!("skipping: no headless GPU available");
+        return;
+    };
+    let image = renderer.render_frame(&project, rt(24)).expect("render");
+    let px = image.pixel(960, 540);
+    // Mid blend of red + blue → purple-ish, not pure red or blue.
+    assert!(px[0] > 80 && px[2] > 80, "midpoint should blend channels, got {px:?}");
+    assert!(px[0] < 240 && px[2] < 240);
+}

@@ -9,12 +9,12 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use cutlass_compositor::{
-    CompositeLayer, Compositor, CompositorConfig, CompositorError, GpuContext, LayerPlacement,
-    RgbaImage, SdfLayer,
+    CompositeLayer, Compositor, CompositorConfig, CompositorError, GpuContext, LayerChromaKey,
+    LayerEffects, LayerMask, LayerPlacement, RgbaImage, SdfLayer, mask_kind,
 };
 use cutlass_core::{RationalTime, VideoDecoder, VideoFrame};
 use cutlass_decoder::OutputMode;
-use cutlass_models::{MediaId, Project};
+use cutlass_models::{MaskKind, MediaId, Project};
 use cutlass_shapes::{PathRaster, ShapeStyle};
 use cutlass_text::TextRenderer;
 
@@ -179,6 +179,7 @@ impl Renderer {
         // below stay valid through the composite call.
         let mut realized: Vec<Realized> = Vec::with_capacity(scene.layers.len());
         for layer in &scene.layers {
+            let effects = layer_effects(layer);
             // The layer carries the anchor position; the quad center falls out
             // of the final pixel size (bitmap sizes only exist after raster).
             let place = |size: [f32; 2]| LayerPlacement {
@@ -193,6 +194,7 @@ impl Renderer {
                     realized.push(Realized::Solid {
                         rgba: *rgba,
                         placement: place(size),
+                        effects,
                     });
                 }
                 LayerSource::Text { content, style } => {
@@ -209,6 +211,7 @@ impl Renderer {
                         image,
                         placement: place(size),
                         uv: layer.uv,
+                        effects,
                     });
                 }
                 LayerSource::Media { media, source_time } => {
@@ -218,6 +221,7 @@ impl Renderer {
                         frame,
                         placement: place(size),
                         uv: layer.uv,
+                        effects,
                     });
                 }
                 LayerSource::Still { media } => {
@@ -227,6 +231,7 @@ impl Renderer {
                         media: *media,
                         placement: place(size),
                         uv: layer.uv,
+                        effects,
                     });
                 }
                 LayerSource::Shape {
@@ -249,6 +254,7 @@ impl Renderer {
                             stroke: *stroke,
                         },
                         placement: place(size),
+                        effects,
                     });
                 }
                 LayerSource::PathShape {
@@ -274,6 +280,7 @@ impl Renderer {
                         image,
                         placement: place(size),
                         uv: layer.uv,
+                        effects,
                     });
                 }
             }
@@ -283,24 +290,40 @@ impl Renderer {
         let layers: Vec<CompositeLayer> = realized
             .iter()
             .map(|r| match r {
-                Realized::Solid { rgba, placement } => CompositeLayer::solid(*rgba, *placement),
+                Realized::Solid {
+                    rgba,
+                    placement,
+                    effects,
+                } => CompositeLayer::solid(*rgba, *placement).with_effects(*effects),
                 Realized::Bitmap {
                     image,
                     placement,
                     uv,
-                } => CompositeLayer::rgba(image, *placement).with_uv(*uv),
+                    effects,
+                } => CompositeLayer::rgba(image, *placement)
+                    .with_uv(*uv)
+                    .with_effects(*effects),
                 Realized::Frame {
                     frame,
                     placement,
                     uv,
-                } => CompositeLayer::frame(frame, *placement).with_uv(*uv),
-                // `ensure_still` populated the cache in the first pass.
+                    effects,
+                } => CompositeLayer::frame(frame, *placement)
+                    .with_uv(*uv)
+                    .with_effects(*effects),
                 Realized::Still {
                     media,
                     placement,
                     uv,
-                } => CompositeLayer::rgba(&self.stills[media], *placement).with_uv(*uv),
-                Realized::Sdf { shape, placement } => CompositeLayer::sdf(*shape, *placement),
+                    effects,
+                } => CompositeLayer::rgba(&self.stills[media], *placement)
+                    .with_uv(*uv)
+                    .with_effects(*effects),
+                Realized::Sdf {
+                    shape,
+                    placement,
+                    effects,
+                } => CompositeLayer::sdf(*shape, *placement).with_effects(*effects),
             })
             .collect();
 
@@ -405,6 +428,7 @@ enum Realized {
         frame: VideoFrame,
         placement: LayerPlacement,
         uv: [f32; 4],
+        effects: LayerEffects,
     },
     /// A still image already decoded into the renderer's cache; the composite
     /// pass borrows the pixels from there instead of cloning them per frame.
@@ -412,20 +436,53 @@ enum Realized {
         media: MediaId,
         placement: LayerPlacement,
         uv: [f32; 4],
+        effects: LayerEffects,
     },
     Bitmap {
         image: RgbaImage,
         placement: LayerPlacement,
         uv: [f32; 4],
+        effects: LayerEffects,
     },
     Solid {
         rgba: [u8; 4],
         placement: LayerPlacement,
+        effects: LayerEffects,
     },
     Sdf {
         shape: SdfLayer,
         placement: LayerPlacement,
+        effects: LayerEffects,
     },
+}
+
+fn layer_effects(layer: &crate::scene::SceneLayer) -> LayerEffects {
+    let mask = layer.mask.map(|m| LayerMask {
+        kind: mask_kind_id(m.kind),
+        feather: m.feather,
+        invert: u32::from(m.invert),
+    });
+    let chroma_key = layer.chroma_key.map(|c| LayerChromaKey {
+        rgb: [
+            f32::from(c.rgb[0]) / 255.0,
+            f32::from(c.rgb[1]) / 255.0,
+            f32::from(c.rgb[2]) / 255.0,
+        ],
+        strength: c.strength,
+        shadow: c.shadow,
+    });
+    LayerEffects { mask, chroma_key }
+}
+
+fn mask_kind_id(kind: MaskKind) -> u32 {
+    match kind {
+        MaskKind::Linear => mask_kind::LINEAR,
+        MaskKind::Mirror => mask_kind::MIRROR,
+        MaskKind::Circle => mask_kind::CIRCLE,
+        MaskKind::Rectangle => mask_kind::RECTANGLE,
+        MaskKind::Heart => mask_kind::HEART,
+        MaskKind::Star => mask_kind::STAR,
+    }
 }
 
 /// The on-canvas size for a non-text layer, falling back to the canvas if a

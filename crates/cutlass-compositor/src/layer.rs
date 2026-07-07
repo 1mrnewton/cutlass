@@ -60,6 +60,50 @@ impl LayerPlacement {
     }
 }
 
+/// Mask shape kind ids shared with WGSL (`mask.wgsl`).
+pub mod mask_kind {
+    pub const LINEAR: u32 = 0;
+    pub const MIRROR: u32 = 1;
+    pub const CIRCLE: u32 = 2;
+    pub const RECTANGLE: u32 = 3;
+    pub const HEART: u32 = 4;
+    pub const STAR: u32 = 5;
+}
+
+/// GPU-ready mask parameters (no `cutlass-models` dependency).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerMask {
+    pub kind: u32,
+    pub feather: f32,
+    pub invert: u32,
+}
+
+/// GPU-ready chroma-key parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerChromaKey {
+    pub rgb: [f32; 3],
+    pub strength: f32,
+    pub shadow: f32,
+}
+
+/// Per-layer mask and chroma-key state for the fx pipelines.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LayerEffects {
+    pub mask: Option<LayerMask>,
+    pub chroma_key: Option<LayerChromaKey>,
+}
+
+impl LayerEffects {
+    pub const IDENTITY: Self = Self {
+        mask: None,
+        chroma_key: None,
+    };
+
+    pub fn is_identity(&self) -> bool {
+        self.mask.is_none() && self.chroma_key.is_none()
+    }
+}
+
 /// A parametric vector shape drawn as a signed-distance field by the shape
 /// pipeline: no texture, no rasterization — geometry parameters ride in the
 /// layer's uniform block, so animated shapes cost a uniform update per frame
@@ -105,6 +149,8 @@ pub struct CompositeLayer<'a> {
     /// (`(0,0)`=top-left, `(1,1)`=bottom-right of the frame's visible region).
     /// A sub-rect crops; a reversed axis mirrors. Ignored by solid fills.
     pub uv: [f32; 4],
+    /// Mask/chroma-key state; identity uses the fast path pipelines.
+    pub effects: LayerEffects,
 }
 
 impl<'a> CompositeLayer<'a> {
@@ -114,6 +160,7 @@ impl<'a> CompositeLayer<'a> {
             content: LayerContent::Frame(frame),
             placement,
             uv: FULL_UV,
+            effects: LayerEffects::IDENTITY,
         }
     }
 
@@ -123,6 +170,7 @@ impl<'a> CompositeLayer<'a> {
             content: LayerContent::Rgba(image),
             placement,
             uv: FULL_UV,
+            effects: LayerEffects::IDENTITY,
         }
     }
 
@@ -132,6 +180,7 @@ impl<'a> CompositeLayer<'a> {
             content: LayerContent::Solid(rgba),
             placement,
             uv: FULL_UV,
+            effects: LayerEffects::IDENTITY,
         }
     }
 
@@ -141,12 +190,19 @@ impl<'a> CompositeLayer<'a> {
             content: LayerContent::Sdf(shape),
             placement,
             uv: FULL_UV,
+            effects: LayerEffects::IDENTITY,
         }
     }
 
     /// Replace the sampled UV rect (crop / mirror).
     pub fn with_uv(mut self, uv: [f32; 4]) -> Self {
         self.uv = uv;
+        self
+    }
+
+    /// Attach mask/chroma-key effects (routes to fx pipelines when non-identity).
+    pub fn with_effects(mut self, effects: LayerEffects) -> Self {
+        self.effects = effects;
         self
     }
 }

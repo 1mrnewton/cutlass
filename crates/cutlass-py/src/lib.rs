@@ -11,8 +11,8 @@ mod project;
 mod track;
 
 use content::{
-    Arrow, Ellipse, Heart, Line, Polygon, Rect, ShapeStrokeSpec, Solid, Star, Text,
-    TextBackground, TextShadow, TextStroke,
+    Arrow, Ellipse, Heart, Line, Polygon, Rect, ShapeStrokeSpec, Solid, Star, Text, TextBackground,
+    TextShadow, TextStroke,
 };
 use pyo3::prelude::*;
 
@@ -51,4 +51,3 @@ fn cutlass(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
-

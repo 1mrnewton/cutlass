@@ -1,15 +1,16 @@
 mod audio;
 mod drafts;
 mod inspector;
+mod interaction;
 mod params;
 mod paths;
 mod placement;
-mod preview;
 mod preview_gesture;
 mod preview_select;
 mod preview_view;
 mod preview_worker;
 mod projection;
+mod proxy;
 mod ruler;
 mod selection;
 mod snap;
@@ -451,16 +452,51 @@ fn main() -> Result<(), slint::PlatformError> {
     // wall-clock transport (`handle.active() == false`).
     let audio_system = audio::AudioSystem::start();
 
+    // Scrub/playback gate: background tile decode + GPU work defers while
+    // the user interacts with the preview, so the preview worker never
+    // shares the decode engine or iGPU mid-gesture.
+    let interaction_gate = interaction::InteractionGate::new();
+
     // Library tile thumbnails decode on their own thread so imports never
     // stall preview scrubbing. Keep the worker alive for the app's lifetime.
-    let thumbnail_worker =
-        thumbnails::ThumbnailWorker::spawn(app.global::<EditorStore>().as_weak())
-            .map_err(slint::PlatformError::Other)?;
+    let thumbnail_worker = thumbnails::ThumbnailWorker::spawn(
+        app.global::<EditorStore>().as_weak(),
+        interaction_gate.clone(),
+    )
+    .map_err(slint::PlatformError::Other)?;
 
     // Timeline clip content (filmstrip frames, waveform tiles) decodes on a
     // third thread: a long strip batch must not delay library tiles, and
     // neither may ever touch the UI or engine threads.
-    let strip_worker = strips::StripWorker::spawn(app.global::<StripBackend>().as_weak())
+    let strip_worker = strips::StripWorker::spawn(
+        app.global::<StripBackend>().as_weak(),
+        interaction_gate.clone(),
+    )
+    .map_err(slint::PlatformError::Other)?;
+
+    // Preview proxies: a fourth thread re-encodes large video imports to
+    // small short-GOP files, one job at a time, deferring to the gate.
+    // Results route to the preview worker through the slot installed right
+    // after it spawns — requests can only originate from that worker, so
+    // the slot is always filled before the first result can fire.
+    let proxy_ready_slot: std::sync::Arc<std::sync::Mutex<Option<preview_worker::WorkerHandle>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let ready_slot = proxy_ready_slot.clone();
+    let proxy_handle =
+        proxy::spawn(
+            interaction_gate.clone(),
+            move |media_id, source, proxy| match ready_slot
+                .lock()
+                .expect("proxy slot poisoned")
+                .as_ref()
+            {
+                Some(handle) => handle.proxy_ready(media_id, source, proxy),
+                None => tracing::error!(
+                    media_id,
+                    "proxy finished before the preview worker wired up"
+                ),
+            },
+        )
         .map_err(slint::PlatformError::Other)?;
 
     // The worker thread owns the Engine (decoders aren't Send); the UI talks
@@ -477,8 +513,10 @@ fn main() -> Result<(), slint::PlatformError> {
         audio_system.handle(),
         thumbnail_worker.handle(),
         strip_worker.handle(),
+        proxy_handle,
     )
     .map_err(slint::PlatformError::Other)?;
+    *proxy_ready_slot.lock().expect("proxy slot poisoned") = Some(preview_worker.handle());
     tracing::debug!(
         duration_ticks = session.duration_ticks,
         "engine session ready"
@@ -489,7 +527,9 @@ fn main() -> Result<(), slint::PlatformError> {
     let frame_handle = preview_worker.handle();
     let scrub_audio = audio_system.handle();
     let scrub_weak = app.as_weak();
+    let scrub_gate = interaction_gate.clone();
     editor.on_on_playhead_changed(move |tick| {
+        scrub_gate.touch();
         frame_handle.request_frame(i64::from(tick));
         // Scrub audio: a manual playhead move while paused plays a short
         // burst of the sound under the playhead. During playback the master
@@ -659,6 +699,17 @@ fn main() -> Result<(), slint::PlatformError> {
     editor.on_on_clips_deleted(move |clip_ids| {
         let clips: Vec<String> = clip_ids.iter().map(|id| id.to_string()).collect();
         delete_handle.remove_clips(clips);
+    });
+
+    let ripple_delete_handle = preview_worker.handle();
+    editor.on_on_clips_ripple_deleted(move |clip_ids| {
+        let clips: Vec<String> = clip_ids.iter().map(|id| id.to_string()).collect();
+        ripple_delete_handle.ripple_delete_clips(clips);
+    });
+
+    let reverse_handle = preview_worker.handle();
+    editor.on_on_clip_reversed(move |clip_id| {
+        reverse_handle.reverse_clip(clip_id.to_string());
     });
 
     let split_handle = preview_worker.handle();
@@ -970,8 +1021,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // Transport intent → audio engine. Play doubles as the mid-playback
     // seek; non-1x speeds play muted (varispeed audio is a later phase).
     let play_audio = audio_system.handle();
+    let play_gate = interaction_gate.clone();
     app.global::<TransportBackend>()
         .on_transport_play(move |tick, speed_num, speed_den| {
+            play_gate.set_playing(true);
             if speed_num == 1 && speed_den == 1 {
                 play_audio.play(i64::from(tick));
             } else {
@@ -980,8 +1033,10 @@ fn main() -> Result<(), slint::PlatformError> {
         });
 
     let pause_audio = audio_system.handle();
+    let pause_gate = interaction_gate.clone();
     app.global::<TransportBackend>()
         .on_transport_pause(move || {
+            pause_gate.set_playing(false);
             pause_audio.pause();
         });
 
@@ -994,7 +1049,9 @@ fn main() -> Result<(), slint::PlatformError> {
     // on the next event-loop turn, outside the callback.
     let stop_audio = audio_system.handle();
     let stop_weak = app.as_weak();
+    let stop_gate = interaction_gate.clone();
     app.global::<TransportBackend>().on_request_stop(move || {
+        stop_gate.set_playing(false);
         stop_audio.pause();
         let stop_weak = stop_weak.clone();
         defer_main_thread(move || {

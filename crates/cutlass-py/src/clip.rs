@@ -1,8 +1,8 @@
 //! [`Clip`] timeline placement handles.
 
 use cutlass_models::{
-    Easing, ClipId, ClipParam, ClipTransform, CropRect, Generator, ParamValue, RationalTime,
-    Shape, ShapeParam,
+    ClipId, ClipParam, ClipTransform, CropRect, Easing, Generator, ParamValue, RationalTime, Shape,
+    ShapeParam,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -59,7 +59,11 @@ impl Clip {
         Ok((tl.start.value, tl.duration.value))
     }
 
-    fn set_transform_constant(project: &mut Project, id: ClipId, transform: ClipTransform) -> PyResult<()> {
+    fn set_transform_constant(
+        project: &mut Project,
+        id: ClipId,
+        transform: ClipTransform,
+    ) -> PyResult<()> {
         project
             .model_mut()
             .set_transform(id, transform, None)
@@ -124,9 +128,7 @@ impl Clip {
     fn source_start(&self, py: Python) -> PyResult<Option<f64>> {
         self.with_project(py, |project| {
             let clip = Self::require(project, self.id)?;
-            Ok(clip
-                .source_range()
-                .map(|r| r.start.seconds()))
+            Ok(clip.source_range().map(|r| r.start.seconds()))
         })
     }
 
@@ -134,9 +136,7 @@ impl Clip {
     fn source_duration(&self, py: Python) -> PyResult<Option<f64>> {
         self.with_project(py, |project| {
             let clip = Self::require(project, self.id)?;
-            Ok(clip
-                .source_range()
-                .map(|r| r.duration.seconds()))
+            Ok(clip.source_range().map(|r| r.duration.seconds()))
         })
     }
 
@@ -150,9 +150,7 @@ impl Clip {
 
     #[getter]
     fn reversed(&self, py: Python) -> PyResult<bool> {
-        self.with_project(py, |project| {
-            Ok(Self::require(project, self.id)?.reversed)
-        })
+        self.with_project(py, |project| Ok(Self::require(project, self.id)?.reversed))
     }
 
     fn split(&self, py: Python, at: f64) -> PyResult<Clip> {
@@ -328,9 +326,8 @@ impl Clip {
 
     #[pyo3(signature = (**kwargs))]
     fn animate(&self, py: Python, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
-        let dict = kwargs.ok_or_else(|| {
-            PyValueError::new_err("animate() requires at least one property")
-        })?;
+        let dict = kwargs
+            .ok_or_else(|| PyValueError::new_err("animate() requires at least one property"))?;
         let default_easing = match dict.get_item("easing")? {
             Some(v) => parse_easing(&v)?,
             None => Easing::Linear,
@@ -448,12 +445,7 @@ impl Clip {
             let fade_out = RationalTime::new(clip.fade_out, rate);
             project
                 .model_mut()
-                .set_clip_audio(
-                    self.id,
-                    None,
-                    time_at(value, rate),
-                    fade_out,
-                )
+                .set_clip_audio(self.id, None, time_at(value, rate), fade_out)
                 .map_err(model_err)
         })
     }
@@ -474,12 +466,7 @@ impl Clip {
             let fade_in = RationalTime::new(clip.fade_in, rate);
             project
                 .model_mut()
-                .set_clip_audio(
-                    self.id,
-                    None,
-                    fade_in,
-                    time_at(value, rate),
-                )
+                .set_clip_audio(self.id, None, fade_in, time_at(value, rate))
                 .map_err(model_err)
         })
     }
@@ -510,12 +497,7 @@ impl Clip {
         self.with_project(py, |project| {
             project
                 .model_mut()
-                .set_clip_crop(
-                    self.id,
-                    CropRect { x, y, w, h },
-                    flip_h,
-                    flip_v,
-                )
+                .set_clip_crop(self.id, CropRect { x, y, w, h }, flip_h, flip_v)
                 .map_err(model_err)
         })
     }
@@ -565,12 +547,7 @@ impl Clip {
     }
 
     #[pyo3(signature = (transition_id, duration = None))]
-    fn transition(
-        &self,
-        py: Python,
-        transition_id: &str,
-        duration: Option<f64>,
-    ) -> PyResult<()> {
+    fn transition(&self, py: Python, transition_id: &str, duration: Option<f64>) -> PyResult<()> {
         self.with_project(py, |project| {
             project
                 .model_mut()
@@ -613,7 +590,9 @@ impl Clip {
     fn set_text(&self, py: Python, content: String) -> PyResult<()> {
         self.with_project(py, |project| {
             let clip = Self::require(project, self.id)?;
-            let cutlass_models::ClipSource::Generated(Generator::Text { style, .. }) = &clip.content else {
+            let cutlass_models::ClipSource::Generated(Generator::Text { style, .. }) =
+                &clip.content
+            else {
                 return Err(PyValueError::new_err("clip is not a text clip"));
             };
             let generator = Generator::Text {
@@ -629,7 +608,8 @@ impl Clip {
 
     #[pyo3(signature = (**kwargs))]
     fn set_style(&self, py: Python, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
-        let kwargs = kwargs.ok_or_else(|| PyValueError::new_err("set_style requires keyword arguments"))?;
+        let kwargs =
+            kwargs.ok_or_else(|| PyValueError::new_err("set_style requires keyword arguments"))?;
         self.with_project(py, |project| {
             enum Target {
                 Text,
@@ -723,7 +703,11 @@ fn clip_param(name: &str) -> PyResult<ClipParam> {
         "stroke_width" => ClipParam::Shape {
             param: ShapeParam::StrokeWidth,
         },
-        other => return Err(PyValueError::new_err(format!("unknown animatable property {other:?}"))),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown animatable property {other:?}"
+            )));
+        }
     })
 }
 
@@ -799,7 +783,8 @@ fn sample_param_at_clip_start(
                 height,
                 corner_radius,
                 stroke,
-            }) = &clip.content else {
+            }) = &clip.content
+            else {
                 return Err(PyValueError::new_err("clip is not a shape"));
             };
             match shape_param {
@@ -843,12 +828,9 @@ fn apply_clip_animation(
     let param = clip_param(name)?;
     if value.is_instance_of::<PyList>() {
         let list = value.cast::<PyList>()?;
-        let pairs = parse_keyframe_pairs(
-            value.py(),
-            list,
-            default_easing,
-            |v| param_value_for(param, v),
-        )?;
+        let pairs = parse_keyframe_pairs(value.py(), list, default_easing, |v| {
+            param_value_for(param, v)
+        })?;
         for (rel, val, easing) in pairs {
             let abs = clip_key_time(clip_start, clip_dur, rel, rate);
             project
@@ -858,9 +840,8 @@ fn apply_clip_animation(
         }
         return Ok(());
     }
-    let at = at.ok_or_else(|| {
-        PyValueError::new_err(format!("single keyframe for {name} requires at="))
-    })?;
+    let at = at
+        .ok_or_else(|| PyValueError::new_err(format!("single keyframe for {name} requires at=")))?;
     let val = param_value_for(param, value)?;
     let abs = clip_key_time(clip_start, clip_dur, at, rate);
     project

@@ -1,9 +1,39 @@
+import { CutlassText } from "../../components/index.slint";
 import { AppStore, EditorStore } from "../../store/index.slint";
 import { Clip, TrackKind } from "../../models/index.slint";
 import { TimelineLib, StripBackend, SelectionBackend, KeyframeBackend, InspectorBackend } from "../../lib/index.slint";
 import { TimelineStore } from "../../store/timeline-store.slint";
+import { TimelineActions } from "../../store/timeline-actions.slint";
 import { TimelineViewState } from "state.slint";
 import { AppState } from "../../state.slint";
+
+// One text row in the clip context menu.
+component MenuRow inherits Rectangle {
+    in property <string> label;
+    callback clicked;
+
+    height: 28px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: row-ta.has-hover ? #ffffff10 : transparent;
+
+    CutlassText {
+        x: AppStore.theme.metrics.spacing.sm;
+        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.label;
+        style: AppStore.theme.typography.body;
+        foreground: AppStore.theme.text.primary;
+        overflow: elide;
+    }
+
+    row-ta := TouchArea {
+        clicked => {
+            AppState.refocus-shortcuts();
+            root.clicked();
+        }
+    }
+}
 
 // Named `model` because `clip` is a built-in Slint property on visual elements.
 //
@@ -22,6 +52,11 @@ export component ClipView inherits Rectangle {
     in property <bool> track-enabled: true;
     in property <bool> track-locked: false;
     in property <float> zoom;
+
+    // Cursor position (clip-local) of the last right-press, used to anchor the
+    // context menu popup.
+    property <length> menu-x;
+    property <length> menu-y;
 
     private property <bool> is-active-drag:
         TimelineViewState.dragging-source-track-id == track-id
@@ -231,10 +266,12 @@ export component ClipView inherits Rectangle {
     // clips that actually carry an envelope and are wide enough to read. The
     // path's normalized viewbox stretches across the card; x runs clip
     // start→end, y maps the gain 0..200% top-down (so the dot math matches).
+    // Dim via per-element color alpha, not group `opacity` — this container
+    // spans the whole card, and a group opacity would composite it into a
+    // clip-wide GPU layer texture (the 16384px trap described on `dimmed`).
     if root.show-waveform && root.model.has-volume-envelope && root.width > 40px: Rectangle {
         width: 100%;
         height: 100%;
-        opacity: root.dimmed ? 0.4 : 0.9;
 
         Path {
             width: 100%;
@@ -242,7 +279,7 @@ export component ClipView inherits Rectangle {
             viewbox-width: 1000;
             viewbox-height: 1000;
             commands: root.model.volume-path;
-            stroke: #ffffff;
+            stroke: #ffffff.with-alpha(root.dimmed ? 0.36 : 0.9);
             stroke-width: 1.5px;
             fill: transparent;
         }
@@ -253,9 +290,9 @@ export component ClipView inherits Rectangle {
             width: 6px;
             height: 6px;
             border-radius: 3px;
-            background: AppStore.theme.accent.primary;
+            background: AppStore.theme.accent.primary.with-alpha(root.dimmed ? 0.36 : 0.9);
             border-width: 1px;
-            border-color: #ffffff;
+            border-color: #ffffff.with-alpha(root.dimmed ? 0.36 : 0.9);
         }
     }
 
@@ -264,34 +301,37 @@ export component ClipView inherits Rectangle {
     // this clip's current window as absolute sequence ticks, so the same
     // tick→x mapping as the keyframe dots places them. Shown on any clip that
     // carries beats (audio lanes, or video clips with detected beats).
+    // No group opacity here either (clip-wide container ⇒ GPU layer trap);
+    // the dim rides on each tick's color.
     if root.model.beats.length > 0 && root.width > 24px: Rectangle {
         width: 100%;
         height: 100%;
-        opacity: root.dimmed ? 0.4 : 0.95;
         for beat in root.model.beats: Rectangle {
             x: (beat - root.model.timeline-start.value) * root.zoom * 1px - self.width / 2;
             y: parent.height - self.height - 1px;
             width: 2px;
             height: 8px;
             border-radius: 1px;
-            background: #ffd34d;
+            background: #ffd34d.with-alpha(root.dimmed ? 0.4 : 0.95);
         }
     }
 
     // Audio fade ramps: a darkening triangle over each attenuated corner with
     // a bright edge line. Driven by the projected fade-*-s (or the live drag
-    // width); drawn before the labels so the badges stay legible.
+    // width); drawn before the labels so the badges stay legible. Dim via the
+    // fill/stroke alpha, not group opacity — these containers span the whole
+    // card, so a group opacity would allocate a clip-wide GPU layer texture
+    // and abort past 16384px (the trap described on `dimmed`).
     if root.show-waveform && root.width > 24px && (root.fade-in-w-live > 0.5px || root.fade-drag == 1): Rectangle {
         width: 100%;
         height: 100%;
-        opacity: root.dimmed ? 0.4 : 1.0;
 
         Path {
             width: 100%;
             height: 100%;
             viewbox-width: 100;
             viewbox-height: 100;
-            fill: #00000059;
+            fill: #000000.with-alpha(root.dimmed ? 0.14 : 0.35);
 
             MoveTo { x: 0; y: 0; }
             LineTo { x: root.fade-in-frac * 100; y: 0; }
@@ -303,7 +343,7 @@ export component ClipView inherits Rectangle {
             height: 100%;
             viewbox-width: 100;
             viewbox-height: 100;
-            stroke: #ffffff;
+            stroke: #ffffff.with-alpha(root.dimmed ? 0.4 : 1.0);
             stroke-width: 1px;
             fill: transparent;
 
@@ -314,14 +354,13 @@ export component ClipView inherits Rectangle {
     if root.show-waveform && root.width > 24px && (root.fade-out-w-live > 0.5px || root.fade-drag == 2): Rectangle {
         width: 100%;
         height: 100%;
-        opacity: root.dimmed ? 0.4 : 1.0;
 
         Path {
             width: 100%;
             height: 100%;
             viewbox-width: 100;
             viewbox-height: 100;
-            fill: #00000059;
+            fill: #000000.with-alpha(root.dimmed ? 0.14 : 0.35);
 
             MoveTo { x: 100; y: 0; }
             LineTo { x: 100 - root.fade-out-frac * 100; y: 0; }
@@ -333,7 +372,7 @@ export component ClipView inherits Rectangle {
             height: 100%;
             viewbox-width: 100;
             viewbox-height: 100;
-            stroke: #ffffff;
+            stroke: #ffffff.with-alpha(root.dimmed ? 0.4 : 1.0);
             stroke-width: 1px;
             fill: transparent;
 
@@ -412,6 +451,23 @@ export component ClipView inherits Rectangle {
                 TimelineViewState.drag-dy-px = 0px;
                 TimelineViewState.pointer-window-x = self.absolute-position.x + self.mouse-x;
                 TimelineViewState.pointer-window-y = self.absolute-position.y + self.mouse-y;
+            } else if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                // Right-press opens the clip context menu at the cursor.
+                // Select like a left-click so actions target this clip.
+                AppState.refocus-shortcuts();
+                if (root.is-selected && TimelineStore.selected-ids.length > 1) {
+                    TimelineStore.selected-track-id = track-id;
+                    TimelineStore.selected-clip-id = model.id;
+                } else {
+                    TimelineStore.apply-selection(SelectionBackend.select-clip(
+                        EditorStore.project.sequence,
+                        track-id,
+                        model.id,
+                        TimelineStore.link-enabled));
+                }
+                root.menu-x = self.mouse-x;
+                root.menu-y = self.mouse-y;
+                menu-popup.show();
             } else if (e.kind == PointerEventKind.up
                     && e.button == PointerEventButton.left
                     && is-active-drag) {
@@ -886,5 +942,88 @@ export component ClipView inherits Rectangle {
         LineTo { x: 5; y: 9.2; }
         LineTo { x: 0.8; y: 5; }
         Close { }
+    }
+
+    // Right-click context menu, anchored at the press point. A plain
+    // PopupWindow (close-on-click-outside) rather than a ContextMenuArea:
+    // the area's native right-click gesture is swallowed by the drag
+    // TouchArea above (same pattern as library tiles.slint).
+    menu-popup := PopupWindow {
+        x: root.menu-x;
+        y: root.menu-y;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        Rectangle {
+            width: 184px;
+            height: menu-list.preferred-height;
+            background: AppStore.theme.panel.background;
+            border-radius: AppStore.theme.metrics.radius.md;
+            border-width: 1px;
+            border-color: #ffffff1f;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000080;
+            drop-shadow-offset-y: 6px;
+
+            menu-list := VerticalLayout {
+                padding: AppStore.theme.metrics.spacing.xs;
+                spacing: 0;
+
+                if TimelineActions.can-split(): MenuRow {
+                    label: "Split at playhead";
+                    clicked => {
+                        TimelineActions.split-at-playhead();
+                        menu-popup.close();
+                    }
+                }
+
+                MenuRow {
+                    label: "Copy";
+                    clicked => {
+                        TimelineActions.copy-selected();
+                        menu-popup.close();
+                    }
+                }
+
+                MenuRow {
+                    label: "Duplicate";
+                    clicked => {
+                        TimelineActions.duplicate-selected();
+                        menu-popup.close();
+                    }
+                }
+
+                MenuRow {
+                    label: "Delete";
+                    clicked => {
+                        TimelineActions.delete-selected();
+                        menu-popup.close();
+                    }
+                }
+
+                if model.caps.can-ripple-delete: MenuRow {
+                    label: "Ripple delete";
+                    clicked => {
+                        TimelineActions.ripple-delete-selected();
+                        menu-popup.close();
+                    }
+                }
+
+                if model.caps.can-reverse && TimelineStore.selected-clip-id == model.id: MenuRow {
+                    label: model.reversed ? "Play forward" : "Reverse";
+                    clicked => {
+                        TimelineActions.reverse-selected();
+                        menu-popup.close();
+                    }
+                }
+
+                if TimelineActions.selection-has-link(): MenuRow {
+                    label: "Unlink";
+                    clicked => {
+                        TimelineActions.unlink-selected();
+                        menu-popup.close();
+                    }
+                }
+            }
+        }
     }
 }

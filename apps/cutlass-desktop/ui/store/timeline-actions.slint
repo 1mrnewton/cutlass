@@ -125,6 +125,21 @@ export global TimelineActions {
         }
     }
 
+    public function ripple-delete-selected() {
+        if (!self.has-selection()) {
+            return;
+        }
+        EditorStore.on-clips-ripple-deleted(TimelineStore.selected-ids);
+        self.clear-selection();
+    }
+
+    public function reverse-selected() {
+        if (!self.has-selection()) {
+            return;
+        }
+        EditorStore.on-clip-reversed(TimelineStore.selected-clip-id);
+    }
+
     // Whether the selection touches any link group — gates the toolbar's
     // Unlink button.
     public pure function selection-has-link() -> bool {

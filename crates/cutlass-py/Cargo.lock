@@ -238,6 +238,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "wgpu",
+ "windows",
 ]
 
 [[package]]
@@ -281,6 +282,7 @@ dependencies = [
  "objc2-core-media",
  "objc2-core-video",
  "objc2-foundation",
+ "windows",
 ]
 
 [[package]]
@@ -320,6 +322,7 @@ dependencies = [
  "cutlass-text",
  "png",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

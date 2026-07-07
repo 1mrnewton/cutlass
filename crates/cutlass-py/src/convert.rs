@@ -84,7 +84,11 @@ pub fn parse_track_kind(kind: &str) -> PyResult<TrackKind> {
         "effect" => TrackKind::Effect,
         "filter" => TrackKind::Filter,
         "adjustment" => TrackKind::Adjustment,
-        other => return Err(PyValueError::new_err(format!("unknown track kind {other:?}"))),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown track kind {other:?}"
+            )));
+        }
     })
 }
 
@@ -185,7 +189,9 @@ pub fn parse_easing(obj: &Bound<'_, PyAny>) -> PyResult<Easing> {
         let easing = Easing::Bezier {
             points: [x1, y1, x2, y2],
         };
-        easing.validate().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        easing
+            .validate()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         return Ok(easing);
     }
     Err(PyValueError::new_err(
@@ -215,7 +221,9 @@ pub fn parse_keyframe_pairs(
     out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     for w in out.windows(2) {
         if (w[0].0 - w[1].0).abs() < f64::EPSILON {
-            return Err(PyValueError::new_err("duplicate keyframe times in one call"));
+            return Err(PyValueError::new_err(
+                "duplicate keyframe times in one call",
+            ));
         }
     }
     Ok(out)
@@ -242,7 +250,6 @@ pub fn param_spec_dict(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn ticks_round_trip_at_30fps() {
@@ -316,7 +323,15 @@ mod tests {
 
     #[test]
     fn track_kind_round_trips() {
-        for name in ["video", "audio", "text", "sticker", "effect", "filter", "adjustment"] {
+        for name in [
+            "video",
+            "audio",
+            "text",
+            "sticker",
+            "effect",
+            "filter",
+            "adjustment",
+        ] {
             let kind = parse_track_kind(name).unwrap();
             assert_eq!(track_kind_name(kind), name);
         }
@@ -339,5 +354,4 @@ mod tests {
         assert!(parse_color_str("#gggggg").is_err());
         assert!(parse_color_str("chartreuse").is_err());
     }
-
 }

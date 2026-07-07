@@ -1,13 +1,22 @@
 [build-system]
-requires = ["maturin>=1.7,<2.0"]
+# 1.9+ for PEP 639 license metadata (license-files below).
+requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
+# Distribution name is `cutlass-py` (the bare `cutlass` name on PyPI belongs to
+# an unrelated project); the import name stays `cutlass` via [tool.maturin]
+# module-name below.
 [project]
-name = "cutlass"
+name = "cutlass-py"
 description = "MoviePy-style Python bindings for the Cutlass video engine."
 readme = "README.md"
-requires-python = ">=3.8"
-license = { text = "MIT OR Apache-2.0" }
+requires-python = ">=3.9"
+# PEP 639 SPDX expression + explicit license-files. The explicit list (rather
+# than maturin's LICENSE-* auto-detection) keeps the sdist's License-File
+# metadata pointing at paths that actually exist at the archive root — PyPI
+# rejects the upload otherwise.
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
 keywords = ["video", "editing", "ffmpeg-alternative", "moviepy", "rust"]
 classifiers = [
     "Programming Language :: Rust",

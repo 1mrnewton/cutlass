@@ -43,10 +43,12 @@ objc2-core-media = "0.3.2"
 objc2-core-video = "0.3.2"
 objc2-core-foundation = "0.3.2"
 
-# Windows backend: Media Foundation Source Reader (demux + decode) producing
-# system-memory NV12 buffers on the CPU path. The `windows` crate gives COM
-# ergonomics (RAII release, `.cast()`, `Result<HRESULT>`) that raw `windows-sys`
-# lacks, which matters for the COM-heavy MF surface.
+# Windows backend: Media Foundation Source Reader (demux + decode). With a
+# D3D11 device manager attached the reader loads *hardware* decoder MFTs
+# (DXVA); CPU output reads planes back through IMF2DBuffer, GPU output shares
+# NV12 textures across to the renderer. The `windows` crate gives COM
+# ergonomics (RAII release, `.cast()`, `Result<HRESULT>`) that raw
+# `windows-sys` lacks, which matters for the COM-heavy MF surface.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",
@@ -54,6 +56,11 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Security",
 ] }
 
 [dev-dependencies]

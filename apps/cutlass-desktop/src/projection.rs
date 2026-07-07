@@ -14,17 +14,19 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use cutlass_models::{
-    Clip as EngineClip, ClipSource, Generator, Keyframe, Lerp, Marker as EngineMarker, MediaSource,
-    Param, Project as EngineProject, Rational as EngineRational, RationalTime as EngineTime,
-    TextAlignH, TextAlignV, TextCase, TextStyle as EngineTextStyle, TimeRange as EngineRange,
-    Track as EngineTrack, TrackKind as EngineKind, rate_eq, resample,
+    Clip as EngineClip, ClipCapabilities as EngineCaps, ClipSource, Generator, Keyframe, Lerp,
+    Marker as EngineMarker, MediaSource, Param, Project as EngineProject,
+    Rational as EngineRational, RationalTime as EngineTime, TextAlignH, TextAlignV, TextCase,
+    TextStyle as EngineTextStyle, TimeRange as EngineRange, Track as EngineTrack,
+    TrackKind as EngineKind, rate_eq, resample,
 };
 use slint::{Color, ModelRc, VecModel};
 
 use crate::params::easing_to_ui;
 use crate::{
-    Clip, EffectParamView, EffectView, Media, ParamKeyframe, Project, Rational, RationalTime,
-    Sequence, TextClipStyle, TimeRange, TimelineMarker, Track, TrackKind, TransitionView,
+    Clip, ClipCapabilities, EffectParamView, EffectView, Media, ParamKeyframe, Project, Rational,
+    RationalTime, Sequence, TextClipStyle, TimeRange, TimelineMarker, Track, TrackKind,
+    TransitionView,
 };
 
 /// Project the engine's project state into the Slint view model.
@@ -192,7 +194,7 @@ fn track_to_slint(
     let clips: Vec<Clip> = track
         .clips_ordered()
         .into_iter()
-        .map(|clip| clip_to_slint(project, clip, generator_sizes))
+        .map(|clip| clip_to_slint(project, clip, track.kind, generator_sizes))
         .collect();
 
     Track {
@@ -212,6 +214,7 @@ fn track_to_slint(
 fn clip_to_slint(
     project: &EngineProject,
     clip: &EngineClip,
+    track_kind: EngineKind,
     generator_sizes: &HashMap<u64, (i32, i32)>,
 ) -> Clip {
     // The timeline UI positions a clip at `timeline-start` and derives its width
@@ -253,6 +256,7 @@ fn clip_to_slint(
     let transform = clip.transform.sample(0);
     let clip_start = clip.timeline.start.value;
     let (shape_width, shape_height) = clip_shape_size(clip);
+    let caps = clip_capabilities(clip, track_kind);
 
     Clip {
         id: clip.id.raw().to_string().into(),
@@ -330,6 +334,7 @@ fn clip_to_slint(
                 .map(clamp_i32)
                 .collect(),
         ),
+        caps,
     }
 }
 
@@ -794,6 +799,23 @@ fn track_kind(kind: EngineKind) -> TrackKind {
     }
 }
 
+fn clip_capabilities(clip: &EngineClip, kind: EngineKind) -> ClipCapabilities {
+    let caps = EngineCaps::for_clip(clip, kind);
+    ClipCapabilities {
+        has_transform: caps.has_transform,
+        has_crop: caps.has_crop,
+        has_audio: caps.has_audio,
+        has_speed: caps.has_speed,
+        has_text: caps.has_text,
+        has_shape: caps.has_shape,
+        has_effects: caps.has_effects,
+        has_filter_adjust: caps.has_filter_adjust,
+        can_split: caps.can_split,
+        can_reverse: caps.can_reverse,
+        can_ripple_delete: caps.can_ripple_delete,
+    }
+}
+
 /// One color per lane kind (the engine has no per-track color). Matches the
 /// palette the UI previously hardcoded in `editor-store.slint`.
 fn kind_color(kind: EngineKind) -> Color {
@@ -1146,7 +1168,7 @@ mod tests {
             TimeRange::at_rate(0, 240, EngineRational::FPS_24),
         );
         // Flat clip: no ramp data projected.
-        let flat = clip_to_slint(&project, &clip, &HashMap::new());
+        let flat = clip_to_slint(&project, &clip, EngineKind::Video, &HashMap::new());
         assert!(!flat.has_speed_curve);
         assert_eq!(flat.kf_speed_curve.row_count(), 0);
         assert_eq!(flat.speed_curve_samples.row_count(), 0);
@@ -1154,7 +1176,7 @@ mod tests {
         // Montage ramp: handles mirror the curve's control points (normalized
         // ticks, no clip-start offset), and the dense sample strip fills in.
         clip.speed_curve = speed_preset("montage").unwrap();
-        let ramped = clip_to_slint(&project, &clip, &HashMap::new());
+        let ramped = clip_to_slint(&project, &clip, EngineKind::Video, &HashMap::new());
         assert!(ramped.has_speed_curve);
         assert_eq!(ramped.kf_speed_curve.row_count(), 3);
         assert_eq!(ramped.kf_speed_curve.row_data(0).unwrap().tick, 0);

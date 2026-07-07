@@ -1,9 +1,12 @@
 /target
 /dist
-# cutlass-py is excluded from the workspace, so it gets its own target dir
-# and development virtualenv.
+# cutlass-py is excluded from the workspace, so it gets its own target dir,
+# development virtualenv, and local wheel output.
 /crates/cutlass-py/target/
 /crates/cutlass-py/.venv/
+/crates/cutlass-py/dist/
+/crates/cutlass-py/uv.lock
+__pycache__/
 # Demo outputs (cutlass-cli, cutlass-render's export_demo example).
 /cutlass-demo.png
 /cutlass-demo.mp4

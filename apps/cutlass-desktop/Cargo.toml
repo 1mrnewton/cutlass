@@ -24,6 +24,7 @@ slint = { version = "=1.16.1", features = [
 cutlass-commands = { path = "../../crates/cutlass-commands" }
 cutlass-compositor = { path = "../../crates/cutlass-compositor" }
 cutlass-decoder = { path = "../../crates/cutlass-decoder" }
+cutlass-encoder = { path = "../../crates/cutlass-encoder" }
 cutlass-engine = { path = "../../crates/cutlass-engine" }
 cutlass-text = { path = "../../crates/cutlass-text" }
 cutlass-models = { path = "../../crates/cutlass-models" }

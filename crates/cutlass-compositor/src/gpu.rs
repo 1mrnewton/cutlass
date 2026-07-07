@@ -20,8 +20,22 @@ pub struct GpuContext {
 impl GpuContext {
     /// Create a headless GPU context (no window, no surface).
     pub async fn new_headless() -> Result<Self, CompositorError> {
+        // On Windows, prefer D3D12 explicitly: wgpu's adapter sort is
+        // backend-agnostic (Vulkan registers first and would win), and the
+        // zero-copy video import opens the decoder's shared D3D11 textures
+        // via D3D12's `OpenSharedHandle`. D3D12 is present on effectively
+        // every Windows 10+ machine (WARP included); fall through to the
+        // full backend set if it somehow isn't.
+        #[cfg(target_os = "windows")]
+        if let Ok(gpu) = Self::new_headless_with(wgpu::Backends::DX12).await {
+            return Ok(gpu);
+        }
+        Self::new_headless_with(wgpu::Backends::all()).await
+    }
+
+    async fn new_headless_with(backends: wgpu::Backends) -> Result<Self, CompositorError> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends,
             ..Default::default()
         });
 
@@ -36,10 +50,12 @@ impl GpuContext {
         // Ask for exactly what the adapter offers rather than wgpu's defaults:
         // the pipelines are raster-only, and default limits assume compute
         // support that GLES 3.0 adapters (Android emulator) don't have.
+        // NV12 (when offered) feeds the Windows zero-copy import path, which
+        // binds shared decoder textures as native NV12 plane views.
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("cutlass-compositor"),
-                required_features: wgpu::Features::empty(),
+                required_features: adapter.features() & wgpu::Features::TEXTURE_FORMAT_NV12,
                 required_limits: adapter.limits(),
                 ..Default::default()
             })

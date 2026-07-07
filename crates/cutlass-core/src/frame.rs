@@ -86,8 +86,42 @@ pub enum GpuSurfaceKind {
     CoreVideoPixelBuffer,
     /// Android `AHardwareBuffer` — imported via external-memory / EGL.
     AHardwareBuffer,
-    /// Windows Direct3D 11 `ID3D11Texture2D`.
+    /// Windows: a shareable Direct3D 11 texture. The [`GpuSurface::handle`]
+    /// points at a [`D3d11SharedSurface`] describing it (owned by the frame's
+    /// keep-alive).
     D3D11Texture2D,
+}
+
+/// Windows zero-copy payload: how a [`GpuSurfaceKind::D3D11Texture2D`] frame
+/// travels from the Media Foundation decoder to the D3D12-backed renderer.
+///
+/// The decoder copies each decoded frame into a texture created with
+/// `D3D11_RESOURCE_MISC_SHARED_NTHANDLE` and signals a shared fence; the
+/// renderer opens both NT handles on its D3D12 device (`OpenSharedHandle`),
+/// waits for `fence_value`, and samples the texture — pixels never leave the
+/// GPU. Plain integers so `cutlass-core` stays platform-agnostic.
+///
+/// ## Lifetime and identity
+///
+/// Both handles are owned by the decoder and stay open for as long as the
+/// frame's `keep_alive` lives — importers must be done with them when the
+/// frame drops. Textures (pool slots) and the fence are *reused* across many
+/// frames: `texture_id` / `fence_id` are process-unique, never-recycled
+/// identities for exactly that reuse, letting importers cache what they've
+/// opened instead of re-opening per frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct D3d11SharedSurface {
+    /// NT shared handle to the NV12 texture (valid in this process).
+    pub texture_handle: u64,
+    /// Stable identity of the texture behind `texture_handle`.
+    pub texture_id: u64,
+    /// NT shared handle to the `ID3D11Fence` guarding the texture contents.
+    pub fence_handle: u64,
+    /// Stable identity of the fence behind `fence_handle`.
+    pub fence_id: u64,
+    /// Fence value signaled after this frame's copy; wait for it before
+    /// sampling.
+    pub fence_value: u64,
 }
 
 /// An opaque, zero-copy GPU surface produced by a native decoder.

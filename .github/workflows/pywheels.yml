@@ -1,0 +1,167 @@
+name: Python wheels
+
+# Builds and publishes the `cutlass-py` distribution (import name `cutlass`,
+# crates/cutlass-py). Separate from the desktop Release workflow: Python
+# releases ride their own `py-v*` tags so an app release never blocks on
+# wheels or vice versa. A manual dispatch builds everything without
+# publishing (or dry-runs against TestPyPI) — use that before the first
+# real tag.
+
+on:
+  push:
+    tags:
+      - 'py-v*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Where to upload the built distributions
+        type: choice
+        options:
+          - none
+          - testpypi
+          - pypi
+        default: none
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  wheels:
+    name: wheel / ${{ matrix.platform.name }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors the desktop Release targets: Apple Silicon macOS and x64
+        # Windows — the platforms with native decode/encode backends (media
+        # is AVFoundation/VideoToolbox and Media Foundation; nothing to
+        # install on the runners). Linux has no media backend yet; add it
+        # here when one lands. Intel macOS / arm64 Windows are possible
+        # follow-ups via `target:` cross builds.
+        platform:
+          - { name: macos-arm64, runner: macos-14 }
+          - { name: windows-x64, runner: windows-latest }
+        # Non-abi3 pyo3 ⇒ one wheel per CPython minor: 3.9 is the oldest we
+        # support (requires-python in pyproject.toml), 3.14 the newest
+        # stable that pyo3 0.29 covers.
+        python: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # cutlass-py is excluded from the cargo workspace: its lockfile
+          # and target dir live inside the crate. One cache per platform —
+          # the Rust deps don't vary across interpreters.
+          workspaces: crates/cutlass-py
+          key: ${{ matrix.platform.name }}
+
+      # Interpreters come from uv, not actions/setup-python: the arm64
+      # macOS runners dropped Python < 3.11 from setup-python's manifest,
+      # while uv's managed builds cover every version on both platforms.
+      # (setup-uv publishes no floating major tag since v8 — pin exact.)
+      - uses: astral-sh/setup-uv@v8.2.0
+
+      - name: Install Python ${{ matrix.python }}
+        id: python
+        shell: bash
+        run: |
+          uv python install ${{ matrix.python }}
+          echo "path=$(uv python find ${{ matrix.python }})" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/cutlass-py
+          args: --release --out dist --interpreter ${{ steps.python.outputs.path }}
+
+      # Import-only smoke test: proves the extension loads against this
+      # exact interpreter line. Frame/export tests need a GPU and hardware
+      # encoders the hosted runners don't reliably have; those run on dev
+      # machines (see crates/cutlass-py/README.md). --no-project keeps uv
+      # from trying to build the crate itself from pyproject.toml.
+      - name: Import smoke test
+        shell: bash
+        working-directory: crates/cutlass-py
+        run: |
+          uv run --no-project --python ${{ matrix.python }} --with dist/*.whl \
+            python -c "import cutlass; print('cutlass', cutlass.__version__)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform.name }}-py${{ matrix.python }}
+          path: crates/cutlass-py/dist/*.whl
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # maturin bundles the local path dependencies (cutlass-core, -render,
+      # …) into the sdist, so a source install works from the archive alone
+      # (Rust toolchain required; media backends still gate which platforms
+      # can export).
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/cutlass-py
+          command: sdist
+          args: --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: crates/cutlass-py/dist/*.tar.gz
+
+  # Both publish jobs authenticate with PyPI Trusted Publishing (OIDC): the
+  # index is configured to trust this repo + workflow + environment, so no
+  # API token is stored in the repo. Configure the publisher on
+  # (test.)pypi.org for project `cutlass-py`, repository 1mrnewton/cutlass,
+  # workflow pywheels.yml, environment testpypi/pypi before the first run.
+  publish-testpypi:
+    name: publish to testpypi
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == 'testpypi'
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # TestPyPI dry runs re-upload the same version; don't fail on it.
+          skip-existing: true
+
+  publish-pypi:
+    name: publish to pypi
+    if: startsWith(github.ref, 'refs/tags/py-v') || (github.event_name == 'workflow_dispatch' && inputs.publish == 'pypi')
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # skip-existing makes re-runs recoverable: a partially published
+      # version (wheels landed, sdist rejected) can be completed by a
+      # re-dispatch — already-uploaded files are skipped, not fatal.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

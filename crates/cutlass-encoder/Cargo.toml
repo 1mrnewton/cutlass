@@ -24,6 +24,16 @@ objc2-core-media = "0.3.2"
 objc2-core-video = "0.3.2"
 objc2-core-foundation = "0.3.2"
 
+# Windows backend: Media Foundation IMFSinkWriter (H.264 encode + mp4 mux,
+# AAC audio). Same `windows` crate line as the decoder so COM idioms match
+# across the decode→encode pair.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
+
 # Android backend: MediaCodec (H.264 + AAC encode) + AMediaMuxer (mp4 mux),
 # pinned to the same ndk-sys line the decoder uses so the MediaCodec/format
 # types unify across the decode→encode handoff.

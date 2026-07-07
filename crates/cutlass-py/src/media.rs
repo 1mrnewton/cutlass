@@ -204,9 +204,7 @@ pub(crate) fn slice_source_range(
         return Err(PyValueError::new_err("invalid source window"));
     }
     if end_tick > media.duration.value && !media.is_image {
-        return Err(model_err(
-            cutlass_models::ModelError::SourceOutOfBounds,
-        ));
+        return Err(model_err(cutlass_models::ModelError::SourceOutOfBounds));
     }
     Ok(TimeRange::at_rate(start, (end_tick - start).max(1), rate))
 }

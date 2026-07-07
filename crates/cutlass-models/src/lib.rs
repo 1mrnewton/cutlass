@@ -21,6 +21,7 @@
 //! swaps the media while the slot's duration, transform, effects, transitions,
 //! and animations stay locked.
 
+mod capabilities;
 mod clip;
 mod effects;
 mod error;
@@ -43,6 +44,7 @@ mod transition;
 /// for an in-process editing model, but much faster than SipHash for `u64`).
 pub type Map<K, V> = rustc_hash::FxHashMap<K, V>;
 
+pub use capabilities::{ClipAction, ClipCapabilities};
 pub use clip::{
     AnimatedTransform, Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator,
     MAX_CLIP_VOLUME, MAX_SHAPE_DIM, MAX_SPEED, MAX_STAR_POINTS, MAX_STROKE_WIDTH,

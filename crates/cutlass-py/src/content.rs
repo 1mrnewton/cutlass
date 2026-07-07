@@ -75,6 +75,9 @@ impl Text {
                 stroke: stroke.map(|s| s.inner),
                 background: background.map(|b| b.inner),
                 shadow: shadow.map(|s| s.inner),
+                // Catalog presets are not exposed here: treatments are
+                // always explicit stroke/background/shadow arguments.
+                effect_preset: None,
             },
         })
     }
@@ -90,7 +93,11 @@ fn parse_text_case(s: &str) -> PyResult<TextCase> {
         "upper" => TextCase::Upper,
         "lower" => TextCase::Lower,
         "title" => TextCase::Title,
-        other => return Err(PyValueError::new_err(format!("unknown text case {other:?}"))),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown text case {other:?}"
+            )));
+        }
     })
 }
 

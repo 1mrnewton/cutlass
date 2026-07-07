@@ -66,6 +66,13 @@ export global EditorStore {
     // entry. Lanes the removals empty are removed too — same policy as
     // drag-moves.
     callback on-clips-deleted(clip-ids: [string]);
+    // Delete the selected clips and close each lane's gap (`RippleDelete`),
+    // regardless of the main-track magnet — the explicit ripple-delete
+    // gesture. One history entry.
+    callback on-clips-ripple-deleted(clip-ids: [string]);
+    // Toggle reverse playback on the primary selected clip (context menu).
+    // The worker reads the current speed and flips `reversed`.
+    callback on-clip-reversed(clip-id: string);
     // Split the clip at `at-tick` (Ctrl/Cmd+B, toolbar). Caller guarantees
     // the tick is strictly inside the clip.
     callback on-clip-split(clip-id: string, at-tick: int);

@@ -16,17 +16,25 @@
 //! for its poster and the pool size stays library-bounded.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
-use crossbeam_channel::{Sender, unbounded};
+use crossbeam_channel::{RecvTimeoutError, Sender, unbounded};
 use cutlass_models::{MediaSource, Project, Rational, RationalTime, TimeRange, TrackKind};
 use cutlass_render::Renderer;
 use slint::{Image, Model, Rgba8Pixel, SharedPixelBuffer};
 use tracing::{error, info};
 
 use crate::EditorStore;
+use crate::interaction::InteractionGate;
+
+/// While the interaction gate is closed, poll for new requests at this
+/// cadence instead of generating — keeps the queue draining without decode
+/// or GPU work competing with the preview.
+const GATE_POLL: Duration = Duration::from_millis(100);
 
 /// Box for video poster frames: 2× the 100px library tile for hidpi.
 const VIDEO_THUMB_MAX: u32 = 256;
@@ -75,7 +83,10 @@ pub struct ThumbnailWorker {
 }
 
 impl ThumbnailWorker {
-    pub fn spawn(editor_weak: slint::Weak<EditorStore<'static>>) -> Result<Self, String> {
+    pub fn spawn(
+        editor_weak: slint::Weak<EditorStore<'static>>,
+        gate: Arc<InteractionGate>,
+    ) -> Result<Self, String> {
         let (tx, rx) = unbounded::<ThumbRequest>();
         let join = std::thread::Builder::new()
             .name("cutlass-thumbs".into())
@@ -84,7 +95,32 @@ impl ThumbnailWorker {
                 // once, not per import. Lazy so a machine whose GPU can't spare
                 // another queue still runs (video tiles keep placeholders).
                 let mut renderer: Option<Renderer> = None;
-                while let Ok(req) = rx.recv() {
+                // Requests deferred while the user scrubs/plays (see
+                // `InteractionGate`): decode + composite here would steal
+                // exactly the hardware the preview is using. FIFO — deferred,
+                // never dropped.
+                let mut pending: VecDeque<ThumbRequest> = VecDeque::new();
+                loop {
+                    if pending.is_empty() {
+                        match rx.recv() {
+                            Ok(req) => pending.push_back(req),
+                            Err(_) => return,
+                        }
+                    }
+                    while let Ok(req) = rx.try_recv() {
+                        pending.push_back(req);
+                    }
+                    if gate.busy() {
+                        match rx.recv_timeout(GATE_POLL) {
+                            Ok(req) => pending.push_back(req),
+                            Err(RecvTimeoutError::Timeout) => {}
+                            Err(RecvTimeoutError::Disconnected) => return,
+                        }
+                        continue;
+                    }
+                    let Some(req) = pending.pop_front() else {
+                        continue;
+                    };
                     match generate(&req, &mut renderer) {
                         Ok((width, height, rgba)) => {
                             info!(media_id = req.media_id, width, height, kind = ?req.kind, "thumbnail ready");

@@ -122,6 +122,24 @@ export struct CatalogEntry {
     label: string,
 }
 
+// Derived per-clip capabilities (inspector sections + context-menu gates).
+// Computed in src/projection.rs from engine content + lane kind — not
+// persisted.
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct ClipCapabilities {
+    has-transform: bool,
+    has-crop: bool,
+    has-audio: bool,
+    has-speed: bool,
+    has-text: bool,
+    has-shape: bool,
+    has-effects: bool,
+    has-filter-adjust: bool,
+    can-split: bool,
+    can-reverse: bool,
+    can-ripple-delete: bool,
+}
+
 @rust-attr(derive(serde::Serialize, serde::Deserialize))
 export struct Clip {
     id: string,
@@ -309,6 +327,8 @@ export struct Clip {
     // edges to them. Empty ⇔ no beats detected. Filled by
     // `EditCommand::DetectBeats` on the worker.
     beats: [int],
+    // What inspector sections and context-menu actions apply to this clip.
+    caps: ClipCapabilities,
 }
 
 // Drives lane ordering, drag targeting (same-kind blocks), and which

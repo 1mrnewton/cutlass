@@ -7,6 +7,17 @@ GPU compositor, and platform-native exporter.
 
 See [api-design.md](./api-design.md) for the full v2 API reference.
 
+## Install
+
+```bash
+pip install --pre cutlass-py   # imports as `cutlass`
+```
+
+Wheels ship for macOS (Apple Silicon) and Windows (x64), Python 3.9+. The
+distribution is named `cutlass-py` (the bare `cutlass` name on PyPI belongs to
+an unrelated project); the module you import is `cutlass`. `--pre` is needed
+while releases carry a pre-release version (e.g. `0.5.3a0`).
+
 ## Install (from source)
 
 Requires the Rust toolchain and [maturin](https://www.maturin.rs/).
@@ -109,5 +120,6 @@ DYLD_FRAMEWORK_PATH="$(python3 -c 'import sys; print(sys.base_prefix.rsplit("/Py
     cargo test --no-default-features
 ```
 
-> **Export:** uses the platform-native encoder. Apple (VideoToolbox H.264 → mp4) is
-> implemented today; other platforms raise until their backends land.
+> **Export:** uses the platform-native encoder — Apple (VideoToolbox) and Windows
+> (Media Foundation), both H.264 + AAC → mp4. Other platforms raise until their
+> backends land.

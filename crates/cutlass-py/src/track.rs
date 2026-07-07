@@ -42,10 +42,7 @@ impl Track {
         f(&mut project)
     }
 
-    pub(crate) fn require(
-        project: &Project,
-        id: TrackId,
-    ) -> PyResult<&cutlass_models::Track> {
+    pub(crate) fn require(project: &Project, id: TrackId) -> PyResult<&cutlass_models::Track> {
         project
             .model()
             .timeline()
@@ -115,7 +112,10 @@ impl Track {
         self.with_project(py, |project| {
             let track = Self::require(project, self.id)?;
             let pos = time_at(t, project.rate());
-            Ok(track.clip_at(pos).map_err(model_err)?.map(|c| Clip::new(self.project.clone_ref(py), c.id)))
+            Ok(track
+                .clip_at(pos)
+                .map_err(model_err)?
+                .map(|c| Clip::new(self.project.clone_ref(py), c.id)))
         })
     }
 
@@ -291,9 +291,8 @@ fn place_content(
     }
 
     let generator = generator_from(content)?;
-    let dur = duration.ok_or_else(|| {
-        PyValueError::new_err("duration is required for generated content")
-    })?;
+    let dur = duration
+        .ok_or_else(|| PyValueError::new_err("duration is required for generated content"))?;
     let timeline = span(start, dur, rate);
     let clip_id = project
         .model_mut()

@@ -22,6 +22,7 @@ mod render;
 mod resolve;
 mod scene;
 
+pub use cutlass_compositor::FrameSink;
 pub use cutlass_core::RgbaImage;
 pub use error::RenderError;
 pub use export::{
@@ -29,6 +30,6 @@ pub use export::{
     export_observed, export_to_file, export_to_file_observed,
 };
 pub use export_audio::{EXPORT_AUDIO_CHANNELS, EXPORT_AUDIO_RATE, ExportAudioMixer};
-pub use render::Renderer;
+pub use render::{FrameStats, Renderer, SeekPolicy};
 pub use resolve::{ResolveOverrides, canvas_size, resolve, resolve_with};
 pub use scene::{LayerSource, Scene, SceneLayer, SizeSpec};

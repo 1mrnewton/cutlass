@@ -10,8 +10,9 @@
 //!   into a `wgpu` texture with no copy on the GPU path, or read back to planes
 //!   on the CPU path.
 //! - **Windows** ([`WmfDecoder`]): Media Foundation's Source Reader demuxes +
-//!   decodes, handing back NV12 planes on the CPU path. (Zero-copy DXGI output
-//!   is not wired up yet.)
+//!   decodes — hardware (DXVA) when a D3D11 device is available, software
+//!   otherwise — handing back NV12 planes on the CPU path or shared D3D11
+//!   textures on the GPU path.
 //! - **Android** ([`MediaCodecDecoder`]): NDK `AMediaExtractor` demuxes and
 //!   `AMediaCodec` hardware-decodes, handing back NV12/I420 planes on the CPU
 //!   path. (Zero-copy `AHardwareBuffer` output is not wired up yet.)
@@ -35,6 +36,20 @@ pub use apple_audio::AvfAudioReader;
 mod wmf;
 #[cfg(target_os = "windows")]
 pub use wmf::WmfDecoder;
+#[cfg(target_os = "windows")]
+mod wmf_audio;
+#[cfg(target_os = "windows")]
+pub use wmf_audio::WmfAudioReader;
+/// Fragmented-MP4 duration recovery, for demuxers that report none
+/// (Media Foundation today; usable by any backend with the same gap).
+#[cfg(target_os = "windows")]
+mod mp4_duration;
+/// Shared D3D11 device + DXGI device manager backing hardware decode.
+#[cfg(target_os = "windows")]
+mod wmf_d3d;
+/// Shared NV12 texture pool + fence: the decoder side of zero-copy output.
+#[cfg(target_os = "windows")]
+mod wmf_gpu;
 
 #[cfg(target_os = "android")]
 mod android;
@@ -64,10 +79,10 @@ use cutlass_core::{AudioReader, DecodeError, VideoDecoder};
 /// `mode`.
 ///
 /// Mirrors [`open_audio_reader`]: shared control flow, native codec only.
-/// Returns [`DecodeError::Unsupported`] on platforms without a backend. Note
-/// that Windows and Android currently ignore a [`OutputMode::Gpu`] request at
-/// the decoder level (no zero-copy surface output yet); pass [`OutputMode::Cpu`]
-/// there, or let the caller fall back.
+/// Returns [`DecodeError::Unsupported`] on platforms without a backend. Apple
+/// and Windows honor [`OutputMode::Gpu`] (zero-copy surfaces, with per-frame
+/// CPU fallback when the hardware path is unavailable); Android currently
+/// ignores it and always delivers CPU planes.
 pub fn open_video_decoder(
     path: &Path,
     mode: OutputMode,
@@ -107,13 +122,17 @@ pub fn open_audio_reader(
     {
         Ok(Box::new(AvfAudioReader::open(path, out_rate, channels)?))
     }
+    #[cfg(target_os = "windows")]
+    {
+        Ok(Box::new(WmfAudioReader::open(path, out_rate, channels)?))
+    }
     #[cfg(target_os = "android")]
     {
         Ok(Box::new(MediaCodecAudioReader::open(
             path, out_rate, channels,
         )?))
     }
-    #[cfg(not(any(target_vendor = "apple", target_os = "android")))]
+    #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "android")))]
     {
         let _ = (path, out_rate, channels);
         Err(DecodeError::unsupported(

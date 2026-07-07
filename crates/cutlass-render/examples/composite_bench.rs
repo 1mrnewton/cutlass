@@ -194,8 +194,7 @@ fn bench_compositor_with_look(
     for &(label, w, h) in sizes {
         let config = CompositorConfig::new(w, h);
         let placement = LayerPlacement::full_canvas(&config);
-        let make_layer =
-            || CompositeLayer::frame(frame, placement).with_color_grade(Some(grade));
+        let make_layer = || CompositeLayer::frame(frame, placement).with_color_grade(Some(grade));
         let _ = comp.render(gpu, &config, &[make_layer()]).expect("prime");
 
         let mut samples = Vec::with_capacity(iters as usize);

@@ -497,8 +497,8 @@ impl Compositor {
                 placement.size[0] * 0.5,
                 placement.size[1] * 0.5,
             ],
-            grade_adj0: grade_adj0,
-            grade_adj1: grade_adj1,
+            grade_adj0,
+            grade_adj1,
         };
         let buffer = gpu
             .device
@@ -543,8 +543,8 @@ impl Compositor {
             ],
             linear,
             trans_opacity: trans,
-            grade_adj0: grade_adj0,
-            grade_adj1: grade_adj1,
+            grade_adj0,
+            grade_adj1,
         };
         let buffer = gpu
             .device
@@ -618,8 +618,8 @@ impl Compositor {
             trans_opacity: trans,
             uv_rect,
             coeffs: [kr, kb, full, plane_mode],
-            grade_adj0: grade_adj0,
-            grade_adj1: grade_adj1,
+            grade_adj0,
+            grade_adj1,
         };
         let buffer = gpu
             .device
@@ -827,8 +827,8 @@ impl Compositor {
             linear,
             trans_opacity: trans,
             uv_rect: layer.uv,
-            grade_adj0: grade_adj0,
-            grade_adj1: grade_adj1,
+            grade_adj0,
+            grade_adj1,
         };
         let buffer = gpu
             .device

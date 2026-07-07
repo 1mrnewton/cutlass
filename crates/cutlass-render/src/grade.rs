@@ -126,7 +126,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(grade.exposure, 0.5);
-        assert!(grade.is_identity() == false);
+        assert!(!grade.is_identity());
     }
 
     #[test]

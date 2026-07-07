@@ -57,6 +57,16 @@ fn vs(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
     var premul = textureSample(tex, samp, in.uv);
 
+    if fx.chroma.w > 0.5 {
+        let a = premul.a;
+        var straight = vec3(0.0);
+        if a > 1e-4 {
+            straight = premul.rgb / a;
+        }
+        let chroma_mul = chroma_alpha(straight, fx.chroma.rgb, fx.chroma_params.x, fx.chroma_params.y);
+        premul = premul * chroma_mul;
+    }
+
     if fx.mask.w > 0.5 {
         let malpha = mask_alpha(
             in.local,

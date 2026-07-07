@@ -138,3 +138,14 @@ fn mask_alpha(
     }
     return alpha;
 }
+
+// Returns an alpha multiplier: 0 keyed out, 1 kept. Chroma runs before mask.
+fn chroma_alpha(rgb: vec3<f32>, key: vec3<f32>, strength: f32, shadow: f32) -> f32 {
+    let dist = length(rgb - key);
+    let tol = max(strength * 0.35, 1e-4);
+    let edge = 0.08;
+    var keyed = 1.0 - smoothstep(tol, tol + edge, dist);
+    let luma = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+    keyed = keyed * (1.0 - shadow * (1.0 - luma));
+    return 1.0 - keyed;
+}

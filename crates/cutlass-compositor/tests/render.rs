@@ -7,8 +7,8 @@
 //! If no GPU adapter is available the test skips rather than fails.
 
 use cutlass_compositor::{
-    CompositeLayer, Compositor, CompositorConfig, GpuContext, LayerEffects, LayerMask, LayerPlacement,
-    RgbaImage, mask_kind,
+    CompositeLayer, Compositor, CompositorConfig, GpuContext, LayerChromaKey, LayerEffects,
+    LayerMask, LayerPlacement, RgbaImage, mask_kind,
 };
 use cutlass_core::{
     ColorRange, ColorSpace, CpuImage, FrameData, MatrixCoefficients, PixelFormat, Plane, Rational,
@@ -422,6 +422,60 @@ fn rgba_placement_lands_in_the_right_quadrant() {
     assert_px(&img, 25, 25, [255, 255, 255, 255], 1); // inside, top-left
     assert_px(&img, 75, 25, [0, 0, 0, 255], 1);
     assert_px(&img, 25, 75, [0, 0, 0, 255], 1);
+}
+
+#[test]
+fn chroma_key_keys_green_nv12_to_transparent() {
+    let gpu = gpu_or_skip!();
+    let mut comp = Compositor::new(&gpu);
+    let config = CompositorConfig::new(64, 64).with_background([0, 0, 255, 255]);
+    // Full-range BT.709 green (#00FF00).
+    let full = ColorSpace {
+        range: ColorRange::Full,
+        ..ColorSpace::BT709
+    };
+    let f = nv12_uniform(64, 64, 182, 30, 12, full);
+    let placement = LayerPlacement::full_canvas(&config);
+    let effects = LayerEffects {
+        mask: None,
+        chroma_key: Some(LayerChromaKey {
+            rgb: [0.0, 1.0, 0.0],
+            strength: 0.5,
+            shadow: 0.0,
+        }),
+    };
+    let layer = CompositeLayer::frame(&f, placement).with_effects(effects);
+    let img = comp.render(&gpu, &config, &[layer]).expect("render");
+    // Keyed-out green reveals the blue background.
+    assert_px(&img, 32, 32, [0, 0, 255, 255], 8);
+}
+
+#[test]
+fn combined_mask_and_chroma_on_rgba_layer() {
+    let gpu = gpu_or_skip!();
+    let mut comp = Compositor::new(&gpu);
+    let config = CompositorConfig::new(64, 64).with_background([0, 0, 255, 255]);
+    let bmp = rgba_uniform(64, 64, [0, 255, 0, 255]);
+    let placement = LayerPlacement::full_canvas(&config);
+    let effects = LayerEffects {
+        mask: Some(LayerMask {
+            kind: mask_kind::CIRCLE,
+            feather: 0.0,
+            invert: 0,
+        }),
+        chroma_key: Some(LayerChromaKey {
+            rgb: [0.0, 1.0, 0.0],
+            strength: 0.5,
+            shadow: 0.0,
+        }),
+    };
+    let layer = CompositeLayer::rgba(&bmp, placement).with_effects(effects);
+    let img = comp.render(&gpu, &config, &[layer]).expect("render");
+
+    // Center: inside circle but green keyed out → background.
+    assert_px(&img, 32, 32, [0, 0, 255, 255], 8);
+    // Corner: outside circle → background regardless.
+    assert_px(&img, 2, 2, [0, 0, 255, 255], 2);
 }
 
 #[test]

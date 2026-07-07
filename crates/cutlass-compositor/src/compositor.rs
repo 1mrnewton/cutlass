@@ -84,6 +84,7 @@ struct SdfUniforms {
 #[derive(Clone, Copy)]
 enum LayerPipeline {
     Yuv,
+    YuvFx,
     Rgba,
     RgbaFx,
     Solid,
@@ -153,11 +154,13 @@ struct TargetCache {
 /// A WGPU alpha-over compositor. Build once (pipelines are reused), render many.
 pub struct Compositor {
     yuv_pipeline: wgpu::RenderPipeline,
+    yuv_fx_pipeline: wgpu::RenderPipeline,
     rgba_pipeline: wgpu::RenderPipeline,
     rgba_fx_pipeline: wgpu::RenderPipeline,
     solid_pipeline: wgpu::RenderPipeline,
     sdf_pipeline: wgpu::RenderPipeline,
     yuv_layout: wgpu::BindGroupLayout,
+    yuv_fx_layout: wgpu::BindGroupLayout,
     rgba_layout: wgpu::BindGroupLayout,
     rgba_fx_layout: wgpu::BindGroupLayout,
     solid_layout: wgpu::BindGroupLayout,
@@ -185,6 +188,18 @@ impl Compositor {
                 plane_tex_entry(2),
                 sampler_entry(3),
                 uniform_entry(4),
+            ],
+        });
+
+        let yuv_fx_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cutlass.yuv_fx.bgl"),
+            entries: &[
+                plane_tex_entry(0),
+                plane_tex_entry(1),
+                plane_tex_entry(2),
+                sampler_entry(3),
+                uniform_entry(4),
+                uniform_entry(5),
             ],
         });
 
@@ -217,6 +232,16 @@ impl Compositor {
             label: Some("cutlass.yuv.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/yuv.wgsl").into()),
         });
+        let yuv_fx_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cutlass.yuv_fx.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../shaders/mask.wgsl"),
+                    include_str!("../shaders/yuv_fx.wgsl"),
+                )
+                .into(),
+            ),
+        });
         let rgba_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass.rgba.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/rgba.wgsl").into()),
@@ -247,6 +272,13 @@ impl Compositor {
             "cutlass.yuv",
             &yuv_layout,
             &yuv_shader,
+            STRAIGHT_OVER,
+        );
+        let yuv_fx_pipeline = build_pipeline(
+            device,
+            "cutlass.yuv_fx",
+            &yuv_fx_layout,
+            &yuv_fx_shader,
             STRAIGHT_OVER,
         );
         let rgba_pipeline = build_pipeline(
@@ -293,11 +325,13 @@ impl Compositor {
 
         Self {
             yuv_pipeline,
+            yuv_fx_pipeline,
             rgba_pipeline,
             rgba_fx_pipeline,
             solid_pipeline,
             sdf_pipeline,
             yuv_layout,
+            yuv_fx_layout,
             rgba_layout,
             rgba_fx_layout,
             solid_layout,
@@ -416,6 +450,7 @@ impl Compositor {
             for layer in &built {
                 let pipeline = match layer.pipeline {
                     LayerPipeline::Yuv => &self.yuv_pipeline,
+                    LayerPipeline::YuvFx => &self.yuv_fx_pipeline,
                     LayerPipeline::Rgba => &self.rgba_pipeline,
                     LayerPipeline::RgbaFx => &self.rgba_fx_pipeline,
                     LayerPipeline::Solid => &self.solid_pipeline,
@@ -637,24 +672,15 @@ impl Compositor {
         let (linear, trans) = placement_affine_rot(config, &layer.placement, rotation);
         let uv_rect = visible_uv_rect(frame, layer.uv);
 
-        let uniforms = YuvUniforms {
+        let placement_uniforms = YuvUniforms {
             linear,
             trans_opacity: trans,
             uv_rect,
             coeffs: [kr, kb, full, plane_mode],
         };
-        let buffer = gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("cutlass.yuv.uniforms"),
-                contents: bytemuck::bytes_of(&uniforms),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
 
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cutlass.yuv.bg"),
-            layout: &self.yuv_layout,
-            entries: &[
+        let plane_entries = |layout: &wgpu::BindGroupLayout, placement_buf: &wgpu::Buffer, fx_buf: Option<&wgpu::Buffer>| {
+            let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(y_view),
@@ -673,17 +699,63 @@ impl Compositor {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: buffer.as_entire_binding(),
+                    resource: placement_buf.as_entire_binding(),
                 },
-            ],
-        });
+            ];
+            if let Some(fx) = fx_buf {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: fx.as_entire_binding(),
+                });
+            }
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("cutlass.yuv.bg"),
+                layout,
+                entries: &entries,
+            })
+        };
+
+        if layer.effects.is_identity() {
+            let buffer = gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("cutlass.yuv.uniforms"),
+                    contents: bytemuck::bytes_of(&placement_uniforms),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+            let bind_group = plane_entries(&self.yuv_layout, &buffer, None);
+            return Ok(LayerGpu {
+                pipeline: LayerPipeline::Yuv,
+                bind_group,
+                _textures: textures.into_iter().map(|(tex, _)| tex).collect(),
+                _uniform: buffer,
+                _keep_alive: keep_alive,
+            });
+        }
+
+        let fx_uniforms = pack_fx_uniforms(&layer.effects, &layer.placement);
+        let placement_buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cutlass.yuv_fx.placement"),
+                contents: bytemuck::bytes_of(&placement_uniforms),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let fx_buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cutlass.yuv_fx.effects"),
+                contents: bytemuck::bytes_of(&fx_uniforms),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind_group = plane_entries(&self.yuv_fx_layout, &placement_buffer, Some(&fx_buffer));
 
         Ok(LayerGpu {
-            pipeline: LayerPipeline::Yuv,
+            pipeline: LayerPipeline::YuvFx,
             bind_group,
             _textures: textures.into_iter().map(|(tex, _)| tex).collect(),
-            _uniform: buffer,
-            _keep_alive: keep_alive,
+            _uniform: placement_buffer,
+            _keep_alive: Some(Box::new((fx_buffer, keep_alive))),
         })
     }
 

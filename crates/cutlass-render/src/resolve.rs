@@ -324,7 +324,7 @@ fn resolve_clip(
     };
     let color_grade = resolve_color_grade(filter, adjust);
 
-    let layer = match &clip.content {
+    match &clip.content {
         ClipSource::Media { media, .. } => {
             let Some(src) = project.media(*media) else {
                 return Ok(None);
@@ -391,8 +391,7 @@ fn resolve_clip(
                 layer
             }))
         }
-    };
-    layer
+    }
 }
 
 /// Sample `clip.effects` at clip-local `tick` into compositor-ready passes.
@@ -735,9 +734,7 @@ fn fit_scale(nw: f32, nh: f32, cw: f32, ch: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::grade::effective_grade;
-    use crate::grade::resolve_color_grade;
     use crate::scene::{LayerSource, SizeSpec};
-    use cutlass_compositor::ColorGrade;
     use cutlass_models::{
         CanvasAspect, CanvasSettings, ClipTransform, ColorAdjustments, CropRect, Filter, Generator,
         MediaSource, Project, Rational, RationalTime, Shape, TextStyle as ModelTextStyle,

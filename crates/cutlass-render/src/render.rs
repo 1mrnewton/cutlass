@@ -966,12 +966,15 @@ impl Renderer {
             SeekPolicy::Exact => decoder.frame_at(source_time)?,
             SeekPolicy::NearestSync => decoder.frame_at_nearest(source_time)?,
         };
-        // Proxies run a frame short by construction (generation drops the
-        // container-reported tail, which routinely over-counts by one): an
-        // exact target at the media's very end can overshoot the proxy's
-        // EOF. Show the nearest decodable frame instead of failing the
-        // whole composite over the final tick.
-        if frame.is_none() && proxy.is_some() {
+        // An exact target at the media's very end can overshoot EOF: the
+        // pool trusts the container's frame count, which routinely
+        // over-reports by one, and proxies additionally run a frame short
+        // by construction (generation drops that untrustworthy tail). Show
+        // the nearest decodable frame instead of failing the whole
+        // composite — transitions pin the outgoing side at the final
+        // source frame, so a miss here would error every frame of the
+        // window.
+        if frame.is_none() {
             frame = decoder.frame_at_nearest(source_time)?;
         }
         frame.ok_or(RenderError::NoFrame {

@@ -411,9 +411,17 @@ impl Engine {
                 self.revision += 1;
                 true
             }
-            // Inverses are written to be infallible once recorded; on failure
-            // the action is already popped and lost.
-            Err(_) => false,
+            // Inverses are meant to be infallible once recorded. A failure
+            // here means the project no longer matches what history expects,
+            // so the remaining stacks can't be trusted either — clearing both
+            // is safer than silently dropping one entry and marching on (which
+            // is what once turned an id collision into permanent data loss).
+            Err(e) => {
+                tracing::error!("undo failed ({e}); clearing history to avoid corruption");
+                self.history.clear();
+                self.revision += 1;
+                false
+            }
         }
     }
 
@@ -431,7 +439,14 @@ impl Engine {
                 self.revision += 1;
                 true
             }
-            Err(_) => false,
+            // See `undo`: a failed redo means history and project have
+            // diverged, so drop both stacks rather than corrupt further.
+            Err(e) => {
+                tracing::error!("redo failed ({e}); clearing history to avoid corruption");
+                self.history.clear();
+                self.revision += 1;
+                false
+            }
         }
     }
 

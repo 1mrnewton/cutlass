@@ -43,7 +43,25 @@ impl EditAction for CompoundAction {
     ) -> Result<Box<dyn EditAction>, EngineError> {
         let mut inverses = Vec::with_capacity(self.actions.len());
         for action in self.actions.into_iter().rev() {
-            inverses.push(action.apply(ctx)?);
+            match action.apply(ctx) {
+                Ok(inverse) => inverses.push(inverse),
+                Err(e) => {
+                    // A partially-applied compound would corrupt state (some
+                    // inner edits done, others not). Revert what we did apply
+                    // — running the produced inverses in reverse — so the
+                    // compound is all-or-nothing.
+                    for inverse in inverses.into_iter().rev() {
+                        if inverse.apply(ctx).is_err() {
+                            tracing::error!(
+                                "compound rollback failed after a partial apply; \
+                                 state may be inconsistent"
+                            );
+                            break;
+                        }
+                    }
+                    return Err(e);
+                }
+            }
         }
         Ok(Box::new(CompoundAction { actions: inverses }))
     }

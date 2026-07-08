@@ -7208,7 +7208,10 @@ mod tests {
         // Row 7 hits no lane at all; the empty main catches the drop.
         place_drop_group(&mut engine, &items, TrackKind::Video, 7, 60, false);
 
-        assert_eq!(lane_clip_extents(&engine, main), vec![(60, 110), (110, 150)]);
+        assert_eq!(
+            lane_clip_extents(&engine, main),
+            vec![(60, 110), (110, 150)]
+        );
         assert_eq!(
             engine.project().timeline().order().len(),
             1,

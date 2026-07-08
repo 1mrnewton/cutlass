@@ -129,26 +129,28 @@ struct Worker {
 
 impl Worker {
     fn new(backend_weak: slint::Weak<crate::AppWindow>, import_handle: WorkerHandle) -> Self {
-        // BYOK stock keys route search straight to the providers; otherwise
-        // anonymous search goes through the Cutlass backend. Env-based until
-        // the `[providers.*]` settings registry lands.
-        let pexels = std::env::var("PEXELS_API_KEY")
-            .ok()
-            .filter(|k| !k.is_empty());
-        let pixabay = std::env::var("PIXABAY_API_KEY")
-            .ok()
-            .filter(|k| !k.is_empty());
+        // The BYOK-first routing rule: stock keys from the `[providers.*]`
+        // settings registry (env vars still work as a fallback) route search
+        // straight to the providers; otherwise anonymous search goes through
+        // the Cutlass backend.
+        let settings =
+            cutlass_settings::load(&cutlass_settings::default_config_path()).unwrap_or_default();
+        let key_for = |name: &str, env: &str| {
+            settings
+                .provider(name)
+                .resolve_key()
+                .or_else(|| std::env::var(env).ok())
+                .filter(|k| !k.is_empty())
+        };
+        let pexels = key_for("pexels", "PEXELS_API_KEY");
+        let pixabay = key_for("pixabay", "PIXABAY_API_KEY");
         let provider: Box<dyn StockProvider> = if pexels.is_some() || pixabay.is_some() {
             info!("stock search: using BYOK provider keys");
             Box::new(DirectStockProvider::new(pexels, pixabay))
         } else {
-            let base_url = std::env::var("CUTLASS_API_BASE")
-                .ok()
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| cutlass_cloud::DEFAULT_BASE_URL.to_string());
             let cache_dir = paths::data_dir().join("catalog-cache");
             Box::new(BackendStockProvider::new(CloudClient::new(
-                &base_url,
+                &crate::account::base_url(),
                 Some(cache_dir),
             )))
         };

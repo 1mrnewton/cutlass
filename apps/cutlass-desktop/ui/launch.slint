@@ -19,6 +19,7 @@ import { AppStore, EditorStore } from "store/index.slint";
 import { AppState } from "state.slint";
 import { WindowBackend } from "lib/window-backend.slint";
 import { TemplatesBackend, TemplateTile } from "lib/templates-backend.slint";
+import { AccountBackend } from "lib/account-backend.slint";
 
 // Frameless-window caption button (mirrors title-bar.slint's CaptionButton):
 // the launch screen has no editor TitleBar, so it carries its own window
@@ -659,6 +660,35 @@ export component LaunchScreen inherits Rectangle {
 
                     Rectangle {
                         vertical-stretch: 1;
+                    }
+
+                    // Update nudge: a quiet chip above the footer when the
+                    // backend reports a newer release. Click opens the
+                    // download page in the browser; never blocks anything.
+                    if AccountBackend.update-available: Rectangle {
+                        height: 30px;
+                        border-radius: AppStore.theme.metrics.radius.sm;
+                        background: update-ta.has-hover
+                            ? AppStore.theme.accent.primary.with-alpha(0.22)
+                            : AppStore.theme.accent.primary.with-alpha(0.14);
+
+                        CutlassText {
+                            x: AppStore.theme.metrics.spacing.md;
+                            width: parent.width - 2 * AppStore.theme.metrics.spacing.md;
+                            height: parent.height;
+                            vertical-alignment: center;
+                            text: "Update available — " + AccountBackend.update-version;
+                            style: AppStore.theme.typography.caption;
+                            foreground: AppStore.theme.accent.primary;
+                            overflow: elide;
+                        }
+
+                        update-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                AccountBackend.open-update();
+                            }
+                        }
                     }
 
                     // Footer: honest local-workspace status.

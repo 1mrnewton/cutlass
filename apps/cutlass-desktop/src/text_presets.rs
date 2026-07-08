@@ -93,14 +93,13 @@ struct Worker {
 
 impl Worker {
     fn new(backend_weak: slint::Weak<crate::AppWindow>, registry: PresetRegistry) -> Self {
-        let base_url = std::env::var("CUTLASS_API_BASE")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| cutlass_cloud::DEFAULT_BASE_URL.to_string());
         Self {
             backend_weak,
             registry,
-            client: CloudClient::new(&base_url, Some(paths::data_dir().join("catalog-cache"))),
+            client: CloudClient::new(
+                &crate::account::base_url(),
+                Some(paths::data_dir().join("catalog-cache")),
+            ),
         }
     }
 

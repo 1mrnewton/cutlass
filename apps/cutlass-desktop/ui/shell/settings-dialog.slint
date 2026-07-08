@@ -17,6 +17,7 @@ import {
 } from "../components/index.slint";
 import { AppStore } from "../store/index.slint";
 import { SettingsBackend } from "../lib/settings-backend.slint";
+import { AccountBackend } from "../lib/account-backend.slint";
 import { AppState } from "../state.slint";
 
 // One row in the left rail.
@@ -122,7 +123,7 @@ component SettingsTextField inherits Rectangle {
 export component SettingsDialog inherits Rectangle {
     background: #000000A0;
 
-    // 0 = AI, 1 = Appearance.
+    // 0 = AI, 1 = Appearance, 2 = Account.
     in-out property <int> section: 0;
 
     property <[string]> theme-names: ["Graphite (default)", "Ember", "Dark blue"];
@@ -208,6 +209,13 @@ export component SettingsDialog inherits Rectangle {
                         selected: root.section == 1;
                         clicked => {
                             root.section = 1;
+                        }
+                    }
+                    NavItem {
+                        label: "Account";
+                        selected: root.section == 2;
+                        clicked => {
+                            root.section = 2;
                         }
                     }
 
@@ -324,6 +332,108 @@ export component SettingsDialog inherits Rectangle {
                                             : 2;
                                     }
                                 }
+                            }
+                        }
+
+                        // --- Account --------------------------------------
+                        if root.section == 2: VerticalLayout {
+                            spacing: AppStore.theme.metrics.spacing.md;
+
+                            PaneTitle {
+                                text: "Account";
+                            }
+                            Hint {
+                                text: "Optional. Everything with your own API keys works signed-out; a Cutlass account adds prepaid credits for managed cloud generation. Sign-in and checkout open in your browser — no passwords, no card data in the app.";
+                            }
+
+                            // Signed out: provider buttons.
+                            if AccountBackend.status != "signed-in": HorizontalLayout {
+                                spacing: AppStore.theme.metrics.spacing.md;
+                                alignment: start;
+
+                                AccentButton {
+                                    label: AccountBackend.status == "signing-in"
+                                        ? "Waiting for browser…"
+                                        : "Sign in with GitHub";
+                                    enabled: AccountBackend.status != "signing-in";
+                                    clicked => {
+                                        AccountBackend.sign-in("github");
+                                    }
+                                }
+                                SubtleButton {
+                                    label: "Sign in with Google";
+                                    enabled: AccountBackend.status != "signing-in";
+                                    clicked => {
+                                        AccountBackend.sign-in("google");
+                                    }
+                                }
+                            }
+
+                            // Signed in: identity + balance + packs.
+                            if AccountBackend.status == "signed-in": VerticalLayout {
+                                spacing: AppStore.theme.metrics.spacing.md;
+
+                                FieldRow {
+                                    label: "Signed in as";
+                                    CutlassText {
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        text: AccountBackend.email + "  (" + AccountBackend.provider + ")";
+                                        style: AppStore.theme.typography.body;
+                                        overflow: elide;
+                                    }
+                                }
+                                FieldRow {
+                                    label: "Credits";
+                                    CutlassText {
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        text: AccountBackend.balance-known
+                                            ? AccountBackend.credits + " credits"
+                                            : "—";
+                                        style: AppStore.theme.typography.body;
+                                    }
+                                    SubtleButton {
+                                        label: "Refresh";
+                                        clicked => {
+                                            AccountBackend.refresh-balance();
+                                        }
+                                    }
+                                }
+
+                                if AccountBackend.packs.length > 0: VerticalLayout {
+                                    spacing: AppStore.theme.metrics.spacing.xs;
+
+                                    Hint {
+                                        text: "Buy credits (opens Polar checkout in your browser):";
+                                    }
+                                    for pack[i] in AccountBackend.packs: HorizontalLayout {
+                                        alignment: start;
+                                        SubtleButton {
+                                            label: pack.label;
+                                            clicked => {
+                                                AccountBackend.buy-pack(i);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    alignment: start;
+                                    SubtleButton {
+                                        label: "Sign out";
+                                        clicked => {
+                                            AccountBackend.sign-out();
+                                        }
+                                    }
+                                }
+                            }
+
+                            if AccountBackend.error != "": CutlassText {
+                                text: AccountBackend.error;
+                                wrap: word-wrap;
+                                style: AppStore.theme.typography.caption;
+                                foreground: #FF6B6B;
                             }
                         }
 

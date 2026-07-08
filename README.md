@@ -13,7 +13,9 @@ It's still alpha and moving fast, but it's a real editor now, not a toy.
 - Import video, audio, and images onto a multi-lane timeline.
 - Cut, trim, split, move, duplicate, link/unlink, ripple-delete, multi-select.
 - Change speed and reverse, crop and flip, move/scale/rotate, set opacity.
-- Add styled text, solid colors, and shapes.
+- Add styled text, solid colors, shapes, and bundled stickers (static or
+  animated).
+- Apply entrance/exit/combo look animations from the catalog.
 - Pick a canvas shape (16:9, 9:16, 1:1, 4:5, 21:9) and a background color.
 - Keyframe almost anything — animate transforms and effect settings over time.
 

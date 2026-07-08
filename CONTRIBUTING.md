@@ -28,8 +28,8 @@ just gives reviewers helpful context.
 ## Before You Start
 
 - Read the [README](README.md) to understand what Cutlass is and how to run it.
-- Check the [Cutlass v1 roadmap](docs/v1-roadmap.md) and the topic roadmaps in
-  [`docs/`](docs/) to see what is planned, in progress, or already done.
+- Check [ROADMAP.md](ROADMAP.md) to see what is planned, in progress, or
+  already done.
 - Search [open issues](https://github.com/1Mr-Newton/cutlass/issues) before
   filing a new one or starting work, so effort is not duplicated.
 - For anything larger than a small fix, open an issue first to discuss the

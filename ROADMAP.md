@@ -9,15 +9,21 @@ reviewable change (or a short series). Update this file as items complete.
   (`crates/cutlass-render/src/export.rs`), wired into the engine
   (`Command::Project(Export)`), the desktop export job
   (`apps/cutlass-desktop/src/preview_worker.rs`), and mobile
-  (`crates/cutlass-mobile/src/export_job.rs`).
-- `cutlass-py`: functional v2 track-first API (`Project`, `Track`, `Clip`,
-  `get_frame() -> numpy`, `export()`), with a passing integration suite.
+  (`crates/cutlass-mobile/src/export_job.rs`). Apple and Windows encoders ship;
+  Linux export still returns `Unsupported` (see item 9).
+- `cutlass-py`: v2 track-first API (`Project`, `Track`, `Clip`, still import,
+  `Sticker` / `stickers()`, look `animations()` / `set_animation`, `get_frame()
+  -> numpy`, `export()`), PyPI wheels via maturin, passing integration suite.
 - Param/keyframe system (`crates/cutlass-models/src/param.rs`) including speed
-  curves; Phase I "look" data model (`crates/cutlass-models/src/look.rs`)
-  persisted + validated but render-neutral.
+  curves; look data model (`crates/cutlass-models/src/look.rs`) drives clip
+  grades, masks/chroma, effects/transitions, lane passes, stickers, and
+  entrance/exit/combo animations at resolve time.
+- Export audio: shared `ExportAudioMixer` varispeed-resamples retimed clips and
+  RNNoise-denoises flagged clips in preview and export (pitch-preserving stretch
+  and reversed-clip audio still deferred).
 - Compositor pipeline benchmark over real media
   (`crates/cutlass-render/examples/composite_bench.rs`) — use it to guard GPU
-  cost regressions for the render work below.
+  cost regressions for render work.
 
 ## 1. Render clip color adjustments and filter presets — DONE
 
@@ -124,7 +130,11 @@ Still-image import, docs, and PyPI packaging are aligned with the engine.
 `crates/cutlass-encoder` returns `Unsupported` on Linux/Windows. Add a backend
 (e.g. FFmpeg libx264 or platform encoders) if cross-platform export matters.
 
-## 10. Docs debt
+## 10. Docs debt — DONE
 
-- Keep `.cursor/rules/overview.mdc` and this roadmap in sync as stickers,
-  look animations, and Python packaging land.
+- `.cursor/rules/overview.mdc` and this file now reflect stickers, look
+  animations, export audio, and cutlass-py (still import, PyPI wheels).
+- [CONTRIBUTING.md](CONTRIBUTING.md) points at this roadmap (replacing stale
+  `docs/v1-roadmap.md` references).
+- `crates/cutlass-py/api-design.md` intro updated from a v2 proposal to the
+  shipped API reference.

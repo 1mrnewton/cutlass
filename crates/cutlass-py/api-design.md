@@ -1,15 +1,13 @@
 # cutlass-py API design (v2)
 
-A redesign proposal for the `cutlass` Python package. The current API is a
-flat `Project` with a handful of `add_*` calls; this document proposes a
-track-first object model that matches how the Rust engine actually works,
-with code samples for every surface. Nothing here requires new engine
-features — every call maps onto an existing `cutlass-models` /
-`cutlass-render` / `cutlass-decoder` API (see the mapping table at the end).
+Reference for the shipped v2 `cutlass` Python package: a track-first object
+model that matches how the Rust engine works, with code samples for every
+surface. Every call maps onto an existing `cutlass-models` / `cutlass-render` /
+`cutlass-decoder` API (see the mapping table at the end).
 
-## Why redesign
+## Motivation
 
-Problems with the shipped API:
+Problems with the retired flat v1 API:
 
 - **Tracks exist but do nothing.** `add_track()` returns an id that no other
   method accepts. `add_solid()` / `add_text()` silently create a *new* track

@@ -65,6 +65,7 @@ fn engine_with_solid_clip(frames: i64) -> (tempfile::TempDir, Engine, cutlass_mo
             kind: TrackKind::Sticker,
             name: "ST1".into(),
             index: None,
+            pinned: false,
         }))
         .expect("track")
     {
@@ -110,6 +111,7 @@ fn engine_with_media(path: &Path, source_frames: i64) -> (tempfile::TempDir, Eng
             kind: TrackKind::Video,
             name: "V1".into(),
             index: None,
+            pinned: false,
         }))
         .expect("track")
     {

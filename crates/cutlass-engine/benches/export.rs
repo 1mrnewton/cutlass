@@ -25,6 +25,7 @@ fn engine_with_solid(frames: i64) -> (tempfile::TempDir, Engine) {
             kind: TrackKind::Video,
             name: "V1".into(),
             index: None,
+            pinned: false,
         }))
         .expect("track")
     {

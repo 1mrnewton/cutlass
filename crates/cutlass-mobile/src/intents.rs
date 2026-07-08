@@ -526,6 +526,7 @@ fn ensure_host_lane(
                 kind,
                 name: default_lane_name(kind).into(),
                 index,
+                pinned: false,
             },
         ),
     }
@@ -542,6 +543,7 @@ fn ensure_main(engine: &mut Engine) -> Result<TrackId, EngineError> {
             kind: TrackKind::Video,
             name: "Main".into(),
             index: Some(0),
+            pinned: false,
         },
     )
 }

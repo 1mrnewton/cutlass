@@ -52,6 +52,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
             kind: track_kind(args.kind),
             name: args.name.clone(),
             index: args.index.map(|i| i as usize),
+            pinned: false,
         },
         WireCommand::AddClip(args) => {
             let track = track_ref(project, args.track)?;

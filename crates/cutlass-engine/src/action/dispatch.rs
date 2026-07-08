@@ -127,8 +127,13 @@ fn dispatch_edit(
     ctx: &mut ApplyContext<'_>,
 ) -> Result<(ApplyOutcome, Option<Box<dyn EditAction>>), EngineError> {
     match edit {
-        EditCommand::AddTrack { kind, name, index } => {
-            let (id, inverse) = edit::add_track::execute(ctx, kind, name, index)?;
+        EditCommand::AddTrack {
+            kind,
+            name,
+            index,
+            pinned,
+        } => {
+            let (id, inverse) = edit::add_track::execute(ctx, kind, name, index, pinned)?;
             Ok((
                 ApplyOutcome::Edited(EditOutcome::CreatedTrack(id)),
                 Some(inverse),
@@ -435,6 +440,20 @@ fn dispatch_edit(
             let inverse = finalize_structural(ctx, guard, primary);
             Ok((
                 ApplyOutcome::Edited(EditOutcome::RemovedTrack(track)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::MoveTrack { track, index } => {
+            let inverse = edit::move_track::execute(ctx, track, index)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::UpdatedTrack(track)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::SetTrackName { track, name } => {
+            let inverse = edit::set_track_name::set_track_name(ctx, track, name)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::UpdatedTrack(track)),
                 Some(inverse),
             ))
         }

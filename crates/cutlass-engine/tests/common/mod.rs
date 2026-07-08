@@ -57,6 +57,7 @@ pub fn add_track(engine: &mut Engine, kind: TrackKind, name: &str) -> TrackId {
             kind,
             name: name.into(),
             index: None,
+            pinned: false,
         }))
         .expect("add track")
     {

@@ -17,10 +17,14 @@ pub fn execute(
     kind: TrackKind,
     name: impl Into<String>,
     index: Option<usize>,
+    pinned: bool,
 ) -> Result<(TrackId, Box<dyn EditAction>), EngineError> {
+    let mut track = Track::new(kind, name);
+    track.pinned = pinned;
+    let timeline = ctx.project.timeline_mut();
     let id = match index {
-        Some(order_index) => ctx.project.insert_track(kind, name, order_index),
-        None => ctx.project.add_track(kind, name),
+        Some(order_index) => timeline.insert_track(track, order_index),
+        None => timeline.add_track(track),
     };
     Ok((id, Box::new(RemoveTrackAction { track_id: id })))
 }

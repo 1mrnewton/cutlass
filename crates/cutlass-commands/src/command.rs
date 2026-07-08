@@ -89,6 +89,10 @@ pub enum EditCommand {
         /// Stack position (0 = bottom layer, composited first). `None`
         /// appends to the top of the stack. Clamped to the stack height.
         index: Option<usize>,
+        /// When true, the lane survives auto-removal while empty until the user
+        /// deletes it (manual "Add track" from the timeline UI).
+        #[serde(default)]
+        pinned: bool,
     },
     /// Place a trimmed range of imported media on a track.
     AddClip {
@@ -322,6 +326,10 @@ pub enum EditCommand {
     RemoveClip { clip: ClipId },
     /// Remove a track (and any clips still on it) from the stack.
     RemoveTrack { track: TrackId },
+    /// Reorder a track in the stack (0 = bottom layer). Clamped to stack height.
+    MoveTrack { track: TrackId, index: usize },
+    /// Rename a track lane (display name in the header).
+    SetTrackName { track: TrackId, name: String },
     /// Toggle whether a (visual) track contributes to the composite.
     SetTrackEnabled { track: TrackId, enabled: bool },
     /// Toggle whether an audio track is silenced.

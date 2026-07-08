@@ -113,6 +113,7 @@ fn bench_engine(path: &Path, seconds: u64) {
             kind: TrackKind::Video,
             name: "V1".into(),
             index: None,
+            pinned: false,
         }))
         .expect("track")
     {

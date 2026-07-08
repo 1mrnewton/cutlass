@@ -648,7 +648,7 @@ mod tests {
         // Gesture: AddTrack + AddGenerated. Inverses are stored in execution
         // order; undo must run them in reverse (remove the clip before its
         // track) or the second inverse hits an unknown clip.
-        let (track, inv_track) = add_track::execute(&mut ctx, TrackKind::Text, "T1", None).unwrap();
+        let (track, inv_track) = add_track::execute(&mut ctx, TrackKind::Text, "T1", None, false).unwrap();
         let (clip, inv_clip) =
             add_generated::execute(&mut ctx, track, Generator::text("x"), tr(0, 10)).unwrap();
 

@@ -325,6 +325,22 @@ impl Timeline {
         Some(track)
     }
 
+    pub fn move_track(&mut self, id: TrackId, new_index: usize) -> Result<(), ModelError> {
+        let current = self
+            .order
+            .iter()
+            .position(|&t| t == id)
+            .ok_or(ModelError::UnknownTrack(id))?;
+        if current == new_index {
+            return Ok(());
+        }
+        self.order.remove(current);
+        let idx = new_index.min(self.order.len());
+        self.order.insert(idx, id);
+        self.enforce_audio_floor();
+        Ok(())
+    }
+
     /// Re-insert a removed track at its prior stack position (undo of [`remove_track`]).
     pub fn restore_track(
         &mut self,
@@ -610,6 +626,18 @@ mod tests {
         // Requesting an audio track at the top sinks back into the audio block.
         let a2 = timeline.insert_track(Track::new(TrackKind::Audio, "A2"), 99);
         assert_eq!(timeline.order(), &[a1, a2, v0, v1]);
+    }
+
+    #[test]
+    fn move_track_reorders_stack() {
+        let mut timeline = Timeline::new(Rational::new(24, 1));
+        let v1 = timeline.add_track(Track::new(TrackKind::Video, "V1"));
+        let v2 = timeline.add_track(Track::new(TrackKind::Video, "V2"));
+        let a1 = timeline.add_track(Track::new(TrackKind::Audio, "A1"));
+        assert_eq!(timeline.order(), &[a1, v1, v2]);
+
+        timeline.move_track(v1, 2).unwrap();
+        assert_eq!(timeline.order(), &[a1, v2, v1]);
     }
 
     #[test]

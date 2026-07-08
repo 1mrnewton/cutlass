@@ -93,6 +93,10 @@ pub struct Track {
     /// trimmed. Compositing/playback are unaffected (CapCut semantics).
     #[serde(default)]
     pub locked: bool,
+    /// When true, an empty lane is not auto-removed by implicit cleanup —
+    /// only an explicit user delete removes it (manual "Add track").
+    #[serde(default)]
+    pub pinned: bool,
     /// Audio: whether this lane is a sidechain "voice" source — its clips
     /// drive audio ducking (M8 Phase 4), so a "duck under voice" gesture dips
     /// music under the talkers on every lane flagged here. Additive: old
@@ -118,6 +122,7 @@ impl Track {
             enabled: true,
             muted: false,
             locked: false,
+            pinned: false,
             duck_source: false,
             clips: Map::default(),
             transitions: Vec::new(),

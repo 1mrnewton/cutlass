@@ -90,6 +90,7 @@ fn edit_samples() -> Vec<EditCommand> {
             kind: TrackKind::Video,
             name: "V2".into(),
             index: Some(1),
+            pinned: false,
         },
         EditCommand::AddClip {
             track: track(1),
@@ -388,6 +389,8 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
         EditCommand::MoveClip { .. } => "MoveClip",
         EditCommand::RemoveClip { .. } => "RemoveClip",
         EditCommand::RemoveTrack { .. } => "RemoveTrack",
+        EditCommand::MoveTrack { .. } => "MoveTrack",
+        EditCommand::SetTrackName { .. } => "SetTrackName",
         EditCommand::SetTrackEnabled { .. } => "SetTrackEnabled",
         EditCommand::SetTrackMuted { .. } => "SetTrackMuted",
         EditCommand::SetTrackLocked { .. } => "SetTrackLocked",

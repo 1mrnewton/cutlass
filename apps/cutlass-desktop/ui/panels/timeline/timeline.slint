@@ -722,6 +722,14 @@ export component TimelinePanel inherits PanelBase {
                     ForceHeadSpace { }
 
                     for t[lane-idx] in sequence.tracks: TrackLane {
+                        // Explicit width, not layout stretch: pinch/wheel zoom
+                        // grows `content-width` without a scroll event, and the
+                        // Flickable's cached layout leaves stretched children at
+                        // their stale width (regression of a5f43dd, which only
+                        // bound the enclosing VerticalLayout). A direct binding
+                        // re-evaluates the moment zoom changes, same as the
+                        // overlay bands below.
+                        width: max(content-width, lanes.width);
                         track-id: t.id;
                         kind: t.kind;
                         for c in t.clips: ClipView {

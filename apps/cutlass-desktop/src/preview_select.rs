@@ -770,7 +770,8 @@ mod tests {
     #[test]
     fn generators_without_bounds_hit_at_canvas_size() {
         let clip = generated_clip("T", "text", 0, 0);
-        let mut sticker = generated_clip("S", "", 0, 0); // not composited yet
+        // A legacy empty-asset sticker: draws nothing, so no composited tag.
+        let mut sticker = generated_clip("S", "", 0, 0);
         sticker.generator_kind = SharedString::default();
         let seq = sequence(vec![
             track("2", TrackKind::Video, vec![sticker]),

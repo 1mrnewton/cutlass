@@ -24,4 +24,4 @@ A **MoviePy-style Python library** so the engine can be scripted from Python. Th
 - **API**: thin, Pythonic wrapper over `Engine` (`add_clip`, `split`, `export`, `get_frame`) — do **not** expose the raw `EditCommand` enum to Python.
 - **Prerequisite (landed)**: the **timeline → video file exporter** exists — `export_to_file(_observed)` in `cutlass-render` composites every frame and muxes H.264/AAC via `cutlass-encoder`, wired into the engine, desktop, and mobile.
 - **`get_frame(t) -> numpy`**: easy given `RgbaImage` is already `width/height/Vec<u8>`.
-- **Gap to close**: `CompositeLayer` handles video frames, RGBA bitmaps (text/stills/pen paths), solids, SDF shapes, per-layer color grades (clip filters/adjustments), and canvas-wide lane effect/filter/adjustment passes. Stickers still aren't composited, so they'd be dropped on export until filled in (see `ROADMAP.md`).
+- **Composited content**: `CompositeLayer` handles video frames, RGBA bitmaps (text/stills/pen paths/bundled stickers, including animated GIF/APNG sticker frames), solids, SDF shapes, per-layer color grades (clip filters/adjustments), and canvas-wide lane effect/filter/adjustment passes.

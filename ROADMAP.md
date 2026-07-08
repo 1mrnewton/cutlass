@@ -66,10 +66,22 @@ composited beneath their track.
 - Resolver, compositor, and render smoke tests cover lane pass ordering,
   no-op elision, gesture fallback, grade, and effect execution.
 
-## 5. Stickers
+## 5. Stickers — DONE
 
-Last skipped generator kind. Needs asset handling (animated sticker sources)
-plus compositing as `Rgba`/`Frame` layers.
+Stickers are first-class generated content end to end.
+
+- `Generator::Sticker { asset }` references a bundled catalog
+  (`cutlass-models/src/sticker.rs`, bytes embedded from `assets/stickers/`);
+  legacy payload-less `"Sticker"` documents still deserialize.
+- `cutlass-decoder` decodes animations from bytes (GIF/APNG portable via
+  `gif`/`png`, plus animated WebP through ImageIO on Apple).
+- Resolve emits `LayerSource::Sticker` (intrinsic pixels as reference pixels,
+  the shape convention); the renderer caches decoded frame sequences and
+  composites the looping frame as an `Rgba` layer in preview and export.
+- Desktop Library tiles (with real thumbnails), mobile `AddSticker { asset }`,
+  and Python `Sticker(asset)` / `cutlass.stickers()` are wired up.
+- The starter pack is placeholder art; swapping in real artwork only touches
+  `assets/stickers/` and the catalog table (a drift test pins them together).
 
 ## 6. Look animations (entrance / exit / combo)
 

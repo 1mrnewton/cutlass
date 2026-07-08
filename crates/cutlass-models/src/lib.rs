@@ -36,6 +36,7 @@ mod schema;
 mod serde_map;
 mod sticker;
 mod template;
+pub mod template_bundle;
 mod time;
 mod timeline;
 mod track;

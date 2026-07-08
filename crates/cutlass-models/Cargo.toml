@@ -12,6 +12,9 @@ cutlass-core = { path = "../cutlass-core" }
 rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Template bundles (`.cutlassb`) are uncompressed tar archives — sample
+# media is already-compressed mp4/jpg, so no compression deps.
+tar = "0.4"
 thiserror.workspace = true
 
 [dev-dependencies]

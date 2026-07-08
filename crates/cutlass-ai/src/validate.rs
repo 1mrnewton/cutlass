@@ -1496,11 +1496,7 @@ mod tests {
         let (mut project, ..) = fixture();
         let lane = project.add_track(TrackKind::Adjustment, "FX");
         let left = project
-            .add_generated(
-                lane,
-                Generator::Adjustment,
-                TimeRange::at_rate(0, 24, R24),
-            )
+            .add_generated(lane, Generator::Adjustment, TimeRange::at_rate(0, 24, R24))
             .unwrap();
         project
             .add_generated(lane, Generator::Adjustment, TimeRange::at_rate(24, 24, R24))

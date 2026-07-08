@@ -125,10 +125,12 @@ Still-image import, docs, and PyPI packaging are aligned with the engine.
   default duration, any placement length on `video` tracks).
 - PyPI wheels ship via maturin (`pyproject.toml`, `pywheels.yml` CI).
 
-## 9. Non-Apple export backends
+## 9. Non-Apple export backends — DEFERRED
 
-`crates/cutlass-encoder` returns `Unsupported` on Linux/Windows. Add a backend
-(e.g. FFmpeg libx264 or platform encoders) if cross-platform export matters.
+Parked with the rest of the intentionally deferred work in
+[docs/deferred.md](docs/deferred.md) (pitch-preserving audio, reverse audio,
+duck, beats, Linux/Windows media, effect/text coverage gaps, AI Import
+stretch). Revisit when cross-platform export matters.
 
 ## 11. AI assistant (cutlass-ai + desktop wiring) — DONE
 

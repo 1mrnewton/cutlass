@@ -19,9 +19,9 @@
 //! publishes a fresh project clone with every projection republish, and the
 //! mixer reopens at its current position — the mobile reader semantics
 //! (reopen on seek and on revision change) instead of main's per-span reader
-//! surgery. `ExportAudioMixer::for_project` skips retimed/denoised clips
-//! (their DSP hasn't landed on this branch), so those play silent in preview
-//! exactly as they'd export.
+//! surgery. Retimed clips are varispeed-resampled and denoise-flagged clips
+//! run through RNNoise in the shared [`ExportAudioMixer`]; reversed clips
+//! still play silent (forward-only decoders).
 //!
 //! The clock counts only real consumed frames: an underrun stalls the
 //! playhead briefly instead of letting video run away from audio. Silence

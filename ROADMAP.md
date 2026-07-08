@@ -96,11 +96,17 @@ at resolve time (transform/opacity over the clip's local timeline).
   `SetClipAnimation`; cutlass-py exposes `animations()` and
   `clip.set_animation(slot, id)`.
 
-## 7. Export audio: retimed and denoised clips
+## 7. Export audio: retimed and denoised clips — DONE
 
-Video retimes via speed curves, but affected clips currently export **silent**
-(`crates/cutlass-render/src/export_audio.rs`). Implement varispeed resampling
-for speed-ramped audio and run RNNoise in the export mix.
+Retimed clips (speed / speed-curve ramps) and denoise-flagged clips now mix in
+preview and export via the shared [`ExportAudioMixer`](crates/cutlass-render/src/export_audio.rs).
+
+- [`audio_dsp.rs`](crates/cutlass-render/src/audio_dsp.rs): `DenoiseReader` wraps
+  each channel through RNNoise (`nnnoiseless`); varispeed source-frame mapping
+  reuses `speed_curve_integral` / `speed_curve_source_fraction` from the model.
+- Warped spans linearly interpolate decoded source PCM; unity-speed spans keep
+  the fast seek-and-stream path. Pitch-preserving time-stretch and reversed-
+  clip audio are deferred (reversed clips still export silent).
 
 ## 8. cutlass-py polish
 
@@ -116,4 +122,4 @@ for speed-ramped audio and run RNNoise in the export mix.
 ## 10. Docs debt
 
 - Keep `.cursor/rules/overview.mdc` and this roadmap in sync as stickers,
-  look animations, export audio, and Python packaging land.
+  look animations, and Python packaging land.

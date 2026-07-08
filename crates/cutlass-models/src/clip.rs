@@ -1633,9 +1633,10 @@ pub struct Clip {
     /// Noise reduction (CapCut "Reduce noise", M8 Phase 5): run this clip's
     /// audio through RNNoise to suppress steady background noise (hiss, hum,
     /// room tone) while keeping speech. Both audio mixers render the cleaned
-    /// signal and serve it 1:1; meaningful for clips on audio lanes, ignored
-    /// elsewhere. `false` (and absent from saves) when off, so old files load
-    /// unchanged.
+    /// signal; meaningful for clips on audio lanes, ignored elsewhere. Pitch-
+    /// preserving time-stretch for retimed clips is still deferred — varispeed
+    /// resampling is used today. `false` (and absent from saves) when off, so
+    /// old files load unchanged.
     #[serde(default, skip_serializing_if = "is_false")]
     pub denoise: bool,
     /// Normalized crop window into the content (CapCut crop, M1): only the

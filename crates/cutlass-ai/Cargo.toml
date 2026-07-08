@@ -1,0 +1,21 @@
+[package]
+name = "cutlass-ai"
+description = "AI agent foundation: LLM-facing wire commands, validation, and project summaries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cutlass-commands = { path = "../cutlass-commands" }
+cutlass-models = { path = "../cutlass-models" }
+schemars = "1"
+serde.workspace = true
+serde_json.workspace = true
+ureq = "2"
+
+[dev-dependencies]
+cutlass-engine = { path = "../cutlass-engine" }
+cutlass-settings = { path = "../cutlass-settings" }
+tempfile = "3"

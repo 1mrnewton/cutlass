@@ -120,18 +120,29 @@ fn defer_main_thread(f: impl FnOnce() + Send + 'static) {
 // during which Slint's display-link tick re-enters timer processing and
 // aborts with "Recursion in timer code".
 
+// Extensions accepted by the import dialog and OS file-drop handler.
+const MEDIA_IMPORT_EXTENSIONS: &[&str] = &[
+    "mp4", "mov", "mkv", "webm", "m4v", "mp3", "wav", "m4a", "aac", "flac", "ogg", "png", "jpg",
+    "jpeg", "webp",
+];
+const VIDEO_IMPORT_EXTENSIONS: &[&str] = &["mp4", "mov", "mkv", "webm", "m4v"];
+const AUDIO_IMPORT_EXTENSIONS: &[&str] = &["mp3", "wav", "m4a", "aac", "flac", "ogg"];
+const IMAGE_IMPORT_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp"];
+
+fn media_extension_supported(path: &std::path::Path) -> bool {
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    let ext = ext.to_ascii_lowercase();
+    MEDIA_IMPORT_EXTENSIONS.iter().any(|&supported| supported == ext)
+}
+
 async fn pick_import_paths() -> Vec<std::path::PathBuf> {
     rfd::AsyncFileDialog::new()
-        .add_filter(
-            "Media",
-            &[
-                "mp4", "mov", "mkv", "webm", "m4v", "mp3", "wav", "m4a", "aac", "flac", "ogg",
-                "png", "jpg", "jpeg", "webp",
-            ],
-        )
-        .add_filter("Video", &["mp4", "mov", "mkv", "webm", "m4v"])
-        .add_filter("Audio", &["mp3", "wav", "m4a", "aac", "flac", "ogg"])
-        .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+        .add_filter("Media", MEDIA_IMPORT_EXTENSIONS)
+        .add_filter("Video", VIDEO_IMPORT_EXTENSIONS)
+        .add_filter("Audio", AUDIO_IMPORT_EXTENSIONS)
+        .add_filter("Images", IMAGE_IMPORT_EXTENSIONS)
         .pick_files()
         .await
         .map(|files| files.into_iter().map(|f| f.path().to_path_buf()).collect())

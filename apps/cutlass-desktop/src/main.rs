@@ -1,5 +1,6 @@
 mod account;
 mod agent;
+mod ai_media;
 mod audio;
 mod cloud;
 mod drafts;
@@ -671,6 +672,26 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // AI generation (Library AI sections): prompt → job → poll → import on
+    // its own thread (src/ai_media.rs), routed BYOK-or-managed.
+    let ai_media_worker = ai_media::AiMediaWorker::spawn(app.as_weak(), preview_worker.handle())
+        .map_err(slint::PlatformError::Other)?;
+    {
+        let ai_backend = app.global::<AiBackend>();
+        let generate_handle = ai_media_worker.handle();
+        ai_backend.on_generate(move |kind, prompt| {
+            generate_handle.generate(kind.to_string(), prompt.trim().to_string());
+        });
+        let import_handle = ai_media_worker.handle();
+        ai_backend.on_import(move |kind, index| {
+            if index >= 0 {
+                import_handle.import(kind.to_string(), index as usize);
+            }
+        });
+        let route_handle = ai_media_worker.handle();
+        ai_backend.on_refresh_route(move || route_handle.refresh_route());
+    }
+
     // Cutlass account (Settings > Account + launch update nudge): sign-in,
     // balance, checkout, and the update check on their own thread
     // (src/account.rs); the session token lives in the OS keychain.
@@ -1335,6 +1356,7 @@ fn main() -> Result<(), slint::PlatformError> {
             .unwrap_or_default()
             .into(),
     );
+    settings_backend.set_ai_use_account(app_settings.ai.use_account);
     app.global::<AppStore>()
         .set_theme_id(app_settings.appearance.theme.index());
 
@@ -1354,6 +1376,7 @@ fn main() -> Result<(), slint::PlatformError> {
             s.ai.model = sb.get_ai_model().trim().to_string();
             s.ai.api_key = non_empty(&sb.get_ai_api_key());
             s.ai.api_key_env = non_empty(&sb.get_ai_api_key_env());
+            s.ai.use_account = sb.get_ai_use_account();
             s.appearance.theme =
                 cutlass_settings::ThemeChoice::from_index(app.global::<AppStore>().get_theme_id());
 

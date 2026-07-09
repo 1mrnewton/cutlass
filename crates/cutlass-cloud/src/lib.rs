@@ -39,6 +39,7 @@ pub mod client;
 pub mod download;
 pub mod dto;
 pub mod error;
+pub mod generate;
 pub mod stock;
 pub mod token_store;
 

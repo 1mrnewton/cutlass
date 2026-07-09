@@ -14,6 +14,9 @@ export global SettingsBackend {
     in-out property <string> ai-model;
     in-out property <string> ai-api-key;
     in-out property <string> ai-api-key-env;
+    // Route the assistant through the Cutlass account (managed proxy,
+    // credits-metered) instead of the endpoint fields above.
+    in-out property <bool> ai-use-account;
 
     // The config file path, shown at the foot of the screen.
     in-out property <string> config-path;

@@ -14,8 +14,8 @@ import {
 } from "../../components/index.slint";
 import { AppStore, EditorStore, TimelineStore } from "../../store/index.slint";
 import { Media, TrackKind, CatalogEntry } from "../../models/index.slint";
-import { EffectsBackend, CloudBackend, TextPresetsBackend } from "../../lib/index.slint";
-import { MediaTile, GeneratedTile, CatalogTile, TransitionCatalogTile, StockMediaTile, TextPresetLibraryTile } from "tiles.slint";
+import { EffectsBackend, CloudBackend, TextPresetsBackend, AiBackend } from "../../lib/index.slint";
+import { MediaTile, GeneratedTile, CatalogTile, TransitionCatalogTile, StockMediaTile, TextPresetLibraryTile, AiMediaTile } from "tiles.slint";
 import { SectionPlaceholder } from "placeholder.slint";
 import { CutlassScrollView } from "../../components/scroll-view.slint";
 
@@ -206,6 +206,101 @@ component StockKindChip inherits Rectangle {
                 }
             }
         }
+    }
+}
+
+// Prompt field for the AI generation sections.
+component AiPromptField inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> value;
+    callback accepted();
+
+    height: 28px;
+    horizontal-stretch: 1;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: #111111;
+    border-width: 1px;
+    border-color: input.has-focus ? AppStore.theme.accent.primary : #ffffff14;
+    clip: true;
+    forward-focus: input;
+
+    input := TextInput {
+        x: AppStore.theme.metrics.spacing.sm;
+        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+        height: parent.height;
+        vertical-alignment: center;
+        single-line: true;
+        text <=> root.value;
+        color: AppStore.theme.text.primary;
+        font-size: AppStore.theme.typography.body.size;
+        selection-background-color: AppStore.theme.accent.primary.with-alpha(0.33);
+        selection-foreground-color: AppStore.theme.text.primary;
+        accessible-role: none;
+        accepted => {
+            root.accepted();
+        }
+    }
+
+    if root.value == "" && !input.has-focus: CutlassText {
+        x: AppStore.theme.metrics.spacing.sm;
+        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.placeholder;
+        style: AppStore.theme.typography.body;
+        foreground: AppStore.theme.text.muted;
+        overflow: elide;
+    }
+}
+
+// Image / Video toggle chip for the AI media section.
+component AiKindChip inherits Rectangle {
+    in property <string> kind;
+    in property <string> label;
+
+    property <bool> active: AiBackend.media-kind == root.kind;
+
+    width: lbl.preferred-width + 16px;
+    height: 24px;
+    border-radius: 12px;
+    background: root.active ? AppStore.theme.accent.primary.with-alpha(0.22)
+        : ta.has-hover ? #ffffff0a
+        : transparent;
+    border-width: 1px;
+    border-color: root.active ? AppStore.theme.accent.primary : #ffffff14;
+
+    lbl := CutlassText {
+        text: root.label;
+        style: { size: 11px, weight: 600, italic: false };
+        foreground: root.active ? AppStore.theme.accent.primary : AppStore.theme.text.secondary;
+    }
+
+    ta := TouchArea {
+        clicked => {
+            AiBackend.media-kind = root.kind;
+        }
+    }
+}
+
+// The "who pays" line under every generate button (the BYOK-first rule
+// made visible), plus the last error when one exists.
+component AiRouteLine inherits VerticalLayout {
+    padding-left: AppStore.theme.metrics.spacing.sm;
+    padding-right: AppStore.theme.metrics.spacing.sm;
+    spacing: 2px;
+
+    CutlassText {
+        text: AiBackend.route-label;
+        style: AppStore.theme.typography.caption;
+        foreground: AppStore.theme.text.muted;
+        wrap: word-wrap;
+    }
+
+    if AiBackend.error != "": CutlassText {
+        text: AiBackend.error;
+        style: AppStore.theme.typography.caption;
+        foreground: #FF6B6B;
+        wrap: word-wrap;
     }
 }
 
@@ -532,12 +627,80 @@ export component LibraryPanel inherits PanelBase {
                     }
                 }
 
-                if LibraryState.active-tab == "media" && LibraryState.media-section == "ai": SectionPlaceholder {
-                    width: parent.width;
-                    height: parent.height;
-                    icon: @image-url("../../../../../assets/icon/library/ai.svg");
-                    title: "AI media";
-                    message: "Generate images and video clips from a prompt, straight into the library. Coming soon.";
+                // ---- Media > AI media ---------------------------------------
+                // Prompt → job → poll → direct-CDN download → normal import
+                // path (src/ai_media.rs). Routed BYOK-or-managed.
+                if LibraryState.active-tab == "media" && LibraryState.media-section == "ai": VerticalLayout {
+                    spacing: AppStore.theme.metrics.spacing.none;
+
+                    HorizontalLayout {
+                        padding: AppStore.theme.metrics.spacing.sm;
+                        spacing: AppStore.theme.metrics.spacing.sm;
+
+                        AiPromptField {
+                            placeholder: "Describe an image or clip…";
+                            value <=> AiBackend.media-prompt;
+                            accepted => {
+                                if !AiBackend.busy && AiBackend.media-prompt != "" {
+                                    AiBackend.generate(AiBackend.media-kind, AiBackend.media-prompt);
+                                }
+                            }
+                        }
+
+                        AiKindChip {
+                            kind: "image";
+                            label: "Image";
+                        }
+
+                        AiKindChip {
+                            kind: "video";
+                            label: "Video";
+                        }
+
+                        SubtleButton {
+                            label: AiBackend.busy ? "Generating…" : "Generate";
+                            enabled: !AiBackend.busy && AiBackend.media-prompt != "";
+                            clicked => {
+                                AiBackend.generate(AiBackend.media-kind, AiBackend.media-prompt);
+                            }
+                        }
+                    }
+
+                    AiRouteLine { }
+
+                    if AiBackend.media-items.length == 0: SectionPlaceholder {
+                        vertical-stretch: 1;
+                        icon: @image-url("../../../../../assets/icon/library/ai.svg");
+                        title: "AI media";
+                        message: AiBackend.available
+                            ? "Generate images and video clips from a prompt; click a result to add it to the library."
+                            : "Sign in (Settings > Account) or add a fal.ai key under [providers.fal] to enable generation.";
+                    }
+
+                    if AiBackend.media-items.length > 0: ai-media-grid := CutlassGridView {
+                        show-horizontal-scrollbar: false;
+                        show-vertical-scrollbar: false;
+                        interactive: false;
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+
+                        columns: max(1, floor((self.width - AppStore.theme.metrics.spacing.md)
+                            / (100px + AppStore.theme.metrics.spacing.md)));
+                        cell-width: 100px;
+                        cell-height: 100px;
+                        spacing: AppStore.theme.metrics.spacing.md;
+                        inset: AppStore.theme.metrics.spacing.md;
+                        item-count: AiBackend.media-items.length;
+
+                        for tile[i] in AiBackend.media-items: AiMediaTile {
+                            x: ai-media-grid.cell-x(i);
+                            y: ai-media-grid.cell-y(i);
+                            width: ai-media-grid.cell-width;
+                            height: ai-media-grid.cell-height;
+                            tile: tile;
+                            index: i;
+                        }
+                    }
                 }
 
                 // ---- Audio > Local ------------------------------------------
@@ -609,12 +772,68 @@ export component LibraryPanel inherits PanelBase {
                     message: "Royalty-free tracks to score your edit. Coming soon.";
                 }
 
-                if LibraryState.active-tab == "audio" && LibraryState.audio-section == "ai": SectionPlaceholder {
-                    width: parent.width;
-                    height: parent.height;
-                    icon: @image-url("../../../../../assets/icon/library/ai.svg");
-                    title: "AI generated";
-                    message: "Generate music and voice-overs from a prompt. Coming soon.";
+                // ---- Audio > AI generated (TTS voice-overs) -----------------
+                if LibraryState.active-tab == "audio" && LibraryState.audio-section == "ai": VerticalLayout {
+                    spacing: AppStore.theme.metrics.spacing.none;
+
+                    HorizontalLayout {
+                        padding: AppStore.theme.metrics.spacing.sm;
+                        spacing: AppStore.theme.metrics.spacing.sm;
+
+                        AiPromptField {
+                            placeholder: "Text to speak…";
+                            value <=> AiBackend.tts-prompt;
+                            accepted => {
+                                if !AiBackend.busy && AiBackend.tts-prompt != "" {
+                                    AiBackend.generate("tts", AiBackend.tts-prompt);
+                                }
+                            }
+                        }
+
+                        SubtleButton {
+                            label: AiBackend.busy ? "Generating…" : "Generate";
+                            enabled: !AiBackend.busy && AiBackend.tts-prompt != "";
+                            clicked => {
+                                AiBackend.generate("tts", AiBackend.tts-prompt);
+                            }
+                        }
+                    }
+
+                    AiRouteLine { }
+
+                    if AiBackend.tts-items.length == 0: SectionPlaceholder {
+                        vertical-stretch: 1;
+                        icon: @image-url("../../../../../assets/icon/library/ai.svg");
+                        title: "AI voice-over";
+                        message: AiBackend.available
+                            ? "Type a line and generate a voice-over; click a result to add it as audio media."
+                            : "Sign in (Settings > Account) or add a fal.ai key under [providers.fal] to enable generation.";
+                    }
+
+                    if AiBackend.tts-items.length > 0: ai-tts-grid := CutlassGridView {
+                        show-horizontal-scrollbar: false;
+                        show-vertical-scrollbar: false;
+                        interactive: false;
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+
+                        columns: max(1, floor((self.width - AppStore.theme.metrics.spacing.md)
+                            / (100px + AppStore.theme.metrics.spacing.md)));
+                        cell-width: 100px;
+                        cell-height: 100px;
+                        spacing: AppStore.theme.metrics.spacing.md;
+                        inset: AppStore.theme.metrics.spacing.md;
+                        item-count: AiBackend.tts-items.length;
+
+                        for tile[i] in AiBackend.tts-items: AiMediaTile {
+                            x: ai-tts-grid.cell-x(i);
+                            y: ai-tts-grid.cell-y(i);
+                            width: ai-tts-grid.cell-width;
+                            height: ai-tts-grid.cell-height;
+                            tile: tile;
+                            index: i;
+                        }
+                    }
                 }
 
                 // ---- Text > Add text ----------------------------------------

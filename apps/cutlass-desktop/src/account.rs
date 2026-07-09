@@ -114,6 +114,24 @@ pub fn base_url() -> String {
         .unwrap_or_else(|| cutlass_cloud::DEFAULT_BASE_URL.to_string())
 }
 
+/// A fresh access token from the keychain session, refreshing (and
+/// re-storing) when stale. The shared entry point for every surface that
+/// talks to the backend as the signed-in user from its own thread (the
+/// managed chat provider, generation fallbacks).
+pub fn managed_access_token() -> Result<String, String> {
+    let mut session =
+        token_store::load().ok_or("Not signed in — sign in under Settings > Account.")?;
+    if session.needs_refresh() {
+        let pair = auth::refresh(&base_url(), &session.refresh_token)
+            .map_err(|e| format!("Session expired — sign in again. ({e})"))?;
+        session = StoredSession::from_pair(&pair);
+        if let Err(e) = token_store::store(&session) {
+            warn!("keychain store after refresh failed: {e}");
+        }
+    }
+    Ok(session.access_token)
+}
+
 struct Worker {
     backend_weak: slint::Weak<crate::AppWindow>,
     base_url: String,

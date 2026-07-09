@@ -1,0 +1,50 @@
+// AI generation plumbing (Library > Media > AI media and Library >
+// Audio > AI generated), implemented in Rust (src/ai_media.rs owns a
+// worker thread).
+//
+// The BYOK-first routing rule made visible: `route-label` names who pays
+// wherever a generate button lives — "Your fal.ai key" (direct, backend
+// uninvolved) or "Cutlass credits" (managed path). With neither a key
+// nor a session, generation is unavailable and the UI says how to enable
+// it.
+
+// One generated (or in-flight) result.
+export struct AiItemTile {
+    key: string,
+    // The prompt, elided — the only honest label for generated media.
+    label: string,
+    // "image" | "video" | "tts".
+    kind: string,
+    // "generating" | "ready" | "imported" | "failed".
+    state: string,
+    thumbnail: image,
+    has-thumbnail: bool,
+}
+
+export global AiBackend {
+    // Who pays, shown next to every generate button.
+    in-out property <string> route-label: "";
+    // False when neither a fal key nor a session exists.
+    in-out property <bool> available: false;
+    in-out property <string> error: "";
+    // True while any job is in flight (generate buttons disable).
+    in-out property <bool> busy: false;
+
+    // Visual results (image/video) and voice-over results, separate lists
+    // because they live in different Library sections.
+    in-out property <[AiItemTile]> media-items: [];
+    in-out property <[AiItemTile]> tts-items: [];
+
+    // Prompt fields survive tab switches.
+    in-out property <string> media-prompt: "";
+    in-out property <string> media-kind: "image";
+    in-out property <string> tts-prompt: "";
+
+    // Start a generation ("image" | "video" | "tts").
+    callback generate(kind: string, prompt: string);
+    // Import a finished result into the media pool. `kind` picks the list
+    // ("tts" = tts-items, anything else = media-items).
+    callback import(kind: string, index: int);
+    // Recompute route-label/available (settings or session changed).
+    callback refresh-route();
+}

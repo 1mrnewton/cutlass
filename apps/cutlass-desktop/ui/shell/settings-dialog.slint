@@ -77,6 +77,35 @@ component FieldRow inherits HorizontalLayout {
     @children
 }
 
+// Pill chip for two-way mode picks (AI provider: custom endpoint vs
+// Cutlass account).
+component ModeChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+
+    width: lbl.preferred-width + 16px;
+    height: 24px;
+    border-radius: 12px;
+    background: root.active ? AppStore.theme.accent.primary.with-alpha(0.22)
+        : ta.has-hover ? #ffffff0a
+        : transparent;
+    border-width: 1px;
+    border-color: root.active ? AppStore.theme.accent.primary : #ffffff14;
+
+    lbl := CutlassText {
+        text: root.label;
+        style: { size: 11px, weight: 600, italic: false };
+        foreground: root.active ? AppStore.theme.accent.primary : AppStore.theme.text.secondary;
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 // A single-line text field styled like the dropdown's search box.
 component SettingsTextField inherits Rectangle {
     in-out property <string> value;
@@ -250,61 +279,89 @@ export component SettingsDialog inherits Rectangle {
                                 text: "AI provider";
                             }
                             Hint {
-                                text: "The endpoint the assistant talks to. Works with Ollama, LM Studio, or any OpenAI-compatible server. Changes apply on your next prompt — no restart.";
-                            }
-
-                            FieldRow {
-                                label: "Endpoint";
-                                SettingsTextField {
-                                    value <=> SettingsBackend.ai-base-url;
-                                    placeholder: "http://localhost:11434/v1";
-                                }
-                            }
-                            FieldRow {
-                                label: "Model";
-                                SettingsTextField {
-                                    value <=> SettingsBackend.ai-model;
-                                    placeholder: "qwen3:14b";
-                                }
-                            }
-                            FieldRow {
-                                label: "API key";
-                                SettingsTextField {
-                                    value <=> SettingsBackend.ai-api-key;
-                                    placeholder: "Optional — local servers need none";
-                                    password: true;
-                                }
-                            }
-                            FieldRow {
-                                label: "Key from env";
-                                SettingsTextField {
-                                    value <=> SettingsBackend.ai-api-key-env;
-                                    placeholder: "e.g. OPENAI_API_KEY (overrides the key above)";
-                                }
+                                text: "Where the assistant runs: your own endpoint (Ollama, LM Studio, any OpenAI-compatible server) or your Cutlass account. Changes apply on your next prompt — no restart.";
                             }
 
                             HorizontalLayout {
-                                spacing: AppStore.theme.metrics.spacing.md;
+                                spacing: AppStore.theme.metrics.spacing.sm;
                                 alignment: start;
 
-                                SubtleButton {
-                                    label: SettingsBackend.ai-testing ? "Testing…" : "Test connection";
-                                    enabled: !SettingsBackend.ai-testing
-                                        && SettingsBackend.ai-base-url != ""
-                                        && SettingsBackend.ai-model != "";
+                                ModeChip {
+                                    label: "My endpoint";
+                                    active: !SettingsBackend.ai-use-account;
                                     clicked => {
-                                        SettingsBackend.test-connection();
+                                        SettingsBackend.ai-use-account = false;
+                                    }
+                                }
+                                ModeChip {
+                                    label: "Cutlass account";
+                                    active: SettingsBackend.ai-use-account;
+                                    clicked => {
+                                        SettingsBackend.ai-use-account = true;
+                                    }
+                                }
+                            }
+
+                            if SettingsBackend.ai-use-account: Hint {
+                                text: "Prompts run through Cutlass on prepaid credits — no keys to manage. Sign in and top up under Account.";
+                            }
+
+                            if !SettingsBackend.ai-use-account: VerticalLayout {
+                                spacing: AppStore.theme.metrics.spacing.md;
+
+                                FieldRow {
+                                    label: "Endpoint";
+                                    SettingsTextField {
+                                        value <=> SettingsBackend.ai-base-url;
+                                        placeholder: "http://localhost:11434/v1";
+                                    }
+                                }
+                                FieldRow {
+                                    label: "Model";
+                                    SettingsTextField {
+                                        value <=> SettingsBackend.ai-model;
+                                        placeholder: "qwen3:14b";
+                                    }
+                                }
+                                FieldRow {
+                                    label: "API key";
+                                    SettingsTextField {
+                                        value <=> SettingsBackend.ai-api-key;
+                                        placeholder: "Optional — local servers need none";
+                                        password: true;
+                                    }
+                                }
+                                FieldRow {
+                                    label: "Key from env";
+                                    SettingsTextField {
+                                        value <=> SettingsBackend.ai-api-key-env;
+                                        placeholder: "e.g. OPENAI_API_KEY (overrides the key above)";
                                     }
                                 }
 
-                                CutlassText {
-                                    vertical-alignment: center;
-                                    text: SettingsBackend.ai-test-status;
-                                    wrap: word-wrap;
-                                    style: AppStore.theme.typography.caption;
-                                    foreground: SettingsBackend.ai-test-ok
-                                        ? AppStore.theme.accent.primary
-                                        : #FF6B6B;
+                                HorizontalLayout {
+                                    spacing: AppStore.theme.metrics.spacing.md;
+                                    alignment: start;
+
+                                    SubtleButton {
+                                        label: SettingsBackend.ai-testing ? "Testing…" : "Test connection";
+                                        enabled: !SettingsBackend.ai-testing
+                                            && SettingsBackend.ai-base-url != ""
+                                            && SettingsBackend.ai-model != "";
+                                        clicked => {
+                                            SettingsBackend.test-connection();
+                                        }
+                                    }
+
+                                    CutlassText {
+                                        vertical-alignment: center;
+                                        text: SettingsBackend.ai-test-status;
+                                        wrap: word-wrap;
+                                        style: AppStore.theme.typography.caption;
+                                        foreground: SettingsBackend.ai-test-ok
+                                            ? AppStore.theme.accent.primary
+                                            : #FF6B6B;
+                                    }
                                 }
                             }
                         }

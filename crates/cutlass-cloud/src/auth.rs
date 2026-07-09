@@ -344,6 +344,30 @@ impl AuthedClient {
             None => self.get("/v1/credits/history"),
         }
     }
+
+    /// `POST /v1/generate/{image|video|tts}` — start a managed job. A 402
+    /// surfaces as [`CloudError::Status`] (out of credits / spend cap).
+    pub fn generate(
+        &self,
+        kind: &str,
+        request: &crate::dto::GenerateRequest,
+    ) -> Result<crate::dto::Job, CloudError> {
+        self.post(
+            &format!("/v1/generate/{kind}"),
+            serde_json::to_value(request).expect("generate request serializes"),
+        )
+    }
+
+    /// `GET /v1/jobs/{id}` — poll a managed job.
+    pub fn job(&self, id: &str) -> Result<crate::dto::Job, CloudError> {
+        self.get(&format!("/v1/jobs/{id}"))
+    }
+
+    /// The bearer token, for surfaces that speak to the backend through
+    /// other clients (the managed chat provider in `cutlass-ai`).
+    pub fn access_token(&self) -> &str {
+        &self.access_token
+    }
 }
 
 /// `POST /v1/auth/refresh` — swap a refresh token for a fresh pair (the

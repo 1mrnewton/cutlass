@@ -378,18 +378,37 @@ fn run_one_prompt(
         );
         return;
     }
-    let api_key = match cutlass_ai::config::resolve_api_key(
-        section.api_key.as_deref(),
-        section.api_key_env.as_deref(),
-    ) {
-        Ok(key) => key,
-        Err(e) => {
-            push_entry(store, "error", e);
-            return;
-        }
+    // The third provider mode: "Cutlass account" routes through the
+    // backend's OpenAI-compatible managed proxy with the keychain session
+    // as the bearer (model pinned server-side; credits metered there).
+    let provider = if section.use_account {
+        let token = match crate::account::managed_access_token() {
+            Ok(token) => token,
+            Err(e) => {
+                push_entry(store, "error", e);
+                return;
+            }
+        };
+        with_store(store, |s| s.set_configured(true));
+        OpenAiCompatProvider::new(
+            &format!("{}/v1/generate", crate::account::base_url()),
+            "cutlass-managed",
+            Some(token),
+        )
+    } else {
+        let api_key = match cutlass_ai::config::resolve_api_key(
+            section.api_key.as_deref(),
+            section.api_key_env.as_deref(),
+        ) {
+            Ok(key) => key,
+            Err(e) => {
+                push_entry(store, "error", e);
+                return;
+            }
+        };
+        with_store(store, |s| s.set_configured(true));
+        OpenAiCompatProvider::new(&section.base_url, &section.model, api_key)
     };
-    with_store(store, |s| s.set_configured(true));
-    let provider = OpenAiCompatProvider::new(&section.base_url, &section.model, api_key);
 
     let sandbox_existed = sandbox.is_some();
     let engine = match sandbox {
@@ -449,6 +468,11 @@ fn run_one_prompt(
                 "error",
                 if reason == "cancelled" {
                     "Stopped — nothing was applied.".to_string()
+                } else if reason.contains("402") {
+                    // The managed proxy's out-of-credits answer.
+                    "Out of Cutlass credits — buy a pack in Settings > Account. \
+                     Nothing was applied."
+                        .to_string()
                 } else {
                     format!("{reason} — nothing was applied.")
                 },

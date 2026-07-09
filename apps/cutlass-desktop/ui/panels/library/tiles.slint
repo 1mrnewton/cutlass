@@ -9,6 +9,7 @@ import { AppStore, EditorStore, TimelineStore } from "../../store/index.slint";
 import { EffectsBackend } from "../../lib/effects-backend.slint";
 import { CloudBackend, StockTile } from "../../lib/cloud-backend.slint";
 import { TextPresetTile } from "../../lib/text-presets-backend.slint";
+import { AiBackend, AiItemTile } from "../../lib/ai-backend.slint";
 import { AppState } from "../../state.slint";
 import { Media, TrackKind } from "../../models/index.slint";
 
@@ -725,6 +726,105 @@ export component TextPresetLibraryTile inherits Rectangle {
             }
             AppState.library-drag-cursor-x = self.absolute-position.x + self.mouse-x;
             AppState.library-drag-cursor-y = self.absolute-position.y + self.mouse-y;
+        }
+    }
+}
+
+// One AI generation result (Library > Media > AI media, Audio > AI
+// generated). Click imports into the media pool once ready; the tile
+// shows generation progress and failure states in place.
+export component AiMediaTile inherits Rectangle {
+    in property <AiItemTile> tile;
+    in property <int> index;
+
+    background: AppStore.theme.surface.content-background;
+    border-radius: 4px;
+    clip: true;
+
+    if tile.has-thumbnail: Image {
+        width: parent.width;
+        height: parent.height;
+        source: tile.thumbnail;
+        image-fit: cover;
+    }
+
+    // TTS results have no picture; show a waveform-ish glyph instead.
+    if !tile.has-thumbnail && tile.kind == "tts": CutlassText {
+        width: parent.width;
+        height: parent.height - 20px;
+        text: "♪";
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        style: AppStore.theme.typography.heading-md;
+    }
+
+    // Prompt strip along the bottom.
+    VerticalLayout {
+        alignment: end;
+        Rectangle {
+            height: 20px;
+            background: #000000a0;
+            CutlassText {
+                text: tile.label;
+                style: { size: 10px, weight: 400, italic: false };
+                overflow: elide;
+                x: 4px;
+                width: parent.width - 8px;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    if tile.state == "generating": Rectangle {
+        background: #00000080;
+        CutlassText {
+            width: parent.width;
+            height: parent.height;
+            text: "Generating…";
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            style: AppStore.theme.typography.caption;
+        }
+    }
+
+    if tile.state == "failed": Rectangle {
+        background: #00000080;
+        CutlassText {
+            width: parent.width;
+            height: parent.height;
+            text: "Failed";
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            style: AppStore.theme.typography.caption;
+            foreground: #FF6B6B;
+        }
+    }
+
+    if tile.state == "imported": Rectangle {
+        x: parent.width - self.width - 4px;
+        y: 4px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: AppStore.theme.accent.primary;
+
+        CutlassText {
+            width: parent.width;
+            height: parent.height;
+            text: "✓";
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            style: { size: 10px, weight: 700, italic: false };
+            foreground: #000000;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: tile.state == "ready" ? pointer : default;
+        clicked => {
+            if tile.state == "ready" {
+                AiBackend.import(tile.kind, index);
+            }
         }
     }
 }

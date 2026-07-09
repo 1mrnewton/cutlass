@@ -126,6 +126,10 @@ pub struct AiSettings {
     /// Name of an environment variable holding the key (preferred over a
     /// literal for cloud providers).
     pub api_key_env: Option<String>,
+    /// Route the assistant through the Cutlass account (managed chat
+    /// proxy, credits-metered) instead of the endpoint above. The three
+    /// provider modes: local/BYOK endpoint (fields above), or this.
+    pub use_account: bool,
 }
 
 impl AiSettings {
@@ -133,7 +137,7 @@ impl AiSettings {
     /// the floor; the key is optional (local servers need none). The agent
     /// panel keys its "connect a provider" state off this.
     pub fn is_configured(&self) -> bool {
-        !self.base_url.trim().is_empty() && !self.model.trim().is_empty()
+        self.use_account || (!self.base_url.trim().is_empty() && !self.model.trim().is_empty())
     }
 }
 
@@ -280,6 +284,7 @@ impl Settings {
             }
             s.ai.api_key = string_at(t, "api_key");
             s.ai.api_key_env = string_at(t, "api_key_env");
+            s.ai.use_account = t.get("use_account").and_then(Item::as_bool).unwrap_or(false);
         }
 
         if let Some(t) = section(doc, "appearance") {
@@ -321,6 +326,11 @@ impl Settings {
             set_str(t, "model", &self.ai.model);
             set_optional(t, "api_key", self.ai.api_key.as_deref());
             set_optional(t, "api_key_env", self.ai.api_key_env.as_deref());
+            if self.ai.use_account {
+                t.insert("use_account", toml_edit::value(true));
+            } else {
+                t.remove("use_account");
+            }
         }
         {
             let t = ensure_table(doc, "appearance");

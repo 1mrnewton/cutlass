@@ -62,7 +62,7 @@ pub use error::ModelError;
 pub use ids::{ClipId, LinkId, MarkerId, MediaId, ProjectId, TemplateId, TrackId};
 pub use look::{
     AnimationRef, AnimationSlot, AnimationSpec, AudioRole, ChromaKey, ColorAdjustments, Filter,
-    FilterSpec, Mask, MaskKind, MaskSpec, StabilizeLevel, TextEffectSpec, animation_catalog,
+    FilterSpec, Lut, Mask, MaskKind, MaskSpec, StabilizeLevel, TextEffectSpec, animation_catalog,
     animation_spec, filter_catalog, filter_spec, mask_catalog, text_effect_catalog,
     text_effect_spec,
 };

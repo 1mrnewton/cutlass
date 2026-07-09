@@ -21,14 +21,16 @@ use cutlass_core::{
 use crate::effect_render::{
     OffscreenPool, PassRegistry, blit_premultiplied_to_canvas, blit_replace,
     draw_layer_to_offscreen, effects_need_offscreen, run_effect_chain, run_grade_pass,
-    run_transition_pass,
+    run_lut_pass, run_transition_pass,
 };
 use crate::error::CompositorError;
 use crate::gpu::GpuContext;
 use crate::grade::ColorGrade;
 use crate::layer::{
-    CompositeLayer, CompositorConfig, CompositorLayer, LayerContent, LayerEffects, LayerPlacement,
+    CompositeLayer, CompositorConfig, CompositorLayer, LayerContent, LayerEffects, LayerLut,
+    LayerPlacement,
 };
+use crate::lut::CubeLut;
 
 /// Canvas pixel format. Plain (non-sRGB) `Unorm`: the YUV shader already emits
 /// gamma-encoded R'G'B', so we store those bytes verbatim (display-ready SDR)
@@ -187,6 +189,20 @@ const PREMULTIPLIED_OVER: wgpu::BlendState = wgpu::BlendState {
     },
 };
 
+/// Ceiling on cached LUT textures; crossing it clears the cache (a project
+/// realistically uses a handful of LUTs, so this only guards runaway churn).
+const LUT_CACHE_MAX: usize = 32;
+
+/// One uploaded `.cube` table: the 3D texture plus the sampling parameters
+/// captured at upload time.
+struct LutTexture {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    size: u32,
+    domain_min: [f32; 3],
+    domain_max: [f32; 3],
+}
+
 /// Canvas texture + readback buffer reused across renders while the size is
 /// stable. Interactive preview (and export) renders the same size every
 /// frame, so recreating these per render is pure allocation overhead on the
@@ -219,6 +235,10 @@ pub struct Compositor {
     target: Option<TargetCache>,
     pass_registry: PassRegistry,
     offscreen: Option<OffscreenPool>,
+    /// Uploaded `.cube` 3D textures keyed by [`LayerLut::key`] (source path).
+    /// LUTs are small (a 33³ RGBA8 table is ~140 KB), so the cache just
+    /// resets past [`LUT_CACHE_MAX`] entries instead of tracking recency.
+    lut_cache: std::collections::HashMap<String, LutTexture>,
     /// Maps Apple `CVPixelBuffer` GPU surfaces into `wgpu` textures with no CPU
     /// copy. `None` when the device isn't a Metal device (e.g. a software
     /// adapter) — GPU frames then fall back to [`CompositorError::UnsupportedFormat`]
@@ -403,6 +423,7 @@ impl Compositor {
             target: None,
             pass_registry: PassRegistry::new(device),
             offscreen: None,
+            lut_cache: std::collections::HashMap::new(),
             #[cfg(target_vendor = "apple")]
             metal_import: crate::metal_import::MetalSurfaceImporter::new(gpu),
             #[cfg(target_os = "windows")]
@@ -457,6 +478,63 @@ impl Compositor {
             readback,
             padded_bytes_per_row: padded,
         });
+    }
+
+    /// Upload `lut` as a 3D texture under `key`, reusing the cached copy when
+    /// it's already there. Called for every LUT in the scene before the pass
+    /// encodes, so lookups inside the render loop are immutable.
+    fn ensure_lut(&mut self, gpu: &GpuContext, key: &str, lut: &CubeLut) {
+        if self.lut_cache.contains_key(key) {
+            return;
+        }
+        if self.lut_cache.len() >= LUT_CACHE_MAX {
+            self.lut_cache.clear();
+        }
+        let n = lut.size();
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cutlass.lut3d"),
+            size: wgpu::Extent3d {
+                width: n,
+                height: n,
+                depth_or_array_layers: n,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &lut.rgba8_texels(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(n * 4),
+                rows_per_image: Some(n),
+            },
+            wgpu::Extent3d {
+                width: n,
+                height: n,
+                depth_or_array_layers: n,
+            },
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.lut_cache.insert(
+            key.to_owned(),
+            LutTexture {
+                _texture: texture,
+                view,
+                size: n,
+                domain_min: lut.domain_min(),
+                domain_max: lut.domain_max(),
+            },
+        );
     }
 
     fn ensure_offscreen(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -530,6 +608,19 @@ impl Compositor {
         let device = &gpu.device;
         self.ensure_target(device, config.width, config.height);
         self.ensure_offscreen(device, config.width, config.height);
+        // Upload every LUT the scene references before target/offscreen are
+        // borrowed; the loop below only reads the cache.
+        for item in layers {
+            let lut = match item {
+                CompositorLayer::Layer(layer) => layer.lut,
+                CompositorLayer::CanvasPass { lut, .. } => *lut,
+                // Transition sides skip LUTs (like effect chains).
+                CompositorLayer::Transition { .. } => None,
+            };
+            if let Some(LayerLut { key, lut, .. }) = lut {
+                self.ensure_lut(gpu, key, lut);
+            }
+        }
         let target = self
             .target
             .as_ref()
@@ -568,7 +659,9 @@ impl Compositor {
 
         for item in layers {
             match item {
-                CompositorLayer::Layer(layer) if !effects_need_offscreen(layer.effects) => {
+                CompositorLayer::Layer(layer)
+                    if !effects_need_offscreen(layer.effects) && layer.lut.is_none() =>
+                {
                     let built = self.build_layer(gpu, config, layer)?;
                     let pipeline = pipeline_for(&built.pipeline, self);
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -613,7 +706,7 @@ impl Compositor {
                         });
                         draw_layer_to_offscreen(&mut pass, pipeline, &built.bind_group);
                     }
-                    let result = run_effect_chain(
+                    let mut result = run_effect_chain(
                         device,
                         &mut encoder,
                         &self.pass_registry,
@@ -623,6 +716,26 @@ impl Compositor {
                         config.width,
                         config.height,
                     );
+                    if let Some(lut) = &layer.lut {
+                        let uploaded = &self.lut_cache[lut.key];
+                        let lut_output = if std::ptr::eq(result, offscreen.view(1)) {
+                            offscreen.view(2)
+                        } else {
+                            offscreen.view(1)
+                        };
+                        result = run_lut_pass(
+                            device,
+                            &mut encoder,
+                            &self.pass_registry,
+                            result,
+                            lut_output,
+                            &uploaded.view,
+                            uploaded.size,
+                            uploaded.domain_min,
+                            uploaded.domain_max,
+                            lut.intensity,
+                        );
+                    }
                     blit_premultiplied_to_canvas(
                         device,
                         &mut encoder,
@@ -631,8 +744,12 @@ impl Compositor {
                         &target.view,
                     );
                 }
-                CompositorLayer::CanvasPass { effects, grade } => {
-                    if !effects_need_offscreen(effects) && grade.is_none() {
+                CompositorLayer::CanvasPass {
+                    effects,
+                    grade,
+                    lut,
+                } => {
+                    if !effects_need_offscreen(effects) && grade.is_none() && lut.is_none() {
                         continue;
                     }
 
@@ -673,6 +790,26 @@ impl Compositor {
                             result,
                             grade_output,
                             *grade,
+                        );
+                    }
+                    if let Some(lut) = lut {
+                        let uploaded = &self.lut_cache[lut.key];
+                        let lut_output = if std::ptr::eq(result, offscreen.view(1)) {
+                            offscreen.view(2)
+                        } else {
+                            offscreen.view(1)
+                        };
+                        result = run_lut_pass(
+                            device,
+                            &mut encoder,
+                            &self.pass_registry,
+                            result,
+                            lut_output,
+                            &uploaded.view,
+                            uploaded.size,
+                            uploaded.domain_min,
+                            uploaded.domain_max,
+                            lut.intensity,
                         );
                     }
                     blit_replace(

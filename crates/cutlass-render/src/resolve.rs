@@ -32,7 +32,7 @@ use cutlass_text::{FontFamily, TextAlign, TextStyle};
 
 use crate::animation::apply_look_animations;
 use crate::grade::resolve_color_grade;
-use crate::scene::{LayerSource, ResolvedPass, Scene, SceneLayer, SizeSpec};
+use crate::scene::{LayerSource, ResolvedPass, Scene, SceneLayer, SceneLut, SizeSpec};
 
 /// Vertical reference height that a generator's reference-pixel sizes (text
 /// `size`, shape `width`/`height`) are authored against. Matches the model's
@@ -249,6 +249,7 @@ fn resolve_track_at(
                 mask: None,
                 chroma_key: None,
                 color_grade: None,
+                lut: None,
             }));
         }
     }
@@ -346,6 +347,16 @@ fn resolve_clip(
         _ => (clip.filter.as_ref(), &clip.adjust),
     };
     let color_grade = resolve_color_grade(filter, adjust);
+    // File-backed `.cube` LUT (applied after the grade). Zero intensity is
+    // identity — drop it here so downstream stages keep their fast paths.
+    let lut = clip
+        .lut
+        .as_ref()
+        .filter(|l| l.intensity > 0.0)
+        .map(|l| SceneLut {
+            path: l.path.clone(),
+            intensity: l.intensity,
+        });
 
     match &clip.content {
         ClipSource::Media { media, .. } => {
@@ -387,6 +398,7 @@ fn resolve_clip(
                 mask: clip.mask,
                 chroma_key: clip.chroma_key,
                 color_grade,
+                lut,
             }))
         }
         ClipSource::Generated(generator) => {
@@ -403,6 +415,7 @@ fn resolve_clip(
                 opacity,
                 uv,
                 color_grade,
+                lut,
                 cw,
                 ch,
                 xf.scale,
@@ -449,6 +462,7 @@ pub(crate) fn resolve_generator(
     opacity: f32,
     uv: [f32; 4],
     color_grade: Option<ColorGrade>,
+    lut: Option<SceneLut>,
     cw: f32,
     ch: f32,
     scale: f32,
@@ -457,7 +471,8 @@ pub(crate) fn resolve_generator(
     effects: Vec<ResolvedPass>,
 ) -> Option<SceneLayer> {
     let ref_scale = ch / REFERENCE_HEIGHT;
-    match generator {
+    let has_lut = lut.is_some();
+    let mut layer = match generator {
         Generator::Text { content, style } => {
             let text = style.case.apply(content);
             if text.trim().is_empty() {
@@ -479,6 +494,7 @@ pub(crate) fn resolve_generator(
                 mask: None,
                 chroma_key: None,
                 color_grade,
+                lut: None,
             })
         }
         Generator::SolidColor { rgba } => Some(SceneLayer {
@@ -494,6 +510,7 @@ pub(crate) fn resolve_generator(
             mask: None,
             chroma_key: None,
             color_grade,
+            lut: None,
         }),
         Generator::Shape {
             shape,
@@ -520,8 +537,10 @@ pub(crate) fn resolve_generator(
             scale,
             effects,
         ),
-        Generator::Effect => canvas_pass(effects, None, cw, ch),
-        Generator::Filter | Generator::Adjustment => canvas_pass(Vec::new(), color_grade, cw, ch),
+        Generator::Effect => canvas_pass(effects, None, has_lut, cw, ch),
+        Generator::Filter | Generator::Adjustment => {
+            canvas_pass(Vec::new(), color_grade, has_lut, cw, ch)
+        }
         Generator::Lottie {
             path,
             width,
@@ -547,6 +566,7 @@ pub(crate) fn resolve_generator(
                 mask: None,
                 chroma_key: None,
                 color_grade,
+                lut: None,
             })
         }
         Generator::Sticker { asset } => {
@@ -574,18 +594,22 @@ pub(crate) fn resolve_generator(
                 mask: None,
                 chroma_key: None,
                 color_grade,
+                lut: None,
             })
         }
-    }
+    }?;
+    layer.lut = lut;
+    Some(layer)
 }
 
 fn canvas_pass(
     effects: Vec<ResolvedPass>,
     color_grade: Option<ColorGrade>,
+    has_lut: bool,
     cw: f32,
     ch: f32,
 ) -> Option<SceneLayer> {
-    (!effects.is_empty() || color_grade.is_some()).then_some(SceneLayer {
+    (!effects.is_empty() || color_grade.is_some() || has_lut).then_some(SceneLayer {
         clip: None,
         source: LayerSource::CanvasPass,
         center: [cw * 0.5, ch * 0.5],
@@ -598,6 +622,7 @@ fn canvas_pass(
         mask: None,
         chroma_key: None,
         color_grade,
+        lut: None,
     })
 }
 
@@ -670,6 +695,7 @@ fn resolve_shape(
             mask: None,
             chroma_key: None,
             color_grade,
+            lut: None,
         });
     }
 
@@ -695,6 +721,7 @@ fn resolve_shape(
             mask: None,
             chroma_key: None,
             color_grade,
+            lut: None,
         });
     }
 
@@ -737,6 +764,7 @@ fn resolve_shape(
         mask: None,
         chroma_key: None,
         color_grade,
+        lut: None,
     })
 }
 
@@ -1040,6 +1068,7 @@ mod tests {
             1.0,
             [0.0, 0.0, 1.0, 1.0],
             None,
+            None,
             1920.0,
             1080.0,
             1.0,
@@ -1273,6 +1302,7 @@ mod tests {
             mask: None,
             chroma_key: None,
             color_grade: None,
+            lut: None,
         };
         // to_center (960, 540) rotated 90° cw (+y down) → (-540, 960).
         approx2(layer.quad_center([1920.0, 1080.0]), [420.0, 1500.0]);

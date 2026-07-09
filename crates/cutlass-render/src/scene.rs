@@ -168,6 +168,19 @@ pub struct SceneLayer {
     /// Resolved color grade (filter preset + manual adjustments); `None` when
     /// the clip's look is identity.
     pub color_grade: Option<ColorGrade>,
+    /// `.cube` 3D LUT applied after the grade; `None` when the clip has none.
+    /// File-backed: the renderer parses and uploads the table on first use
+    /// and skips missing/unparseable files gracefully.
+    pub lut: Option<SceneLut>,
+}
+
+/// A file-backed `.cube` LUT reference on a [`SceneLayer`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneLut {
+    /// Absolute path to the `.cube` file.
+    pub path: String,
+    /// Blend of the looked-up result over the original, `0` … `1`.
+    pub intensity: f32,
 }
 
 impl SceneLayer {
@@ -301,6 +314,7 @@ mod tests {
             mask: None,
             chroma_key: None,
             color_grade: None,
+            lut: None,
         }
     }
 
@@ -326,6 +340,7 @@ mod tests {
             mask: None,
             chroma_key: None,
             color_grade: None,
+            lut: None,
         }
     }
 
@@ -346,6 +361,7 @@ mod tests {
             mask: None,
             chroma_key: None,
             color_grade: None,
+            lut: None,
         }
     }
 

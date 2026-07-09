@@ -11,7 +11,7 @@ use crate::effects::EffectInstance;
 use crate::error::ModelError;
 use crate::ids::{ClipId, MediaId, ProjectId, TrackId};
 use crate::look::{
-    AnimationRef, AnimationSlot, AudioRole, ChromaKey, ColorAdjustments, Filter, Mask,
+    AnimationRef, AnimationSlot, AudioRole, ChromaKey, ColorAdjustments, Filter, Lut, Mask,
     StabilizeLevel, animation_spec,
 };
 use crate::media::MediaSource;
@@ -1393,6 +1393,21 @@ impl Project {
             .clip_mut(clip_id)
             .expect("clip existence checked above")
             .filter = filter;
+        Ok(())
+    }
+
+    /// Set (or clear) a `.cube` 3D LUT (applied after filter + adjust). Any
+    /// visual clip, including `Generator::Filter` lane bars, which apply it
+    /// to everything composited beneath them.
+    pub fn set_clip_lut(&mut self, clip_id: ClipId, lut: Option<Lut>) -> Result<(), ModelError> {
+        if let Some(lut) = &lut {
+            lut.validate()?;
+        }
+        self.require_visual(clip_id, "a LUT")?;
+        self.timeline
+            .clip_mut(clip_id)
+            .expect("clip existence checked above")
+            .lut = lut;
         Ok(())
     }
 

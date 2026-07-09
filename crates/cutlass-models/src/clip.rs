@@ -1747,6 +1747,12 @@ pub struct Clip {
     /// bars, whose picked preset lives here; absent while `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter: Option<crate::look::Filter>,
+    /// `.cube` 3D LUT (applied after filter + adjust): file-backed color
+    /// lookup from the asset catalog or a user file. Visual clips — including
+    /// `Generator::Filter` lane bars, where it grades everything beneath;
+    /// absent while `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lut: Option<crate::look::Lut>,
     /// Manual color grade (CapCut adjust, Phase I): render-neutral this
     /// milestone. Visual clips — including `Generator::Adjustment` lane
     /// bars; neutral (and absent from saves) when never touched.
@@ -1918,6 +1924,7 @@ impl Clip {
             chroma_key: None,
             stabilize: None,
             filter: None,
+            lut: None,
             adjust: crate::look::ColorAdjustments::default(),
             animation_in: None,
             animation_out: None,
@@ -1953,6 +1960,7 @@ impl Clip {
             chroma_key: None,
             stabilize: None,
             filter: None,
+            lut: None,
             adjust: crate::look::ColorAdjustments::default(),
             animation_in: None,
             animation_out: None,

@@ -866,6 +866,7 @@ fn canvas_pass_pixelates_the_composited_stack() {
                 CompositorLayer::CanvasPass {
                     effects: &effects,
                     grade: None,
+                    lut: None,
                 },
             ],
         )
@@ -960,6 +961,7 @@ fn canvas_pass_grade_replaces_translucent_canvas() {
                 CompositorLayer::CanvasPass {
                     effects: &[],
                     grade: Some(grade),
+                    lut: None,
                 },
             ],
         )

@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use cutlass_commands::{
     AnimationRef, AnimationSlot, AudioRole, CanvasAspect, ChromaKey, ClipId, ClipParam,
     ClipTransform, ColorAdjustments, Command, CropRect, Easing, EditCommand, EditOutcome, Filter,
-    Generator, MarkerColor, MarkerId, Mask, MaskKind, MediaId, Param, ParamValue, ProjectCommand,
+    Generator, Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId, Param, ParamValue,
+    ProjectCommand,
     Rational, RationalTime, Replaceable, StabilizeLevel, TemplateMeta, TemplatePick, TimeRange,
     TrackId, TrackKind,
 };
@@ -214,6 +215,13 @@ fn edit_samples() -> Vec<EditCommand> {
                 intensity: 0.6,
             }),
         },
+        EditCommand::SetClipLut {
+            clip: clip(4),
+            lut: Some(Lut {
+                path: "/luts/teal-orange.cube".into(),
+                intensity: 0.7,
+            }),
+        },
         EditCommand::SetClipAdjustments {
             clip: clip(4),
             adjust: ColorAdjustments {
@@ -375,6 +383,7 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
         EditCommand::SetClipChroma { .. } => "SetClipChroma",
         EditCommand::SetClipStabilize { .. } => "SetClipStabilize",
         EditCommand::SetClipFilter { .. } => "SetClipFilter",
+        EditCommand::SetClipLut { .. } => "SetClipLut",
         EditCommand::SetClipAdjustments { .. } => "SetClipAdjustments",
         EditCommand::SetClipAnimation { .. } => "SetClipAnimation",
         EditCommand::SetAudioRole { .. } => "SetAudioRole",

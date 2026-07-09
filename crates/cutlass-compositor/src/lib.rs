@@ -33,6 +33,7 @@ mod error;
 mod gpu;
 mod grade;
 mod layer;
+mod lut;
 #[cfg(target_vendor = "apple")]
 mod metal_import;
 mod passes;
@@ -45,8 +46,9 @@ pub use gpu::GpuContext;
 pub use grade::ColorGrade;
 pub use layer::{
     CompositeLayer, CompositorConfig, CompositorLayer, FULL_UV, LayerChromaKey, LayerContent,
-    LayerEffects, LayerMask, LayerPlacement, SdfLayer, mask_kind,
+    LayerEffects, LayerLut, LayerMask, LayerPlacement, SdfLayer, mask_kind,
 };
+pub use lut::{CubeLut, LutError, MAX_CUBE_SIZE};
 pub use passes::{
     PassCoverage, PassDescriptor, PassInstance, effect_coverage, effect_descriptors,
     effect_is_noop, resolve_transition_pass, transition_coverage, transition_ids,

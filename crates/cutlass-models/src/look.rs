@@ -275,6 +275,43 @@ pub fn filter_spec(id: &str) -> Option<&'static FilterSpec> {
     FILTERS.iter().find(|s| s.id == id)
 }
 
+// --- 3D LUTs ----------------------------------------------------------------
+
+/// A `.cube` 3D LUT applied to a clip after its filter/adjust grade. `None`
+/// on the clip ⇔ no LUT. File-backed like Lottie animations: `path` points at
+/// a `.cube` file on disk (downloaded from the asset catalog or supplied by
+/// the user); the renderer parses and uploads it lazily and skips missing
+/// files gracefully. Also valid on `Generator::Filter` lane bars, which apply
+/// the LUT to everything composited beneath them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Lut {
+    /// Absolute path to the `.cube` file.
+    pub path: String,
+    /// Blend of the looked-up result over the original, `0` … `1`.
+    #[serde(
+        default = "default_filter_intensity",
+        skip_serializing_if = "is_default_filter_intensity"
+    )]
+    pub intensity: f32,
+}
+
+impl Lut {
+    /// A LUT at the default intensity.
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            intensity: default_filter_intensity(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if self.path.trim().is_empty() {
+            return Err(ModelError::InvalidParam("empty LUT path".into()));
+        }
+        validate_unit("LUT intensity", self.intensity)
+    }
+}
+
 // --- Color adjustments -----------------------------------------------------------
 
 /// Manual color grade (CapCut adjust panel): signed strengths, `0` neutral.

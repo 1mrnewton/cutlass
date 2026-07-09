@@ -5,6 +5,7 @@ use cutlass_core::{RgbaImage, VideoFrame};
 use cutlass_shapes::{SdfShape, Stroke};
 
 use crate::grade::ColorGrade;
+use crate::lut::CubeLut;
 use crate::passes::PassInstance;
 
 /// Canvas dimensions and background for one composite pass.
@@ -107,6 +108,20 @@ impl LayerEffects {
     }
 }
 
+/// A `.cube` 3D LUT applied to a layer (or the composited canvas) after its
+/// color grade. `key` is a stable identity for the parsed table (the source
+/// file path); the compositor caches the uploaded 3D texture under it, so the
+/// same LUT costs one upload no matter how many layers or frames use it.
+#[derive(Clone, Copy)]
+pub struct LayerLut<'a> {
+    /// Cache identity for `lut` (its source path).
+    pub key: &'a str,
+    /// The parsed table (uploaded once per `key`).
+    pub lut: &'a CubeLut,
+    /// Blend of the looked-up result over the input, `0` … `1`.
+    pub intensity: f32,
+}
+
 /// A parametric vector shape drawn as a signed-distance field by the shape
 /// pipeline: no texture, no rasterization — geometry parameters ride in the
 /// layer's uniform block, so animated shapes cost a uniform update per frame
@@ -158,16 +173,21 @@ pub struct CompositeLayer<'a> {
     pub fx: LayerEffects,
     /// Resolved color grade for this layer; `None` is the identity fast path.
     pub color_grade: Option<ColorGrade>,
+    /// `.cube` LUT applied after the grade; `None` is the identity fast path.
+    /// Skipped while the layer is a transition side (matching effect chains,
+    /// which also pause during the blend).
+    pub lut: Option<LayerLut<'a>>,
 }
 
 /// A layer, a canvas-wide pass, or a dual-source transition submitted to the compositor.
 pub enum CompositorLayer<'a> {
     /// A standard layer (optionally with an effect chain).
     Layer(&'a CompositeLayer<'a>),
-    /// Apply an effect chain and grade to the current composited canvas.
+    /// Apply an effect chain, grade, and LUT to the current composited canvas.
     CanvasPass {
         effects: &'a [PassInstance<'a>],
         grade: Option<ColorGrade>,
+        lut: Option<LayerLut<'a>>,
     },
     /// Blend two independently placed layers by transition progress.
     Transition {
@@ -194,6 +214,7 @@ impl<'a> CompositeLayer<'a> {
             effects: &[],
             fx: LayerEffects::IDENTITY,
             color_grade: None,
+            lut: None,
         }
     }
 
@@ -206,6 +227,7 @@ impl<'a> CompositeLayer<'a> {
             effects: &[],
             fx: LayerEffects::IDENTITY,
             color_grade: None,
+            lut: None,
         }
     }
 
@@ -218,6 +240,7 @@ impl<'a> CompositeLayer<'a> {
             effects: &[],
             fx: LayerEffects::IDENTITY,
             color_grade: None,
+            lut: None,
         }
     }
 
@@ -230,6 +253,7 @@ impl<'a> CompositeLayer<'a> {
             effects: &[],
             fx: LayerEffects::IDENTITY,
             color_grade: None,
+            lut: None,
         }
     }
 
@@ -260,6 +284,13 @@ impl<'a> CompositeLayer<'a> {
     /// Attach a resolved color grade (filter preset + manual adjustments).
     pub fn with_color_grade(mut self, grade: Option<ColorGrade>) -> Self {
         self.color_grade = grade.filter(|g| !g.is_identity());
+        self
+    }
+
+    /// Attach a `.cube` LUT (applied after the grade). Zero intensity is the
+    /// identity fast path and drops the pass entirely.
+    pub fn with_lut(mut self, lut: Option<LayerLut<'a>>) -> Self {
+        self.lut = lut.filter(|l| l.intensity > 0.0);
         self
     }
 }

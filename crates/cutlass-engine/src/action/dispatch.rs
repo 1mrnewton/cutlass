@@ -319,6 +319,13 @@ fn dispatch_edit(
                 Some(inverse),
             ))
         }
+        EditCommand::SetClipLut { clip, lut } => {
+            let inverse = edit::set_look::set_lut(ctx, clip, lut)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(clip)),
+                Some(inverse),
+            ))
+        }
         EditCommand::SetClipAdjustments { clip, adjust } => {
             let inverse = edit::set_look::set_adjustments(ctx, clip, adjust)?;
             Ok((

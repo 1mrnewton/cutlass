@@ -42,8 +42,8 @@
 // Usage
 // -----
 //     grid := CutlassGridView {
-//         columns: 3;
-//         cell-width: 100px;
+//         columns: 3;            // or `auto-columns: true;` to fit
+//         cell-width: 100px;     //   as many columns as width allows
 //         cell-height: 100px;
 //         spacing: 10px;
 //         inset: 12px;
@@ -76,6 +76,15 @@ export component CutlassGridView inherits Rectangle {
     // `padding` for layout-engine use and refuses to be overridden.
     in property <length> inset: 0px;
 
+    // Auto-fit mode: ignore `columns` and fit as many `cell-width`
+    // columns as the view's own width allows, using the same `inset` /
+    // `spacing` the extent math uses. This guarantees
+    // `content-width <= self.width` (no phantom horizontal overflow
+    // from a call-site formula drifting out of sync) and replaces the
+    // hand-written `columns:` expression every auto-sizing call site
+    // used to carry.
+    in property <bool> auto-columns: false;
+
     // Mirror of the caller's model length (see file header).
     in property <int> item-count: 0;
 
@@ -91,16 +100,31 @@ export component CutlassGridView inherits Rectangle {
     // pointer grab mid-drag and the ghost freezes.
     in property <bool> interactive: true;
 
+    // Current scroll offset, two-way bound through to the inner
+    // scroll view so callers can scroll programmatically (reveal a
+    // selection, jump to a freshly imported item) and observe
+    // wheel-driven changes.
+    in-out property <length> viewport-x;
+    in-out property <length> viewport-y;
+
     // ---- Derived geometry --------------------------------------------------
+
+    // The column count actually used for layout: caller-supplied, or
+    // width-derived in auto-fit mode. Exposed so callers can build
+    // row/column logic (keyboard navigation, "X per row" labels) off
+    // the same value the view lays out with.
+    out property <int> effective-columns: auto-columns
+        ? max(1, floor((self.width - 2 * inset + spacing) / (cell-width + spacing)))
+        : columns;
 
     // Ceiling division so a partial last row still counts. Exposed so
     // callers can hang scrollbar overlays, "X of Y" counters, etc., off
     // the same value the view uses internally.
     out property <int> row-count:
-        columns > 0 ? floor((max(item-count, 0) + columns - 1) / columns) : 0;
+        effective-columns > 0 ? floor((max(item-count, 0) + effective-columns - 1) / effective-columns) : 0;
 
     out property <length> content-width:
-        columns <= 0 ? 0px : columns * cell-width + (columns - 1) * spacing + 2 * inset;
+        effective-columns <= 0 ? 0px : effective-columns * cell-width + (effective-columns - 1) * spacing + 2 * inset;
 
     out property <length> content-height:
         row-count <= 0 ? 0px : row-count * cell-height + (row-count - 1) * spacing + 2 * inset;
@@ -108,15 +132,15 @@ export component CutlassGridView inherits Rectangle {
     // ---- Public placement helpers ------------------------------------------
     //
     // Pure, so Slint can inline them at every for-loop instantiation
-    // without tracking dependencies beyond the inputs. `max(columns, 1)`
-    // guards against divide-by-zero during the brief window where the
-    // caller is still wiring properties.
+    // without tracking dependencies beyond the inputs.
+    // `max(effective-columns, 1)` guards against divide-by-zero during
+    // the brief window where the caller is still wiring properties.
 
     public pure function cell-x(i: int) -> length {
-        inset + mod(i, max(columns, 1)) * (cell-width + spacing)
+        inset + mod(i, max(effective-columns, 1)) * (cell-width + spacing)
     }
     public pure function cell-y(i: int) -> length {
-        inset + floor(i / max(columns, 1)) * (cell-height + spacing)
+        inset + floor(i / max(effective-columns, 1)) * (cell-height + spacing)
     }
 
     // ---- Layout ------------------------------------------------------------
@@ -134,6 +158,8 @@ export component CutlassGridView inherits Rectangle {
         height: 100%;
         viewport-width: root.content-width;
         viewport-height: root.content-height;
+        viewport-x <=> root.viewport-x;
+        viewport-y <=> root.viewport-y;
         show-horizontal-scrollbar: root.show-horizontal-scrollbar;
         show-vertical-scrollbar: root.show-vertical-scrollbar;
         interactive: root.interactive;

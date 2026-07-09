@@ -1,9 +1,14 @@
 import { CutlassGridView } from "components/index.slint";
 
 // Smoke test for `CutlassGridView` (and, transitively,
-// `CutlassScrollView`). Produces a grid large enough to overflow both
-// axes so we can exercise the vertical bar, horizontal bar, corner
-// cap, drag-to-scroll, click-track jumping, and mouse-wheel scrolling.
+// `CutlassScrollView`). Two grids share the window:
+//
+//   - Top: explicit `columns` wide enough to overflow both axes, so we
+//     can exercise the vertical bar, horizontal bar, corner cap,
+//     drag-to-scroll, click-track jumping, and mouse-wheel scrolling.
+//   - Bottom: `auto-columns` — resize the window and watch the column
+//     count refit; content never overflows horizontally, so only the
+//     vertical bar ever appears.
 //
 // Note the bars auto-hide: they appear briefly on launch (initial
 // extent change), then fade out ~1s after the last scroll unless the
@@ -25,11 +30,11 @@ export component TestApp inherits Window {
     in property <int> columns: 8;
     in property <int> total-items: 320;
 
-    grid := CutlassGridView {
+    manual-grid := CutlassGridView {
         x: 0;
         y: 0;
         width: 100%;
-        height: 100%;
+        height: 50%;
 
         columns: root.columns;
         cell-width: 120px;
@@ -39,10 +44,10 @@ export component TestApp inherits Window {
         item-count: total-items;
 
         for _[i] in total-items: Rectangle {
-            x: grid.cell-x(i);
-            y: grid.cell-y(i);
-            width: grid.cell-width;
-            height: grid.cell-height;
+            x: manual-grid.cell-x(i);
+            y: manual-grid.cell-y(i);
+            width: manual-grid.cell-width;
+            height: manual-grid.cell-height;
             border-radius: 6px;
             // Stable per-cell color so scrolling visibly shifts content.
             background: hsv(mod(i * 37, 360), 0.45, 0.85);
@@ -50,6 +55,39 @@ export component TestApp inherits Window {
             Text {
                 text: "\{i}";
                 color: #111;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                width: 100%;
+                height: 100%;
+                font-size: 14px;
+            }
+        }
+    }
+
+    auto-grid := CutlassGridView {
+        x: 0;
+        y: root.height / 2;
+        width: 100%;
+        height: 50%;
+
+        auto-columns: true;
+        cell-width: 120px;
+        cell-height: 120px;
+        spacing: 10px;
+        inset: 12px;
+        item-count: total-items;
+
+        for _[i] in total-items: Rectangle {
+            x: auto-grid.cell-x(i);
+            y: auto-grid.cell-y(i);
+            width: auto-grid.cell-width;
+            height: auto-grid.cell-height;
+            border-radius: 6px;
+            background: hsv(mod(i * 53, 360), 0.35, 0.65);
+
+            Text {
+                text: "\{i}";
+                color: #eee;
                 horizontal-alignment: center;
                 vertical-alignment: center;
                 width: 100%;

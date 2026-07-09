@@ -1033,8 +1033,7 @@ export component LaunchScreen inherits Rectangle {
                         vertical-stretch: 1;
                         horizontal-stretch: 1;
 
-                        columns: max(1, floor((self.width + AppStore.theme.metrics.spacing.md)
-                            / (232px + AppStore.theme.metrics.spacing.md)));
+                        auto-columns: true;
                         cell-width: 232px;
                         cell-height: 186px;
                         spacing: AppStore.theme.metrics.spacing.md;

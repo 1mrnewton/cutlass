@@ -274,21 +274,31 @@ export component CutlassScrollView inherits Rectangle {
     property <bool> v-bar-shown: v-bar-alive || v-bar-linger;
     property <bool> h-bar-shown: h-bar-alive || h-bar-linger;
 
-    // Set when a bar loses its reason to exist while still painted;
-    // cleared once the fade-out lands at zero opacity.
+    // Set while a bar is painted so it can outlive its `alive`
+    // condition through the fade-out; cleared once the fade lands at
+    // zero opacity.
+    //
+    // Latched from the opacity change stream rather than
+    // `changed v-bar-alive`: change trackers evaluate their watched
+    // expression eagerly at component init, and the alive conditions
+    // read `self.width` / `self.height`. When the scroll view sits
+    // inside a conditional (`if`) element, init runs while the parent
+    // layout cache is mid-evaluation, and that eager layout read
+    // re-enters it — Slint panics with "Recursion detected".
+    // `bars-opacity` only depends on plain interaction state, so
+    // watching it is safe; the alive flags are read in the handler
+    // body, which runs from the event loop, outside any binding
+    // evaluation.
     property <bool> v-bar-linger;
     property <bool> h-bar-linger;
 
-    changed v-bar-alive => {
-        if (!v-bar-alive && bars-opacity > 0.001) { v-bar-linger = true; }
-    }
-    changed h-bar-alive => {
-        if (!h-bar-alive && bars-opacity > 0.001) { h-bar-linger = true; }
-    }
     changed bars-opacity => {
         if (bars-opacity <= 0.001) {
             v-bar-linger = false;
             h-bar-linger = false;
+        } else {
+            if (v-bar-alive) { v-bar-linger = true; }
+            if (h-bar-alive) { h-bar-linger = true; }
         }
     }
 

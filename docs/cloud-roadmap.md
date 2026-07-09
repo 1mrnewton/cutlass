@@ -1,11 +1,13 @@
 # Cloud Roadmap — backend, asset catalog, and BYOK architecture
 
-**Status (macos-dev, Jul 2026):** blueprint. The editor is fully local today;
-`../cutlass-backend` is an Axum skeleton (`/health` only). This doc is the
-client-side architecture for everything cloud-shaped: stock media, templates,
-text presets, SFX/LUT packs, AI generation, accounts, and credits. The
-backend's own technical notes live in `cutlass-backend/docs/ARCHITECTURE.md`;
-this doc owns the editor's seams and the policies both sides share.
+**Status (macos-dev, Jul 2026):** in progress. The editor is fully local by
+default; `../cutlass-backend` serves stock/catalog/generation with JWKS-
+verified auth, and `../cutlass-website` owns identity (better-auth) and
+billing (Polar). This doc is the client-side architecture for everything
+cloud-shaped: stock media, templates, text presets, SFX/LUT packs, AI
+generation, accounts, and credits. The backend's own technical notes live in
+`cutlass-backend/docs/ARCHITECTURE.md`; this doc owns the editor's seams and
+the policies all sides share.
 
 Policy: **Cutlass is free, and the cloud is optional.** The backend exists so
 users don't have to juggle provider accounts — never to gate features. Every
@@ -29,8 +31,9 @@ principle below defends that.
   text presets cost no credits and need no account — anonymous,
   rate-limited, cacheable access.
 - **The backend never touches projects/timelines/encoding.** It is an
-  I/O gateway: auth, credit ledger, AI proxy, read-mostly asset catalog,
-  stock search. Heavy work stays in the editor or at upstream providers.
+  I/O gateway: JWT verification, credit metering, AI proxy, read-mostly
+  asset catalog, stock search. Heavy work stays in the editor or at
+  upstream providers.
 - **No media bytes through the backend.** Stock *search* goes through the
   backend (the provider API keys must stay server-side — an embedded key in
   an open-source binary is public, and rate limits are per key). The actual
@@ -52,8 +55,9 @@ principle below defends that.
   real auto-updater is explicitly later.
 - **Privacy is explicit.** BYOK keys never transit our servers. Managed-path
   prompts and generation jobs do — the docs and UI say so. No telemetry
-  without opt-in. Account deletion and GDPR data export are v1 auth
-  requirements, not afterthoughts.
+  without opt-in. Account deletion and GDPR data export ride on
+  better-auth's user-deletion hooks and must be wired before accounts
+  launch, not after.
 
 ## The client seam: `crates/cutlass-cloud`
 
@@ -81,20 +85,33 @@ tests use scripted fakes.
 
 ## Credentials and accounts
 
+- **Identity and billing live on the website** (`cutlass-website`:
+  better-auth + the Polar plugin), not in the Rust backend. The backend
+  only verifies the website's EdDSA JWTs against its JWKS endpoint and
+  meters credits (debits/refunds/balance); sign-in, sessions, checkout,
+  the `order.paid` webhook, and credit grants are all website concerns.
+  Both services share one Postgres.
 - `~/.cutlass/config.toml` (single owner: `cutlass-settings`) grows a
   `[providers.<name>]` key registry (literal key or `_env` indirection,
-  the `AiSettings` pattern) and an `[account]` table (base URL override
-  only).
-- The session token lives in the **OS keychain** (`keyring` crate: macOS
-  Keychain / Windows Credential Manager / Linux secret-service, degrading
-  with a warning where absent) — never in config.toml, never in projects.
-- **Auth is OAuth-only at launch** (GitHub + Google): no password storage,
-  no verification/reset emails, no transactional-email dependency.
-  Magic-link email joins later only if demand shows.
-- Desktop surfaces: sign-in in settings/launch, balance display (Polar
-  customer state via the backend), "Buy credits" opening Polar checkout in
-  the system browser, and a visible "your key vs Cutlass credits"
-  indicator wherever a paid call can originate.
+  the `AiSettings` pattern) and an `[account]` table (`base_url` for the
+  API, `auth_base_url` for the website — overrides only).
+- **Desktop sign-in is the device-authorization flow** (RFC 8628, a
+  first-class better-auth plugin): one "Sign in with browser" button, the
+  app shows a short code and opens the website's approval page, then
+  polls for the session token and exchanges it for a short-lived JWT.
+  Provider choice (GitHub / Google — OAuth-only, no password storage, no
+  transactional-email dependency) happens on the website.
+- Tokens live in the **OS keychain** (`keyring` crate: macOS Keychain /
+  Windows Credential Manager / Linux secret-service, degrading with a
+  warning where absent) — never in config.toml, never in projects. The
+  long-lived better-auth session token sits in the `refresh_token` seat
+  of `StoredSession`; refresh means re-fetching a JWT from the website's
+  `/api/auth/token`.
+- Desktop surfaces: sign-in in settings/launch, balance display (from
+  the shared credit ledger via the backend), "Buy credits" opening the
+  website's `/account` page in the system browser (the device-flow
+  approval already left a session there), and a visible "your key vs
+  Cutlass credits" indicator wherever a paid call can originate.
 
 ## Asset kinds
 
@@ -184,7 +201,9 @@ code and in `cutlass-backend/docs/ARCHITECTURE.md`.
    gallery, `ApplyTemplate` pick flow. Text presets ride along
    (bundled-OFL-fonts-only).
 6. **Accounts & managed routing** — `[providers.*]` registry, keychain
-   token, OAuth sign-in, balance + Polar checkout, update-check nudge.
+   tokens, device-flow sign-in against the website's better-auth,
+   balance display, "Buy credits" → website account page, update-check
+   nudge. (Website side: better-auth + Polar plugin, shared Postgres.)
 7. **AI generation surfaces** — Library AI sections (prompt → job → poll
    → download → import), TTS/voiceover; third provider mode in
    `cutlass-ai` ("Cutlass account") with out-of-credits handling;

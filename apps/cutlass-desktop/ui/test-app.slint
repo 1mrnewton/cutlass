@@ -7,8 +7,10 @@ import { CutlassGridView } from "components/index.slint";
 //
 // Note the bars auto-hide: they appear briefly on launch (initial
 // extent change), then fade out ~1s after the last scroll unless the
-// pointer is over a bar. Hovering the faded bar area reveals it, and
-// the thumb widens slightly on hover.
+// pointer is over a bar. Fully hidden bars are click-through — clicks
+// in the bar footprint land on the tiles beneath — and reappear on
+// the next scroll. Hovering a visible bar keeps it awake, and the
+// thumb widens slightly on hover.
 export component TestApp inherits Window {
     title: "Test App — CutlassGridView";
 

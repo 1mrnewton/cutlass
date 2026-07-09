@@ -38,15 +38,18 @@
 // The bars overlay the content and the Flickable clamps scrolling at
 // the content edge, so a permanently visible bar would permanently
 // occlude the last `scrollbar-size` of content along its axis. Instead
-// the bars fade in on scrolling, on content-extent changes, and on
-// pointer-over, then fade out shortly after the last activity — the
-// occlusion is transient.
+// the bars fade in on scrolling and on content-extent changes, then
+// fade out shortly after the last activity — the occlusion is
+// transient.
 //
-// The bars' input areas stay live while faded so that moving the
-// pointer over a bar reveals it before any click lands. The flip side
-// is that the bar footprint swallows clicks even while invisible; that
-// matches the previous always-visible behavior, and the hover-reveal
-// keeps it visually coherent.
+// The bars' input areas are only live while the bars are visible
+// (poked awake, hovered, or mid-drag). A fully hidden bar is
+// click-through, so content under the bar footprint stays clickable —
+// matching native macOS overlay scrollbars, which appear on scroll
+// activity and only become interactive once revealed. Hovering a bar
+// while it is visible (including mid-fade) keeps it awake and
+// interactive; hovering the footprint of a fully hidden bar does
+// nothing.
 //
 // Usage
 // -----
@@ -88,6 +91,11 @@ component ScrollBar inherits Rectangle {
     // overflow disappears) and in its auto-hide logic.
     in-out property <bool> dragging;
     in-out property <bool> hovered;
+
+    // Hit-testing gate, driven by the parent's auto-hide state: a fully
+    // hidden bar must be click-through so it doesn't swallow clicks
+    // meant for content under its footprint.
+    in property <bool> bar-interactive: true;
 
     in property <color> thumb-color;
     in property <color> thumb-hover-color;
@@ -153,6 +161,7 @@ component ScrollBar inherits Rectangle {
 
         width: 100%;
         height: 100%;
+        enabled: root.bar-interactive;
 
         changed pressed => { root.dragging = self.pressed; }
         changed has-hover => { root.hovered = self.has-hover; }
@@ -238,10 +247,32 @@ export component CutlassScrollView inherits Rectangle {
     // ---- Derived metrics ----------------------------------------------------
 
     // Bar existence latches on `dragging || hovered` so the `if` below
-    // can't destroy a bar mid-drag (or mid-hover, which would cut the
-    // auto-hide fade short) when content shrinks under it.
-    property <bool> v-bar-shown: show-vertical-scrollbar || v-bar-dragging || v-bar-hovered;
-    property <bool> h-bar-shown: show-horizontal-scrollbar || h-bar-dragging || h-bar-hovered;
+    // can't destroy a bar mid-drag when content shrinks under it, and
+    // on `*-bar-linger` so a bar whose overflow just disappeared stays
+    // alive until the fade-out animation completes instead of being
+    // torn down mid-fade.
+    property <bool> v-bar-alive: show-vertical-scrollbar || v-bar-dragging || v-bar-hovered;
+    property <bool> h-bar-alive: show-horizontal-scrollbar || h-bar-dragging || h-bar-hovered;
+    property <bool> v-bar-shown: v-bar-alive || v-bar-linger;
+    property <bool> h-bar-shown: h-bar-alive || h-bar-linger;
+
+    // Set when a bar loses its reason to exist while still painted;
+    // cleared once the fade-out lands at zero opacity.
+    property <bool> v-bar-linger;
+    property <bool> h-bar-linger;
+
+    changed v-bar-alive => {
+        if (!v-bar-alive && bars-opacity > 0.001) { v-bar-linger = true; }
+    }
+    changed h-bar-alive => {
+        if (!h-bar-alive && bars-opacity > 0.001) { h-bar-linger = true; }
+    }
+    changed bars-opacity => {
+        if (bars-opacity <= 0.001) {
+            v-bar-linger = false;
+            h-bar-linger = false;
+        }
+    }
 
     // Reserve the opposite bar's footprint so the two tracks meet at a
     // square corner instead of painting over each other.
@@ -262,6 +293,12 @@ export component CutlassScrollView inherits Rectangle {
     property <bool> bars-poked;
     property <float> bars-opacity: (bars-poked || bars-engaged) ? 1.0 : 0.0;
     animate bars-opacity { duration: 200ms; easing: ease-out; }
+
+    // Bars accept pointer input only while at least partially painted
+    // (awake, engaged, or mid-fade); fully hidden bars are
+    // click-through. Hovering a visible bar re-engages it via the
+    // bar's own hover tracking.
+    property <bool> bars-interactive: bars-poked || bars-engaged || bars-opacity > 0.001;
 
     function poke-bars() {
         self.bars-poked = true;
@@ -320,6 +357,7 @@ export component CutlassScrollView inherits Rectangle {
         offset <=> flick.viewport-y;
         dragging <=> root.v-bar-dragging;
         hovered <=> root.v-bar-hovered;
+        bar-interactive: root.bars-interactive;
 
         thumb-color: scrollbar-thumb-color;
         thumb-hover-color: scrollbar-thumb-hover-color;
@@ -343,6 +381,7 @@ export component CutlassScrollView inherits Rectangle {
         offset <=> flick.viewport-x;
         dragging <=> root.h-bar-dragging;
         hovered <=> root.h-bar-hovered;
+        bar-interactive: root.bars-interactive;
 
         thumb-color: scrollbar-thumb-color;
         thumb-hover-color: scrollbar-thumb-hover-color;
@@ -366,7 +405,11 @@ export component CutlassScrollView inherits Rectangle {
 
         // Rectangles don't participate in hit-testing; without this,
         // clicks on the corner would fall through to the (visually
-        // hidden) content beneath and activate it.
-        TouchArea { }
+        // hidden) content beneath and activate it while the bars are
+        // painted. Disabled when the bars are hidden so the corner is
+        // click-through like the bars themselves.
+        TouchArea {
+            enabled: root.bars-interactive;
+        }
     }
 }

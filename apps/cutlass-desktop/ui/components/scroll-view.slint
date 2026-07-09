@@ -69,6 +69,8 @@
 // Accessibility: Slint 1.16 has no `scrollbar` accessible role
 // (`AccessibleRole` offers `slider` at closest, which would misreport
 // the widget), so the bars carry no accessibility annotations yet.
+// Keyboard access is available instead via the opt-in
+// `enable-key-scroll` (arrows / Page Up / Page Down / Home / End).
 
 import { AppStore } from "../store/index.slint";
 
@@ -229,6 +231,14 @@ export component CutlassScrollView inherits Rectangle {
     // gate).
     in property <bool> interactive: true;
 
+    // Keyboard scrolling (opt-in). When set, a FocusScope around the
+    // viewport takes focus on click and drives `viewport-y`: arrows
+    // step, Page Up/Down page, Home/End jump. Opt-in rather than
+    // default because the scope competes for click-focus with
+    // focusable content (text inputs) and with window-level shortcut
+    // scopes.
+    in property <bool> enable-key-scroll: false;
+
     // ---- Scrollbar configuration --------------------------------------------
 
     // Auto-instantiate by default: only create a bar when content
@@ -283,9 +293,12 @@ export component CutlassScrollView inherits Rectangle {
     }
 
     // Reserve the opposite bar's footprint so the two tracks meet at a
-    // square corner instead of painting over each other.
+    // square corner instead of painting over each other. Animated so
+    // the perpendicular thumb's track length eases instead of jumping
+    // when the other bar latches into or out of existence.
     property <length> reserve-bottom: h-bar-shown ? scrollbar-size : 0px;
     property <length> reserve-right: v-bar-shown ? scrollbar-size : 0px;
+    animate reserve-bottom, reserve-right { duration: 120ms; easing: ease-out; }
 
     // ---- Auto-hide ----------------------------------------------------------
 
@@ -317,9 +330,16 @@ export component CutlassScrollView inherits Rectangle {
     changed viewport-y => { poke-bars(); }
     // Also reveal when the scrollable extent changes (content added or
     // removed, including the initial layout) so overflow is
-    // discoverable without scrolling.
-    changed viewport-width => { poke-bars(); }
-    changed viewport-height => { poke-bars(); }
+    // discoverable without scrolling — but only when that axis
+    // actually overflows, so fit-content views bound to their own
+    // width/height don't flash the bars on every window resize or
+    // splitter drag.
+    changed viewport-width => {
+        if (viewport-width > self.width) { poke-bars(); }
+    }
+    changed viewport-height => {
+        if (viewport-height > self.height) { poke-bars(); }
+    }
 
     hide-delay := Timer {
         interval: 1100ms;
@@ -335,18 +355,61 @@ export component CutlassScrollView inherits Rectangle {
     // sub-pixel rounding leaking content past the scrollbar tracks.
     clip: true;
 
-    flick := Flickable {
+    function scroll-to-y(target: length) {
+        self.viewport-y = clamp(target, min(0px, self.height - self.viewport-height), 0px);
+    }
+
+    // Wraps the viewport so a click inside (that no focusable child
+    // claims) focuses the scope and keys scroll. Disabled scopes never
+    // take focus, so the default is behaviorally inert.
+    key-scope := FocusScope {
         x: 0;
         y: 0;
         width: root.width;
         height: root.height;
-        interactive: root.interactive;
-        viewport-width: root.viewport-width;
-        viewport-height: root.viewport-height;
-        viewport-x <=> root.viewport-x;
-        viewport-y <=> root.viewport-y;
+        enabled: root.enable-key-scroll;
 
-        @children
+        key-pressed(event) => {
+            if (event.text == Key.UpArrow) {
+                root.scroll-to-y(root.viewport-y + 40px);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.scroll-to-y(root.viewport-y - 40px);
+                return accept;
+            }
+            if (event.text == Key.PageUp) {
+                root.scroll-to-y(root.viewport-y + root.height);
+                return accept;
+            }
+            if (event.text == Key.PageDown) {
+                root.scroll-to-y(root.viewport-y - root.height);
+                return accept;
+            }
+            if (event.text == Key.Home) {
+                root.scroll-to-y(0px);
+                return accept;
+            }
+            if (event.text == Key.End) {
+                root.scroll-to-y(-root.viewport-height);
+                return accept;
+            }
+            reject
+        }
+
+        flick := Flickable {
+            x: 0;
+            y: 0;
+            width: root.width;
+            height: root.height;
+            interactive: root.interactive;
+            viewport-width: root.viewport-width;
+            viewport-height: root.viewport-height;
+            viewport-x <=> root.viewport-x;
+            viewport-y <=> root.viewport-y;
+
+            @children
+        }
     }
 
     // ---- Scrollbars ----------------------------------------------------------

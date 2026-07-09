@@ -42,6 +42,11 @@ component ProjectInspector inherits VerticalLayout {
         title: "Inspector";
     }
 
+    // No `enable-key-scroll` here (or on the other inspector body
+    // scrolls): the inspector's blur-catcher deliberately routes keys
+    // back to the window shortcut scope after a click, where arrows
+    // nudge the selected canvas item. A key-scroll FocusScope would
+    // fight that.
     CutlassScrollView {
         vertical-stretch: 1;
         viewport-width: root.width;

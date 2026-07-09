@@ -347,6 +347,7 @@ export component AgentPanel inherits PanelBase {
             viewport-width: self.width;
             viewport-height: transcript-content.preferred-height;
             show-horizontal-scrollbar: false;
+            enable-key-scroll: true;
 
             // Pin to the newest entry as text streams in. Assigning in a
             // change handler (not a binding) keeps wheel scrolling free

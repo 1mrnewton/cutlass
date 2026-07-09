@@ -176,6 +176,11 @@ export component CutlassGridView inherits Rectangle {
     vertical-stretch: 1;
     background: transparent;
 
+    // Closest fit in Slint 1.16's role set (no dedicated `grid` role);
+    // the item count at least sizes the collection for assistive tech.
+    accessible-role: list;
+    accessible-item-count: item-count;
+
     CutlassScrollView {
         x: 0;
         y: 0;

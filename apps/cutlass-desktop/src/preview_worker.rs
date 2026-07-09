@@ -291,7 +291,9 @@ enum WorkerMsg {
     /// Save edited per-project agent rules into `ProjectMetadata`.
     /// Metadata, not a timeline command: dirties the session (rules save
     /// with the project) but is not undoable, like relink.
-    SetAgentRules { rules: String },
+    SetAgentRules {
+        rules: String,
+    },
     /// Set (or clear) one look-animation slot on a visual clip.
     SetClipAnimation {
         clip: String,

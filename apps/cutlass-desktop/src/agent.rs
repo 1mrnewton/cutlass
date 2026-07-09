@@ -22,9 +22,9 @@ use std::thread::JoinHandle;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use cutlass_ai::providers::openai_compat::OpenAiCompatProvider;
 use cutlass_ai::{
-    AgentConfig, AgentEvent, AgentExtensions, EditorContext, EngineBridge, Message,
-    ProjectSummary, PromptStatus, WireCommand, compose_rules, expand_slash_command,
-    load_agent_dir, merge_skills, run_prompt, summarize, validate,
+    AgentConfig, AgentEvent, AgentExtensions, EditorContext, EngineBridge, Message, ProjectSummary,
+    PromptStatus, WireCommand, compose_rules, expand_slash_command, load_agent_dir, merge_skills,
+    run_prompt, summarize, validate,
 };
 use cutlass_commands::EditOutcome;
 use cutlass_engine::{ApplyOutcome, Engine, EngineConfig};

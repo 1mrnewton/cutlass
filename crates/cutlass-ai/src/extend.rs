@@ -249,9 +249,10 @@ pub fn load_agent_dir(dir: &Path) -> AgentDir {
             };
             match parse_skill(&id, &text) {
                 Ok(skill) => out.skills.push(skill),
-                Err(e) => out
-                    .warnings
-                    .push(format!("skill '{id}' skipped: {e} ({})", skill_path.display())),
+                Err(e) => out.warnings.push(format!(
+                    "skill '{id}' skipped: {e} ({})",
+                    skill_path.display()
+                )),
             }
         }
     }
@@ -317,7 +318,10 @@ fn read_capped(path: &Path, warnings: &mut Vec<String>) -> Option<String> {
 
 macro_rules! bundled {
     ($id:literal) => {
-        ($id, include_str!(concat!("../../../assets/skills/", $id, "/SKILL.md")))
+        (
+            $id,
+            include_str!(concat!("../../../assets/skills/", $id, "/SKILL.md")),
+        )
     };
 }
 
@@ -376,8 +380,10 @@ mod tests {
 
     #[test]
     fn compose_rules_caps_and_flags() {
-        let (text, truncated) =
-            compose_rules(&[("user".into(), "always 9:16".into()), ("p".into(), "".into())]);
+        let (text, truncated) = compose_rules(&[
+            ("user".into(), "always 9:16".into()),
+            ("p".into(), "".into()),
+        ]);
         assert_eq!(text, "[user]\nalways 9:16");
         assert!(!truncated);
 
@@ -458,7 +464,10 @@ mod tests {
         std::fs::write(root.join("commands/vertical.md"), "Go 9:16.").unwrap();
 
         let loaded = load_agent_dir(root);
-        assert_eq!(loaded.rules, vec![("style".into(), "prefer crossfades".into())]);
+        assert_eq!(
+            loaded.rules,
+            vec![("style".into(), "prefer crossfades".into())]
+        );
         assert_eq!(loaded.skills.len(), 1);
         assert_eq!(loaded.skills[0].id, "my-skill");
         assert_eq!(

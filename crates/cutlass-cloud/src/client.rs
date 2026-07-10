@@ -22,7 +22,7 @@ pub struct CloudClient {
 }
 
 impl CloudClient {
-    /// `base_url` without a trailing slash, e.g. `https://api.cutlass.app`.
+    /// `base_url` without a trailing slash, e.g. `https://api.cutlass.sh`.
     /// `cache_dir` is the app-data catalog cache (created on demand).
     pub fn new(base_url: &str, cache_dir: Option<PathBuf>) -> Self {
         Self {

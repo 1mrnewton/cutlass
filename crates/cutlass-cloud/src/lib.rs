@@ -50,9 +50,9 @@ pub use stock::{DirectStockProvider, StockProvider};
 /// Default production backend base URL. Overridable via the `[account]`
 /// table in `~/.cutlass/config.toml` (points at staging or a self-hosted
 /// instance).
-pub const DEFAULT_BASE_URL: &str = "https://api.cutlass.app";
+pub const DEFAULT_BASE_URL: &str = "https://api.cutlass.sh";
 
 /// Default production auth base URL — the website, where better-auth
 /// lives (`/api/auth/*`, the `/device` approval page, `/account`
 /// billing). Overridable via `[account] auth_base_url`.
-pub const DEFAULT_AUTH_BASE_URL: &str = "https://cutlass.app";
+pub const DEFAULT_AUTH_BASE_URL: &str = "https://cutlass.sh";

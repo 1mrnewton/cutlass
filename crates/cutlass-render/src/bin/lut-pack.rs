@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! cargo run -p cutlass-render --bin lut-pack -- <out-dir> \
-//!     [--base-url https://assets.cutlass.app/luts]
+//!     [--base-url https://assets.cutlass.sh/luts]
 //! ```
 //!
 //! Output is deterministic: the drift test in `cutlass-render::lut_pack`
@@ -19,7 +19,7 @@ use std::process::ExitCode;
 
 use cutlass_render::starter_lut_pack;
 
-const DEFAULT_BASE_URL: &str = "https://assets.cutlass.app/luts";
+const DEFAULT_BASE_URL: &str = "https://assets.cutlass.sh/luts";
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);

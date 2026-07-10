@@ -41,8 +41,8 @@
 //! # Cutlass account plumbing. The session token itself is NEVER here —
 //! # it lives in the OS keychain (see cutlass-cloud's token store).
 //! [account]
-//! base_url = "https://api.cutlass.app"    # API override; empty = default
-//! auth_base_url = "https://cutlass.app"   # website/auth override; empty = default
+//! base_url = "https://api.cutlass.sh"     # API override; empty = default
+//! auth_base_url = "https://cutlass.sh"    # website/auth override; empty = default
 //! ```
 
 use std::collections::BTreeMap;
@@ -601,7 +601,7 @@ theme = "ember"
                 api_key_env: None,
             },
         );
-        s.account.base_url = "https://staging.api.cutlass.app".into();
+        s.account.base_url = "https://staging.api.cutlass.sh".into();
         save(&path, &s).unwrap();
 
         let loaded = load(&path).unwrap();
@@ -615,7 +615,7 @@ theme = "ember"
             Some("sk-11")
         );
         assert!(!loaded.provider("nonexistent").is_configured());
-        assert_eq!(loaded.account.base_url, "https://staging.api.cutlass.app");
+        assert_eq!(loaded.account.base_url, "https://staging.api.cutlass.sh");
 
         // Dropping a provider removes its table; clearing the account
         // override removes the key.

@@ -171,6 +171,15 @@ fn dispatch_edit(
                 Some(inverse),
             ))
         }
+        EditCommand::FreezeFrame { clip, at, duration } => {
+            let guard = transitions_guard(ctx);
+            let (id, primary) = edit::freeze_frame::execute(ctx, clip, at, duration)?;
+            let inverse = finalize_structural(ctx, guard, primary);
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Created(id)),
+                Some(inverse),
+            ))
+        }
         EditCommand::AddGenerated {
             track,
             generator,

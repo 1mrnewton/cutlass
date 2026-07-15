@@ -6,6 +6,7 @@ pub mod add_track;
 pub mod clip_beats;
 pub mod duplicate_clip;
 pub mod extract_audio;
+pub mod freeze_frame;
 pub mod insert_clip;
 pub mod insert_media;
 pub mod link_clips;

@@ -121,6 +121,16 @@ pub enum EditCommand {
         to_track: TrackId,
         start: RationalTime,
     },
+    /// Hold one resolved frame from a video clip for `duration`, opening a
+    /// same-track hole at `at`. `at` may be either edge or an interior tick;
+    /// interior insertion splits the source first. The created clip remains
+    /// media-backed but is silent and cannot be retimed. One command is one
+    /// atomic undo entry.
+    FreezeFrame {
+        clip: ClipId,
+        at: RationalTime,
+        duration: RationalTime,
+    },
     /// Place a generated clip (text, solid, shape, …) on a track.
     AddGenerated {
         track: TrackId,

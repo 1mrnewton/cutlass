@@ -691,12 +691,15 @@ fn import_file_identity(metadata: &fs::Metadata) -> ImportFileIdentity {
     }
 }
 
+// `volume_serial_number()`/`file_index()` are still unstable
+// (`windows_by_handle`), so approximate identity with stable metadata.
 #[cfg(windows)]
 #[derive(Debug, PartialEq, Eq)]
 struct ImportFileIdentity {
-    volume_serial_number: Option<u32>,
-    file_index: Option<u64>,
     creation_time: u64,
+    last_write_time: u64,
+    file_size: u64,
+    file_attributes: u32,
 }
 
 #[cfg(windows)]
@@ -704,9 +707,10 @@ fn import_file_identity(metadata: &fs::Metadata) -> ImportFileIdentity {
     use std::os::windows::fs::MetadataExt as _;
 
     ImportFileIdentity {
-        volume_serial_number: metadata.volume_serial_number(),
-        file_index: metadata.file_index(),
         creation_time: metadata.creation_time(),
+        last_write_time: metadata.last_write_time(),
+        file_size: metadata.file_size(),
+        file_attributes: metadata.file_attributes(),
     }
 }
 

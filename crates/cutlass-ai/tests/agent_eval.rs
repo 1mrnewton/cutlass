@@ -1885,6 +1885,140 @@ fn inline_image_events_match_the_request_wide_budget() {
 }
 
 #[test]
+fn app_controls_use_fresh_state_for_a_looped_playback_workflow() {
+    let (mut bridge, _, _, _) = fixture();
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![("state", "app_state", serde_json::json!({}))]),
+        tool_turn(vec![
+            (
+                "loop",
+                "app_loop_range",
+                serde_json::json!({
+                    "action": "set",
+                    "start_seconds": 115.0,
+                    "end_seconds": 120.0
+                }),
+            ),
+            (
+                "panel",
+                "app_panel",
+                serde_json::json!({ "panel": "library", "action": "hide" }),
+            ),
+            (
+                "theme",
+                "app_theme",
+                serde_json::json!({ "theme": "dark-blue" }),
+            ),
+            (
+                "play",
+                "app_playback",
+                serde_json::json!({ "action": "play" }),
+            ),
+        ]),
+        text_turn("Playing the last five seconds on a loop with the library hidden."),
+    ]);
+    let specs = [
+        "app_state",
+        "app_loop_range",
+        "app_panel",
+        "app_theme",
+        "app_playback",
+    ]
+    .into_iter()
+    .map(host_spec)
+    .collect();
+    let mut tool_host = ScriptedHost::new(
+        specs,
+        vec![
+            Ok(ToolOutput::text(
+                r#"{"sequence":{"duration_seconds":120.0}}"#,
+            )),
+            Ok(ToolOutput::text(
+                r#"{"state":{"transport":{"loop_enabled":true,"range_in_seconds":115.0,"range_out_seconds":120.0}}}"#,
+            )),
+            Ok(ToolOutput::text(
+                r#"{"state":{"panels":{"library":false}}}"#,
+            )),
+            Ok(ToolOutput::text(r#"{"state":{"theme":"dark-blue"}}"#)),
+            Ok(ToolOutput::text(
+                r#"{"state":{"transport":{"playing":true}}}"#,
+            )),
+        ],
+    );
+
+    let (outcome, events) = run_with(
+        &provider,
+        &mut bridge,
+        &mut tool_host,
+        &EditorContext::default(),
+        "play the last 5 seconds looped, hide the library, and use the dark theme",
+        &AgentConfig::default(),
+    );
+
+    assert_eq!(outcome.status, PromptStatus::Completed);
+    assert!(outcome.actions.is_empty());
+    assert_eq!(
+        tool_host.calls,
+        vec![
+            ("app_state".into(), serde_json::json!({})),
+            (
+                "app_loop_range".into(),
+                serde_json::json!({
+                    "action": "set",
+                    "start_seconds": 115.0,
+                    "end_seconds": 120.0
+                }),
+            ),
+            (
+                "app_panel".into(),
+                serde_json::json!({ "panel": "library", "action": "hide" }),
+            ),
+            (
+                "app_theme".into(),
+                serde_json::json!({ "theme": "dark-blue" }),
+            ),
+            (
+                "app_playback".into(),
+                serde_json::json!({ "action": "play" }),
+            ),
+        ]
+    );
+    let host_actions = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::HostAction { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        host_actions,
+        vec![
+            "app_state",
+            "app_loop_range",
+            "app_panel",
+            "app_theme",
+            "app_playback"
+        ]
+    );
+    let requests = provider.requests();
+    let final_tool_results = requests[2]
+        .iter()
+        .filter_map(|message| match message {
+            Message::ToolResult {
+                call_id, content, ..
+            } if call_id != "state" => Some((call_id.as_str(), content.as_str())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(final_tool_results.len(), 4);
+    assert!(
+        final_tool_results
+            .iter()
+            .any(|(id, content)| *id == "play" && content.contains("\"playing\":true"))
+    );
+}
+
+#[test]
 fn host_rejection_reports_and_the_prompt_still_completes() {
     let (mut host, _, _, _) = fixture();
     let provider = ScriptedProvider::new(vec![

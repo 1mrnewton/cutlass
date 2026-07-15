@@ -1404,17 +1404,22 @@ fn sync_containing_directory(
     snapshot: &RootSnapshot,
     installed_path: &Path,
 ) -> Result<(), ModelManagerError> {
-    snapshot
-        .dir
-        .try_clone()
-        .map(CapabilityDir::into_std_file)
-        .and_then(|directory| directory.sync_all())
-        .map_err(
-            |source| ModelManagerError::InstalledButDirectorySyncFailed {
-                path: installed_path.to_path_buf(),
-                source,
-            },
-        )
+    // cap-std opens directories with O_PATH on Linux, and fsync on an O_PATH
+    // descriptor fails with EBADF, so reopen a regular read-only descriptor
+    // and confirm it still names the pinned root before syncing through it.
+    let sync_failed = |source| ModelManagerError::InstalledButDirectorySyncFailed {
+        path: installed_path.to_path_buf(),
+        source,
+    };
+    let directory = fs::File::open(&snapshot.canonical_root).map_err(sync_failed)?;
+    let identity = FileIdentity::from_file(directory).map_err(sync_failed)?;
+    if identity != snapshot.identity {
+        return Err(ModelManagerError::RootMappingChanged {
+            root: snapshot.lexical_root.clone(),
+            pinned_root: snapshot.canonical_root.clone(),
+        });
+    }
+    identity.as_file().sync_all().map_err(sync_failed)
 }
 
 #[cfg(not(unix))]

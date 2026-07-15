@@ -59,7 +59,10 @@
 //! ```
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use toml_edit::{DocumentMut, Item, Table, value};
 
@@ -405,21 +408,316 @@ pub fn load(path: &Path) -> Result<Settings, String> {
 /// clobbered — refusing to overwrite a file we couldn't understand.
 pub fn save(path: &Path, settings: &Settings) -> Result<(), String> {
     let mut doc = match std::fs::read_to_string(path) {
-        Ok(raw) => raw
-            .parse::<DocumentMut>()
-            .map_err(|e| format!("could not parse {}: {e}", path.display()))?,
+        Ok(raw) => raw.parse::<DocumentMut>().map_err(|_| {
+            format!(
+                "could not parse {}: the existing configuration is malformed",
+                path.display()
+            )
+        })?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
         Err(e) => return Err(format!("could not read {}: {e}", path.display())),
     };
 
     settings.write_into(&mut doc)?;
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    // Materialize and validate the complete output before creating directories,
+    // temporary files, or otherwise changing filesystem state.
+    let serialized = doc.to_string();
+    let _: DocumentMut = serialized.parse().map_err(|_| {
+        format!(
+            "could not validate generated configuration for {}",
+            path.display()
+        )
+    })?;
+
+    persist_serialized(path, serialized.as_bytes())
+}
+
+const UNIQUE_PATH_ATTEMPTS: usize = 128;
+static UNIQUE_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+trait PersistenceFs {
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
+    fn remove_file(&self, path: &Path) -> io::Result<()>;
+    fn symlink_metadata(&self, path: &Path) -> io::Result<std::fs::Metadata>;
+}
+
+struct StdPersistenceFs;
+
+impl PersistenceFs for StdPersistenceFs {
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
     }
-    std::fs::write(path, doc.to_string())
-        .map_err(|e| format!("could not write {}: {e}", path.display()))
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        std::fs::remove_file(path)
+    }
+
+    fn symlink_metadata(&self, path: &Path) -> io::Result<std::fs::Metadata> {
+        std::fs::symlink_metadata(path)
+    }
+}
+
+fn persist_serialized(destination: &Path, contents: &[u8]) -> Result<(), String> {
+    let parent = destination_parent(destination)?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+
+    let permissions = match std::fs::metadata(destination) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(format!(
+                "could not read permissions for {}: {e}",
+                destination.display()
+            ));
+        }
+    };
+
+    let temporary = write_synced_temp(destination, contents, permissions)?;
+    install_temp_with_ops(destination, &temporary, &StdPersistenceFs)
+}
+
+fn write_synced_temp(
+    destination: &Path,
+    contents: &[u8],
+    permissions: Option<std::fs::Permissions>,
+) -> Result<PathBuf, String> {
+    let (temporary, mut file) = create_unique_temp(destination)?;
+
+    if let Err(e) = file.write_all(contents) {
+        drop(file);
+        return Err(cleanup_temp_after_error(
+            &StdPersistenceFs,
+            &temporary,
+            format!(
+                "could not write temporary configuration for {}: {e}",
+                destination.display()
+            ),
+        ));
+    }
+
+    if let Some(permissions) = permissions {
+        if let Err(e) = file.set_permissions(permissions) {
+            drop(file);
+            return Err(cleanup_temp_after_error(
+                &StdPersistenceFs,
+                &temporary,
+                format!(
+                    "could not preserve permissions for {}: {e}",
+                    destination.display()
+                ),
+            ));
+        }
+    }
+
+    if let Err(e) = file.sync_all() {
+        drop(file);
+        return Err(cleanup_temp_after_error(
+            &StdPersistenceFs,
+            &temporary,
+            format!(
+                "could not sync temporary configuration for {}: {e}",
+                destination.display()
+            ),
+        ));
+    }
+    drop(file);
+
+    Ok(temporary)
+}
+
+fn create_unique_temp(destination: &Path) -> Result<(PathBuf, std::fs::File), String> {
+    for _ in 0..UNIQUE_PATH_ATTEMPTS {
+        let candidate = unique_sibling_path(destination, "tmp")?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(file) => return Ok((candidate, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                return Err(format!(
+                    "could not create a temporary configuration beside {}: {e}",
+                    destination.display()
+                ));
+            }
+        }
+    }
+
+    Err(format!(
+        "could not allocate a unique temporary configuration beside {}",
+        destination.display()
+    ))
+}
+
+fn install_temp_with_ops(
+    destination: &Path,
+    temporary: &Path,
+    fs: &impl PersistenceFs,
+) -> Result<(), String> {
+    let atomic_error = match fs.rename(temporary, destination) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+
+    match fs.symlink_metadata(destination) {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(cleanup_temp_after_error(
+                fs,
+                temporary,
+                format!(
+                    "could not install configuration at {} with an atomic rename: {atomic_error}; \
+                     the destination was absent, so no existing configuration required recovery",
+                    destination.display()
+                ),
+            ));
+        }
+        Err(e) => {
+            return Err(cleanup_temp_after_error(
+                fs,
+                temporary,
+                format!(
+                    "could not install configuration at {} with an atomic rename: {atomic_error}; \
+                     could not inspect the existing destination for recovery: {e}",
+                    destination.display()
+                ),
+            ));
+        }
+    }
+
+    let backup = match vacant_backup_path(destination, fs) {
+        Ok(path) => path,
+        Err(e) => {
+            return Err(cleanup_temp_after_error(
+                fs,
+                temporary,
+                format!(
+                    "could not replace configuration at {} after atomic rename failed \
+                     ({atomic_error}): {e}; the existing configuration was left in place",
+                    destination.display()
+                ),
+            ));
+        }
+    };
+
+    if let Err(backup_error) = fs.rename(destination, &backup) {
+        return Err(cleanup_temp_after_error(
+            fs,
+            temporary,
+            format!(
+                "could not replace configuration at {}: atomic rename failed ({atomic_error}); \
+                 moving the existing configuration to a backup also failed: {backup_error}; \
+                 the existing configuration was left in place",
+                destination.display()
+            ),
+        ));
+    }
+
+    match fs.rename(temporary, destination) {
+        Ok(()) => {
+            // Installation is the commit point. A stale backup is preferable
+            // to reporting failure after callers have already persisted the
+            // new state; relocation transactions use `save` as their commit
+            // callback and would otherwise roll data back out from under the
+            // newly installed configuration.
+            let _ = fs.remove_file(&backup);
+            Ok(())
+        }
+        Err(install_error) => match fs.rename(&backup, destination) {
+            Ok(()) => Err(cleanup_temp_after_error(
+                fs,
+                temporary,
+                format!(
+                    "could not install the new configuration at {} after backing up the existing \
+                     file: {install_error}; the original configuration was restored",
+                    destination.display()
+                ),
+            )),
+            Err(rollback_error) => Err(cleanup_temp_after_error(
+                fs,
+                temporary,
+                format!(
+                    "could not install the new configuration at {} after backing up the existing \
+                     file: {install_error}; rollback failed: {rollback_error}; the destination may \
+                     be missing, and the original configuration backup was retained at {}",
+                    destination.display(),
+                    backup.display()
+                ),
+            )),
+        },
+    }
+}
+
+fn vacant_backup_path(destination: &Path, fs: &impl PersistenceFs) -> Result<PathBuf, String> {
+    for _ in 0..UNIQUE_PATH_ATTEMPTS {
+        let candidate = unique_sibling_path(destination, "backup")?;
+        match fs.symlink_metadata(&candidate) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(candidate),
+            Err(e) => {
+                return Err(format!(
+                    "could not inspect a backup path beside {}: {e}",
+                    destination.display()
+                ));
+            }
+        }
+    }
+
+    Err(format!(
+        "could not allocate a unique backup beside {}",
+        destination.display()
+    ))
+}
+
+fn unique_sibling_path(destination: &Path, role: &str) -> Result<PathBuf, String> {
+    let parent = destination_parent(destination)?;
+    let file_name = destination.file_name().ok_or_else(|| {
+        format!(
+            "configuration path {} has no file name",
+            destination.display()
+        )
+    })?;
+    let nonce = UNIQUE_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut name = OsString::from(".");
+    name.push(file_name);
+    name.push(format!(".cutlass-{role}-{}-{nonce}", std::process::id()));
+    Ok(parent.join(name))
+}
+
+fn destination_parent(destination: &Path) -> Result<&Path, String> {
+    let parent = destination.parent().ok_or_else(|| {
+        format!(
+            "configuration path {} has no parent directory",
+            destination.display()
+        )
+    })?;
+    if parent.as_os_str().is_empty() {
+        Ok(Path::new("."))
+    } else {
+        Ok(parent)
+    }
+}
+
+fn cleanup_temp_after_error(
+    fs: &impl PersistenceFs,
+    temporary: &Path,
+    primary_error: String,
+) -> String {
+    match fs.remove_file(temporary) {
+        Ok(()) => primary_error,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => primary_error,
+        Err(e) => format!(
+            "{primary_error}; temporary-file cleanup also failed for {}: {e}; \
+             the temporary file may remain",
+            temporary.display()
+        ),
+    }
 }
 
 impl Settings {
@@ -749,7 +1047,80 @@ fn set_optional(table: &mut Table, key: &str, val: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
+
+    #[derive(Default)]
+    struct FaultFs {
+        rename_calls: Cell<usize>,
+        remove_calls: Cell<usize>,
+        failed_renames: Vec<usize>,
+        failed_removals: Vec<usize>,
+    }
+
+    impl FaultFs {
+        fn failing(failed_renames: &[usize], failed_removals: &[usize]) -> Self {
+            Self {
+                failed_renames: failed_renames.to_vec(),
+                failed_removals: failed_removals.to_vec(),
+                ..Self::default()
+            }
+        }
+
+        fn next_call(counter: &Cell<usize>) -> usize {
+            let call = counter.get() + 1;
+            counter.set(call);
+            call
+        }
+    }
+
+    impl PersistenceFs for FaultFs {
+        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            let call = Self::next_call(&self.rename_calls);
+            if self.failed_renames.contains(&call) {
+                return Err(io::Error::other(format!("injected rename failure #{call}")));
+            }
+            std::fs::rename(from, to)
+        }
+
+        fn remove_file(&self, path: &Path) -> io::Result<()> {
+            let call = Self::next_call(&self.remove_calls);
+            if self.failed_removals.contains(&call) {
+                return Err(io::Error::other(format!(
+                    "injected removal failure #{call}"
+                )));
+            }
+            std::fs::remove_file(path)
+        }
+
+        fn symlink_metadata(&self, path: &Path) -> io::Result<std::fs::Metadata> {
+            std::fs::symlink_metadata(path)
+        }
+    }
+
+    fn transaction_artifacts(directory: &Path) -> Vec<PathBuf> {
+        let mut artifacts: Vec<_> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name.contains(".cutlass-tmp-") || name.contains(".cutlass-backup-")
+                })
+            })
+            .collect();
+        artifacts.sort();
+        artifacts
+    }
+
+    fn assert_no_transaction_artifacts(directory: &Path) {
+        let artifacts = transaction_artifacts(directory);
+        assert!(
+            artifacts.is_empty(),
+            "unexpected transaction artifacts: {artifacts:?}"
+        );
+    }
 
     #[test]
     fn missing_file_is_all_defaults() {
@@ -847,6 +1218,7 @@ mod tests {
             original,
             "failed validation must not rewrite the file"
         );
+        assert_no_transaction_artifacts(dir.path());
     }
 
     #[test]
@@ -879,6 +1251,7 @@ mod tests {
         let error = save(&path, &s).unwrap_err();
         assert!(error.contains("download_quota_mib"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_no_transaction_artifacts(dir.path());
     }
 
     #[test]
@@ -1064,15 +1437,15 @@ theme = "ember"
     fn malformed_file_is_an_error_not_a_default() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let malformed = "[ai]\nbase_url = \n";
-        std::fs::write(&path, malformed).unwrap();
+        let secret = "sk-must-not-appear-in-errors";
+        let malformed = format!("[ai]\napi_key = {secret}\n");
+        std::fs::write(&path, &malformed).unwrap();
         assert!(load(&path).unwrap_err().contains("could not parse"));
-        assert!(
-            save(&path, &Settings::default())
-                .unwrap_err()
-                .contains("could not parse")
-        );
+        let save_error = save(&path, &Settings::default()).unwrap_err();
+        assert!(save_error.contains("could not parse"), "{save_error}");
+        assert!(!save_error.contains(secret), "{save_error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), malformed);
+        assert_no_transaction_artifacts(dir.path());
     }
 
     #[test]
@@ -1148,6 +1521,147 @@ theme = "ember"
         save(&path, &Settings::default()).unwrap();
         assert!(path.exists());
         assert_eq!(load(&path).unwrap(), Settings::default());
+        assert_no_transaction_artifacts(path.parent().unwrap());
+    }
+
+    #[test]
+    fn save_replaces_existing_file_without_transaction_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "# keep this comment\n[ai]\nmodel = \"old\"\n\n[future]\nkeep = true\n";
+        std::fs::write(&path, original).unwrap();
+
+        let mut settings = load(&path).unwrap();
+        settings.ai.model = "new".into();
+        save(&path, &settings).unwrap();
+
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("model = \"new\""), "{saved}");
+        assert!(saved.contains("# keep this comment"), "{saved}");
+        assert!(saved.contains("[future]"), "{saved}");
+        assert_no_transaction_artifacts(dir.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_preserves_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ai]\nmodel = \"old\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let mut settings = load(&path).unwrap();
+        settings.ai.model = "new".into();
+        save(&path, &settings).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+        assert_no_transaction_artifacts(dir.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_temporary_config_is_private_before_installation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("config.toml");
+        let temporary = write_synced_temp(&destination, b"secret = \"value\"\n", None).unwrap();
+
+        let mode = std::fs::metadata(&temporary).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        std::fs::remove_file(temporary).unwrap();
+        assert_no_transaction_artifacts(dir.path());
+    }
+
+    #[test]
+    fn fallback_swap_replaces_existing_file_and_cleans_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("config.toml");
+        let original = b"version = \"old\"\n";
+        let replacement = b"version = \"new\"\n";
+        std::fs::write(&destination, original).unwrap();
+        let temporary = write_synced_temp(&destination, replacement, None).unwrap();
+        let fs = FaultFs::failing(&[1], &[]);
+
+        install_temp_with_ops(&destination, &temporary, &fs).unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), replacement);
+        assert_no_transaction_artifacts(dir.path());
+    }
+
+    #[test]
+    fn fallback_install_failure_restores_original_and_cleans_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("config.toml");
+        let original = b"version = \"old\"\n";
+        let replacement = b"version = \"new\"\n";
+        std::fs::write(&destination, original).unwrap();
+        let temporary = write_synced_temp(&destination, replacement, None).unwrap();
+        let fs = FaultFs::failing(&[1, 3], &[]);
+
+        let error = install_temp_with_ops(&destination, &temporary, &fs).unwrap_err();
+
+        assert!(
+            error.contains("original configuration was restored"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), original);
+        assert_no_transaction_artifacts(dir.path());
+    }
+
+    #[test]
+    fn fallback_reports_failed_rollback_and_retains_original_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("config.toml");
+        let original = b"version = \"old\"\n";
+        let replacement = b"version = \"new\"\n";
+        std::fs::write(&destination, original).unwrap();
+        let temporary = write_synced_temp(&destination, replacement, None).unwrap();
+        let fs = FaultFs::failing(&[1, 3, 4], &[]);
+
+        let error = install_temp_with_ops(&destination, &temporary, &fs).unwrap_err();
+
+        assert!(error.contains("rollback failed"), "{error}");
+        assert!(error.contains("backup was retained"), "{error}");
+        assert!(!destination.exists());
+        let artifacts = transaction_artifacts(dir.path());
+        assert_eq!(artifacts.len(), 1, "{artifacts:?}");
+        assert!(
+            artifacts[0]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(".cutlass-backup-")
+        );
+        assert_eq!(std::fs::read(&artifacts[0]).unwrap(), original);
+    }
+
+    #[test]
+    fn fallback_backup_cleanup_failure_does_not_uncommit_installation() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("config.toml");
+        let original = b"version = \"old\"\n";
+        let replacement = b"version = \"new\"\n";
+        std::fs::write(&destination, original).unwrap();
+        let temporary = write_synced_temp(&destination, replacement, None).unwrap();
+        let fs = FaultFs::failing(&[1], &[1]);
+
+        install_temp_with_ops(&destination, &temporary, &fs).unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), replacement);
+        let artifacts = transaction_artifacts(dir.path());
+        assert_eq!(artifacts.len(), 1, "{artifacts:?}");
+        assert!(
+            artifacts[0]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(".cutlass-backup-")
+        );
+        assert_eq!(std::fs::read(&artifacts[0]).unwrap(), original);
     }
 
     #[test]

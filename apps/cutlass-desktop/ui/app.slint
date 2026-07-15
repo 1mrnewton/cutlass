@@ -50,6 +50,7 @@ export {
     EditorStore,
     ProjectSummary,
     TimelineStore,
+    TimelineActions,
     PreviewStore,
 }from "store/index.slint";
 export { TimelineViewState }from "panels/timeline/index.slint";
@@ -520,12 +521,12 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 1;
                     spacing: AppStore.theme.metrics.spacing.none;
 
-                    LibraryPanel {
+                    if AppState.library-panel-open: LibraryPanel {
                         width: root.left-pane-width;
                         vertical-stretch: 1;
                     }
 
-                    HSplitGripLead {
+                    if AppState.library-panel-open: HSplitGripLead {
                         pane-width <=> root.left-pane-width;
                         vertical-stretch: 1;
                     }
@@ -535,12 +536,12 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                     }
 
-                    HSplitGripTrail {
+                    if AppState.inspector-panel-open: HSplitGripTrail {
                         pane-width <=> root.right-pane-width;
                         vertical-stretch: 1;
                     }
 
-                    InspectorPanel {
+                    if AppState.inspector-panel-open: InspectorPanel {
                         width: root.right-pane-width;
                         vertical-stretch: 1;
                     }
@@ -556,11 +557,11 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                VSplitGripTimeline {
+                if AppState.timeline-panel-open: VSplitGripTimeline {
                     timeline-height <=> root.timeline-height;
                 }
 
-                TimelinePanel {
+                if AppState.timeline-panel-open: TimelinePanel {
                     height: root.timeline-height;
                     horizontal-stretch: 1;
                 }

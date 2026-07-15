@@ -11,6 +11,12 @@ export global AppState {
     // so the launch screen stays up until the user actually picks something.
     in-out property <bool> launch-visible: true;
 
+    // Shared reversible panel surface used by title-bar clicks and agent app
+    // controls; every view can be hidden and restored through these globals.
+    in-out property <bool> library-panel-open: true;
+    in-out property <bool> inspector-panel-open: true;
+    in-out property <bool> agent-panel-open: true;
+    in-out property <bool> timeline-panel-open: true;
     in-out property <bool> preview-maximized: false;
 
     // True on macOS, where the shell keeps the OS-drawn window frame (rounded
@@ -28,10 +34,6 @@ export global AppState {
     // which keep the OS frame and only suppress the caption). Set once at
     // startup from src/main.rs.
     in-out property <bool> frameless: false;
-
-    // AI assistant chat panel (ai-agent roadmap Phase 4): docked at the
-    // far right, toggled from the title bar.
-    in-out property <bool> agent-panel-open: true;
 
     // Export settings dialog (modal overlay; see shell/export-dialog.slint).
     in-out property <bool> export-dialog-open: false;

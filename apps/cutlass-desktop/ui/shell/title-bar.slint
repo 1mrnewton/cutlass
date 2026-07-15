@@ -209,6 +209,58 @@ export component TitleBar inherits Rectangle {
             }
         }
 
+        VerticalLayout {
+            alignment: center;
+
+            // Shares AppState's reversible panel surface with agent app
+            // controls, so every hidden view remains reachable by click.
+            view-menu := ContextMenuArea {
+                width: view-button.width;
+                height: view-button.height;
+
+                Menu {
+                    MenuItem {
+                        title: AppState.library-panel-open ? "Hide Library" : "Show Library";
+                        activated => {
+                            AppState.library-panel-open = !AppState.library-panel-open;
+                        }
+                    }
+                    MenuItem {
+                        title: AppState.inspector-panel-open ? "Hide Inspector" : "Show Inspector";
+                        activated => {
+                            AppState.inspector-panel-open = !AppState.inspector-panel-open;
+                        }
+                    }
+                    MenuItem {
+                        title: AppState.agent-panel-open ? "Hide Assistant" : "Show Assistant";
+                        activated => {
+                            AppState.agent-panel-open = !AppState.agent-panel-open;
+                        }
+                    }
+                    MenuItem {
+                        title: AppState.timeline-panel-open ? "Hide Timeline" : "Show Timeline";
+                        activated => {
+                            AppState.timeline-panel-open = !AppState.timeline-panel-open;
+                        }
+                    }
+                    MenuSeparator { }
+                    MenuItem {
+                        title: AppState.preview-maximized ? "Exit Maximized Preview" : "Maximize Preview";
+                        activated => {
+                            AppState.preview-maximized = !AppState.preview-maximized;
+                        }
+                    }
+                }
+
+                view-button := SubtleButton {
+                    label: "View";
+                    clicked => {
+                        view-menu.show({ x: 0, y: view-button.height });
+                    }
+                }
+            }
+        }
+
         // Flexible middle: stays empty (the centered title paints at bar
         // level) and stays draggable — plain rectangles don't intercept
         // the drag TouchArea below.

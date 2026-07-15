@@ -959,6 +959,12 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
                 a.clip, a.track
             )
         }
+        WireCommand::DuplicateClip(a) => format!(
+            "duplicated clip {} onto track {} at {}",
+            a.clip,
+            a.to_track,
+            secs(a.start),
+        ),
         WireCommand::AddGenerated(a) => format!(
             "added {} at {} for {} on track {}",
             generator_phrase(&a.generator),
@@ -1348,6 +1354,19 @@ mod tests {
         assert_eq!(
             describe_action(&extract, Some(&EditOutcome::Created(ClipId::from_raw(22)))),
             "extracted audio from clip 7 onto track 3 (new clip 22)"
+        );
+
+        let duplicate = WireCommand::DuplicateClip(wire::DuplicateClip {
+            clip: 7,
+            to_track: 3,
+            start: 12.5,
+        });
+        assert_eq!(
+            describe_action(
+                &duplicate,
+                Some(&EditOutcome::Created(ClipId::from_raw(23)))
+            ),
+            "duplicated clip 7 onto track 3 at 12.50s (new clip 23)"
         );
 
         let trim = WireCommand::TrimClip(wire::TrimClip {

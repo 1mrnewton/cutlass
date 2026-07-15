@@ -9,8 +9,8 @@ use cutlass_ai::{summarize, validate};
 use cutlass_commands::{Command, EditOutcome};
 use cutlass_engine::{ApplyOutcome, Engine, EngineConfig};
 use cutlass_models::{
-    AudioRole, ClipParam, Easing, Generator, LinkId, MediaSource, ParamValue, Project, Rational,
-    RationalTime, TimeRange, TrackKind,
+    AnimationRef, AudioRole, ClipParam, Easing, Generator, LinkId, MediaSource, ParamValue,
+    Project, Rational, RationalTime, TimeRange, TrackKind,
 };
 
 const R24: Rational = Rational::FPS_24;
@@ -315,6 +315,96 @@ fn extract_audio_lowers_applies_and_undoes_as_one_edit() {
 
     assert!(engine.redo());
     assert_eq!(engine.project().clip(audio).unwrap(), &snapshot);
+}
+
+#[test]
+fn duplicate_clip_wire_preserves_properties_and_round_trips_one_edit() {
+    let mut project = Project::new("agent duplicate", R24);
+    let source_track = project.add_track(TrackKind::Sticker, "Source");
+    let destination_track = project.add_track(TrackKind::Sticker, "Copies");
+    let source = project
+        .add_generated(
+            source_track,
+            Generator::SolidColor {
+                rgba: [17, 34, 51, 255],
+            },
+            TimeRange::at_rate(0, 48, R24),
+        )
+        .unwrap();
+    let companion = project
+        .add_generated(
+            source_track,
+            Generator::SolidColor {
+                rgba: [51, 34, 17, 255],
+            },
+            TimeRange::at_rate(48, 48, R24),
+        )
+        .unwrap();
+    let link = LinkId::next();
+    for id in [source, companion] {
+        project.timeline_mut().clip_mut(id).unwrap().link = Some(link);
+    }
+    project
+        .set_param_keyframe(
+            source,
+            ClipParam::Scale,
+            RationalTime::new(24, R24),
+            ParamValue::Scalar(1.5),
+            Easing::EaseOut,
+        )
+        .unwrap();
+    project.add_effect(source, "gaussian_blur").unwrap();
+    project.set_effect_param(source, 0, 0, 9.0).unwrap();
+    project
+        .timeline_mut()
+        .clip_mut(source)
+        .unwrap()
+        .animation_combo = Some(AnimationRef::new("pulse"));
+    let source_before = project.clip(source).unwrap().clone();
+    let companion_before = project.clip(companion).unwrap().clone();
+    let mut engine = engine_with(project);
+
+    let outcome = apply(
+        &mut engine,
+        WireCommand::DuplicateClip(wire::DuplicateClip {
+            clip: source.raw(),
+            to_track: destination_track.raw(),
+            start: 5.0,
+        }),
+    );
+    let duplicate = match outcome {
+        ApplyOutcome::Edited(EditOutcome::Created(id)) => id,
+        other => panic!("expected Created, got {other:?}"),
+    };
+    assert_ne!(duplicate, source);
+
+    let duplicate_before_undo = engine.project().clip(duplicate).unwrap().clone();
+    let mut expected = source_before.clone();
+    expected.id = duplicate;
+    expected.timeline.start = RationalTime::new(120, R24);
+    expected.link = None;
+    assert_eq!(duplicate_before_undo, expected);
+    assert_eq!(
+        engine.project().timeline().track_of(duplicate),
+        Some(destination_track)
+    );
+    assert_eq!(engine.project().clip(source).unwrap(), &source_before);
+    assert_eq!(engine.project().clip(companion).unwrap(), &companion_before);
+
+    assert!(engine.undo());
+    assert!(engine.project().clip(duplicate).is_none());
+    assert_eq!(engine.project().clip(source).unwrap(), &source_before);
+    assert!(
+        !engine.undo(),
+        "the duplicate command was exactly one history entry"
+    );
+
+    assert!(engine.redo());
+    assert_eq!(
+        engine.project().clip(duplicate).unwrap(),
+        &duplicate_before_undo,
+        "redo restores the same id and complete clip state"
+    );
 }
 
 #[test]

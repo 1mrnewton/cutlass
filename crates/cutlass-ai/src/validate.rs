@@ -174,6 +174,50 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 to_track: Some(target.id),
             }
         }
+        WireCommand::DuplicateClip(args) => {
+            let clip = clip_ref(project, args.clip)?;
+            let target = track_ref(project, args.to_track)?;
+            if !target.kind.accepts_content(&clip.content) {
+                return Err(Rejection::new(format!(
+                    "clip {} cannot be duplicated onto track {} ({} lane); choose a track \
+                     compatible with the source clip's content",
+                    args.clip,
+                    args.to_track,
+                    kind_name(target.kind),
+                )));
+            }
+            if target.locked {
+                return Err(Rejection::new(format!(
+                    "destination track {} is locked; unlock it or choose another compatible track",
+                    args.to_track
+                )));
+            }
+            let start = timeline_time(project, args.start, "start")?;
+            require_non_negative(args.start, "start")?;
+            let mut destination = clip.timeline;
+            destination.start = start;
+            if target
+                .has_overlap(destination, None)
+                .map_err(|error| Rejection::new(error.to_string()))?
+            {
+                let rate = timeline_rate(project);
+                return Err(Rejection::new(format!(
+                    "track {} has a clip overlapping duplicate of clip {} in the exact \
+                     destination range {:.3}s to {:.3}s; choose another target track or a start \
+                     with {:.3}s of free space — duplicate_clip does not ripple or search for space",
+                    args.to_track,
+                    args.clip,
+                    ticks_to_seconds(destination.start.value, rate),
+                    ticks_to_seconds(destination.end_tick(), rate),
+                    ticks_to_seconds(destination.duration.value, rate),
+                )));
+            }
+            EditCommand::DuplicateClip {
+                clip: clip.id,
+                to_track: target.id,
+                start,
+            }
+        }
         WireCommand::AddGenerated(args) => {
             let track = track_ref(project, args.track)?;
             let generator = lower_generator(&args.generator, None);
@@ -2402,6 +2446,145 @@ mod tests {
         );
         assert!(msg.contains("exact timeline range"), "{msg}");
         assert!(msg.contains("choose or add a free audio track"), "{msg}");
+    }
+
+    #[test]
+    fn duplicate_clip_lowers_at_timeline_rate_without_mutating() {
+        let (mut project, _, _, _, clip, _) = fixture();
+        let destination = project.add_track(TrackKind::Video, "V2");
+        let before = serde_json::to_value(&project).unwrap();
+
+        let edit = lower(
+            &project,
+            WireCommand::DuplicateClip(wire::DuplicateClip {
+                clip,
+                to_track: destination.raw(),
+                start: 12.25,
+            }),
+        );
+
+        assert_eq!(
+            edit,
+            EditCommand::DuplicateClip {
+                clip: ClipId::from_raw(clip),
+                to_track: destination,
+                start: RationalTime::new(294, R24),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&project).unwrap(),
+            before,
+            "validation must not mutate the project"
+        );
+    }
+
+    #[test]
+    fn duplicate_clip_rejects_unknown_ids_and_invalid_starts() {
+        let (project, _, video, _, clip, _) = fixture();
+
+        let msg = reject(
+            &project,
+            WireCommand::DuplicateClip(wire::DuplicateClip {
+                clip: 999,
+                to_track: video,
+                start: 12.0,
+            }),
+        );
+        assert!(msg.contains("clip 999 does not exist"), "{msg}");
+
+        let msg = reject(
+            &project,
+            WireCommand::DuplicateClip(wire::DuplicateClip {
+                clip,
+                to_track: 999,
+                start: 12.0,
+            }),
+        );
+        assert!(msg.contains("track 999 does not exist"), "{msg}");
+
+        for start in [f64::NAN, f64::INFINITY] {
+            let msg = reject(
+                &project,
+                WireCommand::DuplicateClip(wire::DuplicateClip {
+                    clip,
+                    to_track: video,
+                    start,
+                }),
+            );
+            assert!(msg.contains("start must be a finite number"), "{msg}");
+        }
+
+        let msg = reject(
+            &project,
+            WireCommand::DuplicateClip(wire::DuplicateClip {
+                clip,
+                to_track: video,
+                start: -0.5,
+            }),
+        );
+        assert!(msg.contains("start must not be negative"), "{msg}");
+    }
+
+    #[test]
+    fn duplicate_clip_rejects_incompatible_locked_and_overlapping_destinations() {
+        let (mut project, media, _, text, clip, _) = fixture();
+
+        let msg = reject(
+            &project,
+            WireCommand::DuplicateClip(wire::DuplicateClip {
+                clip,
+                to_track: text,
+                start: 12.0,
+            }),
+        );
+        assert!(msg.contains("cannot be duplicated"), "{msg}");
+        assert!(msg.contains("text lane"), "{msg}");
+
+        let destination = project.add_track(TrackKind::Video, "V2");
+        project
+            .timeline_mut()
+            .track_mut(destination)
+            .unwrap()
+            .locked = true;
+        let msg = reject(
+            &project,
+            WireCommand::DuplicateClip(wire::DuplicateClip {
+                clip,
+                to_track: destination.raw(),
+                start: 12.0,
+            }),
+        );
+        assert!(msg.contains("destination track"), "{msg}");
+        assert!(msg.contains("locked"), "{msg}");
+        assert!(msg.contains("unlock it or choose another"), "{msg}");
+
+        project
+            .timeline_mut()
+            .track_mut(destination)
+            .unwrap()
+            .locked = false;
+        project
+            .add_clip(
+                destination,
+                MediaId::from_raw(media),
+                TimeRange::at_rate(0, 24, R24),
+                RationalTime::new(480, R24),
+            )
+            .unwrap();
+        let msg = reject(
+            &project,
+            WireCommand::DuplicateClip(wire::DuplicateClip {
+                clip,
+                to_track: destination.raw(),
+                start: 12.0,
+            }),
+        );
+        assert!(
+            msg.contains("exact destination range 12.000s to 22.000s"),
+            "{msg}"
+        );
+        assert!(msg.contains("10.000s of free space"), "{msg}");
+        assert!(msg.contains("does not ripple or search for space"), "{msg}");
     }
 
     #[test]

@@ -45,7 +45,8 @@ use serde::{Deserialize, Serialize};
 /// 22: complete-group unlinking (`unlink_clips`) and bounded link-group lists.
 /// 23: effect-chain reordering (`move_effect`).
 /// 24: explicit-target audio extraction (`extract_audio`).
-pub const TOOL_SCHEMA_VERSION: u32 = 24;
+/// 25: explicit-target, property-preserving clip duplication (`duplicate_clip`).
+pub const TOOL_SCHEMA_VERSION: u32 = 25;
 
 /// Model-facing clip lists stay small enough for deterministic validation and
 /// useful rejection messages while covering realistic linked groups.
@@ -142,6 +143,19 @@ pub struct ExtractAudio {
     /// Target unlocked audio track. This is required: call `add_track` first
     /// when no suitable audio lane exists, then use its returned id.
     pub track: u64,
+}
+
+/// Make a deep property-preserving copy of one clip at an explicit target
+/// track and timeline start. The copy receives a fresh unlinked clip id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DuplicateClip {
+    /// Source clip to copy.
+    pub clip: u64,
+    /// Explicit destination track id.
+    pub to_track: u64,
+    /// Explicit destination start in timeline seconds.
+    pub start: f64,
 }
 
 /// Place a generated clip (text, solid color, shape) on a matching track.
@@ -849,6 +863,7 @@ pub enum WireCommand {
     AddTrack(AddTrack),
     AddClip(AddClip),
     ExtractAudio(ExtractAudio),
+    DuplicateClip(DuplicateClip),
     AddGenerated(AddGenerated),
     SetGenerator(SetGenerator),
     SetClipTransform(SetClipTransform),
@@ -930,6 +945,10 @@ impl WireCommand {
             WireCommand::ExtractAudio(a) => {
                 clip(&mut a.clip);
                 track(&mut a.track);
+            }
+            WireCommand::DuplicateClip(a) => {
+                clip(&mut a.clip);
+                track(&mut a.to_track);
             }
             WireCommand::AddGenerated(a) => track(&mut a.track),
             WireCommand::SetGenerator(a) => clip(&mut a.clip),
@@ -1089,6 +1108,8 @@ tools! {
         "Place a trimmed range of an imported media file on a video or audio track. Times are in seconds.";
     "extract_audio" => ExtractAudio(ExtractAudio),
         "Detach a video clip's embedded sound onto an existing unlocked audio track, preserving its exact placement and audio/retime settings. The track id is required: call add_track with kind audio first when needed, then pass the returned id. Keeping the target explicit lets planned track ids remap correctly during replay.";
+    "duplicate_clip" => DuplicateClip(DuplicateClip),
+        "Make a deep property-preserving copy of one clip at an explicit target track and start (timeline seconds). The copy gets a fresh unlinked clip id. This tool does not ripple clips or search for space; choose a non-overlapping destination explicitly.";
     "add_generated" => AddGenerated(AddGenerated),
         "Place a generated clip (text title, solid color, or shape) on a matching track. Times are in seconds.";
     "set_generator" => SetGenerator(SetGenerator),
@@ -1212,6 +1233,45 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_clip_tagged_json_and_tool_arguments_are_strict() {
+        let json = serde_json::json!({
+            "command": "duplicate_clip",
+            "clip": 7,
+            "to_track": 3,
+            "start": 12.5,
+        });
+        let command: WireCommand = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            command,
+            WireCommand::DuplicateClip(DuplicateClip {
+                clip: 7,
+                to_track: 3,
+                start: 12.5,
+            })
+        );
+        assert_eq!(command.tool_name(), "duplicate_clip");
+
+        let missing = WireCommand::from_tool_call(
+            "duplicate_clip",
+            serde_json::json!({ "clip": 7, "to_track": 3 }),
+        )
+        .unwrap_err();
+        assert!(missing.contains("missing field `start`"), "{missing}");
+
+        let extra = WireCommand::from_tool_call(
+            "duplicate_clip",
+            serde_json::json!({
+                "clip": 7,
+                "to_track": 3,
+                "start": 12.5,
+                "ripple": true,
+            }),
+        )
+        .unwrap_err();
+        assert!(extra.contains("unknown field `ripple`"), "{extra}");
+    }
+
+    #[test]
     fn from_tool_call_rejects_unknown_tool_and_bad_args() {
         let err = WireCommand::from_tool_call("save_project", serde_json::json!({})).unwrap_err();
         assert!(err.contains("unknown tool 'save_project'"));
@@ -1315,6 +1375,21 @@ mod tests {
             WireCommand::ExtractAudio(ExtractAudio { clip: 99, track: 7 })
         );
 
+        let mut duplicate = WireCommand::DuplicateClip(DuplicateClip {
+            clip: 10,
+            to_track: 2,
+            start: 8.0,
+        });
+        duplicate.remap_ids(&clip_map, &track_map, &marker_map);
+        assert_eq!(
+            duplicate,
+            WireCommand::DuplicateClip(DuplicateClip {
+                clip: 99,
+                to_track: 7,
+                start: 8.0,
+            })
+        );
+
         // Unmapped ids pass through; link lists remap element-wise.
         let mut link = WireCommand::LinkClips(LinkClips {
             clips: vec![10, 11],
@@ -1361,7 +1436,7 @@ mod tests {
     #[test]
     fn tool_specs_cover_every_command_with_object_schemas() {
         let specs = tool_specs();
-        assert_eq!(specs.len(), 46);
+        assert_eq!(specs.len(), 47);
         for spec in &specs {
             assert!(
                 !spec.description.is_empty(),
@@ -1397,6 +1472,36 @@ mod tests {
             WireCommand::from_tool_call("extract_audio", serde_json::json!({"clip": 7}))
                 .unwrap_err()
                 .contains("missing field `track`")
+        );
+    }
+
+    #[test]
+    fn duplicate_clip_schema_requires_only_explicit_placement_fields() {
+        let specs = tool_specs();
+        let duplicate = specs
+            .iter()
+            .find(|spec| spec.name == "duplicate_clip")
+            .expect("duplicate_clip tool");
+        assert_eq!(
+            duplicate.parameters["required"],
+            serde_json::json!(["clip", "to_track", "start"])
+        );
+        assert_eq!(duplicate.parameters["additionalProperties"], false);
+        assert!(
+            duplicate
+                .description
+                .contains("deep property-preserving copy")
+        );
+        assert!(duplicate.description.contains("fresh unlinked clip id"));
+        assert!(
+            duplicate
+                .description
+                .contains("explicit target track and start")
+        );
+        assert!(
+            duplicate
+                .description
+                .contains("does not ripple clips or search for space")
         );
     }
 

@@ -338,6 +338,75 @@ fn cut_the_first_three_seconds() {
 }
 
 #[test]
+fn duplicate_selected_clip_and_one_prompt_undo_removes_the_copy() {
+    let (mut host, _, track, clip) = fixture();
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![(
+            "call_1",
+            "duplicate_clip",
+            serde_json::json!({
+                "clip": clip,
+                "to_track": track,
+                "start": 12.0,
+            }),
+        )]),
+        text_turn("Duplicated the selected clip at 12 seconds."),
+    ]);
+    let context = EditorContext {
+        selected_clips: vec![clip],
+        ..Default::default()
+    };
+
+    let (outcome, _) = run(
+        &provider,
+        &mut host,
+        &context,
+        "duplicate the selected clip at 12 seconds",
+        &AgentConfig::default(),
+    );
+
+    assert_eq!(outcome.status, PromptStatus::Completed);
+    assert_eq!(outcome.actions.len(), 1);
+    assert_eq!(
+        outcome.actions[0].command,
+        WireCommand::DuplicateClip(cutlass_ai::wire::DuplicateClip {
+            clip,
+            to_track: track,
+            start: 12.0,
+        })
+    );
+    let duplicate = host
+        .engine
+        .project()
+        .timeline()
+        .tracks_ordered()
+        .flat_map(|track| track.clips())
+        .find(|candidate| candidate.id.raw() != clip)
+        .expect("duplicated clip")
+        .clone();
+    assert_eq!(duplicate.timeline, TimeRange::at_rate(288, 240, R24));
+    assert_eq!(duplicate.link, None);
+    assert_eq!(
+        outcome.actions[0].description,
+        format!(
+            "duplicated clip {clip} onto track {track} at 12.00s (new clip {})",
+            duplicate.id.raw()
+        )
+    );
+
+    assert!(host.engine.undo(), "one prompt is one undo entry");
+    assert!(host.engine.project().clip(duplicate.id).is_none());
+    assert!(
+        host.engine
+            .project()
+            .clip(cutlass_models::ClipId::from_raw(clip))
+            .is_some()
+    );
+    assert_eq!(host.engine.project().timeline().clip_count(), 1);
+    assert!(!host.engine.undo(), "the fixture itself created no history");
+}
+
+#[test]
 fn unlink_one_member_commits_the_complete_group_as_one_phase() {
     let mut project = Project::new("eval-unlink", R24);
     let track = project.add_track(TrackKind::Sticker, "Overlays");

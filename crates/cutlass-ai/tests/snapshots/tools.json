@@ -129,6 +129,41 @@
       }
     },
     {
+      "description": "Make a deep property-preserving copy of one clip at an explicit target track and start (timeline seconds). The copy gets a fresh unlinked clip id. This tool does not ripple clips or search for space; choose a non-overlapping destination explicitly.",
+      "name": "duplicate_clip",
+      "parameters": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Make a deep property-preserving copy of one clip at an explicit target\ntrack and timeline start. The copy receives a fresh unlinked clip id.",
+        "properties": {
+          "clip": {
+            "description": "Source clip to copy.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start": {
+            "description": "Explicit destination start in timeline seconds.",
+            "format": "double",
+            "type": "number"
+          },
+          "to_track": {
+            "description": "Explicit destination track id.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "clip",
+          "to_track",
+          "start"
+        ],
+        "title": "DuplicateClip",
+        "type": "object"
+      }
+    },
+    {
       "description": "Place a generated clip (text title, solid color, or shape) on a matching track. Times are in seconds.",
       "name": "add_generated",
       "parameters": {
@@ -1978,5 +2013,5 @@
       }
     }
   ],
-  "version": 24
+  "version": 25
 }

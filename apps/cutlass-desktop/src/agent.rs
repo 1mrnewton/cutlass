@@ -430,14 +430,25 @@ fn sandbox_engine() -> Result<Engine, String> {
         .map_err(|e| format!("agent sandbox engine failed to start: {e}"))
 }
 
-struct SandboxBridge<'a> {
+trait ProjectSnapshotSource {
+    fn snapshot_project(&self) -> Option<cutlass_models::Project>;
+}
+
+impl ProjectSnapshotSource for WorkerHandle {
+    fn snapshot_project(&self) -> Option<cutlass_models::Project> {
+        WorkerHandle::snapshot_project(self)
+    }
+}
+
+struct SandboxBridge<'a, W: ProjectSnapshotSource + ?Sized> {
+    worker: &'a W,
     engine: &'a mut Engine,
     plan: &'a mut Vec<AgentPlanStep>,
     senses: &'a mut AgentSenses,
     default_playhead_seconds: f64,
 }
 
-impl EngineBridge for SandboxBridge<'_> {
+impl<W: ProjectSnapshotSource + ?Sized> EngineBridge for SandboxBridge<'_, W> {
     fn summary(&mut self) -> ProjectSummary {
         summarize(self.engine.project())
     }
@@ -465,6 +476,46 @@ impl EngineBridge for SandboxBridge<'_> {
             return Err("cancelled while the media sense was running".into());
         }
         Ok(output)
+    }
+
+    fn before_host_call(
+        &mut self,
+        name: &str,
+        _arguments: &serde_json::Value,
+    ) -> Result<(), String> {
+        if cutlass_ai::namespace(name) == "project" && !self.plan.is_empty() {
+            return Err(format!(
+                "{name} cannot run while timeline edits are staged; project operations must \
+                 happen before staged edits, or after the user applies or discards the pending \
+                 plan"
+            ));
+        }
+        Ok(())
+    }
+
+    fn after_host_call(
+        &mut self,
+        name: &str,
+        _arguments: &serde_json::Value,
+        _result: Result<&ToolOutput, &str>,
+    ) -> Result<(), String> {
+        if cutlass_ai::namespace(name) != "project" {
+            return Ok(());
+        }
+
+        let snapshot = self.worker.snapshot_project().ok_or_else(|| {
+            format!(
+                "could not reconcile the agent sandbox after project host call '{name}': \
+                 the editor engine did not reply with a live project snapshot"
+            )
+        })?;
+        self.plan.clear();
+        self.engine.reset_project(snapshot);
+        // `reset_project` clears history, including the prompt's pending
+        // group. Reopen it immediately so any later staged edit is still
+        // covered by the core loop's normal abort rollback.
+        self.engine.begin_group();
+        Ok(())
     }
 
     fn apply(&mut self, command: &WireCommand) -> Result<EditOutcome, String> {
@@ -683,6 +734,7 @@ pub struct DesktopToolHost {
     approval_rx: Receiver<ApprovalDecision>,
     pending_approval_id: Arc<AtomicU64>,
     approval_id_allocator: Arc<AtomicU64>,
+    ordinary_host_call_attempted: bool,
 }
 
 impl DesktopToolHost {
@@ -703,7 +755,12 @@ impl DesktopToolHost {
             approval_rx,
             pending_approval_id,
             approval_id_allocator,
+            ordinary_host_call_attempted: false,
         }
+    }
+
+    fn ordinary_host_call_attempted(&self) -> bool {
+        self.ordinary_host_call_attempted
     }
 }
 
@@ -785,13 +842,44 @@ impl ToolHost for DesktopToolHost {
         arguments: &serde_json::Value,
         cancel: &AtomicBool,
     ) -> Result<ToolOutput, String> {
-        match cutlass_ai::namespace(name) {
+        let namespace = cutlass_ai::namespace(name);
+        if matches!(namespace, "app" | "project" | "system") {
+            // Set this before dispatch: an error can still follow a partial
+            // host-side effect, so abort messaging must be conservative.
+            self.ordinary_host_call_attempted = true;
+        }
+        match namespace {
             "app" => crate::agent_app_control::call(self.app.clone(), name, arguments, cancel),
             "system" => {
                 crate::agent_system::call(self.cache_registry.as_ref(), name, arguments, cancel)
             }
             other => Err(format!("unsupported desktop tool namespace '{other}'")),
         }
+    }
+}
+
+fn abort_status_message(reason: &str, ordinary_host_call_attempted: bool) -> String {
+    if !ordinary_host_call_attempted {
+        return if reason == "cancelled" {
+            "Stopped — nothing was applied.".to_string()
+        } else if reason.contains("402") {
+            // The managed proxy's out-of-credits answer.
+            "Out of Cutlass credits — buy a pack in Settings > Account. \
+             Nothing was applied."
+                .to_string()
+        } else {
+            format!("{reason} — nothing was applied.")
+        };
+    }
+
+    let effect_notice = "Timeline edits staged by this prompt were rolled back and were not \
+                         applied; any host actions that already completed remain in effect.";
+    if reason == "cancelled" {
+        format!("Stopped — {effect_notice}")
+    } else if reason.contains("402") {
+        format!("Out of Cutlass credits — buy a pack in Settings > Account. {effect_notice}")
+    } else {
+        format!("{reason} — {effect_notice}")
     }
 }
 
@@ -1096,6 +1184,7 @@ fn run_one_prompt(
     let plan_base = preview.plan.len();
     let mut plan: Vec<AgentPlanStep> = preview.plan.clone();
     let mut bridge = SandboxBridge {
+        worker,
         engine,
         plan: &mut plan,
         senses,
@@ -1133,6 +1222,7 @@ fn run_one_prompt(
         cancel,
         &mut on_event,
     );
+    let ordinary_host_call_attempted = tool_host.ordinary_host_call_attempted();
 
     match outcome.status {
         PromptStatus::Aborted(reason) => {
@@ -1140,16 +1230,7 @@ fn run_one_prompt(
             push_entry(
                 store,
                 "error",
-                if reason == "cancelled" {
-                    "Stopped — nothing was applied.".to_string()
-                } else if reason.contains("402") {
-                    // The managed proxy's out-of-credits answer.
-                    "Out of Cutlass credits — buy a pack in Settings > Account. \
-                     Nothing was applied."
-                        .to_string()
-                } else {
-                    format!("{reason} — nothing was applied.")
-                },
+                abort_status_message(&reason, ordinary_host_call_attempted),
             );
         }
         PromptStatus::Completed | PromptStatus::DryRun => {
@@ -1296,6 +1377,8 @@ mod tests {
     use cutlass_models::{
         Generator, MediaSource, Project, Rational, RationalTime, TimeRange, TrackKind,
     };
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
 
     const TEST_APPROVAL_WAIT: Duration = Duration::from_millis(10);
 
@@ -1550,6 +1633,62 @@ mod tests {
     }
 
     #[test]
+    fn desktop_host_tracks_attempts_before_dispatch_without_ui() {
+        let (_tx, rx) = unbounded();
+        let mut host = DesktopToolHost::new(
+            Autonomy::Full,
+            slint::Weak::default(),
+            slint::Weak::default(),
+            None,
+            rx,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let cancel = AtomicBool::new(false);
+
+        assert!(!host.ordinary_host_call_attempted());
+        let error = host
+            .call("project_future_operation", &serde_json::json!({}), &cancel)
+            .expect_err("future project dispatch is not wired yet");
+        assert!(error.contains("unsupported desktop tool namespace 'project'"));
+        assert!(host.ordinary_host_call_attempted());
+    }
+
+    #[test]
+    fn abort_status_distinguishes_sandbox_only_from_host_effects() {
+        assert_eq!(
+            abort_status_message("cancelled", false),
+            "Stopped — nothing was applied."
+        );
+        assert_eq!(
+            abort_status_message("provider failed", false),
+            "provider failed — nothing was applied."
+        );
+
+        let cancelled_after_host = abort_status_message("cancelled", true);
+        assert!(cancelled_after_host.starts_with("Stopped —"));
+        assert!(
+            cancelled_after_host.contains("Timeline edits staged by this prompt were rolled back"),
+            "{cancelled_after_host}"
+        );
+        assert!(
+            cancelled_after_host.contains("host actions that already completed remain in effect"),
+            "{cancelled_after_host}"
+        );
+        assert!(
+            !cancelled_after_host.contains("nothing was applied"),
+            "{cancelled_after_host}"
+        );
+
+        let credits_after_host = abort_status_message("HTTP 402", true);
+        assert!(credits_after_host.contains("Out of Cutlass credits"));
+        assert!(
+            credits_after_host.contains("Timeline edits staged by this prompt were rolled back")
+        );
+        assert!(credits_after_host.contains("remain in effect"));
+    }
+
+    #[test]
     fn transcript_images_decode_through_the_bounded_rgba_boundary() {
         let expected = cutlass_render::RgbaImage::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 128]);
         let image = cutlass_ai::ImagePart::png(
@@ -1599,6 +1738,40 @@ mod tests {
         Engine::with_project(EngineConfig::default(), project).expect("engine")
     }
 
+    struct UnexpectedProjectSnapshot;
+
+    impl ProjectSnapshotSource for UnexpectedProjectSnapshot {
+        fn snapshot_project(&self) -> Option<Project> {
+            panic!("this test must not request a live project snapshot")
+        }
+    }
+
+    static UNEXPECTED_PROJECT_SNAPSHOT: UnexpectedProjectSnapshot = UnexpectedProjectSnapshot;
+
+    struct ScriptedProjectSnapshots {
+        snapshots: RefCell<VecDeque<Option<Project>>>,
+        calls: Cell<usize>,
+    }
+
+    impl ScriptedProjectSnapshots {
+        fn new(snapshots: impl IntoIterator<Item = Option<Project>>) -> Self {
+            Self {
+                snapshots: RefCell::new(snapshots.into_iter().collect()),
+                calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl ProjectSnapshotSource for ScriptedProjectSnapshots {
+        fn snapshot_project(&self) -> Option<Project> {
+            self.calls.set(self.calls.get() + 1);
+            self.snapshots
+                .borrow_mut()
+                .pop_front()
+                .expect("scripted project snapshot")
+        }
+    }
+
     #[test]
     fn sandbox_bridge_exposes_read_only_senses_of_its_project() {
         let (project, _) = fixture_project();
@@ -1608,6 +1781,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let output = {
             let mut bridge = SandboxBridge {
+                worker: &UNEXPECTED_PROJECT_SNAPSHOT,
                 engine: &mut sandbox,
                 plan: &mut plan,
                 senses: &mut senses,
@@ -1630,6 +1804,206 @@ mod tests {
     }
 
     #[test]
+    fn project_host_pre_hook_rejects_an_existing_staged_plan() {
+        let (project, _) = fixture_project();
+        let mut sandbox = temp_engine(project);
+        let mut plan = vec![AgentPlanStep {
+            command: WireCommand::AddMarker(wire::AddMarker {
+                at: 1.0,
+                name: Some("pending".into()),
+                color: None,
+            }),
+            created: None,
+        }];
+        let mut senses = AgentSenses::new();
+        let mut bridge = SandboxBridge {
+            worker: &UNEXPECTED_PROJECT_SNAPSHOT,
+            engine: &mut sandbox,
+            plan: &mut plan,
+            senses: &mut senses,
+            default_playhead_seconds: 0.0,
+        };
+
+        let error = bridge
+            .before_host_call(
+                "project_import_media",
+                &serde_json::json!({ "path": "/tmp/new.mp4" }),
+            )
+            .expect_err("project mutation must not invalidate a staged plan");
+        assert!(error.contains("before staged edits"), "{error}");
+        assert!(
+            error.contains("applies or discards the pending plan"),
+            "{error}"
+        );
+        assert_eq!(
+            bridge.before_host_call("app_state", &serde_json::json!({})),
+            Ok(()),
+            "non-project host tools are unchanged"
+        );
+    }
+
+    #[test]
+    fn project_post_hook_refreshes_after_host_success_and_failure_and_reopens_group() {
+        fn live_snapshot(name: &str) -> Project {
+            let mut project = Project::new(name, Rational::FPS_24);
+            project.add_track(TrackKind::Video, "Live Main");
+            project
+        }
+
+        let success_snapshot = live_snapshot("after-success");
+        let failure_snapshot = live_snapshot("after-failure");
+        let snapshots = ScriptedProjectSnapshots::new([
+            Some(success_snapshot.clone()),
+            Some(failure_snapshot.clone()),
+        ]);
+
+        let mut success_sandbox = temp_engine(live_snapshot("stale-success"));
+        let mut success_plan = Vec::new();
+        let mut success_senses = AgentSenses::new();
+        {
+            let mut bridge = SandboxBridge {
+                worker: &snapshots,
+                engine: &mut success_sandbox,
+                plan: &mut success_plan,
+                senses: &mut success_senses,
+                default_playhead_seconds: 0.0,
+            };
+            bridge.begin_group();
+            let output = ToolOutput::text(r#"{"media_id":42}"#);
+            bridge
+                .after_host_call(
+                    "project_import_media",
+                    &serde_json::json!({ "path": "/tmp/new.mp4" }),
+                    Ok(&output),
+                )
+                .expect("successful project call reconciliation");
+            assert_eq!(bridge.engine.project().name, "after-success");
+            assert!(bridge.plan.is_empty());
+
+            bridge
+                .apply(&WireCommand::AddMarker(wire::AddMarker {
+                    at: 1.0,
+                    name: Some("later edit".into()),
+                    color: None,
+                }))
+                .expect("edit after reconciliation");
+            assert_eq!(bridge.engine.project().timeline().marker_count(), 1);
+            bridge.rollback_group();
+        }
+        assert_eq!(success_sandbox.project().name, "after-success");
+        assert_eq!(
+            success_sandbox.project().timeline().marker_count(),
+            success_snapshot.timeline().marker_count(),
+            "abort rollback restores the reconciled live snapshot"
+        );
+        assert!(
+            !success_sandbox.undo(),
+            "the reopened group did not leak an undo entry"
+        );
+
+        let mut failure_sandbox = temp_engine(live_snapshot("stale-failure"));
+        let mut failure_plan = Vec::new();
+        let mut failure_senses = AgentSenses::new();
+        {
+            let mut bridge = SandboxBridge {
+                worker: &snapshots,
+                engine: &mut failure_sandbox,
+                plan: &mut failure_plan,
+                senses: &mut failure_senses,
+                default_playhead_seconds: 0.0,
+            };
+            bridge.begin_group();
+            bridge
+                .after_host_call(
+                    "project_import_media",
+                    &serde_json::json!({ "path": "/tmp/bad.mp4" }),
+                    Err("import failed after dispatch"),
+                )
+                .expect("failed host result still reconciles");
+            assert_eq!(bridge.engine.project().name, "after-failure");
+            assert!(bridge.plan.is_empty());
+            bridge.rollback_group();
+        }
+        assert_eq!(failure_sandbox.project().name, "after-failure");
+        assert_eq!(
+            snapshots.calls.get(),
+            2,
+            "one ordered snapshot per dispatch"
+        );
+        assert!(
+            snapshots.snapshots.borrow().is_empty(),
+            "snapshots were consumed in queue order"
+        );
+    }
+
+    #[test]
+    fn project_post_hook_fails_hard_when_the_worker_cannot_reply() {
+        let snapshots = ScriptedProjectSnapshots::new([None]);
+        let (project, _) = fixture_project();
+        let mut sandbox = temp_engine(project);
+        let mut plan = Vec::new();
+        let mut senses = AgentSenses::new();
+        let mut bridge = SandboxBridge {
+            worker: &snapshots,
+            engine: &mut sandbox,
+            plan: &mut plan,
+            senses: &mut senses,
+            default_playhead_seconds: 0.0,
+        };
+        bridge.begin_group();
+
+        let error = bridge
+            .after_host_call(
+                "project_relink_media",
+                &serde_json::json!({}),
+                Err("host result is immaterial"),
+            )
+            .expect_err("a missing live snapshot must abort reconciliation");
+        assert!(error.contains("could not reconcile"), "{error}");
+        assert!(error.contains("did not reply"), "{error}");
+        bridge.rollback_group();
+    }
+
+    #[test]
+    fn non_project_host_hooks_do_not_snapshot_or_reset_the_sandbox() {
+        let snapshots =
+            ScriptedProjectSnapshots::new([Some(Project::new("unused", Rational::FPS_24))]);
+        let (project, _) = fixture_project();
+        let mut sandbox = temp_engine(project);
+        let revision = sandbox.revision();
+        let mut plan = vec![AgentPlanStep {
+            command: WireCommand::AddMarker(wire::AddMarker {
+                at: 1.0,
+                name: None,
+                color: None,
+            }),
+            created: None,
+        }];
+        let mut senses = AgentSenses::new();
+        let mut bridge = SandboxBridge {
+            worker: &snapshots,
+            engine: &mut sandbox,
+            plan: &mut plan,
+            senses: &mut senses,
+            default_playhead_seconds: 0.0,
+        };
+        let output = ToolOutput::text("ok");
+
+        assert_eq!(
+            bridge.before_host_call("app_state", &serde_json::json!({})),
+            Ok(())
+        );
+        assert_eq!(
+            bridge.after_host_call("app_state", &serde_json::json!({}), Ok(&output)),
+            Ok(())
+        );
+        assert_eq!(snapshots.calls.get(), 0);
+        assert_eq!(bridge.engine.revision(), revision);
+        assert_eq!(bridge.engine.project().name, "agent-ui-fixture");
+        assert_eq!(bridge.plan.len(), 1);
+    }
+
+    #[test]
     fn rehearsed_plan_replays_with_id_remapping_and_single_undo() {
         let (project, media) = fixture_project();
         let mut sandbox = temp_engine(project.clone());
@@ -1638,6 +2012,7 @@ mod tests {
         let mut plan: Vec<AgentPlanStep> = Vec::new();
         let mut senses = AgentSenses::new();
         let mut bridge = SandboxBridge {
+            worker: &UNEXPECTED_PROJECT_SNAPSHOT,
             engine: &mut sandbox,
             plan: &mut plan,
             senses: &mut senses,
@@ -1805,6 +2180,7 @@ mod tests {
         let mut plan: Vec<AgentPlanStep> = Vec::new();
         let mut senses = AgentSenses::new();
         let mut bridge = SandboxBridge {
+            worker: &UNEXPECTED_PROJECT_SNAPSHOT,
             engine: &mut sandbox,
             plan: &mut plan,
             senses: &mut senses,
@@ -1910,6 +2286,7 @@ mod tests {
         let mut plan: Vec<AgentPlanStep> = Vec::new();
         let mut senses = AgentSenses::new();
         let mut bridge = SandboxBridge {
+            worker: &UNEXPECTED_PROJECT_SNAPSHOT,
             engine: &mut sandbox,
             plan: &mut plan,
             senses: &mut senses,

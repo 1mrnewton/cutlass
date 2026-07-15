@@ -29,6 +29,10 @@ struct EngineHost {
     sense_outputs: std::collections::VecDeque<Result<ToolOutput, String>>,
     sense_calls: Vec<(String, serde_json::Value)>,
     sense_clip_counts: Vec<usize>,
+    before_host_outputs: std::collections::VecDeque<Result<(), String>>,
+    after_host_outputs: std::collections::VecDeque<Result<(), String>>,
+    before_host_calls: Vec<(String, serde_json::Value)>,
+    after_host_calls: Vec<(String, serde_json::Value, bool)>,
 }
 
 impl EngineHost {
@@ -40,6 +44,10 @@ impl EngineHost {
             sense_outputs: std::collections::VecDeque::new(),
             sense_calls: Vec::new(),
             sense_clip_counts: Vec::new(),
+            before_host_outputs: std::collections::VecDeque::new(),
+            after_host_outputs: std::collections::VecDeque::new(),
+            before_host_calls: Vec::new(),
+            after_host_calls: Vec::new(),
         }
     }
 }
@@ -65,6 +73,27 @@ impl EngineBridge for EngineHost {
         self.sense_outputs
             .pop_front()
             .unwrap_or_else(|| Err("scripted engine sense ran out of outputs".into()))
+    }
+
+    fn before_host_call(
+        &mut self,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<(), String> {
+        self.before_host_calls
+            .push((name.to_string(), arguments.clone()));
+        self.before_host_outputs.pop_front().unwrap_or(Ok(()))
+    }
+
+    fn after_host_call(
+        &mut self,
+        name: &str,
+        arguments: &serde_json::Value,
+        result: Result<&ToolOutput, &str>,
+    ) -> Result<(), String> {
+        self.after_host_calls
+            .push((name.to_string(), arguments.clone(), result.is_ok()));
+        self.after_host_outputs.pop_front().unwrap_or(Ok(()))
     }
 
     fn apply(&mut self, command: &WireCommand) -> Result<EditOutcome, String> {
@@ -187,6 +216,7 @@ fn run(
 struct ScriptedHost {
     specs: Vec<HostToolSpec>,
     outputs: std::collections::VecDeque<Result<ToolOutput, String>>,
+    authorizations: Vec<(String, serde_json::Value, ToolTier)>,
     calls: Vec<(String, serde_json::Value)>,
 }
 
@@ -195,6 +225,7 @@ impl ScriptedHost {
         Self {
             specs,
             outputs: outputs.into(),
+            authorizations: Vec::new(),
             calls: Vec::new(),
         }
     }
@@ -203,6 +234,23 @@ impl ScriptedHost {
 impl ToolHost for ScriptedHost {
     fn tools(&self) -> Vec<HostToolSpec> {
         self.specs.clone()
+    }
+
+    fn authorize(
+        &mut self,
+        name: &str,
+        arguments: &serde_json::Value,
+        tier: ToolTier,
+        _cancel: &AtomicBool,
+    ) -> Result<(), String> {
+        self.authorizations
+            .push((name.to_string(), arguments.clone(), tier));
+        match tier {
+            ToolTier::ReadOnly | ToolTier::Workspace => Ok(()),
+            ToolTier::System => Err(format!(
+                "system tool '{name}' requires confirmation, but this host has no approval broker"
+            )),
+        }
     }
 
     fn call(
@@ -1897,6 +1945,195 @@ fn host_tool_round_trip_carries_arguments_images_and_events() {
     assert!(events.iter().any(
         |event| matches!(event, AgentEvent::Image(image) if image.label == "preview at 1.50s")
     ));
+}
+
+#[test]
+fn host_pre_hook_rejection_skips_authorization_dispatch_and_post() {
+    let (mut bridge, _, _, _) = fixture();
+    bridge
+        .before_host_outputs
+        .push_back(Err("project operations must run before staged edits".into()));
+    let arguments = serde_json::json!({ "path": "/tmp/new.mp4" });
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![("call_1", "project_import_media", arguments.clone())]),
+        text_turn("I need to import before editing."),
+    ]);
+    let mut tool_host = ScriptedHost::new(
+        vec![host_spec("project_import_media")],
+        vec![Ok(ToolOutput::text("imported"))],
+    );
+
+    let (outcome, _) = run_with(
+        &provider,
+        &mut bridge,
+        &mut tool_host,
+        &EditorContext::default(),
+        "import this",
+        &AgentConfig::default(),
+    );
+
+    assert_eq!(outcome.status, PromptStatus::Completed);
+    assert_eq!(
+        bridge.before_host_calls,
+        vec![("project_import_media".into(), arguments)]
+    );
+    assert!(bridge.after_host_calls.is_empty());
+    assert!(tool_host.authorizations.is_empty());
+    assert!(tool_host.calls.is_empty());
+    match provider.requests()[1].last().unwrap() {
+        Message::ToolResult { content, .. } => {
+            assert!(
+                content.contains("rejected: project operations must run before staged edits"),
+                "{content}"
+            );
+        }
+        other => panic!("expected tool result, got {other:?}"),
+    }
+}
+
+#[test]
+fn host_post_hook_runs_after_success_and_failure_without_changing_outputs() {
+    let (mut bridge, _, _, _) = fixture();
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![
+            (
+                "call_1",
+                "media_screenshot_preview",
+                serde_json::json!({ "at": 1.0 }),
+            ),
+            (
+                "call_2",
+                "media_screenshot_preview",
+                serde_json::json!({ "at": 2.0 }),
+            ),
+        ]),
+        text_turn("Checked both frames."),
+    ]);
+    let mut tool_host = ScriptedHost::new(
+        vec![host_spec("media_screenshot_preview")],
+        vec![
+            Ok(ToolOutput {
+                text: "first frame".into(),
+                images: vec![ImagePart::png(vec![4, 5, 6], "first")],
+            }),
+            Err("second frame unavailable".into()),
+        ],
+    );
+
+    let (outcome, events) = run_with(
+        &provider,
+        &mut bridge,
+        &mut tool_host,
+        &EditorContext::default(),
+        "check two frames",
+        &AgentConfig::default(),
+    );
+
+    assert_eq!(outcome.status, PromptStatus::Completed);
+    assert_eq!(
+        bridge
+            .after_host_calls
+            .iter()
+            .map(|(name, arguments, succeeded)| (
+                name.as_str(),
+                arguments["at"].as_f64(),
+                *succeeded
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("media_screenshot_preview", Some(1.0), true),
+            ("media_screenshot_preview", Some(2.0), false),
+        ]
+    );
+    let requests = provider.requests();
+    let results = requests[1]
+        .iter()
+        .filter_map(|message| match message {
+            Message::ToolResult {
+                call_id,
+                content,
+                images,
+            } => Some((call_id.as_str(), content.as_str(), images.as_slice())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].0, "call_1");
+    assert_eq!(results[0].1, "first frame");
+    assert_eq!(results[0].2[0].label, "first");
+    assert_eq!(results[1].0, "call_2");
+    assert_eq!(results[1].1, "rejected: second frame unavailable");
+    assert!(results[1].2.is_empty());
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Image(image) if image.label == "first"))
+    );
+}
+
+#[test]
+fn host_post_hook_failure_aborts_and_rolls_back_before_more_work() {
+    let (mut bridge, _, _, clip) = fixture();
+    bridge
+        .after_host_outputs
+        .push_back(Err("live project snapshot did not reply".into()));
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![(
+            "edit_1",
+            "split_clip",
+            serde_json::json!({ "clip": clip, "at": 5.0 }),
+        )]),
+        tool_turn(vec![
+            ("host_1", "app_ping", serde_json::json!({})),
+            (
+                "edit_2",
+                "add_track",
+                serde_json::json!({ "kind": "text", "name": "Too late" }),
+            ),
+        ]),
+        text_turn("This turn must never run."),
+    ]);
+    let mut tool_host = ScriptedHost::new(
+        vec![host_spec("app_ping")],
+        vec![Ok(ToolOutput::text("pong"))],
+    );
+
+    let (outcome, events) = run_with(
+        &provider,
+        &mut bridge,
+        &mut tool_host,
+        &EditorContext::default(),
+        "split, ping, then add a track",
+        &AgentConfig::default(),
+    );
+
+    match &outcome.status {
+        PromptStatus::Aborted(reason) => {
+            assert!(reason.contains("reconciliation failed"), "{reason}");
+            assert!(
+                reason.contains("host effects may already have occurred"),
+                "{reason}"
+            );
+        }
+        other => panic!("expected abort, got {other:?}"),
+    }
+    assert_eq!(provider.requests().len(), 2, "no later provider turn");
+    assert_eq!(outcome.actions.len(), 1, "the later edit never ran");
+    assert_eq!(tool_host.calls.len(), 1, "host dispatch ran exactly once");
+    assert_eq!(bridge.after_host_calls.len(), 1);
+    assert_eq!(
+        bridge.engine.project().timeline().clip_count(),
+        1,
+        "the staged split was rolled back"
+    );
+    assert_eq!(bridge.engine.project().timeline().track_count(), 1);
+    assert!(!bridge.engine.undo(), "the aborted group left no history");
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, AgentEvent::HostAction { .. })),
+        "a result that could not be reconciled is not surfaced as completed"
+    );
 }
 
 #[test]

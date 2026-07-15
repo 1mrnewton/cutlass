@@ -53,6 +53,40 @@ pub trait EngineBridge {
     ) -> Result<crate::tools::ToolOutput, String> {
         Err(format!("unknown engine sense '{name}'"))
     }
+    /// Prepare for an ordinary registered [`ToolHost`] call.
+    ///
+    /// The loop invokes this after charging the host-call cap, but before
+    /// authorization or dispatch. Returning `Err` rejects the call without
+    /// invoking either [`ToolHost::authorize`], [`ToolHost::call`], or
+    /// [`EngineBridge::after_host_call`]. Bridge-owned read-only senses do
+    /// not pass through this hook.
+    fn before_host_call(
+        &mut self,
+        _name: &str,
+        _arguments: &serde_json::Value,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    /// Reconcile bridge state after an ordinary host dispatch was attempted.
+    ///
+    /// The loop invokes this exactly once after [`ToolHost::call`] returns,
+    /// for both success and failure, and before exposing that result to the
+    /// model. Authorization failures and pre-call rejections do not invoke
+    /// it. `result` borrows the host result so implementations can inspect
+    /// success or failure without cloning [`crate::tools::ToolOutput`].
+    ///
+    /// Host calls may have partial side effects even when they return `Err`.
+    /// This hook is therefore the bridge's reconciliation boundary. A hook
+    /// failure aborts the prompt and rolls back its sandbox edit group, but
+    /// cannot promise to undo effects the host already performed.
+    fn after_host_call(
+        &mut self,
+        _name: &str,
+        _arguments: &serde_json::Value,
+        _result: Result<&crate::tools::ToolOutput, &str>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     /// Validate + apply one wire command. `Err` is a model-readable reason
     /// (validation rejection or engine error); state is unchanged on `Err`.
     fn apply(&mut self, command: &WireCommand) -> Result<EditOutcome, String>;
@@ -129,7 +163,9 @@ pub enum PromptStatus {
     Completed,
     /// Dry-run: the plan in `actions` validated but nothing was applied.
     DryRun,
-    /// Rolled back; nothing from this prompt remains. The string says why.
+    /// This prompt's sandbox edits rolled back. Ordinary host effects may
+    /// remain when a host dispatch was attempted; the string says why the
+    /// prompt stopped.
     Aborted(String),
 }
 
@@ -148,7 +184,8 @@ pub struct PromptOutcome {
     /// This turn's conversation, ready to append to the session history so
     /// the next prompt remembers it: the user message, every assistant
     /// turn and tool result the loop produced, and the final text answer.
-    /// Empty when the prompt aborted (nothing applied → no memory trace).
+    /// Empty when the prompt aborted (no conversational memory trace is
+    /// retained, even though an already-dispatched host effect may remain).
     /// `describe_project` results are collapsed to a short placeholder —
     /// they're large and the fresh system snapshot supersedes them.
     pub turn_messages: Vec<Message>,
@@ -538,29 +575,57 @@ pub fn run_prompt_with_host(
                         ),
                     );
                 }
-                match host
-                    .authorize(&call.name, &call.arguments, spec.tier, cancel)
-                    .and_then(|()| host.call(&call.name, &call.arguments, cancel))
-                {
+                match bridge.before_host_call(&call.name, &call.arguments) {
                     Err(reason) => format!("rejected: {reason}"),
-                    Ok(output) => {
-                        let mut content = if output.text.is_empty() {
-                            "ok".to_string()
-                        } else {
-                            output.text
-                        };
-                        images = output.images;
-                        enforce_tool_output_image_budget(
-                            &mut content,
-                            &mut images,
-                            config.max_images,
-                            config.max_image_bytes,
-                        );
-                        on_event(AgentEvent::HostAction {
-                            name: call.name.clone(),
-                            summary: host_action_summary(&content),
-                        });
-                        content
+                    Ok(()) => {
+                        match host.authorize(&call.name, &call.arguments, spec.tier, cancel) {
+                            Err(reason) => format!("rejected: {reason}"),
+                            Ok(()) => {
+                                let host_result = host.call(&call.name, &call.arguments, cancel);
+                                let borrowed_result = match &host_result {
+                                    Ok(output) => Ok(output),
+                                    Err(reason) => Err(reason.as_str()),
+                                };
+                                if let Err(reason) = bridge.after_host_call(
+                                    &call.name,
+                                    &call.arguments,
+                                    borrowed_result,
+                                ) {
+                                    return abort(
+                                        bridge,
+                                        actions,
+                                        format!(
+                                            "host tool '{}' was dispatched, but reconciliation \
+                                             failed: {reason}; host effects may already have \
+                                             occurred",
+                                            call.name
+                                        ),
+                                    );
+                                }
+                                match host_result {
+                                    Err(reason) => format!("rejected: {reason}"),
+                                    Ok(output) => {
+                                        let mut content = if output.text.is_empty() {
+                                            "ok".to_string()
+                                        } else {
+                                            output.text
+                                        };
+                                        images = output.images;
+                                        enforce_tool_output_image_budget(
+                                            &mut content,
+                                            &mut images,
+                                            config.max_images,
+                                            config.max_image_bytes,
+                                        );
+                                        on_event(AgentEvent::HostAction {
+                                            name: call.name.clone(),
+                                            summary: host_action_summary(&content),
+                                        });
+                                        content
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             } else {

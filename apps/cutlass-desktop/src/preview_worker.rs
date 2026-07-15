@@ -608,13 +608,13 @@ enum WorkerMsg {
         operation: Arc<WorkerRpcOperation>,
     },
     /// Hand an off-UI maintenance worker a coherent clone of the live project,
-    /// then stop consuming this queue until its guard disconnects `resume`.
-    /// The operation state prevents an abandoned queued request from pausing
-    /// the worker when it is eventually dequeued.
+    /// then stop consuming this queue until its guard sends or disconnects
+    /// `resume`. The operation state prevents an abandoned queued request from
+    /// pausing the worker when it is eventually dequeued.
     #[allow(dead_code)] // Wired into cache relocation by its coordination slice.
     BeginProjectMaintenance {
         reply: Sender<Result<Project, ()>>,
-        resume: Receiver<()>,
+        resume: Receiver<ProjectMaintenanceResumeAction>,
         operation: Arc<WorkerRpcOperation>,
     },
     /// Clone the live project for the AI agent's sandbox rehearsal
@@ -735,6 +735,17 @@ impl WorkerRpcOperation {
     }
 }
 
+/// Work the preview worker performs synchronously before it resumes its normal
+/// queue after a project-maintenance lease.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ProjectMaintenanceResumeAction {
+    /// Resume without changing any worker-owned runtime state.
+    #[default]
+    Resume,
+    /// Proxy cache storage moved; discard old bindings and look them up again.
+    RefreshProxies,
+}
+
 /// Exclusive maintenance lease over a coherent live-project snapshot.
 ///
 /// While this value is alive the preview worker is paused and consumes no
@@ -745,7 +756,8 @@ impl WorkerRpcOperation {
 #[allow(dead_code)] // Constructed once cache relocation consumes the staged API.
 pub(crate) struct ProjectMaintenanceGuard {
     project: Project,
-    resume: Option<Sender<()>>,
+    resume: Option<Sender<ProjectMaintenanceResumeAction>>,
+    resume_action: ProjectMaintenanceResumeAction,
 }
 
 impl ProjectMaintenanceGuard {
@@ -753,44 +765,56 @@ impl ProjectMaintenanceGuard {
     pub(crate) fn project(&self) -> &Project {
         &self.project
     }
+
+    /// Refresh every runtime proxy binding before normal preview work resumes.
+    #[allow(dead_code)] // Called by cache relocation once its move is published.
+    pub(crate) fn refresh_proxies_on_resume(&mut self) {
+        self.resume_action = ProjectMaintenanceResumeAction::RefreshProxies;
+    }
 }
 
 impl Drop for ProjectMaintenanceGuard {
     fn drop(&mut self) {
-        // This is the only sender. Disconnecting it wakes the worker's
-        // blocking receive without requiring a timeout or a successful send.
-        drop(self.resume.take());
+        if let Some(resume) = self.resume.take() {
+            // Capacity one means this never waits for the worker. Sending is
+            // best-effort; dropping the sole sender immediately afterward
+            // still wakes a receiver if the channel has disconnected.
+            let _ = resume.try_send(self.resume_action);
+        }
     }
 }
 
 #[allow(dead_code)] // Reachable through the intentionally staged API below.
 fn project_maintenance_result(
     reply: Result<Project, ()>,
-    resume: Sender<()>,
+    resume: Sender<ProjectMaintenanceResumeAction>,
 ) -> Result<ProjectMaintenanceGuard, String> {
     match reply {
         Ok(project) => Ok(ProjectMaintenanceGuard {
             project,
             resume: Some(resume),
+            resume_action: ProjectMaintenanceResumeAction::Resume,
         }),
         Err(()) => Err("project maintenance request was refused by preview worker".into()),
     }
 }
 
 /// Claim, snapshot, and pause for one maintenance request. The blocking
-/// receive has no timeout: only guard drop (or an abandoned caller dropping
-/// its sender) resumes worker message processing.
+/// receive has no timeout: only guard drop resumes worker message processing.
+/// A disconnected action channel safely means an ordinary resume.
 fn serve_project_maintenance(
     project: &Project,
     reply: Sender<Result<Project, ()>>,
-    resume: Receiver<()>,
+    resume: Receiver<ProjectMaintenanceResumeAction>,
     operation: Arc<WorkerRpcOperation>,
-) {
+) -> ProjectMaintenanceResumeAction {
     if !operation.claim() {
-        return;
+        return ProjectMaintenanceResumeAction::Resume;
     }
     if reply.send(Ok(project.clone())).is_ok() {
-        let _ = resume.recv();
+        resume.recv().unwrap_or_default()
+    } else {
+        ProjectMaintenanceResumeAction::Resume
     }
 }
 
@@ -953,9 +977,9 @@ impl WorkerHandle {
         timeout: Duration,
     ) -> Result<ProjectMaintenanceGuard, String> {
         let (reply, response) = bounded(1);
-        // No values are sent. The guard owns the sole sender; dropping it
-        // disconnects this receiver and resumes the worker.
-        let (resume, wait_for_resume) = bounded::<()>(0);
+        // The guard owns the sole sender. Its one typed action fits without
+        // waiting; sender drop also wakes the worker as an ordinary resume.
+        let (resume, wait_for_resume) = bounded::<ProjectMaintenanceResumeAction>(1);
         let operation = Arc::new(WorkerRpcOperation::pending());
         self.tx
             .send(WorkerMsg::BeginProjectMaintenance {
@@ -2072,7 +2096,12 @@ fn worker_loop(
                 reply,
                 resume,
                 operation,
-            } => serve_project_maintenance(engine.project(), reply, resume, operation),
+            } => {
+                let action = serve_project_maintenance(engine.project(), reply, resume, operation);
+                if action == ProjectMaintenanceResumeAction::RefreshProxies {
+                    refresh_proxies_after_maintenance(engine, &cache, &ui);
+                }
+            }
             WorkerMsg::SnapshotProject { reply } => {
                 let _ = reply.send(engine.project().clone());
             }
@@ -3580,6 +3609,58 @@ fn register_media_with_workers(media: &cutlass_models::MediaSource, ui: &UiSink)
             media.width,
             media.height,
         );
+    }
+}
+
+/// One current media descriptor captured before proxy refresh mutates the
+/// engine's renderer state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProxyRefreshMedia {
+    id: MediaId,
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    is_video: bool,
+}
+
+/// Snapshot the media catalog needed to clear and re-request proxy bindings.
+///
+/// Project media lives in a hash map, so sorting makes the refresh order
+/// deterministic without changing its semantics.
+fn plan_proxy_refresh(project: &Project) -> Vec<ProxyRefreshMedia> {
+    let mut media: Vec<_> = project
+        .media_iter()
+        .map(|source| ProxyRefreshMedia {
+            id: source.id,
+            path: source.path().to_path_buf(),
+            width: source.width,
+            height: source.height,
+            is_video: source.kind() == cutlass_models::MediaKind::Video,
+        })
+        .collect();
+    media.sort_unstable_by_key(|source| source.id.raw());
+    media
+}
+
+/// Rebind proxy-dependent runtime state after the proxy cache root moves.
+///
+/// This deliberately bypasses project commands: renderer substitutions,
+/// strip scratch state, and delivered preview frames are session caches, so
+/// refreshing them must not touch Project, history, or revision.
+fn refresh_proxies_after_maintenance(engine: &mut Engine, cache: &FrameCache, ui: &UiSink) {
+    // Collect every descriptor before the first mutable Engine call so no
+    // project borrow can overlap renderer mutation.
+    let media = plan_proxy_refresh(engine.project());
+
+    for source in &media {
+        engine.clear_media_proxy(source.id);
+    }
+    ui.strips.clear_proxies();
+    cache.clear();
+
+    for source in media.into_iter().filter(|source| source.is_video) {
+        ui.proxy
+            .request(source.id.raw(), source.path, source.width, source.height);
     }
 }
 
@@ -7499,10 +7580,10 @@ mod tests {
             reply
                 .send(Ok(Project::new("claimed", Rational::FPS_30)))
                 .unwrap();
-            assert!(matches!(
-                resume.recv_timeout(Duration::from_secs(1)),
-                Err(RecvTimeoutError::Disconnected)
-            ));
+            assert_eq!(
+                resume.recv_timeout(Duration::from_secs(1)).unwrap(),
+                ProjectMaintenanceResumeAction::Resume
+            );
         });
 
         let guard = handle
@@ -7514,7 +7595,7 @@ mod tests {
     }
 
     #[test]
-    fn project_maintenance_guard_drop_resumes_queued_work_and_is_send() {
+    fn project_maintenance_guard_ordinary_drop_resumes_queued_work_and_is_send() {
         let (tx, rx) = unbounded();
         let handle = WorkerHandle { tx };
         let (resumed_tx, resumed_rx) = bounded(1);
@@ -7529,8 +7610,8 @@ mod tests {
                 panic!("expected maintenance request");
             };
             let project = Project::new("live snapshot", Rational::FPS_30);
-            serve_project_maintenance(&project, reply, resume, operation);
-            resumed_tx.send(()).unwrap();
+            let action = serve_project_maintenance(&project, reply, resume, operation);
+            resumed_tx.send(action).unwrap();
 
             let WorkerMsg::RenameProject { name } = rx.recv().unwrap() else {
                 panic!("expected work queued behind maintenance");
@@ -7548,14 +7629,112 @@ mod tests {
         // Moving the guard into this background holder is also a compile-time
         // assertion that ProjectMaintenanceGuard is Send.
         std::thread::spawn(move || drop(guard)).join().unwrap();
-        resumed_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("guard drop must resume worker");
+        assert_eq!(
+            resumed_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("guard drop must resume worker"),
+            ProjectMaintenanceResumeAction::Resume
+        );
         assert_eq!(
             processed_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             "after maintenance"
         );
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn project_maintenance_guard_can_request_proxy_refresh_on_drop() {
+        let (resume, wait_for_resume) = bounded(1);
+        let mut guard = ProjectMaintenanceGuard {
+            project: Project::new("refresh", Rational::FPS_30),
+            resume: Some(resume),
+            resume_action: ProjectMaintenanceResumeAction::Resume,
+        };
+
+        guard.refresh_proxies_on_resume();
+        drop(guard);
+
+        assert_eq!(
+            wait_for_resume
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            ProjectMaintenanceResumeAction::RefreshProxies
+        );
+    }
+
+    #[test]
+    fn disconnected_maintenance_resume_defaults_to_ordinary_action() {
+        let project = Project::new("disconnected resume", Rational::FPS_30);
+        let (reply, response) = bounded(1);
+        let (resume, wait_for_resume) = bounded(1);
+        drop(resume);
+
+        assert_eq!(
+            serve_project_maintenance(
+                &project,
+                reply,
+                wait_for_resume,
+                Arc::new(WorkerRpcOperation::pending()),
+            ),
+            ProjectMaintenanceResumeAction::Resume
+        );
+        assert_eq!(
+            response.recv().unwrap().unwrap().name,
+            "disconnected resume"
+        );
+    }
+
+    #[test]
+    fn proxy_refresh_plan_captures_all_media_and_requests_only_videos() {
+        let mut project = Project::new("proxy refresh", Rational::FPS_30);
+        let video = project.add_media(cutlass_models::MediaSource::new(
+            "/media/video.mov",
+            3840,
+            2160,
+            Rational::FPS_30,
+            300,
+            true,
+        ));
+        let audio = project.add_media(cutlass_models::MediaSource::new(
+            "/media/audio.wav",
+            0,
+            0,
+            Rational::FPS_30,
+            300,
+            true,
+        ));
+        let image = project.add_media(cutlass_models::MediaSource::image(
+            "/media/still.png",
+            1600,
+            900,
+        ));
+
+        let plan = plan_proxy_refresh(&project);
+        assert_eq!(plan.len(), 3);
+        assert!(
+            plan.windows(2)
+                .all(|pair| pair[0].id.raw() < pair[1].id.raw())
+        );
+
+        let video = plan.iter().find(|source| source.id == video).unwrap();
+        assert_eq!(video.path, PathBuf::from("/media/video.mov"));
+        assert_eq!((video.width, video.height), (3840, 2160));
+        assert!(video.is_video);
+        assert!(
+            !plan
+                .iter()
+                .find(|source| source.id == audio)
+                .unwrap()
+                .is_video
+        );
+        assert!(
+            !plan
+                .iter()
+                .find(|source| source.id == image)
+                .unwrap()
+                .is_video
+        );
+        assert_eq!(plan.iter().filter(|source| source.is_video).count(), 1);
     }
 
     #[test]

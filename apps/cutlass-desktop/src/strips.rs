@@ -522,6 +522,10 @@ enum StripMsg {
     /// frames* from this smaller short-GOP file instead of the original.
     /// Waveforms are untouched — proxies carry no audio.
     Proxy { media_id: u64, path: PathBuf },
+    /// Proxy cache storage moved: return every future filmstrip decode to its
+    /// registered original and discard scratch projects/decoder cursors that
+    /// may still hold an old proxy path. Waveform state remains warm.
+    ClearProxies,
     /// Decode the frames at `times_us` (media time, grid-aligned).
     Filmstrip { media_id: u64, times_us: Vec<i64> },
     /// Rasterize the waveform tiles starting at `times_us`, each spanning
@@ -548,6 +552,13 @@ impl StripHandle {
     /// Point future filmstrip decodes for `media_id` at its preview proxy.
     pub fn register_proxy(&self, media_id: u64, path: PathBuf) {
         let _ = self.tx.send(StripMsg::Proxy { media_id, path });
+    }
+
+    /// Remove every preview-proxy substitution and its scratch decode state.
+    ///
+    /// Original media registrations and waveform peak files are preserved.
+    pub fn clear_proxies(&self) {
+        let _ = self.tx.send(StripMsg::ClearProxies);
     }
 
     fn request_filmstrip(&self, media_id: u64, times_us: Vec<i64>) {
@@ -598,6 +609,7 @@ struct ScratchClip {
     duration_frames: i64,
 }
 
+#[derive(Default)]
 struct WorkerState {
     paths: HashMap<u64, PathBuf>,
     /// Preview-proxy overrides for *frame* decode: when present, the scratch
@@ -629,15 +641,7 @@ fn worker_loop(
     backend: &slint::Weak<StripBackend<'static>>,
     gate: &InteractionGate,
 ) {
-    let mut state = WorkerState {
-        paths: HashMap::new(),
-        proxies: HashMap::new(),
-        renderer: None,
-        scratch: HashMap::new(),
-        frames_failed: HashSet::new(),
-        peaks: HashMap::new(),
-        peaks_failed: HashSet::new(),
-    };
+    let mut state = WorkerState::default();
     let mut backlog: Vec<StripMsg> = Vec::new();
 
     loop {
@@ -673,7 +677,7 @@ fn worker_loop(
                 } => {
                     process_waveform(&mut state, media_id, k, &times_us, backend);
                 }
-                StripMsg::Register { .. } | StripMsg::Proxy { .. } => {
+                StripMsg::Register { .. } | StripMsg::Proxy { .. } | StripMsg::ClearProxies => {
                     unreachable!("registrations apply in triage")
                 }
             }
@@ -707,8 +711,26 @@ fn triage(msg: StripMsg, state: &mut WorkerState, backlog: &mut Vec<StripMsg>) {
                 state.proxies.insert(media_id, path);
             }
         }
+        StripMsg::ClearProxies => clear_proxy_substitutions(state),
         work => backlog.push(work),
     }
+}
+
+/// Return filmstrip decoding to registered originals after proxy storage moves.
+///
+/// Scratch projects and the private renderer are both discarded: either can
+/// retain decoder state opened on a proxy path. Audio always reads `paths`, so
+/// its peak files and failure latch deliberately survive this reset.
+fn clear_proxy_substitutions(state: &mut WorkerState) {
+    let proxy_count = state.proxies.len();
+    state.proxies.clear();
+    state.renderer = None;
+    state.scratch.clear();
+    state.frames_failed.clear();
+    info!(
+        proxy_count,
+        "strip worker cleared proxy substitutions and scratch decode state"
+    );
 }
 
 fn process_filmstrip(
@@ -1099,6 +1121,58 @@ mod tests {
         assert_eq!(clear_all_caches(), expected);
         assert_eq!(cache_stats(), StripCacheStats::default());
         assert_eq!(clear_all_caches(), StripCacheStats::default());
+    }
+
+    #[test]
+    fn strip_proxy_clear_is_idempotent_and_preserves_original_and_waveform_state() {
+        let media_id = 17;
+        let original = PathBuf::from("/media/original.mov");
+        let mut state = WorkerState::default();
+        state.paths.insert(media_id, original.clone());
+        state
+            .proxies
+            .insert(media_id, PathBuf::from("/old-proxies/proxy.mp4"));
+        state.scratch.insert(
+            media_id,
+            ScratchClip {
+                project: Project::new("scratch", Rational::FPS_30),
+                rate: Rational::FPS_30,
+                duration_frames: 30,
+            },
+        );
+        state.frames_failed.insert(media_id);
+        state.peaks.insert(
+            media_id,
+            AudioPeaks {
+                per_second: 100.0,
+                peaks: vec![0.25, 0.5],
+            },
+        );
+        state.peaks_failed.insert(99);
+
+        let (tx, rx) = unbounded();
+        let handle = StripHandle { tx };
+        let mut backlog = Vec::new();
+        handle.clear_proxies();
+        triage(rx.recv().unwrap(), &mut state, &mut backlog);
+
+        assert_eq!(state.paths.get(&media_id), Some(&original));
+        assert!(state.proxies.is_empty());
+        assert!(state.scratch.is_empty());
+        assert!(state.frames_failed.is_empty());
+        assert!(state.renderer.is_none());
+        assert_eq!(state.peaks[&media_id].peaks, vec![0.25, 0.5]);
+        assert!(state.peaks_failed.contains(&99));
+        assert!(backlog.is_empty());
+
+        handle.clear_proxies();
+        triage(rx.recv().unwrap(), &mut state, &mut backlog);
+        assert_eq!(state.paths.get(&media_id), Some(&original));
+        assert!(state.proxies.is_empty());
+        assert!(state.scratch.is_empty());
+        assert_eq!(state.peaks[&media_id].peaks, vec![0.25, 0.5]);
+        assert!(state.peaks_failed.contains(&99));
+        assert!(backlog.is_empty());
     }
 
     #[test]

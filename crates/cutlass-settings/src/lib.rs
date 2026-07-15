@@ -25,6 +25,7 @@
 //! model = "qwen3:14b"
 //! # api_key = "sk-..."             # literal key, or:
 //! # api_key_env = "OPENAI_API_KEY"  # read from the environment
+//! # autonomy = "full"              # skip destructive-tool confirmations
 //!
 //! [appearance]
 //! theme = "dark-blue"              # "default" | "ember" | "dark-blue"
@@ -111,6 +112,41 @@ impl ThemeChoice {
     }
 }
 
+/// How much the agent may do without asking. Read by the desktop's tool
+/// host when it executes destructive (System-tier) agent tools; the
+/// validated edit vocabulary is not affected (it has its own preview/undo
+/// flow).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Autonomy {
+    /// Destructive tools (clear caches, run scripts, overwrite files)
+    /// require a per-call confirmation in the agent panel.
+    #[default]
+    Ask,
+    /// Run everything without confirmations.
+    Full,
+}
+
+impl Autonomy {
+    /// The stable string written to `config.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Autonomy::Ask => "ask",
+            Autonomy::Full => "full",
+        }
+    }
+
+    /// Parse a `config.toml` value; `None` for anything unrecognized (the
+    /// caller keeps the default rather than failing the whole load).
+    /// "confirm" is accepted as an alias for [`Autonomy::Ask`].
+    pub fn from_key(s: &str) -> Option<Self> {
+        match s {
+            "ask" | "confirm" => Some(Autonomy::Ask),
+            "full" => Some(Autonomy::Full),
+            _ => None,
+        }
+    }
+}
+
 /// The `[ai]` table: how the agent reaches an OpenAI-compatible endpoint.
 /// Plain data — key *resolution* (the `api_key_env` indirection) is an
 /// AI-domain concern and lives in `cutlass_ai::config`. The default (empty
@@ -131,6 +167,10 @@ pub struct AiSettings {
     /// proxy, credits-metered) instead of the endpoint above. The three
     /// provider modes: local/BYOK endpoint (fields above), or this.
     pub use_account: bool,
+    /// Confirmation policy for destructive agent tools. Orthogonal to
+    /// [`is_configured`](Self::is_configured) — it gates tool *execution*,
+    /// not provider reachability.
+    pub autonomy: Autonomy,
 }
 
 impl AiSettings {
@@ -303,6 +343,12 @@ impl Settings {
                 .get("use_account")
                 .and_then(Item::as_bool)
                 .unwrap_or(false);
+            if let Some(autonomy) = string_at(t, "autonomy")
+                .as_deref()
+                .and_then(Autonomy::from_key)
+            {
+                s.ai.autonomy = autonomy;
+            }
         }
 
         if let Some(t) = section(doc, "appearance") {
@@ -351,6 +397,13 @@ impl Settings {
                 t.insert("use_account", toml_edit::value(true));
             } else {
                 t.remove("use_account");
+            }
+            // Same convention as `use_account`: the default is absence, so a
+            // fresh config stays minimal.
+            if self.ai.autonomy == Autonomy::default() {
+                t.remove("autonomy");
+            } else {
+                set_str(t, "autonomy", self.ai.autonomy.key());
             }
         }
         {
@@ -652,6 +705,56 @@ theme = "ember"
         }
         assert_eq!(ThemeChoice::from_key("nonsense"), None);
         assert_eq!(ThemeChoice::from_index(99), ThemeChoice::DarkBlue);
+    }
+
+    #[test]
+    fn autonomy_parses_and_tolerates_missing_or_garbage_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        std::fs::write(&path, "[ai]\nmodel = \"m\"\nautonomy = \"full\"\n").unwrap();
+        assert_eq!(load(&path).unwrap().ai.autonomy, Autonomy::Full);
+
+        // Missing key keeps the default.
+        std::fs::write(&path, "[ai]\nmodel = \"m\"\n").unwrap();
+        assert_eq!(load(&path).unwrap().ai.autonomy, Autonomy::Ask);
+
+        // Unrecognized value keeps the default rather than failing the load.
+        std::fs::write(&path, "[ai]\nautonomy = \"yolo\"\n").unwrap();
+        assert_eq!(load(&path).unwrap().ai.autonomy, Autonomy::Ask);
+
+        // "confirm" is the tolerated alias for Ask.
+        std::fs::write(&path, "[ai]\nautonomy = \"confirm\"\n").unwrap();
+        assert_eq!(load(&path).unwrap().ai.autonomy, Autonomy::Ask);
+    }
+
+    #[test]
+    fn autonomy_round_trips_and_preserves_unrelated_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# my cutlass config\n[ai]\nbase_url = \"http://x/v1\"  # local\nmodel = \"m\"\n",
+        )
+        .unwrap();
+
+        let mut s = load(&path).unwrap();
+        s.ai.autonomy = Autonomy::Full;
+        save(&path, &s).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("autonomy = \"full\""), "{raw}");
+        assert!(raw.contains("# my cutlass config"), "leading comment kept");
+        assert!(raw.contains("# local"), "inline comment kept");
+        assert_eq!(load(&path).unwrap().ai.autonomy, Autonomy::Full);
+
+        // Back to the default removes the key (the `use_account` convention).
+        let mut s = load(&path).unwrap();
+        s.ai.autonomy = Autonomy::Ask;
+        save(&path, &s).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("autonomy"), "default left no literal: {raw}");
+        assert_eq!(load(&path).unwrap().ai.autonomy, Autonomy::Ask);
     }
 
     #[test]

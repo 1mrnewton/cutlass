@@ -77,6 +77,10 @@ pub struct AgentConfig {
     /// tools bound each image's dimensions, so count × bounded size caps
     /// the whole vision payload.
     pub max_images: usize,
+    /// Hard cap on total encoded image bytes carried by one request. This
+    /// protects the provider boundary even when an extensible host tool does
+    /// not honor the normal screenshot dimension limits.
+    pub max_image_bytes: usize,
     /// Validate and collect the plan without applying anything.
     pub dry_run: bool,
 }
@@ -88,6 +92,7 @@ impl Default for AgentConfig {
             max_host_calls: 24,
             max_turns: 16,
             max_images: 8,
+            max_image_bytes: 24 * 1024 * 1024,
             dry_run: false,
         }
     }
@@ -386,7 +391,7 @@ pub fn run_prompt_with_host(
     };
 
     for _turn in 0..config.max_turns {
-        enforce_image_budget(&mut messages, config.max_images);
+        enforce_image_budget(&mut messages, config.max_images, config.max_image_bytes);
         let turn = {
             let mut forward = |delta: &str| on_event(AgentEvent::TextDelta(delta.to_string()));
             match provider.chat(
@@ -623,16 +628,22 @@ fn read_skill_result(skills: &[crate::extend::Skill], arguments: &serde_json::Va
 /// the label, so the model knows what it saw and can re-request it.
 /// Newest-wins matches how the agent works with vision: screenshot, look,
 /// act — a stale frame is cheaper to re-take than to carry.
-fn enforce_image_budget(messages: &mut [Message], max_images: usize) {
-    let total: usize = messages.iter().map(image_count).sum();
-    let mut to_drop = total.saturating_sub(max_images);
-    if to_drop == 0 {
+fn enforce_image_budget(messages: &mut [Message], max_images: usize, max_bytes: usize) {
+    let mut image_total: usize = messages.iter().map(image_count).sum();
+    let mut byte_total: usize = messages
+        .iter()
+        .flat_map(message_images)
+        .map(|image| image.data.len())
+        .fold(0usize, usize::saturating_add);
+    if image_total <= max_images && byte_total <= max_bytes {
         return;
     }
-    // Oldest first: walk from the front, draining each message's images
-    // front-first until the excess is gone.
+
+    // Oldest first. Count how much of each image vector to drain before
+    // mutating it, keeping this O(number of images) rather than repeatedly
+    // removing index zero.
     for message in messages.iter_mut() {
-        if to_drop == 0 {
+        if image_total <= max_images && byte_total <= max_bytes {
             break;
         }
         let (content, images) = match message {
@@ -642,10 +653,17 @@ fn enforce_image_budget(messages: &mut [Message], max_images: usize) {
             } => (content, images),
             _ => continue,
         };
-        while to_drop > 0 && !images.is_empty() {
-            let dropped = images.remove(0);
+        let mut drop_count = 0usize;
+        for image in images.iter() {
+            if image_total <= max_images && byte_total <= max_bytes {
+                break;
+            }
+            image_total = image_total.saturating_sub(1);
+            byte_total = byte_total.saturating_sub(image.data.len());
+            drop_count += 1;
+        }
+        for dropped in images.drain(..drop_count) {
             content.push_str(&format!("\n[image no longer attached: {}]", dropped.label));
-            to_drop -= 1;
         }
     }
 }
@@ -654,6 +672,13 @@ fn image_count(message: &Message) -> usize {
     match message {
         Message::User { images, .. } | Message::ToolResult { images, .. } => images.len(),
         _ => 0,
+    }
+}
+
+fn message_images(message: &Message) -> &[ImagePart] {
+    match message {
+        Message::User { images, .. } | Message::ToolResult { images, .. } => images,
+        _ => &[],
     }
 }
 
@@ -1258,7 +1283,7 @@ mod tests {
             },
         ];
 
-        enforce_image_budget(&mut messages, 1);
+        enforce_image_budget(&mut messages, 1, usize::MAX);
 
         match &messages[1] {
             Message::User { content, images } => {
@@ -1284,8 +1309,62 @@ mod tests {
             content: "one".into(),
             images: vec![ImagePart::png(vec![1], "a")],
         }];
-        enforce_image_budget(&mut under, 8);
+        enforce_image_budget(&mut under, 8, usize::MAX);
         assert_eq!(image_count(&under[0]), 1);
+    }
+
+    #[test]
+    fn image_byte_budget_keeps_the_newest_payload_that_fits() {
+        let mut messages = vec![
+            Message::User {
+                content: "old".into(),
+                images: vec![ImagePart::png(vec![1; 6], "old six bytes")],
+            },
+            Message::ToolResult {
+                call_id: "call_1".into(),
+                content: "new".into(),
+                images: vec![
+                    ImagePart::png(vec![2; 4], "new four bytes"),
+                    ImagePart::png(vec![3; 5], "newest five bytes"),
+                ],
+            },
+        ];
+
+        enforce_image_budget(&mut messages, 8, 9);
+
+        let Message::User { content, images } = &messages[0] else {
+            panic!("user message");
+        };
+        assert!(images.is_empty());
+        assert!(content.contains("old six bytes"));
+        let Message::ToolResult {
+            content, images, ..
+        } = &messages[1]
+        else {
+            panic!("tool result");
+        };
+        assert_eq!(
+            images
+                .iter()
+                .map(|image| image.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new four bytes", "newest five bytes"]
+        );
+        assert!(!content.contains("no longer attached"));
+
+        enforce_image_budget(&mut messages, 8, 3);
+        let Message::ToolResult {
+            content, images, ..
+        } = &messages[1]
+        else {
+            panic!("tool result");
+        };
+        assert!(
+            images.is_empty(),
+            "an individually oversized newest image drops"
+        );
+        assert!(content.contains("new four bytes"));
+        assert!(content.contains("newest five bytes"));
     }
 
     #[test]

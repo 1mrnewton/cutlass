@@ -3,6 +3,8 @@
 //! The app owns one [`JobManager`] for its lifetime. This module only exposes
 //! sanitized snapshots from that registry; monotonic timestamps and other
 //! registry internals never cross the tool boundary.
+//! `cancel_requested` records an accepted request; `cancellable` says whether
+//! the registry still accepts cancellation for the job.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -21,19 +23,19 @@ pub fn specs() -> Vec<HostToolSpec> {
     vec![
         spec(
             JOB_LIST,
-            "List known background jobs newest first, including state, progress, cancellation, and elapsed time.",
+            "List known background jobs newest first, including state, progress, whether cancellation was requested, whether cancellation is still accepted, and elapsed time.",
             empty_object_schema(),
             ToolTier::ReadOnly,
         ),
         spec(
             JOB_STATUS,
-            "Read the current status of one known background job by job_id.",
+            "Read one background job by job_id, including distinct cancel_requested and cancellable fields.",
             job_id_schema(),
             ToolTier::ReadOnly,
         ),
         spec(
             JOB_CANCEL,
-            "Request cooperative cancellation of one queued or running background job.",
+            "Request cooperative cancellation of a queued or running background job that has not begun committing.",
             job_id_schema(),
             ToolTier::Workspace,
         ),
@@ -93,6 +95,9 @@ fn cancel_job(manager: &JobManager, id: JobId) -> Result<Value, String> {
     if before.state.is_terminal() {
         return Err(terminal_cancel_error(id, before.state));
     }
+    if !before.cancellable {
+        return Err(commit_phase_cancel_error(id));
+    }
 
     if manager.cancel(id) {
         return Ok(json!({
@@ -102,11 +107,13 @@ fn cancel_job(manager: &JobManager, id: JobId) -> Result<Value, String> {
         }));
     }
 
-    // The job may have crossed its terminal transition between `get` and
-    // `cancel`. Never claim cancellation when the registry refused it.
+    // The job may have crossed its commit boundary or terminal transition
+    // between `get` and `cancel`. Never claim cancellation when the registry
+    // refused it, and distinguish a live commit-phase job from a terminal one.
     match manager.get(id) {
         None => Err(unknown_job(id)),
         Some(after) if after.state.is_terminal() => Err(terminal_cancel_error(id, after.state)),
+        Some(after) if !after.cancellable => Err(commit_phase_cancel_error(id)),
         Some(_) => Err(format!(
             "job {} did not accept the cancellation request",
             id.raw()
@@ -119,6 +126,7 @@ fn snapshot_value(snapshot: JobSnapshot, now: Instant) -> Value {
         id,
         label,
         state,
+        cancellable,
         progress,
         detail,
         cancel_requested,
@@ -135,6 +143,7 @@ fn snapshot_value(snapshot: JobSnapshot, now: Instant) -> Value {
         "job_id": id.raw(),
         "label": label,
         "state": state_name(state),
+        "cancellable": cancellable,
         "progress": progress,
         "detail": detail,
         "cancel_requested": cancel_requested,
@@ -161,6 +170,13 @@ fn terminal_cancel_error(id: JobId, state: JobState) -> String {
         "job {} is already {} and cannot be cancelled",
         id.raw(),
         state_name(state)
+    )
+}
+
+fn commit_phase_cancel_error(id: JobId) -> String {
+    format!(
+        "job {} has begun committing and no longer accepts cancellation",
+        id.raw()
     )
 }
 
@@ -268,6 +284,10 @@ mod tests {
         loop {
             let snapshot = rx.recv_timeout(WAIT).expect("timed out waiting for job");
             if snapshot.id == id {
+                assert!(
+                    !snapshot.cancellable,
+                    "terminal job {id} still accepts cancellation"
+                );
                 return snapshot;
             }
         }
@@ -288,6 +308,7 @@ mod tests {
             row.keys().map(String::as_str).collect::<BTreeSet<_>>(),
             BTreeSet::from([
                 "cancel_requested",
+                "cancellable",
                 "detail",
                 "elapsed_ms",
                 "job_id",
@@ -302,6 +323,7 @@ mod tests {
         assert!(row["progress"].is_null() || row["progress"].is_number());
         assert!(row["detail"].is_string());
         assert!(row["cancel_requested"].is_boolean());
+        assert!(row["cancellable"].is_boolean());
         assert!(row["elapsed_ms"].as_u64().is_some());
         row
     }
@@ -393,6 +415,7 @@ mod tests {
             assert!(row["progress"].is_null());
             assert_eq!(row["detail"], "");
             assert_eq!(row["cancel_requested"], false);
+            assert_eq!(row["cancellable"], true);
             assert!(row.get("started").is_none());
             assert!(row.get("finished").is_none());
         }
@@ -424,6 +447,8 @@ mod tests {
         );
         let queued_row = job_row(&queued["job"]);
         assert_eq!(queued_row["state"], "queued");
+        assert_eq!(queued_row["cancellable"], true);
+        assert_eq!(queued_row["cancel_requested"], false);
         assert!(queued_row["progress"].is_null());
         terminal_for(&terminal_rx, queued_id);
 
@@ -444,6 +469,8 @@ mod tests {
         let running_row = job_row(&running["job"]);
         assert_eq!(running["status"], "ok");
         assert_eq!(running_row["state"], "running");
+        assert_eq!(running_row["cancellable"], true);
+        assert_eq!(running_row["cancel_requested"], false);
         assert_eq!(running_row["progress"], 0.25);
         assert_eq!(running_row["detail"], "one quarter");
 
@@ -456,6 +483,8 @@ mod tests {
         ));
         let done_row = job_row(&done["job"]);
         assert_eq!(done_row["state"], "done");
+        assert_eq!(done_row["cancellable"], false);
+        assert_eq!(done_row["cancel_requested"], false);
         assert_eq!(done_row["progress"], 1.0);
         assert_eq!(done_row["detail"], "complete");
 
@@ -471,6 +500,8 @@ mod tests {
         ));
         let failed_row = job_row(&failed["job"]);
         assert_eq!(failed_row["state"], "failed");
+        assert_eq!(failed_row["cancellable"], false);
+        assert_eq!(failed_row["cancel_requested"], false);
         assert_eq!(failed_row["progress"], 0.375);
         assert_eq!(failed_row["detail"], "fixture failed");
 
@@ -492,6 +523,7 @@ mod tests {
         ));
         let cancelled_row = job_row(&cancelled["job"]);
         assert_eq!(cancelled_row["state"], "cancelled");
+        assert_eq!(cancelled_row["cancellable"], false);
         assert!(cancelled_row["progress"].is_null());
         assert_eq!(cancelled_row["cancel_requested"], true);
 
@@ -503,6 +535,74 @@ mod tests {
         )
         .expect_err("unknown status must fail");
         assert!(error.contains("unknown or has been pruned"));
+    }
+
+    #[test]
+    fn status_and_cancel_distinguish_live_commit_phase() {
+        let (manager, terminal_rx) = manager_with_terminals();
+        let (committing_tx, committing_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let id = manager.spawn("commit-phase-status", move |context| {
+            let token = context.cancellation_token();
+            assert!(context.try_begin_commit());
+            committing_tx
+                .send(token.clone())
+                .expect("commit token receiver");
+            release_rx.recv().expect("release commit-phase job");
+            observed_tx
+                .send((context.cancelled(), token.cancelled()))
+                .expect("cancellation observer");
+            Ok("committed".into())
+        });
+
+        let token = committing_rx
+            .recv_timeout(WAIT)
+            .expect("job did not enter commit phase");
+        let status = output_json(&invoke(&manager, JOB_STATUS, json!({ "job_id": id.raw() })));
+        let row = job_row(&status["job"]);
+        assert_eq!(row["state"], "running");
+        assert_eq!(row["cancellable"], false);
+        assert_eq!(row["cancel_requested"], false);
+
+        let error = call(
+            &manager,
+            JOB_CANCEL,
+            &json!({ "job_id": id.raw() }),
+            &AtomicBool::new(false),
+        )
+        .expect_err("commit-phase cancellation must fail");
+        assert_eq!(
+            error,
+            format!(
+                "job {} has begun committing and no longer accepts cancellation",
+                id.raw()
+            )
+        );
+        assert!(error.len() <= 96);
+        assert!(!token.cancelled());
+        let committing = manager.get(id).expect("commit-phase job");
+        assert_eq!(committing.state, JobState::Running);
+        assert!(!committing.cancellable);
+        assert!(!committing.cancel_requested);
+
+        release_tx.send(()).expect("release commit-phase job");
+        assert_eq!(
+            observed_rx
+                .recv_timeout(WAIT)
+                .expect("job did not report cancellation state"),
+            (false, false)
+        );
+        let terminal = terminal_for(&terminal_rx, id);
+        assert_eq!(terminal.state, JobState::Done);
+        assert!(!terminal.cancel_requested);
+        assert!(!token.cancelled());
+
+        let done = output_json(&invoke(&manager, JOB_STATUS, json!({ "job_id": id.raw() })));
+        let done_row = job_row(&done["job"]);
+        assert_eq!(done_row["state"], "done");
+        assert_eq!(done_row["cancellable"], false);
+        assert_eq!(done_row["cancel_requested"], false);
     }
 
     #[test]

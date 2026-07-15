@@ -215,6 +215,12 @@ impl CacheRegistry {
                 self.download_cache.root().display()
             );
         }
+        if cache_requires_reference_migration(id) {
+            return format!(
+                "Cache: {}\n\nClearing is blocked because existing projects may reference files in this cache.",
+                descriptor.label
+            );
+        }
         match self.layout.resolve(id) {
             Some(path) => format!(
                 "Cache: {}\nLocation: {}\n\nClearing runs immediately and cannot be undone from Cutlass.",
@@ -514,7 +520,20 @@ fn ensure_cache_can_be_cleared(id: CacheId) -> Result<(), String> {
     if id.descriptor().tier == CacheTier::UserData {
         return Err("user data cannot be cleared through the cache registry".into());
     }
+    if cache_requires_reference_migration(id) {
+        return Err(
+            "cache clearing is unavailable because projects may reference its files".into(),
+        );
+    }
     Ok(())
+}
+
+pub(crate) fn cache_can_be_cleared(id: CacheId) -> bool {
+    ensure_cache_can_be_cleared(id).is_ok()
+}
+
+fn cache_requires_reference_migration(id: CacheId) -> bool {
+    matches!(id, CacheId::Luts | CacheId::Lottie | CacheId::Templates)
 }
 
 fn validate_layout(layout: &StorageLayout) -> Result<(), String> {
@@ -820,9 +839,12 @@ mod tests {
     }
 
     #[test]
-    fn cache_clear_policy_allows_protected_download_cleanup() {
+    fn cache_clear_policy_fails_closed_for_project_referenced_catalog_assets() {
         assert!(ensure_cache_can_be_cleared(CacheId::Proxies).is_ok());
         assert!(ensure_cache_can_be_cleared(CacheId::Download).is_ok());
+        for id in [CacheId::Luts, CacheId::Lottie, CacheId::Templates] {
+            assert!(!cache_can_be_cleared(id), "{id} must fail closed");
+        }
     }
 
     #[test]

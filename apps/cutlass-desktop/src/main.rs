@@ -505,7 +505,7 @@ fn cache_rows_from_snapshots(
                 )
                 .into(),
                 path: path.into(),
-                clearable: snapshot.tier != cutlass_storage::CacheTier::UserData,
+                clearable: cache_registry::cache_can_be_cleared(snapshot.id),
                 relocatable: false,
             })
         })

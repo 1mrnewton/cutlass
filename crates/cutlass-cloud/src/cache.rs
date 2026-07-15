@@ -11,6 +11,7 @@
 //! [`DownloadCache::clear`].
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use crate::error::CloudError;
@@ -21,16 +22,36 @@ pub const DEFAULT_QUOTA_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// A directory with a byte budget.
 pub struct DownloadCache {
     root: PathBuf,
-    quota_bytes: u64,
+    quota_bytes: AtomicU64,
 }
 
 impl DownloadCache {
     pub fn new(root: PathBuf, quota_bytes: u64) -> Self {
-        Self { root, quota_bytes }
+        Self {
+            root,
+            quota_bytes: AtomicU64::new(quota_bytes),
+        }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Returns the current byte quota.
+    ///
+    /// Quota enforcement snapshots this value once per invocation, so a
+    /// concurrent update takes effect on a subsequent invocation.
+    #[must_use]
+    pub fn quota_bytes(&self) -> u64 {
+        self.quota_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Replaces the byte quota used by subsequent quota enforcement.
+    ///
+    /// An enforcement already in progress continues using the quota it
+    /// snapshotted when it started.
+    pub fn set_quota_bytes(&self, new: u64) {
+        self.quota_bytes.store(new, Ordering::Relaxed);
     }
 
     /// Where a download for `key` (e.g. `stock/pexels-857191-hd.mp4`)
@@ -57,16 +78,18 @@ impl DownloadCache {
 
     /// Total bytes currently cached.
     pub fn size_bytes(&self) -> u64 {
-        walk_files(&self.root)
-            .into_iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum()
+        saturating_total_bytes(
+            walk_files(&self.root)
+                .into_iter()
+                .filter_map(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len()),
+        )
     }
 
     /// Evict least-recently-modified files until under quota. Called after
     /// each completed download; cheap when under budget.
     pub fn enforce_quota(&self) {
+        let quota_bytes = self.quota_bytes();
         let mut files: Vec<(PathBuf, u64, SystemTime)> = walk_files(&self.root)
             .into_iter()
             .filter_map(|p| {
@@ -75,14 +98,14 @@ impl DownloadCache {
                 Some((p, meta.len(), mtime))
             })
             .collect();
-        let mut total: u64 = files.iter().map(|(_, len, _)| len).sum();
-        if total <= self.quota_bytes {
+        let mut total = saturating_total_bytes(files.iter().map(|(_, len, _)| *len));
+        if total <= quota_bytes {
             return;
         }
         // Oldest first.
         files.sort_by_key(|(_, _, mtime)| *mtime);
         for (path, len, _) in files {
-            if total <= self.quota_bytes {
+            if total <= quota_bytes {
                 break;
             }
             if std::fs::remove_file(&path).is_ok() {
@@ -109,6 +132,12 @@ impl DownloadCache {
         }
         Ok(())
     }
+}
+
+fn saturating_total_bytes(lengths: impl IntoIterator<Item = u64>) -> u64 {
+    lengths
+        .into_iter()
+        .fold(0, |total, len| total.saturating_add(len))
 }
 
 fn walk_files(root: &Path) -> Vec<PathBuf> {
@@ -138,11 +167,20 @@ fn filetime_touch(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     fn write(cache: &DownloadCache, key: &str, len: usize) -> PathBuf {
         let path = cache.path_for(key).unwrap();
         std::fs::write(&path, vec![0u8; len]).unwrap();
         path
+    }
+
+    fn backdate(path: &Path) {
+        let earlier = SystemTime::now() - std::time::Duration::from_secs(120);
+        let file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(earlier))
+            .unwrap();
     }
 
     #[test]
@@ -151,16 +189,78 @@ mod tests {
         let cache = DownloadCache::new(dir.path().to_path_buf(), 250);
         let old = write(&cache, "stock/old.bin", 100);
         // Ensure distinct mtimes even on coarse filesystems.
-        let earlier = SystemTime::now() - std::time::Duration::from_secs(120);
-        let file = std::fs::OpenOptions::new().append(true).open(&old).unwrap();
-        file.set_times(std::fs::FileTimes::new().set_modified(earlier))
-            .unwrap();
+        backdate(&old);
         let new = write(&cache, "stock/new.bin", 200);
 
         cache.enforce_quota();
         assert!(!old.exists(), "oldest file evicted");
         assert!(new.exists(), "newest file kept");
-        assert!(cache.size_bytes() <= 250);
+        assert_eq!(cache.size_bytes(), 200);
+    }
+
+    #[test]
+    fn quota_updates_apply_to_subsequent_enforcement() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DownloadCache::new(dir.path().to_path_buf(), 300);
+        let old = write(&cache, "stock/old.bin", 100);
+        backdate(&old);
+        let new = write(&cache, "stock/new.bin", 200);
+
+        assert_eq!(cache.quota_bytes(), 300);
+        cache.enforce_quota();
+        assert!(old.exists());
+        assert!(new.exists());
+
+        cache.set_quota_bytes(200);
+        assert_eq!(cache.quota_bytes(), 200);
+        cache.enforce_quota();
+        assert!(!old.exists(), "updated quota evicts the oldest file");
+        assert!(new.exists(), "updated quota does not over-evict");
+        assert_eq!(cache.size_bytes(), 200);
+    }
+
+    #[test]
+    fn quota_is_safe_to_read_and_update_from_concurrent_threads() {
+        const WORKERS: usize = 4;
+        const ROUNDS: u64 = 64;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(DownloadCache::new(dir.path().to_path_buf(), 0));
+        let phase = Arc::new(Barrier::new(WORKERS));
+        let handles: Vec<_> = (0..WORKERS)
+            .map(|worker| {
+                let cache = Arc::clone(&cache);
+                let phase = Arc::clone(&phase);
+                thread::spawn(move || {
+                    let mut observed_quotas = Vec::with_capacity(ROUNDS as usize);
+                    for round in 0..ROUNDS {
+                        phase.wait();
+                        let first_quota = round * WORKERS as u64;
+                        cache.set_quota_bytes(first_quota + worker as u64);
+                        phase.wait();
+                        observed_quotas.push(cache.quota_bytes());
+                        phase.wait();
+                    }
+                    observed_quotas
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            for (round, observed) in handle.join().unwrap().into_iter().enumerate() {
+                let first_quota = round as u64 * WORKERS as u64;
+                let quotas_this_round = first_quota..first_quota + WORKERS as u64;
+                assert!(
+                    quotas_this_round.contains(&observed),
+                    "observed quota {observed} outside {quotas_this_round:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn total_size_saturates_instead_of_overflowing() {
+        assert_eq!(saturating_total_bytes([u64::MAX - 1, 1, 1]), u64::MAX);
     }
 
     #[test]

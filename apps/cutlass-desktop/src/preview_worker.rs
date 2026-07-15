@@ -57,6 +57,13 @@ pub struct PreviewSession {
     pub tl_rate: Rational,
 }
 
+/// Exact in-memory usage of the composited preview-frame cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct PreviewCacheStats {
+    pub(crate) entries: usize,
+    pub(crate) bytes: u64,
+}
+
 /// Work submitted to the engine thread. Scrub frames coalesce to the latest
 /// pending tick; imports must not be dropped by that coalescing (see
 /// [`worker_loop`]).
@@ -587,6 +594,17 @@ enum WorkerMsg {
     RenameProject {
         name: String,
     },
+    /// Report the preview-frame cache's exact current in-memory usage.
+    #[allow(dead_code)] // Wired into the cache registry in its follow-up phase.
+    GetPreviewCacheStats {
+        reply: Sender<PreviewCacheStats>,
+    },
+    /// Drop every composited preview frame and report the exact pre-clear
+    /// usage (the entries and bytes removed).
+    #[allow(dead_code)] // Wired into the cache registry in its follow-up phase.
+    ClearPreviewCache {
+        reply: Sender<PreviewCacheStats>,
+    },
     /// Clone the live project for the AI agent's sandbox rehearsal
     /// (`src/agent.rs`). Ordered with mutations, so the snapshot always
     /// reflects every edit sent before it.
@@ -663,6 +681,10 @@ pub struct WorkerHandle {
     tx: Sender<WorkerMsg>,
 }
 
+/// Cache-management calls must not wait forever behind a stuck render.
+#[allow(dead_code)] // Used once the cache registry consumes this Phase 2b RPC.
+const PREVIEW_CACHE_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
 impl WorkerHandle {
     pub fn request_frame(&self, tick: i64) {
         let _ = self.tx.send(WorkerMsg::Frame(tick));
@@ -712,6 +734,48 @@ impl WorkerHandle {
 
     pub fn rename_project(&self, name: String) {
         let _ = self.tx.send(WorkerMsg::RenameProject { name });
+    }
+
+    /// Return exact preview-frame cache usage, ordered with all worker
+    /// requests submitted before this call.
+    #[allow(dead_code)] // Public(crate) seam for the follow-up registry wiring.
+    pub(crate) fn preview_cache_stats(&self) -> Result<PreviewCacheStats, String> {
+        self.preview_cache_rpc("stats", PREVIEW_CACHE_RPC_TIMEOUT, |reply| {
+            WorkerMsg::GetPreviewCacheStats { reply }
+        })
+    }
+
+    /// Clear only composited preview frames and return their exact pre-clear
+    /// usage. The cache is empty when the worker produces the reply; later
+    /// queued renders may refill it.
+    #[allow(dead_code)] // Public(crate) seam for the follow-up registry wiring.
+    pub(crate) fn clear_preview_cache(&self) -> Result<PreviewCacheStats, String> {
+        self.preview_cache_rpc("clear", PREVIEW_CACHE_RPC_TIMEOUT, |reply| {
+            WorkerMsg::ClearPreviewCache { reply }
+        })
+    }
+
+    #[allow(dead_code)] // Reachable through the intentionally staged APIs above.
+    fn preview_cache_rpc(
+        &self,
+        operation: &'static str,
+        timeout: Duration,
+        request: impl FnOnce(Sender<PreviewCacheStats>) -> WorkerMsg,
+    ) -> Result<PreviewCacheStats, String> {
+        let (reply, response) = bounded(1);
+        self.tx.send(request(reply)).map_err(|_| {
+            format!("preview cache {operation} request failed: preview worker is not running")
+        })?;
+        match response.recv_timeout(timeout) {
+            Ok(stats) => Ok(stats),
+            Err(RecvTimeoutError::Timeout) => Err(format!(
+                "preview cache {operation} request timed out after {} ms",
+                timeout.as_millis()
+            )),
+            Err(RecvTimeoutError::Disconnected) => Err(format!(
+                "preview cache {operation} request failed: preview worker stopped before replying"
+            )),
+        }
     }
 
     /// Synchronous round-trip: clone of the live project as of every edit
@@ -1746,6 +1810,12 @@ fn worker_loop(
                 apply_template_and_publish(engine, path, picks, &ui)
             }
             WorkerMsg::RenameProject { name } => rename_project_and_publish(engine, name, &ui),
+            WorkerMsg::GetPreviewCacheStats { reply } => {
+                let _ = reply.send(cache.stats());
+            }
+            WorkerMsg::ClearPreviewCache { reply } => {
+                let _ = reply.send(cache.clear());
+            }
             WorkerMsg::SnapshotProject { reply } => {
                 let _ = reply.send(engine.project().clone());
             }
@@ -1821,7 +1891,12 @@ fn worker_loop(
         };
         // Scrub/seek frames are reads — they must not push the auto-save
         // deadline out, or playback over a pending edit would never flush.
-        let resets_deadline = !matches!(msg, WorkerMsg::Frame(_));
+        let resets_deadline = !matches!(
+            msg,
+            WorkerMsg::Frame(_)
+                | WorkerMsg::GetPreviewCacheStats { .. }
+                | WorkerMsg::ClearPreviewCache { .. }
+        );
         match msg {
             WorkerMsg::Frame(mut tick) => {
                 // Frame requests coalesced away right here: when > 0 the UI
@@ -6696,12 +6771,24 @@ struct FrameCache {
 }
 
 impl FrameCache {
+    fn stats(&self) -> PreviewCacheStats {
+        PreviewCacheStats {
+            entries: self.entries.borrow().len(),
+            // Every supported Rust target's `usize` fits in `u64`; the cast is
+            // exact and gives the cache registry a platform-stable unit.
+            bytes: self.bytes.get() as u64,
+        }
+    }
+
     /// Drop every delivered frame — for state changes the revision key
     /// doesn't cover (a proxy binding swaps decode sources without touching
-    /// the project).
-    fn clear(&self) {
+    /// the project). Returns the exact usage that was removed.
+    fn clear(&self) -> PreviewCacheStats {
+        let removed = self.stats();
         self.entries.borrow_mut().clear();
         self.bytes.set(0);
+        self.clock.set(0);
+        removed
     }
 
     fn get(&self, key: &FrameKey) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
@@ -6974,6 +7061,104 @@ fn deliver_frame(
 mod tests {
     use super::*;
     use cutlass_models::Project;
+
+    fn cache_key(tick: i64) -> FrameKey {
+        FrameKey {
+            tick,
+            revision: 1,
+            bound: Some((320, 180)),
+        }
+    }
+
+    fn cache_buffer(width: u32, height: u32) -> SharedPixelBuffer<Rgba8Pixel> {
+        SharedPixelBuffer::new(width, height)
+    }
+
+    #[test]
+    fn frame_cache_reports_exact_insert_and_replacement_accounting() {
+        let cache = FrameCache::default();
+        let first = cache_key(1);
+        let second = cache_key(2);
+
+        cache.insert(first, cache_buffer(2, 3));
+        assert_eq!(
+            cache.stats(),
+            PreviewCacheStats {
+                entries: 1,
+                bytes: 24,
+            }
+        );
+
+        cache.insert(second, cache_buffer(1, 4));
+        assert_eq!(
+            cache.stats(),
+            PreviewCacheStats {
+                entries: 2,
+                bytes: 40,
+            }
+        );
+
+        // Replacing a key subtracts the old allocation before adding the new
+        // one; cache hits only update LRU order.
+        cache.insert(first, cache_buffer(3, 3));
+        assert!(cache.get(&second).is_some());
+        assert_eq!(
+            cache.stats(),
+            PreviewCacheStats {
+                entries: 2,
+                bytes: 52,
+            }
+        );
+    }
+
+    #[test]
+    fn frame_cache_clear_returns_removed_usage_and_resets_all_state() {
+        let cache = FrameCache::default();
+        let key = cache_key(1);
+        cache.insert(key, cache_buffer(4, 2));
+        assert!(cache.get(&key).is_some());
+        assert!(cache.clock.get() > 1);
+
+        assert_eq!(
+            cache.clear(),
+            PreviewCacheStats {
+                entries: 1,
+                bytes: 32,
+            }
+        );
+        assert_eq!(cache.stats(), PreviewCacheStats::default());
+        assert!(cache.entries.borrow().is_empty());
+        assert_eq!(cache.bytes.get(), 0);
+        assert_eq!(cache.clock.get(), 0);
+
+        cache.insert(cache_key(2), cache_buffer(1, 1));
+        assert_eq!(cache.clock.get(), 1, "LRU order restarts after clear");
+    }
+
+    #[test]
+    fn preview_cache_rpc_reports_a_disconnected_worker() {
+        let (tx, rx) = unbounded();
+        drop(rx);
+        let handle = WorkerHandle { tx };
+
+        assert_eq!(
+            handle.preview_cache_stats().unwrap_err(),
+            "preview cache stats request failed: preview worker is not running"
+        );
+    }
+
+    #[test]
+    fn preview_cache_rpc_times_out_when_worker_does_not_reply() {
+        let (tx, _rx) = unbounded();
+        let handle = WorkerHandle { tx };
+
+        let error = handle
+            .preview_cache_rpc("clear", Duration::from_millis(1), |reply| {
+                WorkerMsg::ClearPreviewCache { reply }
+            })
+            .unwrap_err();
+        assert_eq!(error, "preview cache clear request timed out after 1 ms");
+    }
 
     /// The ladder drops on one slow render but climbs back only on
     /// sustained, uniformly fast evidence: dwell elapsed, enough samples,

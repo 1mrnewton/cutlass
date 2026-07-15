@@ -194,15 +194,36 @@ impl Renderer {
         }
     }
 
-    /// Remove every proxy substitution — required when the session swaps
-    /// projects: media ids persist in project files, so an id from the old
-    /// registry can name a different file in the new one.
+    /// Remove every proxy substitution while preserving original-media
+    /// decoders. Use [`reset_media_sources`](Self::reset_media_sources) when
+    /// the project/media-id namespace itself changes.
     pub fn clear_proxies(&mut self) {
         let stale: Vec<MediaId> = self.proxies.keys().copied().collect();
         self.proxies.clear();
         for media in stale {
             self.drop_decoders_for(media);
         }
+    }
+
+    /// Drop every cache keyed by the current project's media-id namespace.
+    ///
+    /// Call this before reusing one renderer with a different project or a
+    /// relinked media catalog. Media ids are persisted per project, so the
+    /// same numeric id can name a different file after a session switch;
+    /// retaining its decoder or still bitmap would render the old asset.
+    /// Path-keyed and bundled-asset caches remain warm.
+    pub fn reset_media_sources(&mut self) {
+        self.decoders.clear();
+        self.stills.clear();
+        self.proxies.clear();
+    }
+
+    /// Invalidate one media id after its source path or probed metadata
+    /// changes. The next frame reopens/redecodes it from the project.
+    pub fn invalidate_media_source(&mut self, media: MediaId) {
+        self.proxies.remove(&media);
+        self.drop_decoders_for(media);
+        self.stills.remove(&media);
     }
 
     /// The proxy path registered for `media`, if any (regardless of

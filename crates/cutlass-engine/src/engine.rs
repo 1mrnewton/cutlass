@@ -178,9 +178,10 @@ impl Engine {
         self.transform_override = None;
         self.generator_override = None;
         self.look_override = None;
-        // Media ids persist in project files: an id in the proxy registry
-        // can name a different file in the incoming project.
-        self.renderer.clear_proxies();
+        // Media ids are project-local: the same id can name a different
+        // file in the incoming project, so all id-keyed render state is
+        // stale (open decoders and still bitmaps, not only proxies).
+        self.renderer.reset_media_sources();
         self.revision += 1;
         self.saved_revision = self.revision;
     }
@@ -213,17 +214,17 @@ impl Engine {
                 }
                 // Same media-id hazard as `reset_project`: the incoming
                 // file's ids owe nothing to the outgoing registry.
-                self.renderer.clear_proxies();
+                self.renderer.reset_media_sources();
                 // The session now mirrors the file it came from: rebaseline as
                 // clean (revision still bumps so observers see a change).
                 self.revision += 1;
                 self.saved_revision = self.revision;
             }
             ApplyOutcome::Saved => self.saved_revision = self.revision,
-            // The media now names a different file: its proxy (keyed to the
-            // old file's content) is stale until the worker re-generates.
+            // The media now names a different file: every id-keyed cache
+            // (open decoder, still bitmap, proxy) belongs to the old path.
             ApplyOutcome::Relinked { media } => {
-                self.renderer.clear_proxy(media);
+                self.renderer.invalidate_media_source(media);
                 self.revision += 1;
             }
             ApplyOutcome::Edited(_)
@@ -233,7 +234,7 @@ impl Engine {
             // project file: bump without rebaselining so the session reads
             // dirty until first saved.
             ApplyOutcome::AppliedTemplate => {
-                self.renderer.clear_proxies();
+                self.renderer.reset_media_sources();
                 self.revision += 1;
             }
             // Writing a `.cutlasst` (like exporting an MP4) doesn't touch the

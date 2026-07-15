@@ -95,6 +95,83 @@ impl Easing {
         }
     }
 
+    /// Reparameterize the portion `from..=to` of this easing back onto
+    /// `0..=1`. The returned easing satisfies
+    ///
+    /// `slice(u) = (self(from + (to-from)u) - self(from)) /
+    ///             (self(to) - self(from))`.
+    ///
+    /// Structural edits use this when a normalized speed-ramp segment is cut
+    /// at an arbitrary point. Polynomial presets are first represented as
+    /// equivalent cubic Béziers; de Casteljau subdivision then preserves the
+    /// exact curve shape. A subrange whose endpoint progress is identical but
+    /// whose interior is not flat cannot be represented by one `Easing`, so it
+    /// fails closed.
+    pub(crate) fn subsegment(self, from: f32, to: f32) -> Result<Self, ModelError> {
+        if !from.is_finite()
+            || !to.is_finite()
+            || !(0.0..1.0).contains(&from)
+            || !(0.0..=1.0).contains(&to)
+            || from >= to
+        {
+            return Err(ModelError::InvalidParam(
+                "easing subsegment must satisfy 0 <= from < to <= 1".into(),
+            ));
+        }
+        if from == 0.0 && to == 1.0 {
+            return Ok(self);
+        }
+        if self == Easing::Linear {
+            return Ok(Easing::Linear);
+        }
+
+        let [x1, y1, x2, y2] = match self {
+            Easing::Linear => unreachable!("linear handled above"),
+            // x(s) = s for control x values 1/3 and 2/3. The y controls
+            // below are the cubic Bézier forms of t², 2t-t², and smoothstep.
+            Easing::EaseIn => [1.0 / 3.0, 0.0, 2.0 / 3.0, 1.0 / 3.0],
+            Easing::EaseOut => [1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 1.0],
+            Easing::EaseInOut => [1.0 / 3.0, 0.0, 2.0 / 3.0, 1.0],
+            Easing::Bezier { points } => points,
+        };
+        let points = [
+            BezierPoint { x: 0.0, y: 0.0 },
+            BezierPoint { x: x1, y: y1 },
+            BezierPoint { x: x2, y: y2 },
+            BezierPoint { x: 1.0, y: 1.0 },
+        ];
+        let start_parameter = cubic_parameter_for_x(from, x1, x2);
+        let end_parameter = cubic_parameter_for_x(to, x1, x2);
+        let segment = cubic_subsegment(points, start_parameter, end_parameter);
+        let dx = segment[3].x - segment[0].x;
+        let dy = segment[3].y - segment[0].y;
+        if dx <= f32::EPSILON {
+            return Err(ModelError::InvalidParam(
+                "easing subsegment has no time span".into(),
+            ));
+        }
+        if dy.abs() <= f32::EPSILON {
+            let midpoint = self.apply(0.5 * (from + to));
+            if (midpoint - segment[0].y).abs() <= f32::EPSILON {
+                return Ok(Easing::Linear);
+            }
+            return Err(ModelError::InvalidParam(
+                "easing subsegment with equal endpoints is not representable".into(),
+            ));
+        }
+
+        let normalize_x = |x: f32| ((x - segment[0].x) / dx).clamp(0.0, 1.0);
+        let normalize_y = |y: f32| (y - segment[0].y) / dy;
+        Ok(Easing::Bezier {
+            points: [
+                normalize_x(segment[1].x),
+                normalize_y(segment[1].y),
+                normalize_x(segment[2].x),
+                normalize_y(segment[2].y),
+            ],
+        })
+    }
+
     /// `Ok` iff a bezier's x control points are within `0..=1` and every
     /// component is finite (an x outside the unit range makes the curve
     /// non-monotonic in time — not a function of t).
@@ -126,40 +203,53 @@ fn cubic_bezier(t: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
     if t >= 1.0 {
         return 1.0;
     }
-    // Polynomial coefficients for B(s) with P0=0, P3=1.
-    let (cx, bx, ax) = poly_coefficients(x1, x2);
+    let s = cubic_parameter_for_x(t, x1, x2);
     let (cy, by, ay) = poly_coefficients(y1, y2);
-    let eval = |c: f32, b: f32, a: f32, s: f32| ((a * s + b) * s + c) * s;
+    ((ay * s + by) * s + cy) * s
+}
 
-    // Newton-Raphson: x(s) is monotonic for x1,x2 in 0..=1.
-    let mut s = t;
+/// Parameter `s` where a unit cubic Bézier with x controls `x1`/`x2`
+/// intersects normalized time `x`. Newton converges quickly for ordinary
+/// curves; bounded bisection handles flat derivatives deterministically.
+fn cubic_parameter_for_x(x: f32, x1: f32, x2: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    let (cx, bx, ax) = poly_coefficients(x1, x2);
+    let eval = |s: f32| ((ax * s + bx) * s + cx) * s;
+    let mut s = x;
     for _ in 0..8 {
-        let x = eval(cx, bx, ax, s) - t;
-        if x.abs() < 1e-5 {
-            return eval(cy, by, ay, s);
+        let error = eval(s) - x;
+        if error.abs() < 1e-7 && (0.0..=1.0).contains(&s) {
+            return s;
         }
         let dx = (3.0 * ax * s + 2.0 * bx) * s + cx;
         if dx.abs() < 1e-6 {
             break;
         }
-        s -= x / dx;
-    }
-    // Bisection fallback for flat derivatives.
-    let (mut lo, mut hi) = (0.0f32, 1.0f32);
-    s = t;
-    for _ in 0..20 {
-        let x = eval(cx, bx, ax, s);
-        if (x - t).abs() < 1e-5 {
+        s -= error / dx;
+        if !(0.0..=1.0).contains(&s) {
             break;
         }
-        if x < t {
+    }
+
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..32 {
+        s = 0.5 * (lo + hi);
+        let value = eval(s);
+        if (value - x).abs() < 1e-7 {
+            return s;
+        }
+        if value < x {
             lo = s;
         } else {
             hi = s;
         }
-        s = 0.5 * (lo + hi);
     }
-    eval(cy, by, ay, s)
+    0.5 * (lo + hi)
 }
 
 /// Coefficients `(c, b, a)` of `B(s) = a·s³ + b·s² + c·s` for a unit bezier
@@ -169,6 +259,40 @@ fn poly_coefficients(p1: f32, p2: f32) -> (f32, f32, f32) {
     let b = 3.0 * (p2 - p1) - c;
     let a = 1.0 - c - b;
     (c, b, a)
+}
+
+#[derive(Clone, Copy)]
+struct BezierPoint {
+    x: f32,
+    y: f32,
+}
+
+impl BezierPoint {
+    fn lerp(self, other: Self, t: f32) -> Self {
+        Self {
+            x: self.x + (other.x - self.x) * t,
+            y: self.y + (other.y - self.y) * t,
+        }
+    }
+}
+
+/// The exact cubic control polygon over parameter interval `from..=to`.
+fn cubic_subsegment(points: [BezierPoint; 4], from: f32, to: f32) -> [BezierPoint; 4] {
+    let (_, after_start) = split_cubic(points, from);
+    let relative_end = ((to - from) / (1.0 - from)).clamp(0.0, 1.0);
+    let (segment, _) = split_cubic(after_start, relative_end);
+    segment
+}
+
+/// De Casteljau subdivision at parameter `t`.
+fn split_cubic(points: [BezierPoint; 4], t: f32) -> ([BezierPoint; 4], [BezierPoint; 4]) {
+    let p01 = points[0].lerp(points[1], t);
+    let p12 = points[1].lerp(points[2], t);
+    let p23 = points[2].lerp(points[3], t);
+    let p012 = p01.lerp(p12, t);
+    let p123 = p12.lerp(p23, t);
+    let p = p012.lerp(p123, t);
+    ([points[0], p01, p012, p], [p, p123, p23, points[3]])
 }
 
 /// Values a [`Param`] can animate: lerp-able, plain-old-data.
@@ -598,6 +722,34 @@ mod tests {
             let v = e.apply(i as f32 / 100.0);
             assert!(v >= prev - 1e-4, "non-monotonic at {i}");
             prev = v;
+        }
+    }
+
+    #[test]
+    fn easing_subsegments_preserve_original_progress() {
+        const FROM: f32 = 0.2;
+        const TO: f32 = 0.8;
+        for easing in [
+            Easing::Linear,
+            Easing::EaseIn,
+            Easing::EaseOut,
+            Easing::EaseInOut,
+            Easing::Bezier {
+                points: [0.42, 0.0, 0.58, 1.0],
+            },
+        ] {
+            let sliced = easing.subsegment(FROM, TO).unwrap();
+            let start = easing.apply(FROM);
+            let span = easing.apply(TO) - start;
+            for step in 0..=20 {
+                let u = step as f32 / 20.0;
+                let original = easing.apply(FROM + (TO - FROM) * u);
+                let expected = (original - start) / span;
+                assert!(
+                    (sliced.apply(u) - expected).abs() < 2e-4,
+                    "{easing:?} slice diverged at {u}"
+                );
+            }
         }
     }
 

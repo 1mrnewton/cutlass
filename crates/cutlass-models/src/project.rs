@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::Map;
 use crate::clip::{
     Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator, ParamValue, Replaceable,
-    SlotMedia, look_animation_combo_period_ticks, look_animation_window_ticks,
+    SlotMedia, look_animation_combo_period_ticks, look_animation_window_ticks, split_speed_curve,
 };
 use crate::effects::EffectInstance;
 use crate::error::ModelError;
@@ -896,6 +896,9 @@ impl Project {
             right_tl.duration.value,
             tl_rate,
         )?;
+        let split_fraction = left_tl.duration.value as f64 / tl.duration.value as f64;
+        let (left_speed_curve, right_speed_curve) =
+            split_speed_curve(&clip.speed_curve, split_fraction)?;
 
         let new_left_source = match clip.content.clone() {
             ClipSource::Media { media, source } => {
@@ -907,11 +910,35 @@ impl Project {
                 if source.duration.value < 2 {
                     return Err(ModelError::InvalidRange);
                 }
-                // Source consumed by the left half scales with the clip's
-                // speed (1:1 for never-retimed clips).
-                let left_src_dur = clip
-                    .scale_by_speed(resample(left_tl.duration, media_fps).value)
-                    .clamp(1, source.duration.value - 1);
+                // Use the original clip's actual source positions on both
+                // sides of the cut. This includes exact rational base speed,
+                // integrated speed ramps, mixed source/timeline rates, and
+                // reversal. If adjacent timeline frames resolve to the same
+                // source frame, disjoint non-empty source windows cannot
+                // preserve both halves, so reject that sub-frame cut.
+                let boundary = clip.source_time_at(at)?.ok_or(ModelError::InvalidRange)?;
+                let previous_at = RationalTime::new(
+                    at.value.checked_sub(1).ok_or(ModelError::TimeOverflow)?,
+                    tl_rate,
+                );
+                let previous = clip
+                    .source_time_at(previous_at)?
+                    .ok_or(ModelError::InvalidRange)?;
+                let source_last = source.start.value + source.duration.value - 1;
+                let left_src_dur = if clip.reversed {
+                    if previous.value <= boundary.value {
+                        return Err(ModelError::InvalidRange);
+                    }
+                    source_last - boundary.value
+                } else {
+                    if previous.value >= boundary.value {
+                        return Err(ModelError::InvalidRange);
+                    }
+                    boundary.value - source.start.value
+                };
+                if left_src_dur <= 0 || left_src_dur >= source.duration.value {
+                    return Err(ModelError::InvalidRange);
+                }
                 // A reversed clip plays its window backward: the timeline's
                 // left half shows the source window's TOP, so the split
                 // hands the window bottom to the right clip.
@@ -952,6 +979,7 @@ impl Project {
         // keyframe left by the split offset makes sampling tail tick `t`
         // identical to sampling original tick `split + t`.
         new_clip.shift_timeline_params(-left_tl.duration.value)?;
+        new_clip.speed_curve = right_speed_curve;
         // Edge-anchored properties stay on the corresponding outer edge.
         new_clip.fade_in = 0;
         if new_clip.animation_combo.is_none() {
@@ -979,6 +1007,7 @@ impl Project {
             {
                 *source = left_source;
             }
+            left.speed_curve = left_speed_curve;
         }
         self.timeline.add_clip(track_id, new_clip)
     }
@@ -2759,6 +2788,8 @@ mod tests {
         }
 
         let before = project.clip(clip_id).unwrap().clone();
+        let (expected_left_curve, expected_right_curve) =
+            split_speed_curve(&before.speed_curve, 0.5).unwrap();
         let right_id = project.split_clip(clip_id, rt(70)).unwrap();
 
         let mut expected_left = before.clone();
@@ -2769,6 +2800,7 @@ mod tests {
         };
         expected_left.fade_out = 0;
         expected_left.animation_out = None;
+        expected_left.speed_curve = expected_left_curve;
         assert_eq!(
             project.clip(clip_id).unwrap(),
             &expected_left,
@@ -2784,6 +2816,7 @@ mod tests {
         };
         expected_right.link = None;
         expected_right.shift_timeline_params(-60).unwrap();
+        expected_right.speed_curve = expected_right_curve;
         expected_right.fade_in = 0;
         expected_right.animation_in = None;
         assert_eq!(
@@ -2812,6 +2845,140 @@ mod tests {
             right.link, None,
             "callers remain responsible for relinking tails"
         );
+    }
+
+    #[test]
+    fn split_clip_uses_forward_constant_speed_source_boundary() {
+        let (mut project, media_id, track) = project_with_media(1_000);
+        let clip_id = project
+            .add_clip(track, media_id, tr(100, 120), rt(10))
+            .unwrap();
+        project
+            .set_clip_speed(clip_id, Rational::new(3, 2), false)
+            .unwrap();
+        let before = project.clip(clip_id).unwrap().clone();
+
+        let right_id = project.split_clip(clip_id, rt(42)).unwrap();
+        let left = project.clip(clip_id).unwrap();
+        let right = project.clip(right_id).unwrap();
+        assert_eq!(left.timeline, tr(10, 32));
+        assert_eq!(right.timeline, tr(42, 48));
+        assert_eq!(left.source_range(), Some(tr(100, 48)));
+        assert_eq!(right.source_range(), Some(tr(148, 72)));
+
+        for tick in [10, 25, 41] {
+            assert_eq!(
+                left.source_time_at(rt(tick)),
+                before.source_time_at(rt(tick))
+            );
+        }
+        for tick in [42, 55, 75, 89] {
+            assert_eq!(
+                right.source_time_at(rt(tick)),
+                before.source_time_at(rt(tick))
+            );
+        }
+    }
+
+    #[test]
+    fn split_clip_uses_reversed_constant_speed_source_boundary() {
+        let (mut project, media_id, track) = project_with_media(1_000);
+        let clip_id = project
+            .add_clip(track, media_id, tr(100, 120), rt(10))
+            .unwrap();
+        project
+            .set_clip_speed(clip_id, Rational::new(3, 2), true)
+            .unwrap();
+        let before = project.clip(clip_id).unwrap().clone();
+
+        let right_id = project.split_clip(clip_id, rt(42)).unwrap();
+        let left = project.clip(clip_id).unwrap();
+        let right = project.clip(right_id).unwrap();
+        assert_eq!(left.source_range(), Some(tr(172, 48)));
+        assert_eq!(right.source_range(), Some(tr(100, 72)));
+
+        for tick in [10, 25, 41] {
+            assert_eq!(
+                left.source_time_at(rt(tick)),
+                before.source_time_at(rt(tick))
+            );
+        }
+        for tick in [42, 55, 75, 89] {
+            assert_eq!(
+                right.source_time_at(rt(tick)),
+                before.source_time_at(rt(tick))
+            );
+        }
+    }
+
+    #[test]
+    fn split_clip_segments_speed_curve_and_preserves_source_mapping() {
+        let (mut project, media_id, track) = project_with_media(1_000);
+        let clip_id = project
+            .add_clip(track, media_id, tr(100, 200), rt(0))
+            .unwrap();
+        let mut curve = Param::Constant(1.0);
+        curve.set_keyframe(0, 1.0, Easing::Linear);
+        curve.set_keyframe(crate::SPEED_CURVE_SCALE, 3.0, Easing::Linear);
+        project.set_clip_speed_curve(clip_id, Some(curve)).unwrap();
+        let before = project.clip(clip_id).unwrap().clone();
+        assert_eq!(before.timeline, tr(0, 100));
+
+        let right_id = project.split_clip(clip_id, rt(50)).unwrap();
+        let left = project.clip(clip_id).unwrap();
+        let right = project.clip(right_id).unwrap();
+        assert_eq!(left.source_range(), Some(tr(100, 75)));
+        assert_eq!(right.source_range(), Some(tr(175, 125)));
+        assert_eq!(
+            left.source_range().unwrap().end_tick(),
+            right.source_range().unwrap().start.value,
+            "forward source windows stay contiguous at the split"
+        );
+        assert_eq!(
+            left.speed_curve.sample_at(500.0),
+            before.speed_curve.sample_at(250.0)
+        );
+        assert_eq!(
+            right.speed_curve.sample_at(500.0),
+            before.speed_curve.sample_at(750.0)
+        );
+
+        for tick in [0, 10, 25, 49] {
+            assert_eq!(
+                left.source_time_at(rt(tick)),
+                before.source_time_at(rt(tick))
+            );
+        }
+        for tick in [50, 60, 75, 99] {
+            assert_eq!(
+                right.source_time_at(rt(tick)),
+                before.source_time_at(rt(tick))
+            );
+        }
+        assert_eq!(
+            right.source_time_at(rt(50)).unwrap(),
+            before.source_time_at(rt(50)).unwrap(),
+            "the first tail frame is the original frame at the boundary"
+        );
+    }
+
+    #[test]
+    fn split_clip_rejects_a_cut_inside_one_source_frame() {
+        let (mut project, media_id, track) = project_with_media(100);
+        let clip_id = project
+            .add_clip(track, media_id, tr(0, 100), rt(0))
+            .unwrap();
+        project
+            .set_clip_speed(clip_id, Rational::new(1, 2), false)
+            .unwrap();
+        let before = project.clip(clip_id).unwrap().clone();
+
+        assert_eq!(
+            project.split_clip(clip_id, rt(1)),
+            Err(ModelError::InvalidRange)
+        );
+        assert_eq!(project.clip(clip_id), Some(&before));
+        assert_eq!(project.timeline().clip_count(), 1);
     }
 
     #[test]

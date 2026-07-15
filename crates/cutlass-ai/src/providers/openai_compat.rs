@@ -73,8 +73,7 @@ impl OpenAiCompatProvider {
     }
 
     fn request_body(&self, request: &ChatRequest<'_>) -> serde_json::Value {
-        let messages: Vec<serde_json::Value> =
-            request.messages.iter().flat_map(to_openai).collect();
+        let messages = to_openai_messages(request.messages);
         let mut body = serde_json::json!({
             "model": self.model,
             "stream": true,
@@ -156,6 +155,77 @@ impl ChatProvider for OpenAiCompatProvider {
 
         consume_sse(response.into_reader(), cancel, on_text)
     }
+}
+
+/// Convert a complete history while preserving OpenAI's parallel-tool-call
+/// ordering rule: every `role=tool` response for an assistant turn must
+/// precede the next user message. Image attachments are therefore hoisted
+/// only after the entire contiguous run of tool results, not immediately
+/// after whichever tool happened to return the first image.
+fn to_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
+    let mut wire = Vec::new();
+    let mut index = 0usize;
+    while index < messages.len() {
+        if !matches!(messages[index], Message::ToolResult { .. }) {
+            wire.extend(to_openai(&messages[index]));
+            index += 1;
+            continue;
+        }
+
+        let run_start = index;
+        while index < messages.len() && matches!(messages[index], Message::ToolResult { .. }) {
+            let Message::ToolResult {
+                call_id, content, ..
+            } = &messages[index]
+            else {
+                unreachable!("tool-result run checked above");
+            };
+            wire.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": content,
+            }));
+            index += 1;
+        }
+
+        let image_results: Vec<(&str, &[ImagePart])> = messages[run_start..index]
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResult {
+                    call_id, images, ..
+                } if !images.is_empty() => Some((call_id.as_str(), images.as_slice())),
+                _ => None,
+            })
+            .collect();
+        if !image_results.is_empty() {
+            let labels = image_results
+                .iter()
+                .map(|(call_id, images)| {
+                    format!(
+                        "{call_id}: {}",
+                        images
+                            .iter()
+                            .map(|image| image.label.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            let mut parts = vec![serde_json::json!({
+                "type": "text",
+                "text": format!("[tool attachments: {labels}]"),
+            })];
+            parts.extend(
+                image_results
+                    .iter()
+                    .flat_map(|(_, images)| images.iter())
+                    .map(image_url_part),
+            );
+            wire.push(serde_json::json!({ "role": "user", "content": parts }));
+        }
+    }
+    wire
 }
 
 /// Statuses whose response is explicitly temporary. Authentication,
@@ -575,6 +645,49 @@ mod tests {
 
         let without = Message::tool_result("call_2", "removed clip 3");
         assert_eq!(to_openai(&without).len(), 1);
+    }
+
+    #[test]
+    fn parallel_tool_results_all_precede_hoisted_images() {
+        let messages = vec![
+            Message::Assistant {
+                content: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "call_a".into(),
+                        name: "media_preview_frame".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                    ToolCall {
+                        id: "call_b".into(),
+                        name: "describe_project".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                ],
+            },
+            Message::ToolResult {
+                call_id: "call_a".into(),
+                content: "frame ready".into(),
+                images: vec![ImagePart::png(vec![1, 2], "preview frame")],
+            },
+            Message::tool_result("call_b", "project summary"),
+        ];
+
+        let wire = to_openai_messages(&messages);
+        let roles: Vec<_> = wire
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["assistant", "tool", "tool", "user"]);
+        assert_eq!(wire[1]["tool_call_id"], "call_a");
+        assert_eq!(wire[2]["tool_call_id"], "call_b");
+        assert!(
+            wire[3]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("call_a: preview frame")
+        );
+        assert_eq!(wire[3]["content"][1]["type"], "image_url");
     }
 
     #[test]

@@ -1,379 +1,393 @@
-# AI Agent Roadmap — prompt-to-edit foundation (v1 M3)
+# AI Agent Roadmap — the Everything Agent (v2)
 
-**Status (macos-dev, Jul 2026):** Phases 0–5 shipped. `cutlass-ai` and the
-desktop assistant panel (`apps/cutlass-desktop/src/agent.rs`) are wired end to
-end. Tool schema v20 adds look commands; `duck` and `detect_beats` were removed
-from the vocabulary because their engine arms return `Unsupported` on this line.
-Guarded `Import` (Phase 5 stretch) remains deferred.
+**Status (macos-dev, Jul 2026):** v2. v1 (M3) shipped the closed-vocabulary
+timeline agent — wire format + validation, OpenAI-compatible provider,
+sandbox-rehearse-then-replay loop, chat panel, eval harness — end to end in
+`crates/cutlass-ai` and `apps/cutlass-desktop/src/agent.rs`; see
+[v1 foundation (shipped)](#v1-foundation-shipped) for the compressed record.
+v2 grows that agent into the app-wide agent that is the product's selling
+point: an assistant that can see the project, drive the app, understand the
+footage, and compute — not just edit the timeline.
 
-Policy: **the agent is the reason Cutlass exists.** CapCut has no real
-equivalent of a prompt box that edits the timeline; this is the
-differentiator, and it ships early because it depends only on the command
-layer — which has existed, undoable and integration-tested, since the
-headless days. Every later milestone (keyframes, effects, color, audio)
-grows the agent's vocabulary for free; nothing here waits on them.
+Policy: **the agent is the reason Cutlass exists**, and v1 proved the trust
+machinery on the highest-stakes surface (timeline mutation). v2 extends the
+same discipline — validated, observable, undoable-or-confirmed — to
+everything else the user can do, instead of inventing a second, looser
+mechanism per feature. Local-first stays law: every capability below works
+against a local model and local analysis; cloud raises quality, never gates.
 
-This doc tracks v1-roadmap **M3 — "The AI agent"**. The dependency is M0's
-command layer plus one M0 honesty item pulled forward as a hard
-prerequisite: the agent must never emit the phantom generator kinds
-(`Sticker`/`Effect`/`Filter`/`Adjustment`) that `composite.rs` silently
-drops — an agent that "adds a sticker" which renders nothing is the
-phantom-feature problem with a megaphone.
+## v1 foundation (shipped)
 
-## Architecture invariants (apply to every phase)
+Compressed from the v1 doc (phases 0–5, all landed on this line):
 
-- **The agent is just another command source.** Agent output is validated
-  `cutlass_commands` commands applied on the worker thread through the
-  same `Engine::apply` as every gesture; the UI learns the result from
-  the republished projection. The agent gets correctness, undo, and
-  validation for free — that is the entire point of the command-layer
-  design, and the agent never gets a side channel into project state.
-- **One prompt = one history group.** The loop wraps each prompt in
-  `begin_group`/`end_group` (the compound-gesture pattern all over
-  `preview_worker.rs`); an aborted prompt is `rollback_group`ed. An AI
-  edit is exactly as undoable as a drag — one Cmd+Z per prompt.
-- **AI proposes, the engine disposes.** Validation rejects, it never
-  guesses: unknown commands, dead ids, phantom generators, and
-  out-of-vocabulary requests fail loudly back to the model (which may
-  retry) and visibly to the user. No silent fixups.
-- **Provider-abstracted, local-first, never local-only.** `cutlass-ai`
-  defines the `ChatProvider` trait; the first implementation is generic
-  OpenAI-compatible HTTP, which covers Ollama / llama.cpp-server /
-  LM Studio locally *and* OpenAI-class clouds day one. Adding providers
-  is config or one adapter, never an agent change.
-- **Keys and provider config live in `~/.cutlass/config.toml`** (the
-  config-dir convention the settings crate established) — never in
-  project files, never serialized into `.cutlass`.
-- **Network and inference stay off the UI thread.** The agent runs on
-  its own thread, talks to the engine via the worker's ordered mutation
-  lane, and streams status to the UI through the established
-  handle/callback pattern.
-- **The vocabulary is closed and versioned.** The tool schema is
-  generated from one wire layer, snapshot-tested, and versioned with the
-  crate. New engine commands join the vocabulary by a checklist (Phase 5),
-  not by accident.
+- [x] **Closed command vocabulary** over the engine's command layer: wire
+      DTOs shaped for LLMs (`#[serde(tag = "command")]`, seconds not ticks,
+      raw-int ids), validated against a project snapshot with model-readable
+      rejections; schema v21 includes M2 keyframes and look commands.
+- [x] **Tool schema export** via `schemars`, one tool per command,
+      `TOOL_SCHEMA_VERSION` + snapshot test — schema drift is a reviewed
+      diff, never an accident.
+- [x] **`describe_project` + `EditorContext`** pushed fresh each prompt
+      (summary, selection, playhead, in/out) — context is pushed, not
+      retrieved.
+- [x] **`ChatProvider` trait + OpenAI-compatible SSE provider** (Ollama,
+      llama.cpp-server, LM Studio, OpenAI, gateways), config in
+      `~/.cutlass/config.toml` `[ai]`; `ScriptedProvider` test double; error
+      taxonomy the UI can speak.
+- [x] **The loop**: per-call validate → apply → outcome-or-rejection fed
+      back; caps (tool calls, turns); dry-run; human-readable action log.
+- [x] **Sandbox-rehearse-then-replay**: prompts rehearse against a
+      snapshot-seeded sandbox engine, then the validated plan replays
+      atomically on the live engine as **one undo group** with sandbox→live
+      id remapping. One prompt = one Cmd+Z.
+- [x] **Chat panel**: streamed transcript, action lines, dry-run preview
+      card (Apply/Discard), undo chip, not-configured setup state, Stop.
+- [x] **Eval harness**: scripted-provider prompts against fixture projects
+      asserting final timeline + action log, in CI, zero network.
+- [x] **Q&A without mutation** + the **vocabulary growth checklist** (wire
+      DTO, schema snapshot, action line, eval case — per new command).
+- v1's deferred stretch (guarded `Import` with per-prompt confirmation) is
+  superseded by the tier model below.
+
+## Vision
+
+The agent can do (almost) everything the user can — and things they can't:
+
+- **Senses.** Screenshot the timeline and preview, grab frames from any
+  asset at any time, read analysis results — the model stops editing blind.
+- **App control.** Window, panels, playback transport, zoom, selection,
+  theme, caches, storage locations — "make the preview bigger and loop the
+  selection" is a prompt, not a hunt through menus.
+- **Project operations.** Import, export, save, open, relink, templates —
+  the full project lifecycle, with confirmations where the stakes demand.
+- **Semantic media understanding.** "Cut all my kills from this gameplay",
+  "make C. Ronaldo edits from this match — dribbles, goals, respect
+  moments", beat-synced montages, silence removal, auto-captions. The
+  agent's edge over every prompt-box gimmick is that it can *watch the
+  footage* and then execute frame-exact edits through the validated
+  vocabulary.
+- **Open-ended computation.** A Python runtime (cutlass-py + analysis
+  libraries) for the long tail no fixed toolset covers.
+
+Everything runs local-first (local models, local analysis, local Python) and
+cloud-optional (frontier models and hosted vision raise quality when
+configured — the cloud-roadmap BYOK rules apply unchanged).
+
+## Trust model — validated edits plus three host tiers
+
+Validated edits remain their own closed execution plane: every edit is
+validated against a snapshot, rehearsed in the sandbox, and replayed in one
+or more explicit undo phases pinned by the schema snapshot test. Host tools
+cannot bypass that plane or mutate the timeline directly.
+
+Every host tool then declares exactly one `ToolTier`:
+
+1. **ReadOnly** — screenshots, frame grabs, state reads, and analysis
+   queries. These cannot mutate app, project, or system state and never
+   confirm.
+2. **Workspace** — safe, reversible app/project state: panel, playback,
+   window, theme, zoom, and selection control. These run immediately; the
+   next call or a user click can reverse them.
+3. **System** — destructive or external effects: cache clear, storage
+   relocation, writes outside managed project storage, opening external
+   apps, and Python execution. The loop fails closed before execution unless
+   the embedding host authorizes the call. Desktop authorization follows the
+   `[ai] autonomy` setting: `ask` (default) parks the call behind a per-call
+   confirmation card; `full` runs without prompts. The card names the effect
+   precisely ("runs now; not undoable from Cutlass" — the MCP doc's phrasing,
+   same posture).
+
+**Namespaced host tools.** Everything beyond the edit vocabulary is a host
+tool named `{namespace}_{tool}` — namespaces `app`, `project`, `system`,
+`media`, `analysis`, `python`, `job`. The built-in edit vocabulary stays
+unprefixed. Dispatch requires exact membership in the host registry; the
+namespace is validated at registration time and used for grouping, not as a
+wildcard router. Unknown names fall through to the closed wire-command parser
+and return a model-readable rejection. The edit schema snapshot continues to
+cover only the closed vocabulary; host tools carry their own registry and
+their own tests. Structural containment, not textual: no host tool can mutate
+the timeline except by the model reading its result and issuing validated
+edit commands.
 
 ## Status legend
 
 - [x] shipped
-- [ ] not started / in progress
+- [ ] not started / in progress ("(in flight)" = landing in the current
+  dev cycle)
 
 ---
 
-## Phase 0 — Foundation (done — what this builds on)
+## Phase 0 — Runtime foundations
 
-All engine-side, all tested:
+What the loop, panel, and provider layer need before any new capability can
+land cleanly.
 
-- [x] Closed command vocabulary: 15 `EditCommand`s + 5 `ProjectCommand`s
-      (`crates/cutlass-commands/src/command.rs`), every edit returning an
-      inverse action through `dispatch` (`action/dispatch.rs`), with
-      `EditOutcome` telling callers what happened.
-- [x] History groups with rollback: `Engine::{begin_group, end_group,
-      rollback_group}` (`engine.rs`), used by every compound gesture in
-      `preview_worker.rs` — the exact transaction shape a prompt needs.
-- [x] Worker thread owns the engine; every mutation republishes the
-      projection (`publish_projection`) — agent edits will repaint the
-      timeline, inspector, and preview with zero new plumbing.
-- [x] Models are fully serde (`cutlass-models`, project persistence) —
-      ids serialize, `RationalTime`/`TimeRange` serialize, and the UI
-      already round-trips raw u64 ids (`parse_raw_id`).
-- [x] Config-dir convention: `~/.cutlass/config.toml` for settings; the
-      per-user data dir's `projects/` for app-owned project drafts.
+- [x] **Multimodal messages**: `ImagePart` on the provider wire, a
+      per-request image budget, text-only history (images are referenced,
+      not resent — image tokens are the expensive kind).
+- [x] **`[ai] autonomy` setting** (`cutlass-settings`): `ask` default /
+      `full`, the System-tier gate above.
+- [x] **ToolHost registry + loop dispatch + phase commits**:
+      host tools register exact `{namespace}_{tool}` specs; the loop dispatches
+      only registry members; `commit_progress` lets the model commit rehearsed edits in
+      named phases — per-phase undo groups instead of one monolithic group
+      for long multi-step prompts.
+- [x] **Provider retries**: transient network/5xx failures retry
+      with backoff instead of aborting the prompt and rolling back a
+      half-built plan.
+- [x] **`cutlass-jobs` background-job registry**: std-only
+      `JobManager` — named worker threads, progress + detail snapshots,
+      cooperative cancel, subscriber bridge for the UI, bounded finished
+      history. Exports, analysis, transcription, and Python runs migrate to
+      it as those phases land; `job_list` / `job_status` / `job_cancel`
+      then expose the shared registry.
+- [x] **Per-draft session persistence**: conversation history + transcript
+      survive draft close/reopen (sidecar next to the draft, following the
+      recents/autosave conventions — never inside the project file).
+- [ ] **Desktop System authorization broker** (in flight): fail-closed loop
+      authorization has landed; the `ask` confirmation card and `full`
+      bypass are being wired to the desktop host.
 
-What does **not** exist (the work): `cutlass-commands` has no serde and
-no JSON schema; there is no provider code, no agent loop, no chat UI, no
-eval harness. The product's stated identity is 0% built — this roadmap
-is that 0% → shipped.
+Exit: a host tool registered under a namespace is dispatchable from the
+loop; job lifecycle tests prove ordered progress, cancellation, and bounded
+history; reopening a draft restores its conversation; a provider blip
+mid-prompt is a retry, not a rollback; System calls cannot execute without
+desktop authorization.
 
-## Phase 1 — `cutlass-ai`: wire format, validation, tool schema ✅
+## Phase 1 — Vision: the agent gets eyes
 
-The smallest slice that makes the command layer machine-callable, with
-no network anywhere yet: JSON in → validated `Command`s out → applied to
-a real engine in tests. Everything later stands on this.
+The single highest-leverage v2 capability: every later phase assumes the
+model can check its own work.
 
-- [x] **Crate scaffold**: `crates/cutlass-ai`, workspace member, deps
-      `cutlass-commands`/`cutlass-models` + `serde`/`serde_json`/
-      `schemars`. Deliberately **no** `cutlass-engine` dependency: the
-      agent emits commands and reads summaries through a narrow bridge
-      trait (Phase 3), so the crate stays light and the eval harness
-      stays honest about the boundary.
-- [x] **Agent wire format**: dedicated serde DTOs (`wire.rs`) mirroring
-      `EditCommand`, *not* serde derives on `cutlass-commands` itself.
-      Deviation from the v1-roadmap sketch, deliberately: the wire layer
-      is shaped for LLM ergonomics — `#[serde(tag = "command")]` flat
-      objects, **times as fractional seconds** (models reason in
-      seconds; converted to frame-snapped `RationalTime` at the project
-      timeline rate during validation), **ids as plain integers** (the
-      raw u64s the UI already uses), enums as lowercase strings. Keeps
-      internal refactors of `cutlass-commands` from silently changing
-      the prompt-visible schema.
-- [x] **Validation + lowering** (`validate.rs`): wire command →
-      `cutlass_commands::Command` against a project snapshot — id
-      existence, range sanity, track-kind rules, second→tick conversion.
-      **Whitelist enforced here**: edit commands only (no
-      `ProjectCommand` in the vocabulary at all in M3 — open/save/
-      export/import stay human), and `AddGenerated`/`SetGenerator`
-      accept only `Text`/`SolidColor`/`Shape`. Every rejection carries a
-      model-readable reason string ("clip 12 does not exist; current
-      clips are …").
-- [x] **Tool schema export**: JSON Schema per wire command via
-      `schemars`, one tool per command (flat single-purpose tools
-      tool-call better than one mega-tool, and 17 is well inside every
-      provider's comfort zone), plus `describe_project`. Versioned
-      constant (`TOOL_SCHEMA_VERSION`) + snapshot test
-      (`tests/snapshots/tools.json`, re-bless with `BLESS_TOOL_SCHEMA=1`)
-      so schema drift is a reviewed diff, never an accident.
-- [x] **`describe_project()`** (`describe.rs`): compact, token-bounded
-      timeline summary from `&Project` — project rate, tracks in
-      stack order (id, kind, name, flags), clips per track (id, media or
-      generator, timeline start/duration in seconds *and* exact frames,
-      source range, link groups), media pool (id, file name, duration,
-      dimensions, has-audio). Deterministic output order (stack order /
-      start order / id order) so eval tests can assert on it verbatim.
-      `EditorContext` (selection, playhead, in/out) lives here too,
-      ready for Phase 3's prompt assembly. Phantom generator clips
-      surface as `content: other` — visible, not editable.
-- [x] **Round-trip tests**: every wire command deserializes from
-      realistic JSON, validates against a fixture project, lowers to the
-      expected `EditCommand`, and applies through a real `Engine`
-      (dev-dependency, `tests/engine_roundtrip.rs` — fake media pool
-      entries, no decode) — plus rejection tests for the guardrails
-      (dead id, bad range, lane mismatches, sub-frame deltas; phantom
-      generators and project commands are unrepresentable by
-      construction). A 10-command prompt-sized scenario applies and
-      fully unwinds with 10 undos.
+- [x] **Frame-capture primitives**: bounded project/asset renders use a
+      private lazy renderer, the real compositor, safe media-cache reuse,
+      exact frame snapping, path-redacted labels, and in-memory PNG output.
+- [ ] **`media_*` senses**: timeline screenshot, preview frame at playhead
+      or given time, frame grabs from any pool asset at any source time,
+      asset thumbnail strips. All Workspace tier; all return images through
+      the multimodal wire under the image budget.
+- [x] **Schematic timeline map renderer**: render the timeline as a labeled schematic
+      image server-side (tracks, clips with names/ids, markers, playhead,
+      explicit time window) —
+      cheaper, crisper, and more model-legible at small sizes than a raw UI
+      screenshot, and it works headless (no Slint in the loop). The UI
+      screenshot stays available for "what does the user actually see".
+- [ ] **Sandbox self-verify**: after rehearsing edits, the loop offers the
+      model a render of the *sandbox* state (schematic map + composited
+      frame grabs) so it verifies placement/timing before the plan is ever
+      presented — catch the wrong-lane title in rehearsal, not in review.
+- [x] **Inline image transcript rows**: the agent panel has bounded,
+      aspect-aware image cards and persists text-only placeholders. Emitting
+      sensed host-tool images into those rows remains part of `media_*` wiring.
 
-Exit: `serde_json::from_str` → `validate` → `Engine::apply` edits a
-fixture project correctly in CI, and the generated tool schema is a
-checked-in, reviewed artifact. ✔ shipped.
+Exit: "add a title over the intro, then check it" produces a plan the model
+already verified against a sandbox frame grab; the transcript shows the
+grab; an eval case locks the verify loop in with a scripted vision turn.
 
-## Phase 2 — Providers ✅
+## Phase 2a — App control
 
-Decision: **no agent framework** (evaluated AutoAgents, the strongest
-Rust candidate). The loop is the product here — one-group-per-prompt
-transactions, per-call rejection feedback, dry-run, rollback — and
-frameworks own the loop; they'd also drag a tokio runtime into a
-std-thread app and take ownership of the prompt-visible schema. What a
-framework actually replaces (provider HTTP + SSE + the turn loop) is a
-few hundred well-tested lines. The `ChatProvider` trait is the seam: a
-framework's provider layer can become *one implementation* later (M9)
-if the provider matrix demands it, without touching the agent.
+- [ ] **`app_*` tools** via winit + the existing Slint globals: window
+      position/size, playback transport (play/pause/seek/loop selection),
+      panel toggles (library/inspector/agent/timeline zoom), active
+      selection, theme. Workspace tier — every one reversible by the next
+      call or a click.
+- [ ] **State echo**: each `app_*` call returns the resulting app state
+      block, so the model never operates on a stale picture of the shell.
 
-- [x] **`ChatProvider` trait** (`provider.rs`): chat completion over a
-      message history with tool definitions, streamed text (an
-      `on_text` delta callback; tool calls arrive whole in the returned
-      `ChatTurn` with its finish reason), and cooperative cancellation
-      via an `AtomicBool`. Blocking trait on a dedicated agent
-      thread — no tokio runtime enters the app for v1 (matches the
-      std-thread architecture everywhere else).
-- [x] **OpenAI-compatible provider** (`providers/openai_compat.rs`):
-      `POST {base_url}/chat/completions` with `tools` + SSE streaming
-      over `ureq`. Tool-call argument fragments accumulate per index
-      across chunks (parallel calls supported). One implementation,
-      many backends: Ollama (`localhost:11434/v1`), llama.cpp-server,
-      LM Studio, OpenAI, OpenRouter-style gateways — "cloud providers
-      later" becomes config, not code, exactly as the v1 roadmap wants.
-- [x] **Config**: `~/.cutlass/config.toml` — `[ai]` table with
-      `base_url`, `model`, `api_key` (or `api_key_env` to read an
-      environment variable instead of storing the key). Parsed in
-      `cutlass-ai` (`config.rs`), absent file = agent not configured (a
-      state the UI surfaces in Phase 4, never a crash).
-- [x] **`ScriptedProvider` test double**: deterministic canned
-      tool-call sequences, no network, records every request for
-      assertions — the substrate for every loop test and the Phase 3
-      eval harness.
-- [x] **Error taxonomy**: `ProviderError::{NotConfigured, Network,
-      Provider{status}, Protocol, Cancelled}` carried distinctly, so
-      the UI can say "Ollama isn't running at localhost:11434" instead
-      of "something failed".
+Exit: "play the last 5 seconds looped, hide the library, dark theme" works
+as one prompt; evals cover the tool results; nothing here can touch project
+data.
 
-Exit: a unit test streams a tool call out of a recorded SSE fixture, and
-a hand-run binary gets a real completion from a local Ollama. ✔ shipped —
-`examples/chat_probe.rs` against local Ollama (gemma4) streams text and
-emits a real assembled `trim_clip` tool call.
+## Phase 2b — System: caches, storage, external
 
-## Phase 3 — Agent loop, guardrails, eval harness ✅
+- [ ] **Cache registry**: one enumerable registry of app caches (proxies,
+      thumbnails, waveforms, transcript/models when they land) with size,
+      clear, and relocate operations — the substrate for both the Settings
+      UI and the `system_*` tools.
+- [ ] **`[storage]` settings + Settings UI section**: cache/storage
+      locations become visible, configurable, and relocatable (move-then-
+      swap, never delete-then-hope).
+- [ ] **`system_*` tools**: cache sizes/clear/relocate, reveal-in-Finder,
+      open-external. All System tier: `ask` autonomy shows the confirmation
+      card per call.
 
-The brain: prompt in, validated-and-applied command group out, every
-step observable.
+Exit: "free up disk space" enumerates caches with sizes, proposes clears,
+and executes only through confirmations (or autonomy `full`); Settings shows
+the same registry the agent uses.
 
-- [x] **`EngineBridge` trait** (`agent.rs`): the loop's whole world —
-      `summary() -> ProjectSummary`, `apply(&WireCommand) ->
-      Result<EditOutcome, String>` (validate + dispatch host-side,
-      model-readable errors), `check` for dry-run, and the group
-      markers (`begin/end/rollback`). The UI implements it over a
-      sandbox engine whose plan replays onto the live one (Phase 4);
-      tests implement it over a plain `Engine`. The loop cannot name a
-      file path, a socket, or a Slint type.
-- [x] **The loop** (`agent::run_prompt`): system prompt (vocabulary +
-      house rules + current `describe_project`) → provider turn → for
-      each tool call: validate → apply → feed the outcome (or the
-      rejection reason) back as the tool result → repeat until the
-      model finishes or a cap trips. Failed commands don't abort the
-      prompt — the model sees the error and may correct course (that's
-      the point of per-call feedback); the group rolls back only when
-      the prompt aborts (cancellation, provider error, cap exceeded).
-      The house rules teach trim-head semantics explicitly (live gemma4
-      got it wrong without the rule, right with it).
-- [x] **Prompt context assembly — pushed, not retrieved**: every prompt
-      carries fresh state — the `describe_project` summary plus an
-      **`EditorContext`** snapshot (selected clip ids, playhead position,
-      in/out range) captured when the user hits send. "Trim the selected
-      clip", "split at the playhead", "delete everything before the in
-      point" resolve against this block; tool results carry updated
-      state back so later calls in the same prompt see the world they
-      changed. Stale references (selection changed mid-prompt, undone
-      clips) fail validation loudly instead of editing the wrong thing.
-- [x] **Guardrails**: max tool calls per prompt (default 32) and max
-      provider turns (default 16); unknown tool names rejected with the
-      valid list (defense in depth with Phase 1's closed vocabulary);
-      **dry-run mode** — validate and collect the plan without
-      applying, for the Phase 4 preview card.
-- [x] **Action log**: every applied command renders a human-readable
-      line from the wire command + `EditOutcome` ("split clip 7 at
-      12.40s (new clip 21)", "added text 'INTRO' at 0.00s for 3.00s on
-      track 3") — the transcript entry, the undo tooltip, and the
-      eval-test assertion format, all one renderer
-      (`agent::describe_action`).
-- [x] **Eval harness** (`tests/agent_eval.rs`): scripted-provider
-      prompts against fixture projects asserting on the final timeline
-      and the action log — "cut the first 3 seconds", "add a title that
-      says INTRO" (a model-simulator provider that reads the new track
-      id out of the tool result), "delete every clip on the music
-      track", a multi-step correction case (first tool call rejected,
-      model retries), a cap-trip rollback case, dry-run, Q&A-without-
-      editing, and provider-failure rollback. Runs in CI with zero
-      network; this is how agent regressions get caught without a live
-      model.
+## Phase 2c — Project operations
 
-Exit: `cargo test -p cutlass-ai` proves prompt → correct timeline → one
-undo entry, including the failure paths, against the stub provider.
-✔ shipped — and verified live end-to-end: `examples/agent_probe.rs`
-ran "cut the first 3 seconds of the selected clip" through local
-Ollama against a real engine and produced the frame-exact trim.
+- [ ] **`project_*` tools**: import media, export (spawned as a
+      `cutlass-jobs` job with progress + cancel), save, open, new,
+      list-drafts, relink missing media, apply/save templates.
+- [ ] **Tier mapping with teeth**: reads (list-drafts, relink candidates)
+      are Workspace; mutations that can lose unsaved work (open, new) or
+      write outside the app dirs (export, import-by-path) are System tier
+      with card copy naming the file paths involved.
+- [ ] **Export-as-job**: the agent starts an export and keeps working;
+      `job_status` reports progress; completion lands in the transcript.
 
-## Phase 4 — Chat panel in `cutlass-ui` ✅
+Exit: "export this draft for YouTube and start a new project from the vlog
+template" runs end-to-end with exactly the confirmations the tier table
+demands, and the export is cancellable mid-flight.
 
-- [x] **Worker integration** (`src/agent.rs`) — *landed as
-      sandbox-rehearse-then-replay rather than per-call worker
-      round-trips*: the engine's history groups don't nest, so holding a
-      group open on the live engine across network waits would swallow
-      any user edit made while the model thinks. Instead the agent
-      worker thread rehearses the prompt against a throwaway sandbox
-      `Engine` seeded with a project snapshot (one `SnapshotProject`
-      round-trip on the ordered mutation lane) — tool calls really
-      apply, so the model sees created clip/track ids and the world it
-      changed — and on completion the validated plan replays atomically
-      on the live engine (`WorkerMsg::AgentApplyPlan`): one history
-      group, re-validated step by step against the live project,
-      sandbox-allocated ids remapped onto live ones
-      (`WireCommand::remap_ids`), `publish_projection` after every step
-      so the user watches the plan land. Any replay failure (the
-      project changed mid-prompt) rolls the whole group back and says
-      so. `EditorContext` snapshots at send time in `main.rs`
-      (selection + playhead + in/out from `TimelineStore`, ticks →
-      seconds at the sequence rate). Session-epoch rules hold: the
-      `app.slint` epoch watcher fires `AgentStore.session-changed`,
-      which cancels the running prompt and discards any parked plan.
-      Covered by `agent::tests` (replay with id remapping + single
-      undo; stale-plan rollback) — ids are process-global atomics, so
-      the live engine always allocates different ids than the sandbox
-      and the tests genuinely exercise the remap.
-- [x] **Chat panel** (`ui/panels/agent/agent.slint`): docked at the far
-      right behind a title-bar "Assistant" toggle, resizable via the
-      house split grip. Prompt box (Enter or Send), transcript with
-      streamed assistant text, kind-styled entries (user bubble /
-      assistant text / accent-ticked action lines / status / applied /
-      error), "Thinking…" while running, auto-pinned scroll. Slint
-      stays a dumb renderer of `AgentStore.transcript`; the agent
-      worker mutates the model from Rust via the event loop.
-- [x] **Action list per prompt**: Phase 3 action-log lines stream in as
-      entries; the "Applied N edits as one undo step" entry carries a
-      one-click **Undo** chip (plain history undo — one group per
-      prompt makes it free), offered while it's the newest entry.
-- [x] **Dry-run preview card**: panel toggle ("Preview before
-      applying"), default **on**. The rehearsed plan parks in the agent
-      worker and the panel shows the planned-edit list with Apply /
-      Discard; Apply replays the validated plan in one group. A new
-      prompt or a session change discards a stale plan.
-- [x] **Not-configured state**: no `[ai]` table → the panel renders
-      setup instructions (config path + a config.toml example +
-      provider notes) instead of a dead prompt box; config re-reads on
-      every send, so fixing it needs no restart.
-- [x] **Error surfaces**: config errors, provider failures, cap trips,
-      and replay failures land in the transcript as error entries that
-      say what (didn't) happen — aborts always report "nothing was
-      applied".
-- [x] **Cancellation**: Stop button sets the shared cancel flag; the
-      provider aborts between stream chunks, the sandbox group rolls
-      back, and the transcript records the stop. Nothing ever reached
-      the live engine.
+## Phase 2d — Command gaps: close the vocabulary delta
 
-Exit: "cut the first 3 seconds and add a title that says INTRO" works
-end-to-end against local Ollama — watched live, listed as actions,
-undone with one click. The M3 exit criterion, shipped.
+The agent wire still covers a subset of the engine. Every gap follows the
+v1 growth checklist (wire DTO + validation, schema snapshot, action line,
+eval case).
 
-## Phase 5 — Read-only Q&A + vocabulary growth policy ✅ (stretch deferred)
+- [ ] **New/wired engine commands**: `ExtractAudio` wired into the agent
+      vocabulary, `UnlinkClips`, duplicate-with-properties, freeze frame,
+      effect reorder.
+- [ ] **Full `EditCommand` surface**: expand the wire until the vocabulary
+      delta is zero (masks, chroma, retiming, markers — everything the UI
+      can do that the wire can't yet), bumping the schema version once per
+      landed batch.
 
-- [x] **Q&A without mutation**: "how long is the timeline?", "which
-      clips have no audio?" — the model answers from `describe_project`
-      and finishes without tool calls. Shipped as prompt-tuning plus
-      eval coverage: the system prompt now teaches that the pushed
-      state is a fresh send-time snapshot — answer questions directly
-      from it (no redundant `describe_project` round-trip, which
-      matters on slow local models), name clips/tracks by id so
-      answers are checkable, and admit when the state can't answer
-      rather than guess. Eval cases lock it in: "which clips have no
-      audio?" answered in **one turn** from the pushed summary
-      (`has_audio` reaches the prompt), and an answer-only turn under
-      dry-run yields zero actions — so the preview card and the
-      "Applied N edits" line never render for a question (the Phase 4
-      empty-plan guard, now contract-tested).
-- [x] **Vocabulary growth checklist**, documented in `cutlass-ai`:
-      every new `EditCommand` lands with (1) wire DTO + validation,
-      (2) schema snapshot update, (3) action-log line, (4) one eval
-      case. M2's keyframe commands and M4's effect commands join this
-      way — the "grows for free" promise made enforceable. Lives as
-      the "Growing the vocabulary" section of the crate docs
-      (`cutlass-ai/src/lib.rs`), next to the code it governs.
-      *First exercise of the checklist: M2's `set_param_keyframe` /
-      `remove_param_keyframe` / `set_param_constant` joined (tool
-      schema v2) — "fade the clip in over the first second" is an
-      eval case.*
-- [ ] **Guarded project commands (stretch)**: `Import` behind an
-      explicit per-prompt user confirmation card — the first crack in
-      the edit-only wall, deliberately after the trust model is proven.
-      `Open`/`Save`/`Export` stay human-only through v1. *Deferred
-      past M3 on purpose: let the alpha prove the trust model first.*
+Exit: the wire-vs-`EditCommand` coverage table in `cutlass-ai` docs reads
+complete; schema snapshot bumped; every added command has its eval.
+
+## Phase 3a — `cutlass-analysis`: deterministic senses
+
+A new crate for local, model-free media analysis — the cheap-and-always-on
+layer under the VLM.
+
+- [ ] **Shot detection** (frame-difference/histogram cuts) over decoded
+      frames via the existing decode path.
+- [ ] **Audio DSP**: silence spans, loudness contours, beat grid — the
+      substrate for silence removal and beat-synced montages.
+- [ ] **Moments index (SQLite)**: a content-hash-keyed per-media cache of
+      analysis results with time range + kind + confidence, written by
+      analysis jobs (`cutlass-jobs`), queried by `analysis_*` tools.
+
+Exit: importing gameplay footage and running analysis yields queryable
+shots/silences/beats with timestamps; `analysis_query` answers from the
+index with zero model involvement.
+
+## Phase 3b — Transcription
+
+- [ ] **whisper.cpp via `whisper-rs`**: local transcription as a job, word
+      + segment timestamps into the moments index. (A proven prototype
+      exists in the separate cutlass-playground repo — port, don't
+      research.)
+- [ ] **Model download manager**: on-demand whisper model fetch with
+      size/license surfaced, stored under the cache registry (2b), never
+      bundled into the app.
+- [ ] **`analysis_transcribe` / transcript queries**: transcript search by
+      word with exact time ranges — the substrate for filler-word cuts,
+      quote-finding, and captions.
+
+Exit: "cut the part where I say the sponsor name" resolves through the
+transcript index to a frame-exact validated edit.
+
+## Phase 3c — VLM moments: semantic understanding
+
+- [ ] **Vision provider seam**: Gemini-style native video input where the
+      provider supports it; OpenAI-compatible frame batches (sampled stills
+      + timestamps) everywhere else — one `analysis_find_moments` surface
+      over both.
+- [ ] **Propose → verify pipeline**: pass 1 proposes candidate moments from
+      sparse frames; pass 2 re-samples densely around candidates and
+      confirms/refines boundaries before anything reaches the index —
+      VLM recall is cheap, precision is what edits need.
+- [ ] **Skill packs**: prompt-level moment taxonomies for gameplay (kills,
+      deaths, clutches) and sports (dribbles, goals, celebrations,
+      "respect" moments) shipped as data, not code — the C. Ronaldo edit is
+      a skill pack plus the pipeline.
+
+Exit: "find every kill in this match" yields indexed moments with
+timestamps + confidence from footage the eval fixtures pin; "make a montage
+of them" is then pure Phase-1-verified vocabulary work.
+
+## Phase 4 — Python runtime
+
+- [ ] **uv-bootstrapped venv, optional**: first `python_run` offers to
+      provision an isolated environment (uv + pinned cutlass-py + analysis
+      libs) under the app data dir; no system Python touched; fully
+      removable via the cache registry.
+- [ ] **`python_run` tool**: System tier, always. Scripts get the project
+      handle through cutlass-py, run as a cancellable job, and return
+      stdout + declared artifacts (files, images) with size caps — artifact
+      images flow back through the multimodal wire.
+- [ ] **Import boundary**: artifacts never auto-enter the project; media an
+      agent script produces goes through the same import consent as any
+      other file.
+
+Exit: "plot the loudness of the master track" provisions (once, with
+consent), runs, and renders the plot inline; a runaway script dies by
+`job_cancel`.
+
+## Phase 5a — Superpowers
+
+The features the phases above exist for — each mostly composition:
+
+- [ ] **Embeddings search** over transcripts + moments ("find where I talk
+      about the patch notes").
+- [ ] **Auto-captions** with karaoke styling (3b timestamps → text
+      vocabulary; styles from the text-preset system).
+- [ ] **Beat-synced montage** (3a beats + 3c moments + validated edits).
+- [ ] **Silence removal** (3a silence spans → ripple deletes, preview
+      card as always).
+- [ ] **Vertical reframe** (subject-tracked crop keyframes for 9:16
+      exports).
+- [ ] **Agent memory**: per-project durable notes (naming conventions,
+      user preferences) folded into the system prompt; user-visible and
+      user-editable.
+- [ ] **Session history UI**: browse/reopen past conversations per draft
+      (on the Phase 0 persistence).
+
+Exit: each superpower ships with an eval scenario and a demo script; the
+gameplay and football prompts from the Vision section run end-to-end on a
+stock machine with local models.
+
+## Phase 5b — MCP + voice
+
+- [ ] **MCP client** (external tools into our loop) per docs/mcp-design.md
+      — that doc's open questions (approval UX under streaming, Windows
+      stdio, secrets, server lifetime) must be resolved and its status line
+      flipped before implementation starts; the fenced `mcp__` namespace
+      slots into the Phase 0 dispatch rule unchanged.
+- [ ] **MCP server** (Cutlass tools for external agents): expose Workspace-
+      tier reads and validated-edit submission over MCP so external agents
+      script Cutlass with the same trust model — never a raw engine door.
+- [ ] **Push-to-talk voice input**: hold-to-talk in the agent panel,
+      transcribed locally by the 3b whisper stack into the prompt box —
+      dictation, not a wake word.
+
+Exit: an external MCP client lists and calls Cutlass tools under the tier
+rules; a held key turns speech into a prompt with no cloud round-trip.
 
 ---
 
 ## Known gaps / open questions
 
-- **Local model tool-calling quality is the headline risk.** Small
-  local models may emit malformed or boneheaded tool calls. Mitigations
-  are structural: a closed 15-command schema (far easier than open
-  codegen), per-call rejection feedback, dry-run default-on in the
-  first alpha, caps + rollback. The OpenAI-compatible provider means
-  anyone with a key gets frontier-quality calls day one.
-- **Seconds rounding**: the wire format's fractional seconds snap to
-  frame ticks at validation; a model asking for `1.0001s` gets the
-  nearest frame. Fine for editing semantics; revisit only if eval
-  cases surface drift.
-- **`describe_project` token growth**: a 500-clip timeline blows the
-  summary budget. v1 ships id-sorted truncation with counts ("track 2:
-  41 more clips…") and a follow-up tool query if the model asks;
-  smarter windowing (around the playhead / named ranges) is post-M3.
-- **No conversation persistence**: the transcript dies with the
-  session. Acceptable for M3; revisit alongside project metadata
-  (`ProjectMetadata` already exists for notes) if users want history.
-- **Undo of *parts* of a prompt** isn't a thing — one group is
-  all-or-nothing by design. If users want surgical reverts, that's a
-  history-UI feature, not an agent feature.
-- **Selection staleness after undo** (the tracked M0/timeline debt)
-  gets more visible when an agent edits under the user's selection;
-  the M0 fix should land before or with Phase 4.
-- **Tick model**: Slint's `i32` ticks vs the engine's `i64` is tracked
-  for M2; the agent operates engine-side in `i64` and is unaffected,
-  but `describe_project` inherits whatever the resolution audit
-  decides.
+- **Local-model vision quality.** Small local VLMs misread timelines and
+  frames; the schematic map (drawn labels, not pixels-of-UI) is the
+  mitigation, but the floor for "self-verify" on local-only setups is
+  unproven. May need a "verify only when vision-capable" capability flag
+  per provider.
+- **Image token budgets and cost.** Screenshots + frame grabs + self-verify
+  multiply per-prompt image counts fast. The per-request budget and
+  referenced-not-resent history are structural; the right defaults
+  (resolution, count, when to drop to schematic-only) need live tuning.
+- **VLM latency on long footage.** Frame-batch analysis of an hour of
+  gameplay is minutes-to-hours depending on provider; the propose→verify
+  split and the persistent moments index amortize it, but first-run
+  expectations need UI honesty (jobs with progress, resumable).
+- **Python sandboxing story.** "Isolated venv" is not a security sandbox.
+  What OS-level containment means per platform (macOS sandbox-exec is
+  deprecated; Windows has no cheap equivalent) is unresolved — until then
+  the System tier confirmation card *is* the sandbox, and the docs must say
+  so plainly.
+- **Whisper model sizes/licensing.** Multi-GB model downloads, per-model
+  licenses, and non-English quality tiers need surfacing in the download
+  manager UI, not buried in docs.
+- **Screenshot fidelity vs. schematic renders.** Two renderers can drift
+  from the truth differently: the schematic map must be generated from the
+  same projection the UI renders, snapshot-tested, or the model will
+  "verify" against a lie.
+- **Confirmation fatigue vs. autonomy.** If `ask` fires too often, users
+  flip to `full` and the tier model loses its teeth. Tier boundaries (what
+  is genuinely Workspace-safe) deserve periodic re-audit as tools land —
+  the mitigation is fewer, better-scoped System tools, not more cards.

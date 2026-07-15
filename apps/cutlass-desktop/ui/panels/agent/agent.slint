@@ -254,6 +254,58 @@ component TranscriptEntry inherits VerticalLayout {
         foreground: AppStore.theme.text.secondary;
     }
 
+    // Tool-produced screenshots and timeline maps stay inline with the
+    // conversation. The neutral viewport also reads cleanly behind alpha.
+    if entry.kind == "image": image-card := Rectangle {
+        horizontal-stretch: 1;
+        private property <float> safe-aspect: entry.image-aspect > 0.0
+            ? entry.image-aspect
+            : 16.0 / 9.0;
+        private property <length> image-viewport-height: clamp(
+            max(0px, self.width) / self.safe-aspect,
+            120px,
+            320px,
+        );
+
+        background: AppStore.theme.agent.input-bg;
+        border-width: AppStore.theme.metrics.stroke.hairline;
+        border-color: AppStore.theme.text.muted.with-alpha(0.35);
+        border-radius: AppStore.theme.metrics.radius.md;
+        clip: true;
+
+        VerticalLayout {
+            spacing: AppStore.theme.metrics.spacing.none;
+
+            image-viewport := Rectangle {
+                height: image-card.image-viewport-height;
+                background: AppStore.theme.surface.content-background;
+
+                Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: entry.image;
+                    image-fit: ImageFit.contain;
+                    accessible-label: "Agent image attachment";
+                }
+            }
+
+            if entry.text != "": VerticalLayout {
+                padding-left: AppStore.theme.metrics.spacing.sm;
+                padding-right: AppStore.theme.metrics.spacing.sm;
+                padding-top: AppStore.theme.metrics.spacing.xs;
+                padding-bottom: AppStore.theme.metrics.spacing.sm;
+
+                CutlassText {
+                    horizontal-stretch: 1;
+                    text: entry.text;
+                    wrap: word-wrap;
+                    style: AppStore.theme.typography.caption;
+                    foreground: AppStore.theme.text.muted;
+                }
+            }
+        }
+    }
+
     // One edit line: accent tick so applied work scans at a glance.
     if entry.kind == "action": HorizontalLayout {
         spacing: AppStore.theme.metrics.spacing.sm;

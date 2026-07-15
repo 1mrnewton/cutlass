@@ -10,9 +10,13 @@
 //   "status"    — quiet meta line (plan discarded, …)
 //   "applied"   — edits landed; offers the one-click Undo while fresh
 //   "error"     — abort/rejection surface (nothing was applied)
+//   "image"     — tool/screenshot attachment rendered inline
 export struct AgentEntry {
     kind: string,
     text: string,
+    image: image,
+    // Source width / height. The transcript guards non-positive values.
+    image-aspect: float,
 }
 
 export global AgentStore {

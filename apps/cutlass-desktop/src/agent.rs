@@ -133,6 +133,8 @@ fn entry(kind: &str, text: impl Into<SharedString>) -> AgentEntry {
     AgentEntry {
         kind: kind.into(),
         text: text.into(),
+        image: Default::default(),
+        image_aspect: 0.0,
     }
 }
 

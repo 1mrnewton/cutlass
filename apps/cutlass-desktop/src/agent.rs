@@ -34,6 +34,7 @@ use cutlass_settings::Autonomy;
 use slint::{Model, ModelRc, SharedString, VecModel};
 use tracing::{error, info, warn};
 
+use crate::agent_senses::AgentSenses;
 use crate::agent_session::{AgentSession, TranscriptEntry};
 use crate::preview_worker::WorkerHandle;
 use crate::{AgentEntry, AgentStore};
@@ -338,11 +339,38 @@ fn sandbox_engine() -> Result<Engine, String> {
 struct SandboxBridge<'a> {
     engine: &'a mut Engine,
     plan: &'a mut Vec<AgentPlanStep>,
+    senses: &'a mut AgentSenses,
+    default_playhead_seconds: f64,
 }
 
 impl EngineBridge for SandboxBridge<'_> {
     fn summary(&mut self) -> ProjectSummary {
         summarize(self.engine.project())
+    }
+
+    fn sense_tools(&self) -> Vec<HostToolSpec> {
+        AgentSenses::specs()
+    }
+
+    fn sense(
+        &mut self,
+        name: &str,
+        arguments: &serde_json::Value,
+        cancel: &AtomicBool,
+    ) -> Result<ToolOutput, String> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled before the media sense could run".into());
+        }
+        let output = self.senses.call(
+            self.engine.project(),
+            self.default_playhead_seconds,
+            name,
+            arguments,
+        )?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled while the media sense was running".into());
+        }
+        Ok(output)
     }
 
     fn apply(&mut self, command: &WireCommand) -> Result<EditOutcome, String> {
@@ -625,6 +653,7 @@ fn agent_main(
     approval_id_allocator: Arc<AtomicU64>,
 ) {
     let mut sandbox: Option<Engine> = None;
+    let mut senses = AgentSenses::new();
     let mut preview = Preview::default();
     let mut history: Vec<Message> = Vec::new();
     let mut current_project: Option<PathBuf> = None;
@@ -687,6 +716,7 @@ fn agent_main(
                     &worker,
                     &store,
                     &mut sandbox,
+                    &mut senses,
                     &mut preview,
                     &mut history,
                     &sent,
@@ -758,6 +788,7 @@ fn run_one_prompt(
     worker: &WorkerHandle,
     store: &slint::Weak<AgentStore<'static>>,
     sandbox: &mut Option<Engine>,
+    senses: &mut AgentSenses,
     preview: &mut Preview,
     history: &mut Vec<Message>,
     prompt: &str,
@@ -883,6 +914,8 @@ fn run_one_prompt(
     let mut bridge = SandboxBridge {
         engine,
         plan: &mut plan,
+        senses,
+        default_playhead_seconds: context.playhead_seconds,
     };
     let mut tool_host = DesktopToolHost::new(
         section.autonomy,
@@ -1228,15 +1261,48 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_bridge_exposes_read_only_senses_of_its_project() {
+        let (project, _) = fixture_project();
+        let mut sandbox = temp_engine(project);
+        let mut plan = Vec::new();
+        let mut senses = AgentSenses::new();
+        let cancel = AtomicBool::new(false);
+        let output = {
+            let mut bridge = SandboxBridge {
+                engine: &mut sandbox,
+                plan: &mut plan,
+                senses: &mut senses,
+                default_playhead_seconds: 1.25,
+            };
+            assert_eq!(bridge.sense_tools().len(), 4);
+            bridge
+                .sense(
+                    "media_timeline_map",
+                    &serde_json::json!({"playhead_seconds": 1.25}),
+                    &cancel,
+                )
+                .expect("timeline sense")
+        };
+
+        assert!(plan.is_empty(), "a sense never adds an edit step");
+        assert_eq!(output.images.len(), 1);
+        assert_eq!(output.images[0].media_type, "image/png");
+        assert!(output.text.contains("playhead 1.25s"));
+    }
+
+    #[test]
     fn rehearsed_plan_replays_with_id_remapping_and_single_undo() {
         let (project, media) = fixture_project();
         let mut sandbox = temp_engine(project.clone());
         let mut live = temp_engine(project);
 
         let mut plan: Vec<AgentPlanStep> = Vec::new();
+        let mut senses = AgentSenses::new();
         let mut bridge = SandboxBridge {
             engine: &mut sandbox,
             plan: &mut plan,
+            senses: &mut senses,
+            default_playhead_seconds: 0.0,
         };
         bridge.begin_group();
         let track = match bridge
@@ -1398,9 +1464,12 @@ mod tests {
         let mut live = temp_engine(project);
 
         let mut plan: Vec<AgentPlanStep> = Vec::new();
+        let mut senses = AgentSenses::new();
         let mut bridge = SandboxBridge {
             engine: &mut sandbox,
             plan: &mut plan,
+            senses: &mut senses,
+            default_playhead_seconds: 0.0,
         };
         bridge.begin_group();
         let track = match bridge
@@ -1500,9 +1569,12 @@ mod tests {
         let mut live = temp_engine(project);
 
         let mut plan: Vec<AgentPlanStep> = Vec::new();
+        let mut senses = AgentSenses::new();
         let mut bridge = SandboxBridge {
             engine: &mut sandbox,
             plan: &mut plan,
+            senses: &mut senses,
+            default_playhead_seconds: 0.0,
         };
         bridge.begin_group();
         let track = match bridge

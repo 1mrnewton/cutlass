@@ -1,6 +1,8 @@
 mod account;
 mod agent;
+mod agent_senses;
 mod agent_session;
+mod agent_vision;
 mod ai_media;
 mod audio;
 mod cloud;
@@ -29,6 +31,7 @@ mod text_presets;
 mod thumbnails;
 mod timecode;
 mod timeline;
+mod timeline_map;
 mod transport;
 mod window;
 

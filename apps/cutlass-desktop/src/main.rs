@@ -2274,6 +2274,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let config_path = config_path.clone();
         let download_cache = Arc::clone(&download_cache);
         let preview = preview_worker.handle();
+        let registry = cache_registry.clone();
         settings_backend.on_save(move || {
             let Some(app) = app_weak.upgrade() else {
                 return false;
@@ -2293,9 +2294,37 @@ fn main() -> Result<(), slint::PlatformError> {
                     return false;
                 }
             };
-            let mut s = match cutlass_settings::load(&config_path) {
-                Ok(settings) => settings,
+            let ai_base_url = sb.get_ai_base_url().trim().to_string();
+            let ai_model = sb.get_ai_model().trim().to_string();
+            let ai_api_key = non_empty(&sb.get_ai_api_key());
+            let ai_api_key_env = non_empty(&sb.get_ai_api_key_env());
+            let ai_use_account = sb.get_ai_use_account();
+            let theme =
+                cutlass_settings::ThemeChoice::from_index(app.global::<AppStore>().get_theme_id());
+            let persisted = registry.try_with_settings_persistence(|| {
+                let mut settings = cutlass_settings::load(&config_path)
+                    .map_err(|error| ("load", error.to_string()))?;
+                settings.ai.base_url = ai_base_url;
+                settings.ai.model = ai_model;
+                settings.ai.api_key = ai_api_key;
+                settings.ai.api_key_env = ai_api_key_env;
+                settings.ai.use_account = ai_use_account;
+                settings.appearance.theme = theme;
+                settings.storage.download_quota_mib = quota.mib;
+                cutlass_settings::save(&config_path, &settings)
+                    .map_err(|error| ("save", error.to_string()))?;
+                Ok::<_, (&'static str, String)>(settings.ai.is_configured())
+            });
+            let configured = match persisted {
                 Err(error) => {
+                    tracing::warn!(%error, "settings save deferred by cache maintenance");
+                    sb.set_save_error(
+                        "Wait for the active cache operation to finish before saving Settings."
+                            .into(),
+                    );
+                    return false;
+                }
+                Ok(Err(("load", error))) => {
                     tracing::error!(%error, "refusing to overwrite unreadable settings");
                     sb.set_save_error(
                         "Settings could not be saved because the configuration file is invalid."
@@ -2303,23 +2332,15 @@ fn main() -> Result<(), slint::PlatformError> {
                     );
                     return false;
                 }
+                Ok(Err((_, error))) => {
+                    tracing::error!(%error, "failed to save settings");
+                    sb.set_save_error(
+                        "Settings could not be saved. Check the configuration file.".into(),
+                    );
+                    return false;
+                }
+                Ok(Ok(configured)) => configured,
             };
-            s.ai.base_url = sb.get_ai_base_url().trim().to_string();
-            s.ai.model = sb.get_ai_model().trim().to_string();
-            s.ai.api_key = non_empty(&sb.get_ai_api_key());
-            s.ai.api_key_env = non_empty(&sb.get_ai_api_key_env());
-            s.ai.use_account = sb.get_ai_use_account();
-            s.appearance.theme =
-                cutlass_settings::ThemeChoice::from_index(app.global::<AppStore>().get_theme_id());
-            s.storage.download_quota_mib = quota.mib;
-
-            if let Err(error) = cutlass_settings::save(&config_path, &s) {
-                tracing::error!(%error, "failed to save settings");
-                sb.set_save_error(
-                    "Settings could not be saved. Check the configuration file.".into(),
-                );
-                return false;
-            }
 
             download_cache.set_quota_bytes(quota.bytes);
             let quota_cache = Arc::clone(&download_cache);
@@ -2344,8 +2365,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 tracing::error!(%error, "download quota enforcement worker could not start");
             }
             sb.set_download_quota_mib(quota.mib.to_string().into());
-            app.global::<AgentStore>()
-                .set_configured(s.ai.is_configured());
+            app.global::<AgentStore>().set_configured(configured);
             true
         });
     }

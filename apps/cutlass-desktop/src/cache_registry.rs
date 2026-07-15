@@ -190,6 +190,19 @@ impl CacheRegistry {
         disk_path(snapshot.layout(), id)
     }
 
+    /// Run a short settings read-modify-write while excluding cache
+    /// maintenance that persists storage overrides through the same file.
+    ///
+    /// This is deliberately non-blocking: Settings invokes it on the UI
+    /// thread, so an agent-initiated relocation reports busy instead of
+    /// freezing the window while a potentially long filesystem move finishes.
+    pub(crate) fn try_with_settings_persistence<T>(
+        &self,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, String> {
+        try_with_operation_gate(&self.operation_gate, operation)
+    }
+
     /// Snapshot every cache in stable descriptor order.
     ///
     /// This method dispatches Slint-owned cache reads to the UI event loop and
@@ -1181,6 +1194,21 @@ fn exact_count(count: usize) -> Result<u64, String> {
     u64::try_from(count).map_err(|_| "cache entry count exceeds the reporting range".into())
 }
 
+fn try_with_operation_gate<T>(
+    gate: &Mutex<()>,
+    operation: impl FnOnce() -> T,
+) -> Result<T, String> {
+    let _guard = gate.try_lock().map_err(|error| match error {
+        TryLockError::WouldBlock => {
+            "a cache operation is in progress; settings were not saved".to_string()
+        }
+        TryLockError::Poisoned(_) => {
+            "cache operation coordination is unavailable; settings were not saved".to_string()
+        }
+    })?;
+    Ok(operation())
+}
+
 fn acquire_operation_gate<'a>(
     gate: &'a Mutex<()>,
     cancel: &AtomicBool,
@@ -2006,6 +2034,23 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn settings_persistence_never_runs_while_cache_operation_gate_is_held() {
+        let gate = Mutex::new(());
+        let held = gate.lock().unwrap();
+        let ran = AtomicBool::new(false);
+
+        let error = try_with_operation_gate(&gate, || {
+            ran.store(true, Ordering::Release);
+        })
+        .unwrap_err();
+        assert!(error.contains("cache operation is in progress"));
+        assert!(!ran.load(Ordering::Acquire));
+
+        drop(held);
+        assert_eq!(try_with_operation_gate(&gate, || 42), Ok(42));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 mod account;
 mod agent;
+mod agent_session;
 mod ai_media;
 mod audio;
 mod cloud;
@@ -839,10 +840,17 @@ fn main() -> Result<(), slint::PlatformError> {
     agent_store.on_discard_plan(move || agent_discard.discard_plan());
 
     let agent_session = agent_worker.handle();
+    let agent_session_app = app.as_weak();
     agent_store.on_session_changed(move || {
         agent_session.cancel();
-        agent_session.discard_plan();
-        agent_session.reset_history();
+        let path = agent_session_app.upgrade().and_then(|app| {
+            let path = app
+                .global::<EditorStore>()
+                .get_project_file_path()
+                .to_string();
+            (!path.is_empty()).then(|| std::path::PathBuf::from(path))
+        });
+        agent_session.switch_project(path);
     });
 
     // Per-project agent rules editor (agent panel) → ProjectMetadata via

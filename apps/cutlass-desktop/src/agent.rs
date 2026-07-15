@@ -15,11 +15,13 @@
 //! With the dry-run toggle on (the default), the plan is parked here and
 //! the chat panel shows an Apply / Discard card instead of auto-applying.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use cutlass_ai::providers::openai_compat::OpenAiCompatProvider;
 use cutlass_ai::{
     AgentConfig, AgentEvent, AgentExtensions, EditorContext, EngineBridge, HostToolSpec, Message,
@@ -31,6 +33,7 @@ use cutlass_engine::{ApplyOutcome, Engine, EngineConfig};
 use slint::{Model, ModelRc, SharedString, VecModel};
 use tracing::{error, info, warn};
 
+use crate::agent_session::{AgentSession, TranscriptEntry};
 use crate::preview_worker::WorkerHandle;
 use crate::{AgentEntry, AgentStore};
 
@@ -60,9 +63,11 @@ enum AgentRequest {
     },
     ApplyPlan,
     DiscardPlan,
-    /// Forget the conversation so far (the project was replaced wholesale —
-    /// open / new / restore — and prior turns name clips that are gone).
-    ResetHistory,
+    /// Persist the outgoing draft's conversation and restore the incoming
+    /// draft. A missing path means no app-owned project is active.
+    SwitchProject {
+        path: Option<PathBuf>,
+    },
 }
 
 #[derive(Clone)]
@@ -88,10 +93,10 @@ impl AgentHandle {
         let _ = self.tx.send(AgentRequest::DiscardPlan);
     }
 
-    /// Drop the multi-turn conversation memory; the next prompt starts a
-    /// fresh dialogue. Fired when the project is replaced wholesale.
-    pub fn reset_history(&self) {
-        let _ = self.tx.send(AgentRequest::ResetHistory);
+    /// Persist the outgoing session and restore the incoming draft's
+    /// conversation. Fired after the worker publishes a new project path.
+    pub fn switch_project(&self, path: Option<PathBuf>) {
+        let _ = self.tx.send(AgentRequest::SwitchProject { path });
     }
 
     /// Cooperative cancel: the provider checks this flag between stream
@@ -181,6 +186,93 @@ fn with_store(
             f(store);
         }
     });
+}
+
+/// Snapshot the visible transcript on the Slint thread. Calls are made only
+/// from the dedicated agent worker; the timeout prevents shutdown from
+/// hanging if the event loop has already stopped.
+fn transcript_snapshot(
+    store: &slint::Weak<AgentStore<'static>>,
+) -> Result<Vec<TranscriptEntry>, String> {
+    let (tx, rx) = bounded(1);
+    let store = store.clone();
+    slint::invoke_from_event_loop(move || {
+        let rows = store
+            .upgrade()
+            .map(|store| {
+                let model = store.get_transcript();
+                (0..model.row_count())
+                    .filter_map(|index| model.row_data(index))
+                    .map(|row| TranscriptEntry {
+                        kind: row.kind.to_string(),
+                        text: row.text.to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let _ = tx.send(rows);
+    })
+    .map_err(|error| format!("failed to schedule agent transcript snapshot: {error}"))?;
+    rx.recv_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("agent transcript snapshot timed out: {error}"))
+}
+
+fn replace_transcript(
+    store: &slint::Weak<AgentStore<'static>>,
+    mut transcript: Vec<TranscriptEntry>,
+    restore_error: Option<String>,
+) {
+    if let Some(error) = restore_error {
+        warn!(error, "agent session could not be restored");
+        transcript.push(TranscriptEntry {
+            kind: "error".into(),
+            text: "The previous agent conversation could not be restored.".into(),
+        });
+    }
+    with_store(store, move |store| {
+        // Build Slint image-bearing rows on the UI thread: `slint::Image`
+        // is intentionally not Send even when it is empty.
+        let rows: Vec<AgentEntry> = transcript
+            .into_iter()
+            .map(|saved| {
+                if saved.kind == "image" {
+                    let caption = if saved.text.is_empty() {
+                        "Image attachment from the previous session.".to_string()
+                    } else {
+                        format!("Image attachment from the previous session: {}", saved.text)
+                    };
+                    entry("status", caption)
+                } else {
+                    entry(&saved.kind, saved.text)
+                }
+            })
+            .collect();
+        store.set_transcript(ModelRc::new(VecModel::from(rows)));
+    });
+}
+
+fn persist_session(
+    path: Option<&Path>,
+    history: &[Message],
+    store: &slint::Weak<AgentStore<'static>>,
+) {
+    let Some(path) = path else {
+        return;
+    };
+    let transcript = match transcript_snapshot(store) {
+        Ok(transcript) => transcript,
+        Err(error) => {
+            warn!(error, "agent session transcript was not captured");
+            return;
+        }
+    };
+    let session = AgentSession {
+        history: history.to_vec(),
+        transcript,
+    };
+    if let Err(error) = crate::agent_session::save(path, &session) {
+        warn!(error, project = %path.display(), "agent session was not saved");
+    }
 }
 
 fn sandbox_engine() -> Result<Engine, String> {
@@ -290,6 +382,7 @@ fn agent_main(
     let mut sandbox: Option<Engine> = None;
     let mut preview = Preview::default();
     let mut history: Vec<Message> = Vec::new();
+    let mut current_project: Option<PathBuf> = None;
 
     let config_path = cutlass_settings::default_config_path();
     let configured = cutlass_settings::load(&config_path)
@@ -359,6 +452,7 @@ fn agent_main(
                 );
 
                 with_store(&store, |s| s.set_running(false));
+                persist_session(current_project.as_deref(), &history, &store);
             }
             AgentRequest::ApplyPlan => {
                 let plan = std::mem::take(&mut preview.plan);
@@ -369,6 +463,7 @@ fn agent_main(
                     continue;
                 }
                 apply_plan_live(&worker, &store, plan, &phase_breaks);
+                persist_session(current_project.as_deref(), &history, &store);
             }
             AgentRequest::DiscardPlan => {
                 if preview.is_pending() {
@@ -383,10 +478,28 @@ fn agent_main(
                     );
                 }
                 with_store(&store, |s| s.set_plan_pending(false));
+                persist_session(current_project.as_deref(), &history, &store);
             }
-            AgentRequest::ResetHistory => {
-                history.clear();
+            AgentRequest::SwitchProject { path } => {
+                // A parked dry-run conversation names edits that never
+                // landed. Restore the history checkpoint before persisting
+                // the draft we are leaving.
+                if let Some(saved) = preview.history_restore.take() {
+                    history = saved;
+                }
                 preview.clear();
+                persist_session(current_project.as_deref(), &history, &store);
+
+                let (session, restore_error) = match path.as_deref() {
+                    Some(project) => match crate::agent_session::load(project) {
+                        Ok(session) => (session, None),
+                        Err(error) => (AgentSession::default(), Some(error)),
+                    },
+                    None => (AgentSession::default(), None),
+                };
+                history = session.history;
+                replace_transcript(&store, session.transcript, restore_error);
+                current_project = path;
             }
         }
     }

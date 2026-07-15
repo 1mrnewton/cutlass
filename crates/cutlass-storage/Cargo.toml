@@ -1,0 +1,8 @@
+[package]
+name = "cutlass-storage"
+description = "Stable cache metadata and safe filesystem primitives for Cutlass"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true

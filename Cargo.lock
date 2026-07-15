@@ -1473,6 +1473,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutlass-storage"
+version = "0.5.3-alpha.0"
+
+[[package]]
 name = "cutlass-text"
 version = "0.5.3-alpha.0"
 dependencies = [

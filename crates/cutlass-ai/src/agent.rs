@@ -1033,7 +1033,9 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         match &messages[2] {
-            Message::ToolResult { content, images, .. } => {
+            Message::ToolResult {
+                content, images, ..
+            } => {
                 assert_eq!(images.len(), 1, "the newest image survives");
                 assert_eq!(images[0].label, "preview at 8.00s");
                 assert!(!content.contains("no longer attached"));

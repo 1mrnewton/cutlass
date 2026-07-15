@@ -43,7 +43,8 @@ use serde::{Deserialize, Serialize};
 ///     removed unsupported `duck` and `detect_beats`.
 /// 21: prompt extensions add the read-only `read_skill` tool.
 /// 22: complete-group unlinking (`unlink_clips`) and bounded link-group lists.
-pub const TOOL_SCHEMA_VERSION: u32 = 22;
+/// 23: effect-chain reordering (`move_effect`).
+pub const TOOL_SCHEMA_VERSION: u32 = 23;
 
 /// Model-facing clip lists stay small enough for deterministic validation and
 /// useful rejection messages while covering realistic linked groups.
@@ -241,6 +242,18 @@ pub struct RemoveEffect {
     pub clip: u64,
     /// Index of the effect in the clip's chain (0 = first).
     pub index: u32,
+}
+
+/// Reorder one effect within a clip's chain. Both indices address the current
+/// pre-move chain; `to_index` is the moved effect's final index after removal
+/// and insertion. Use `describe_project` to inspect the current order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MoveEffect {
+    pub clip: u64,
+    /// Current index of the effect to move (0 = first).
+    pub from_index: u32,
+    /// Final index for the moved effect (0 = first).
+    pub to_index: u32,
 }
 
 /// Set one parameter of an effect already on a clip to a fixed value. The
@@ -830,6 +843,7 @@ pub enum WireCommand {
     SetClipCrop(SetClipCrop),
     AddEffect(AddEffect),
     RemoveEffect(RemoveEffect),
+    MoveEffect(MoveEffect),
     SetEffectParam(SetEffectParam),
     AddTransition(AddTransition),
     RemoveTransition(RemoveTransition),
@@ -907,6 +921,7 @@ impl WireCommand {
             WireCommand::SetClipCrop(a) => clip(&mut a.clip),
             WireCommand::AddEffect(a) => clip(&mut a.clip),
             WireCommand::RemoveEffect(a) => clip(&mut a.clip),
+            WireCommand::MoveEffect(a) => clip(&mut a.clip),
             WireCommand::SetEffectParam(a) => clip(&mut a.clip),
             WireCommand::AddTransition(a) => clip(&mut a.clip),
             WireCommand::RemoveTransition(a) => clip(&mut a.clip),
@@ -1068,6 +1083,8 @@ tools! {
         "Add a visual effect to a clip's effect chain. Available effects: gaussian_blur (param 'radius'), vignette (param 'amount'). Effects render on the placed layer, in chain order. Not valid on audio tracks.";
     "remove_effect" => RemoveEffect(RemoveEffect),
         "Remove an effect from a clip's chain by its index (0 = first). See describe_project for a clip's current effects.";
+    "move_effect" => MoveEffect(MoveEffect),
+        "Reorder a clip's effect chain. Both from_index and to_index address the current pre-move chain; to_index is the effect's final index. See describe_project for the current order.";
     "set_effect_param" => SetEffectParam(SetEffectParam),
         "Set a parameter of an effect on a clip to a value (e.g. gaussian_blur 'radius', vignette 'amount'). Use describe_project to see effect indices and current params.";
     "add_transition" => AddTransition(AddTransition),
@@ -1258,6 +1275,21 @@ mod tests {
             })
         );
 
+        let mut move_effect = WireCommand::MoveEffect(MoveEffect {
+            clip: 10,
+            from_index: 0,
+            to_index: 2,
+        });
+        move_effect.remap_ids(&clip_map, &track_map, &marker_map);
+        assert_eq!(
+            move_effect,
+            WireCommand::MoveEffect(MoveEffect {
+                clip: 99,
+                from_index: 0,
+                to_index: 2,
+            })
+        );
+
         // Unmapped ids pass through; link lists remap element-wise.
         let mut link = WireCommand::LinkClips(LinkClips {
             clips: vec![10, 11],
@@ -1304,7 +1336,7 @@ mod tests {
     #[test]
     fn tool_specs_cover_every_command_with_object_schemas() {
         let specs = tool_specs();
-        assert_eq!(specs.len(), 44);
+        assert_eq!(specs.len(), 45);
         for spec in &specs {
             assert!(
                 !spec.description.is_empty(),
@@ -1317,6 +1349,25 @@ mod tests {
                 "{} schema is not an object",
                 spec.name
             );
+        }
+    }
+
+    #[test]
+    fn move_effect_schema_uses_u32_indices() {
+        let specs = tool_specs();
+        let move_effect = specs
+            .iter()
+            .find(|spec| spec.name == "move_effect")
+            .expect("move_effect tool");
+        assert_eq!(
+            move_effect.parameters["required"],
+            serde_json::json!(["clip", "from_index", "to_index"])
+        );
+        for field in ["from_index", "to_index"] {
+            let index = &move_effect.parameters["properties"][field];
+            assert_eq!(index["type"], "integer");
+            assert_eq!(index["format"], "uint32");
+            assert_eq!(index["minimum"], 0);
         }
     }
 

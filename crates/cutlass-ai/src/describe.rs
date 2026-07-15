@@ -135,8 +135,9 @@ pub struct ClipSummary {
     /// Mirrored top-bottom (set_clip_crop); absent when not flipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flip_v: Option<bool>,
-    /// Visual effects in chain order (add_effect); the index of each entry
-    /// is what remove_effect / set_effect_param address. Absent when empty.
+    /// Visual effects in chain order (add_effect); the index of each entry is
+    /// what remove_effect / move_effect / set_effect_param address. Absent
+    /// when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<EffectSummary>,
     /// Transition at this clip's right cut (add_transition), if any. The

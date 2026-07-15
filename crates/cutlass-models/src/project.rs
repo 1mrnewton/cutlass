@@ -684,6 +684,39 @@ impl Project {
         Ok(())
     }
 
+    /// Move one effect within a clip's chain. Both indices address the chain
+    /// before the move; `to_index` is the effect's final index after removal
+    /// and insertion. Moving an effect to its current index is a valid no-op.
+    pub fn move_effect(
+        &mut self,
+        clip_id: ClipId,
+        from_index: usize,
+        to_index: usize,
+    ) -> Result<(), ModelError> {
+        let clip = self
+            .timeline
+            .clip_mut(clip_id)
+            .ok_or(ModelError::UnknownClip(clip_id))?;
+        let len = clip.effects.len();
+        if from_index >= len {
+            return Err(ModelError::InvalidParam(format!(
+                "effect from index {from_index} out of range for chain length {len}"
+            )));
+        }
+        if to_index >= len {
+            return Err(ModelError::InvalidParam(format!(
+                "effect to index {to_index} out of range for chain length {len}"
+            )));
+        }
+        if from_index == to_index {
+            return Ok(());
+        }
+
+        let effect = clip.effects.remove(from_index);
+        clip.effects.insert(to_index, effect);
+        Ok(())
+    }
+
     /// Set one effect parameter to a constant (the non-animated quick edit;
     /// keyframes go through [`Self::set_param_keyframe`] with
     /// [`ClipParam::Effect`]).

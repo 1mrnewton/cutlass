@@ -305,6 +305,14 @@ pub enum EditCommand {
     /// Remove the effect at `index` from a clip's chain. The inverse restores
     /// it (clip snapshot).
     RemoveEffect { clip: ClipId, index: usize },
+    /// Move an effect within a clip's chain. Both indices address the pre-move
+    /// chain; `to_index` is the effect's final index after the move. The
+    /// inverse restores the previous clip state.
+    MoveEffect {
+        clip: ClipId,
+        from_index: usize,
+        to_index: usize,
+    },
     /// Set one effect parameter to a constant (the non-animated quick edit;
     /// animated edits go through `SetParamKeyframe` with `ClipParam::Effect`).
     /// `param` is the catalog slot index. The inverse restores the previous

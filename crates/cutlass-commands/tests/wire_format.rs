@@ -253,6 +253,11 @@ fn edit_samples() -> Vec<EditCommand> {
             clip: clip(4),
             index: 0,
         },
+        EditCommand::MoveEffect {
+            clip: clip(4),
+            from_index: 0,
+            to_index: 2,
+        },
         EditCommand::SetEffectParam {
             clip: clip(4),
             index: 0,
@@ -405,6 +410,7 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
         EditCommand::SetAudioRole { .. } => "SetAudioRole",
         EditCommand::AddEffect { .. } => "AddEffect",
         EditCommand::RemoveEffect { .. } => "RemoveEffect",
+        EditCommand::MoveEffect { .. } => "MoveEffect",
         EditCommand::SetEffectParam { .. } => "SetEffectParam",
         EditCommand::AddTransition { .. } => "AddTransition",
         EditCommand::RemoveTransition { .. } => "RemoveTransition",
@@ -441,7 +447,7 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
 #[test]
 fn command_variant_counts_are_locked() {
     assert_eq!(project_samples().len(), 9);
-    assert_eq!(edit_samples().len(), 56);
+    assert_eq!(edit_samples().len(), 57);
 }
 
 #[test]
@@ -557,6 +563,19 @@ fn golden_unlink_clips() {
     assert_eq!(
         serde_json::to_value(&cmd).unwrap(),
         json!({"type": "UnlinkClips", "clips": [4, 5]})
+    );
+}
+
+#[test]
+fn golden_move_effect() {
+    let cmd = Command::Edit(EditCommand::MoveEffect {
+        clip: clip(4),
+        from_index: 0,
+        to_index: 2,
+    });
+    assert_eq!(
+        serde_json::to_value(&cmd).unwrap(),
+        json!({"type": "MoveEffect", "clip": 4, "from_index": 0, "to_index": 2})
     );
 }
 

@@ -8,7 +8,10 @@ use cutlass_ai::wire::{self, WireCommand, WireGenerator};
 use cutlass_ai::{summarize, validate};
 use cutlass_commands::{Command, EditOutcome};
 use cutlass_engine::{ApplyOutcome, Engine, EngineConfig};
-use cutlass_models::{Generator, LinkId, MediaSource, Project, Rational, TimeRange, TrackKind};
+use cutlass_models::{
+    ClipParam, Easing, Generator, LinkId, MediaSource, ParamValue, Project, Rational, RationalTime,
+    TimeRange, TrackKind,
+};
 
 const R24: Rational = Rational::FPS_24;
 
@@ -193,6 +196,60 @@ fn prompt_sized_scenario_round_trips_and_unwinds() {
     assert_eq!(undone, 10);
     assert_eq!(engine.project().timeline().track_count(), 0);
     assert_eq!(engine.project().timeline().clip_count(), 0);
+}
+
+#[test]
+fn move_effect_lowers_applies_and_undoes_exactly() {
+    let mut project = Project::new("agent effect order", R24);
+    let track = project.add_track(TrackKind::Text, "Titles");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::text("TITLE"),
+            TimeRange::at_rate(0, 48, R24),
+        )
+        .unwrap();
+    for effect in ["gaussian_blur", "glitch", "vignette"] {
+        project.add_effect(clip, effect).unwrap();
+    }
+    project.set_effect_param(clip, 0, 0, 12.0).unwrap();
+    for (tick, value, easing) in [(0, 0.2, Easing::EaseIn), (24, 0.8, Easing::EaseOut)] {
+        project
+            .set_param_keyframe(
+                clip,
+                ClipParam::Effect {
+                    effect: 1,
+                    param: 0,
+                },
+                RationalTime::new(tick, R24),
+                ParamValue::Scalar(value),
+                easing,
+            )
+            .unwrap();
+    }
+    project.set_effect_param(clip, 2, 0, 0.75).unwrap();
+    let before = project.clip(clip).unwrap().effects.clone();
+    let expected = vec![before[1].clone(), before[2].clone(), before[0].clone()];
+    let mut engine = engine_with(project);
+
+    let outcome = apply(
+        &mut engine,
+        WireCommand::MoveEffect(wire::MoveEffect {
+            clip: clip.raw(),
+            from_index: 0,
+            to_index: 2,
+        }),
+    );
+    assert!(matches!(
+        outcome,
+        ApplyOutcome::Edited(EditOutcome::Updated(id)) if id == clip
+    ));
+    assert_eq!(engine.project().clip(clip).unwrap().effects, expected);
+
+    assert!(engine.undo());
+    assert_eq!(engine.project().clip(clip).unwrap().effects, before);
+    assert!(engine.redo());
+    assert_eq!(engine.project().clip(clip).unwrap().effects, expected);
 }
 
 #[test]

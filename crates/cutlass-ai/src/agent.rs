@@ -1179,6 +1179,10 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
         WireCommand::RemoveEffect(a) => {
             format!("removed effect {} from clip {}", a.index, a.clip)
         }
+        WireCommand::MoveEffect(a) => format!(
+            "moved effect {} to {} on clip {}",
+            a.from_index, a.to_index, a.clip
+        ),
         WireCommand::SetEffectParam(a) => {
             format!(
                 "set clip {} effect {} {} = {}",
@@ -1322,6 +1326,16 @@ mod tests {
         assert_eq!(
             describe_action(&split, Some(&EditOutcome::Created(ClipId::from_raw(21)))),
             "split clip 7 at 12.40s (new clip 21)"
+        );
+
+        let move_effect = WireCommand::MoveEffect(wire::MoveEffect {
+            clip: 7,
+            from_index: 0,
+            to_index: 2,
+        });
+        assert_eq!(
+            describe_action(&move_effect, None),
+            "moved effect 0 to 2 on clip 7"
         );
 
         let trim = WireCommand::TrimClip(wire::TrimClip {

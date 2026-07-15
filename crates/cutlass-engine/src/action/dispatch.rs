@@ -378,6 +378,17 @@ fn dispatch_edit(
                 Some(inverse),
             ))
         }
+        EditCommand::MoveEffect {
+            clip,
+            from_index,
+            to_index,
+        } => {
+            let inverse = edit::set_effect::move_effect(ctx, clip, from_index, to_index)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(clip)),
+                Some(inverse),
+            ))
+        }
         EditCommand::SetEffectParam {
             clip,
             index,

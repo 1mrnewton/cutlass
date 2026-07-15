@@ -201,6 +201,23 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 index,
             }
         }
+        WireCommand::MoveEffect(args) => {
+            let clip = clip_ref(project, args.clip)?;
+            let from_index = effect_index(clip, args.from_index, args.clip)?;
+            let to_index = effect_index(clip, args.to_index, args.clip)?;
+            if from_index == to_index {
+                return Err(Rejection::new(format!(
+                    "effect {from_index} on clip {} is already at index {to_index}; \
+                     move_effect would make no change",
+                    args.clip
+                )));
+            }
+            EditCommand::MoveEffect {
+                clip: clip.id,
+                from_index,
+                to_index,
+            }
+        }
         WireCommand::SetEffectParam(args) => {
             let clip = clip_ref(project, args.clip)?;
             let index = effect_index(clip, args.index, args.clip)?;
@@ -1051,10 +1068,15 @@ fn require_transition(project: &Project, clip: &Clip, raw_clip: u64) -> Result<(
 /// Resolve a wire effect-chain index against a clip, rejecting out-of-range
 /// indices with the clip's current chain length.
 fn effect_index(clip: &Clip, index: u32, raw_clip: u64) -> Result<usize, Rejection> {
-    let index = index as usize;
+    let index = usize::try_from(index).map_err(|_| {
+        Rejection::new(format!(
+            "clip {raw_clip} has no effect at index {index} (chain length {})",
+            clip.effects.len()
+        ))
+    })?;
     if index >= clip.effects.len() {
         return Err(Rejection::new(format!(
-            "clip {raw_clip} has no effect at index {index} ({} on the chain)",
+            "clip {raw_clip} has no effect at index {index} (chain length {})",
             clip.effects.len()
         )));
     }
@@ -1993,6 +2015,57 @@ mod tests {
             }),
         );
         assert!(msg.contains("no frame to crop"), "{msg}");
+    }
+
+    #[test]
+    fn move_effect_lowers_and_reports_invalid_requests() {
+        let (mut project, _, _, _, clip, _) = fixture();
+        let clip_id = ClipId::from_raw(clip);
+        for effect in ["gaussian_blur", "glitch", "vignette"] {
+            project.add_effect(clip_id, effect).unwrap();
+        }
+
+        assert_eq!(
+            lower(
+                &project,
+                WireCommand::MoveEffect(wire::MoveEffect {
+                    clip,
+                    from_index: 0,
+                    to_index: 2,
+                }),
+            ),
+            EditCommand::MoveEffect {
+                clip: clip_id,
+                from_index: 0,
+                to_index: 2,
+            }
+        );
+
+        for command in [
+            wire::MoveEffect {
+                clip,
+                from_index: 3,
+                to_index: 0,
+            },
+            wire::MoveEffect {
+                clip,
+                from_index: 0,
+                to_index: 3,
+            },
+        ] {
+            let msg = reject(&project, WireCommand::MoveEffect(command));
+            assert!(msg.contains("chain length 3"), "{msg}");
+        }
+
+        let msg = reject(
+            &project,
+            WireCommand::MoveEffect(wire::MoveEffect {
+                clip,
+                from_index: 1,
+                to_index: 1,
+            }),
+        );
+        assert!(msg.contains("would make no change"), "{msg}");
     }
 
     #[test]

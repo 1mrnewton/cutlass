@@ -1717,6 +1717,59 @@ fn set_effect_param_undo_redo_roundtrip() {
 }
 
 #[test]
+fn move_effect_undo_redo_restores_exact_instances() {
+    let (_dir, mut engine) = temp_engine();
+    let clip_id = text_clip(&mut engine);
+
+    for effect_id in ["gaussian_blur", "glitch", "vignette"] {
+        engine
+            .apply(Command::Edit(EditCommand::AddEffect {
+                clip: clip_id,
+                effect_id: effect_id.into(),
+            }))
+            .expect("add effect");
+    }
+    engine
+        .apply(Command::Edit(EditCommand::SetEffectParam {
+            clip: clip_id,
+            index: 0,
+            param: 0,
+            value: 12.0,
+        }))
+        .expect("set constant effect param");
+    for (tick, value, easing) in [(0, 0.2, Easing::EaseIn), (24, 0.8, Easing::EaseOut)] {
+        engine
+            .apply(Command::Edit(EditCommand::SetParamKeyframe {
+                clip: clip_id,
+                param: ClipParam::Effect {
+                    effect: 1,
+                    param: 0,
+                },
+                at: rt(tick),
+                value: ParamValue::Scalar(value),
+                easing,
+            }))
+            .expect("set animated effect param");
+    }
+
+    let before = engine.project().clip(clip_id).unwrap().effects.clone();
+    let expected = vec![before[1].clone(), before[2].clone(), before[0].clone()];
+    engine
+        .apply(Command::Edit(EditCommand::MoveEffect {
+            clip: clip_id,
+            from_index: 0,
+            to_index: 2,
+        }))
+        .expect("move effect");
+    assert_eq!(engine.project().clip(clip_id).unwrap().effects, expected);
+
+    assert!(engine.undo());
+    assert_eq!(engine.project().clip(clip_id).unwrap().effects, before);
+    assert!(engine.redo());
+    assert_eq!(engine.project().clip(clip_id).unwrap().effects, expected);
+}
+
+#[test]
 fn effect_param_keyframe_through_clip_param() {
     let (_dir, mut engine) = temp_engine();
     let clip_id = text_clip(&mut engine);

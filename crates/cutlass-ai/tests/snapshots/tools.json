@@ -551,6 +551,40 @@
       }
     },
     {
+      "description": "Reorder a clip's effect chain. Both from_index and to_index address the current pre-move chain; to_index is the effect's final index. See describe_project for the current order.",
+      "name": "move_effect",
+      "parameters": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Reorder one effect within a clip's chain. Both indices address the current\npre-move chain; `to_index` is the moved effect's final index after removal\nand insertion. Use `describe_project` to inspect the current order.",
+        "properties": {
+          "clip": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "from_index": {
+            "description": "Current index of the effect to move (0 = first).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "to_index": {
+            "description": "Final index for the moved effect (0 = first).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "clip",
+          "from_index",
+          "to_index"
+        ],
+        "title": "MoveEffect",
+        "type": "object"
+      }
+    },
+    {
       "description": "Set a parameter of an effect on a clip to a value (e.g. gaussian_blur 'radius', vignette 'amount'). Use describe_project to see effect indices and current params.",
       "name": "set_effect_param",
       "parameters": {
@@ -1916,5 +1950,5 @@
       }
     }
   ],
-  "version": 22
+  "version": 23
 }

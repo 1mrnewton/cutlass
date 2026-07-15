@@ -579,7 +579,7 @@ mod tests {
         );
         assert_eq!(body["messages"][2]["role"], "tool");
         assert_eq!(body["messages"][2]["tool_call_id"], "call_1");
-        assert_eq!(body["tools"].as_array().unwrap().len(), 44);
+        assert_eq!(body["tools"].as_array().unwrap().len(), 45);
         assert_eq!(body["tools"][0]["function"]["name"], "add_track");
     }
 

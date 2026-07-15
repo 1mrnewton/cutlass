@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounded, unbounded};
 use cutlass_commands::{Command, EditCommand, EditOutcome, ProjectCommand, TemplatePick};
 use cutlass_engine::{ApplyOutcome, Engine, EngineConfig, SeekPolicy};
 use cutlass_models::{
@@ -598,14 +598,24 @@ enum WorkerMsg {
     #[allow(dead_code)] // Wired into the cache registry in its follow-up phase.
     GetPreviewCacheStats {
         reply: Sender<PreviewCacheStats>,
-        operation: Arc<CacheRpcOperation>,
+        operation: Arc<WorkerRpcOperation>,
     },
     /// Drop every composited preview frame and report the exact pre-clear
     /// usage (the entries and bytes removed).
     #[allow(dead_code)] // Wired into the cache registry in its follow-up phase.
     ClearPreviewCache {
         reply: Sender<PreviewCacheStats>,
-        operation: Arc<CacheRpcOperation>,
+        operation: Arc<WorkerRpcOperation>,
+    },
+    /// Hand an off-UI maintenance worker a coherent clone of the live project,
+    /// then stop consuming this queue until its guard disconnects `resume`.
+    /// The operation state prevents an abandoned queued request from pausing
+    /// the worker when it is eventually dequeued.
+    #[allow(dead_code)] // Wired into cache relocation by its coordination slice.
+    BeginProjectMaintenance {
+        reply: Sender<Result<Project, ()>>,
+        resume: Receiver<()>,
+        operation: Arc<WorkerRpcOperation>,
     },
     /// Clone the live project for the AI agent's sandbox rehearsal
     /// (`src/agent.rs`). Ordered with mutations, so the snapshot always
@@ -687,22 +697,26 @@ pub struct WorkerHandle {
 #[allow(dead_code)] // Used once the cache registry consumes this Phase 2b RPC.
 const PREVIEW_CACHE_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_CACHE_RPC_WAIT_SLICE: Duration = Duration::from_millis(25);
-const CACHE_RPC_PENDING: u8 = 0;
-const CACHE_RPC_RUNNING: u8 = 1;
-const CACHE_RPC_ABANDONED: u8 = 2;
+#[allow(dead_code)] // Used by the staged maintenance entry point below.
+const PROJECT_MAINTENANCE_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+const WORKER_RPC_PENDING: u8 = 0;
+const WORKER_RPC_RUNNING: u8 = 1;
+const WORKER_RPC_ABANDONED: u8 = 2;
 
-struct CacheRpcOperation(AtomicU8);
+/// Shared claim state for bounded worker RPCs. Only a request still in
+/// `PENDING` may be started by the worker or abandoned by its caller.
+struct WorkerRpcOperation(AtomicU8);
 
-impl CacheRpcOperation {
+impl WorkerRpcOperation {
     fn pending() -> Self {
-        Self(AtomicU8::new(CACHE_RPC_PENDING))
+        Self(AtomicU8::new(WORKER_RPC_PENDING))
     }
 
     fn claim(&self) -> bool {
         self.0
             .compare_exchange(
-                CACHE_RPC_PENDING,
-                CACHE_RPC_RUNNING,
+                WORKER_RPC_PENDING,
+                WORKER_RPC_RUNNING,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -712,12 +726,71 @@ impl CacheRpcOperation {
     fn abandon(&self) -> bool {
         self.0
             .compare_exchange(
-                CACHE_RPC_PENDING,
-                CACHE_RPC_ABANDONED,
+                WORKER_RPC_PENDING,
+                WORKER_RPC_ABANDONED,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
             .is_ok()
+    }
+}
+
+/// Exclusive maintenance lease over a coherent live-project snapshot.
+///
+/// While this value is alive the preview worker is paused and consumes no
+/// edit, import, relink, template, or other queued messages. The guard owns no
+/// engine state and is safe to move to the background maintenance thread that
+/// performs the filesystem operation.
+#[must_use = "dropping the maintenance guard resumes the preview worker"]
+#[allow(dead_code)] // Constructed once cache relocation consumes the staged API.
+pub(crate) struct ProjectMaintenanceGuard {
+    project: Project,
+    resume: Option<Sender<()>>,
+}
+
+impl ProjectMaintenanceGuard {
+    #[allow(dead_code)] // Read by the cache relocation coordination slice.
+    pub(crate) fn project(&self) -> &Project {
+        &self.project
+    }
+}
+
+impl Drop for ProjectMaintenanceGuard {
+    fn drop(&mut self) {
+        // This is the only sender. Disconnecting it wakes the worker's
+        // blocking receive without requiring a timeout or a successful send.
+        drop(self.resume.take());
+    }
+}
+
+#[allow(dead_code)] // Reachable through the intentionally staged API below.
+fn project_maintenance_result(
+    reply: Result<Project, ()>,
+    resume: Sender<()>,
+) -> Result<ProjectMaintenanceGuard, String> {
+    match reply {
+        Ok(project) => Ok(ProjectMaintenanceGuard {
+            project,
+            resume: Some(resume),
+        }),
+        Err(()) => Err("project maintenance request was refused by preview worker".into()),
+    }
+}
+
+/// Claim, snapshot, and pause for one maintenance request. The blocking
+/// receive has no timeout: only guard drop (or an abandoned caller dropping
+/// its sender) resumes worker message processing.
+fn serve_project_maintenance(
+    project: &Project,
+    reply: Sender<Result<Project, ()>>,
+    resume: Receiver<()>,
+    operation: Arc<WorkerRpcOperation>,
+) {
+    if !operation.claim() {
+        return;
+    }
+    if reply.send(Ok(project.clone())).is_ok() {
+        let _ = resume.recv();
     }
 }
 
@@ -817,10 +890,10 @@ impl WorkerHandle {
         operation: &'static str,
         timeout: Duration,
         cancel: &AtomicBool,
-        request: impl FnOnce(Sender<PreviewCacheStats>, Arc<CacheRpcOperation>) -> WorkerMsg,
+        request: impl FnOnce(Sender<PreviewCacheStats>, Arc<WorkerRpcOperation>) -> WorkerMsg,
     ) -> Result<PreviewCacheStats, String> {
         let (reply, response) = bounded(1);
-        let operation_state = Arc::new(CacheRpcOperation::pending());
+        let operation_state = Arc::new(WorkerRpcOperation::pending());
         self.tx
             .send(request(reply, Arc::clone(&operation_state)))
             .map_err(|_| {
@@ -853,6 +926,101 @@ impl WorkerHandle {
                     return Err(format!(
                         "preview cache {operation} request failed: preview worker stopped before replying"
                     ));
+                }
+            }
+        }
+    }
+
+    /// Freeze the preview worker in queue order and return a coherent clone of
+    /// its live project. Dropping the returned guard resumes message handling.
+    ///
+    /// This synchronous RPC must run on a background maintenance thread,
+    /// never the UI thread. Acquisition is cancellation-aware and bounded;
+    /// after acquisition there is deliberately no lease timeout, because a
+    /// legitimate cache relocation may take arbitrarily long.
+    #[allow(dead_code)] // Public(crate) seam for cache relocation wiring.
+    pub(crate) fn begin_project_maintenance_with_cancel(
+        &self,
+        cancel: &AtomicBool,
+    ) -> Result<ProjectMaintenanceGuard, String> {
+        self.begin_project_maintenance_with_timeout(cancel, PROJECT_MAINTENANCE_ACQUIRE_TIMEOUT)
+    }
+
+    #[allow(dead_code)] // Testable timeout seam used by the public(crate) API.
+    fn begin_project_maintenance_with_timeout(
+        &self,
+        cancel: &AtomicBool,
+        timeout: Duration,
+    ) -> Result<ProjectMaintenanceGuard, String> {
+        let (reply, response) = bounded(1);
+        // No values are sent. The guard owns the sole sender; dropping it
+        // disconnects this receiver and resumes the worker.
+        let (resume, wait_for_resume) = bounded::<()>(0);
+        let operation = Arc::new(WorkerRpcOperation::pending());
+        self.tx
+            .send(WorkerMsg::BeginProjectMaintenance {
+                reply,
+                resume: wait_for_resume,
+                operation: Arc::clone(&operation),
+            })
+            .map_err(|_| {
+                operation.abandon();
+                "project maintenance request failed: preview worker is not running".to_string()
+            })?;
+
+        let started = Instant::now();
+        loop {
+            // A delivered grant wins a cancellation race after worker claim.
+            // Returning it transfers the only resume sender into the guard.
+            match response.try_recv() {
+                Ok(reply) => return project_maintenance_result(reply, resume),
+                Err(TryRecvError::Disconnected) => {
+                    return Err(
+                        "project maintenance request failed: preview worker stopped before replying"
+                            .into(),
+                    );
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+
+            if cancel.load(Ordering::Acquire) && operation.abandon() {
+                return Err("project maintenance request was cancelled before worker claim".into());
+            }
+
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                // Close the smallest race between the timeout check and a
+                // grant already entering the bounded response channel.
+                match response.try_recv() {
+                    Ok(reply) => return project_maintenance_result(reply, resume),
+                    Err(TryRecvError::Disconnected) => {
+                        return Err(
+                            "project maintenance request failed: preview worker stopped before replying"
+                                .into(),
+                        );
+                    }
+                    Err(TryRecvError::Empty) => {}
+                }
+                let detail = if operation.abandon() {
+                    "while still queued"
+                } else {
+                    "after worker claim"
+                };
+                return Err(format!(
+                    "project maintenance request timed out {detail} after {} ms",
+                    timeout.as_millis()
+                ));
+            }
+
+            match response.recv_timeout(PREVIEW_CACHE_RPC_WAIT_SLICE.min(remaining)) {
+                Ok(reply) => return project_maintenance_result(reply, resume),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    operation.abandon();
+                    return Err(
+                        "project maintenance request failed: preview worker stopped before replying"
+                            .into(),
+                    );
                 }
             }
         }
@@ -1900,6 +2068,11 @@ fn worker_loop(
                     let _ = reply.send(cache.clear());
                 }
             }
+            WorkerMsg::BeginProjectMaintenance {
+                reply,
+                resume,
+                operation,
+            } => serve_project_maintenance(engine.project(), reply, resume, operation),
             WorkerMsg::SnapshotProject { reply } => {
                 let _ = reply.send(engine.project().clone());
             }
@@ -1980,6 +2153,7 @@ fn worker_loop(
             WorkerMsg::Frame(_)
                 | WorkerMsg::GetPreviewCacheStats { .. }
                 | WorkerMsg::ClearPreviewCache { .. }
+                | WorkerMsg::BeginProjectMaintenance { .. }
         );
         match msg {
             WorkerMsg::Frame(mut tick) => {
@@ -7274,6 +7448,225 @@ mod tests {
             panic!("expected queued clear request");
         };
         assert!(!operation.claim());
+    }
+
+    #[test]
+    fn project_maintenance_cancellation_abandons_a_queued_request() {
+        let (tx, rx) = unbounded();
+        let handle = WorkerHandle { tx };
+        let cancel = AtomicBool::new(true);
+
+        let error =
+            match handle.begin_project_maintenance_with_timeout(&cancel, Duration::from_secs(1)) {
+                Ok(_) => panic!("cancelled maintenance request was granted"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            error,
+            "project maintenance request was cancelled before worker claim"
+        );
+
+        let WorkerMsg::BeginProjectMaintenance {
+            resume, operation, ..
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("expected queued maintenance request");
+        };
+        assert!(
+            !operation.claim(),
+            "cancelled queued maintenance must remain abandoned"
+        );
+        assert!(matches!(resume.try_recv(), Err(TryRecvError::Disconnected)));
+    }
+
+    #[test]
+    fn project_maintenance_claim_wins_a_cancellation_delivery_race() {
+        let (tx, rx) = unbounded();
+        let handle = WorkerHandle { tx };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let worker = std::thread::spawn(move || {
+            let WorkerMsg::BeginProjectMaintenance {
+                reply,
+                resume,
+                operation,
+            } = rx.recv().unwrap()
+            else {
+                panic!("expected maintenance request");
+            };
+            assert!(operation.claim());
+            worker_cancel.store(true, Ordering::Release);
+            reply
+                .send(Ok(Project::new("claimed", Rational::FPS_30)))
+                .unwrap();
+            assert!(matches!(
+                resume.recv_timeout(Duration::from_secs(1)),
+                Err(RecvTimeoutError::Disconnected)
+            ));
+        });
+
+        let guard = handle
+            .begin_project_maintenance_with_timeout(cancel.as_ref(), Duration::from_secs(1))
+            .expect("a claim that beat cancellation must deliver its guard");
+        assert_eq!(guard.project().name, "claimed");
+        drop(guard);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn project_maintenance_guard_drop_resumes_queued_work_and_is_send() {
+        let (tx, rx) = unbounded();
+        let handle = WorkerHandle { tx };
+        let (resumed_tx, resumed_rx) = bounded(1);
+        let (processed_tx, processed_rx) = bounded(1);
+        let worker = std::thread::spawn(move || {
+            let WorkerMsg::BeginProjectMaintenance {
+                reply,
+                resume,
+                operation,
+            } = rx.recv().unwrap()
+            else {
+                panic!("expected maintenance request");
+            };
+            let project = Project::new("live snapshot", Rational::FPS_30);
+            serve_project_maintenance(&project, reply, resume, operation);
+            resumed_tx.send(()).unwrap();
+
+            let WorkerMsg::RenameProject { name } = rx.recv().unwrap() else {
+                panic!("expected work queued behind maintenance");
+            };
+            processed_tx.send(name).unwrap();
+        });
+
+        let guard = handle
+            .begin_project_maintenance_with_timeout(&AtomicBool::new(false), Duration::from_secs(1))
+            .expect("maintenance guard");
+        assert_eq!(guard.project().name, "live snapshot");
+        handle.rename_project("after maintenance".into());
+        assert!(matches!(processed_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        // Moving the guard into this background holder is also a compile-time
+        // assertion that ProjectMaintenanceGuard is Send.
+        std::thread::spawn(move || drop(guard)).join().unwrap();
+        resumed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("guard drop must resume worker");
+        assert_eq!(
+            processed_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "after maintenance"
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn project_maintenance_acquisition_timeout_is_finite() {
+        let (tx, rx) = unbounded();
+        let handle = WorkerHandle { tx };
+        let (done_tx, done_rx) = bounded(1);
+        let caller = std::thread::spawn(move || {
+            let cancel = AtomicBool::new(false);
+            let result =
+                handle.begin_project_maintenance_with_timeout(&cancel, Duration::from_millis(5));
+            assert!(done_tx.send(result).is_ok());
+        });
+
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("maintenance acquisition must have a finite timeout");
+        let error = match result {
+            Ok(_) => panic!("unserviced maintenance request was granted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            "project maintenance request timed out while still queued after 5 ms"
+        );
+        caller.join().unwrap();
+
+        let WorkerMsg::BeginProjectMaintenance { operation, .. } = rx.try_recv().unwrap() else {
+            panic!("expected timed-out maintenance request");
+        };
+        assert!(!operation.claim());
+    }
+
+    #[test]
+    fn abandoned_project_maintenance_request_cannot_freeze_worker_later() {
+        let (tx, rx) = unbounded();
+        let handle = WorkerHandle { tx };
+        let cancel = AtomicBool::new(false);
+        let result =
+            handle.begin_project_maintenance_with_timeout(&cancel, Duration::from_millis(1));
+        assert!(result.is_err());
+        handle.rename_project("still runs".into());
+
+        let (done_tx, done_rx) = bounded(1);
+        let worker = std::thread::spawn(move || {
+            let WorkerMsg::BeginProjectMaintenance {
+                reply,
+                resume,
+                operation,
+            } = rx.recv().unwrap()
+            else {
+                panic!("expected abandoned maintenance request");
+            };
+            let project = Project::new("late", Rational::FPS_30);
+            serve_project_maintenance(&project, reply, resume, operation);
+
+            let WorkerMsg::RenameProject { name } = rx.recv().unwrap() else {
+                panic!("abandoned maintenance froze later queue work");
+            };
+            done_tx.send(name).unwrap();
+        });
+
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "still runs"
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn project_maintenance_reports_worker_refusal_separately() {
+        let (tx, rx) = unbounded();
+        let handle = WorkerHandle { tx };
+        let worker = std::thread::spawn(move || {
+            let WorkerMsg::BeginProjectMaintenance {
+                reply, operation, ..
+            } = rx.recv().unwrap()
+            else {
+                panic!("expected maintenance request");
+            };
+            assert!(operation.claim());
+            reply.send(Err(())).unwrap();
+        });
+
+        let error = match handle
+            .begin_project_maintenance_with_timeout(&AtomicBool::new(false), Duration::from_secs(1))
+        {
+            Ok(_) => panic!("refused maintenance request was granted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            "project maintenance request was refused by preview worker"
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn project_maintenance_reports_a_disconnected_queue() {
+        let (tx, rx) = unbounded();
+        drop(rx);
+        let handle = WorkerHandle { tx };
+
+        let error = match handle.begin_project_maintenance_with_cancel(&AtomicBool::new(false)) {
+            Ok(_) => panic!("disconnected worker granted maintenance"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            "project maintenance request failed: preview worker is not running"
+        );
     }
 
     /// The ladder drops on one slow render but climbs back only on

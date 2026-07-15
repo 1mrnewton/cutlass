@@ -449,6 +449,32 @@ impl StorageLayoutSnapshot {
     }
 }
 
+/// A borrowed layout generation held stable for one complete cache operation.
+///
+/// While this lease exists, a writer cannot publish a replacement layout.
+/// Cache workers should acquire one at the start of an operation and retain it
+/// until every filesystem access using its resolved paths has finished.
+pub struct StorageLayoutLease<'a> {
+    state: RwLockReadGuard<'a, VersionedStorageLayout>,
+}
+
+impl StorageLayoutLease<'_> {
+    /// Return the coherently borrowed layout.
+    pub fn layout(&self) -> &StorageLayout {
+        &self.state.layout
+    }
+
+    /// Return the generation held by this lease.
+    pub fn generation(&self) -> u64 {
+        self.state.generation
+    }
+
+    /// Resolve a cache against the held generation.
+    pub fn resolve(&self, id: CacheId) -> Option<PathBuf> {
+        self.state.layout.resolve(id)
+    }
+}
+
 /// A cheap-to-clone, thread-safe, versioned [`StorageLayout`].
 ///
 /// Clones share one layout through an [`Arc`]. Readers observe the layout and
@@ -488,6 +514,17 @@ impl SharedStorageLayout {
         }
     }
 
+    /// Hold one generation stable for a complete cache operation.
+    ///
+    /// Keep the returned lease alive until all work using its paths finishes.
+    /// Long-lived leases delay relocation, so callers should scope them to one
+    /// refresh, download, install, render, or maintenance operation.
+    pub fn lease(&self) -> StorageLayoutLease<'_> {
+        StorageLayoutLease {
+            state: self.read_state(),
+        }
+    }
+
     /// Resolve one cache from a single coherent read of the current layout.
     ///
     /// Memory caches return `None`.
@@ -516,6 +553,34 @@ impl SharedStorageLayout {
     ) -> Result<u64, SharedStorageLayoutError> {
         let mut state = self.write_state();
         let next_generation = checked_next_generation(&state, expected_generation)?;
+        *state = VersionedStorageLayout {
+            layout: replacement,
+            generation: next_generation,
+        };
+        Ok(next_generation)
+    }
+
+    /// Run an exclusive transition and publish `replacement` on success.
+    ///
+    /// Existing [`StorageLayoutLease`] values finish before `transition`
+    /// starts, and new leases wait until this method returns. The callback
+    /// receives the old and replacement layouts while publication is
+    /// exclusive. A callback error or panic leaves the shared layout and
+    /// generation unchanged.
+    pub fn transition<F, E>(
+        &self,
+        expected_generation: u64,
+        replacement: StorageLayout,
+        transition: F,
+    ) -> Result<u64, SharedStorageLayoutTransitionError<E>>
+    where
+        F: FnOnce(&StorageLayout, &StorageLayout) -> Result<(), E>,
+    {
+        let mut state = self.write_state();
+        let next_generation = checked_next_generation(&state, expected_generation)
+            .map_err(SharedStorageLayoutTransitionError::Layout)?;
+        transition(&state.layout, &replacement)
+            .map_err(SharedStorageLayoutTransitionError::Transition)?;
         *state = VersionedStorageLayout {
             layout: replacement,
             generation: next_generation,
@@ -638,6 +703,36 @@ impl fmt::Display for SharedStorageLayoutError {
 }
 
 impl Error for SharedStorageLayoutError {}
+
+/// A rejected exclusive [`SharedStorageLayout::transition`].
+#[derive(Debug)]
+pub enum SharedStorageLayoutTransitionError<E> {
+    /// The expected generation was stale or exhausted.
+    Layout(SharedStorageLayoutError),
+    /// The caller's transition failed before publication.
+    Transition(E),
+}
+
+impl<E: fmt::Display> fmt::Display for SharedStorageLayoutTransitionError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Layout(error) => error.fmt(f),
+            Self::Transition(error) => write!(f, "storage layout transition failed: {error}"),
+        }
+    }
+}
+
+impl<E> Error for SharedStorageLayoutTransitionError<E>
+where
+    E: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Layout(error) => Some(error),
+            Self::Transition(error) => Some(error),
+        }
+    }
+}
 
 /// Cooperative cancellation check used by filesystem operations.
 pub trait Cancellation {

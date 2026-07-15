@@ -3,14 +3,15 @@ use std::fs;
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use cutlass_storage::{
     CACHE_REGISTRY, CacheId, CacheKind, CacheTier, NeverCancelled, SharedStorageLayout,
-    SharedStorageLayoutError, StorageError, StorageLayout, cache_descriptor_by_key, clear_cache,
-    measure_disk_usage, relocate_cache,
+    SharedStorageLayoutError, SharedStorageLayoutTransitionError, StorageError, StorageLayout,
+    cache_descriptor_by_key, clear_cache, measure_disk_usage, relocate_cache,
 };
 
 struct TestDirectory {
@@ -461,6 +462,90 @@ fn shared_layout_recovers_after_a_panicking_update() {
     assert_eq!(snapshot.generation(), 1);
     assert_eq!(snapshot.layout(), &replacement);
     assert_ne!(snapshot.layout(), &initial);
+}
+
+#[test]
+fn shared_layout_lease_blocks_transition_until_operation_finishes() {
+    let temporary = TestDirectory::new();
+    let initial = StorageLayout::new(temporary.path.join("initial")).unwrap();
+    let replacement = StorageLayout::new(temporary.path.join("replacement")).unwrap();
+    let shared = SharedStorageLayout::new(initial.clone());
+    let lease = shared.lease();
+    assert_eq!(lease.generation(), 0);
+    assert_eq!(
+        lease.resolve(CacheId::Proxies),
+        initial.resolve(CacheId::Proxies)
+    );
+
+    let transition_started = Arc::new(AtomicBool::new(false));
+    let callback_started = Arc::new(AtomicBool::new(false));
+    let (attempt_tx, attempt_rx) = mpsc::channel();
+    let worker = {
+        let shared = shared.clone();
+        let transition_started = Arc::clone(&transition_started);
+        let callback_started = Arc::clone(&callback_started);
+        thread::spawn(move || {
+            transition_started.store(true, Ordering::Release);
+            attempt_tx.send(()).unwrap();
+            shared.transition(0, replacement, |old, new| {
+                callback_started.store(true, Ordering::Release);
+                assert_ne!(old, new);
+                Ok::<(), io::Error>(())
+            })
+        })
+    };
+
+    attempt_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(transition_started.load(Ordering::Acquire));
+    thread::sleep(Duration::from_millis(20));
+    assert!(
+        !callback_started.load(Ordering::Acquire),
+        "exclusive transition must wait for the active lease"
+    );
+
+    drop(lease);
+    assert_eq!(worker.join().unwrap().unwrap(), 1);
+    assert!(callback_started.load(Ordering::Acquire));
+    assert_eq!(shared.snapshot().generation(), 1);
+}
+
+#[test]
+fn shared_layout_failed_transition_does_not_publish_replacement() {
+    let temporary = TestDirectory::new();
+    let initial = StorageLayout::new(temporary.path.join("initial")).unwrap();
+    let replacement = StorageLayout::new(temporary.path.join("replacement")).unwrap();
+    let shared = SharedStorageLayout::new(initial.clone());
+
+    let result = shared.transition(0, replacement.clone(), |old, new| {
+        assert_eq!(old, &initial);
+        assert_eq!(new, &replacement);
+        Err(io::Error::other("injected transition failure"))
+    });
+    assert!(matches!(
+        result,
+        Err(SharedStorageLayoutTransitionError::Transition(error))
+            if error.kind() == io::ErrorKind::Other
+    ));
+
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.generation(), 0);
+    assert_eq!(snapshot.layout(), &initial);
+
+    let callback_called = AtomicBool::new(false);
+    let stale = shared.transition(7, replacement, |_, _| {
+        callback_called.store(true, Ordering::Release);
+        Ok::<(), io::Error>(())
+    });
+    assert!(matches!(
+        stale,
+        Err(SharedStorageLayoutTransitionError::Layout(
+            SharedStorageLayoutError::StaleGeneration {
+                expected: 7,
+                current: 0,
+            }
+        ))
+    ));
+    assert!(!callback_called.load(Ordering::Acquire));
 }
 
 #[test]

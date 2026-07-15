@@ -1245,6 +1245,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutlass-analysis"
+version = "0.5.3-alpha.0"
+
+[[package]]
 name = "cutlass-cli"
 version = "0.5.3-alpha.0"
 dependencies = [

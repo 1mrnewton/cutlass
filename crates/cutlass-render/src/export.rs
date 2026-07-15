@@ -271,6 +271,35 @@ impl VideoEncoder for PngSequenceEncoder {
     }
 }
 
+/// Encode one tightly packed RGBA8 image as an in-memory PNG.
+///
+/// Agent vision tools use this boundary rather than depending on `png`
+/// themselves: rendered frames stay [`RgbaImage`] until the provider needs
+/// encoded bytes, and every caller gets the same well-formedness check.
+pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, RenderError> {
+    if !image.is_well_formed() {
+        return Err(RenderError::unsupported(format!(
+            "RGBA image is {}x{} but carries {} bytes",
+            image.width,
+            image.height,
+            image.pixels.len()
+        )));
+    }
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, image.width, image.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| RenderError::Encode(EncodeError::Encode(e.to_string())))?;
+        writer
+            .write_image_data(&image.pixels)
+            .map_err(|e| RenderError::Encode(EncodeError::Encode(e.to_string())))?;
+    }
+    Ok(bytes)
+}
+
 /// Write one RGBA8 plane to an 8-bit PNG, compacting away any row padding.
 fn write_png(path: &Path, width: u32, height: u32, plane: &Plane) -> Result<(), EncodeError> {
     let row_bytes = width as usize * 4;
@@ -298,4 +327,35 @@ fn write_png(path: &Path, width: u32, height: u32, plane: &Plane) -> Result<(), 
             .map_err(|e| EncodeError::Encode(e.to_string()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn in_memory_png_round_trips_rgba_pixels() {
+        let image = RgbaImage::new(2, 1, vec![255, 0, 0, 255, 10, 20, 30, 40]);
+
+        let encoded = encode_png(&image).expect("encode");
+        assert_eq!(&encoded[..8], b"\x89PNG\r\n\x1a\n");
+
+        let decoder = png::Decoder::new(encoded.as_slice());
+        let mut reader = decoder.read_info().expect("header");
+        let mut decoded = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut decoded).expect("frame");
+        assert_eq!((info.width, info.height), (2, 1));
+        assert_eq!(info.color_type, png::ColorType::Rgba);
+        assert_eq!(&decoded[..info.buffer_size()], image.pixels);
+    }
+
+    #[test]
+    fn in_memory_png_rejects_malformed_rgba_buffer() {
+        let malformed = RgbaImage::new(2, 2, vec![0; 3]);
+        let error = encode_png(&malformed).expect_err("bad buffer");
+        assert!(
+            error.to_string().contains("carries 3 bytes"),
+            "unexpected error: {error}"
+        );
+    }
 }

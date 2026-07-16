@@ -331,13 +331,13 @@ fn transcript_image_label(label: &str) -> String {
 
 fn append_assistant_text(store: &slint::Weak<AgentStore<'static>>, delta: String) {
     with_transcript(store, move |model| {
-        append_transcript_text(&model, "assistant", delta);
+        append_transcript_text(model, "assistant", delta);
     });
 }
 
 fn append_reasoning_text(store: &slint::Weak<AgentStore<'static>>, delta: String) {
     with_transcript(store, move |model| {
-        append_transcript_text(&model, "reasoning", delta);
+        append_transcript_text(model, "reasoning", delta);
     });
 }
 

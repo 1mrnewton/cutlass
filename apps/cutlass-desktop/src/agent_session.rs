@@ -150,7 +150,7 @@ pub(crate) fn load(project: &Path) -> Result<AgentSession, String> {
 }
 
 fn load_file(path: &Path) -> Result<AgentSession, String> {
-    let file = match fs::File::open(&path) {
+    let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(AgentSession::default());
@@ -173,7 +173,7 @@ fn load_file(path: &Path) -> Result<AgentSession, String> {
         })?
         .len();
     if file_size > MAX_FILE_SIZE_BYTES {
-        return Err(oversize_error(&path, file_size));
+        return Err(oversize_error(path, file_size));
     }
 
     // The metadata check prevents preallocation from an already-large file;
@@ -183,7 +183,7 @@ fn load_file(path: &Path) -> Result<AgentSession, String> {
         .read_to_end(&mut bytes)
         .map_err(|error| format!("failed to read agent session '{}': {error}", path.display()))?;
     if bytes.len() as u64 > MAX_FILE_SIZE_BYTES {
-        return Err(oversize_error(&path, bytes.len() as u64));
+        return Err(oversize_error(path, bytes.len() as u64));
     }
 
     let header: PersistedSessionHeader = serde_json::from_slice(&bytes).map_err(|error| {
@@ -255,7 +255,7 @@ fn save_file(path: &Path, temp_name: &str, session: &AgentSession) -> Result<(),
             temp.display()
         ));
     }
-    if let Err(error) = replace_file(&temp, &path) {
+    if let Err(error) = replace_file(&temp, path) {
         let _ = fs::remove_file(&temp);
         return Err(format!(
             "failed to replace agent session '{}': {error}",

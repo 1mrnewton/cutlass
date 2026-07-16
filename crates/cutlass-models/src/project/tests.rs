@@ -1395,8 +1395,7 @@ fn set_clip_speed_curve_rejects_bad_targets() {
         )
         .unwrap();
     assert!(matches!(
-        project
-            .set_clip_speed_curve(generated, Some(crate::clip::speed_preset("hero").unwrap())),
+        project.set_clip_speed_curve(generated, Some(crate::clip::speed_preset("hero").unwrap())),
         Err(ModelError::InvalidParam(_))
     ));
 }
@@ -1980,8 +1979,8 @@ fn project_clone_is_independent_snapshot() {
 // --- Phase I look properties --------------------------------------------
 
 use crate::look::{
-    AnimationRef, AnimationSlot, AudioRole, ChromaKey, ColorAdjustments, Filter, Mask,
-    MaskKind, StabilizeLevel,
+    AnimationRef, AnimationSlot, AudioRole, ChromaKey, ColorAdjustments, Filter, Mask, MaskKind,
+    StabilizeLevel,
 };
 
 #[test]
@@ -2218,8 +2217,7 @@ fn text_effect_presets_bake_onto_the_style() {
         )
         .unwrap();
 
-    let ClipSource::Generated(Generator::Text { style, .. }) =
-        &project.clip(clip).unwrap().content
+    let ClipSource::Generated(Generator::Text { style, .. }) = &project.clip(clip).unwrap().content
     else {
         panic!("expected text");
     };
@@ -2264,8 +2262,7 @@ fn text_effect_presets_bake_onto_the_style() {
             },
         )
         .unwrap();
-    let ClipSource::Generated(Generator::Text { style, .. }) =
-        &project.clip(clip).unwrap().content
+    let ClipSource::Generated(Generator::Text { style, .. }) = &project.clip(clip).unwrap().content
     else {
         panic!("expected text");
     };

@@ -1,226 +1,4 @@
-//! Shared desktop cache inventory, clearing, and coordinated relocation.
-//!
-//! The registry owns the live storage layout and serializes every destructive
-//! cache operation. All public operations are synchronous and intended for an
-//! off-UI worker thread.
-
-use std::collections::BTreeSet;
-use std::error::Error;
-use std::fmt;
-use std::io;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
-use std::time::{Duration, Instant};
-
-use crossbeam_channel::{Receiver, RecvTimeoutError, bounded};
-use cutlass_cloud::cache::DownloadCache;
-use cutlass_storage::{
-    CacheDescriptor, CacheId, CacheKind, CacheTier, SharedStorageLayout, StorageError,
-    StorageLayout, cache_descriptors, clear_cache, measure_disk_usage, relocate_cache,
-};
-use serde::ser::SerializeStruct;
-use serde::{Serialize, Serializer};
-
-use crate::AppWindow;
-use crate::cache_references::{CacheReferenceReport, DraftReferenceReport};
-use crate::preview_worker::{PreviewCacheStats, ProjectMaintenanceGuard, WorkerHandle};
-
-const GATE_WAIT_SLICE: Duration = Duration::from_millis(25);
-const GATE_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
-const UI_WAIT_SLICE: Duration = Duration::from_millis(25);
-const UI_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_ERROR_CHARS: usize = 240;
-const UI_OPERATION_PENDING: u8 = 0;
-const UI_OPERATION_RUNNING: u8 = 1;
-const UI_OPERATION_ABANDONED: u8 = 2;
-
-/// One cache's current usage and immutable descriptor metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CacheSnapshot {
-    pub(crate) id: CacheId,
-    pub(crate) label: &'static str,
-    pub(crate) kind: CacheKind,
-    pub(crate) tier: CacheTier,
-    pub(crate) path: Option<PathBuf>,
-    pub(crate) bytes: u64,
-    pub(crate) entries: u64,
-    pub(crate) files: u64,
-}
-
-impl Serialize for CacheSnapshot {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut fields = serializer
-            .serialize_struct("CacheSnapshot", if self.path.is_some() { 8 } else { 7 })?;
-        fields.serialize_field("cache_id", self.id.as_str())?;
-        fields.serialize_field("label", self.label)?;
-        fields.serialize_field("kind", cache_kind_key(self.kind))?;
-        fields.serialize_field("tier", cache_tier_key(self.tier))?;
-        if let Some(path) = &self.path {
-            fields.serialize_field("path", &path.to_string_lossy())?;
-        }
-        fields.serialize_field("bytes", &self.bytes)?;
-        fields.serialize_field("entries", &self.entries)?;
-        fields.serialize_field("files", &self.files)?;
-        fields.end()
-    }
-}
-
-/// Exact pre-clear accounting plus a current snapshot when it was practical
-/// to collect one after the operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CacheClearReport {
-    pub(crate) id: CacheId,
-    pub(crate) removed_bytes: u64,
-    pub(crate) removed_entries: u64,
-    pub(crate) removed_files: u64,
-    pub(crate) current: Option<CacheSnapshot>,
-}
-
-impl Serialize for CacheClearReport {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut fields = serializer.serialize_struct(
-            "CacheClearReport",
-            if self.current.is_some() { 5 } else { 4 },
-        )?;
-        fields.serialize_field("cache_id", self.id.as_str())?;
-        fields.serialize_field("removed_bytes", &self.removed_bytes)?;
-        fields.serialize_field("removed_entries", &self.removed_entries)?;
-        fields.serialize_field("removed_files", &self.removed_files)?;
-        if let Some(current) = &self.current {
-            fields.serialize_field("cache", current)?;
-        }
-        fields.end()
-    }
-}
-
-/// Committed relocation accounting and the newly published cache generation.
-#[allow(dead_code)] // Public(crate) DTO for the following UI/agent wiring slice.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CacheRelocationReport {
-    pub(crate) id: CacheId,
-    pub(crate) old_path: PathBuf,
-    pub(crate) new_path: PathBuf,
-    pub(crate) bytes: u64,
-    pub(crate) files: u64,
-    pub(crate) used_copy_fallback: bool,
-    pub(crate) cleanup_warning: Option<String>,
-    pub(crate) generation: u64,
-    pub(crate) current: Option<CacheSnapshot>,
-}
-
-impl Serialize for CacheRelocationReport {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut fields = serializer.serialize_struct(
-            "CacheRelocationReport",
-            7 + usize::from(self.cleanup_warning.is_some()) + usize::from(self.current.is_some()),
-        )?;
-        fields.serialize_field("cache_id", self.id.as_str())?;
-        fields.serialize_field("old_path", &self.old_path.to_string_lossy())?;
-        fields.serialize_field("new_path", &self.new_path.to_string_lossy())?;
-        fields.serialize_field("bytes", &self.bytes)?;
-        fields.serialize_field("files", &self.files)?;
-        fields.serialize_field("used_copy_fallback", &self.used_copy_fallback)?;
-        if let Some(warning) = &self.cleanup_warning {
-            fields.serialize_field("cleanup_warning", warning)?;
-        }
-        fields.serialize_field("generation", &self.generation)?;
-        if let Some(current) = &self.current {
-            fields.serialize_field("cache", current)?;
-        }
-        fields.end()
-    }
-}
-
-/// Failures that can prevent a coordinated disk-cache callback from starting.
-#[derive(Debug)]
-pub(crate) enum CacheCoordinationError {
-    /// Cooperative cancellation was requested, including by a panicking
-    /// cancellation callback.
-    Cancelled,
-    /// Another cache operation held the gate for longer than the bounded wait.
-    TimedOut,
-    /// The operation gate was poisoned.
-    GateUnavailable,
-    /// The requested cache is memory-only.
-    MemoryCache,
-    /// The leased storage generation failed point-in-time filesystem
-    /// validation.
-    InvalidLayout { source: StorageError },
-    /// A registered disk cache did not resolve to an absolute path.
-    DiskPathUnavailable,
-}
-
-impl fmt::Display for CacheCoordinationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Cancelled => formatter.write_str("coordinated cache operation cancelled"),
-            Self::TimedOut => formatter.write_str("another cache operation did not finish in time"),
-            Self::GateUnavailable => {
-                formatter.write_str("cache operation coordination is unavailable")
-            }
-            Self::MemoryCache => formatter.write_str("memory cache has no coordinated disk root"),
-            Self::InvalidLayout { .. } => {
-                formatter.write_str("cache layout failed filesystem validation")
-            }
-            Self::DiskPathUnavailable => {
-                formatter.write_str("disk cache has no valid storage path")
-            }
-        }
-    }
-}
-
-impl Error for CacheCoordinationError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::InvalidLayout { source } => Some(source),
-            Self::Cancelled
-            | Self::TimedOut
-            | Self::GateUnavailable
-            | Self::MemoryCache
-            | Self::DiskPathUnavailable => None,
-        }
-    }
-}
-
-/// A coordinated disk-cache failure, preserving callback errors separately
-/// from cancellation and registry coordination failures.
-#[derive(Debug)]
-pub(crate) enum CoordinatedCacheError<E> {
-    Coordination(CacheCoordinationError),
-    Callback(E),
-}
-
-impl<E> fmt::Display for CoordinatedCacheError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Coordination(error) => error.fmt(formatter),
-            Self::Callback(_) => formatter.write_str("coordinated cache callback failed"),
-        }
-    }
-}
-
-impl<E> Error for CoordinatedCacheError<E>
-where
-    E: Error + 'static,
-{
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Coordination(error) => Some(error),
-            Self::Callback(error) => Some(error),
-        }
-    }
-}
+use super::*;
 
 /// The single cloneable desktop cache service shared by agent and Settings.
 #[derive(Clone)]
@@ -814,269 +592,6 @@ impl CacheRegistry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CommittedRelocation {
-    report: cutlass_storage::RelocationReport,
-    cleanup_warning: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CacheRelocationFailure(String);
-
-impl CacheRelocationFailure {
-    fn from_message(message: impl Into<String>) -> Self {
-        Self(bounded_message(&message.into()))
-    }
-
-    fn with_detail(prefix: &str, detail: &str) -> Self {
-        Self(bounded_message(&format!("{prefix}: {detail}")))
-    }
-}
-
-impl fmt::Display for CacheRelocationFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl Error for CacheRelocationFailure {}
-
-fn ensure_cache_can_be_relocated(id: CacheId) -> Result<(), String> {
-    if !cache_descriptors()
-        .iter()
-        .any(|descriptor| descriptor.id == id)
-    {
-        return Err("unknown cache cannot be relocated".into());
-    }
-    let descriptor = id.descriptor();
-    if descriptor.kind == CacheKind::Memory {
-        return Err("memory cache cannot be relocated".into());
-    }
-    if descriptor.tier == CacheTier::UserData {
-        return Err("user data cannot be relocated through the cache registry".into());
-    }
-    if !matches!(
-        id,
-        CacheId::Proxies
-            | CacheId::Analysis
-            | CacheId::AiModels
-            | CacheId::Download
-            | CacheId::Catalog
-            | CacheId::Luts
-            | CacheId::Lottie
-            | CacheId::Templates
-    ) {
-        return Err("cache target is not relocatable".into());
-    }
-    Ok(())
-}
-
-fn validate_relocation_paths(old_path: &Path, new_path: &Path) -> Result<(), String> {
-    if old_path == new_path || old_path.starts_with(new_path) || new_path.starts_with(old_path) {
-        return Err("cache relocation source and destination must not overlap".into());
-    }
-    Ok(())
-}
-
-fn validate_relocation_destination(destination: &Path) -> Result<(), String> {
-    match std::fs::symlink_metadata(destination) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            Err("cache relocation destination cannot be a symbolic link".into())
-        }
-        Ok(_) => Err("cache relocation destination already exists".into()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err("cache relocation destination could not be inspected".into()),
-    }
-}
-
-fn set_storage_path_override(
-    settings: &mut cutlass_settings::Settings,
-    id: CacheId,
-    path: PathBuf,
-) -> Result<(), String> {
-    ensure_cache_can_be_relocated(id)?;
-    let field = match id {
-        CacheId::Proxies => &mut settings.storage.paths.proxies,
-        CacheId::Analysis => &mut settings.storage.paths.analysis,
-        CacheId::AiModels => &mut settings.storage.paths.ai_models,
-        CacheId::Download => &mut settings.storage.paths.download,
-        CacheId::Catalog => &mut settings.storage.paths.catalog,
-        CacheId::Luts => &mut settings.storage.paths.luts,
-        CacheId::Lottie => &mut settings.storage.paths.lottie,
-        CacheId::Templates => &mut settings.storage.paths.templates,
-        _ => return Err("cache target has no storage settings field".into()),
-    };
-    *field = Some(path);
-    Ok(())
-}
-
-fn persist_relocation_settings(
-    config_path: &Path,
-    settings: &cutlass_settings::Settings,
-) -> Result<(), String> {
-    cutlass_settings::save(config_path, settings)
-        .map_err(|_| "storage settings could not be saved".to_string())
-}
-
-fn validate_relocation_references(
-    id: CacheId,
-    saved: &DraftReferenceReport,
-    live: &CacheReferenceReport,
-) -> Result<(), CacheRelocationFailure> {
-    let has_persisted_project_references = match id {
-        CacheId::Proxies | CacheId::Analysis | CacheId::AiModels | CacheId::Catalog => false,
-        CacheId::Download | CacheId::Luts | CacheId::Lottie | CacheId::Templates => true,
-        CacheId::PreviewFrames
-        | CacheId::LibraryThumbnails
-        | CacheId::TimelineFilmstrips
-        | CacheId::TimelineWaveforms => {
-            return Err(CacheRelocationFailure::from_message(
-                "memory cache has no relocation reference policy",
-            ));
-        }
-    };
-    if !saved.is_complete() {
-        return Err(CacheRelocationFailure::from_message(
-            "saved project reference inventory is incomplete; cache relocation was refused",
-        ));
-    }
-    if !live.is_complete() {
-        return Err(CacheRelocationFailure::from_message(
-            "current project reference inventory is incomplete; cache relocation was refused",
-        ));
-    }
-    if !has_persisted_project_references {
-        return Ok(());
-    }
-
-    let saved_references = saved.references.by_cache.get(&id).ok_or_else(|| {
-        CacheRelocationFailure::from_message(
-            "saved project reference inventory omitted the target cache",
-        )
-    })?;
-    let live_references = live.by_cache.get(&id).ok_or_else(|| {
-        CacheRelocationFailure::from_message(
-            "current project reference inventory omitted the target cache",
-        )
-    })?;
-    if !saved_references.is_empty() || !live_references.is_empty() {
-        return Err(CacheRelocationFailure::from_message(
-            "project files reference this cache; cache relocation was refused",
-        ));
-    }
-    Ok(())
-}
-
-fn relocate_disk_root<F>(
-    old_path: &Path,
-    new_path: &Path,
-    cancel: &AtomicBool,
-    persist: F,
-) -> Result<CommittedRelocation, CacheRelocationFailure>
-where
-    F: FnOnce(&Path) -> Result<(), String>,
-{
-    ensure_not_cancelled(cancel, "cancelled before creating the cache source")
-        .map_err(CacheRelocationFailure::from_message)?;
-    ensure_relocation_source_exists(old_path)?;
-    let cancellation = || cancel.load(Ordering::Acquire);
-    classify_relocation_result(relocate_cache(old_path, new_path, &cancellation, persist)).map_err(
-        |error| {
-            CacheRelocationFailure::with_detail(
-                "cache filesystem relocation failed",
-                &error.to_string(),
-            )
-        },
-    )
-}
-
-fn relocate_download_root<F>(
-    cache: &DownloadCache,
-    expected_old_path: &Path,
-    new_path: &Path,
-    cancel: &AtomicBool,
-    persist: F,
-) -> Result<CommittedRelocation, CacheRelocationFailure>
-where
-    F: FnOnce(&Path) -> Result<(), String>,
-{
-    let mut committed = None;
-    cache
-        .switch_root(new_path, |old_path, destination| {
-            if old_path != expected_old_path || destination != new_path {
-                return Err(CacheRelocationFailure::from_message(
-                    "download cache root changed before relocation",
-                ));
-            }
-            committed = Some(relocate_disk_root(old_path, destination, cancel, persist)?);
-            Ok(())
-        })
-        .map_err(|error| {
-            CacheRelocationFailure::with_detail(
-                "download cache root could not be switched",
-                &error.to_string(),
-            )
-        })?;
-    committed.ok_or_else(|| {
-        CacheRelocationFailure::from_message(
-            "download cache root switched without relocation accounting",
-        )
-    })
-}
-
-fn ensure_relocation_source_exists(path: &Path) -> Result<(), CacheRelocationFailure> {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => std::fs::create_dir_all(path)
-            .map_err(|error| {
-                CacheRelocationFailure::with_detail(
-                    "missing cache source could not be created",
-                    &error.to_string(),
-                )
-            }),
-        Err(error) => Err(CacheRelocationFailure::with_detail(
-            "cache source could not be inspected",
-            &error.to_string(),
-        )),
-    }
-}
-
-fn classify_relocation_result(
-    result: Result<cutlass_storage::RelocationReport, StorageError>,
-) -> Result<CommittedRelocation, StorageError> {
-    match result {
-        Ok(report) => Ok(CommittedRelocation {
-            report,
-            cleanup_warning: None,
-        }),
-        Err(error) => {
-            let Some(report) = error.committed_relocation() else {
-                return Err(error);
-            };
-            Ok(CommittedRelocation {
-                report,
-                cleanup_warning: Some(bounded_message(&format!(
-                    "cache relocation committed, but old-copy cleanup did not finish: {error}"
-                ))),
-            })
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct CacheUsage {
-    bytes: u64,
-    entries: u64,
-    files: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct UiCacheUsage {
-    thumbnails: CacheUsage,
-    filmstrips: CacheUsage,
-    waveforms: CacheUsage,
-}
-
 fn memory_snapshot(descriptor: &CacheDescriptor, usage: CacheUsage) -> CacheSnapshot {
     CacheSnapshot {
         id: descriptor.id,
@@ -1090,7 +605,7 @@ fn memory_snapshot(descriptor: &CacheDescriptor, usage: CacheUsage) -> CacheSnap
     }
 }
 
-fn snapshot_disk_caches(
+pub(super) fn snapshot_disk_caches(
     layout: &StorageLayout,
     cancel: &AtomicBool,
 ) -> Result<Vec<CacheSnapshot>, String> {
@@ -1101,7 +616,7 @@ fn snapshot_disk_caches(
         .collect()
 }
 
-fn snapshot_disk_cache(
+pub(super) fn snapshot_disk_cache(
     layout: &StorageLayout,
     id: CacheId,
     cancel: &AtomicBool,
@@ -1124,7 +639,7 @@ fn snapshot_disk_cache(
     })
 }
 
-fn clear_disk_contents(
+pub(super) fn clear_disk_contents(
     layout: &StorageLayout,
     id: CacheId,
     cancel: &AtomicBool,
@@ -1147,7 +662,7 @@ fn clear_disk_contents(
     })
 }
 
-fn ensure_cache_can_be_cleared(id: CacheId) -> Result<(), String> {
+pub(super) fn ensure_cache_can_be_cleared(id: CacheId) -> Result<(), String> {
     if id.descriptor().tier == CacheTier::UserData {
         return Err("user data cannot be cleared through the cache registry".into());
     }
@@ -1178,7 +693,7 @@ fn cache_requires_reference_migration(id: CacheId) -> bool {
     }
 }
 
-fn clear_download_cache_from_inventories(
+pub(super) fn clear_download_cache_from_inventories(
     cache: &DownloadCache,
     saved: &DraftReferenceReport,
     live: &CacheReferenceReport,
@@ -1199,7 +714,7 @@ fn clear_download_cache_from_inventories(
     })
 }
 
-fn prepare_download_cache_clear(
+pub(super) fn prepare_download_cache_clear(
     cache: &DownloadCache,
     saved: &DraftReferenceReport,
     live: &CacheReferenceReport,
@@ -1271,7 +786,10 @@ fn validate_layout(layout: &StorageLayout) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_download_root(layout: &StorageLayout, download_root: &Path) -> Result<(), String> {
+pub(super) fn validate_download_root(
+    layout: &StorageLayout,
+    download_root: &Path,
+) -> Result<(), String> {
     let resolved = disk_path(layout, CacheId::Download)?;
     if resolved != download_root {
         return Err("download cache root does not match the active storage layout".into());
@@ -1289,7 +807,7 @@ fn ensure_memory_has_no_path(layout: &StorageLayout, id: CacheId) -> Result<(), 
     Ok(())
 }
 
-fn disk_path(layout: &StorageLayout, id: CacheId) -> Result<PathBuf, String> {
+pub(super) fn disk_path(layout: &StorageLayout, id: CacheId) -> Result<PathBuf, String> {
     if id.descriptor().kind != CacheKind::Disk {
         return Err("memory cache has no disk path".into());
     }
@@ -1329,212 +847,3 @@ fn strip_usage(stats: crate::strips::StripImageCacheStats) -> Result<CacheUsage,
 fn exact_count(count: usize) -> Result<u64, String> {
     u64::try_from(count).map_err(|_| "cache entry count exceeds the reporting range".into())
 }
-
-fn try_with_operation_gate<T>(
-    gate: &Mutex<()>,
-    operation: impl FnOnce() -> T,
-) -> Result<T, String> {
-    let _guard = gate.try_lock().map_err(|error| match error {
-        TryLockError::WouldBlock => {
-            "a cache operation is in progress; settings were not saved".to_string()
-        }
-        TryLockError::Poisoned(_) => {
-            "cache operation coordination is unavailable; settings were not saved".to_string()
-        }
-    })?;
-    Ok(operation())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn with_coordinated_disk_cache_root<T, E>(
-    layout: &SharedStorageLayout,
-    gate: &Mutex<()>,
-    id: CacheId,
-    cancelled: &dyn Fn() -> bool,
-    timeout: Duration,
-    wait_slice: Duration,
-    operation: impl FnOnce(&Path) -> Result<T, E>,
-) -> Result<T, CoordinatedCacheError<E>> {
-    check_coordinated_cancelled(cancelled).map_err(CoordinatedCacheError::Coordination)?;
-    if id.descriptor().kind != CacheKind::Disk {
-        return Err(CoordinatedCacheError::Coordination(
-            CacheCoordinationError::MemoryCache,
-        ));
-    }
-
-    let _operation = acquire_operation_gate_with_cancel(gate, cancelled, timeout, wait_slice)
-        .map_err(CoordinatedCacheError::Coordination)?;
-    let layout = layout.lease();
-    check_coordinated_cancelled(cancelled).map_err(CoordinatedCacheError::Coordination)?;
-    layout.layout().validate_filesystem().map_err(|source| {
-        CoordinatedCacheError::Coordination(CacheCoordinationError::InvalidLayout { source })
-    })?;
-    check_coordinated_cancelled(cancelled).map_err(CoordinatedCacheError::Coordination)?;
-
-    let root = layout.resolve(id).filter(|path| path.is_absolute()).ok_or(
-        CoordinatedCacheError::Coordination(CacheCoordinationError::DiskPathUnavailable),
-    )?;
-    check_coordinated_cancelled(cancelled).map_err(CoordinatedCacheError::Coordination)?;
-    operation(&root).map_err(CoordinatedCacheError::Callback)
-}
-
-fn check_coordinated_cancelled(cancelled: &dyn Fn() -> bool) -> Result<(), CacheCoordinationError> {
-    let requested = catch_unwind(AssertUnwindSafe(cancelled)).unwrap_or(true);
-    if requested {
-        Err(CacheCoordinationError::Cancelled)
-    } else {
-        Ok(())
-    }
-}
-
-fn acquire_operation_gate_with_cancel<'a>(
-    gate: &'a Mutex<()>,
-    cancelled: &dyn Fn() -> bool,
-    timeout: Duration,
-    wait_slice: Duration,
-) -> Result<MutexGuard<'a, ()>, CacheCoordinationError> {
-    let started = Instant::now();
-    loop {
-        check_coordinated_cancelled(cancelled)?;
-        match gate.try_lock() {
-            Ok(guard) => {
-                check_coordinated_cancelled(cancelled)?;
-                return Ok(guard);
-            }
-            Err(TryLockError::Poisoned(_)) => {
-                return Err(CacheCoordinationError::GateUnavailable);
-            }
-            Err(TryLockError::WouldBlock) => {}
-        }
-        let remaining = timeout.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            return Err(CacheCoordinationError::TimedOut);
-        }
-        std::thread::sleep(wait_slice.min(remaining));
-    }
-}
-
-fn acquire_operation_gate<'a>(
-    gate: &'a Mutex<()>,
-    cancel: &AtomicBool,
-    timeout: Duration,
-    wait_slice: Duration,
-) -> Result<MutexGuard<'a, ()>, String> {
-    let started = Instant::now();
-    loop {
-        ensure_not_cancelled(
-            cancel,
-            "cancelled while waiting for another cache operation",
-        )?;
-        match gate.try_lock() {
-            Ok(guard) => return Ok(guard),
-            Err(TryLockError::Poisoned(_)) => {
-                return Err("cache operation gate is unavailable".into());
-            }
-            Err(TryLockError::WouldBlock) => {}
-        }
-        let remaining = timeout.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            return Err("another cache operation did not finish in time".into());
-        }
-        std::thread::sleep(wait_slice.min(remaining));
-    }
-}
-
-fn wait_for_ui_response<T>(
-    receiver: &Receiver<Result<T, String>>,
-    cancel: &AtomicBool,
-    state: &AtomicU8,
-    timeout: Duration,
-    wait_slice: Duration,
-) -> Result<T, String> {
-    let started = Instant::now();
-    loop {
-        if cancel.load(Ordering::Acquire)
-            && state
-                .compare_exchange(
-                    UI_OPERATION_PENDING,
-                    UI_OPERATION_ABANDONED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-        {
-            return Err("cancelled while waiting for cache statistics".into());
-        }
-        let remaining = timeout.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            let abandoned_while_queued = state
-                .compare_exchange(
-                    UI_OPERATION_PENDING,
-                    UI_OPERATION_ABANDONED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok();
-            return Err(if abandoned_while_queued {
-                "the Cutlass UI did not respond to the cache operation in time".into()
-            } else {
-                "the cache UI operation started but did not finish in time".into()
-            });
-        }
-        match receiver.recv_timeout(wait_slice.min(remaining)) {
-            // Once the UI has completed an operation, return its result even
-            // if cancellation raced with delivery. In particular, a clear is
-            // a commit point and must not be reported as though it never ran.
-            Ok(response) => return response,
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => {
-                let _ = state.compare_exchange(
-                    UI_OPERATION_PENDING,
-                    UI_OPERATION_ABANDONED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                );
-                return Err("the cache UI response channel closed".into());
-            }
-        }
-    }
-}
-
-fn ensure_not_cancelled(cancel: &AtomicBool, message: &'static str) -> Result<(), String> {
-    if cancel.load(Ordering::Acquire) {
-        Err(message.into())
-    } else {
-        Ok(())
-    }
-}
-
-fn bounded_error(prefix: &str, error: &str) -> String {
-    let mut bounded: String = error.chars().take(MAX_ERROR_CHARS).collect();
-    if error.chars().count() > MAX_ERROR_CHARS {
-        bounded.push('…');
-    }
-    format!("{prefix}: {bounded}")
-}
-
-fn bounded_message(message: &str) -> String {
-    let mut bounded: String = message.chars().take(MAX_ERROR_CHARS).collect();
-    if message.chars().count() > MAX_ERROR_CHARS {
-        bounded.push('…');
-    }
-    bounded
-}
-
-const fn cache_kind_key(kind: CacheKind) -> &'static str {
-    match kind {
-        CacheKind::Memory => "memory",
-        CacheKind::Disk => "disk",
-    }
-}
-
-const fn cache_tier_key(tier: CacheTier) -> &'static str {
-    match tier {
-        CacheTier::Disposable => "disposable",
-        CacheTier::Redownloadable => "redownloadable",
-        CacheTier::UserData => "user_data",
-    }
-}
-
-#[cfg(test)]
-mod tests;

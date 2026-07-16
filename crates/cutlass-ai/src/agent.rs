@@ -124,10 +124,10 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_tool_calls: 32,
-            max_host_calls: 24,
-            max_turns: 16,
-            max_images: 8,
+            max_tool_calls: 1000,
+            max_host_calls: 1000,
+            max_turns: 1000,
+            max_images: 100,
             max_image_bytes: 24 * 1024 * 1024,
             dry_run: false,
         }

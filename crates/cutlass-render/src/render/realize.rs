@@ -459,9 +459,7 @@ impl Renderer {
         for r in &realized {
             match r {
                 Realized::Transition {
-                    outgoing,
-                    incoming,
-                    ..
+                    outgoing, incoming, ..
                 } => {
                     for side in [&**outgoing, &**incoming] {
                         if let Some(effects) = side.effects().filter(|e| !e.is_empty()) {

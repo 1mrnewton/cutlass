@@ -456,6 +456,10 @@ mod tests {
                     text: "Cut at the frame shown.".to_owned(),
                 },
                 TranscriptEntry {
+                    kind: "reasoning".to_owned(),
+                    text: "The requested frame is a safe split point.".to_owned(),
+                },
+                TranscriptEntry {
                     kind: "assistant".to_owned(),
                     text: "Done.".to_owned(),
                 },
@@ -467,6 +471,7 @@ mod tests {
             fs::read_to_string(path_for_project(&project).expect("session path")).expect("read");
         assert!(!raw.contains("image/png"));
         assert!(!raw.contains("image/jpeg"));
+        assert!(raw.contains("\"kind\": \"reasoning\""));
 
         let loaded = load(&project).expect("load");
         assert_eq!(

@@ -318,16 +318,26 @@ fn transcript_image_label(label: &str) -> String {
 
 fn append_assistant_text(store: &slint::Weak<AgentStore<'static>>, delta: String) {
     with_transcript(store, move |model| {
-        let last = model.row_count().wrapping_sub(1);
-        match model.row_data(last) {
-            Some(e) if e.kind == "assistant" => {
-                let mut e = e;
-                e.text = format!("{}{}", e.text, delta).into();
-                model.set_row_data(last, e);
-            }
-            _ => model.push(entry("assistant", delta)),
-        }
+        append_transcript_text(&model, "assistant", delta);
     });
+}
+
+fn append_reasoning_text(store: &slint::Weak<AgentStore<'static>>, delta: String) {
+    with_transcript(store, move |model| {
+        append_transcript_text(&model, "reasoning", delta);
+    });
+}
+
+fn append_transcript_text(model: &VecModel<AgentEntry>, kind: &str, delta: String) {
+    let last = model.row_count().wrapping_sub(1);
+    match model.row_data(last) {
+        Some(row) if row.kind == kind => {
+            let mut row = row;
+            row.text = format!("{}{}", row.text, delta).into();
+            model.set_row_data(last, row);
+        }
+        _ => model.push(entry(kind, delta)),
+    }
 }
 
 fn with_store(
@@ -1345,8 +1355,7 @@ fn run_one_prompt(
     let event_store = store.clone();
     let mut on_event = move |event: AgentEvent| match event {
         AgentEvent::TextDelta(delta) => append_assistant_text(&event_store, delta),
-        // Provider summaries use their own transcript row in the UI layer.
-        AgentEvent::ReasoningDelta(_) => {}
+        AgentEvent::ReasoningDelta(delta) => append_reasoning_text(&event_store, delta),
         AgentEvent::Action(action) => push_entry(&event_store, "action", action.description),
         AgentEvent::HostAction { name, summary } => {
             push_entry(&event_store, "action", format!("{name}: {summary}"))
@@ -1539,6 +1548,22 @@ mod tests {
             job_manager,
             worker: None,
         }
+    }
+
+    #[test]
+    fn transcript_text_coalesces_only_adjacent_rows_of_the_same_kind() {
+        let model = VecModel::<AgentEntry>::default();
+        append_transcript_text(&model, "reasoning", "Inspecting ".into());
+        append_transcript_text(&model, "reasoning", "the timeline.".into());
+        append_transcript_text(&model, "assistant", "Done.".into());
+        append_transcript_text(&model, "reasoning", "Verifying.".into());
+
+        assert_eq!(model.row_count(), 3);
+        assert_eq!(model.row_data(0).unwrap().kind, "reasoning");
+        assert_eq!(model.row_data(0).unwrap().text, "Inspecting the timeline.");
+        assert_eq!(model.row_data(1).unwrap().kind, "assistant");
+        assert_eq!(model.row_data(2).unwrap().kind, "reasoning");
+        assert_eq!(model.row_data(2).unwrap().text, "Verifying.");
     }
 
     #[test]

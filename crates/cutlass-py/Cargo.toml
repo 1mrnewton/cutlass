@@ -1,6 +1,6 @@
 [package]
 name = "cutlass-py"
-version = "0.5.3-alpha.0"
+version = "0.5.3-alpha.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"

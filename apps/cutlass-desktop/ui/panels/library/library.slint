@@ -233,11 +233,39 @@ component ImportToolbar inherits HorizontalLayout {
     padding: AppStore.theme.metrics.spacing.sm;
     alignment: start;
 
-    SubtleButton {
-        label: "+  Import";
-        clicked => {
-            EditorStore.on-import-clicked();
-            AppState.refocus-shortcuts();
+    import-btn := Rectangle {
+        width: import-row.preferred-width + 2 * AppStore.theme.metrics.spacing.lg;
+        height: 26px;
+        border-radius: AppStore.theme.metrics.radius.sm;
+        background: import-ta.has-hover ? #ffffff14 : transparent;
+        border-width: 1px;
+        border-color: #ffffff22;
+
+        import-row := HorizontalLayout {
+            padding-left: AppStore.theme.metrics.spacing.md;
+            padding-right: AppStore.theme.metrics.spacing.md;
+            spacing: AppStore.theme.metrics.spacing.xs;
+            alignment: center;
+
+            Image {
+                width: 14px;
+                height: 14px;
+                source: @image-url("../../../../../assets/icon/library/folder-plus.svg");
+                image-fit: contain;
+                colorize: AppStore.theme.text.primary;
+            }
+
+            CutlassText {
+                text: "Import";
+                style: AppStore.theme.typography.label;
+            }
+        }
+
+        import-ta := TouchArea {
+            clicked => {
+                EditorStore.on-import-clicked();
+                AppState.refocus-shortcuts();
+            }
         }
     }
 }

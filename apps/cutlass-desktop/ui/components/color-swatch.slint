@@ -39,15 +39,14 @@ export component CutlassColorSwatch inherits Rectangle {
         border-color: #ffffff1f;
     }
 
-    CutlassText {
+    Image {
         x: parent.width - 22px;
-        width: 18px;
-        height: parent.height;
-        text: "v";
-        style: AppStore.theme.typography.caption;
-        foreground: AppStore.theme.text.muted;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+        width: 12px;
+        height: 12px;
+        y: (parent.height - self.height) / 2;
+        source: @image-url("../../../../assets/icon/ui/chevron-down.svg");
+        image-fit: contain;
+        colorize: AppStore.theme.text.muted;
     }
 
     trigger := TouchArea {

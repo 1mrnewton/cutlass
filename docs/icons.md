@@ -38,11 +38,12 @@ behind. The same loop is codified for the agent in
 
 All UI icons live under the **single** tracked root
 `assets/icon/` (transport in `icon/`, library glyphs in
-`icon/library/`). Reference them from Slint with `@image-url` paths
-relative to each `.slint` file (see `app.slint` and panel files).
-Media scratch files for local dev and tests live in gitignored
-`local-assets/assets/` (`frames/`, `proxy/` stay ignored too). The dock
-icon is also loaded from `assets/icon/` via `include_bytes!` in
+`icon/library/`, and Lucide/Tabler fetches under `shell/`, `launch/`,
+`timeline/`, `text/`, `inspector/`, `ui/`). Reference them from Slint with
+`@image-url` paths relative to each `.slint` file (see `app.slint` and
+panel files). Media scratch files for local dev and tests live in
+gitignored `local-assets/assets/` (`frames/`, `proxy/` stay ignored too).
+The dock icon is also loaded from `assets/icon/` via `include_bytes!` in
 `src/main.rs`.
 
 Loaded via `@image-url(...)` relative to the `.slint` file, then tinted with
@@ -59,7 +60,7 @@ lacks cleanly (`letter-spacing`, `line-height`): **[Tabler](https://tabler.io/ic
 `play`, `pause`, `fullscreen` (preview transport) · library tabs/sections
 `media`, `audio`, `text`, `stickers`, `effects`, `transitions`, `stock`,
 `ai`, `sfx`, `filters`, `adjustment` · logo `cutlass.png` /
-`cutlass-in-app.png`.
+`cutlass-in-app.png` · chat `send` / `circle-stop`.
 
 ---
 
@@ -67,93 +68,89 @@ lacks cleanly (`letter-spacing`, `line-height`): **[Tabler](https://tabler.io/ic
 
 ### Window controls — `shell/title-bar.slint`
 
-- [ ] `minus` — placeholder `"─"` — `shell/title-bar.slint` — minimize.
-- [ ] `square` — placeholder `"□"` — `shell/title-bar.slint` — maximize.
-- [ ] `copy` — placeholder `"❐"` — `shell/title-bar.slint` — restore (when maximized).
-- [ ] `x` — placeholder `"✕"` — `shell/title-bar.slint` — close.
-- [ ] `sparkles` — placeholder `"Assistant"` — `shell/title-bar.slint` — AI assistant dock toggle.
-- [ ] `upload` — placeholder `"Export"` — `shell/title-bar.slint` — export action (AccentButton).
-- [ ] (logo) — placeholder `"C"` — `shell/title-bar.slint` — brand mark; use the existing logo, not a letter.
+- [x] `minus` — `assets/icon/shell/minus.svg` — minimize.
+- [x] `square` — `assets/icon/shell/square.svg` — maximize.
+- [x] `copy` — `assets/icon/shell/copy.svg` — restore (when maximized).
+- [x] `x` — `assets/icon/shell/x.svg` — close.
+- [x] `sparkles` — `assets/icon/shell/sparkles.svg` — AI assistant dock toggle.
+- [x] `settings` — `assets/icon/shell/settings.svg` — settings gear.
+- [ ] `upload` — placeholder `"Export"` — `shell/title-bar.slint` — export action stays worded (`AccentButton`).
+- [x] (logo) — `assets/icon/cutlass-in-app.png` — brand mark.
 
 ### Start screen — `launch.slint`
 
-- [ ] `plus` — placeholder `"+"` — `launch.slint` — New project tile mark.
-- [ ] `folder-open` — placeholder (drawn folder silhouette) — `launch.slint` — Open project tile mark.
-- [ ] `clapperboard` / `film` — placeholder `"▶"` — `launch.slint` — recent-project thumb chip.
-- [ ] window controls — placeholders `"─" "□" "❐" "✕"` — `launch.slint` — frameless min/max/restore/close (mirrors `shell/title-bar.slint`).
+- [x] `plus` — `assets/icon/launch/plus.svg` — New project tile mark.
+- [x] `folder-open` — `assets/icon/launch/folder-open.svg` — Open project tile mark.
+- [x] `clapperboard` — `assets/icon/launch/clapperboard.svg` — recent-project thumb chip.
+- [x] window controls — reuse `assets/icon/shell/{minus,square,copy,x}.svg`.
 
 ### Timeline toolbar — `panels/timeline/toolbar.slint`
 
-- [ ] `undo-2` — placeholder `"Undo"` — `panels/timeline/toolbar.slint`.
-- [ ] `redo-2` — placeholder `"Redo"` — `panels/timeline/toolbar.slint`.
-- [ ] `scissors` — placeholder `"Split"` — `panels/timeline/toolbar.slint` — split at playhead.
-- [ ] `flag` — placeholder `"Marker"` — `panels/timeline/toolbar.slint` — add marker.
-- [ ] `trash-2` — placeholder `"Delete"` — `panels/timeline/toolbar.slint`.
-- [ ] `audio-lines` — placeholder `"Extract"` — `panels/timeline/toolbar.slint` — extract audio from video clip.
-- [ ] `repeat` — placeholder `"Loop"` — `panels/timeline/toolbar.slint`.
-- [ ] `magnet` — placeholder `"Magnet"` — `panels/timeline/toolbar.slint` — main-track gapless magnet.
-- [ ] `magnet` (variant — must read different from Magnet) — placeholder `"Snap"` — `panels/timeline/toolbar.slint` — auto-snap toggle.
-- [ ] `link` — placeholder `"Link"` — `panels/timeline/toolbar.slint`.
-- [ ] `unlink` — placeholder `"Unlink"` — `panels/timeline/toolbar.slint`.
-- [ ] `scan` — placeholder `"Fit"` — `panels/timeline/toolbar.slint` — zoom to fit.
-- [ ] `zoom-out` — placeholder `"−"` — `panels/timeline/toolbar.slint`.
-- [ ] `zoom-in` — placeholder `"+"` — `panels/timeline/toolbar.slint`.
+- [x] `undo-2` — `assets/icon/timeline/undo-2.svg`.
+- [x] `redo-2` — `assets/icon/timeline/redo-2.svg`.
+- [x] `scissors` — `assets/icon/timeline/scissors.svg` — split at playhead.
+- [x] `flag` — `assets/icon/timeline/flag.svg` — add marker.
+- [x] `trash-2` — `assets/icon/timeline/trash-2.svg`.
+- [x] `audio-lines` — `assets/icon/timeline/audio-lines.svg` — extract audio.
+- [x] `repeat` — `assets/icon/timeline/repeat.svg` — loop.
+- [x] `magnet` — `assets/icon/timeline/magnet.svg` — main-track gapless magnet.
+- [x] `grid-3x3` — `assets/icon/timeline/grid-3x3.svg` — auto-snap (distinct from Magnet).
+- [x] `link` — `assets/icon/timeline/link.svg`.
+- [x] `unlink` — `assets/icon/timeline/unlink.svg`.
+- [x] `scan` — `assets/icon/timeline/scan.svg` — zoom to fit.
+- [x] `zoom-out` — `assets/icon/timeline/zoom-out.svg`.
+- [x] `zoom-in` — `assets/icon/timeline/zoom-in.svg`.
 
 ### Track headers — `panels/timeline/track-head.slint`
 
-- [ ] `eye` / `eye-off` — placeholder `"V"` — `panels/timeline/track-head.slint` — visibility (visual lanes).
-- [ ] `volume-2` / `volume-x` — placeholder `"M"` — `panels/timeline/track-head.slint` — mute (audio lanes).
-- [ ] `mic` — placeholder `"V"` — `panels/timeline/track-head.slint` — voice / duck source tag (audio lanes).
-- [ ] `lock` / `lock-open` — placeholder `"L"` — `panels/timeline/track-head.slint` — lock lane.
+- [x] `eye` / `eye-off` — `assets/icon/timeline/eye.svg` · `eye-off.svg`.
+- [x] `volume-2` / `volume-x` — `assets/icon/timeline/volume-2.svg` · `volume-x.svg`.
+- [x] `mic` — `assets/icon/timeline/mic.svg` — voice / duck source.
+- [x] `lock` / `lock-open` — `assets/icon/timeline/lock.svg` · `lock-open.svg`.
 
 ### Text inspector — `panels/inspector/text-inspector.slint`
 
-- [ ] `bold` — placeholder `"B"` — text bold.
-- [ ] `underline` — placeholder `"U"` — text underline.
-- [ ] `italic` — placeholder `"I"` — text italic.
-- [ ] `case-upper` — placeholder `"TT"` — uppercase.
-- [ ] `case-lower` — placeholder `"tt"` — lowercase.
-- [ ] `case-sensitive` — placeholder `"Tt"` — title case.
-- [ ] `align-left` — placeholder `"|<"` — horizontal align left.
-- [ ] `align-center` — placeholder `"-"` — horizontal align center.
-- [ ] `align-right` — placeholder `">|"` — horizontal align right.
-- [ ] `vertical-align-top` — placeholder `"T"` — vertical align top.
-- [ ] `vertical-align-middle` — placeholder `"M"` — vertical align middle.
-- [ ] `vertical-align-bottom` — placeholder `"B"` — vertical align bottom.
-- [ ] `wrap-text` — placeholder `"On"/"Off"` — wrap toggle.
-- [ ] `letter-spacing` (Tabler) — placeholder `"C"` — letter spacing prefix.
-- [ ] `line-height` (Tabler) — placeholder `"L"` — line spacing prefix.
+- [x] `bold` — `assets/icon/text/bold.svg`.
+- [x] `underline` — `assets/icon/text/underline.svg`.
+- [x] `italic` — `assets/icon/text/italic.svg`.
+- [x] `case-upper` — `assets/icon/text/case-upper.svg`.
+- [x] `case-lower` — `assets/icon/text/case-lower.svg`.
+- [x] `case-sensitive` — `assets/icon/text/case-sensitive.svg`.
+- [x] `align-left` / `align-center` / `align-right` — `assets/icon/text/`.
+- [x] `align-start-vertical` / `align-center-vertical` / `align-end-vertical` — `assets/icon/text/`.
+- [x] `wrap-text` — `assets/icon/text/wrap-text.svg`.
+- [x] `letter-spacing` (Tabler) — `assets/icon/text/letter-spacing.svg`.
+- [x] `line-height` (Tabler) — `assets/icon/text/line-height.svg`.
 - [ ] keyframe in/out icons — placeholder `"|<" "+" ">|" "T" "B"` — disabled animation row (lower priority).
 
 ### Inspector (general)
 
-- [ ] `chevron-up` / `chevron-down` — placeholder `"^"` — section collapse caret (`inspector/inspector-widgets.slint`, `inspector/transform-inspector.slint`).
-- [ ] `spline` — placeholder `"~"` — keyframe easing trigger (`inspector/keyframe-control.slint`).
-- [ ] `scan` + `expand` — placeholder `"Fit"` / `"Fill"` — transform fit/fill (`inspector/transform-inspector.slint`).
-- [ ] `trash-2` — placeholder `"Remove"` — remove effect (`inspector/effects-inspector.slint`).
-- [ ] `flip-horizontal` — placeholder `"Flip H"` — crop mirror (`inspector/crop-inspector.slint`).
-- [ ] `flip-vertical` — placeholder `"Flip V"` — crop mirror (`inspector/crop-inspector.slint`).
+- [ ] `chevron-up` / `chevron-down` — placeholder `"^"` — section collapse caret (`inspector/inspector-widgets.slint`, `inspector/transform-inspector.slint`) — assets ready at `assets/icon/inspector/`.
+- [x] `spline` — `assets/icon/inspector/spline.svg` — keyframe easing.
+- [ ] `scan` + `expand` — placeholder `"Fit"` / `"Fill"` — transform fit/fill stays worded (`SubtleButton`); assets ready at `assets/icon/inspector/`.
+- [ ] `trash-2` — placeholder `"Remove"` — remove effect stays worded; asset ready at `assets/icon/inspector/trash-2.svg`.
+- [x] `flip-horizontal` / `flip-vertical` — `assets/icon/inspector/`.
 
 ### Dropdowns & pickers
 
-- [ ] `chevron-down` — placeholder `"v"` — dropdown chevron (`components/dropdown.slint`).
-- [ ] `chevron-down` — placeholder `"v"` — color-swatch chevron (`components/color-swatch.slint`).
+- [x] `chevron-down` — `assets/icon/ui/chevron-down.svg` — dropdown / color-swatch / look / animation pickers.
 
 ### Library & tiles
 
-- [ ] `plus` / `folder-plus` — placeholder `"+  Import"` — import button (`panels/library/library.slint`).
-- [ ] `wand-2` / `sparkles` — placeholder `"fx"` — effect/transition tile glyph (`panels/library/tiles.slint`).
-- [ ] `image` — placeholder `"IMG"` — still-image badge (`panels/library/tiles.slint`).
-- [ ] `alert-triangle` / `unlink` — placeholder `"Missing"` — missing-media badge (`panels/library/tiles.slint`).
+- [x] `folder-plus` — `assets/icon/library/folder-plus.svg` — import button.
+- [x] `wand-sparkles` — `assets/icon/library/wand-sparkles.svg` — effect/transition tile glyph.
+- [x] `image` — `assets/icon/library/image.svg` — still-image badge.
+- [x] `triangle-alert` — `assets/icon/library/triangle-alert.svg` — missing-media badge.
 
 ### Misc
 
-- [ ] `x` — placeholder `"×"` — transition remove (`panels/timeline/transition-pill.slint`).
-- [ ] `check` — placeholder `"✓"` — agent dry-run checkbox (`panels/agent/agent.slint`).
-- [x] `send` — `assets/icon/chat/send.svg` — agent submit (`panels/agent/agent.slint`).
-- [x] `circle-stop` — `assets/icon/chat/stop.svg` — agent cancel (`panels/agent/agent.slint`).
+- [x] `x` — `assets/icon/ui/x.svg` — transition remove.
+- [x] `check` — `assets/icon/ui/check.svg` — agent dry-run checkbox.
+- [x] `send` — `assets/icon/chat/send.svg` — agent submit.
+- [x] `circle-stop` — `assets/icon/chat/stop.svg` — agent cancel.
 
 ### Fine as text (no icon needed)
 
 Timecode `/` separators, the zoom `%` readout, and word buttons in dialogs
 (Browse… / Cancel / Export / Done / OK / Locate… / New project / etc.).
+Preview / track-height cycle labels on the timeline toolbar stay worded.

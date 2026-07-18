@@ -8,15 +8,18 @@ import { AppStore, EditorStore, TimelineStore, TimelineActions } from "../../sto
 import { TimelineLib } from "../../lib/timeline-lib.slint";
 import { Slider } from "std-widgets.slint";
 
-// Compact text button. `active` renders the pressed/latched accent
-// (used by the Snap magnet); `enabled` dims and mutes the click.
+// Compact toolbar control. Pass `icon` for a glyph button; otherwise
+// `label` renders as text (used by the few non-icon actions). `active`
+// latches the accent (Snap / Magnet / Loop); `enabled` dims the click.
 component ToolButton inherits Rectangle {
     in property <string> label;
+    in property <image> icon;
+    in property <bool> show-icon: false;
     in property <bool> enabled: true;
     in property <bool> active: false;
     callback clicked();
 
-    width: text.preferred-width + 2 * AppStore.theme.metrics.spacing.sm;
+    width: show-icon ? 28px : text.preferred-width + 2 * AppStore.theme.metrics.spacing.sm;
     border-radius: AppStore.theme.metrics.radius.sm;
     background: active
         ? AppStore.theme.accent.primary.with-alpha(0.2)
@@ -24,6 +27,17 @@ component ToolButton inherits Rectangle {
     border-width: active ? 1px : 0px;
     border-color: AppStore.theme.accent.primary;
     opacity: enabled ? 1.0 : 0.35;
+
+    Image {
+        width: 16px;
+        height: 16px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        image-fit: contain;
+        colorize: active ? AppStore.theme.accent.primary : AppStore.theme.text.primary;
+        visible: show-icon;
+    }
 
     text := CutlassText {
         width: parent.width;
@@ -33,6 +47,7 @@ component ToolButton inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
         foreground: active ? AppStore.theme.accent.primary : AppStore.theme.text.primary;
+        visible: !show-icon;
     }
 
     ta := TouchArea {
@@ -65,6 +80,8 @@ export component Toolbar inherits Rectangle {
 
         ToolButton {
             label: "Undo";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/timeline/undo-2.svg");
             enabled: EditorStore.can-undo;
             clicked => {
                 TimelineActions.undo();
@@ -73,6 +90,8 @@ export component Toolbar inherits Rectangle {
 
         ToolButton {
             label: "Redo";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/timeline/redo-2.svg");
             enabled: EditorStore.can-redo;
             clicked => {
                 TimelineActions.redo();
@@ -85,6 +104,8 @@ export component Toolbar inherits Rectangle {
 
         ToolButton {
             label: "Split";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/timeline/scissors.svg");
             enabled: TimelineActions.can-split();
             clicked => {
                 TimelineActions.split-at-playhead();
@@ -93,6 +114,8 @@ export component Toolbar inherits Rectangle {
 
         ToolButton {
             label: "Marker";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/timeline/flag.svg");
             clicked => {
                 TimelineActions.add-marker-at-playhead();
             }
@@ -100,6 +123,8 @@ export component Toolbar inherits Rectangle {
 
         ToolButton {
             label: "Delete";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/timeline/trash-2.svg");
             enabled: TimelineActions.has-selection();
             clicked => {
                 TimelineActions.delete-selected();
@@ -110,6 +135,8 @@ export component Toolbar inherits Rectangle {
         // a linked audio-lane companion (same media, no new library asset).
         ToolButton {
             label: "Extract";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/timeline/audio-lines.svg");
             enabled: TimelineActions.can-extract-audio();
             clicked => {
                 TimelineActions.extract-audio-selected();
@@ -147,6 +174,8 @@ export component Toolbar inherits Rectangle {
         // the out-mark) wraps to the start instead of pausing. Cmd/Ctrl+L.
         ToolButton {
             label: "Loop";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/timeline/repeat.svg");
             active: TimelineStore.loop-enabled;
             clicked => {
                 TimelineActions.toggle-loop();
@@ -159,6 +188,8 @@ export component Toolbar inherits Rectangle {
         // the flag and pack the lane on enable.
         ToolButton {
             label: "Magnet";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/timeline/magnet.svg");
             active: TimelineStore.main-magnet-enabled;
             clicked => {
                 TimelineActions.toggle-main-magnet();
@@ -168,6 +199,8 @@ export component Toolbar inherits Rectangle {
         // CapCut's auto-snapping magnet toggle: latched while active.
         ToolButton {
             label: "Snap";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/timeline/grid-3x3.svg");
             active: TimelineStore.snap-enabled;
             clicked => {
                 TimelineStore.snap-enabled = !TimelineStore.snap-enabled;
@@ -198,6 +231,8 @@ export component Toolbar inherits Rectangle {
         // mirrors the flag.
         ToolButton {
             label: "Link";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/timeline/link.svg");
             active: TimelineStore.link-enabled;
             clicked => {
                 TimelineActions.toggle-linkage();
@@ -210,6 +245,8 @@ export component Toolbar inherits Rectangle {
         // actually touches a link group.
         ToolButton {
             label: "Unlink";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/timeline/unlink.svg");
             enabled: TimelineActions.selection-has-link();
             clicked => {
                 TimelineActions.unlink-selected();
@@ -223,6 +260,8 @@ export component Toolbar inherits Rectangle {
         // Fit the whole sequence into the viewport (CapCut's zoom-to-fit).
         ToolButton {
             label: "Fit";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/timeline/scan.svg");
             clicked => {
                 TimelineActions.zoom-to-fit();
             }
@@ -230,7 +269,9 @@ export component Toolbar inherits Rectangle {
 
         // Zoom: − / slider / + (log scale; see TimelineActions).
         ToolButton {
-            label: "−";
+            label: "Zoom out";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/timeline/zoom-out.svg");
             clicked => {
                 root.nudge-zoom(-8);
             }
@@ -248,7 +289,9 @@ export component Toolbar inherits Rectangle {
         }
 
         ToolButton {
-            label: "+";
+            label: "Zoom in";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/timeline/zoom-in.svg");
             clicked => {
                 root.nudge-zoom(8);
             }

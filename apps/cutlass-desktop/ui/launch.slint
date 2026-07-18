@@ -25,7 +25,7 @@ import { AccountBackend } from "lib/account-backend.slint";
 // the launch screen has no editor TitleBar, so it carries its own window
 // controls and drag strip.
 component WinButton inherits Rectangle {
-    in property <string> glyph;
+    in property <image> icon;
     in property <bool> danger: false;
     callback clicked();
 
@@ -34,14 +34,14 @@ component WinButton inherits Rectangle {
         : danger ? #E81123
         : #ffffff14;
 
-    CutlassText {
-        width: parent.width;
-        height: parent.height;
-        text: glyph;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        style: AppStore.theme.typography.label;
-        foreground: ta.has-hover ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
+    Image {
+        width: 14px;
+        height: 14px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        image-fit: contain;
+        colorize: ta.has-hover || danger ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
     }
 
     ta := TouchArea {
@@ -140,40 +140,24 @@ component ActionCard inherits Rectangle {
             border-radius: AppStore.theme.metrics.radius.md;
             background: root.primary ? AppStore.theme.accent.primary : #ffffff12;
 
-            if root.primary: CutlassText {
-                width: parent.width;
-                height: parent.height;
-                text: "+";
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                style: { size: 24px, weight: 600, italic: false };
-                foreground: AppStore.theme.accent.on-accent;
+            if root.primary: Image {
+                width: 20px;
+                height: 20px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                source: @image-url("../../../assets/icon/launch/plus.svg");
+                image-fit: contain;
+                colorize: AppStore.theme.accent.on-accent;
             }
 
-            // Folder silhouette (placeholder for lucide `folder-open`).
-            if !root.primary: Rectangle {
+            if !root.primary: Image {
                 width: 20px;
-                height: 16px;
+                height: 20px;
                 x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2 + 1px;
-
-                Rectangle {
-                    x: 0;
-                    y: 0;
-                    width: 9px;
-                    height: 5px;
-                    border-radius: 1px;
-                    background: AppStore.theme.text.secondary;
-                }
-
-                Rectangle {
-                    x: 0;
-                    y: 4px;
-                    width: parent.width;
-                    height: 12px;
-                    border-radius: 2px;
-                    background: AppStore.theme.text.secondary;
-                }
+                y: (parent.height - self.height) / 2;
+                source: @image-url("../../../assets/icon/launch/folder-open.svg");
+                image-fit: contain;
+                colorize: AppStore.theme.text.secondary;
             }
         }
 
@@ -235,14 +219,14 @@ component ProjectRow inherits Rectangle {
                 border-width: AppStore.theme.metrics.stroke.hairline;
                 border-color: #ffffff14;
 
-                CutlassText {
-                    width: parent.width;
-                    height: parent.height;
-                    text: "▶";
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    style: AppStore.theme.typography.caption;
-                    foreground: AppStore.theme.text.muted;
+                Image {
+                    width: 16px;
+                    height: 16px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    source: @image-url("../../../assets/icon/launch/clapperboard.svg");
+                    image-fit: contain;
+                    colorize: AppStore.theme.text.muted;
                 }
             }
         }
@@ -549,21 +533,23 @@ export component LaunchScreen inherits Rectangle {
                 // lights (kept on the hidden titlebar) sit over the empty left
                 // of this drag strip.
                 if !AppState.is-macos: WinButton {
-                    glyph: "─";
+                    icon: @image-url("../../../assets/icon/shell/minus.svg");
                     clicked => {
                         WindowBackend.minimize();
                     }
                 }
 
                 if !AppState.is-macos: WinButton {
-                    glyph: WindowBackend.maximized ? "❐" : "□";
+                    icon: WindowBackend.maximized
+                        ? @image-url("../../../assets/icon/shell/copy.svg")
+                        : @image-url("../../../assets/icon/shell/square.svg");
                     clicked => {
                         WindowBackend.toggle-maximize();
                     }
                 }
 
                 if !AppState.is-macos: WinButton {
-                    glyph: "✕";
+                    icon: @image-url("../../../assets/icon/shell/x.svg");
                     danger: true;
                     clicked => {
                         WindowBackend.close();

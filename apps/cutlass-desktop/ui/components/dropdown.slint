@@ -40,13 +40,13 @@ export component CutlassDropdown inherits Rectangle {
             overflow: TextOverflow.elide;
         }
 
-        CutlassText {
+        Image {
             width: 12px;
+            height: 12px;
             vertical-alignment: center;
-            horizontal-alignment: center;
-            text: "v";
-            style: AppStore.theme.typography.caption;
-            foreground: AppStore.theme.text.muted;
+            source: @image-url("../../../../assets/icon/ui/chevron-down.svg");
+            image-fit: contain;
+            colorize: AppStore.theme.text.muted;
         }
     }
 

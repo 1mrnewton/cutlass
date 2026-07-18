@@ -906,14 +906,14 @@ export component AgentPanel inherits PanelBase {
                             border-color: AgentStore.dry-run ? AppStore.theme.accent.primary : AppStore.theme.agent.preview-toggle-border;
                             background: AgentStore.dry-run ? AppStore.theme.accent.primary : transparent;
 
-                            if AgentStore.dry-run: CutlassText {
-                                width: parent.width;
-                                height: parent.height;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                text: "✓";
-                                style: AppStore.theme.typography.caption;
-                                foreground: #0A0A0A;
+                            if AgentStore.dry-run: Image {
+                                width: 10px;
+                                height: 10px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                source: @image-url("../../../../../assets/icon/ui/check.svg");
+                                image-fit: contain;
+                                colorize: #0A0A0A;
                             }
                         }
 

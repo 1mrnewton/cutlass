@@ -15,7 +15,7 @@ import { AppState } from "../state.slint";
 // radius — Windows-style, like CapCut's. `danger` paints the close
 // button's red hover.
 component CaptionButton inherits Rectangle {
-    in property <string> glyph;
+    in property <image> icon;
     in property <bool> danger: false;
     callback clicked();
 
@@ -24,14 +24,14 @@ component CaptionButton inherits Rectangle {
         : danger ? #E81123
         : #ffffff14;
 
-    CutlassText {
-        width: parent.width;
-        height: parent.height;
-        text: glyph;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        style: AppStore.theme.typography.label;
-        foreground: ta.has-hover ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
+    Image {
+        width: 14px;
+        height: 14px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        image-fit: contain;
+        colorize: ta.has-hover || danger ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
     }
 
     ta := TouchArea {
@@ -127,21 +127,11 @@ export component TitleBar inherits Rectangle {
             HorizontalLayout {
                 spacing: AppStore.theme.metrics.spacing.sm;
 
-                Rectangle {
+                Image {
                     width: 18px;
                     height: 18px;
-                    border-radius: AppStore.theme.metrics.radius.sm;
-                    background: @linear-gradient(135deg, AppStore.theme.accent.primary 0%, AppStore.theme.accent.gradient-end 100%);
-
-                    CutlassText {
-                        width: parent.width;
-                        height: parent.height;
-                        text: "C";
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        style: AppStore.theme.typography.heading-sm;
-                        foreground: #0A0A0A;
-                    }
+                    source: @image-url("../../../../assets/icon/cutlass-in-app.png");
+                    image-fit: cover;
                 }
 
                 VerticalLayout {
@@ -272,10 +262,28 @@ export component TitleBar inherits Rectangle {
             alignment: center;
 
             // AI assistant dock toggle (ai-agent roadmap Phase 4).
-            SubtleButton {
-                label: AppState.agent-panel-open ? "Hide Assistant" : "Assistant";
-                clicked => {
-                    AppState.agent-panel-open = !AppState.agent-panel-open;
+            assistant := Rectangle {
+                width: 28px;
+                height: 26px;
+                border-radius: AppStore.theme.metrics.radius.sm;
+                background: assistant-ta.has-hover || AppState.agent-panel-open ? #ffffff14 : transparent;
+
+                Image {
+                    width: 16px;
+                    height: 16px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    source: @image-url("../../../../assets/icon/shell/sparkles.svg");
+                    image-fit: contain;
+                    colorize: AppState.agent-panel-open
+                        ? AppStore.theme.accent.primary
+                        : (assistant-ta.has-hover ? AppStore.theme.text.primary : AppStore.theme.text.secondary);
+                }
+
+                assistant-ta := TouchArea {
+                    clicked => {
+                        AppState.agent-panel-open = !AppState.agent-panel-open;
+                    }
                 }
             }
         }
@@ -285,8 +293,7 @@ export component TitleBar inherits Rectangle {
         }
 
         // Settings — reachable on every platform (the macOS Cutlass menu also
-        // opens it). Gear glyph is a placeholder until the lucide icon lands
-        // (see docs/icons.md).
+        // opens it).
         VerticalLayout {
             alignment: center;
 
@@ -296,14 +303,14 @@ export component TitleBar inherits Rectangle {
                 border-radius: AppStore.theme.metrics.radius.sm;
                 background: gear-ta.has-hover ? #ffffff14 : transparent;
 
-                CutlassText {
-                    width: parent.width;
-                    height: parent.height;
-                    text: "⚙";
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    style: AppStore.theme.typography.label;
-                    foreground: gear-ta.has-hover ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
+                Image {
+                    width: 16px;
+                    height: 16px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    source: @image-url("../../../../assets/icon/shell/settings.svg");
+                    image-fit: contain;
+                    colorize: gear-ta.has-hover ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
                 }
 
                 gear-ta := TouchArea {
@@ -341,21 +348,23 @@ export component TitleBar inherits Rectangle {
         // Custom window controls — only off macOS, where the native
         // traffic lights (kept on the hidden titlebar) handle these.
         if !AppState.is-macos: CaptionButton {
-            glyph: "─";
+            icon: @image-url("../../../../assets/icon/shell/minus.svg");
             clicked => {
                 WindowBackend.minimize();
             }
         }
 
         if !AppState.is-macos: CaptionButton {
-            glyph: WindowBackend.maximized ? "❐" : "□";
+            icon: WindowBackend.maximized
+                ? @image-url("../../../../assets/icon/shell/copy.svg")
+                : @image-url("../../../../assets/icon/shell/square.svg");
             clicked => {
                 WindowBackend.toggle-maximize();
             }
         }
 
         if !AppState.is-macos: CaptionButton {
-            glyph: "✕";
+            icon: @image-url("../../../../assets/icon/shell/x.svg");
             danger: true;
             clicked => {
                 WindowBackend.close();

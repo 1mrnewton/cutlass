@@ -37,6 +37,7 @@ import { CutlassLineInput, CutlassText } from "../../components/index.slint";
 import { TimelineViewState } from "state.slint";
 import { RulerBackend, RulerTick } from "../../lib/ruler-backend.slint";
 import { DragBackend } from "../../lib/drag-backend.slint";
+import { TimelineLib } from "../../lib/timeline-lib.slint";
 import { AppState } from "../../state.slint";
 
 component MarkerColorSwatch inherits Rectangle {
@@ -71,6 +72,32 @@ export component Ruler inherits Rectangle {
     private property <length> playhead-x:
         TimelineStore.playhead-tick * zoom * 1px + scroll-x;
 
+    // Hand scrubbing reveals the timeline continuously near either viewport
+    // edge. Keep the unclamped pointer for velocity, but clamp the scrubbed
+    // playhead itself to the visible ruler while the content moves beneath it.
+    private property <length> scrub-pointer-x: 0px;
+    private property <length> scrub-autoscroll-margin: 32px;
+    private property <length> scrub-autoscroll-max: 16px;
+    private property <length> scrub-min-scroll-x: min(
+        0px,
+        self.width - TimelineLib.calc-viewport-width(EditorStore.project.sequence, zoom));
+    private property <length> scrub-autoscroll-dx:
+        !TimelineViewState.playhead-scrubbing ? 0px
+        : scrub-pointer-x < scrub-autoscroll-margin
+                && TimelineStore.playhead-tick > 0
+            ? scrub-autoscroll-max * clamp(
+                (scrub-autoscroll-margin - scrub-pointer-x) / scrub-autoscroll-margin,
+                0,
+                1)
+        : scrub-pointer-x > self.width - scrub-autoscroll-margin
+                && TimelineStore.playhead-tick < TimelineActions.sequence-end-tick()
+            ? -scrub-autoscroll-max * clamp(
+                (scrub-pointer-x - (self.width - scrub-autoscroll-margin))
+                    / scrub-autoscroll-margin,
+                0,
+                1)
+        : 0px;
+
     // CapCut's magnet: ~10 px of pull at the current zoom; 0 ⇔ off.
     private property <int> snap-threshold-ticks:
         TimelineStore.snap-enabled ? max(1, round(10 / zoom)) : 0;
@@ -100,6 +127,29 @@ export component Ruler inherits Rectangle {
     function scrub-to(mx: length) {
         TimelineStore.playhead-tick = TimelineActions.clamp-playhead(
             self.snap-tick(max(0, round((mx - scroll-x) / 1px / zoom))));
+    }
+
+    function scrub-to-visible-pointer() {
+        self.scrub-to(clamp(
+            self.scrub-pointer-x,
+            0px,
+            max(0px, self.width - 1px)));
+    }
+
+    scrub-autoscroll := Timer {
+        interval: 16ms;
+        running: TimelineViewState.playhead-scrubbing
+            && scrub-autoscroll-dx != 0px
+            && ((scrub-autoscroll-dx > 0px && TimelineViewState.scroll-x < 0px)
+                || (scrub-autoscroll-dx < 0px
+                    && TimelineViewState.scroll-x > scrub-min-scroll-x));
+        triggered => {
+            TimelineViewState.scroll-x = clamp(
+                TimelineViewState.scroll-x + root.scrub-autoscroll-dx,
+                root.scrub-min-scroll-x,
+                0px);
+            root.scrub-to-visible-pointer();
+        }
     }
 
     function submit-marker-edit() {
@@ -173,16 +223,22 @@ export component Ruler inherits Rectangle {
         width: parent.width;
         height: parent.height;
 
+        changed pressed => {
+            TimelineViewState.playhead-scrubbing = self.pressed;
+        }
+
         pointer-event(event) => {
             if event.kind == PointerEventKind.down {
                 AppState.refocus-shortcuts();
-                root.scrub-to(self.mouse-x);
+                root.scrub-pointer-x = self.mouse-x;
+                root.scrub-to-visible-pointer();
             }
         }
 
         moved => {
             if self.pressed {
-                root.scrub-to(self.mouse-x);
+                root.scrub-pointer-x = self.mouse-x;
+                root.scrub-to-visible-pointer();
             }
         }
     }

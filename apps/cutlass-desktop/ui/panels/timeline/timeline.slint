@@ -481,6 +481,46 @@ export component TimelinePanel inherits PanelBase {
         TimelineViewState.scroll-x = clamp(TimelineViewState.scroll-x, min-scroll-x, 0px);
     }
 
+    // Playback page-follow: leave the viewport still while the playhead is
+    // visible, then reveal it with context in the direction of travel. Forward
+    // playback lands near the left edge; reverse playback mirrors that near the
+    // right. Ruler hand-scrubbing has its own smooth edge-scroll loop and
+    // temporarily suspends this page behavior.
+    private property <length> playback-playhead-content-x:
+        TimelineStore.playhead-tick * TimelineStore.zoom * 1px;
+    private property <length> playback-playhead-viewport-x:
+        playback-playhead-content-x + TimelineViewState.scroll-x;
+    private property <bool> playback-follow-active:
+        TimelineStore.playing && !TimelineViewState.playhead-scrubbing;
+
+    function reveal-playing-playhead() {
+        if (!playback-follow-active || lanes.width <= 0px) {
+            return;
+        }
+        if (playback-playhead-viewport-x < 0px
+                || playback-playhead-viewport-x >= lanes.width) {
+            TimelineViewState.scroll-x = clamp(
+                (TimelineStore.play-speed-num < 0 ? lanes.width * 0.9 : lanes.width * 0.1)
+                    - playback-playhead-content-x,
+                min-scroll-x,
+                0px);
+        }
+    }
+
+    // A tick change covers ordinary playback, shuttle, live seeks, and loop
+    // wraps. The playing edge separately reveals an already-off-screen
+    // playhead before the first clock tick after Play/J/L.
+    private property <int> playback-follow-tick: TimelineStore.playhead-tick;
+    changed playback-follow-tick => {
+        root.reveal-playing-playhead();
+    }
+    private property <bool> playback-follow-active-watch: playback-follow-active;
+    changed playback-follow-active-watch => {
+        if (self.playback-follow-active-watch) {
+            root.reveal-playing-playhead();
+        }
+    }
+
     // Mirror the lane viewport width so zoom anchoring (TimelineActions
     // .set-zoom) can keep the playhead / view center stationary.
     private property <length> lanes-width: lanes.width;

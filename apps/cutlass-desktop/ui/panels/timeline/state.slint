@@ -7,6 +7,11 @@ export global TimelineViewState {
     // TimelinePanel so zoom anchoring can convert viewport px ↔ ticks.
     in-out property <length> viewport-w: 0px;
 
+    // True only while the ruler owns a live playhead scrub. The ruler uses an
+    // edge-scroll loop to reveal content under the pointer; TimelinePanel uses
+    // the flag to suspend playback page-follow until that gesture ends.
+    in-out property <bool> playhead-scrubbing: false;
+
     // Window-space cursor during a clip move/trim gesture (library drags use
     // AppState.library-drag-cursor-*). Recorded by ClipView; read by the
     // panel's edge auto-scroll so it can scroll while the cursor sits in the

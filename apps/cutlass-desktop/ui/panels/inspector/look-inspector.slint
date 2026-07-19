@@ -69,12 +69,18 @@ component FilterDropdown inherits Rectangle {
             overflow: TextOverflow.elide;
         }
 
-        Image {
+        Rectangle {
             width: 12px;
-            height: 12px;
-            source: @image-url("../../../../../assets/icon/ui/chevron-down.svg");
-            image-fit: contain;
-            colorize: AppStore.theme.text.muted;
+            vertical-stretch: 1;
+
+            Image {
+                width: 12px;
+                height: 12px;
+                y: (parent.height - self.height) / 2;
+                source: @image-url("../../../../../assets/icon/ui/chevron-down.svg");
+                image-fit: contain;
+                colorize: AppStore.theme.text.muted;
+            }
         }
     }
 

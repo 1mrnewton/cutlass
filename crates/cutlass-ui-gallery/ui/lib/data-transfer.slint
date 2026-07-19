@@ -1,0 +1,13 @@
+// Rust-backed helpers for Slint's opaque `data-transfer` type.
+// Construct / inspect payloads in `main.rs` — Slint cannot build them inline.
+
+export global DataTransferBridge {
+    // Build a plain-text drag payload.
+    pure callback plain-text(text: string) -> data-transfer;
+
+    // True when the payload carries plain text.
+    pure callback has-plain-text(data: data-transfer) -> bool;
+
+    // Read plain text, or "" if absent / unreadable.
+    pure callback read-plain-text(data: data-transfer) -> string;
+}

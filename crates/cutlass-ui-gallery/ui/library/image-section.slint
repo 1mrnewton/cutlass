@@ -1,0 +1,88 @@
+// Gallery demos for CutlassImage (thumb → lightbox with Copy / Save / Close).
+
+import { AppStore } from "../../../../apps/cutlass-desktop/ui/store/app-store.slint";
+import { CutlassText } from "../../../../apps/cutlass-desktop/ui/components/text.slint";
+import { CutlassImage } from "../components/index.slint";
+import { DemoImages } from "../lib/image-actions.slint";
+
+component SectionTitle inherits CutlassText {
+    style: AppStore.theme.typography.heading-sm;
+    foreground: AppStore.theme.text.primary;
+    vertical-stretch: 0;
+}
+
+component SectionHint inherits CutlassText {
+    style: AppStore.theme.typography.caption;
+    foreground: AppStore.theme.text.muted;
+    wrap: word-wrap;
+    vertical-stretch: 0;
+}
+
+component StatusLine inherits CutlassText {
+    style: AppStore.theme.typography.caption;
+    foreground: AppStore.theme.text.secondary;
+    vertical-stretch: 0;
+    wrap: word-wrap;
+}
+
+export component ImageSection inherits VerticalLayout {
+    spacing: AppStore.theme.metrics.spacing.md;
+    padding: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    in-out property <string> status: "Click a thumbnail to open the lightbox.";
+
+    SectionTitle { text: "Image"; }
+    SectionHint {
+        text: "CutlassImage: cover thumb → click expands a lightbox with Copy, Save, and Close. Escape or click outside also closes. Copy / Save are Rust-backed (clipboard + PNG file dialog).";
+    }
+
+    HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.lg;
+        vertical-stretch: 0;
+
+        CutlassImage {
+            source: DemoImages.aurora;
+            caption: "Aurora";
+            file-name: "aurora.png";
+            thumb-width: 200px;
+            thumb-height: 140px;
+            opened => { root.status = "Opened Aurora"; }
+            closed => { root.status = "Closed Aurora"; }
+            copied(ok) => { root.status = ok ? "Copied Aurora to clipboard" : "Copy failed"; }
+            saved(ok) => { root.status = ok ? "Saved Aurora" : "Save cancelled"; }
+        }
+
+        CutlassImage {
+            source: DemoImages.dune;
+            caption: "Dune";
+            file-name: "dune.png";
+            thumb-width: 160px;
+            thumb-height: 160px;
+            corner-radius: 20px;
+            opened => { root.status = "Opened Dune"; }
+            closed => { root.status = "Closed Dune"; }
+            copied(ok) => { root.status = ok ? "Copied Dune to clipboard" : "Copy failed"; }
+            saved(ok) => { root.status = ok ? "Saved Dune" : "Save cancelled"; }
+        }
+
+        CutlassImage {
+            source: DemoImages.tide;
+            caption: "Tide";
+            file-name: "tide.png";
+            thumb-width: 220px;
+            thumb-height: 120px;
+            corner-radius: 8px;
+            opened => { root.status = "Opened Tide"; }
+            closed => { root.status = "Closed Tide"; }
+            copied(ok) => { root.status = ok ? "Copied Tide to clipboard" : "Copy failed"; }
+            saved(ok) => { root.status = ok ? "Saved Tide" : "Save cancelled"; }
+        }
+    }
+
+    StatusLine { text: root.status; }
+
+    SectionHint {
+        text: "Keyboard: focus a thumb (click once without opening via Tab if needed), Space/Enter opens; Escape closes the lightbox.";
+    }
+}

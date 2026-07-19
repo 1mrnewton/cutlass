@@ -30,7 +30,7 @@ component CategoryTab inherits Rectangle {
     callback activated();
 
     width: label-text.preferred-width + 28px;
-    height: 50px;
+    height: 40px;
     border-radius: AppStore.theme.metrics.radius.sm;
     background: transparent;
     opacity: enabled ? 1.0 : 0.78;
@@ -148,11 +148,27 @@ export component SectionHeader inherits HorizontalLayout {
         }
 
         HorizontalLayout {
+            spacing: AppStore.theme.metrics.spacing.xs;
+
             CutlassText {
-                text: root.title + " ^";
+                text: root.title;
                 style: AppStore.theme.typography.heading-sm;
                 foreground: active ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
                 vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Rectangle {
+                width: 12px;
+                vertical-stretch: 1;
+
+                Image {
+                    width: 12px;
+                    height: 12px;
+                    y: (parent.height - self.height) / 2;
+                    source: @image-url("../../../../../assets/icon/ui/chevron-up.svg");
+                    image-fit: contain;
+                    colorize: active ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
+                }
             }
 
             Rectangle {

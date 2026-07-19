@@ -1,0 +1,276 @@
+// CutlassImage — thumbnail that expands into a lightbox with Copy / Save / Close.
+//
+// Click the thumb (or press Space/Enter when focused) to open. Escape or Close
+// dismisses. Copy / Save are wired through ImageActions (Rust).
+
+import { AppStore } from "../../../../apps/cutlass-desktop/ui/store/app-store.slint";
+import { CutlassText } from "../../../../apps/cutlass-desktop/ui/components/text.slint";
+import { ImageActions } from "../lib/image-actions.slint";
+
+component LightboxButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    callback clicked();
+
+    height: 32px;
+    horizontal-stretch: 0;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    border-width: 1px;
+    border-color: root.primary ? transparent
+        : (ta.has-hover ? #ffffff28 : #ffffff18);
+    background: root.primary
+        ? (ta.has-hover ? #60a5fa : AppStore.theme.accent.primary)
+        : (ta.has-hover ? #ffffff14 : #ffffff0a);
+    animate background { duration: 120ms; easing: ease-out; }
+    animate border-color { duration: 120ms; easing: ease-out; }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+
+        CutlassText {
+            horizontal-stretch: 1;
+            vertical-stretch: 1;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            text: root.label;
+            style: AppStore.theme.typography.label;
+            foreground: root.primary
+                ? AppStore.theme.accent.on-accent
+                : AppStore.theme.text.primary;
+        }
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component CutlassImage inherits Rectangle {
+    in property <image> source;
+    in property <string> caption: "";
+    in property <string> file-name: "image.png";
+    in property <length> thumb-width: 180px;
+    in property <length> thumb-height: 120px;
+    in property <length> corner-radius: 12px;
+
+    callback opened();
+    callback closed();
+    callback copied(ok: bool);
+    callback saved(ok: bool);
+
+    width: root.thumb-width;
+    // Caption row is laid out inside; keep preferred height natural via layout.
+    forward-focus: focus-scope;
+
+    private property <bool> expanded: false;
+    private property <string> flash: "";
+    private property <int> popup-focus-nonce: 0;
+    // Sync thumb chrome when the popup is dismissed via click-outside.
+    private property <bool> popup-open: popup.is-open;
+    changed popup-open => {
+        if (!root.popup-open && root.expanded) {
+            root.expanded = false;
+            root.flash = "";
+            root.closed();
+        }
+    }
+
+    public function open-lightbox() {
+        root.flash = "";
+        popup.show();
+        root.expanded = true;
+        root.opened();
+        root.popup-focus-nonce += 1;
+    }
+
+    public function close-lightbox() {
+        popup.close();
+        root.expanded = false;
+        root.flash = "";
+        root.closed();
+        focus-scope.focus();
+    }
+
+    VerticalLayout {
+        spacing: 6px;
+
+        thumb := Rectangle {
+            width: root.thumb-width;
+            height: root.thumb-height;
+            vertical-stretch: 0;
+            border-radius: root.corner-radius;
+            border-width: 1px;
+            border-color: root.expanded ? AppStore.theme.accent.primary
+                : (ta.has-hover ? AppStore.theme.accent.primary : #ffffff18);
+            background: #121212;
+            clip: true;
+            drop-shadow-color: #00000040;
+            drop-shadow-blur: ta.has-hover ? 18px : 8px;
+            drop-shadow-offset-y: 4px;
+            animate border-color { duration: 140ms; easing: ease-out; }
+            animate drop-shadow-blur { duration: 140ms; easing: ease-out; }
+
+            Image {
+                width: 100%;
+                height: 100%;
+                source: root.source;
+                image-fit: cover;
+            }
+
+            if ta.has-hover && !root.expanded: Rectangle {
+                width: 100%;
+                height: 100%;
+                background: #00000028;
+
+                CutlassText {
+                    width: 100%;
+                    height: 100%;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    text: "View";
+                    style: AppStore.theme.typography.label;
+                    foreground: #ffffff;
+                }
+            }
+
+            ta := TouchArea {
+                clicked => {
+                    focus-scope.focus();
+                    root.open-lightbox();
+                }
+            }
+        }
+
+        if root.caption != "": CutlassText {
+            text: root.caption;
+            style: AppStore.theme.typography.caption;
+            foreground: AppStore.theme.text.muted;
+            overflow: TextOverflow.elide;
+            vertical-stretch: 0;
+            height: 16px;
+        }
+    }
+
+    focus-scope := FocusScope {
+        width: 0;
+        height: 0;
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.open-lightbox();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.thumb-height + 8px;
+        width: 640px;
+        height: 480px;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: #ffffff22;
+            background: #141414;
+            drop-shadow-color: #00000088;
+            drop-shadow-blur: 40px;
+            drop-shadow-offset-y: 12px;
+            clip: true;
+
+            popup-keys := FocusScope {
+                width: 100%;
+                height: 100%;
+
+                private property <int> focus-nonce: root.popup-focus-nonce;
+                changed focus-nonce => {
+                    self.focus();
+                }
+
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.close-lightbox();
+                        return accept;
+                    }
+                    reject
+                }
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 12px;
+
+                    HorizontalLayout {
+                        height: 32px;
+                        vertical-stretch: 0;
+                        spacing: 10px;
+
+                        CutlassText {
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                            text: root.caption == "" ? root.file-name : root.caption;
+                            style: AppStore.theme.typography.label;
+                            foreground: AppStore.theme.text.primary;
+                            overflow: TextOverflow.elide;
+                        }
+
+                        if root.flash != "": CutlassText {
+                            vertical-alignment: center;
+                            text: root.flash;
+                            style: AppStore.theme.typography.caption;
+                            foreground: #6ee7b7;
+                            horizontal-stretch: 0;
+                        }
+
+                        LightboxButton {
+                            width: 72px;
+                            label: "Copy";
+                            clicked => {
+                                let ok = ImageActions.copy-image(root.source);
+                                root.flash = ok ? "Copied" : "Copy failed";
+                                root.copied(ok);
+                            }
+                        }
+                        LightboxButton {
+                            width: 72px;
+                            label: "Save";
+                            clicked => {
+                                let ok = ImageActions.save-image(root.source, root.file-name);
+                                root.flash = ok ? "Saved" : "Save cancelled";
+                                root.saved(ok);
+                            }
+                        }
+                        LightboxButton {
+                            width: 80px;
+                            label: "Close";
+                            primary: true;
+                            clicked => {
+                                root.close-lightbox();
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                        border-radius: 12px;
+                        background: #000000;
+                        clip: true;
+
+                        Image {
+                            width: 100%;
+                            height: 100%;
+                            source: root.source;
+                            image-fit: contain;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

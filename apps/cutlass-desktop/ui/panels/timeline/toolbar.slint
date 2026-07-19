@@ -1,11 +1,10 @@
 // Timeline toolbar (CapCut layout): edit actions on the left, magnet
-// toggle and zoom control on the right, SMPTE transport readout
-// in between. Every button routes through `TimelineActions`, the same
-// functions the keyboard shortcuts call, so gating can never diverge.
+// toggle and zoom control on the right. Every button routes through
+// `TimelineActions`, the same functions the keyboard shortcuts call,
+// so gating can never diverge.
 
 import { CutlassText, HorizontalDivider } from "../../components/index.slint";
 import { AppStore, EditorStore, TimelineStore, TimelineActions } from "../../store/index.slint";
-import { TimelineLib } from "../../lib/timeline-lib.slint";
 import { Slider } from "std-widgets.slint";
 
 // Compact toolbar control. Pass `icon` for a glyph button; otherwise
@@ -55,6 +54,12 @@ component ToolButton inherits Rectangle {
         clicked => {
             root.clicked();
         }
+    }
+
+    // Tip on the button (not CutlassText): TouchArea covers the glyph, and
+    // icon tools hide the label — same hover target either way.
+    Tooltip {
+        text: @markdown("\{root.label}");
     }
 }
 
@@ -143,31 +148,9 @@ export component Toolbar inherits Rectangle {
             }
         }
 
+        // Spacer keeps edit actions left and magnet/zoom controls right.
         Rectangle {
             horizontal-stretch: 1;
-
-            // Transport readout — the ruler's compact labels don't show
-            // full SMPTE, this does: playhead / sequence duration.
-            CutlassText {
-                width: parent.width;
-                height: parent.height;
-                mono: true;
-                style: AppStore.theme.typography.caption;
-                foreground: AppStore.theme.text.secondary;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                text: TimelineLib.format-timecode(
-                        TimelineStore.playhead-tick,
-                        EditorStore.project.sequence.fps.num,
-                        EditorStore.project.sequence.fps.den,
-                        EditorStore.project.sequence.drop-frame)
-                    + " / "
-                    + TimelineLib.format-timecode(
-                        TimelineLib.sequence-duration(EditorStore.project.sequence).value,
-                        EditorStore.project.sequence.fps.num,
-                        EditorStore.project.sequence.fps.den,
-                        EditorStore.project.sequence.drop-frame);
-            }
         }
 
         // Loop playback (playback roadmap Phase 4): reaching the end (or

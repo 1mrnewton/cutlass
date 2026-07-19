@@ -1,0 +1,239 @@
+// Demos for Slint's built-in Tooltip (1.17) — no Cutlass wrapper yet.
+
+import { AppStore } from "../../../../apps/cutlass-desktop/ui/store/app-store.slint";
+import { CutlassText } from "../../../../apps/cutlass-desktop/ui/components/text.slint";
+import { CutlassCard } from "../components/index.slint";
+
+component SectionTitle inherits CutlassText {
+    style: AppStore.theme.typography.heading-sm;
+    foreground: AppStore.theme.text.primary;
+    vertical-stretch: 0;
+}
+
+component SectionHint inherits CutlassText {
+    style: AppStore.theme.typography.caption;
+    foreground: AppStore.theme.text.muted;
+    wrap: word-wrap;
+    vertical-stretch: 0;
+}
+
+component FieldLabel inherits CutlassText {
+    style: AppStore.theme.typography.label;
+    foreground: AppStore.theme.text.secondary;
+    vertical-stretch: 0;
+}
+
+// Shared hover chrome. Tooltip must attach to an item, not a layout —
+// and each parent may have only one Tooltip child (even under `if`).
+component TipChip inherits Rectangle {
+    in property <string> label;
+
+    height: 32px;
+    horizontal-stretch: 0;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    border-width: 1px;
+    border-color: ta.has-hover ? #ffffff28 : #ffffff14;
+    background: ta.has-hover ? #242424 : #1a1a1a;
+    animate border-color { duration: 120ms; easing: ease-out; }
+    animate background { duration: 120ms; easing: ease-out; }
+
+    HorizontalLayout {
+        padding-left: AppStore.theme.metrics.spacing.md;
+        padding-right: AppStore.theme.metrics.spacing.md;
+
+        CutlassText {
+            horizontal-stretch: 1;
+            vertical-stretch: 1;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            text: root.label;
+            style: AppStore.theme.typography.label;
+            foreground: AppStore.theme.text.primary;
+        }
+    }
+
+    ta := TouchArea { }
+
+    @children
+}
+
+export component TooltipSection inherits VerticalLayout {
+    spacing: AppStore.theme.metrics.spacing.md;
+    padding: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    in-out property <bool> show-gated-tip: true;
+
+    SectionTitle { text: "Tooltip"; }
+    SectionHint {
+        text: "Slint 1.17 built-in Tooltip: nest inside a hoverable item. Appears after ~500ms near the pointer. One tip per parent; text mode or a single custom child — not both.";
+    }
+
+    FieldLabel { text: "Plain text"; }
+    TipChip {
+        vertical-stretch: 0;
+        width: 160px;
+        label: "Hover me";
+
+        Tooltip {
+            text: @markdown("Trim the in-point of the selected clip.");
+        }
+    }
+
+    FieldLabel { text: "Icon button"; }
+    Rectangle {
+        vertical-stretch: 0;
+        width: 32px;
+        height: 32px;
+        border-radius: AppStore.theme.metrics.radius.sm;
+        border-width: 1px;
+        border-color: icon-ta.has-hover ? #ffffff28 : #ffffff14;
+        background: icon-ta.has-hover ? #242424 : #1a1a1a;
+        animate border-color { duration: 120ms; easing: ease-out; }
+        animate background { duration: 120ms; easing: ease-out; }
+
+        Image {
+            width: 16px;
+            height: 16px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            source: @image-url("../../../../assets/icon/timeline/scissors.svg");
+            image-fit: contain;
+            colorize: icon-ta.has-hover
+                ? AppStore.theme.text.primary
+                : AppStore.theme.text.muted;
+        }
+
+        icon-ta := TouchArea { }
+
+        Tooltip {
+            text: @markdown("**Split** — cut the clip at the playhead.");
+        }
+    }
+
+    FieldLabel { text: "Markdown text"; }
+    TipChip {
+        vertical-stretch: 0;
+        width: 160px;
+        label: "Split tool";
+
+        Tooltip {
+            text: @markdown("**Split** — cut the clip at the playhead.");
+        }
+    }
+
+    FieldLabel { text: "Custom content (CutlassCard glass)"; }
+    TipChip {
+        vertical-stretch: 0;
+        width: 200px;
+        label: "Command palette";
+
+        Tooltip {
+            CutlassCard {
+                floor-width: 0px;
+                floor-height: 0px;
+                tint: #2a2a2a;
+                content-padding: 10px;
+                content-spacing: 4px;
+                corner-radius: 10px;
+
+                CutlassText {
+                    text: "Quick actions";
+                    style: AppStore.theme.typography.label;
+                    foreground: AppStore.theme.text.primary;
+                    vertical-stretch: 0;
+                }
+
+                CutlassText {
+                    text: "Open the command palette and search settings.";
+                    style: AppStore.theme.typography.caption;
+                    foreground: AppStore.theme.text.secondary;
+                    wrap: word-wrap;
+                    vertical-stretch: 0;
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    vertical-stretch: 0;
+                    height: 22px;
+
+                    Rectangle {
+                        border-radius: 4px;
+                        background: #ffffff14;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            CutlassText {
+                                text: "⌘";
+                                style: AppStore.theme.typography.caption;
+                                foreground: AppStore.theme.text.primary;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        border-radius: 4px;
+                        background: #ffffff14;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            CutlassText {
+                                text: "K";
+                                style: AppStore.theme.typography.caption;
+                                foreground: AppStore.theme.text.primary;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    FieldLabel { text: "Conditional (if tip-enabled)"; }
+    HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+        vertical-stretch: 0;
+
+        TipChip {
+            width: 160px;
+            horizontal-stretch: 0;
+            label: root.show-gated-tip ? "Tip on" : "Tip off";
+
+            if root.show-gated-tip: Tooltip {
+                text: @markdown("Gated with if show-gated-tip : Tooltip.");
+            }
+        }
+
+        Rectangle {
+            width: 120px;
+            height: 32px;
+            horizontal-stretch: 0;
+            border-radius: AppStore.theme.metrics.radius.sm;
+            border-width: 1px;
+            border-color: #ffffff14;
+            background: toggle.has-hover ? #242424 : #1a1a1a;
+
+            CutlassText {
+                width: 100%;
+                height: 100%;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                text: root.show-gated-tip ? "Disable tip" : "Enable tip";
+                style: AppStore.theme.typography.label;
+                foreground: AppStore.theme.text.secondary;
+            }
+
+            toggle := TouchArea {
+                clicked => {
+                    root.show-gated-tip = !root.show-gated-tip;
+                }
+            }
+        }
+    }
+
+    SectionHint {
+        text: "Constraints: not on layouts; cannot inherit Tooltip; cannot for-loop Tooltip. Delay (500ms) and offset (8px) are fixed in 1.17. Custom content still sits inside std-widgets ToolTipImpl chrome.";
+    }
+}

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+  <title>Split and delete left</title>
+  <path d="M8 7h3M10 7v3M8 13h2v3H8M10 19v6M8 25h3" opacity=".45"/>
+  <path d="M26 7h-6M22 7v18M26 25h-6"/>
+</svg>

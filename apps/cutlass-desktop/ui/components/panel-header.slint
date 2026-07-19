@@ -1,7 +1,7 @@
 import { AppStore } from "../store/app-store.slint";
 
 export component PanelHeader inherits Rectangle {
-    height: 50px;
+    height: 40px;
     background: AppStore.theme.panel.header-background;
     in property <string> title: "";
     if title != "": Text {

@@ -1,0 +1,15 @@
+// Rust-backed image clipboard / save for CutlassImage.
+
+export global ImageActions {
+    // Copy pixels to the system clipboard. Returns false on failure.
+    callback copy-image(img: image) -> bool;
+
+    // Show a save dialog and write PNG. Returns false if cancelled / failed.
+    callback save-image(img: image, suggested-name: string) -> bool;
+}
+
+export global DemoImages {
+    in-out property <image> aurora;
+    in-out property <image> dune;
+    in-out property <image> tide;
+}

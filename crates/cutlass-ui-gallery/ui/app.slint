@@ -3,8 +3,15 @@
 import { AppStore } from "../../../apps/cutlass-desktop/ui/store/app-store.slint";
 import { CutlassText } from "../../../apps/cutlass-desktop/ui/components/text.slint";
 import { StringFilter } from "lib/string-filter.slint";
+import { DataTransferBridge } from "lib/data-transfer.slint";
+import { TimelineDemo } from "lib/timeline-demo.slint";
+import { ImageActions, DemoImages } from "lib/image-actions.slint";
 import { DropdownSection } from "library/dropdown-section.slint";
 import { CardSection } from "library/card-section.slint";
+import { CardDropdownSection } from "library/card-dropdown-section.slint";
+import { TooltipSection } from "library/tooltip-section.slint";
+import { DndSection } from "library/dnd-section.slint";
+import { ImageSection } from "library/image-section.slint";
 import {
     NavItem,
     ButtonsSection,
@@ -18,6 +25,10 @@ import {
 
 export { AppStore }
 export { StringFilter }
+export { DataTransferBridge }
+export { TimelineDemo }
+export { ImageActions }
+export { DemoImages }
 
 component ThemeChip inherits Rectangle {
     in property <string> label;
@@ -67,8 +78,8 @@ export component GalleryWindow inherits Window {
     min-height: 520px;
     background: AppStore.theme.surface.app-background;
 
-    // 0-1 Library: Dropdown, Card
-    // 2-8 Desktop: Buttons, Text, Inputs, Slider, Layout, Scroll, Split
+    // 0-5 Library: Dropdown, Card, Card Dropdown, Tooltip, Drag & Drop, Image
+    // 6-12 Desktop: Buttons, Text, Inputs, Slider, Layout, Scroll, Split
     in-out property <int> section: 0;
 
     VerticalLayout {
@@ -143,44 +154,64 @@ export component GalleryWindow inherits Window {
                         active: root.section == 1;
                         clicked => { root.section = 1; }
                     }
+                    NavItem {
+                        label: "Card Dropdown";
+                        active: root.section == 2;
+                        clicked => { root.section = 2; }
+                    }
+                    NavItem {
+                        label: "Tooltip";
+                        active: root.section == 3;
+                        clicked => { root.section = 3; }
+                    }
+                    NavItem {
+                        label: "Drag & Drop";
+                        active: root.section == 4;
+                        clicked => { root.section = 4; }
+                    }
+                    NavItem {
+                        label: "Image";
+                        active: root.section == 5;
+                        clicked => { root.section = 5; }
+                    }
 
                     Rectangle { height: 12px; vertical-stretch: 0; }
 
                     NavCaption { text: "Desktop"; }
                     NavItem {
                         label: "Buttons";
-                        active: root.section == 2;
-                        clicked => { root.section = 2; }
-                    }
-                    NavItem {
-                        label: "Text";
-                        active: root.section == 3;
-                        clicked => { root.section = 3; }
-                    }
-                    NavItem {
-                        label: "Inputs";
-                        active: root.section == 4;
-                        clicked => { root.section = 4; }
-                    }
-                    NavItem {
-                        label: "Slider";
-                        active: root.section == 5;
-                        clicked => { root.section = 5; }
-                    }
-                    NavItem {
-                        label: "Layout";
                         active: root.section == 6;
                         clicked => { root.section = 6; }
                     }
                     NavItem {
-                        label: "Scroll & grid";
+                        label: "Text";
                         active: root.section == 7;
                         clicked => { root.section = 7; }
                     }
                     NavItem {
-                        label: "Split grips";
+                        label: "Inputs";
                         active: root.section == 8;
                         clicked => { root.section = 8; }
+                    }
+                    NavItem {
+                        label: "Slider";
+                        active: root.section == 9;
+                        clicked => { root.section = 9; }
+                    }
+                    NavItem {
+                        label: "Layout";
+                        active: root.section == 10;
+                        clicked => { root.section = 10; }
+                    }
+                    NavItem {
+                        label: "Scroll & grid";
+                        active: root.section == 11;
+                        clicked => { root.section = 11; }
+                    }
+                    NavItem {
+                        label: "Split grips";
+                        active: root.section == 12;
+                        clicked => { root.section = 12; }
                     }
                 }
             }
@@ -203,31 +234,47 @@ export component GalleryWindow inherits Window {
                     width: 100%;
                     height: 100%;
                 }
-                if root.section == 2: ButtonsSection {
+                if root.section == 2: CardDropdownSection {
                     width: 100%;
                     height: 100%;
                 }
-                if root.section == 3: TextSection {
+                if root.section == 3: TooltipSection {
                     width: 100%;
                     height: 100%;
                 }
-                if root.section == 4: InputsSection {
+                if root.section == 4: DndSection {
                     width: 100%;
                     height: 100%;
                 }
-                if root.section == 5: SliderSection {
+                if root.section == 5: ImageSection {
                     width: 100%;
                     height: 100%;
                 }
-                if root.section == 6: LayoutSection {
+                if root.section == 6: ButtonsSection {
                     width: 100%;
                     height: 100%;
                 }
-                if root.section == 7: ScrollSection {
+                if root.section == 7: TextSection {
                     width: 100%;
                     height: 100%;
                 }
-                if root.section == 8: SplitSection {
+                if root.section == 8: InputsSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 9: SliderSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 10: LayoutSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 11: ScrollSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 12: SplitSection {
                     width: 100%;
                     height: 100%;
                 }

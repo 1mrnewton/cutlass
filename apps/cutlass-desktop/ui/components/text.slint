@@ -1,14 +1,21 @@
 import { TextStyle } from "../types/index.slint";
 import { AppStore } from "../store/app-store.slint";
 
+// Themed text. Optional `tip` shows Slint's built-in Tooltip on hover
+// (same pattern as the UI gallery). Empty tip = no tooltip.
 export component CutlassText inherits Text {
     in property <TextStyle> style: AppStore.theme.typography.body;
     in property <bool> mono: false;
     in property <color> foreground: AppStore.theme.text.primary;
+    in property <string> tip: "";
 
     color: foreground;
     font-family: root.mono ? AppStore.theme.typography.font-family-mono : AppStore.theme.typography.font-family;
     font-size: style.size;
     font-weight: style.weight;
     font-italic: style.italic;
+
+    if tip != "": Tooltip {
+        text: @markdown("\{root.tip}");
+    }
 }

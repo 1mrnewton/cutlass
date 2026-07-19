@@ -1,0 +1,332 @@
+// Mini timeline DnD demo: drag library media onto a track; drop creates a clip
+// at event.position.x (DropArea local coords → time via pps).
+
+import { AppStore } from "../../../../apps/cutlass-desktop/ui/store/app-store.slint";
+import { CutlassText } from "../../../../apps/cutlass-desktop/ui/components/text.slint";
+import { DataTransferBridge } from "../lib/data-transfer.slint";
+import { TimelineDemo } from "../lib/timeline-demo.slint";
+
+component SectionTitle inherits CutlassText {
+    style: AppStore.theme.typography.heading-sm;
+    foreground: AppStore.theme.text.primary;
+    vertical-stretch: 0;
+}
+
+component SectionHint inherits CutlassText {
+    style: AppStore.theme.typography.caption;
+    foreground: AppStore.theme.text.muted;
+    wrap: word-wrap;
+    vertical-stretch: 0;
+}
+
+component FieldLabel inherits CutlassText {
+    style: AppStore.theme.typography.label;
+    foreground: AppStore.theme.text.secondary;
+    vertical-stretch: 0;
+}
+
+component StatusLine inherits CutlassText {
+    style: AppStore.theme.typography.caption;
+    foreground: AppStore.theme.text.secondary;
+    vertical-stretch: 0;
+    wrap: word-wrap;
+}
+
+component MediaChip inherits Rectangle {
+    in property <string> label;
+    in property <int> duration-ms: 2500;
+
+    height: 40px;
+    horizontal-stretch: 0;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    border-width: 1px;
+    border-color: drag.dragging ? AppStore.theme.accent.primary : #ffffff14;
+    background: drag.dragging ? #ffffff18 : #1a1a1a;
+    opacity: drag.dragging ? 0.5 : 1.0;
+    animate border-color { duration: 120ms; easing: ease-out; }
+    animate background { duration: 120ms; easing: ease-out; }
+    animate opacity { duration: 120ms; easing: ease-out; }
+
+    VerticalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        padding-top: 5px;
+        padding-bottom: 5px;
+        spacing: 2px;
+
+        HorizontalLayout {
+            spacing: 6px;
+            Image {
+                width: 12px;
+                height: 12px;
+                y: (parent.height - self.height) / 2;
+                source: @image-url("../../../../assets/icon/library/media.svg");
+                image-fit: contain;
+                colorize: AppStore.theme.text.muted;
+            }
+            CutlassText {
+                text: root.label;
+                style: AppStore.theme.typography.label;
+                foreground: AppStore.theme.text.primary;
+                vertical-alignment: center;
+            }
+        }
+
+        CutlassText {
+            text: round(root.duration-ms / 100) / 10 + "s";
+            style: AppStore.theme.typography.caption;
+            foreground: AppStore.theme.text.muted;
+        }
+    }
+
+    // Payload: "label|duration-ms"
+    drag := DragArea {
+        allow-copy: true;
+        allow-move: true;
+        data: DataTransferBridge.plain-text(root.label + "|" + root.duration-ms);
+    }
+}
+
+component TimelineClip inherits Rectangle {
+    in property <string> label;
+    in property <int> hue;
+
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: #ffffff22;
+    background: root.hue == 0 ? #3b82f688
+        : (root.hue == 1 ? #a855f788 : #14b8a688);
+    clip: true;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+
+        CutlassText {
+            horizontal-stretch: 1;
+            vertical-stretch: 1;
+            vertical-alignment: center;
+            text: root.label;
+            style: AppStore.theme.typography.caption;
+            foreground: #f8fafc;
+            overflow: TextOverflow.elide;
+        }
+    }
+}
+
+export component DndSection inherits VerticalLayout {
+    spacing: AppStore.theme.metrics.spacing.md;
+    padding: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    // 100px per second — drop x maps to start time.
+    private property <length> pps: 100px;
+    private property <length> track-height: 56px;
+    private property <length> hover-x: 0px;
+    private property <int> hover-duration-ms: 2500;
+    private property <string> hover-label: "";
+    private property <bool> track-has-drag: false;
+    private property <string> status: "Drag media onto the main track. Drop position sets clip start.";
+
+    pure function format-time(ms: int) -> string {
+        if (ms < 0) {
+            return "0.0s";
+        }
+        return (round(ms / 100) / 10) + "s";
+    }
+
+    pure function x-to-ms(x: length) -> int {
+        return max(0, round((x / root.pps) * 1000));
+    }
+
+    SectionTitle { text: "Drag & Drop"; }
+    SectionHint {
+        text: "Library → timeline mimic. DropArea.position.x maps to start time (pps = 100px/s). Ghost shows insertion while dragging.";
+    }
+
+    FieldLabel { text: "Library"; }
+    HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.sm;
+        vertical-stretch: 0;
+
+        MediaChip {
+            width: 120px;
+            label: "Intro.mp4";
+            duration-ms: 3000;
+        }
+        MediaChip {
+            width: 110px;
+            label: "B-roll";
+            duration-ms: 2000;
+        }
+        MediaChip {
+            width: 120px;
+            label: "VO take 2";
+            duration-ms: 4000;
+        }
+        MediaChip {
+            width: 110px;
+            label: "A-roll";
+            duration-ms: 2500;
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        Rectangle {
+            width: 72px;
+            height: 32px;
+            y: 4px;
+            border-radius: AppStore.theme.metrics.radius.sm;
+            border-width: 1px;
+            border-color: #ffffff14;
+            background: clear-ta.has-hover ? #242424 : #1a1a1a;
+
+            CutlassText {
+                width: 100%;
+                height: 100%;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                text: "Clear";
+                style: AppStore.theme.typography.label;
+                foreground: AppStore.theme.text.secondary;
+            }
+
+            clear-ta := TouchArea {
+                clicked => {
+                    TimelineDemo.clear-clips();
+                    root.status = "Timeline cleared.";
+                }
+            }
+        }
+    }
+
+    FieldLabel { text: "Main track"; }
+
+    timeline := Rectangle {
+        vertical-stretch: 0;
+        height: 28px + root.track-height + 8px;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: root.track-has-drag ? AppStore.theme.accent.primary : #ffffff14;
+        background: #0e0e0e;
+        clip: true;
+        animate border-color { duration: 120ms; easing: ease-out; }
+
+        VerticalLayout {
+            spacing: 0;
+
+            // Ruler
+            Rectangle {
+                height: 28px;
+                vertical-stretch: 0;
+                background: #141414;
+
+                for t in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]: Rectangle {
+                    x: t * root.pps;
+                    width: 1px;
+                    height: parent.height;
+                    background: #ffffff10;
+
+                    CutlassText {
+                        x: 4px;
+                        y: 6px;
+                        text: t + "s";
+                        style: AppStore.theme.typography.caption;
+                        foreground: AppStore.theme.text.muted;
+                    }
+                }
+            }
+
+            // Track / drop surface
+            track := Rectangle {
+                height: root.track-height;
+                vertical-stretch: 0;
+                background: #121212;
+
+                for clip[i] in TimelineDemo.clips: TimelineClip {
+                    x: clip.start-ms * root.pps / 1000;
+                    y: 8px;
+                    width: max(36px, clip.duration-ms * root.pps / 1000);
+                    height: parent.height - 16px;
+                    label: clip.label;
+                    hue: clip.hue;
+                }
+
+                if root.track-has-drag: Rectangle {
+                    x: root.hover-x;
+                    y: 8px;
+                    width: max(36px, root.hover-duration-ms * root.pps / 1000);
+                    height: parent.height - 16px;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: AppStore.theme.accent.primary;
+                    background: AppStore.theme.accent.primary.with-alpha(0.22);
+
+                    CutlassText {
+                        width: 100%;
+                        height: 100%;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        text: root.hover-label;
+                        style: AppStore.theme.typography.caption;
+                        foreground: AppStore.theme.accent.primary;
+                        overflow: TextOverflow.elide;
+                    }
+                }
+
+                if root.track-has-drag: Rectangle {
+                    x: root.hover-x - 1px;
+                    width: 2px;
+                    height: 100%;
+                    background: AppStore.theme.accent.primary;
+                }
+
+                drop := DropArea {
+                    can-drop(event) => {
+                        if (!DataTransferBridge.has-plain-text(event.data)) {
+                            return DragAction.none;
+                        }
+                        let payload = DataTransferBridge.read-plain-text(event.data);
+                        root.hover-x = max(0px, event.position.x);
+                        root.hover-label = TimelineDemo.payload-label(payload);
+                        root.hover-duration-ms = TimelineDemo.payload-duration-ms(payload);
+                        root.track-has-drag = true;
+                        return DragAction.copy;
+                    }
+                    dropped(event) => {
+                        if (!DataTransferBridge.has-plain-text(event.data)) {
+                            root.track-has-drag = false;
+                            return DragAction.none;
+                        }
+                        let payload = DataTransferBridge.read-plain-text(event.data);
+                        let label = TimelineDemo.payload-label(payload);
+                        let duration-ms = TimelineDemo.payload-duration-ms(payload);
+                        let start-ms = root.x-to-ms(max(0px, event.position.x));
+                        TimelineDemo.push-clip(label, start-ms, duration-ms);
+                        root.status = "Created \"" + label + "\" at "
+                            + root.format-time(start-ms)
+                            + " (" + root.format-time(duration-ms) + ")";
+                        root.track-has-drag = false;
+                        return DragAction.copy;
+                    }
+                    changed has-drag => {
+                        if (!self.has-drag) {
+                            root.track-has-drag = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    StatusLine {
+        text: root.track-has-drag
+            ? ("Hover @ " + root.format-time(root.x-to-ms(root.hover-x))
+                + " → " + root.hover-label)
+            : root.status;
+    }
+
+    SectionHint {
+        text: "DropEvent.position is local to the DropArea — here x→time via pps. Same mapping the editor timeline would use (plus scroll offset). Auto-copy so library chips stay put.";
+    }
+}

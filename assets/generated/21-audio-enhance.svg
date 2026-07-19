@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <title>Audio enhance</title>
+  <g fill="currentColor">
+    <rect x="3" y="14" width="2.5" height="5" rx="1.25"/>
+    <rect x="8" y="10" width="2.5" height="13" rx="1.25"/>
+    <rect x="13" y="5" width="2.5" height="23" rx="1.25"/>
+    <rect x="18" y="12" width="2.5" height="9" rx="1.25"/>
+    <rect x="23" y="14" width="2.5" height="5" rx="1.25"/>
+    <path d="M24 2.5c.7 2.55 2.2 4.05 4.75 4.75C26.2 7.95 24.7 9.45 24 12c-.7-2.55-2.2-4.05-4.75-4.75C21.8 6.55 23.3 5.05 24 2.5Z"/>
+    <path d="m27.1 30.2 3.4-3.4v3.4z"/>
+  </g>
+</svg>

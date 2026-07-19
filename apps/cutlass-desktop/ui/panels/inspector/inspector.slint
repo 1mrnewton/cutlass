@@ -74,6 +74,8 @@ component ProjectInspector inherits VerticalLayout {
 
                 CutlassText {
                     text: field.value;
+                    // Path is often wider than the panel — tip the full string.
+                    tip: field.label == "Path" && field.value != "—" ? field.value : "";
                     horizontal-stretch: 1;
                     vertical-alignment: center;
                     style: AppStore.theme.typography.body;

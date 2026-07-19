@@ -15,6 +15,9 @@ slint = { version = "=1.17.1", features = [
     "unstable-wgpu-29",
     "renderer-femtovg-wgpu",
 ] }
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+rfd = "0.17"
 
 [build-dependencies]
 slint-build = "=1.17.1"

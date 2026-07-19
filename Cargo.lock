@@ -1325,7 +1325,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "cutlass-ai"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "base64",
  "cutlass-commands",
@@ -1341,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-analysis"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "rusqlite",
  "tempfile",
@@ -1349,7 +1349,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-cli"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "cutlass-compositor",
  "cutlass-text",
@@ -1358,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-cloud"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "keyring",
  "serde",
@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-commands"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "cutlass-models",
  "serde",
@@ -1381,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-compositor"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "bytemuck",
  "cutlass-core",
@@ -1398,7 +1398,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-core"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-decoder"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "cutlass-core",
  "gif",
@@ -1433,7 +1433,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-desktop"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "cpal",
  "crossbeam-channel",
@@ -1472,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-encoder"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "cutlass-core",
  "cutlass-decoder",
@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-engine"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "cutlass-commands",
  "cutlass-compositor",
@@ -1506,11 +1506,11 @@ dependencies = [
 
 [[package]]
 name = "cutlass-jobs"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 
 [[package]]
 name = "cutlass-mobile"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "android_logger",
  "cutlass-commands",
@@ -1530,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-models"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "cutlass-core",
  "rustc-hash 2.1.2",
@@ -1543,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-render"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "cutlass-compositor",
  "cutlass-core",
@@ -1563,7 +1563,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-settings"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "dirs",
  "tempfile",
@@ -1572,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-shapes"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "cutlass-core",
  "tiny-skia 0.11.4",
@@ -1580,11 +1580,11 @@ dependencies = [
 
 [[package]]
 name = "cutlass-storage"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 
 [[package]]
 name = "cutlass-text"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "cosmic-text",
  "cutlass-compositor",
@@ -1593,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-transcription"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "cap-std",
  "cutlass-analysis",
@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "cutlass-ui-gallery"
-version = "0.6.0-alpha.0"
+version = "0.6.1-alpha.0"
 dependencies = [
  "arboard",
  "image",

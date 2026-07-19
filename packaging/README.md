@@ -11,10 +11,10 @@ The Linux script is kept working so packaging is ready the day that happens.
 
 ## Versioning
 
-- Cargo workspace version: `0.5.3-alpha.0` (semver pre-release) in the root
+- Cargo workspace version: `0.6.1-alpha.0` (semver pre-release) in the root
   `Cargo.toml`.
-- Git tag for the alpha line: `alpha-0.5.3` (and `alpha-0.5.4`, …).
-- macOS `Info.plist` short version: `0.5.3-alpha`.
+- Git tag for the alpha line: `alpha-0.6.1` (and `alpha-0.6.2`, …).
+- macOS `Info.plist` short version: `0.6.1-alpha`.
 
 ## Local builds
 
@@ -22,17 +22,17 @@ The Linux script is kept working so packaging is ready the day that happens.
 # macOS .app: no bundled media libraries; AVFoundation is part of the OS
 cargo build --release -p cutlass-desktop
 ./scripts/package-macos.sh
-# → dist/Cutlass-0.5.3-alpha.0-macos-arm64.zip
+# → dist/Cutlass-0.6.1-alpha.0-macos-arm64.zip
 
 # Linux tarball (dormant preview: UI only, no media decode yet)
 cargo build --release -p cutlass-desktop
 ./scripts/package-linux.sh
-# → dist/Cutlass-0.5.3-alpha.0-linux-x86_64.tar.gz
+# → dist/Cutlass-0.6.1-alpha.0-linux-x86_64.tar.gz
 
 # Windows zip: no bundled media libraries; Media Foundation is part of the OS
 cargo build --release -p cutlass-desktop
 .\scripts\package-windows.ps1
-# → dist/Cutlass-0.5.3-alpha.0-windows-x86_64.zip
+# → dist/Cutlass-0.6.1-alpha.0-windows-x86_64.zip
 ```
 
 ### Windows installer (Setup.exe)
@@ -46,11 +46,11 @@ choco install innosetup
 
 # stages the payload (reusing package-windows.ps1) and compiles the installer
 .\scripts\package-windows-installer.ps1
-# → dist/Cutlass-0.5.3-alpha.0-windows-x86_64-Setup.exe
+# → dist/Cutlass-0.6.1-alpha.0-windows-x86_64-Setup.exe
 
 # native ARM64 installer (run on an ARM64 Windows host):
 .\scripts\package-windows-installer.ps1 -Arch arm64
-# → dist/Cutlass-0.5.3-alpha.0-windows-arm64-Setup.exe
+# → dist/Cutlass-0.6.1-alpha.0-windows-arm64-Setup.exe
 ```
 
 The Inno Setup script lives at `packaging/windows/cutlass.iss`; the PowerShell

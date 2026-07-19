@@ -1,5 +1,16 @@
 use super::*;
 
+/// Text uses the live full-frame override path during transform gestures.
+/// Its transparent full-canvas sprite is valid at the renderer boundary, but
+/// the transformed embedded image is not reliably painted by Slint on macOS
+/// (the selection overlay moves while the title disappears). Other clip kinds
+/// retain the cheaper partitioned-sprite path.
+fn supports_ui_gesture_sprite(project: &Project, clip_id: ClipId) -> bool {
+    !project
+        .clip(clip_id)
+        .is_some_and(|clip| matches!(&clip.content, ClipSource::Generated(Generator::Text { .. })))
+}
+
 pub(super) fn clear_gesture_sprite_ready(preview_weak: &slint::Weak<PreviewStore<'static>>) {
     let weak = preview_weak.clone();
     if let Err(e) = slint::invoke_from_event_loop(move || {
@@ -24,6 +35,14 @@ pub(super) fn begin_transform_gesture(
         error!(clip, "begin transform gesture ignored: unparsable clip id");
         return;
     };
+    if !supports_ui_gesture_sprite(engine.project(), clip_id) {
+        // TransformOverride will render the complete frame on each move while
+        // sprite_mode is false, keeping text pixels and controls in lockstep.
+        sprite_mode.set(false);
+        clear_gesture_sprite_ready(preview_weak);
+        debug!(%clip_id, tick, "text gesture using live frame preview");
+        return;
+    }
     let at = RationalTime::new(tick, tl_rate);
     let started = Instant::now();
     let result = match fit.fit_bound() {
@@ -224,5 +243,39 @@ fn deliver_frame(
         }
     }) {
         error!("failed to deliver preview frame to UI: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_transform_gestures_use_live_frames_instead_of_ui_sprites() {
+        let mut project = Project::new("p", Rational::FPS_24);
+        let text_track = project.add_track(TrackKind::Text, "T1");
+        let text = project
+            .add_generated(
+                text_track,
+                Generator::Text {
+                    content: "hello".into(),
+                    style: Default::default(),
+                },
+                TimeRange::at_rate(0, 24, Rational::FPS_24),
+            )
+            .unwrap();
+        let shape_track = project.add_track(TrackKind::Sticker, "S1");
+        let shape = project
+            .add_generated(
+                shape_track,
+                Generator::SolidColor {
+                    rgba: [255, 0, 0, 255],
+                },
+                TimeRange::at_rate(0, 24, Rational::FPS_24),
+            )
+            .unwrap();
+
+        assert!(!supports_ui_gesture_sprite(&project, text));
+        assert!(supports_ui_gesture_sprite(&project, shape));
     }
 }

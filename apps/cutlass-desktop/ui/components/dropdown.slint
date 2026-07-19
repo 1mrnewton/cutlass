@@ -33,6 +33,7 @@ export component CutlassDropdown inherits Rectangle {
 
         CutlassText {
             horizontal-stretch: 1;
+            vertical-stretch: 1;
             vertical-alignment: center;
             text: root.current == "" ? root.placeholder : root.current;
             style: AppStore.theme.typography.body;
@@ -40,13 +41,18 @@ export component CutlassDropdown inherits Rectangle {
             overflow: TextOverflow.elide;
         }
 
-        Image {
+        Rectangle {
             width: 12px;
-            height: 12px;
-            vertical-alignment: center;
-            source: @image-url("../../../../assets/icon/ui/chevron-down.svg");
-            image-fit: contain;
-            colorize: AppStore.theme.text.muted;
+            vertical-stretch: 1;
+
+            Image {
+                width: 12px;
+                height: 12px;
+                y: (parent.height - self.height) / 2;
+                source: @image-url("../../../../assets/icon/ui/chevron-down.svg");
+                image-fit: contain;
+                colorize: AppStore.theme.text.muted;
+            }
         }
     }
 

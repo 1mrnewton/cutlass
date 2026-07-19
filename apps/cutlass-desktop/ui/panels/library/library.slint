@@ -44,18 +44,19 @@ component LibraryTab inherits Rectangle {
     in property <image> icon;
     in property <string> label;
     in property <string> tab-id;
+    in property <bool> compact: false;
 
     property <bool> active: LibraryState.active-tab == root.tab-id;
     property <color> ink: root.active ? LibraryStyle.accent
         : ta.has-hover ? AppStore.theme.text.primary
         : AppStore.theme.text.secondary;
 
-    width: max(38px, lbl.preferred-width + 10px);
+    width: root.compact ? 38px : max(38px, lbl.preferred-width + 10px);
     background: transparent;
 
     VerticalLayout {
         alignment: center;
-        spacing: 5px;
+        spacing: root.compact ? 0px : 5px;
 
         HorizontalLayout {
             alignment: center;
@@ -69,6 +70,7 @@ component LibraryTab inherits Rectangle {
         }
 
         lbl := CutlassText {
+            visible: !root.compact;
             text: root.label;
             horizontal-alignment: center;
             style: { size: 12px, weight: 600, italic: false };
@@ -242,20 +244,26 @@ component ImportToolbar inherits HorizontalLayout {
         border-color: #ffffff22;
 
         import-row := HorizontalLayout {
-            padding-left: AppStore.theme.metrics.spacing.md;
-            padding-right: AppStore.theme.metrics.spacing.md;
             spacing: AppStore.theme.metrics.spacing.xs;
             alignment: center;
 
-            Image {
+            Rectangle {
                 width: 14px;
-                height: 14px;
-                source: @image-url("../../../../../assets/icon/library/folder-plus.svg");
-                image-fit: contain;
-                colorize: AppStore.theme.text.primary;
+                vertical-stretch: 1;
+
+                Image {
+                    width: 14px;
+                    height: 14px;
+                    y: (parent.height - self.height) / 2;
+                    source: @image-url("../../../../../assets/icon/library/folder-plus.svg");
+                    image-fit: contain;
+                    colorize: AppStore.theme.text.primary;
+                }
             }
 
             CutlassText {
+                vertical-stretch: 1;
+                vertical-alignment: center;
                 text: "Import";
                 style: AppStore.theme.typography.label;
             }
@@ -292,39 +300,47 @@ export component LibraryPanel inherits PanelBase {
                 tabs := HorizontalLayout {
                     padding-left: AppStore.theme.metrics.spacing.xs;
                     alignment: start;
-                    spacing: AppStore.theme.metrics.spacing.md;
+                    spacing: root.width < 380px
+                        ? AppStore.theme.metrics.spacing.xs
+                        : AppStore.theme.metrics.spacing.md;
 
                     LibraryTab {
+                        compact: root.width < 380px;
                         tab-id: "media";
                         icon: @image-url("../../../../../assets/icon/library/media.svg");
                         label: "Media";
                     }
 
                     LibraryTab {
+                        compact: root.width < 380px;
                         tab-id: "audio";
                         icon: @image-url("../../../../../assets/icon/library/audio.svg");
                         label: "Audio";
                     }
 
                     LibraryTab {
+                        compact: root.width < 380px;
                         tab-id: "text";
                         icon: @image-url("../../../../../assets/icon/library/text.svg");
                         label: "Text";
                     }
 
                     LibraryTab {
+                        compact: root.width < 380px;
                         tab-id: "stickers";
                         icon: @image-url("../../../../../assets/icon/library/stickers.svg");
                         label: "Stickers";
                     }
 
                     LibraryTab {
+                        compact: root.width < 380px;
                         tab-id: "effects";
                         icon: @image-url("../../../../../assets/icon/library/effects.svg");
                         label: "Effects";
                     }
 
                     LibraryTab {
+                        compact: root.width < 380px;
                         tab-id: "transitions";
                         icon: @image-url("../../../../../assets/icon/library/transitions.svg");
                         label: "Transitions";

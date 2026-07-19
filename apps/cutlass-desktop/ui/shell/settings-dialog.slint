@@ -209,6 +209,10 @@ export component SettingsDialog inherits Rectangle {
         SettingsBackend.refresh-caches();
     }
 
+    changed section => {
+        settings-scroll.viewport-y = 0px;
+    }
+
     function close() {
         if (SettingsBackend.cache-busy-id != "") {
             root.section = 2;
@@ -257,14 +261,14 @@ export component SettingsDialog inherits Rectangle {
                     border-radius: AppStore.theme.metrics.radius.sm;
                     background: close-ta.has-hover ? #ffffff14 : transparent;
 
-                    CutlassText {
-                        width: parent.width;
-                        height: parent.height;
-                        text: "✕";
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        style: AppStore.theme.typography.label;
-                        foreground: AppStore.theme.text.secondary;
+                    Image {
+                        width: 14px;
+                        height: 14px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        source: @image-url("../../../../assets/icon/ui/x.svg");
+                        image-fit: contain;
+                        colorize: AppStore.theme.text.secondary;
                     }
 
                     close-ta := TouchArea {
@@ -327,7 +331,7 @@ export component SettingsDialog inherits Rectangle {
                 }
 
                 // Content pane.
-                CutlassScrollView {
+                settings-scroll := CutlassScrollView {
                     horizontal-stretch: 1;
                     viewport-width: self.width;
                     viewport-height: content.preferred-height;
@@ -335,7 +339,8 @@ export component SettingsDialog inherits Rectangle {
                     enable-key-scroll: true;
 
                     content := VerticalLayout {
-                        width: parent.width;
+                        width: max(0px, settings-scroll.width - AppStore.theme.scrollbar.size);
+                        padding-right: AppStore.theme.metrics.spacing.sm;
                         alignment: start;
                         spacing: AppStore.theme.metrics.spacing.md;
 

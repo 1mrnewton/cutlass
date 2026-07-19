@@ -145,11 +145,11 @@ export component TitleBar inherits Rectangle {
             }
         }
 
-        Rectangle {
+        if !AppState.is-macos: Rectangle {
             width: AppStore.theme.metrics.spacing.sm;
         }
 
-        VerticalLayout {
+        if !AppState.is-macos: VerticalLayout {
             alignment: center;
 
             // File menu (app-owned drafts): New starts a fresh draft, Open
@@ -199,7 +199,7 @@ export component TitleBar inherits Rectangle {
             }
         }
 
-        VerticalLayout {
+        if !AppState.is-macos: VerticalLayout {
             alignment: center;
 
             // Shares AppState's reversible panel surface with agent app

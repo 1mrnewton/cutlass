@@ -55,24 +55,29 @@ component ProjectInspector inherits VerticalLayout {
 
         content := VerticalLayout {
             width: root.width;
-            spacing: 30px;
+            spacing: AppStore.theme.metrics.spacing.md;
             alignment: LayoutAlignment.start;
             padding: AppStore.theme.metrics.spacing.lg;
 
             for field in root.fields: HorizontalLayout {
-                spacing: AppStore.theme.metrics.spacing.lg;
+                spacing: AppStore.theme.metrics.spacing.md;
 
-                Text {
+                CutlassText {
                     text: field.label;
-                    min-width: 120px;
-                    color: AppStore.theme.text.secondary;
-                    font-size: AppStore.theme.typography.label.size;
+                    width: 96px;
+                    horizontal-stretch: 0;
+                    vertical-alignment: center;
+                    style: AppStore.theme.typography.label;
+                    foreground: AppStore.theme.text.secondary;
+                    overflow: elide;
                 }
 
-                Text {
+                CutlassText {
                     text: field.value;
                     horizontal-stretch: 1;
-                    wrap: TextWrap.char-wrap;
+                    vertical-alignment: center;
+                    style: AppStore.theme.typography.body;
+                    overflow: elide;
                 }
             }
         }

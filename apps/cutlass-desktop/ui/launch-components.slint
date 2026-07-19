@@ -1,0 +1,482 @@
+// Launch-screen-only primitives extracted to keep launch.slint focused on
+// screen composition and scrolling behavior.
+
+import { CutlassText } from "components/index.slint";
+import { AppStore } from "store/index.slint";
+import { TemplatesBackend, TemplateTile } from "lib/templates-backend.slint";
+
+// Frameless-window caption button (mirrors title-bar.slint's CaptionButton):
+// the launch screen has no editor TitleBar, so it carries its own window
+// controls and drag strip.
+export component WinButton inherits Rectangle {
+    in property <image> icon;
+    in property <bool> danger: false;
+    callback clicked();
+
+    width: 44px;
+    background: !ta.has-hover ? transparent
+        : danger ? #E81123
+        : #ffffff14;
+
+    Image {
+        width: 14px;
+        height: 14px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        image-fit: contain;
+        colorize: ta.has-hover || danger ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Left-rail navigation row. `active` is the current screen (Home); disabled
+// rows (enabled:false) are roadmap entries flagged with a "Soon" tag — quiet
+// and clearly not-yet-live rather than fake working links.
+export component RailNav inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    in property <string> tag: "";
+    callback clicked();
+
+    height: 34px;
+    border-radius: AppStore.theme.metrics.radius.md;
+    background: root.active ? #ffffff12
+        : (root.enabled && ta.has-hover) ? #ffffff0a
+        : transparent;
+
+    VerticalLayout {
+        alignment: center;
+
+        HorizontalLayout {
+            padding-left: AppStore.theme.metrics.spacing.md;
+            padding-right: AppStore.theme.metrics.spacing.md;
+            spacing: AppStore.theme.metrics.spacing.sm;
+
+            CutlassText {
+                text: root.label;
+                vertical-alignment: center;
+                style: AppStore.theme.typography.label;
+                foreground: root.active ? AppStore.theme.accent.primary
+                    : root.enabled ? AppStore.theme.text.primary
+                    : AppStore.theme.text.muted;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            if root.tag != "": Rectangle {
+                width: tag-text.preferred-width + 2 * AppStore.theme.metrics.spacing.sm;
+                background: #ffffff0f;
+                border-radius: AppStore.theme.metrics.radius.sm;
+
+                tag-text := CutlassText {
+                    text: root.tag;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    style: AppStore.theme.typography.caption;
+                    foreground: AppStore.theme.text.muted;
+                }
+            }
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A primary create/open action. `primary` marks the dominant action (filled
+// accent mark + brighter keyline); the secondary draws a hairline folder
+// glyph. The mark/title/subtitle sit bottom-anchored for an editorial feel.
+export component ActionCard inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> primary: false;
+    callback clicked();
+
+    border-radius: AppStore.theme.metrics.radius.lg;
+    border-width: AppStore.theme.metrics.stroke.hairline;
+    background: ta.has-hover ? AppStore.theme.panel.header-background : AppStore.theme.panel.background;
+    border-color: root.primary
+        ? (ta.has-hover ? AppStore.theme.accent.primary : #ffffff24)
+        : (ta.has-hover ? #ffffff33 : #ffffff14);
+
+    VerticalLayout {
+        padding: AppStore.theme.metrics.spacing.lg;
+        spacing: AppStore.theme.metrics.spacing.xs;
+
+        // Mark.
+        Rectangle {
+            width: 40px;
+            height: 40px;
+            border-radius: AppStore.theme.metrics.radius.md;
+            background: root.primary ? AppStore.theme.accent.primary : #ffffff12;
+
+            if root.primary: Image {
+                width: 20px;
+                height: 20px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                source: @image-url("../../../assets/icon/launch/plus.svg");
+                image-fit: contain;
+                colorize: AppStore.theme.accent.on-accent;
+            }
+
+            if !root.primary: Image {
+                width: 20px;
+                height: 20px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                source: @image-url("../../../assets/icon/launch/folder-open.svg");
+                image-fit: contain;
+                colorize: AppStore.theme.text.secondary;
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        CutlassText {
+            text: root.title;
+            style: AppStore.theme.typography.heading-md;
+        }
+
+        CutlassText {
+            text: root.subtitle;
+            style: AppStore.theme.typography.caption;
+            foreground: AppStore.theme.text.secondary;
+            wrap: word-wrap;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A row in the project gallery. The thumb is an honest placeholder (a neutral
+// frame chip with a play mark) — not a fabricated preview frame, as a draft
+// summary only carries name + modified time. A delete affordance stacks above
+// the row's click target so removing a draft never also opens it.
+export component ProjectRow inherits Rectangle {
+    in property <string> name;
+    in property <string> modified;
+    callback open();
+    callback remove();
+
+    height: 52px;
+    // Fill the list width so the whole row is a hover/click target (Slint
+    // would otherwise size the row to its text content).
+    max-width: 100000px;
+    border-radius: AppStore.theme.metrics.radius.md;
+    background: ta.has-hover || del.has-hover ? #ffffff0a : transparent;
+
+    HorizontalLayout {
+        padding-left: AppStore.theme.metrics.spacing.sm;
+        padding-right: AppStore.theme.metrics.spacing.md;
+        spacing: AppStore.theme.metrics.spacing.md;
+
+        VerticalLayout {
+            alignment: center;
+
+            Rectangle {
+                width: 56px;
+                height: 34px;
+                border-radius: AppStore.theme.metrics.radius.sm;
+                background: #1c1c1c;
+                border-width: AppStore.theme.metrics.stroke.hairline;
+                border-color: #ffffff14;
+
+                Image {
+                    width: 16px;
+                    height: 16px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    source: @image-url("../../../assets/icon/launch/clapperboard.svg");
+                    image-fit: contain;
+                    colorize: AppStore.theme.text.muted;
+                }
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            max-width: 100000px;
+            alignment: center;
+            spacing: 2px;
+
+            CutlassText {
+                text: root.name;
+                style: AppStore.theme.typography.body;
+                overflow: elide;
+            }
+
+            CutlassText {
+                text: root.modified;
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.muted;
+                overflow: elide;
+            }
+        }
+
+        // Reserve the slot the delete button overlays so the open hint never
+        // sits under it.
+        Rectangle {
+            width: 64px;
+
+            CutlassText {
+                width: parent.width;
+                height: parent.height;
+                text: "Open";
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                style: AppStore.theme.typography.label;
+                foreground: AppStore.theme.accent.primary;
+                opacity: ta.has-hover && !del.has-hover ? 1.0 : 0.0;
+            }
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.open();
+        }
+    }
+
+    // Delete affordance: declared after `ta` so it stacks above and keeps its
+    // own clicks (deleting a draft must never also open it). Shown only while
+    // the row or the button itself is hovered.
+    del := TouchArea {
+        width: 64px;
+        height: 28px;
+        x: parent.width - self.width - AppStore.theme.metrics.spacing.md;
+        y: (parent.height - self.height) / 2;
+        visible: ta.has-hover || self.has-hover;
+        mouse-cursor: pointer;
+        clicked => {
+            root.remove();
+        }
+
+        Rectangle {
+            border-radius: AppStore.theme.metrics.radius.sm;
+            background: del.has-hover ? #E8112333 : transparent;
+
+            CutlassText {
+                width: parent.width;
+                height: parent.height;
+                text: "Delete";
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                style: AppStore.theme.typography.label;
+                foreground: del.has-hover ? #ff6b6b : AppStore.theme.text.muted;
+                opacity: del.has-hover ? 1.0 : 0.0;
+            }
+        }
+    }
+}
+
+// One template-category filter chip (gallery header row).
+export component CategoryChip inherits Rectangle {
+    in property <string> value;
+    in property <string> label;
+
+    property <bool> active: TemplatesBackend.category == value;
+
+    width: chip-text.preferred-width + 2 * AppStore.theme.metrics.spacing.md;
+    height: 26px;
+    border-radius: 13px;
+    background: active ? #ffffff1e
+        : ta.has-hover ? #ffffff0f
+        : #ffffff08;
+
+    chip-text := CutlassText {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        style: AppStore.theme.typography.label;
+        foreground: active ? AppStore.theme.text.primary : AppStore.theme.text.secondary;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            TemplatesBackend.category = root.value;
+            TemplatesBackend.refresh(root.value);
+        }
+    }
+}
+
+// One template gallery card: 16:9 preview on top, name + author below, a
+// state overlay while a use is in flight. The whole card is the click
+// target ("Use this template").
+export component TemplateCard inherits Rectangle {
+    in property <TemplateTile> tile;
+    in property <int> index;
+
+    border-radius: AppStore.theme.metrics.radius.lg;
+    border-width: AppStore.theme.metrics.stroke.hairline;
+    border-color: ta.has-hover ? #ffffff33 : #ffffff14;
+    background: ta.has-hover ? AppStore.theme.panel.header-background : AppStore.theme.panel.background;
+    clip: true;
+
+    VerticalLayout {
+        spacing: AppStore.theme.metrics.spacing.none;
+
+        // Preview frame (16:9 slice of the card).
+        Rectangle {
+            height: parent.width * 9 / 16;
+            background: #1c1c1c;
+            clip: true;
+
+            if tile.has-preview: Image {
+                width: parent.width;
+                height: parent.height;
+                source: tile.preview;
+                image-fit: cover;
+            }
+
+            if !tile.has-preview: CutlassText {
+                width: parent.width;
+                height: parent.height;
+                text: "▶";
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                style: AppStore.theme.typography.heading-md;
+                foreground: AppStore.theme.text.muted;
+            }
+
+            // Corner chip: duration + slot count.
+            if tile.label != "": Rectangle {
+                x: 6px;
+                y: 6px;
+                width: chip.preferred-width + 10px;
+                height: 18px;
+                border-radius: 4px;
+                background: #000000a0;
+
+                chip := CutlassText {
+                    width: parent.width;
+                    text: tile.label;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    style: AppStore.theme.typography.caption;
+                    foreground: #ffffffcc;
+                }
+            }
+
+            // Hover hint.
+            if ta.has-hover && tile.state == "": Rectangle {
+                background: #00000066;
+
+                CutlassText {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "Use template";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    style: AppStore.theme.typography.label;
+                    foreground: AppStore.theme.text.primary;
+                }
+            }
+
+            // In-flight states.
+            if tile.state == "downloading" || tile.state == "installing" || tile.state == "picking": Rectangle {
+                background: #000000a0;
+
+                VerticalLayout {
+                    alignment: center;
+                    padding: AppStore.theme.metrics.spacing.md;
+                    spacing: AppStore.theme.metrics.spacing.sm;
+
+                    CutlassText {
+                        text: tile.state == "downloading" ? "Downloading…"
+                            : tile.state == "installing" ? "Installing…"
+                            : "Choose your media…";
+                        horizontal-alignment: center;
+                        style: AppStore.theme.typography.caption;
+                    }
+
+                    if tile.state == "downloading": Rectangle {
+                        height: 3px;
+                        border-radius: 1.5px;
+                        background: #ffffff22;
+
+                        Rectangle {
+                            x: 0;
+                            width: parent.width * max(0.05, tile.progress);
+                            height: parent.height;
+                            border-radius: parent.border-radius;
+                            background: AppStore.theme.accent.primary;
+                        }
+                    }
+                }
+            }
+
+            if tile.state == "unsupported" || tile.state == "failed": Rectangle {
+                background: #000000a0;
+
+                CutlassText {
+                    width: parent.width - 2 * AppStore.theme.metrics.spacing.md;
+                    x: AppStore.theme.metrics.spacing.md;
+                    height: parent.height;
+                    text: tile.state == "unsupported"
+                        ? "Needs a newer Cutlass"
+                        : "Couldn't install — click to retry";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    style: AppStore.theme.typography.caption;
+                    foreground: tile.state == "unsupported" ? AppStore.theme.text.secondary : #ff8888;
+                }
+            }
+        }
+
+        // Name + author.
+        VerticalLayout {
+            padding: AppStore.theme.metrics.spacing.sm;
+            padding-left: AppStore.theme.metrics.spacing.md;
+            padding-right: AppStore.theme.metrics.spacing.md;
+            spacing: 1px;
+
+            CutlassText {
+                text: tile.name;
+                style: AppStore.theme.typography.label;
+                overflow: elide;
+            }
+
+            CutlassText {
+                text: tile.author;
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.muted;
+                overflow: elide;
+            }
+        }
+    }
+
+    ta := TouchArea {
+        enabled: tile.state == "" || tile.state == "failed";
+        mouse-cursor: self.enabled ? pointer : default;
+        clicked => {
+            TemplatesBackend.use-template(root.index);
+        }
+    }
+}

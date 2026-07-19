@@ -80,14 +80,14 @@ export component ExportDialog inherits Rectangle {
                     background: close-ta.has-hover && root.configuring ? #ffffff14 : transparent;
                     opacity: root.configuring ? 1.0 : 0.3;
 
-                    CutlassText {
-                        width: parent.width;
-                        height: parent.height;
-                        text: "✕";
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        style: AppStore.theme.typography.label;
-                        foreground: AppStore.theme.text.secondary;
+                    Image {
+                        width: 14px;
+                        height: 14px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        source: @image-url("../../../../assets/icon/ui/x.svg");
+                        image-fit: contain;
+                        colorize: AppStore.theme.text.secondary;
                     }
 
                     close-ta := TouchArea {

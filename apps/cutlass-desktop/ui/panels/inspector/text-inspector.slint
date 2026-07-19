@@ -138,6 +138,7 @@ component MultilineTextInput inherits Rectangle {
         viewport-height: max(self.height, input.preferred-height);
         show-horizontal-scrollbar: false;
         show-vertical-scrollbar: input.preferred-height > self.height;
+        interactive: false;
 
         input := TextInput {
             width: editor-scroll.width;
@@ -648,6 +649,7 @@ export component TextInspector inherits VerticalLayout {
         viewport-width: root.width;
         viewport-height: content.preferred-height;
         show-horizontal-scrollbar: false;
+        interactive: false;
 
         // Same blur catcher for the property sheet: any click that no
         // control claims (labels, dividers, padding) unfocuses the active
@@ -1105,6 +1107,7 @@ export component TextInspector inherits VerticalLayout {
                 viewport-height: self.height;
                 show-horizontal-scrollbar: false;
                 show-vertical-scrollbar: false;
+                interactive: false;
 
                 preset-styles := HorizontalLayout {
                     spacing: AppStore.theme.metrics.spacing.md;

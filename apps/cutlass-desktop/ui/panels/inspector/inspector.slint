@@ -52,6 +52,7 @@ component ProjectInspector inherits VerticalLayout {
         viewport-width: root.width;
         viewport-height: content.preferred-height;
         show-horizontal-scrollbar: false;
+        interactive: false;
 
         content := VerticalLayout {
             width: root.width;
@@ -624,6 +625,7 @@ component VisualClipInspector inherits VerticalLayout {
         viewport-width: root.width;
         viewport-height: content.preferred-height;
         show-horizontal-scrollbar: false;
+        interactive: false;
 
         // Blur catcher: any click that no control claims (labels, dividers,
         // padding) unfocuses the active text input, which commits its
@@ -762,6 +764,7 @@ component AudioClipInspector inherits VerticalLayout {
         viewport-width: root.width;
         viewport-height: content.preferred-height;
         show-horizontal-scrollbar: false;
+        interactive: false;
 
         TouchArea {
             x: 0;

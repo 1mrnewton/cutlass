@@ -1,0 +1,482 @@
+// Demo bodies for each gallery section. Imported by app.slint.
+
+import {
+    AccentButton,
+    SubtleButton,
+    CutlassDropdown,
+    CutlassSlider,
+    CutlassLineInput,
+    CutlassText,
+    CutlassColorSwatch,
+    CutlassScrollView,
+    CutlassGridView,
+    VerticalDivider,
+    HorizontalDivider,
+    PanelBase,
+    PanelHeader,
+    HSplitGripLead,
+    HSplitGripTrail,
+} from "../../../apps/cutlass-desktop/ui/components/index.slint";
+import { AppStore } from "../../../apps/cutlass-desktop/ui/store/app-store.slint";
+
+export component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+
+    height: 32px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: active ? AppStore.theme.accent.primary.with-alpha(0.14)
+        : (ta.has-hover ? #ffffff10 : transparent);
+
+    CutlassText {
+        x: AppStore.theme.metrics.spacing.md;
+        width: parent.width - 2 * AppStore.theme.metrics.spacing.md;
+        height: 100%;
+        vertical-alignment: center;
+        text: root.label;
+        style: AppStore.theme.typography.label;
+        foreground: active ? AppStore.theme.accent.primary : AppStore.theme.text.secondary;
+        overflow: TextOverflow.elide;
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component SectionTitle inherits CutlassText {
+    style: AppStore.theme.typography.heading-sm;
+    foreground: AppStore.theme.text.primary;
+    vertical-stretch: 0;
+}
+
+component SectionHint inherits CutlassText {
+    style: AppStore.theme.typography.caption;
+    foreground: AppStore.theme.text.muted;
+    wrap: word-wrap;
+    vertical-stretch: 0;
+}
+
+component StatusLine inherits CutlassText {
+    style: AppStore.theme.typography.caption;
+    foreground: AppStore.theme.text.secondary;
+    vertical-stretch: 0;
+}
+
+export component ButtonsSection inherits VerticalLayout {
+    spacing: AppStore.theme.metrics.spacing.md;
+    padding: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    in-out property <string> status: "Click a button";
+
+    SectionTitle { text: "Buttons"; }
+    SectionHint { text: "AccentButton is the primary action; SubtleButton is the quiet secondary."; }
+
+    HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+        vertical-stretch: 0;
+
+        AccentButton {
+            label: "Export";
+            clicked => { root.status = "AccentButton clicked"; }
+        }
+        SubtleButton {
+            label: "Cancel";
+            clicked => { root.status = "SubtleButton clicked"; }
+        }
+        AccentButton {
+            label: "Disabled";
+            enabled: false;
+        }
+    }
+
+    StatusLine { text: root.status; }
+}
+
+export component TextSection inherits VerticalLayout {
+    spacing: AppStore.theme.metrics.spacing.md;
+    padding: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    SectionTitle { text: "Text"; }
+    SectionHint { text: "CutlassText reads size/weight from AppStore.theme.typography."; }
+
+    CutlassText {
+        text: "Heading medium";
+        style: AppStore.theme.typography.heading-md;
+        vertical-stretch: 0;
+    }
+    CutlassText {
+        text: "Heading small";
+        style: AppStore.theme.typography.heading-sm;
+        vertical-stretch: 0;
+    }
+    CutlassText {
+        text: "Body — the default reading style for chrome copy.";
+        style: AppStore.theme.typography.body;
+        vertical-stretch: 0;
+    }
+    CutlassText {
+        text: "Label";
+        style: AppStore.theme.typography.label;
+        vertical-stretch: 0;
+    }
+    CutlassText {
+        text: "Caption / muted helper";
+        style: AppStore.theme.typography.caption;
+        foreground: AppStore.theme.text.muted;
+        vertical-stretch: 0;
+    }
+    CutlassText {
+        text: "Mono 0123456789";
+        style: AppStore.theme.typography.mono;
+        mono: true;
+        vertical-stretch: 0;
+    }
+}
+
+export component InputsSection inherits VerticalLayout {
+    spacing: AppStore.theme.metrics.spacing.md;
+    padding: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    private property <[string]> speeds: ["0.25x", "0.5x", "0.75x", "1x", "1.5x", "2x", "3x", "4x"];
+    private property <[string]> fonts: [
+        "Inter", "SF Pro", "Helvetica", "Arial", "Georgia",
+        "Menlo", "JetBrains Mono", "Roboto", "Courier New", "Times New Roman",
+    ];
+
+    in-out property <string> line-text: "Editable value";
+    in-out property <string> speed: "1x";
+    in-out property <string> font: "Inter";
+    in-out property <string> font-query: "";
+    in-out property <color> swatch: #3bb0ff;
+    in-out property <string> status: "Interact with an input";
+
+    SectionTitle { text: "Inputs"; }
+    SectionHint { text: "Line input, dropdown (plain + searchable), and color swatch."; }
+
+    CutlassText {
+        text: "CutlassLineInput";
+        style: AppStore.theme.typography.label;
+        foreground: AppStore.theme.text.secondary;
+        vertical-stretch: 0;
+    }
+    CutlassLineInput {
+        height: 28px;
+        vertical-stretch: 0;
+        text <=> root.line-text;
+        placeholder-text: "Type here";
+        edited(t) => { root.status = "edited: " + t; }
+        accepted(t) => { root.status = "accepted: " + t; }
+    }
+
+    CutlassText {
+        text: "CutlassDropdown";
+        style: AppStore.theme.typography.label;
+        foreground: AppStore.theme.text.secondary;
+        vertical-stretch: 0;
+    }
+    CutlassDropdown {
+        vertical-stretch: 0;
+        items: root.speeds;
+        current: root.speed;
+        selected(value) => {
+            root.speed = value;
+            root.status = "speed: " + value;
+        }
+    }
+
+    CutlassText {
+        text: "CutlassDropdown (searchable)";
+        style: AppStore.theme.typography.label;
+        foreground: AppStore.theme.text.secondary;
+        vertical-stretch: 0;
+    }
+    CutlassDropdown {
+        vertical-stretch: 0;
+        searchable: true;
+        query <=> root.font-query;
+        // Filtering is the caller's job; gallery shows the search chrome with the full list.
+        items: root.fonts;
+        current: root.font;
+        placeholder: "Font";
+        selected(value) => {
+            root.font = value;
+            root.status = "font: " + value;
+        }
+    }
+
+    CutlassText {
+        text: "CutlassColorSwatch";
+        style: AppStore.theme.typography.label;
+        foreground: AppStore.theme.text.secondary;
+        vertical-stretch: 0;
+    }
+    CutlassColorSwatch {
+        vertical-stretch: 0;
+        value <=> root.swatch;
+        changed(value) => {
+            root.swatch = value;
+            root.status = "color changed";
+        }
+    }
+
+    StatusLine { text: root.status; }
+}
+
+export component SliderSection inherits VerticalLayout {
+    spacing: AppStore.theme.metrics.spacing.md;
+    padding: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    in-out property <float> value: 42;
+    in-out property <string> status: "Drag the slider";
+
+    SectionTitle { text: "Slider"; }
+    SectionHint { text: "CutlassSlider — drop-in for std Slider with themeable track/handle."; }
+
+    CutlassSlider {
+        height: 28px;
+        vertical-stretch: 0;
+        minimum: 0;
+        maximum: 100;
+        step: 1;
+        value <=> root.value;
+        changed(v) => { root.status = "changed: \{round(v)}"; }
+        released(v) => { root.status = "released: \{round(v)}"; }
+    }
+
+    StatusLine { text: root.status + "  (value=\{round(root.value)})"; }
+}
+
+export component LayoutSection inherits VerticalLayout {
+    spacing: AppStore.theme.metrics.spacing.md;
+    padding: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    SectionTitle { text: "Layout"; }
+    SectionHint { text: "Dividers and the themed panel shell (PanelBase + PanelHeader)."; }
+
+    HorizontalLayout {
+        height: 48px;
+        vertical-stretch: 0;
+        spacing: AppStore.theme.metrics.spacing.md;
+
+        CutlassText {
+            text: "Left";
+            vertical-alignment: center;
+            style: AppStore.theme.typography.body;
+        }
+        VerticalDivider { }
+        CutlassText {
+            text: "Right";
+            vertical-alignment: center;
+            style: AppStore.theme.typography.body;
+        }
+    }
+
+    HorizontalDivider { }
+
+    PanelBase {
+        height: 120px;
+        vertical-stretch: 0;
+
+        VerticalLayout {
+            PanelHeader { title: "Panel header"; }
+            HorizontalLayout {
+                padding-left: AppStore.theme.metrics.spacing.md;
+                padding-right: AppStore.theme.metrics.spacing.md;
+                CutlassText {
+                    text: "PanelBase fills with theme.panel.background.";
+                    style: AppStore.theme.typography.body;
+                    foreground: AppStore.theme.text.secondary;
+                }
+            }
+        }
+    }
+}
+
+export component ScrollSection inherits VerticalLayout {
+    spacing: AppStore.theme.metrics.spacing.md;
+    padding: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    private property <int> list-count: 40;
+    private property <int> grid-count: 48;
+
+    SectionTitle { text: "Scroll & grid"; }
+    SectionHint { text: "CutlassScrollView (tall list) and CutlassGridView (auto-columns)."; }
+
+    CutlassText {
+        text: "CutlassScrollView";
+        style: AppStore.theme.typography.label;
+        foreground: AppStore.theme.text.secondary;
+        vertical-stretch: 0;
+    }
+
+    Rectangle {
+        height: 180px;
+        vertical-stretch: 0;
+        background: AppStore.theme.surface.content-background;
+        border-radius: AppStore.theme.metrics.radius.sm;
+
+        CutlassScrollView {
+            width: 100%;
+            height: 100%;
+            viewport-width: self.width;
+            viewport-height: list.preferred-height;
+            show-horizontal-scrollbar: false;
+
+            list := VerticalLayout {
+                padding: AppStore.theme.metrics.spacing.sm;
+                spacing: 2px;
+                alignment: LayoutAlignment.start;
+
+                for i in root.list-count: Rectangle {
+                    height: 28px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: mod(i, 2) == 0 ? #ffffff08 : transparent;
+
+                    CutlassText {
+                        x: AppStore.theme.metrics.spacing.sm;
+                        height: 100%;
+                        vertical-alignment: center;
+                        text: "Row \{i}";
+                        style: AppStore.theme.typography.body;
+                    }
+                }
+            }
+        }
+    }
+
+    CutlassText {
+        text: "CutlassGridView (auto-columns)";
+        style: AppStore.theme.typography.label;
+        foreground: AppStore.theme.text.secondary;
+        vertical-stretch: 0;
+    }
+
+    Rectangle {
+        height: 220px;
+        vertical-stretch: 0;
+        background: AppStore.theme.surface.content-background;
+        border-radius: AppStore.theme.metrics.radius.sm;
+
+        grid := CutlassGridView {
+            width: 100%;
+            height: 100%;
+            auto-columns: true;
+            cell-width: 72px;
+            cell-height: 72px;
+            spacing: 8px;
+            inset: 10px;
+            item-count: root.grid-count;
+
+            for _[i] in root.grid-count: Rectangle {
+                x: grid.cell-x(i);
+                y: grid.cell-y(i);
+                width: grid.cell-width;
+                height: grid.cell-height;
+                border-radius: 6px;
+                background: hsv(mod(i * 37, 360), 0.45, 0.75);
+
+                CutlassText {
+                    width: 100%;
+                    height: 100%;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    text: "\{i}";
+                    style: AppStore.theme.typography.caption;
+                    foreground: #111111;
+                }
+            }
+        }
+    }
+}
+
+export component SplitSection inherits VerticalLayout {
+    spacing: AppStore.theme.metrics.spacing.md;
+    padding: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    in-out property <length> left-pane: 220px;
+    in-out property <length> right-pane: 180px;
+
+    SectionTitle { text: "Split grips"; }
+    SectionHint { text: "Drag the grips to resize the side panes."; }
+
+    Rectangle {
+        height: 200px;
+        vertical-stretch: 0;
+        background: AppStore.theme.surface.content-background;
+        border-radius: AppStore.theme.metrics.radius.sm;
+        clip: true;
+
+        HorizontalLayout {
+            width: 100%;
+            height: 100%;
+
+            Rectangle {
+                width: root.left-pane;
+                horizontal-stretch: 0;
+                background: AppStore.theme.accent.primary.with-alpha(0.12);
+
+                CutlassText {
+                    width: 100%;
+                    height: 100%;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    text: "Left";
+                    style: AppStore.theme.typography.label;
+                }
+            }
+
+            HSplitGripLead {
+                pane-width <=> root.left-pane;
+                min-pane: 80px;
+                max-pane: 360px;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+                background: #ffffff08;
+
+                CutlassText {
+                    width: 100%;
+                    height: 100%;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    text: "Center";
+                    style: AppStore.theme.typography.label;
+                    foreground: AppStore.theme.text.muted;
+                }
+            }
+
+            HSplitGripTrail {
+                pane-width <=> root.right-pane;
+                min-pane: 80px;
+                max-pane: 320px;
+            }
+
+            Rectangle {
+                width: root.right-pane;
+                horizontal-stretch: 0;
+                background: AppStore.theme.accent.primary.with-alpha(0.12);
+
+                CutlassText {
+                    width: 100%;
+                    height: 100%;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    text: "Right";
+                    style: AppStore.theme.typography.label;
+                }
+            }
+        }
+    }
+}

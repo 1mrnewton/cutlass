@@ -1583,6 +1583,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutlass-ui-gallery"
+version = "0.6.0-alpha.0"
+dependencies = [
+ "slint",
+ "slint-build",
+]
+
+[[package]]
 name = "dasp"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

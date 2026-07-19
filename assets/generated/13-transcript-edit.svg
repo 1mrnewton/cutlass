@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <title>Transcript edit</title>
+  <path fill="currentColor" fill-rule="evenodd" d="M4.5 5h18A2.5 2.5 0 0 1 25 7.5v10a2.5 2.5 0 0 1-2.5 2.5h-18A2.5 2.5 0 0 1 2 17.5v-10A2.5 2.5 0 0 1 4.5 5Zm2.2 4a1 1 0 0 0 0 2h13.6a1 1 0 1 0 0-2Zm0 5a1 1 0 0 0 0 2h5.6a1 1 0 1 0 0-2Z"/>
+  <g fill="none" stroke="currentColor" stroke-width="2.15" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="19" cy="24.5" r="3"/>
+    <circle cx="27" cy="24.5" r="3"/>
+    <path d="m21.2 22.4 7-8.4M24.8 22.4 17.8 14M23 20.25l2.05-2.45"/>
+  </g>
+</svg>

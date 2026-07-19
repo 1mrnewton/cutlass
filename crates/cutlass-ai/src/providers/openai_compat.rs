@@ -388,11 +388,11 @@ pub(crate) fn consume_sse(
         }
 
         let delta = &choice["delta"];
-        if let Some(piece) = delta["content"].as_str() {
-            if !piece.is_empty() {
-                text.push_str(piece);
-                on_text(piece);
-            }
+        if let Some(piece) = delta["content"].as_str()
+            && !piece.is_empty()
+        {
+            text.push_str(piece);
+            on_text(piece);
         }
         if let Some(fragments) = delta["tool_calls"].as_array() {
             for fragment in fragments {

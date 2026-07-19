@@ -115,7 +115,27 @@ fn text_generator_maps_style_and_defers_size() {
     let track = project.add_track(TrackKind::Text, "T1");
     let style = ModelTextStyle {
         size: 90.0,
+        bold: true,
+        italic: true,
+        underline: true,
         fill: [255, 0, 0, 255],
+        letter_spacing: 12.0,
+        line_spacing: 1.5,
+        align_h: cutlass_models::TextAlignH::Right,
+        align_v: cutlass_models::TextAlignV::Bottom,
+        stroke: Some(cutlass_models::TextStroke {
+            rgba: [0, 0, 0, 255],
+            width: 8.0,
+        }),
+        background: Some(cutlass_models::TextBackground {
+            rgba: [0, 0, 255, 200],
+            radius: 0.5,
+        }),
+        shadow: Some(cutlass_models::TextShadow {
+            rgba: [0, 0, 0, 230],
+            blur: 0.15,
+            distance: 10.0,
+        }),
         ..ModelTextStyle::default()
     };
     project
@@ -140,9 +160,39 @@ fn text_generator_maps_style_and_defers_size() {
             assert_eq!(content, "Hi");
             approx(style.font_size, 90.0);
             assert_eq!(style.color, [255, 0, 0, 255]);
+            assert!(style.bold);
+            assert!(style.italic);
+            assert!(style.underline);
+            approx(style.letter_spacing, 12.0);
+            approx(style.line_height, 135.0);
+            assert_eq!(style.align, cutlass_text::TextAlign::Right);
+            assert_eq!(
+                style.vertical_align,
+                cutlass_text::TextVerticalAlign::Bottom
+            );
+            assert_eq!(style.max_width, Some(1920.0));
+            let stroke = style.stroke.expect("stroke mapped");
+            assert_eq!(stroke.rgba, [0, 0, 0, 255]);
+            approx(stroke.width, 8.0);
+            let bg = style.background.expect("background mapped");
+            assert_eq!(bg.rgba, [0, 0, 255, 200]);
+            approx(bg.radius, 0.5);
+            let shadow = style.shadow.expect("shadow mapped");
+            assert_eq!(shadow.rgba, [0, 0, 0, 230]);
+            approx(shadow.blur, 0.15);
+            approx(shadow.distance, 10.0);
         }
         other => panic!("expected text source, got {other:?}"),
     }
+}
+
+#[test]
+fn text_wrap_toggle_removes_the_canvas_width_constraint() {
+    let style = ModelTextStyle {
+        wrap: false,
+        ..ModelTextStyle::default()
+    };
+    assert_eq!(map_text_style(&style, 1920.0, 1080.0).max_width, None);
 }
 
 #[test]

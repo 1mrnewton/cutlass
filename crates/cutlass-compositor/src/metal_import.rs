@@ -9,25 +9,23 @@
 //!
 //! ## Why the version pinning matters
 //!
-//! `wgpu-hal` 28 links the `metal` 0.33 crate, and this crate depends on the
-//! *same* version so the [`metal::Texture`] handed to
+//! `wgpu-hal` 29 links `objc2-metal` 0.3, and this crate depends on the *same*
+//! line so the [`Retained<ProtocolObject<dyn MTLTexture>>`] handed to
 //! [`wgpu::hal::metal::Device::texture_from_raw`] is the exact type it expects
-//! (cargo unifies the two into one crate instance). A mismatched `metal`
+//! (cargo unifies the two into one crate instance). A mismatched `objc2-metal`
 //! version would be a distinct, incompatible type.
 //!
 //! ## Bindings
 //!
-//! The `objc2-core-video` 0.3.2 `CVMetalTextureCache` bindings take
-//! `objc2-metal` `ProtocolObject<dyn MTLDevice>` handles, which would force a
-//! bridge to/from the `metal` (metal-rs) device wgpu-hal exposes. To avoid that
-//! cross-crate type juggling we declare the three CoreVideo entry points
-//! directly — they are plain C functions whose handle arguments are just
-//! pointers at the ABI level.
+//! We declare the three CoreVideo entry points directly — they are plain C
+//! functions whose handle arguments are just pointers at the ABI level.
 
 use std::ffi::c_void;
 use std::ptr;
 
-use metal::foreign_types::ForeignType;
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::{MTLDevice, MTLTexture, MTLTextureType};
 
 use cutlass_core::GpuSurface;
 
@@ -74,14 +72,6 @@ unsafe extern "C" {
 unsafe extern "C" {
     // CoreFoundation release for the CFType cache / texture handles.
     fn CFRelease(cf: *const c_void);
-}
-
-#[link(name = "objc", kind = "dylib")]
-unsafe extern "C" {
-    // Objective-C runtime retain (+1). Used to give the `metal::Texture`
-    // wrapper its own reference to the MTLTexture `CVMetalTextureGetTexture`
-    // returns at +0.
-    fn objc_retain(obj: *mut c_void) -> *mut c_void;
 }
 
 /// A retained `CVMetalTextureCacheRef`. CoreVideo's cache is internally
@@ -137,7 +127,7 @@ pub(crate) struct MetalSurfaceImporter {
     cache: CacheHandle,
     // Keep the Metal device retained so the cache's device stays valid for the
     // importer's lifetime, independent of the wgpu device's hal guard.
-    _device: metal::Device,
+    _device: Retained<ProtocolObject<dyn MTLDevice>>,
 }
 
 impl MetalSurfaceImporter {
@@ -145,7 +135,7 @@ impl MetalSurfaceImporter {
     /// Metal device (e.g. a Vulkan/GL software adapter in CI) — callers then
     /// fall back to the CPU plane-upload path.
     pub(crate) fn new(gpu: &GpuContext) -> Option<Self> {
-        // SAFETY: `as_hal` hands back the backing `metal::Device` for a Metal
+        // SAFETY: `as_hal` hands back the backing Metal device for a Metal
         // wgpu device; we clone (retain) it so it outlives the borrowed guard.
         let device = unsafe {
             gpu.device
@@ -159,7 +149,7 @@ impl MetalSurfaceImporter {
             CVMetalTextureCacheCreate(
                 ptr::null(),
                 ptr::null(),
-                device.as_ptr().cast(),
+                Retained::as_ptr(&device) as *mut c_void,
                 ptr::null(),
                 &mut cache,
             )
@@ -250,13 +240,18 @@ impl MetalSurfaceImporter {
             }
 
             // `CVMetalTextureGetTexture` returns the MTLTexture at +0 (owned by
-            // the CVMetalTexture). Retain it so the `metal::Texture` wrapper —
-            // and the wgpu texture that adopts it — can release on drop without
+            // the CVMetalTexture). Retain it so the `Retained` wrapper — and
+            // the wgpu texture that adopts it — can release on drop without
             // over-releasing the cache's reference.
             // SAFETY: `mtl_texture_ptr` is a live `id<MTLTexture>`.
-            let retained = unsafe { objc_retain(mtl_texture_ptr) };
-            // SAFETY: `retained` is a live, +1 MTLTexture; `from_ptr` adopts it.
-            let metal_texture = unsafe { metal::Texture::from_ptr(retained.cast()) };
+            let metal_texture = unsafe {
+                Retained::retain(mtl_texture_ptr.cast::<ProtocolObject<dyn MTLTexture>>())
+            }
+            .ok_or_else(|| {
+                CompositorError::UnsupportedFormat(
+                    "failed to retain MTLTexture from CVMetalTexture".into(),
+                )
+            })?;
 
             let copy_size = wgpu::hal::CopyExtent {
                 width: w,
@@ -269,7 +264,7 @@ impl MetalSurfaceImporter {
                 wgpu::hal::metal::Device::texture_from_raw(
                     metal_texture,
                     wgpu_format,
-                    metal::MTLTextureType::D2,
+                    MTLTextureType::Type2D,
                     1,
                     1,
                     copy_size,

@@ -16,7 +16,8 @@ use slint::Model;
 
 use crate::placement::{anchor_canvas_position, reposition_anchor};
 use crate::preview_select::{
-    canvas_config, clip_placement, clip_transform, is_composited, viewport_mapping,
+    canvas_config, clip_placement, clip_transform, is_composited, text_alignment_offset,
+    viewport_mapping,
 };
 use crate::{Clip, PreviewDragResolution, Sequence, TrackKind};
 
@@ -126,6 +127,7 @@ pub fn resolve_drag_in_viewport(
 
     // Viewport displacement → canvas px → the anchor's new canvas position.
     let placement = clip_placement(&clip, &canvas);
+    let layout_offset = text_alignment_offset(&clip, &placement, &canvas);
     let start = anchor_canvas_position(&clip_transform(&clip), &placement);
     let mut anchor_x = start[0] + (cursor_x - press_x) / scale;
     let mut anchor_y = start[1] + (cursor_y - press_y) / scale;
@@ -141,8 +143,12 @@ pub fn resolve_drag_in_viewport(
         anchor_y = ch / 2.0;
     }
 
-    let position_x = (anchor_x - cw / 2.0) / cw;
-    let position_y = (anchor_y - ch / 2.0) / ch;
+    // Text alignment is a canvas-layout offset, not part of the persisted
+    // transform position. Remove it when mapping the dragged visible anchor
+    // back into ClipTransform; otherwise the first pointer move applies the
+    // alignment twice and can throw the text completely out of the preview.
+    let position_x = (anchor_x - layout_offset[0] - cw / 2.0) / cw;
+    let position_y = (anchor_y - layout_offset[1] - ch / 2.0) / ch;
 
     PreviewDragResolution {
         valid: true,
@@ -604,6 +610,28 @@ mod tests {
         let r = resolve_drag(&seq, "A", 10, 100.0, 100.0, 52.0, 100.0, VW, VH, 0.0);
         assert!(r.valid && r.moved);
         assert!((r.position_x - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn drag_does_not_fold_text_alignment_into_transform_position() {
+        let mut clip = media_clip("T", 400, 200);
+        clip.media_id = SharedString::default();
+        clip.generator_kind = SharedString::from("text");
+        clip.text_style.align_h = 0;
+        clip.text_style.align_v = 2;
+        let seq = sequence(vec![track("1", vec![clip])]);
+
+        let still = resolve_drag(&seq, "T", 10, 50.0, 500.0, 50.0, 500.0, VW, VH, 0.0);
+        assert!(still.valid && !still.moved);
+        assert_eq!((still.position_x, still.position_y), (0.0, 0.0));
+
+        // 48 viewport pixels are 96 canvas pixels at this fit. Alignment
+        // stays a layout concern; the persisted transform moves by exactly
+        // that cursor delta instead of receiving the left/bottom offsets.
+        let moved = resolve_drag(&seq, "T", 10, 50.0, 500.0, 98.0, 500.0, VW, VH, 0.0);
+        assert!(moved.valid && moved.moved);
+        assert!((moved.position_x - 96.0 / 1920.0).abs() < 1e-6);
+        assert_eq!(moved.position_y, 0.0);
     }
 
     #[test]

@@ -126,15 +126,15 @@ export component KeyframeControl inherits HorizontalLayout {
         border-radius: AppStore.theme.metrics.radius.sm;
         background: easing-ta.has-hover && root.state.on-keyframe ? #ffffff14 : transparent;
 
-        if root.state.on-keyframe: CutlassText {
-            width: 100%;
-            height: 100%;
-            text: "~";
-            style: AppStore.theme.typography.label;
+        if root.state.on-keyframe: Image {
+            width: 12px;
+            height: 12px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            source: @image-url("../../../../../assets/icon/inspector/spline.svg");
+            image-fit: contain;
             // Non-linear easing reads as "configured", like the diamond.
-            foreground: root.state.easing != 0 ? root.accent : AppStore.theme.text.secondary;
-            horizontal-alignment: center;
-            vertical-alignment: center;
+            colorize: root.state.easing != 0 ? root.accent : AppStore.theme.text.secondary;
         }
 
         easing-ta := TouchArea {
@@ -159,9 +159,9 @@ export component KeyframeControl inherits HorizontalLayout {
                 border-radius: AppStore.theme.metrics.radius.md;
                 border-width: 1px;
                 border-color: #ffffff1f;
-                drop-shadow-blur: 24px;
-                drop-shadow-color: #00000080;
-                drop-shadow-offset-y: 6px;
+                drop-shadow-blur: 12px;
+                drop-shadow-color: #00000040;
+                drop-shadow-offset-y: 3px;
 
                 easing-list := VerticalLayout {
                     padding: AppStore.theme.metrics.spacing.sm;

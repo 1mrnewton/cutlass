@@ -65,13 +65,18 @@ component AnimationDropdown inherits Rectangle {
             overflow: TextOverflow.elide;
         }
 
-        CutlassText {
+        Rectangle {
             width: 12px;
-            vertical-alignment: center;
-            horizontal-alignment: center;
-            text: "v";
-            style: AppStore.theme.typography.caption;
-            foreground: AppStore.theme.text.muted;
+            vertical-stretch: 1;
+
+            Image {
+                width: 12px;
+                height: 12px;
+                y: (parent.height - self.height) / 2;
+                source: @image-url("../../../../../assets/icon/ui/chevron-down.svg");
+                image-fit: contain;
+                colorize: AppStore.theme.text.muted;
+            }
         }
     }
 
@@ -95,9 +100,9 @@ component AnimationDropdown inherits Rectangle {
             border-radius: AppStore.theme.metrics.radius.md;
             border-width: 1px;
             border-color: #ffffff1f;
-            drop-shadow-blur: 24px;
-            drop-shadow-color: #00000080;
-            drop-shadow-offset-y: 6px;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000040;
+            drop-shadow-offset-y: 3px;
 
             VerticalLayout {
                 padding: AppStore.theme.metrics.spacing.sm;
@@ -108,6 +113,7 @@ component AnimationDropdown inherits Rectangle {
                     viewport-width: self.width;
                     viewport-height: list.preferred-height;
                     show-horizontal-scrollbar: false;
+                    interactive: false;
 
                     list := VerticalLayout {
                         spacing: 0;

@@ -304,9 +304,12 @@ export struct Clip {
     adjust-exposure: float,
     adjust-temperature: float,
     // Optional `.cube` LUT, projected read-only. `lut-id` is the catalog id
-    // (the file's stem); edits go through `InspectorBackend.set-clip-lut`.
+    // (the file's stem); `lut-path` is the absolute `.cube` path used to
+    // re-apply intensity for catalog and user-picked files. Edits go through
+    // `InspectorBackend.set-clip-lut` / `pick-clip-lut`.
     lut-id: string,
     lut-label: string,
+    lut-path: string,
     lut-intensity: float,
     // Look animation presets (CapCut In / Out / Combo tabs). Projected
     // read-only — edits go through `InspectorBackend.set-clip-animation`.

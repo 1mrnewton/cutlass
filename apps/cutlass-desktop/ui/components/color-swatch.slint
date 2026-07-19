@@ -4,7 +4,7 @@
 // palette covers the common title-color choices CapCut surfaces.)
 
 import { CutlassText } from "text.slint";
-import { AppStore } from "../store/index.slint";
+import { AppStore } from "../store/app-store.slint";
 import { AppState } from "../state.slint";
 
 export component CutlassColorSwatch inherits Rectangle {
@@ -39,15 +39,14 @@ export component CutlassColorSwatch inherits Rectangle {
         border-color: #ffffff1f;
     }
 
-    CutlassText {
+    Image {
         x: parent.width - 22px;
-        width: 18px;
-        height: parent.height;
-        text: "v";
-        style: AppStore.theme.typography.caption;
-        foreground: AppStore.theme.text.muted;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+        width: 12px;
+        height: 12px;
+        y: (parent.height - self.height) / 2;
+        source: @image-url("../../../../assets/icon/ui/chevron-down.svg");
+        image-fit: contain;
+        colorize: AppStore.theme.text.muted;
     }
 
     trigger := TouchArea {
@@ -71,9 +70,9 @@ export component CutlassColorSwatch inherits Rectangle {
             border-radius: AppStore.theme.metrics.radius.md;
             border-width: 1px;
             border-color: #ffffff1f;
-            drop-shadow-blur: 24px;
-            drop-shadow-color: #00000080;
-            drop-shadow-offset-y: 6px;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000040;
+            drop-shadow-offset-y: 3px;
 
             content := VerticalLayout {
                 padding: AppStore.theme.metrics.spacing.md;

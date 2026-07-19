@@ -108,30 +108,235 @@ export component AppWindow inherits Window {
 
     preferred-width: 1280px;
     preferred-height: 800px;
+    min-width: 1024px;
+    min-height: 700px;
 
     default-font-size: AppStore.theme.typography.body.size;
     default-font-weight: AppStore.theme.typography.body.weight;
 
     full-screen: AppState.preview-maximized;
 
-    in-out property <length> left-pane-width: 350px;
-    in-out property <length> right-pane-width: 350px;
-    in-out property <length> agent-pane-width: 350px;
-    in-out property <length> timeline-height: 400px;
+    in-out property <length> left-pane-width: 300px;
+    in-out property <length> right-pane-width: 300px;
+    in-out property <length> agent-pane-width: 300px;
+    in-out property <length> timeline-height: 340px;
 
-    // Native menu bar — on macOS Slint renders this through muda as the
-    // top-of-screen system menu, so the first menu becomes the bold app
-    // menu. macOS-only: elsewhere the shell is frameless with a custom title
-    // bar, and a Slint-drawn in-window bar would double up on it. The flag is
-    // set once at startup (src/main.rs) before the window shows, so this is
-    // present from the first layout pass rather than toggled at runtime.
+    // At compact desktop widths the Inspector and Assistant share the right
+    // dock. Assistant has priority while open; closing it reveals Inspector
+    // again without changing the Inspector visibility preference.
+    private property <bool> compact-right-dock: root.width < 1440px;
+    private property <bool> inspector-pane-visible: AppState.inspector-panel-open
+        && (!root.compact-right-dock || !AppState.agent-panel-open);
+    private property <bool> agent-pane-visible: AppState.agent-panel-open;
+
+    private property <length> min-preview-width: 360px;
+    private property <length> min-upper-workspace-height: 300px;
+    private property <length> editor-content-width: max(
+        0px,
+        root.width - 2 * AppStore.theme.metrics.spacing.sm,
+    );
+    private property <length> horizontal-grips-width:
+        (AppState.library-panel-open ? AppStore.theme.metrics.layout.split-grip : 0px)
+        + (root.inspector-pane-visible ? AppStore.theme.metrics.layout.split-grip : 0px)
+        + (root.agent-pane-visible ? AppStore.theme.metrics.layout.split-grip : 0px);
+
+    private property <length> live-left-pane-max: max(
+        AppStore.theme.metrics.layout.min-pane-width,
+        min(
+            AppStore.theme.metrics.layout.max-pane-width,
+            root.editor-content-width
+                - root.min-preview-width
+                - root.horizontal-grips-width
+                - (root.inspector-pane-visible ? root.right-pane-width : 0px)
+                - (root.agent-pane-visible ? root.agent-pane-width : 0px),
+        ),
+    );
+    private property <length> live-right-pane-max: max(
+        AppStore.theme.metrics.layout.min-pane-width,
+        min(
+            AppStore.theme.metrics.layout.max-pane-width,
+            root.editor-content-width
+                - root.min-preview-width
+                - root.horizontal-grips-width
+                - (AppState.library-panel-open ? root.left-pane-width : 0px)
+                - (root.agent-pane-visible ? root.agent-pane-width : 0px),
+        ),
+    );
+    private property <length> live-agent-pane-max: max(
+        AppStore.theme.metrics.layout.min-pane-width,
+        min(
+            AppStore.theme.metrics.layout.max-pane-width,
+            root.editor-content-width
+                - root.min-preview-width
+                - root.horizontal-grips-width
+                - (AppState.library-panel-open ? root.left-pane-width : 0px)
+                - (root.inspector-pane-visible ? root.right-pane-width : 0px),
+        ),
+    );
+    private property <length> live-timeline-max: max(
+        AppStore.theme.metrics.layout.min-timeline-height,
+        min(
+            AppStore.theme.metrics.layout.max-timeline-height,
+            root.height
+                - AppStore.theme.metrics.layout.toolbar-height
+                - AppStore.theme.metrics.spacing.sm
+                - AppStore.theme.metrics.layout.split-grip
+                - root.min-upper-workspace-height,
+        ),
+    );
+
+    function clamp-layout-sizes() {
+        if (AppState.library-panel-open) {
+            root.left-pane-width = clamp(
+                root.left-pane-width,
+                AppStore.theme.metrics.layout.min-pane-width,
+                root.live-left-pane-max,
+            );
+        }
+        if (root.inspector-pane-visible) {
+            root.right-pane-width = clamp(
+                root.right-pane-width,
+                AppStore.theme.metrics.layout.min-pane-width,
+                root.live-right-pane-max,
+            );
+        }
+        if (root.agent-pane-visible) {
+            root.agent-pane-width = clamp(
+                root.agent-pane-width,
+                AppStore.theme.metrics.layout.min-pane-width,
+                root.live-agent-pane-max,
+            );
+        }
+
+        // Re-evaluate after the first pass: each maximum depends on the other
+        // visible panes, so a resize from a very wide window may clamp more
+        // than one pane in the same event.
+        if (AppState.library-panel-open) {
+            root.left-pane-width = clamp(
+                root.left-pane-width,
+                AppStore.theme.metrics.layout.min-pane-width,
+                root.live-left-pane-max,
+            );
+        }
+        if (root.inspector-pane-visible) {
+            root.right-pane-width = clamp(
+                root.right-pane-width,
+                AppStore.theme.metrics.layout.min-pane-width,
+                root.live-right-pane-max,
+            );
+        }
+        if (root.agent-pane-visible) {
+            root.agent-pane-width = clamp(
+                root.agent-pane-width,
+                AppStore.theme.metrics.layout.min-pane-width,
+                root.live-agent-pane-max,
+            );
+        }
+        if (AppState.timeline-panel-open) {
+            root.timeline-height = clamp(
+                root.timeline-height,
+                AppStore.theme.metrics.layout.min-timeline-height,
+                root.live-timeline-max,
+            );
+        }
+    }
+
+    private property <length> clamp-window-width: root.width;
+    private property <length> clamp-window-height: root.height;
+    private property <int> clamp-layout-state:
+        (AppState.library-panel-open ? 1 : 0)
+        + (AppState.inspector-panel-open ? 2 : 0)
+        + (AppState.agent-panel-open ? 4 : 0)
+        + (AppState.timeline-panel-open ? 8 : 0)
+        + (root.compact-right-dock ? 16 : 0)
+        + AppStore.theme-id * 32;
+
+    changed clamp-window-width => { root.clamp-layout-sizes(); }
+    changed clamp-window-height => { root.clamp-layout-sizes(); }
+    changed clamp-layout-state => { root.clamp-layout-sizes(); }
+
+    // Native menu bar — on macOS Slint renders this through muda in the
+    // top-of-screen system menu bar, after the standard application menu.
+    // File/View therefore live where Mac users expect them instead of being
+    // repeated as controls inside the window. Other platforms retain the
+    // title-bar menus in shell/title-bar.slint.
     if AppState.is-macos: MenuBar {
         Menu {
-            title: "Cutlass";
+            title: "File";
+
             MenuItem {
-                title: "Settings…";
+                title: "New Project";
+                shortcut: @keys(Control + N);
                 activated => {
-                    AppState.settings-open = true;
+                    EditorStore.on-new-requested();
+                }
+            }
+            MenuItem {
+                title: "Open…";
+                shortcut: @keys(Control + O);
+                activated => {
+                    EditorStore.on-open-requested();
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Save";
+                shortcut: @keys(Control + S);
+                activated => {
+                    EditorStore.on-save-requested(false);
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Canvas Settings…";
+                activated => {
+                    AppState.canvas-dialog-open = true;
+                }
+            }
+        }
+
+        Menu {
+            title: "View";
+
+            MenuItem {
+                title: "Library";
+                checkable: true;
+                checked: AppState.library-panel-open;
+                activated => {
+                    AppState.library-panel-open = !AppState.library-panel-open;
+                }
+            }
+            MenuItem {
+                title: "Inspector";
+                checkable: true;
+                checked: AppState.inspector-panel-open;
+                activated => {
+                    AppState.inspector-panel-open = !AppState.inspector-panel-open;
+                }
+            }
+            MenuItem {
+                title: "Assistant";
+                checkable: true;
+                checked: AppState.agent-panel-open;
+                activated => {
+                    AppState.agent-panel-open = !AppState.agent-panel-open;
+                }
+            }
+            MenuItem {
+                title: "Timeline";
+                checkable: true;
+                checked: AppState.timeline-panel-open;
+                activated => {
+                    AppState.timeline-panel-open = !AppState.timeline-panel-open;
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Maximize Preview";
+                checkable: true;
+                checked: AppState.preview-maximized;
+                activated => {
+                    AppState.preview-maximized = !AppState.preview-maximized;
                 }
             }
         }
@@ -529,7 +734,9 @@ export component AppWindow inherits Window {
                     // layout children unconditional and put each conditional
                     // component behind a fixed-size Rectangle boundary.
                     Rectangle {
-                        width: AppState.library-panel-open ? root.left-pane-width : 0px;
+                        width: AppState.library-panel-open
+                            ? min(root.left-pane-width, root.live-left-pane-max)
+                            : 0px;
                         horizontal-stretch: 0;
                         vertical-stretch: 1;
 
@@ -550,6 +757,7 @@ export component AppWindow inherits Window {
                             width: 100%;
                             height: 100%;
                             pane-width <=> root.left-pane-width;
+                            max-pane: root.live-left-pane-max;
                         }
                     }
 
@@ -559,50 +767,56 @@ export component AppWindow inherits Window {
                     }
 
                     Rectangle {
-                        width: AppState.inspector-panel-open
+                        width: root.inspector-pane-visible
                             ? AppStore.theme.metrics.layout.split-grip
                             : 0px;
                         horizontal-stretch: 0;
                         vertical-stretch: 1;
 
-                        if AppState.inspector-panel-open: HSplitGripTrail {
+                        if root.inspector-pane-visible: HSplitGripTrail {
                             width: 100%;
                             height: 100%;
                             pane-width <=> root.right-pane-width;
+                            max-pane: root.live-right-pane-max;
                         }
                     }
 
                     Rectangle {
-                        width: AppState.inspector-panel-open ? root.right-pane-width : 0px;
+                        width: root.inspector-pane-visible
+                            ? min(root.right-pane-width, root.live-right-pane-max)
+                            : 0px;
                         horizontal-stretch: 0;
                         vertical-stretch: 1;
 
-                        if AppState.inspector-panel-open: InspectorPanel {
+                        if root.inspector-pane-visible: InspectorPanel {
                             width: 100%;
                             height: 100%;
                         }
                     }
 
                     Rectangle {
-                        width: AppState.agent-panel-open
+                        width: root.agent-pane-visible
                             ? AppStore.theme.metrics.layout.split-grip
                             : 0px;
                         horizontal-stretch: 0;
                         vertical-stretch: 1;
 
-                        if AppState.agent-panel-open: HSplitGripTrail {
+                        if root.agent-pane-visible: HSplitGripTrail {
                             width: 100%;
                             height: 100%;
                             pane-width <=> root.agent-pane-width;
+                            max-pane: root.live-agent-pane-max;
                         }
                     }
 
                     Rectangle {
-                        width: AppState.agent-panel-open ? root.agent-pane-width : 0px;
+                        width: root.agent-pane-visible
+                            ? min(root.agent-pane-width, root.live-agent-pane-max)
+                            : 0px;
                         horizontal-stretch: 0;
                         vertical-stretch: 1;
 
-                        if AppState.agent-panel-open: AgentPanel {
+                        if root.agent-pane-visible: AgentPanel {
                             width: 100%;
                             height: 100%;
                         }
@@ -620,11 +834,14 @@ export component AppWindow inherits Window {
                         width: 100%;
                         height: 100%;
                         timeline-height <=> root.timeline-height;
+                        max-timeline: root.live-timeline-max;
                     }
                 }
 
                 Rectangle {
-                    height: AppState.timeline-panel-open ? root.timeline-height : 0px;
+                    height: AppState.timeline-panel-open
+                        ? min(root.timeline-height, root.live-timeline-max)
+                        : 0px;
                     horizontal-stretch: 1;
                     vertical-stretch: 0;
 

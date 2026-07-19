@@ -16,25 +16,25 @@ import { SectionHeader, SliderRow } from "inspector-widgets.slint";
 
 // Mirror toggle: quiet bordered chip that fills with the accent when active.
 component FlipToggle inherits Rectangle {
-    in property <string> label;
+    in property <image> icon;
     in property <bool> active;
     callback toggled();
 
-    width: text.preferred-width + 2 * AppStore.theme.metrics.spacing.lg;
+    width: 32px;
     height: 26px;
     border-radius: AppStore.theme.metrics.radius.sm;
     background: active ? AppStore.theme.accent.primary.with-alpha(0.12) : (ta.has-hover ? #ffffff14 : transparent);
     border-width: 1px;
     border-color: active ? AppStore.theme.accent.primary : #ffffff22;
 
-    text := CutlassText {
-        width: parent.width;
-        height: parent.height;
-        text: root.label;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        style: AppStore.theme.typography.label;
-        foreground: root.active ? AppStore.theme.accent.primary : AppStore.theme.text.primary;
+    Image {
+        width: 16px;
+        height: 16px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        image-fit: contain;
+        colorize: root.active ? AppStore.theme.accent.primary : AppStore.theme.text.primary;
     }
 
     ta := TouchArea {
@@ -134,7 +134,7 @@ export component CropInspector inherits VerticalLayout {
         alignment: LayoutAlignment.start;
 
         FlipToggle {
-            label: "Flip H";
+            icon: @image-url("../../../../../assets/icon/inspector/flip-horizontal.svg");
             active: root.model.flip-h;
             toggled => {
                 root.apply(root.left-v, root.top-v, root.right-v, root.bottom-v,
@@ -143,7 +143,7 @@ export component CropInspector inherits VerticalLayout {
         }
 
         FlipToggle {
-            label: "Flip V";
+            icon: @image-url("../../../../../assets/icon/inspector/flip-vertical.svg");
             active: root.model.flip-v;
             toggled => {
                 root.apply(root.left-v, root.top-v, root.right-v, root.bottom-v,

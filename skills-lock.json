@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "glassmorphism": {
+      "source": "ainergiz/design-inspirations",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/glassmorphism/SKILL.md",
+      "computedHash": "c18a7316efedb5d8e7dc21d0e0d5cf99247b599e2794d7fed389d4139d43249a"
+    }
+  }
+}

@@ -30,18 +30,22 @@
 //! [`TextRenderer::load_font`] to add bundled/custom faces for deterministic,
 //! platform-independent output.
 
+mod effects;
 mod style;
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::ops::Range;
 
 use cosmic_text::{
-    Align, Attrs, Buffer, CacheKey, Family, FontSystem, LineIter, Metrics, Shaping, SwashCache,
-    SwashContent, SwashImage,
+    Align, Attrs, Buffer, CacheKey, Family, FontSystem, LineIter, Metrics, Shaping,
+    Style as FontStyle, SwashCache, SwashContent, SwashImage, Weight,
 };
 use cutlass_core::RgbaImage;
 
-pub use style::{FontFamily, TextAlign, TextStyle};
+pub use style::{
+    FontFamily, TextAlign, TextBackground, TextShadow, TextStroke, TextStyle, TextVerticalAlign,
+};
 
 /// Enumerate installed font family names (deduped, sorted) for a font picker.
 /// Scanning the system font directories is slow (hundreds of ms), so callers
@@ -118,9 +122,9 @@ pub struct TextRenderer {
     /// Memoized [`shape`](Self::shape) results, keyed by (text, style).
     /// Cleared by [`load_font`](Self::load_font) — a new face can change
     /// shaping/fallback for any string.
-    shape_memo: HashMap<MemoKey, ShapedText>,
+    shape_memo: HashMap<ShapeKey, ShapedText>,
     /// Memoized [`rasterize`](Self::rasterize) results (padding folded in).
-    raster_memo: HashMap<MemoKey, RgbaImage>,
+    raster_memo: HashMap<RasterKey, RgbaImage>,
 }
 
 impl TextRenderer {
@@ -167,7 +171,7 @@ impl TextRenderer {
     /// shaping entirely and costs one copy-out of the cached clusters, so
     /// per-frame animators can call this unconditionally.
     pub fn shape(&mut self, text: &str, style: &TextStyle) -> ShapedText {
-        let key = MemoKey::new(text, style);
+        let key = ShapeKey::new(text, style);
         if let Some(hit) = self.shape_memo.get(&key) {
             return hit.clone();
         }
@@ -313,7 +317,7 @@ impl TextRenderer {
     /// Results are memoized: repeating a call with identical input costs one
     /// bitmap copy, not a re-shape — safe to call every frame.
     pub fn rasterize(&mut self, text: &str, style: &TextStyle) -> RgbaImage {
-        let key = MemoKey::new(text, style);
+        let key = RasterKey::new(text, style);
         if let Some(hit) = self.raster_memo.get(&key) {
             return hit.clone();
         }
@@ -327,48 +331,15 @@ impl TextRenderer {
         if !shaped.has_ink() {
             return RgbaImage::transparent(0, 0);
         }
-
-        let pad = style.padding;
-        let width = shaped.extent.0 + 2 * pad;
-        let height = shaped.extent.1 + 2 * pad;
-        let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
-
-        for cluster in &shaped.clusters {
-            let (cw, ch) = (cluster.image.width, cluster.image.height);
-            if cw == 0 || ch == 0 {
-                continue;
-            }
-            // Ink offsets are integral by construction (pixel box minus pixel
-            // box); rounding is belt and braces.
-            let ox = cluster.offset[0].round() as i64 + i64::from(pad);
-            let oy = cluster.offset[1].round() as i64 + i64::from(pad);
-            for row in 0..ch {
-                for col in 0..cw {
-                    let src = cluster.image.pixel(col, row);
-                    if src[3] == 0 {
-                        continue;
-                    }
-                    let (px, py) = (ox + i64::from(col), oy + i64::from(row));
-                    debug_assert!(
-                        px >= 0 && py >= 0 && px < i64::from(width) && py < i64::from(height),
-                        "cluster ink escaped the measured extent"
-                    );
-                    if px < 0 || py < 0 || px >= i64::from(width) || py >= i64::from(height) {
-                        continue;
-                    }
-                    let idx = ((py as u32 * width + px as u32) * 4) as usize;
-                    over_straight(&mut pixels[idx..idx + 4], src);
-                }
-            }
-        }
-
-        RgbaImage::new(width, height, pixels)
+        // Stroke / background / shadow (and plain padding) are painted here —
+        // `shape` stays ink-tight so cluster animation can place glyphs freely.
+        effects::paint(&shaped, style)
     }
 
     /// Insert into a memo map, bounding memory with a wholesale clear at the
     /// cap. Frame loops keep a handful of live keys, so an LRU would buy
     /// nothing; the clear only ever costs one re-shape per entry after it.
-    fn memo_insert<V>(memo: &mut HashMap<MemoKey, V>, key: MemoKey, value: V) {
+    fn memo_insert<K: Eq + Hash, V>(memo: &mut HashMap<K, V>, key: K, value: V) {
         const MEMO_CAP: usize = 64;
         if memo.len() >= MEMO_CAP {
             memo.clear();
@@ -398,7 +369,26 @@ impl TextRenderer {
             FontFamily::Monospace => Family::Monospace,
             FontFamily::Named(name) => Family::Name(name),
         };
-        let attrs = Attrs::new().family(family);
+        let font_size = style.font_size.max(1.0);
+        let tracking_px = if style.letter_spacing.is_finite() {
+            style.letter_spacing.clamp(-4096.0, 4096.0)
+        } else {
+            0.0
+        };
+        let attrs = Attrs::new()
+            .family(family)
+            .weight(if style.bold {
+                Weight::BOLD
+            } else {
+                Weight::NORMAL
+            })
+            .style(if style.italic {
+                FontStyle::Italic
+            } else {
+                FontStyle::Normal
+            })
+            // cosmic-text expresses tracking in em, while Cutlass exposes px.
+            .letter_spacing(tracking_px / font_size);
         let align = match style.align {
             TextAlign::Left => Align::Left,
             TextAlign::Center => Align::Center,
@@ -437,22 +427,27 @@ impl Default for TextRenderer {
     }
 }
 
-/// Hashable identity of a (text, style) request for the memo caches. `f32`s
-/// are keyed by bit pattern, so styles that differ only in float encoding are
-/// simply distinct keys (never a wrong hit).
-#[derive(PartialEq, Eq, Hash)]
-struct MemoKey {
+/// Hashable identity of the fields that affect shaping and glyph pixels.
+/// Bitmap-only treatments deliberately stay out: dragging a stroke/shadow/
+/// background control must reuse the already-shaped glyph run.
+///
+/// `f32`s are keyed by bit pattern, so styles that differ only in float
+/// encoding are simply distinct keys (never a wrong hit).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ShapeKey {
     text: String,
     font_size: u32,
     line_height: u32,
     color: [u8; 4],
     family: FontFamily,
+    bold: bool,
+    italic: bool,
+    letter_spacing: u32,
     align: TextAlign,
     max_width: Option<u32>,
-    padding: u32,
 }
 
-impl MemoKey {
+impl ShapeKey {
     fn new(text: &str, style: &TextStyle) -> Self {
         Self {
             text: text.to_owned(),
@@ -460,9 +455,37 @@ impl MemoKey {
             line_height: style.line_height.to_bits(),
             color: style.color,
             family: style.family.clone(),
+            bold: style.bold,
+            italic: style.italic,
+            letter_spacing: style.letter_spacing.to_bits(),
             align: style.align,
             max_width: style.max_width.map(f32::to_bits),
+        }
+    }
+}
+
+/// Full bitmap identity: the shaped run plus bitmap padding/treatments.
+#[derive(PartialEq, Eq, Hash)]
+struct RasterKey {
+    shape: ShapeKey,
+    underline: bool,
+    padding: u32,
+    stroke: Option<([u8; 4], u32)>,
+    background: Option<([u8; 4], u32)>,
+    shadow: Option<([u8; 4], u32, u32)>,
+}
+
+impl RasterKey {
+    fn new(text: &str, style: &TextStyle) -> Self {
+        Self {
+            shape: ShapeKey::new(text, style),
+            underline: style.underline,
             padding: style.padding,
+            stroke: style.stroke.map(|s| (s.rgba, s.width.to_bits())),
+            background: style.background.map(|b| (b.rgba, b.radius.to_bits())),
+            shadow: style
+                .shadow
+                .map(|s| (s.rgba, s.blur.to_bits(), s.distance.to_bits())),
         }
     }
 }
@@ -582,7 +605,7 @@ fn write_glyph(
 /// Straight-alpha "source over destination" compositing of one pixel. Both
 /// `dst` and `src` are non-premultiplied RGBA; `dst` is updated in place.
 /// Callers skip fully transparent sources (`src[3] > 0` is a precondition).
-fn over_straight(dst: &mut [u8], src: [u8; 4]) {
+pub(crate) fn over_straight(dst: &mut [u8], src: [u8; 4]) {
     // Fast path: an opaque source (the common interior-of-glyph case) replaces.
     if src[3] == 255 {
         dst.copy_from_slice(&src);
@@ -802,6 +825,29 @@ mod tests {
     }
 
     #[test]
+    fn letter_spacing_changes_shaped_width() {
+        let mut r = test_renderer();
+        let compact = r.shape("HHHH", &TextStyle::new(48.0));
+        let tracked = r.shape("HHHH", &TextStyle::new(48.0).with_letter_spacing(12.0));
+        assert!(
+            tracked.extent.0 > compact.extent.0 + 20,
+            "tracking did not widen text: compact={} tracked={}",
+            compact.extent.0,
+            tracked.extent.0
+        );
+    }
+
+    #[test]
+    fn max_width_wraps_text_onto_multiple_lines() {
+        let mut r = test_renderer();
+        let shaped = r.shape("HH HH HH", &TextStyle::new(48.0).with_max_width(70.0));
+        assert!(
+            shaped.clusters.iter().any(|cluster| cluster.line > 0),
+            "wrap width left all clusters on one line"
+        );
+    }
+
+    #[test]
     fn memo_caches_repeat_calls_and_invalidate_on_font_load() {
         let mut r = test_renderer();
         let style = TextStyle::new(48.0);
@@ -813,12 +859,20 @@ mod tests {
         assert_eq!(first, again);
         assert_eq!(r.memo_sizes(), (1, 1));
 
-        // Same key through shape() hits the shared entry; a new style is a
-        // new key.
+        // Same key through shape() hits the shared entry. Bitmap-only style
+        // changes create raster entries but keep reusing that shaped run.
         let _ = r.shape("Hi", &style);
         assert_eq!(r.memo_sizes(), (1, 1));
         let _ = r.rasterize("Hi", &style.clone().with_padding(3));
-        assert_eq!(r.memo_sizes(), (2, 2));
+        assert_eq!(r.memo_sizes(), (1, 2));
+        let _ = r.rasterize(
+            "Hi",
+            &style.clone().with_stroke(TextStroke {
+                rgba: [0, 0, 0, 255],
+                width: 6.0,
+            }),
+        );
+        assert_eq!(r.memo_sizes(), (1, 3));
 
         // Loading a font can change shaping for any string: memos must drop.
         assert!(r.load_font(TEST_FONT.to_vec()) > 0);

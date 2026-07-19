@@ -1,0 +1,20 @@
+// Rust-backed clip list + payload helpers for the gallery timeline DnD demo.
+// Library chips encode "label|duration-ms" as plain-text data-transfer.
+
+export struct DemoClip {
+    label: string,
+    start-ms: int,
+    duration-ms: int,
+    hue: int,
+}
+
+export global TimelineDemo {
+    in-out property <[DemoClip]> clips;
+
+    // Parse "label|duration-ms" payloads from DragArea.
+    pure callback payload-label(payload: string) -> string;
+    pure callback payload-duration-ms(payload: string) -> int;
+
+    callback push-clip(label: string, start-ms: int, duration-ms: int);
+    callback clear-clips();
+}

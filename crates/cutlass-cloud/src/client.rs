@@ -106,10 +106,10 @@ impl CloudClient {
         let cached = self.read_cache(cache_name);
 
         let mut request = self.agent.get(&url);
-        if let Some((etag, _)) = &cached {
-            if !etag.is_empty() {
-                request = request.set("If-None-Match", etag);
-            }
+        if let Some((etag, _)) = &cached
+            && !etag.is_empty()
+        {
+            request = request.set("If-None-Match", etag);
         }
 
         match request.call() {
@@ -131,11 +131,11 @@ impl CloudClient {
             Err(err) => {
                 // Offline (or server trouble) with a cache on disk: serve
                 // stale rather than blank out the Library section.
-                if let Some((_, body)) = cached {
-                    if let Ok(parsed) = serde_json::from_str(&body) {
-                        tracing::debug!("serving stale catalog {cache_name} after: {err}");
-                        return Ok(parsed);
-                    }
+                if let Some((_, body)) = cached
+                    && let Ok(parsed) = serde_json::from_str(&body)
+                {
+                    tracing::debug!("serving stale catalog {cache_name} after: {err}");
+                    return Ok(parsed);
                 }
                 Err(CloudError::from_ureq(&url, err))
             }

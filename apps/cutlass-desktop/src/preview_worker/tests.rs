@@ -681,6 +681,20 @@ fn acknowledged_relinks_invalidate_preview_like_ui_relinks() {
 }
 
 #[test]
+fn look_edits_invalidate_preview() {
+    assert!(message_invalidates_preview(&WorkerMsg::SetClipLut {
+        clip: "1".into(),
+        path: "/unused/look.cube".into(),
+        intensity: 0.8,
+    }));
+    assert!(message_invalidates_preview(&WorkerMsg::SetClipAnimation {
+        clip: "1".into(),
+        slot: "in".into(),
+        animation_id: "fade".into(),
+    }));
+}
+
+#[test]
 fn acknowledged_session_replacements_invalidate_preview() {
     let (open_reply, _) = bounded(1);
     let (new_reply, _) = bounded(1);

@@ -50,10 +50,14 @@ export component CatalogTile inherits Rectangle {
         border-radius: 4px;
         background: @linear-gradient(135deg, root.swatch 0%, root.swatch.darker(0.4) 100%);
 
-        CutlassText {
-            text: "fx";
-            style: { size: 16px, weight: 600, italic: false };
-            foreground: #ffffffcc;
+        Image {
+            width: 20px;
+            height: 20px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            source: @image-url("../../../../../assets/icon/library/wand-sparkles.svg");
+            image-fit: contain;
+            colorize: #ffffffcc;
         }
     }
 
@@ -291,19 +295,37 @@ export component MediaTile inherits Rectangle {
     // Duration badge, top-right like CapCut. Stills badge their kind
     // instead: the 5s pool duration is a default placement length, not a
     // property of the file.
-    Rectangle {
+    if media.is-image: Rectangle {
+        x: parent.width - self.width - 4px;
+        y: 4px;
+        width: 20px;
+        height: 16px;
+        background: #000000a0;
+        border-radius: 3px;
+
+        Image {
+            width: 12px;
+            height: 12px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            source: @image-url("../../../../../assets/icon/library/image.svg");
+            image-fit: contain;
+            colorize: AppStore.theme.text.primary;
+        }
+    }
+
+    if !media.is-image && media.duration-label != "": Rectangle {
         x: parent.width - self.width - 4px;
         y: 4px;
         width: duration-text.preferred-width + 8px;
         height: duration-text.preferred-height + 4px;
         background: #000000a0;
         border-radius: 3px;
-        visible: media.is-image || media.duration-label != "";
 
         duration-text := CutlassText {
             x: 4px;
             y: 2px;
-            text: media.is-image ? "IMG" : media.duration-label;
+            text: media.duration-label;
             style: AppStore.theme.typography.label;
         }
     }
@@ -334,16 +356,31 @@ export component MediaTile inherits Rectangle {
     if media.is-missing: Rectangle {
         x: 4px;
         y: 4px;
-        width: missing-text.preferred-width + 8px;
-        height: missing-text.preferred-height + 4px;
+        width: missing-row.preferred-width;
+        height: missing-row.preferred-height;
         background: #C83A3AE0;
         border-radius: 3px;
 
-        missing-text := CutlassText {
-            x: 4px;
-            y: 2px;
-            text: "Missing";
-            style: AppStore.theme.typography.label;
+        missing-row := HorizontalLayout {
+            padding-left: 4px;
+            padding-right: 4px;
+            padding-top: 2px;
+            padding-bottom: 2px;
+            spacing: 4px;
+            alignment: center;
+
+            Image {
+                width: 10px;
+                height: 10px;
+                source: @image-url("../../../../../assets/icon/library/triangle-alert.svg");
+                image-fit: contain;
+                colorize: #ffffff;
+            }
+
+            CutlassText {
+                text: "Missing";
+                style: AppStore.theme.typography.label;
+            }
         }
 
         TouchArea {
@@ -376,9 +413,9 @@ export component MediaTile inherits Rectangle {
             border-radius: AppStore.theme.metrics.radius.md;
             border-width: 1px;
             border-color: #ffffff1f;
-            drop-shadow-blur: 24px;
-            drop-shadow-color: #00000080;
-            drop-shadow-offset-y: 6px;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000040;
+            drop-shadow-offset-y: 3px;
 
             menu-list := VerticalLayout {
                 padding: AppStore.theme.metrics.spacing.xs;

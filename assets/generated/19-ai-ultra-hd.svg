@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <title>AI Ultra HD</title>
+  <defs>
+    <mask id="hd-cutout">
+      <rect width="32" height="32" fill="#000"/>
+      <rect x="4" y="6" width="24" height="19" rx="4" fill="#fff"/>
+      <path d="M10 11v9M15 11v9M10 15.5h5M18 11v9h2.25a4.5 4.5 0 0 0 0-9Z" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </mask>
+  </defs>
+  <rect width="32" height="32" fill="currentColor" mask="url(#hd-cutout)"/>
+  <path d="m27.3 30.2 3.2-3.2v3.2z" fill="currentColor"/>
+</svg>

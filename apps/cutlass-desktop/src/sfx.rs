@@ -247,11 +247,11 @@ impl Worker {
     fn patch_row(&self, row: usize, key: String, patch: impl Fn(&mut SfxTile) + Send + 'static) {
         self.on_ui(move |backend| {
             let model = backend.get_items();
-            if let Some(mut tile) = model.row_data(row) {
-                if tile.key == key.as_str() {
-                    patch(&mut tile);
-                    model.set_row_data(row, tile);
-                }
+            if let Some(mut tile) = model.row_data(row)
+                && tile.key == key.as_str()
+            {
+                patch(&mut tile);
+                model.set_row_data(row, tile);
             }
         });
     }
@@ -317,10 +317,12 @@ fn attribution(entry: &CatalogEntry) -> String {
 /// anyway; this only keeps cache filenames and import probing sensible).
 fn extension(url: &str) -> String {
     let path_part = url.split(['?', '#']).next().unwrap_or("");
-    if let Some((_, ext)) = path_part.rsplit_once('.') {
-        if !ext.is_empty() && ext.len() <= 4 && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return ext.to_lowercase();
-        }
+    if let Some((_, ext)) = path_part.rsplit_once('.')
+        && !ext.is_empty()
+        && ext.len() <= 4
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return ext.to_lowercase();
     }
     "wav".into()
 }

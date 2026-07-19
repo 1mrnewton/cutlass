@@ -268,7 +268,7 @@ impl<'a> InterleavedPcm<'a> {
         if channels == 0 {
             return Err(AudioInputError::ZeroChannels);
         }
-        if samples.len() % channels != 0 {
+        if !samples.len().is_multiple_of(channels) {
             return Err(AudioInputError::NonFrameAligned {
                 sample_count: samples.len(),
                 channels,

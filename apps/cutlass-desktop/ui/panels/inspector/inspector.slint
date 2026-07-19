@@ -52,27 +52,35 @@ component ProjectInspector inherits VerticalLayout {
         viewport-width: root.width;
         viewport-height: content.preferred-height;
         show-horizontal-scrollbar: false;
+        interactive: false;
 
         content := VerticalLayout {
             width: root.width;
-            spacing: 30px;
+            spacing: AppStore.theme.metrics.spacing.md;
             alignment: LayoutAlignment.start;
             padding: AppStore.theme.metrics.spacing.lg;
 
             for field in root.fields: HorizontalLayout {
-                spacing: AppStore.theme.metrics.spacing.lg;
+                spacing: AppStore.theme.metrics.spacing.md;
 
-                Text {
+                CutlassText {
                     text: field.label;
-                    min-width: 120px;
-                    color: AppStore.theme.text.secondary;
-                    font-size: AppStore.theme.typography.label.size;
+                    width: 96px;
+                    horizontal-stretch: 0;
+                    vertical-alignment: center;
+                    style: AppStore.theme.typography.label;
+                    foreground: AppStore.theme.text.secondary;
+                    overflow: elide;
                 }
 
-                Text {
+                CutlassText {
                     text: field.value;
+                    // Path is often wider than the panel — tip the full string.
+                    tip: field.label == "Path" && field.value != "—" ? field.value : "";
                     horizontal-stretch: 1;
-                    wrap: TextWrap.char-wrap;
+                    vertical-alignment: center;
+                    style: AppStore.theme.typography.body;
+                    overflow: elide;
                 }
             }
         }
@@ -617,6 +625,7 @@ component VisualClipInspector inherits VerticalLayout {
         viewport-width: root.width;
         viewport-height: content.preferred-height;
         show-horizontal-scrollbar: false;
+        interactive: false;
 
         // Blur catcher: any click that no control claims (labels, dividers,
         // padding) unfocuses the active text input, which commits its
@@ -755,6 +764,7 @@ component AudioClipInspector inherits VerticalLayout {
         viewport-width: root.width;
         viewport-height: content.preferred-height;
         show-horizontal-scrollbar: false;
+        interactive: false;
 
         TouchArea {
             x: 0;

@@ -12,7 +12,7 @@
 // rail), `progress-color` (the filled part up to the cap), `handle-color`
 // (the cap), plus `track-thickness` / `handle-size` for geometry.
 
-import { AppStore } from "../store/index.slint";
+import { AppStore } from "../store/app-store.slint";
 
 export component CutlassSlider {
     // std `Slider` API — keep names and semantics identical.
@@ -46,8 +46,12 @@ export component CutlassSlider {
     private property <float> ratio: root.maximum > root.minimum
         ? clamp((root.value - root.minimum) / (root.maximum - root.minimum), 0, 1) : 0;
 
-    min-width: root.vertical ? 50px : 0px;
-    min-height: root.vertical ? 0px : 50px;
+    // Keep enough room for the rail along the active axis and for the handle
+    // across it. Without the active-axis minimum, layouts can squeeze a
+    // horizontal slider down to little more than its handle (and likewise for
+    // a vertical slider).
+    min-width: root.vertical ? root.handle-size : 50px;
+    min-height: root.vertical ? 50px : root.handle-size;
     vertical-stretch: root.vertical ? 1 : 0;
     horizontal-stretch: root.vertical ? 0 : 1;
     opacity: root.enabled ? 1.0 : 0.4;

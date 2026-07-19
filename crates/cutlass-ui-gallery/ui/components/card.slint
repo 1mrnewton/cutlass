@@ -1,0 +1,52 @@
+// Theme-independent glass card for the gallery library.
+//
+// Slint 1.16 does not expose a backdrop-blur primitive, so the material is
+// built from translucent tint, edge refraction, a soft highlight, and a
+// tinted depth shadow. Background color still reads through the surface.
+
+export component CutlassCard inherits Rectangle {
+    in property <color> tint: #2a2a2a;
+    in property <length> content-padding: 20px;
+    in property <length> content-spacing: 10px;
+    in property <length> corner-radius: 30px;
+    // Named apart from geometry `min-*` so callers can shrink for menus
+    // without also binding `width`/`height` on the same node.
+    in property <length> floor-width: 180px;
+    in property <length> floor-height: 120px;
+
+    min-width: root.floor-width;
+    min-height: root.floor-height;
+    border-radius: root.corner-radius;
+    border-width: 1px;
+    border-color: @linear-gradient(135deg, #ffffff28 0%, #ffffff38 35%, root.tint.with-alpha(0.40) 72%, #ffffff08 100%,);
+    // Opaque near-gray ramps band; soft alpha overlays read smoother (no fill blur).
+    background: root.tint;
+    drop-shadow-color: #00000007;
+    drop-shadow-blur: 150px;
+
+    drop-shadow-offset-y: 10px;
+    drop-shadow-offset-x: -4px;
+    clip: true;
+
+    // Soft top-left lift
+    // Rectangle {
+    //     width: 100%;
+    //     height: 100%;
+    //     border-radius: root.corner-radius;
+    //     background: @linear-gradient(145deg, #ffffff14 0%, #ffffff08 28%, transparent 55%);
+    // }
+
+    // // Soft bottom-right depth
+    // Rectangle {
+    //     width: 100%;
+    //     height: 100%;
+    //     border-radius: root.corner-radius;
+    //     background: @linear-gradient(145deg, transparent 45%, #00000010 78%, #00000018 100%);
+    // }
+
+    VerticalLayout {
+        padding: root.content-padding;
+        spacing: root.content-spacing;
+        @children
+    }
+}

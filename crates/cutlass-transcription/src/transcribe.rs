@@ -219,10 +219,10 @@ where
 
     let model_path = model_path.as_ref();
     let mut context_parameters = WhisperContextParameters::default();
-    if options.token_timestamps {
-        if let Some(model_preset) = dtw_preset_from_model_path(model_path) {
-            context_parameters.dtw_parameters.mode = DtwMode::ModelPreset { model_preset };
-        }
+    if options.token_timestamps
+        && let Some(model_preset) = dtw_preset_from_model_path(model_path)
+    {
+        context_parameters.dtw_parameters.mode = DtwMode::ModelPreset { model_preset };
     }
 
     let context = WhisperContext::new_with_params(model_path, context_parameters)?;

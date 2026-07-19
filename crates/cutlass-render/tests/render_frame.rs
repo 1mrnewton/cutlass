@@ -6,7 +6,7 @@ use std::path::Path;
 use cutlass_compositor::{ColorGrade, GpuContext};
 use cutlass_models::{
     ChromaKey, ColorAdjustments, Filter, Generator, Mask, MaskKind, MediaSource, Project, Rational,
-    RationalTime, Shape, ShapePath, ShapePathPoint, TimeRange, TrackKind,
+    RationalTime, Shape, ShapePath, ShapePathPoint, TextStyle, TimeRange, TrackKind,
 };
 use cutlass_render::Renderer;
 
@@ -213,6 +213,49 @@ fn renders_a_solid_generator_to_a_red_canvas() {
     assert!(
         top_left[0] > 240 && top_left[1] < 16 && top_left[2] < 16,
         "expected a red canvas, got {top_left:?}"
+    );
+}
+
+#[test]
+fn gesture_sprite_contains_unwrapped_text_pixels() {
+    let mut project = Project::new("text-gesture", FPS_24);
+    let track = project.add_track(TrackKind::Text, "T1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::Text {
+                content: "hello worldhello worldhello worldhello world".into(),
+                style: TextStyle {
+                    font: "Micro 5".into(),
+                    size: 56.0,
+                    letter_spacing: 30.0,
+                    wrap: false,
+                    ..TextStyle::default()
+                },
+            },
+            TimeRange::at_rate(0, 100, FPS_24),
+        )
+        .unwrap();
+
+    let Ok(mut renderer) = Renderer::new_headless() else {
+        eprintln!("skipping: no headless GPU available");
+        return;
+    };
+    renderer.load_font(include_bytes!("../../cutlass-text/assets/Micro5-Regular.ttf").to_vec());
+    let frames = renderer
+        .render_gesture_frames(&project, rt(0), clip, 960, 540)
+        .expect("render gesture frames")
+        .expect("text clip should support sprite partitioning");
+
+    let visible = frames
+        .sprite
+        .pixels
+        .chunks_exact(4)
+        .filter(|pixel| pixel[3] > 0)
+        .count();
+    assert!(
+        visible > 100,
+        "gesture sprite was transparent ({visible} pixels)"
     );
 }
 

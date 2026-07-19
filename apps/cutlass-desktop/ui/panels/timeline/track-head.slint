@@ -7,7 +7,7 @@ import { TimelineViewState } from "state.slint";
 // One compact square toggle in a track header. `active` latches the accent
 // when the lane is in its "special" state (hidden / muted / locked).
 component HeadToggle inherits Rectangle {
-    in property <string> label;
+    in property <image> icon;
     in property <bool> active;
     callback clicked();
 
@@ -18,14 +18,14 @@ component HeadToggle inherits Rectangle {
         ? AppStore.theme.accent.primary.with-alpha(0.13)
         : ta.has-hover ? #ffffff1a : transparent;
 
-    Text {
-        width: 100%;
-        height: 100%;
-        text: label;
-        font-size: 10px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        color: active ? AppStore.theme.accent.primary : AppStore.theme.text.secondary;
+    Image {
+        width: 12px;
+        height: 12px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        image-fit: contain;
+        colorize: active ? AppStore.theme.accent.primary : AppStore.theme.text.secondary;
     }
 
     ta := TouchArea {
@@ -128,6 +128,7 @@ export component TrackHead inherits Rectangle {
 
         Text {
             horizontal-stretch: 1;
+            vertical-stretch: 1;
             vertical-alignment: center;
             overflow: elide;
             text: root.track.name;
@@ -141,36 +142,66 @@ export component TrackHead inherits Rectangle {
                     : AppStore.theme.text.secondary;
         }
 
-        if root.track.kind != TrackKind.audio: HeadToggle {
-            label: "V";
-            active: !root.track.enabled;
-            clicked => {
-                EditorStore.on-track-flag-toggled(root.track.id, "enabled", !root.track.enabled);
+        if root.track.kind != TrackKind.audio: Rectangle {
+            width: 18px;
+            vertical-stretch: 1;
+
+            HeadToggle {
+                y: (parent.height - self.height) / 2;
+                icon: root.track.enabled
+                    ? @image-url("../../../../../assets/icon/timeline/eye.svg")
+                    : @image-url("../../../../../assets/icon/timeline/eye-off.svg");
+                active: !root.track.enabled;
+                clicked => {
+                    EditorStore.on-track-flag-toggled(root.track.id, "enabled", !root.track.enabled);
+                }
             }
         }
-        if root.track.kind == TrackKind.audio: HeadToggle {
-            label: "M";
-            active: root.track.muted;
-            clicked => {
-                EditorStore.on-track-flag-toggled(root.track.id, "muted", !root.track.muted);
+        if root.track.kind == TrackKind.audio: Rectangle {
+            width: 18px;
+            vertical-stretch: 1;
+
+            HeadToggle {
+                y: (parent.height - self.height) / 2;
+                icon: root.track.muted
+                    ? @image-url("../../../../../assets/icon/timeline/volume-x.svg")
+                    : @image-url("../../../../../assets/icon/timeline/volume-2.svg");
+                active: root.track.muted;
+                clicked => {
+                    EditorStore.on-track-flag-toggled(root.track.id, "muted", !root.track.muted);
+                }
             }
         }
-        if root.track.kind == TrackKind.audio: HeadToggle {
-            label: "V";
-            active: root.track.duck-source;
-            clicked => {
-                EditorStore.on-track-flag-toggled(
-                    root.track.id,
-                    "duck-source",
-                    !root.track.duck-source);
+        if root.track.kind == TrackKind.audio: Rectangle {
+            width: 18px;
+            vertical-stretch: 1;
+
+            HeadToggle {
+                y: (parent.height - self.height) / 2;
+                icon: @image-url("../../../../../assets/icon/timeline/mic.svg");
+                active: root.track.duck-source;
+                clicked => {
+                    EditorStore.on-track-flag-toggled(
+                        root.track.id,
+                        "duck-source",
+                        !root.track.duck-source);
+                }
             }
         }
 
-        HeadToggle {
-            label: "L";
-            active: root.track.locked;
-            clicked => {
-                EditorStore.on-track-flag-toggled(root.track.id, "locked", !root.track.locked);
+        Rectangle {
+            width: 18px;
+            vertical-stretch: 1;
+
+            HeadToggle {
+                y: (parent.height - self.height) / 2;
+                icon: root.track.locked
+                    ? @image-url("../../../../../assets/icon/timeline/lock.svg")
+                    : @image-url("../../../../../assets/icon/timeline/lock-open.svg");
+                active: root.track.locked;
+                clicked => {
+                    EditorStore.on-track-flag-toggled(root.track.id, "locked", !root.track.locked);
+                }
             }
         }
     }
@@ -187,6 +218,9 @@ export component TrackHead inherits Rectangle {
             height: 100%;
             background: AppStore.theme.panel.background;
             border-radius: 4px;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000040;
+            drop-shadow-offset-y: 3px;
 
             menu-list := VerticalLayout {
                 padding: 4px;
@@ -224,6 +258,9 @@ export component TrackHead inherits Rectangle {
             width: 200px;
             background: AppStore.theme.panel.background;
             border-radius: 4px;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000040;
+            drop-shadow-offset-y: 3px;
 
             VerticalLayout {
                 padding: 8px;

@@ -434,8 +434,12 @@ impl Generator {
     /// `Ok` iff the generator's content is structurally sound and every
     /// stored value (constants and keyframes) is in range. Enforced by
     /// [`crate::Project::add_generated`] / [`crate::Project::set_generator`]
-    /// so a project never holds a shape the renderer would have to clamp.
+    /// so a project never holds generated content the renderer would have to
+    /// clamp.
     pub fn validate(&self) -> Result<(), ModelError> {
+        if let Generator::Text { style, .. } = self {
+            return style.validate();
+        }
         if let Generator::Sticker { asset } = self {
             // Empty = legacy payload-less sticker; renders nothing but loads.
             if !asset.is_empty() && crate::sticker::sticker_spec(asset).is_none() {

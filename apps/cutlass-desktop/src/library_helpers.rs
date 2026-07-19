@@ -201,6 +201,15 @@ pub(crate) async fn pick_relink_path() -> Option<std::path::PathBuf> {
         .map(|file| file.path().to_path_buf())
 }
 
+/// File picker for a user-supplied `.cube` 3D LUT (look inspector Browse…).
+pub(crate) async fn pick_lut_path() -> Option<std::path::PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .add_filter("LUT", &["cube"])
+        .pick_file()
+        .await
+        .map(|file| file.path().to_path_buf())
+}
+
 pub(crate) async fn pick_relink_folder() -> Option<std::path::PathBuf> {
     rfd::AsyncFileDialog::new()
         .pick_folder()

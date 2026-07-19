@@ -400,7 +400,7 @@ impl VideoEncoder for AvfEncoder {
             return Ok(());
         }
         let channels = usize::from(cfg.channels);
-        if channels == 0 || samples.len() % channels != 0 {
+        if channels == 0 || !samples.len().is_multiple_of(channels) {
             return Err(EncodeError::Encode(
                 "audio block length is not a frame multiple".into(),
             ));

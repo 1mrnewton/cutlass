@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <title>Subject enhance</title>
+  <g fill="currentColor" opacity=".28">
+    <path d="M4 7h6v6H4zM14 7h6v6h-6zM4 17h6v6H4zM22 17h6v6h-6zM4 27h6v3H4zM22 27h6v3h-6z"/>
+  </g>
+  <path fill="currentColor" d="M12 14.5a4.5 4.5 0 1 1 9 0 4.5 4.5 0 0 1-9 0ZM7.5 28a9 9 0 0 1 18 0Z"/>
+  <path fill="currentColor" d="M25 3c.7 2.55 2.2 4.05 4.75 4.75C27.2 8.45 25.7 9.95 25 12.5c-.7-2.55-2.2-4.05-4.75-4.75C22.8 7.05 24.3 5.55 25 3Z"/>
+</svg>

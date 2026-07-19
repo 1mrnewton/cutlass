@@ -674,13 +674,13 @@ export component PreviewPanel inherits PanelBase {
                 }
             }
 
-            HorizontalLayout {
-                spacing: AppStore.theme.metrics.spacing.sm;
+            transport := Rectangle {
                 height: 30px;
                 horizontal-stretch: 1;
 
                 Rectangle {
-                    width: 33%;
+                    x: 0;
+                    width: transport.width * 0.5 - 18px;
                     clip: true;
 
                     HorizontalLayout {
@@ -689,6 +689,7 @@ export component PreviewPanel inherits PanelBase {
                         spacing: AppStore.theme.metrics.spacing.sm;
 
                         Text {
+                            vertical-stretch: 1;
                             text: TimelineLib.format-timecode(
                                 TimelineStore.playhead-tick,
                                 EditorStore.project.sequence.fps.num,
@@ -701,6 +702,7 @@ export component PreviewPanel inherits PanelBase {
                         }
 
                         Text {
+                            vertical-stretch: 1;
                             text: "/";
                             color: #484848;
                             font-size: 16px;
@@ -711,6 +713,7 @@ export component PreviewPanel inherits PanelBase {
                         }
 
                         Text {
+                            vertical-stretch: 1;
                             text: TimelineLib.format-timecode(
                                 root.sequence-duration.value,
                                 root.sequence-duration.rate.num,
@@ -725,14 +728,22 @@ export component PreviewPanel inherits PanelBase {
                 }
 
                 Rectangle {
-                    width: 33%;
+                    x: (transport.width - self.width) / 2;
+                    width: 24px;
 
-                    HorizontalLayout {
-                        alignment: LayoutAlignment.center;
+                    // Play/pause: same TimelineActions path as the Space
+                    // shortcut, so gating can never diverge.
+                    Rectangle {
+                        width: 24px;
+                        height: 24px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
 
-                        // Play/pause: same TimelineActions path as the
-                        // Space shortcut, so gating can never diverge.
                         Image {
+                            width: 18px;
+                            height: 18px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
                             source: TimelineStore.playing
                                 ? @image-url("../../../../../assets/icon/pause.svg")
                                 : @image-url("../../../../../assets/icon/play.svg");
@@ -743,6 +754,10 @@ export component PreviewPanel inherits PanelBase {
                             vertical-alignment: ImageVerticalAlignment.center;
 
                             TouchArea {
+                                width: 24px;
+                                height: 24px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
                                 clicked => {
                                     TimelineActions.toggle-play();
                                 }
@@ -752,50 +767,71 @@ export component PreviewPanel inherits PanelBase {
                 }
 
                 Rectangle {
-                    width: 33%;
+                    x: transport.width * 0.5 + 18px;
+                    width: transport.width * 0.5 - 18px;
+                    clip: true;
                     HorizontalLayout {
                         alignment: LayoutAlignment.end;
                         spacing: AppStore.theme.metrics.spacing.sm;
 
                         Rectangle {
                             width: 52px;
-                            height: 24px;
-                            border-radius: 4px;
-                            background: abs(PreviewStore.viewport-zoom - 1.0) > 0.001 ? #2A2A2A : transparent;
-                            border-width: 1px;
-                            border-color: #FFFFFF24;
+                            vertical-stretch: 1;
 
-                            Text {
-                                width: parent.width;
-                                height: parent.height;
-                                text: round(PreviewStore.viewport-zoom * 100) + "%";
-                                color: #DCDCDC;
-                                font-size: 11px;
-                                horizontal-alignment: TextHorizontalAlignment.center;
-                                vertical-alignment: TextVerticalAlignment.center;
-                            }
+                            zoom-reset := Rectangle {
+                                width: 52px;
+                                height: 24px;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: 4px;
+                                background: abs(PreviewStore.viewport-zoom - 1.0) > 0.001 ? #2A2A2A : transparent;
+                                border-width: 1px;
+                                border-color: #FFFFFF24;
 
-                            TouchArea {
-                                width: parent.width;
-                                height: parent.height;
-                                mouse-cursor: MouseCursor.pointer;
-                                clicked => {
-                                    PreviewStore.viewport-zoom = 1.0;
-                                    PreviewStore.viewport-pan-x = 0px;
-                                    PreviewStore.viewport-pan-y = 0px;
+                                Text {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: round(PreviewStore.viewport-zoom * 100) + "%";
+                                    color: #DCDCDC;
+                                    font-size: 11px;
+                                    horizontal-alignment: TextHorizontalAlignment.center;
+                                    vertical-alignment: TextVerticalAlignment.center;
+                                }
+
+                                TouchArea {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => {
+                                        PreviewStore.viewport-zoom = 1.0;
+                                        PreviewStore.viewport-pan-x = 0px;
+                                        PreviewStore.viewport-pan-y = 0px;
+                                    }
                                 }
                             }
                         }
 
-                        Image {
-                            source: @image-url("../../../../../assets/icon/fullscreen.svg");
-                            image-fit: ImageFit.contain;
-                            colorize: #ffffff;
+                        Rectangle {
+                            width: 24px;
+                            vertical-stretch: 1;
 
-                            TouchArea {
-                                clicked => {
-                                    // AppState.enter-preview-maximized();
-                                    AppState.preview-maximized = true;
+                            Image {
+                                width: 18px;
+                                height: 18px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                source: @image-url("../../../../../assets/icon/fullscreen.svg");
+                                image-fit: ImageFit.contain;
+                                colorize: #ffffff;
+
+                                TouchArea {
+                                    width: 24px;
+                                    height: 24px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    clicked => {
+                                        // AppState.enter-preview-maximized();
+                                        AppState.preview-maximized = true;
+                                    }
                                 }
                             }
                         }

@@ -1,0 +1,284 @@
+// Cutlass UI component gallery — incubating Library + Desktop reference demos.
+
+import { AppStore } from "../../../apps/cutlass-desktop/ui/store/app-store.slint";
+import { CutlassText } from "../../../apps/cutlass-desktop/ui/components/text.slint";
+import { StringFilter } from "lib/string-filter.slint";
+import { DataTransferBridge } from "lib/data-transfer.slint";
+import { TimelineDemo } from "lib/timeline-demo.slint";
+import { ImageActions, DemoImages } from "lib/image-actions.slint";
+import { DropdownSection } from "library/dropdown-section.slint";
+import { CardSection } from "library/card-section.slint";
+import { CardDropdownSection } from "library/card-dropdown-section.slint";
+import { TooltipSection } from "library/tooltip-section.slint";
+import { DndSection } from "library/dnd-section.slint";
+import { ImageSection } from "library/image-section.slint";
+import {
+    NavItem,
+    ButtonsSection,
+    TextSection,
+    InputsSection,
+    SliderSection,
+    LayoutSection,
+    ScrollSection,
+    SplitSection,
+} from "desktop-sections.slint";
+
+export { AppStore }
+export { StringFilter }
+export { DataTransferBridge }
+export { TimelineDemo }
+export { ImageActions }
+export { DemoImages }
+
+component ThemeChip inherits Rectangle {
+    in property <string> label;
+    in property <int> theme-id;
+    callback clicked();
+
+    private property <bool> active: AppStore.theme-id == root.theme-id;
+
+    height: 26px;
+    width: label-text.preferred-width + 2 * AppStore.theme.metrics.spacing.md;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: active ? AppStore.theme.accent.primary
+        : (ta.has-hover ? #ffffff14 : #ffffff0a);
+    border-width: 1px;
+    border-color: active ? transparent : #ffffff18;
+
+    label-text := CutlassText {
+        width: 100%;
+        height: 100%;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        text: root.label;
+        style: AppStore.theme.typography.label;
+        foreground: active ? AppStore.theme.accent.on-accent : AppStore.theme.text.secondary;
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component NavCaption inherits CutlassText {
+    style: AppStore.theme.typography.caption;
+    foreground: AppStore.theme.text.muted;
+    vertical-stretch: 0;
+    height: 24px;
+    vertical-alignment: center;
+}
+
+export component GalleryWindow inherits Window {
+    title: "Cutlass UI";
+    preferred-width: 1100px;
+    preferred-height: 720px;
+    min-width: 800px;
+    min-height: 520px;
+    background: AppStore.theme.surface.app-background;
+
+    // 0-5 Library: Dropdown, Card, Card Dropdown, Tooltip, Drag & Drop, Image
+    // 6-12 Desktop: Buttons, Text, Inputs, Slider, Layout, Scroll, Split
+    in-out property <int> section: 0;
+
+    VerticalLayout {
+        spacing: 0;
+
+        Rectangle {
+            height: 52px;
+            vertical-stretch: 0;
+            background: AppStore.theme.surface.content-background;
+
+            HorizontalLayout {
+                padding-left: AppStore.theme.metrics.spacing.lg;
+                padding-right: AppStore.theme.metrics.spacing.lg;
+                spacing: AppStore.theme.metrics.spacing.md;
+                alignment: LayoutAlignment.center;
+
+                CutlassText {
+                    text: "Cutlass UI";
+                    style: AppStore.theme.typography.heading-sm;
+                    vertical-alignment: center;
+                    vertical-stretch: 0;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                ThemeChip {
+                    label: "Default";
+                    theme-id: 0;
+                    clicked => { AppStore.theme-id = 0; }
+                }
+                ThemeChip {
+                    label: "Ember";
+                    theme-id: 1;
+                    clicked => { AppStore.theme-id = 1; }
+                }
+                ThemeChip {
+                    label: "Dark Blue";
+                    theme-id: 2;
+                    clicked => { AppStore.theme-id = 2; }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            vertical-stretch: 0;
+            background: AppStore.theme.surface.divider;
+        }
+
+        HorizontalLayout {
+            spacing: 0;
+            vertical-stretch: 1;
+
+            Rectangle {
+                width: 200px;
+                horizontal-stretch: 0;
+                background: AppStore.theme.surface.content-background;
+
+                VerticalLayout {
+                    padding: AppStore.theme.metrics.spacing.md;
+                    spacing: 2px;
+                    alignment: LayoutAlignment.start;
+
+                    NavCaption { text: "Library"; }
+                    NavItem {
+                        label: "Dropdown";
+                        active: root.section == 0;
+                        clicked => { root.section = 0; }
+                    }
+                    NavItem {
+                        label: "Card";
+                        active: root.section == 1;
+                        clicked => { root.section = 1; }
+                    }
+                    NavItem {
+                        label: "Card Dropdown";
+                        active: root.section == 2;
+                        clicked => { root.section = 2; }
+                    }
+                    NavItem {
+                        label: "Tooltip";
+                        active: root.section == 3;
+                        clicked => { root.section = 3; }
+                    }
+                    NavItem {
+                        label: "Drag & Drop";
+                        active: root.section == 4;
+                        clicked => { root.section = 4; }
+                    }
+                    NavItem {
+                        label: "Image";
+                        active: root.section == 5;
+                        clicked => { root.section = 5; }
+                    }
+
+                    Rectangle { height: 12px; vertical-stretch: 0; }
+
+                    NavCaption { text: "Desktop"; }
+                    NavItem {
+                        label: "Buttons";
+                        active: root.section == 6;
+                        clicked => { root.section = 6; }
+                    }
+                    NavItem {
+                        label: "Text";
+                        active: root.section == 7;
+                        clicked => { root.section = 7; }
+                    }
+                    NavItem {
+                        label: "Inputs";
+                        active: root.section == 8;
+                        clicked => { root.section = 8; }
+                    }
+                    NavItem {
+                        label: "Slider";
+                        active: root.section == 9;
+                        clicked => { root.section = 9; }
+                    }
+                    NavItem {
+                        label: "Layout";
+                        active: root.section == 10;
+                        clicked => { root.section = 10; }
+                    }
+                    NavItem {
+                        label: "Scroll & grid";
+                        active: root.section == 11;
+                        clicked => { root.section = 11; }
+                    }
+                    NavItem {
+                        label: "Split grips";
+                        active: root.section == 12;
+                        clicked => { root.section = 12; }
+                    }
+                }
+            }
+
+            Rectangle {
+                width: 1px;
+                horizontal-stretch: 0;
+                background: AppStore.theme.surface.divider;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+                background: AppStore.theme.surface.app-background;
+
+                if root.section == 0: DropdownSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 1: CardSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 2: CardDropdownSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 3: TooltipSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 4: DndSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 5: ImageSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 6: ButtonsSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 7: TextSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 8: InputsSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 9: SliderSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 10: LayoutSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 11: ScrollSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 12: SplitSection {
+                    width: 100%;
+                    height: 100%;
+                }
+            }
+        }
+    }
+}

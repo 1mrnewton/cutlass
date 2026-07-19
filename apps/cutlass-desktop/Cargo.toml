@@ -8,13 +8,11 @@ repository.workspace = true
 description = "Cutlass desktop editor (Slint): a native Rust frontend that links the platform-independent engine directly."
 
 [dependencies]
-# Slint pinned to the 1.16 line: 1.17 moved the unstable wgpu interop to
-# wgpu 29, while this workspace (compositor, render) pins wgpu 28 so the
-# desktop UI and the engine can eventually share one device for zero-copy
-# preview. Bump both together when the workspace moves to a newer wgpu.
-slint = { version = "=1.16.1", features = [
+# Slint 1.17 + wgpu 29 (`unstable-wgpu-29`): tooltips, in-window DnD, and a
+# shared device/queue path with the compositor for zero-copy preview.
+slint = { version = "=1.17.1", features = [
     "unstable-winit-030",
-    "unstable-wgpu-28",
+    "unstable-wgpu-29",
     "renderer-femtovg-wgpu",
     "serde",
 ] }
@@ -80,4 +78,4 @@ x11rb = "0.13"
 tempfile = "3"
 
 [build-dependencies]
-slint-build = "=1.16.1"
+slint-build = "=1.17.1"

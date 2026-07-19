@@ -11,7 +11,7 @@
 use cutlass_compositor::ColorGrade;
 use cutlass_models::{ChromaKey, ClipId, Mask, MediaId};
 use cutlass_shapes::{BezierPath, SdfParams, Stroke};
-use cutlass_text::TextStyle;
+use cutlass_text::{TextAlign, TextStyle, TextVerticalAlign};
 
 pub use cutlass_core::RationalTime;
 
@@ -200,6 +200,28 @@ impl SceneLayer {
             self.center[1] + to_center[0] * sin + to_center[1] * cos,
         ]
     }
+
+    /// Place an ink-tight text bitmap at its requested canvas alignment while
+    /// retaining the clip transform's position and anchor offsets.
+    pub fn text_quad_center(
+        &self,
+        style: &TextStyle,
+        size: [f32; 2],
+        canvas: [f32; 2],
+    ) -> [f32; 2] {
+        let mut center = self.quad_center(size);
+        center[0] += match style.align {
+            TextAlign::Left => (size[0] - canvas[0]) * 0.5,
+            TextAlign::Center => 0.0,
+            TextAlign::Right => (canvas[0] - size[0]) * 0.5,
+        };
+        center[1] += match style.vertical_align {
+            TextVerticalAlign::Top => (size[1] - canvas[1]) * 0.5,
+            TextVerticalAlign::Middle => 0.0,
+            TextVerticalAlign::Bottom => (canvas[1] - size[1]) * 0.5,
+        };
+        center
+    }
 }
 
 /// How a layer's on-canvas size is determined.
@@ -363,6 +385,34 @@ mod tests {
             color_grade: None,
             lut: None,
         }
+    }
+
+    #[test]
+    fn text_alignment_positions_tight_bounds_against_canvas_edges() {
+        let layer = text_layer();
+        let size = [200.0, 100.0];
+        let canvas = [1920.0, 1080.0];
+
+        assert_eq!(
+            layer.text_quad_center(
+                &TextStyle::new(48.0)
+                    .with_align(TextAlign::Left)
+                    .with_vertical_align(TextVerticalAlign::Top),
+                size,
+                canvas,
+            ),
+            [-810.0, -465.0]
+        );
+        assert_eq!(
+            layer.text_quad_center(
+                &TextStyle::new(48.0)
+                    .with_align(TextAlign::Right)
+                    .with_vertical_align(TextVerticalAlign::Bottom),
+                size,
+                canvas,
+            ),
+            [910.0, 515.0]
+        );
     }
 
     #[test]

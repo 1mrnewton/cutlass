@@ -103,13 +103,14 @@ export component TransitionPill inherits Rectangle {
         border-radius: self.width / 2;
         background: remove-ta.has-hover ? #000000e0 : #00000088;
 
-        CutlassText {
-            width: 100%;
-            height: 100%;
-            text: "×";
-            style: AppStore.theme.typography.label;
-            horizontal-alignment: TextHorizontalAlignment.center;
-            vertical-alignment: TextVerticalAlignment.center;
+        Image {
+            width: 10px;
+            height: 10px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            source: @image-url("../../../../../assets/icon/ui/x.svg");
+            image-fit: contain;
+            colorize: #ffffff;
         }
 
         remove-ta := TouchArea {

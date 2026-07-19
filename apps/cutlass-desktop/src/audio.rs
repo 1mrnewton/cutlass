@@ -468,14 +468,14 @@ fn mixer_loop(msg_rx: Receiver<AudioMsg>, block_tx: Sender<AudioBlock>) {
                 break;
             }
             let mut samples = vec![0f32; BLOCK_FRAMES * CHANNELS];
-            if let Some(m) = &mut mixer {
-                if let Err(e) = m.mix_into(write_frame, &mut samples) {
-                    // Fail-soft in preview (export is the fail-loud path):
-                    // log, go silent, and let the next snapshot/seek retry.
-                    warn!("audio mix failed, muting until the next edit/seek: {e}");
-                    mixer = None;
-                    samples.fill(0.0);
-                }
+            if let Some(m) = &mut mixer
+                && let Err(e) = m.mix_into(write_frame, &mut samples)
+            {
+                // Fail-soft in preview (export is the fail-loud path):
+                // log, go silent, and let the next snapshot/seek retry.
+                warn!("audio mix failed, muting until the next edit/seek: {e}");
+                mixer = None;
+                samples.fill(0.0);
             }
             if block_tx.send(AudioBlock { epoch, samples }).is_err() {
                 return; // device side gone

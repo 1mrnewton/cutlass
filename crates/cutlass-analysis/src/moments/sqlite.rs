@@ -824,10 +824,10 @@ fn configure_durability(connection: &Connection) -> Result<(), MomentsIndexError
     let wal_result = connection.query_row("PRAGMA journal_mode = WAL", [], |row| {
         row.get::<_, String>(0)
     });
-    if let Err(source) = wal_result {
-        if !is_locking_error(&source) {
-            return Err(map_sqlite_error(source));
-        }
+    if let Err(source) = wal_result
+        && !is_locking_error(&source)
+    {
+        return Err(map_sqlite_error(source));
     }
 
     connection

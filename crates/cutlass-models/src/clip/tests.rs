@@ -1460,6 +1460,71 @@ fn text_style_roundtrips_through_serde() {
 }
 
 #[test]
+fn text_generator_validation_rejects_unsafe_metrics() {
+    let invalid = |style| {
+        Generator::Text {
+            content: "Unsafe".into(),
+            style,
+        }
+        .validate()
+        .is_err()
+    };
+
+    assert!(invalid(TextStyle {
+        size: f32::NAN,
+        ..Default::default()
+    }));
+    assert!(invalid(TextStyle {
+        line_spacing: 0.0,
+        ..Default::default()
+    }));
+    assert!(invalid(TextStyle {
+        stroke: Some(TextStroke {
+            rgba: [0, 0, 0, 255],
+            width: 513.0,
+        }),
+        ..Default::default()
+    }));
+    assert!(invalid(TextStyle {
+        background: Some(TextBackground {
+            rgba: [0, 0, 0, 255],
+            radius: 1.01,
+        }),
+        ..Default::default()
+    }));
+    assert!(invalid(TextStyle {
+        shadow: Some(TextShadow {
+            rgba: [0, 0, 0, 255],
+            blur: 0.2,
+            distance: -1.0,
+        }),
+        ..Default::default()
+    }));
+
+    Generator::Text {
+        content: "Safe".into(),
+        style: TextStyle {
+            stroke: Some(TextStroke {
+                rgba: [0, 0, 0, 255],
+                width: 40.0,
+            }),
+            background: Some(TextBackground {
+                rgba: [0, 0, 0, 200],
+                radius: 1.0,
+            }),
+            shadow: Some(TextShadow {
+                rgba: [0, 0, 0, 230],
+                blur: 1.0,
+                distance: 50.0,
+            }),
+            ..Default::default()
+        },
+    }
+    .validate()
+    .expect("inspector effect limits are valid");
+}
+
+#[test]
 fn text_case_apply() {
     assert_eq!(TextCase::Normal.apply("Hello World"), "Hello World");
     assert_eq!(TextCase::Upper.apply("Hello World"), "HELLO WORLD");

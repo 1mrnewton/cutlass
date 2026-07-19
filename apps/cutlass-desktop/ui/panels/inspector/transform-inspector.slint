@@ -153,10 +153,28 @@ export component TransformInspector inherits VerticalLayout {
         height: 26px;
         vertical-stretch: 0;
 
-        CutlassText {
-            text: "Transform ^";
-            style: AppStore.theme.typography.heading-sm;
-            vertical-alignment: TextVerticalAlignment.center;
+        HorizontalLayout {
+            spacing: AppStore.theme.metrics.spacing.xs;
+
+            CutlassText {
+                text: "Transform";
+                style: AppStore.theme.typography.heading-sm;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            Rectangle {
+                width: 12px;
+                vertical-stretch: 1;
+
+                Image {
+                    width: 12px;
+                    height: 12px;
+                    y: (parent.height - self.height) / 2;
+                    source: @image-url("../../../../../assets/icon/ui/chevron-up.svg");
+                    image-fit: contain;
+                    colorize: AppStore.theme.text.primary;
+                }
+            }
         }
 
         if root.badge-visible: Rectangle {

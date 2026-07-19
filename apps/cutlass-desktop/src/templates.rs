@@ -241,11 +241,11 @@ impl Worker {
     ) {
         self.on_ui(move |backend| {
             let model = backend.get_items();
-            if let Some(mut tile) = model.row_data(row) {
-                if tile.key == key.as_str() {
-                    patch(&mut tile);
-                    model.set_row_data(row, tile);
-                }
+            if let Some(mut tile) = model.row_data(row)
+                && tile.key == key.as_str()
+            {
+                patch(&mut tile);
+                model.set_row_data(row, tile);
             }
         });
     }
@@ -453,11 +453,11 @@ impl Worker {
                 // bump swaps to the editor; on cancel the card re-arms.
                 if let Some(app) = weak.upgrade() {
                     let model = app.global::<TemplatesBackend>().get_items();
-                    if let Some(mut tile) = model.row_data(row) {
-                        if tile.key == key.as_str() {
-                            tile.state = Default::default();
-                            model.set_row_data(row, tile);
-                        }
+                    if let Some(mut tile) = model.row_data(row)
+                        && tile.key == key.as_str()
+                    {
+                        tile.state = Default::default();
+                        model.set_row_data(row, tile);
                     }
                 }
 

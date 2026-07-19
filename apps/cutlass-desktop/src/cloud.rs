@@ -313,11 +313,11 @@ impl Worker {
     fn patch_row(&self, row: usize, key: String, patch: impl Fn(&mut StockTile) + Send + 'static) {
         self.on_ui(move |backend| {
             let model = backend.get_stock_items();
-            if let Some(mut tile) = model.row_data(row) {
-                if tile.key == key.as_str() {
-                    patch(&mut tile);
-                    model.set_row_data(row, tile);
-                }
+            if let Some(mut tile) = model.row_data(row)
+                && tile.key == key.as_str()
+            {
+                patch(&mut tile);
+                model.set_row_data(row, tile);
             }
         });
     }
@@ -512,10 +512,12 @@ fn extension(item: &StockItem, content_type: &str, url: &str) -> String {
         _ => {}
     }
     let path_part = url.split(['?', '#']).next().unwrap_or("");
-    if let Some((_, ext)) = path_part.rsplit_once('.') {
-        if !ext.is_empty() && ext.len() <= 4 && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return ext.to_lowercase();
-        }
+    if let Some((_, ext)) = path_part.rsplit_once('.')
+        && !ext.is_empty()
+        && ext.len() <= 4
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return ext.to_lowercase();
     }
     match item.kind {
         StockKind::Photo => "jpg".into(),

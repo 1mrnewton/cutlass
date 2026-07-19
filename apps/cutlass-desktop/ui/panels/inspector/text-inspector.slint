@@ -138,6 +138,7 @@ component MultilineTextInput inherits Rectangle {
         viewport-height: max(self.height, input.preferred-height);
         show-horizontal-scrollbar: false;
         show-vertical-scrollbar: input.preferred-height > self.height;
+        interactive: false;
 
         input := TextInput {
             width: editor-scroll.width;
@@ -209,12 +210,14 @@ component MultilineTextInput inherits Rectangle {
 
 component IconButton inherits Rectangle {
     in property <string> label;
+    in property <image> icon;
+    in property <bool> show-icon: false;
     in property <bool> selected: false;
     in property <bool> enabled: false;
 
     callback clicked();
 
-    width: 32px;
+    width: show-icon ? 32px : max(32px, text.preferred-width + 2 * AppStore.theme.metrics.spacing.sm);
     height: 28px;
     border-radius: AppStore.theme.metrics.radius.sm;
     background: selected
@@ -222,7 +225,18 @@ component IconButton inherits Rectangle {
         : (ta.has-hover && enabled ? #ffffff1c : #ffffff10);
     opacity: enabled ? 1.0 : 0.45;
 
-    CutlassText {
+    Image {
+        width: 16px;
+        height: 16px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.icon;
+        image-fit: contain;
+        colorize: AppStore.theme.text.primary;
+        visible: show-icon;
+    }
+
+    text := CutlassText {
         width: 100%;
         height: 100%;
         text: root.label;
@@ -230,6 +244,7 @@ component IconButton inherits Rectangle {
         foreground: AppStore.theme.text.primary;
         horizontal-alignment: center;
         vertical-alignment: center;
+        visible: !show-icon;
     }
 
     ta := TouchArea {
@@ -297,6 +312,8 @@ component DisabledPropertyRow inherits HorizontalLayout {
 
 component NumberBox inherits Rectangle {
     in property <string> prefix;
+    in property <image> prefix-icon;
+    in property <bool> show-prefix-icon: false;
     in property <float> value;
     in property <string> accessibility-label: root.prefix + " value";
     callback commit(value: float);
@@ -343,6 +360,17 @@ component NumberBox inherits Rectangle {
         }
     }
 
+    Image {
+        x: AppStore.theme.metrics.spacing.sm;
+        y: (parent.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        source: root.prefix-icon;
+        image-fit: contain;
+        colorize: AppStore.theme.text.muted;
+        visible: show-prefix-icon;
+    }
+
     CutlassText {
         x: AppStore.theme.metrics.spacing.sm;
         width: 16px;
@@ -352,6 +380,7 @@ component NumberBox inherits Rectangle {
         foreground: AppStore.theme.text.muted;
         vertical-alignment: TextVerticalAlignment.center;
         accessible-role: none;
+        visible: !show-prefix-icon;
     }
 }
 
@@ -457,9 +486,8 @@ component DisabledEffectCard inherits Rectangle {
     }
 }
 
-// CapCut-inspired property sheet for text / title clips. Only fields backed
-// by the current model are interactive; style/effect controls are shown as
-// disabled placeholders until text generator styling is persisted.
+// CapCut-inspired property sheet for text / title clips. Style treatments
+// (stroke / background / shadow) persist and render; Glow is still a stub.
 export component TextInspector inherits VerticalLayout {
     in property <string> track-id;
     // Named `model` — `clip` is a built-in boolean on Slint elements.
@@ -621,6 +649,7 @@ export component TextInspector inherits VerticalLayout {
         viewport-width: root.width;
         viewport-height: content.preferred-height;
         show-horizontal-scrollbar: false;
+        interactive: false;
 
         // Same blur catcher for the property sheet: any click that no
         // control claims (labels, dividers, padding) unfocuses the active
@@ -767,7 +796,7 @@ export component TextInspector inherits VerticalLayout {
                     accepted(entered) => {
                         if (entered.is-float()) {
                             root.begin-edit();
-                            root.style.size = entered.to-float();
+                            root.style.size = clamp(entered.to-float(), 8, 240);
                             root.commit-style();
                         }
                         self.text = Math.round(model.text-style.size) + "";
@@ -795,7 +824,9 @@ export component TextInspector inherits VerticalLayout {
                 }
 
                 IconButton {
-                    label: "B";
+                    label: "Bold";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/bold.svg");
                     enabled: true;
                     selected: model.text-style.bold;
                     clicked => {
@@ -806,7 +837,9 @@ export component TextInspector inherits VerticalLayout {
                 }
 
                 IconButton {
-                    label: "U";
+                    label: "Underline";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/underline.svg");
                     enabled: true;
                     selected: model.text-style.underline;
                     clicked => {
@@ -817,7 +850,9 @@ export component TextInspector inherits VerticalLayout {
                 }
 
                 IconButton {
-                    label: "I";
+                    label: "Italic";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/italic.svg");
                     enabled: true;
                     selected: model.text-style.italic;
                     clicked => {
@@ -840,7 +875,9 @@ export component TextInspector inherits VerticalLayout {
                 }
 
                 IconButton {
-                    label: "TT";
+                    label: "Uppercase";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/case-upper.svg");
                     enabled: true;
                     selected: model.text-style.case == 1;
                     clicked => {
@@ -851,7 +888,9 @@ export component TextInspector inherits VerticalLayout {
                 }
 
                 IconButton {
-                    label: "tt";
+                    label: "Lowercase";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/case-lower.svg");
                     enabled: true;
                     selected: model.text-style.case == 2;
                     clicked => {
@@ -862,7 +901,9 @@ export component TextInspector inherits VerticalLayout {
                 }
 
                 IconButton {
-                    label: "Tt";
+                    label: "Title case";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/case-sensitive.svg");
                     enabled: true;
                     selected: model.text-style.case == 3;
                     clicked => {
@@ -907,6 +948,8 @@ export component TextInspector inherits VerticalLayout {
 
                 NumberBox {
                     prefix: "C";
+                    show-prefix-icon: true;
+                    prefix-icon: @image-url("../../../../../assets/icon/text/letter-spacing.svg");
                     accessibility-label: "Character spacing";
                     value: model.text-style.letter-spacing;
                     commit(v) => {
@@ -918,6 +961,8 @@ export component TextInspector inherits VerticalLayout {
 
                 NumberBox {
                     prefix: "L";
+                    show-prefix-icon: true;
+                    prefix-icon: @image-url("../../../../../assets/icon/text/line-height.svg");
                     accessibility-label: "Line spacing percent";
                     value: model.text-style.line-spacing * 100;
                     commit(v) => {
@@ -940,7 +985,9 @@ export component TextInspector inherits VerticalLayout {
                 }
 
                 IconButton {
-                    label: "|<";
+                    label: "Align left";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/align-left.svg");
                     enabled: true;
                     selected: model.text-style.align-h == 0;
                     clicked => {
@@ -951,7 +998,9 @@ export component TextInspector inherits VerticalLayout {
                 }
 
                 IconButton {
-                    label: "-";
+                    label: "Align center";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/align-center.svg");
                     enabled: true;
                     selected: model.text-style.align-h == 1;
                     clicked => {
@@ -962,7 +1011,9 @@ export component TextInspector inherits VerticalLayout {
                 }
 
                 IconButton {
-                    label: ">|";
+                    label: "Align right";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/align-right.svg");
                     enabled: true;
                     selected: model.text-style.align-h == 2;
                     clicked => {
@@ -973,7 +1024,9 @@ export component TextInspector inherits VerticalLayout {
                 }
 
                 IconButton {
-                    label: "T";
+                    label: "Align top";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/align-start-vertical.svg");
                     enabled: true;
                     selected: model.text-style.align-v == 0;
                     clicked => {
@@ -984,7 +1037,9 @@ export component TextInspector inherits VerticalLayout {
                 }
 
                 IconButton {
-                    label: "M";
+                    label: "Align middle";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/align-center-vertical.svg");
                     enabled: true;
                     selected: model.text-style.align-v == 1;
                     clicked => {
@@ -995,7 +1050,9 @@ export component TextInspector inherits VerticalLayout {
                 }
 
                 IconButton {
-                    label: "B";
+                    label: "Align bottom";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/align-end-vertical.svg");
                     enabled: true;
                     selected: model.text-style.align-v == 2;
                     clicked => {
@@ -1018,7 +1075,9 @@ export component TextInspector inherits VerticalLayout {
                 }
 
                 IconButton {
-                    label: model.text-style.wrap ? "On" : "Off";
+                    label: "Wrap";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/wrap-text.svg");
                     enabled: true;
                     selected: model.text-style.wrap;
                     clicked => {
@@ -1048,6 +1107,7 @@ export component TextInspector inherits VerticalLayout {
                 viewport-height: self.height;
                 show-horizontal-scrollbar: false;
                 show-vertical-scrollbar: false;
+                interactive: false;
 
                 preset-styles := HorizontalLayout {
                     spacing: AppStore.theme.metrics.spacing.md;
@@ -1317,10 +1377,15 @@ export component TextInspector inherits VerticalLayout {
                 minimum: 0;
                 maximum: 40;
                 reset-value: 6;
+                preview(v) => {
+                    root.begin-edit();
+                    root.style.stroke-width = clamp(v, 0, 40);
+                    root.preview-style();
+                }
                 commit(v) => {
                     root.begin-edit();
-                    root.style.stroke-width = v;
-                    root.commit-style();
+                    root.style.stroke-width = clamp(v, 0, 40);
+                    root.commit-or-clear-style();
                 }
             }
 
@@ -1371,10 +1436,15 @@ export component TextInspector inherits VerticalLayout {
                 minimum: 0;
                 maximum: 100;
                 reset-value: 100;
+                preview(v) => {
+                    root.begin-edit();
+                    root.style.background-opacity = clamp(v, 0, 100) / 100;
+                    root.preview-style();
+                }
                 commit(v) => {
                     root.begin-edit();
                     root.style.background-opacity = clamp(v, 0, 100) / 100;
-                    root.commit-style();
+                    root.commit-or-clear-style();
                 }
             }
 
@@ -1385,10 +1455,15 @@ export component TextInspector inherits VerticalLayout {
                 minimum: 0;
                 maximum: 100;
                 reset-value: 0;
+                preview(v) => {
+                    root.begin-edit();
+                    root.style.background-radius = clamp(v, 0, 100) / 100;
+                    root.preview-style();
+                }
                 commit(v) => {
                     root.begin-edit();
                     root.style.background-radius = clamp(v, 0, 100) / 100;
-                    root.commit-style();
+                    root.commit-or-clear-style();
                 }
             }
 
@@ -1470,10 +1545,15 @@ export component TextInspector inherits VerticalLayout {
                 minimum: 0;
                 maximum: 100;
                 reset-value: 90;
+                preview(v) => {
+                    root.begin-edit();
+                    root.style.shadow-opacity = clamp(v, 0, 100) / 100;
+                    root.preview-style();
+                }
                 commit(v) => {
                     root.begin-edit();
                     root.style.shadow-opacity = clamp(v, 0, 100) / 100;
-                    root.commit-style();
+                    root.commit-or-clear-style();
                 }
             }
 
@@ -1484,10 +1564,15 @@ export component TextInspector inherits VerticalLayout {
                 minimum: 0;
                 maximum: 100;
                 reset-value: 15;
+                preview(v) => {
+                    root.begin-edit();
+                    root.style.shadow-blur = clamp(v, 0, 100) / 100;
+                    root.preview-style();
+                }
                 commit(v) => {
                     root.begin-edit();
                     root.style.shadow-blur = clamp(v, 0, 100) / 100;
-                    root.commit-style();
+                    root.commit-or-clear-style();
                 }
             }
 
@@ -1498,10 +1583,15 @@ export component TextInspector inherits VerticalLayout {
                 minimum: 0;
                 maximum: 50;
                 reset-value: 5;
+                preview(v) => {
+                    root.begin-edit();
+                    root.style.shadow-distance = clamp(v, 0, 50);
+                    root.preview-style();
+                }
                 commit(v) => {
                     root.begin-edit();
-                    root.style.shadow-distance = v;
-                    root.commit-style();
+                    root.style.shadow-distance = clamp(v, 0, 50);
+                    root.commit-or-clear-style();
                 }
             }
 

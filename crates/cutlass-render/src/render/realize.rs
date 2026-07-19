@@ -317,9 +317,19 @@ impl Renderer {
                         SizeSpec::Fixed(_) => 1.0,
                     };
                     let size = [image.width as f32 * scale, image.height as f32 * scale];
+                    let placement = LayerPlacement {
+                        center: layer.text_quad_center(
+                            style,
+                            size,
+                            [scene.width as f32, scene.height as f32],
+                        ),
+                        size,
+                        rotation: layer.rotation,
+                        opacity: layer.opacity,
+                    };
                     realized.push(Realized::Bitmap {
                         image,
-                        placement: place(size),
+                        placement,
                         uv: layer.uv,
                         effects: layer.effects.clone(),
                         fx,
@@ -704,9 +714,19 @@ impl Renderer {
                     SizeSpec::Fixed(_) => 1.0,
                 };
                 let size = [image.width as f32 * scale, image.height as f32 * scale];
+                let placement = LayerPlacement {
+                    center: layer.text_quad_center(
+                        style,
+                        size,
+                        [scene.width as f32, scene.height as f32],
+                    ),
+                    size,
+                    rotation: layer.rotation,
+                    opacity: layer.opacity,
+                };
                 Realized::Bitmap {
                     image,
-                    placement: place(size),
+                    placement,
                     uv: layer.uv,
                     effects: layer.effects.clone(),
                     fx,

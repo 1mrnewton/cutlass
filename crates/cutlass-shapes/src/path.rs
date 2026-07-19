@@ -106,22 +106,22 @@ fn rasterize_uncached(path: &BezierPath, style: &ShapeStyle, scale: f32) -> Rgba
         paint.set_color_rgba8(fill[0], fill[1], fill[2], fill[3]);
         pixmap.fill_path(&skia_path, &paint, FillRule::Winding, translate, None);
     }
-    if let Some(stroke) = style.stroke {
-        if stroke_w > 0.0 {
-            paint.set_color_rgba8(
-                stroke.rgba[0],
-                stroke.rgba[1],
-                stroke.rgba[2],
-                stroke.rgba[3],
-            );
-            let sk_stroke = tiny_skia::Stroke {
-                width: stroke_w,
-                line_cap: LineCap::Round,
-                line_join: LineJoin::Round,
-                ..tiny_skia::Stroke::default()
-            };
-            pixmap.stroke_path(&skia_path, &paint, &sk_stroke, translate, None);
-        }
+    if let Some(stroke) = style.stroke
+        && stroke_w > 0.0
+    {
+        paint.set_color_rgba8(
+            stroke.rgba[0],
+            stroke.rgba[1],
+            stroke.rgba[2],
+            stroke.rgba[3],
+        );
+        let sk_stroke = tiny_skia::Stroke {
+            width: stroke_w,
+            line_cap: LineCap::Round,
+            line_join: LineJoin::Round,
+            ..tiny_skia::Stroke::default()
+        };
+        pixmap.stroke_path(&skia_path, &paint, &sk_stroke, translate, None);
     }
 
     // tiny-skia stores premultiplied alpha; the compositor's RGBA path takes

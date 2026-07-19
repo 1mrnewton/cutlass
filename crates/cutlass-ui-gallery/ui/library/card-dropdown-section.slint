@@ -1,0 +1,98 @@
+// Demos for the incubating gallery CutlassCardDropdown.
+
+import { AppStore } from "../../../../apps/cutlass-desktop/ui/store/app-store.slint";
+import { CutlassText } from "../../../../apps/cutlass-desktop/ui/components/text.slint";
+import { CutlassCardDropdown } from "../components/index.slint";
+
+component SectionTitle inherits CutlassText {
+    style: AppStore.theme.typography.heading-sm;
+    foreground: AppStore.theme.text.primary;
+    vertical-stretch: 0;
+}
+
+component SectionHint inherits CutlassText {
+    style: AppStore.theme.typography.caption;
+    foreground: AppStore.theme.text.muted;
+    wrap: word-wrap;
+    vertical-stretch: 0;
+}
+
+component FieldLabel inherits CutlassText {
+    style: AppStore.theme.typography.label;
+    foreground: AppStore.theme.text.secondary;
+    vertical-stretch: 0;
+}
+
+component StatusLine inherits CutlassText {
+    style: AppStore.theme.typography.caption;
+    foreground: AppStore.theme.text.secondary;
+    vertical-stretch: 0;
+}
+
+export component CardDropdownSection inherits VerticalLayout {
+    spacing: AppStore.theme.metrics.spacing.md;
+    padding: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    private property <[string]> speeds: ["0.25x", "0.5x", "0.75x", "1x", "1.5x", "2x", "3x", "4x"];
+    private property <[string]> fonts: [
+        "Inter", "SF Pro", "Helvetica", "Arial", "Georgia",
+        "Menlo", "JetBrains Mono", "Roboto", "Courier New", "Times New Roman",
+        "Palatino", "Futura", "Gill Sans", "Optima", "Avenir",
+    ];
+
+    in-out property <string> speed: "1x";
+    in-out property <string> font: "Inter";
+    in-out property <string> empty-pick: "";
+    in-out property <string> status: "Open a menu — popup chrome is CutlassCard";
+
+    SectionTitle { text: "Card Dropdown"; }
+    SectionHint {
+        text: "Same CutlassDropdown behavior; the popup panel is CutlassCard glass (compact padding / radius). Existing Dropdown section is unchanged.";
+    }
+
+    FieldLabel { text: "Plain"; }
+    CutlassCardDropdown {
+        vertical-stretch: 0;
+        max-width: 280px;
+        items: root.speeds;
+        current <=> root.speed;
+        selected(value) => { root.status = "selected: " + value + " (current=" + root.speed + ")"; }
+    }
+
+    FieldLabel { text: "Searchable"; }
+    CutlassCardDropdown {
+        vertical-stretch: 0;
+        max-width: 320px;
+        searchable: true;
+        items: root.fonts;
+        current <=> root.font;
+        placeholder: "Font";
+        selected(value) => { root.status = "font: " + value; }
+    }
+
+    FieldLabel { text: "Disabled"; }
+    CutlassCardDropdown {
+        vertical-stretch: 0;
+        max-width: 280px;
+        enabled: false;
+        items: root.speeds;
+        current: "1x";
+    }
+
+    FieldLabel { text: "Placeholder (empty current)"; }
+    CutlassCardDropdown {
+        vertical-stretch: 0;
+        max-width: 280px;
+        items: root.speeds;
+        current <=> root.empty-pick;
+        placeholder: "Choose speed";
+        selected(value) => { root.status = "empty→ " + value; }
+    }
+
+    StatusLine { text: root.status; }
+
+    SectionHint {
+        text: "Keyboard: Space/Enter/↓ opens; ↑/↓ moves; Enter commits; Escape closes.";
+    }
+}

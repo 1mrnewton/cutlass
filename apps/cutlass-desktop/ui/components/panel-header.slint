@@ -1,10 +1,16 @@
 import { AppStore } from "../store/app-store.slint";
+import { CutlassText } from "text.slint";
 
 export component PanelHeader inherits Rectangle {
     height: 40px;
     background: AppStore.theme.panel.header-background;
     in property <string> title: "";
-    if title != "": Text {
+    if title != "": CutlassText {
+        x: AppStore.theme.metrics.spacing.lg;
+        width: parent.width - 2 * AppStore.theme.metrics.spacing.lg;
+        height: 100%;
         text: title;
+        style: { size: 13px, weight: 500, italic: false };
+        vertical-alignment: center;
     }
 }

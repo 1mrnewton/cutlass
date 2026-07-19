@@ -1,0 +1,167 @@
+// Gallery demos for the theme-independent CutlassCard.
+
+import { CutlassCard } from "../components/index.slint";
+
+component GalleryTitle inherits Text {
+    color: #f3f5fb;
+    font-family: "SF Pro Display";
+    font-size: 22px;
+    font-weight: 650;
+    vertical-stretch: 0;
+}
+
+component GalleryHint inherits Text {
+    color: #aeb7ca;
+    font-family: "SF Pro Text";
+    font-size: 13px;
+    vertical-stretch: 0;
+    wrap: word-wrap;
+}
+
+component CardLabel inherits Text {
+    color: #9ca3af;
+    font-family: "SF Pro Text";
+    font-size: 13px;
+    vertical-stretch: 0;
+}
+
+component CardValue inherits Text {
+    color: #f3f4f6;
+    font-family: "SF Pro Display";
+    font-size: 15px;
+    font-weight: 600;
+    vertical-stretch: 0;
+}
+
+export component CardSection inherits Rectangle {
+    background: #090c14;
+
+    VerticalLayout {
+        padding: 28px;
+        spacing: 8px;
+
+        GalleryTitle {
+            text: "Card";
+        }
+
+        GalleryHint {
+            text: "Layered translucent material with refracted edges. The component carries no Cutlass theme dependency.";
+        }
+
+        Rectangle {
+            height: 12px;
+            vertical-stretch: 0;
+        }
+
+        stage := Rectangle {
+            vertical-stretch: 1;
+            min-height: 430px;
+            // border-radius: 24px;
+            // border-width: 1px;
+            // border-color: #ffffff12;
+            // background: @linear-gradient(145deg, #0a1020 0%, #151226 54%, #080b12 100%,);
+            background: #202020;
+            clip: true;
+
+            primary-card := CutlassCard {
+                x: max(
+                    28px,
+                    (parent.width - self.width) / 2
+                    - (parent.width >= 720px ? 72px : 0px),
+                );
+                y: 62px;
+                width: min(500px, parent.width - 56px);
+                height: 272px;
+
+                content-padding: 24px;
+                content-spacing: 11px;
+
+                HorizontalLayout {
+                    height: 22px;
+                    vertical-stretch: 0;
+
+                    Text {
+                        text: "Project handoff";
+                        color: #d1d5db;
+                        font-family: "SF Pro Text";
+                        font-size: 14px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+
+                    Text {
+                        text: "Ready";
+                        color: #6ee7b7;
+                        font-family: "SF Pro Text";
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Text {
+                    text: "Review package";
+                    color: #f9fafb;
+                    font-family: "SF Pro Display";
+                    font-size: 28px;
+                    font-weight: 680;
+                    vertical-stretch: 0;
+                }
+
+                Text {
+                    text: "A calm surface for artwork, metadata, and the controls that move work forward.";
+                    color: #9ca3af;
+                    font-family: "SF Pro Text";
+                    font-size: 14px;
+                    wrap: word-wrap;
+                    vertical-stretch: 0;
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+
+                Rectangle {
+                    height: 1px;
+                    vertical-stretch: 0;
+                    background: #ffffff1c;
+                }
+
+                HorizontalLayout {
+                    height: 42px;
+                    vertical-stretch: 0;
+                    spacing: 32px;
+
+                    VerticalLayout {
+                        spacing: 3px;
+                        CardLabel {
+                            text: "Format";
+                        }
+
+                        CardValue {
+                            text: "4K ProRes";
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 3px;
+                        CardLabel {
+                            text: "Color";
+                        }
+
+                        CardValue {
+                            text: "Display P3";
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,120 @@
+// Demos for the incubating gallery CutlassDropdown.
+
+import { AppStore } from "../../../../apps/cutlass-desktop/ui/store/app-store.slint";
+import { CutlassText } from "../../../../apps/cutlass-desktop/ui/components/text.slint";
+import { CutlassDropdown } from "../components/index.slint";
+
+component SectionTitle inherits CutlassText {
+    style: AppStore.theme.typography.heading-sm;
+    foreground: AppStore.theme.text.primary;
+    vertical-stretch: 0;
+}
+
+component SectionHint inherits CutlassText {
+    style: AppStore.theme.typography.caption;
+    foreground: AppStore.theme.text.muted;
+    wrap: word-wrap;
+    vertical-stretch: 0;
+}
+
+component FieldLabel inherits CutlassText {
+    style: AppStore.theme.typography.label;
+    foreground: AppStore.theme.text.secondary;
+    vertical-stretch: 0;
+}
+
+component StatusLine inherits CutlassText {
+    style: AppStore.theme.typography.caption;
+    foreground: AppStore.theme.text.secondary;
+    vertical-stretch: 0;
+}
+
+export component DropdownSection inherits VerticalLayout {
+    spacing: AppStore.theme.metrics.spacing.md;
+    padding: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    private property <[string]> speeds: ["0.25x", "0.5x", "0.75x", "1x", "1.5x", "2x", "3x", "4x"];
+    private property <[string]> fonts: [
+        "Inter", "SF Pro", "Helvetica", "Arial", "Georgia",
+        "Menlo", "JetBrains Mono", "Roboto", "Courier New", "Times New Roman",
+        "Palatino", "Futura", "Gill Sans", "Optima", "Avenir",
+    ];
+
+    in-out property <string> speed: "1x";
+    in-out property <string> font: "Inter";
+    in-out property <string> empty-pick: "";
+    in-out property <string> narrow-pick: "Arial";
+    in-out property <string> wide-pick: "2x";
+    in-out property <string> status: "Pick an option — current is written on select";
+
+    SectionTitle { text: "Dropdown"; }
+    SectionHint {
+        text: "Gallery library CutlassDropdown: owns current, built-in filter, keyboard nav, enabled gate. Promote to desktop after bake-in.";
+    }
+
+    FieldLabel { text: "Plain"; }
+    CutlassDropdown {
+        vertical-stretch: 0;
+        max-width: 280px;
+        items: root.speeds;
+        current <=> root.speed;
+        selected(value) => { root.status = "selected: " + value + " (current=" + root.speed + ")"; }
+    }
+
+    FieldLabel { text: "Searchable (built-in filter)"; }
+    CutlassDropdown {
+        vertical-stretch: 0;
+        max-width: 320px;
+        searchable: true;
+        items: root.fonts;
+        current <=> root.font;
+        placeholder: "Font";
+        selected(value) => { root.status = "font: " + value; }
+    }
+
+    FieldLabel { text: "Disabled"; }
+    CutlassDropdown {
+        vertical-stretch: 0;
+        max-width: 280px;
+        enabled: false;
+        items: root.speeds;
+        current: "1x";
+    }
+
+    FieldLabel { text: "Placeholder (empty current)"; }
+    CutlassDropdown {
+        vertical-stretch: 0;
+        max-width: 280px;
+        items: root.speeds;
+        current <=> root.empty-pick;
+        placeholder: "Choose speed";
+        selected(value) => { root.status = "empty→ " + value; }
+    }
+
+    FieldLabel { text: "Widths (elide)"; }
+    HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+        vertical-stretch: 0;
+
+        CutlassDropdown {
+            width: 120px;
+            horizontal-stretch: 0;
+            items: root.fonts;
+            current <=> root.narrow-pick;
+            selected(value) => { root.status = "narrow: " + value; }
+        }
+        CutlassDropdown {
+            horizontal-stretch: 1;
+            items: root.speeds;
+            current <=> root.wide-pick;
+            selected(value) => { root.status = "wide: " + value; }
+        }
+    }
+
+    StatusLine { text: root.status; }
+
+    SectionHint {
+        text: "Keyboard: focus the control, Space/Enter/↓ opens; ↑/↓ moves; Enter commits; Escape closes. Theme chips above recolor the control.";
+    }
+}

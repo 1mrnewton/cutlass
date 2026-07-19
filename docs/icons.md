@@ -145,7 +145,8 @@ lacks cleanly (`letter-spacing`, `line-height`): **[Tabler](https://tabler.io/ic
 ### Misc
 
 - [x] `x` — `assets/icon/ui/x.svg` — transition remove.
-- [x] `check` — `assets/icon/ui/check.svg` — agent dry-run checkbox.
+- [x] `check` — `assets/icon/ui/check.svg` — agent dry-run checkbox; gallery dropdown selected row (`crates/cutlass-ui-gallery/ui/components/dropdown.slint`).
+- [x] `chevron-down` — `assets/icon/ui/chevron-down.svg` — gallery dropdown trigger.
 - [x] `send` — `assets/icon/chat/send.svg` — agent submit.
 - [x] `circle-stop` — `assets/icon/chat/stop.svg` — agent cancel.
 

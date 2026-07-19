@@ -1,0 +1,15 @@
+// Rust-backed string helpers for gallery library components.
+// Slint has no case-insensitive substring match; `main.rs` wires these.
+
+export global StringFilter {
+    // True when `haystack` contains `needle` (case-insensitive). Empty needle matches all.
+    pure callback contains(haystack: string, needle: string) -> bool;
+
+    // Index of `value` in `items`, or -1.
+    pure callback index-of(items: [string], value: string) -> int;
+
+    // Next matching index from `from` stepping by `direction` (+1 / -1).
+    // Pass `from: -1` (dir +1) or `from: items.length` (dir -1) to start at an end.
+    // Returns -1 when none.
+    pure callback next-match(items: [string], query: string, from: int, direction: int) -> int;
+}

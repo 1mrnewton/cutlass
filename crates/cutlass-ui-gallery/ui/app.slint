@@ -1,8 +1,10 @@
-// Cutlass UI component gallery — Storybook-style showcase of ready custom widgets.
-// Components are imported from cutlass-desktop; this crate only hosts demos.
+// Cutlass UI component gallery — incubating Library + Desktop reference demos.
 
 import { AppStore } from "../../../apps/cutlass-desktop/ui/store/app-store.slint";
 import { CutlassText } from "../../../apps/cutlass-desktop/ui/components/text.slint";
+import { StringFilter } from "lib/string-filter.slint";
+import { DropdownSection } from "library/dropdown-section.slint";
+import { CardSection } from "library/card-section.slint";
 import {
     NavItem,
     ButtonsSection,
@@ -12,9 +14,10 @@ import {
     LayoutSection,
     ScrollSection,
     SplitSection,
-} from "sections.slint";
+} from "desktop-sections.slint";
 
 export { AppStore }
+export { StringFilter }
 
 component ThemeChip inherits Rectangle {
     in property <string> label;
@@ -48,6 +51,14 @@ component ThemeChip inherits Rectangle {
     }
 }
 
+component NavCaption inherits CutlassText {
+    style: AppStore.theme.typography.caption;
+    foreground: AppStore.theme.text.muted;
+    vertical-stretch: 0;
+    height: 24px;
+    vertical-alignment: center;
+}
+
 export component GalleryWindow inherits Window {
     title: "Cutlass UI";
     preferred-width: 1100px;
@@ -56,13 +67,13 @@ export component GalleryWindow inherits Window {
     min-height: 520px;
     background: AppStore.theme.surface.app-background;
 
-    // 0 Buttons · 1 Text · 2 Inputs · 3 Slider · 4 Layout · 5 Scroll · 6 Split
+    // 0-1 Library: Dropdown, Card
+    // 2-8 Desktop: Buttons, Text, Inputs, Slider, Layout, Scroll, Split
     in-out property <int> section: 0;
 
     VerticalLayout {
         spacing: 0;
 
-        // Header
         Rectangle {
             height: 52px;
             vertical-stretch: 0;
@@ -111,7 +122,6 @@ export component GalleryWindow inherits Window {
             spacing: 0;
             vertical-stretch: 1;
 
-            // Nav rail
             Rectangle {
                 width: 200px;
                 horizontal-stretch: 0;
@@ -122,49 +132,55 @@ export component GalleryWindow inherits Window {
                     spacing: 2px;
                     alignment: LayoutAlignment.start;
 
-                    CutlassText {
-                        text: "Components";
-                        style: AppStore.theme.typography.caption;
-                        foreground: AppStore.theme.text.muted;
-                        vertical-stretch: 0;
-                        height: 24px;
-                        vertical-alignment: center;
-                    }
-
+                    NavCaption { text: "Library"; }
                     NavItem {
-                        label: "Buttons";
+                        label: "Dropdown";
                         active: root.section == 0;
                         clicked => { root.section = 0; }
                     }
                     NavItem {
-                        label: "Text";
+                        label: "Card";
                         active: root.section == 1;
                         clicked => { root.section = 1; }
                     }
+
+                    Rectangle { height: 12px; vertical-stretch: 0; }
+
+                    NavCaption { text: "Desktop"; }
                     NavItem {
-                        label: "Inputs";
+                        label: "Buttons";
                         active: root.section == 2;
                         clicked => { root.section = 2; }
                     }
                     NavItem {
-                        label: "Slider";
+                        label: "Text";
                         active: root.section == 3;
                         clicked => { root.section = 3; }
                     }
                     NavItem {
-                        label: "Layout";
+                        label: "Inputs";
                         active: root.section == 4;
                         clicked => { root.section = 4; }
                     }
                     NavItem {
-                        label: "Scroll & grid";
+                        label: "Slider";
                         active: root.section == 5;
                         clicked => { root.section = 5; }
                     }
                     NavItem {
-                        label: "Split grips";
+                        label: "Layout";
                         active: root.section == 6;
                         clicked => { root.section = 6; }
+                    }
+                    NavItem {
+                        label: "Scroll & grid";
+                        active: root.section == 7;
+                        clicked => { root.section = 7; }
+                    }
+                    NavItem {
+                        label: "Split grips";
+                        active: root.section == 8;
+                        clicked => { root.section = 8; }
                     }
                 }
             }
@@ -175,36 +191,43 @@ export component GalleryWindow inherits Window {
                 background: AppStore.theme.surface.divider;
             }
 
-            // Detail pane
             Rectangle {
                 horizontal-stretch: 1;
                 background: AppStore.theme.surface.app-background;
 
-                if root.section == 0: ButtonsSection {
+                if root.section == 0: DropdownSection {
                     width: 100%;
                     height: 100%;
                 }
-                if root.section == 1: TextSection {
+                if root.section == 1: CardSection {
                     width: 100%;
                     height: 100%;
                 }
-                if root.section == 2: InputsSection {
+                if root.section == 2: ButtonsSection {
                     width: 100%;
                     height: 100%;
                 }
-                if root.section == 3: SliderSection {
+                if root.section == 3: TextSection {
                     width: 100%;
                     height: 100%;
                 }
-                if root.section == 4: LayoutSection {
+                if root.section == 4: InputsSection {
                     width: 100%;
                     height: 100%;
                 }
-                if root.section == 5: ScrollSection {
+                if root.section == 5: SliderSection {
                     width: 100%;
                     height: 100%;
                 }
-                if root.section == 6: SplitSection {
+                if root.section == 6: LayoutSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 7: ScrollSection {
+                    width: 100%;
+                    height: 100%;
+                }
+                if root.section == 8: SplitSection {
                     width: 100%;
                     height: 100%;
                 }

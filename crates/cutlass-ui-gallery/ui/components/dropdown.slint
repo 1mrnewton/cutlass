@@ -1,0 +1,349 @@
+// Incubating CutlassDropdown — gallery library (promote to desktop after bake-in).
+//
+// vs desktop dropdown:
+//   - writes `current` on select (caller need not bind selected → current)
+//   - `enabled` gate
+//   - built-in search filter (no caller-side items binding)
+//   - keyboard: Space/Enter open, ↑/↓ highlight, Enter commit, Escape close
+//   - no AppState / desktop scroll / line-input deps
+
+import { AppStore } from "../../../../apps/cutlass-desktop/ui/store/app-store.slint";
+import { StringFilter } from "../lib/string-filter.slint";
+
+export component CutlassDropdown inherits Rectangle {
+    in property <[string]> items;
+    in-out property <string> current;
+    in property <string> placeholder: "Select";
+    in property <bool> enabled: true;
+    in property <bool> searchable: false;
+
+    callback selected(value: string);
+
+    private property <string> query: "";
+    private property <int> highlight: -1;
+    // Bumped after `popup.show()` so the popup can focus itself (ids inside
+    // PopupWindow are not reachable from the enclosing component).
+    private property <int> popup-focus-nonce: 0;
+    private property <length> row-height: 28px;
+    private property <length> popup-max-height: 260px;
+    private property <length> list-pad: AppStore.theme.metrics.spacing.sm;
+
+    height: 28px;
+    horizontal-stretch: 1;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    border-width: 1px;
+    border-color: focus-scope.has-focus ? AppStore.theme.accent.primary
+        : (trigger.has-hover && root.enabled ? #ffffff28 : #ffffff14);
+    background: !root.enabled ? #1a1a1a88
+        : (trigger.has-hover ? #242424 : #1a1a1a);
+    opacity: root.enabled ? 1.0 : 0.45;
+    forward-focus: focus-scope;
+
+    animate border-color { duration: 120ms; easing: ease-out; }
+    animate background { duration: 120ms; easing: ease-out; }
+
+    public function open-popup() {
+        if (!root.enabled) {
+            return;
+        }
+        root.query = "";
+        root.highlight = StringFilter.index-of(root.items, root.current);
+        if (root.highlight < 0) {
+            root.highlight = StringFilter.next-match(root.items, "", -1, 1);
+        }
+        popup.show();
+        root.popup-focus-nonce += 1;
+    }
+
+    public function close-popup() {
+        root.query = "";
+        popup.close();
+        focus-scope.focus();
+    }
+
+    function commit-highlight() {
+        if (root.highlight < 0 || root.highlight >= root.items.length) {
+            return;
+        }
+        root.commit-value(root.items[root.highlight]);
+    }
+
+    function commit-value(value: string) {
+        root.current = value;
+        root.selected(value);
+        root.close-popup();
+    }
+
+    function move-highlight(direction: int) {
+        root.highlight = StringFilter.next-match(
+            root.items,
+            root.query,
+            root.highlight,
+            direction,
+        );
+    }
+
+    HorizontalLayout {
+        padding-left: AppStore.theme.metrics.spacing.sm;
+        padding-right: AppStore.theme.metrics.spacing.sm;
+        spacing: AppStore.theme.metrics.spacing.xs;
+
+        Text {
+            horizontal-stretch: 1;
+            vertical-stretch: 1;
+            vertical-alignment: TextVerticalAlignment.center;
+            text: root.current == "" ? root.placeholder : root.current;
+            color: root.current == "" ? AppStore.theme.text.muted : AppStore.theme.text.primary;
+            font-family: AppStore.theme.typography.font-family;
+            font-size: AppStore.theme.typography.body.size;
+            font-weight: AppStore.theme.typography.body.weight;
+            overflow: TextOverflow.elide;
+        }
+
+        Rectangle {
+            width: 12px;
+            vertical-stretch: 1;
+
+            Image {
+                width: 12px;
+                height: 12px;
+                y: (parent.height - self.height) / 2;
+                source: @image-url("../../../../assets/icon/ui/chevron-down.svg");
+                image-fit: contain;
+                colorize: AppStore.theme.text.muted;
+            }
+        }
+    }
+
+    // Zero-size FocusScope (same pattern as CutlassSlider): keyboard only via
+    // `forward-focus`. A full-size scope steals the first click for focus and
+    // the TouchArea never fires until the second click.
+    focus-scope := FocusScope {
+        x: 0;
+        y: 0;
+        width: 0;
+        height: 0;
+        enabled: root.enabled;
+
+        key-pressed(event) => {
+            if (!root.enabled) {
+                return reject;
+            }
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.open-popup();
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.open-popup();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    trigger := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            focus-scope.focus();
+            root.open-popup();
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: max(root.width, 160px);
+        // Search row + padding + list; clamp via inner clip/flick.
+        height: min(
+            root.popup-max-height,
+            (root.searchable ? 34px : 0px)
+                + 2 * root.list-pad
+                + root.items.length * root.row-height
+                + 4px,
+        );
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: AppStore.theme.panel.background;
+            border-radius: AppStore.theme.metrics.radius.md;
+            border-width: 1px;
+            border-color: #ffffff1f;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000040;
+            drop-shadow-offset-y: 3px;
+            clip: true;
+
+            popup-keys := FocusScope {
+                width: 100%;
+                height: 100%;
+
+                private property <int> focus-nonce: root.popup-focus-nonce;
+                changed focus-nonce => {
+                    if (root.searchable) {
+                        search-input.focus();
+                    } else {
+                        self.focus();
+                    }
+                }
+
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.close-popup();
+                        return accept;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        root.move-highlight(-1);
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        root.move-highlight(1);
+                        return accept;
+                    }
+                    if (event.text == Key.Return) {
+                        root.commit-highlight();
+                        return accept;
+                    }
+                    reject
+                }
+
+                VerticalLayout {
+                    padding: root.list-pad;
+                    spacing: AppStore.theme.metrics.spacing.sm;
+
+                    // Always present so `open-popup` can call `search-input.focus()`.
+                    search-chrome := Rectangle {
+                        height: root.searchable ? 26px : 0px;
+                        vertical-stretch: 0;
+                        border-radius: AppStore.theme.metrics.radius.sm;
+                        border-width: root.searchable ? 1px : 0px;
+                        border-color: search-input.has-focus
+                            ? AppStore.theme.accent.primary
+                            : #ffffff14;
+                        background: #141414;
+                        clip: true;
+
+                        search-input := TextInput {
+                            x: AppStore.theme.metrics.spacing.sm;
+                            width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+                            height: 100%;
+                            single-line: true;
+                            text <=> root.query;
+                            color: AppStore.theme.text.primary;
+                            font-family: AppStore.theme.typography.font-family;
+                            font-size: AppStore.theme.typography.body.size;
+                            vertical-alignment: TextVerticalAlignment.center;
+                            input-type: text;
+                            enabled: root.searchable;
+
+                            edited => {
+                                root.highlight = StringFilter.next-match(
+                                    root.items,
+                                    root.query,
+                                    -1,
+                                    1,
+                                );
+                            }
+
+                            key-pressed(event) => {
+                                if (event.text == Key.Escape) {
+                                    root.close-popup();
+                                    return accept;
+                                }
+                                if (event.text == Key.UpArrow) {
+                                    root.move-highlight(-1);
+                                    return accept;
+                                }
+                                if (event.text == Key.DownArrow) {
+                                    root.move-highlight(1);
+                                    return accept;
+                                }
+                                if (event.text == Key.Return) {
+                                    root.commit-highlight();
+                                    return accept;
+                                }
+                                reject
+                            }
+                        }
+
+                        if root.searchable && root.query == "" && !search-input.has-focus: Text {
+                            x: AppStore.theme.metrics.spacing.sm;
+                            width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+                            height: 100%;
+                            vertical-alignment: TextVerticalAlignment.center;
+                            text: "Search";
+                            color: AppStore.theme.text.muted;
+                            font-family: AppStore.theme.typography.font-family;
+                            font-size: AppStore.theme.typography.body.size;
+                        }
+                    }
+
+                    Flickable {
+                        vertical-stretch: 1;
+                        viewport-width: self.width;
+                        viewport-height: list.preferred-height;
+
+                        list := VerticalLayout {
+                            spacing: 0;
+                            alignment: LayoutAlignment.start;
+
+                            for item[i] in root.items: Rectangle {
+                                private property <bool> matched: root.query == ""
+                                    || StringFilter.contains(item, root.query);
+                                height: matched ? root.row-height : 0px;
+                                clip: true;
+                                border-radius: AppStore.theme.metrics.radius.sm;
+                                background: !matched ? transparent
+                                    : i == root.highlight
+                                    ? AppStore.theme.accent.primary.with-alpha(0.16)
+                                    : (row-ta.has-hover ? #ffffff10 : transparent);
+
+                                if matched: HorizontalLayout {
+                                    padding-left: AppStore.theme.metrics.spacing.sm;
+                                    padding-right: AppStore.theme.metrics.spacing.sm;
+                                    spacing: AppStore.theme.metrics.spacing.sm;
+
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        vertical-stretch: 1;
+                                        vertical-alignment: TextVerticalAlignment.center;
+                                        text: item;
+                                        color: i == root.highlight || item == root.current
+                                            ? AppStore.theme.accent.primary
+                                            : AppStore.theme.text.primary;
+                                        font-family: AppStore.theme.typography.font-family;
+                                        font-size: AppStore.theme.typography.body.size;
+                                        font-weight: AppStore.theme.typography.body.weight;
+                                        overflow: TextOverflow.elide;
+                                    }
+
+                                    if item == root.current: Image {
+                                        width: 12px;
+                                        height: 12px;
+                                        y: (parent.height - self.height) / 2;
+                                        source: @image-url("../../../../assets/icon/ui/check.svg");
+                                        image-fit: contain;
+                                        colorize: AppStore.theme.accent.primary;
+                                    }
+                                }
+
+                                row-ta := TouchArea {
+                                    enabled: matched;
+                                    clicked => {
+                                        root.commit-value(item);
+                                    }
+                                    moved => {
+                                        if (matched) {
+                                            root.highlight = i;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

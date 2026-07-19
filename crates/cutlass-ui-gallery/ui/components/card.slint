@@ -1,0 +1,63 @@
+// Theme-independent glass card for the gallery library.
+//
+// Slint 1.16 does not expose a backdrop-blur primitive, so the material is
+// built from translucent tint, edge refraction, a soft highlight, and a
+// tinted depth shadow. Background color still reads through the surface.
+
+export component CutlassCard inherits Rectangle {
+    in property <color> tint: #2a2a2a;
+    in property <length> content-padding: 20px;
+    in property <length> content-spacing: 10px;
+    in property <length> corner-radius: 18px;
+
+    min-width: 180px;
+    min-height: 120px;
+    border-radius: root.corner-radius;
+    border-width: 1px;
+    border-color: @linear-gradient(135deg, #ffffff28 0%, #ffffff10 35%, root.tint.with-alpha(0.40) 72%, #ffffff08 100%,);
+    background: @linear-gradient(145deg, #2e2e2ef0 0%, root.tint.with-alpha(0.94) 48%, #262626f2 100%,);
+    drop-shadow-blur: 120px;
+    drop-shadow-color: #0000006f;
+    drop-shadow-offset-y: 10px;
+    drop-shadow-offset-x: 10px;
+    clip: true;
+
+    // Broad reflection across the upper face.
+    Rectangle {
+        x: 1px;
+        y: 1px;
+        width: max(0px, parent.width - 2px);
+        height: max(0px, parent.height * 0.62);
+        border-radius: max(0px, root.corner-radius - 1px);
+        background: @linear-gradient(155deg, #ffffff14 0%, #ffffff06 38%, transparent 72%,);
+    }
+
+    // A quiet pool of tint at the lower edge gives the glass depth without a
+    // neon outer glow.
+    Rectangle {
+        x: 1px;
+        y: parent.height * 0.46;
+        width: max(0px, parent.width - 2px);
+        height: max(0px, parent.height * 0.54 - 1px);
+        border-radius: max(0px, root.corner-radius - 1px);
+        background: @radial-gradient(circle, root.tint.darker(0.10).with-alpha(0.35) 0%, transparent 72%,);
+    }
+
+    // Inner edge catches light separately from the outer border.
+    Rectangle {
+        x: 2px;
+        y: 2px;
+        width: max(0px, parent.width - 4px);
+        height: max(0px, parent.height - 4px);
+        border-radius: max(0px, root.corner-radius - 2px);
+        border-width: 1px;
+        border-color: @linear-gradient(145deg, #ffffff18 0%, transparent 44%, #ffffff08 100%,);
+        background: transparent;
+    }
+
+    VerticalLayout {
+        padding: root.content-padding;
+        spacing: root.content-spacing;
+        @children
+    }
+}

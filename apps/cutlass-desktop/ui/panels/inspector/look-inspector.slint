@@ -44,8 +44,11 @@ component FilterDropdown inherits Rectangle {
     in property <[CatalogEntry]> entries: InspectorBackend.filter-catalog;
     in property <string> current-id;
     in property <string> current-label;
+    // When true, pin a Browse… row under the catalog list (LUT preset).
+    in property <bool> show-browse: false;
 
     callback selected(id: string);
+    callback browse();
 
     height: 28px;
     horizontal-stretch: 1;
@@ -102,6 +105,38 @@ component FilterDropdown inherits Rectangle {
             VerticalLayout {
                 padding: AppStore.theme.metrics.spacing.sm;
                 spacing: 0;
+
+                // Dedicated row (not FilterRow): avoid refocus-shortcuts, which
+                // steals focus and can cancel the native file sheet. Call
+                // browse before close so the callback isn't torn down with the
+                // popup.
+                if root.show-browse: Rectangle {
+                    height: 26px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: browse-ta.has-hover ? #ffffff10 : transparent;
+
+                    CutlassText {
+                        x: AppStore.theme.metrics.spacing.sm;
+                        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        text: "Browse…";
+                        style: AppStore.theme.typography.body;
+                        foreground: AppStore.theme.text.primary;
+                    }
+
+                    browse-ta := TouchArea {
+                        clicked => {
+                            root.browse();
+                            popup.close();
+                        }
+                    }
+                }
+
+                if root.show-browse: Rectangle {
+                    height: 1px;
+                    background: #ffffff12;
+                }
 
                 CutlassScrollView {
                     vertical-stretch: 1;
@@ -256,8 +291,12 @@ export component LookInspector inherits VerticalLayout {
             entries: InspectorBackend.lut-catalog;
             current-id: root.model.lut-id;
             current-label: root.model.lut-label;
+            show-browse: true;
             selected(id) => {
                 InspectorBackend.set-clip-lut(root.model.id, id, id == "" ? 0 : 0.8);
+            }
+            browse => {
+                InspectorBackend.pick-clip-lut(root.model.id);
             }
         }
     }
@@ -275,7 +314,7 @@ export component LookInspector inherits VerticalLayout {
         wrap: word-wrap;
     }
 
-    if root.model.lut-id != "": SliderRow {
+    if root.model.lut-path != "": SliderRow {
         label: "Intensity";
         suffix: "%";
         value: root.model.lut-intensity * 100;
@@ -290,7 +329,7 @@ export component LookInspector inherits VerticalLayout {
         commit(v) => {
             InspectorBackend.set-clip-lut(
                 root.model.id,
-                root.model.lut-id,
+                root.model.lut-path,
                 clamp(v, 0, 100) / 100);
         }
     }

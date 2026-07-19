@@ -220,9 +220,15 @@ export global InspectorBackend {
     callback refresh-luts();
 
     // Set (or clear with an empty id) a visual clip's `.cube` LUT. `lut-id`
-    // is a `lut-catalog` entry id; Rust resolves it to the downloaded file.
-    // Intensity is normalized 0..=1. One undoable edit.
+    // is a `lut-catalog` entry id, or an absolute `.cube` path (intensity
+    // re-apply / user-picked file). Catalog ids resolve to the downloaded
+    // file; absolute paths pass through. Intensity is normalized 0..=1.
+    // One undoable edit.
     callback set-clip-lut(clip-id: string, lut-id: string, intensity: float);
+
+    // Open a native `.cube` file picker and apply the chosen LUT to the clip
+    // at default intensity (0.8). Cancel leaves the clip unchanged.
+    callback pick-clip-lut(clip-id: string);
 
     // Set (or clear with an empty id) one look-animation slot: "in", "out",
     // or "combo". One undoable edit; combo exclusivity is enforced by the model.

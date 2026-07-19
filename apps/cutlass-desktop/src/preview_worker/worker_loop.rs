@@ -721,6 +721,8 @@ pub(super) fn message_invalidates_preview(msg: &WorkerMsg) -> bool {
             | WorkerMsg::SetClipCrop { .. }
             | WorkerMsg::SetClipFilter { .. }
             | WorkerMsg::SetClipAdjust { .. }
+            | WorkerMsg::SetClipLut { .. }
+            | WorkerMsg::SetClipAnimation { .. }
             // Effects and transitions repaint the canvas at the playhead.
             | WorkerMsg::AddEffect { .. }
             | WorkerMsg::RemoveEffect { .. }

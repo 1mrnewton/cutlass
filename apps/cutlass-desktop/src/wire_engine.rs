@@ -353,6 +353,8 @@ pub(crate) fn wire_engine(
             .on_set_clip_lut(move |clip_id, lut_id, intensity| {
                 let path = if lut_id.is_empty() {
                     String::new()
+                } else if is_absolute_cube_path(lut_id.as_str()) {
+                    lut_id.to_string()
                 } else {
                     let Some(path) = registry
                         .lock()
@@ -366,6 +368,29 @@ pub(crate) fn wire_engine(
                     path
                 };
                 set_lut_handle.set_clip_lut(clip_id.to_string(), path, intensity);
+            });
+    }
+    {
+        let pick_lut_handle = preview_worker.handle();
+        app.global::<InspectorBackend>()
+            .on_pick_clip_lut(move |clip_id| {
+                let pick_lut_handle = pick_lut_handle.clone();
+                let clip_id = clip_id.to_string();
+                // Defer past popup teardown so the macOS sheet can present.
+                defer_main_thread(move || {
+                    let task = slint::spawn_local(async move {
+                        if let Some(path) = pick_lut_path().await {
+                            pick_lut_handle.set_clip_lut(
+                                clip_id,
+                                path.to_string_lossy().into_owned(),
+                                0.8,
+                            );
+                        }
+                    });
+                    if let Err(e) = task {
+                        tracing::error!("failed to open LUT file dialog: {e}");
+                    }
+                });
             });
     }
 
@@ -810,4 +835,15 @@ pub(crate) fn wire_engine(
         _lut_worker: lut_worker,
         _agent_worker: agent_worker,
     })
+}
+
+/// True when `value` is an absolute filesystem path to a `.cube` LUT file.
+/// Used by `set-clip-lut` so intensity re-apply and Browse… can pass a path
+/// without going through the cloud catalog registry.
+fn is_absolute_cube_path(value: &str) -> bool {
+    let path = std::path::Path::new(value);
+    path.is_absolute()
+        && path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("cube"))
 }

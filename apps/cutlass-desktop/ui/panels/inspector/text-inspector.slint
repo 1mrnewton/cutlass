@@ -794,7 +794,7 @@ export component TextInspector inherits VerticalLayout {
                     accepted(entered) => {
                         if (entered.is-float()) {
                             root.begin-edit();
-                            root.style.size = entered.to-float();
+                            root.style.size = clamp(entered.to-float(), 8, 240);
                             root.commit-style();
                         }
                         self.text = Math.round(model.text-style.size) + "";
@@ -1374,10 +1374,15 @@ export component TextInspector inherits VerticalLayout {
                 minimum: 0;
                 maximum: 40;
                 reset-value: 6;
+                preview(v) => {
+                    root.begin-edit();
+                    root.style.stroke-width = clamp(v, 0, 40);
+                    root.preview-style();
+                }
                 commit(v) => {
                     root.begin-edit();
-                    root.style.stroke-width = v;
-                    root.commit-style();
+                    root.style.stroke-width = clamp(v, 0, 40);
+                    root.commit-or-clear-style();
                 }
             }
 
@@ -1428,10 +1433,15 @@ export component TextInspector inherits VerticalLayout {
                 minimum: 0;
                 maximum: 100;
                 reset-value: 100;
+                preview(v) => {
+                    root.begin-edit();
+                    root.style.background-opacity = clamp(v, 0, 100) / 100;
+                    root.preview-style();
+                }
                 commit(v) => {
                     root.begin-edit();
                     root.style.background-opacity = clamp(v, 0, 100) / 100;
-                    root.commit-style();
+                    root.commit-or-clear-style();
                 }
             }
 
@@ -1442,10 +1452,15 @@ export component TextInspector inherits VerticalLayout {
                 minimum: 0;
                 maximum: 100;
                 reset-value: 0;
+                preview(v) => {
+                    root.begin-edit();
+                    root.style.background-radius = clamp(v, 0, 100) / 100;
+                    root.preview-style();
+                }
                 commit(v) => {
                     root.begin-edit();
                     root.style.background-radius = clamp(v, 0, 100) / 100;
-                    root.commit-style();
+                    root.commit-or-clear-style();
                 }
             }
 
@@ -1527,10 +1542,15 @@ export component TextInspector inherits VerticalLayout {
                 minimum: 0;
                 maximum: 100;
                 reset-value: 90;
+                preview(v) => {
+                    root.begin-edit();
+                    root.style.shadow-opacity = clamp(v, 0, 100) / 100;
+                    root.preview-style();
+                }
                 commit(v) => {
                     root.begin-edit();
                     root.style.shadow-opacity = clamp(v, 0, 100) / 100;
-                    root.commit-style();
+                    root.commit-or-clear-style();
                 }
             }
 
@@ -1541,10 +1561,15 @@ export component TextInspector inherits VerticalLayout {
                 minimum: 0;
                 maximum: 100;
                 reset-value: 15;
+                preview(v) => {
+                    root.begin-edit();
+                    root.style.shadow-blur = clamp(v, 0, 100) / 100;
+                    root.preview-style();
+                }
                 commit(v) => {
                     root.begin-edit();
                     root.style.shadow-blur = clamp(v, 0, 100) / 100;
-                    root.commit-style();
+                    root.commit-or-clear-style();
                 }
             }
 
@@ -1555,10 +1580,15 @@ export component TextInspector inherits VerticalLayout {
                 minimum: 0;
                 maximum: 50;
                 reset-value: 5;
+                preview(v) => {
+                    root.begin-edit();
+                    root.style.shadow-distance = clamp(v, 0, 50);
+                    root.preview-style();
+                }
                 commit(v) => {
                     root.begin-edit();
-                    root.style.shadow-distance = v;
-                    root.commit-style();
+                    root.style.shadow-distance = clamp(v, 0, 50);
+                    root.commit-or-clear-style();
                 }
             }
 

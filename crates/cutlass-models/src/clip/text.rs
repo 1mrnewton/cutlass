@@ -1,5 +1,17 @@
 use serde::{Deserialize, Serialize};
 
+use crate::error::ModelError;
+
+/// Sanity ceilings for persisted text metrics in 1080-reference pixels.
+/// These are deliberately broader than the desktop inspector ranges so API
+/// clients can create oversized display type without exposing the renderer to
+/// unbounded allocations or morphology work.
+pub const MAX_TEXT_SIZE: f32 = 4096.0;
+pub const MAX_TEXT_LETTER_SPACING: f32 = 4096.0;
+pub const MAX_TEXT_LINE_SPACING: f32 = 100.0;
+pub const MAX_TEXT_STROKE_WIDTH: f32 = 512.0;
+pub const MAX_TEXT_SHADOW_DISTANCE: f32 = 4096.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum TextCase {
     /// Render the text as authored.
@@ -199,6 +211,57 @@ fn default_line_spacing() -> f32 {
 /// projects, which had no toggle, deserialize to their original look.
 fn default_wrap() -> bool {
     true
+}
+
+impl TextStyle {
+    /// Reject non-finite or unbounded metrics before a style reaches text
+    /// layout/rasterization. Called by [`crate::Generator::validate`] for all
+    /// project mutations; the renderer still sanitizes defensively for direct
+    /// `cutlass-text` callers and legacy files.
+    pub fn validate(&self) -> Result<(), ModelError> {
+        validate_range(self.size, f32::EPSILON, MAX_TEXT_SIZE, "text size")?;
+        if !self.letter_spacing.is_finite() || self.letter_spacing.abs() > MAX_TEXT_LETTER_SPACING {
+            return Err(ModelError::InvalidParam(format!(
+                "text letter spacing must be finite and within -{MAX_TEXT_LETTER_SPACING}..={MAX_TEXT_LETTER_SPACING} reference px"
+            )));
+        }
+        validate_range(
+            self.line_spacing,
+            f32::EPSILON,
+            MAX_TEXT_LINE_SPACING,
+            "text line spacing",
+        )?;
+        if let Some(stroke) = self.stroke {
+            validate_range(
+                stroke.width,
+                0.0,
+                MAX_TEXT_STROKE_WIDTH,
+                "text stroke width",
+            )?;
+        }
+        if let Some(background) = self.background {
+            validate_range(background.radius, 0.0, 1.0, "text background radius")?;
+        }
+        if let Some(shadow) = self.shadow {
+            validate_range(shadow.blur, 0.0, 1.0, "text shadow blur")?;
+            validate_range(
+                shadow.distance,
+                0.0,
+                MAX_TEXT_SHADOW_DISTANCE,
+                "text shadow distance",
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_range(value: f32, min: f32, max: f32, what: &str) -> Result<(), ModelError> {
+    if !value.is_finite() || !(min..=max).contains(&value) {
+        return Err(ModelError::InvalidParam(format!(
+            "{what} must be in {min}..={max}"
+        )));
+    }
+    Ok(())
 }
 
 impl Default for TextStyle {

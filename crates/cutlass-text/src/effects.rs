@@ -3,6 +3,8 @@
 //! Applied only by [`crate::TextRenderer::rasterize`] — [`crate::TextRenderer::shape`]
 //! stays ink-tight so character-level animation can still place clusters freely.
 
+use std::collections::VecDeque;
+
 use crate::style::TextStyle;
 use crate::{ShapedText, over_straight};
 use cutlass_core::RgbaImage;
@@ -10,19 +12,32 @@ use cutlass_core::RgbaImage;
 /// Extra margin (as a fraction of font size) between glyph ink and the
 /// background card's edge — CapCut-ish breathing room.
 const BG_INSET_FRAC: f32 = 0.18;
+const BOX_BLUR_ITERATIONS: u32 = 2;
+
+/// Defensive render-side ceiling for direct `cutlass-text` callers. The app's
+/// model validation is tighter in reference space, but this crate also has a
+/// public pixel-space API and must not turn a corrupt/hostile float into an
+/// overflowing allocation or practically unbounded morphology loop.
+const MAX_EFFECT_EXTENT_PX: f32 = 4096.0;
 
 /// Compose stroke / background / shadow around an already-shaped run.
 pub(crate) fn paint(shaped: &ShapedText, style: &TextStyle) -> RgbaImage {
     let pad = effect_padding(style);
-    let width = shaped.extent.0 + 2 * pad;
-    let height = shaped.extent.1 + 2 * pad;
-    let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
+    let width = shaped.extent.0.saturating_add(pad.saturating_mul(2));
+    let height = shaped.extent.1.saturating_add(pad.saturating_mul(2));
+    let Some(pixel_len) = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return RgbaImage::transparent(0, 0);
+    };
+    let mut pixels = vec![0u8; pixel_len];
 
     // Coverage of the fill glyphs — substrate for stroke dilation and shadow blur.
     let cover = glyph_coverage(shaped, pad, width, height);
 
     if let Some(bg) = style.background {
-        let inset = (style.font_size * BG_INSET_FRAC).max(2.0);
+        let inset = effect_extent(style.font_size * BG_INSET_FRAC).max(2.0);
         let rect = CardRect {
             x0: pad as f32 - inset,
             y0: pad as f32 - inset,
@@ -32,31 +47,31 @@ pub(crate) fn paint(shaped: &ShapedText, style: &TextStyle) -> RgbaImage {
         fill_rounded_rect(&mut pixels, width, height, rect, bg.radius, bg.rgba);
     }
 
+    // Stroke is the expensive mask operation. Compute it once: a shadow can
+    // bloom from the stroked silhouette and the visible outline uses the same
+    // pixels immediately afterwards.
+    let stroke_radius = style
+        .stroke
+        .map_or(0.0, |stroke| effect_extent(stroke.width));
+    let stroke_mask =
+        (stroke_radius > 0.0).then(|| dilate_alpha(&cover, width, height, stroke_radius));
+
     if let Some(shadow) = style.shadow {
         // Glow/outline shadows should bloom from the stroked silhouette when
         // a stroke is present (neon / chrome presets).
-        let shadow_src = match style.stroke {
-            Some(stroke) if stroke.width > 0.0 => dilate_alpha(&cover, width, height, stroke.width),
-            _ => cover.clone(),
-        };
-        let blur_px = (shadow.blur.clamp(0.0, 1.0) * style.font_size).max(0.0);
-        let blurred = if blur_px > 0.5 {
-            box_blur_alpha(&shadow_src, width, height, blur_px)
-        } else {
-            shadow_src
-        };
+        let shadow_src = stroke_mask.as_deref().unwrap_or(&cover);
+        let blur_px = shadow_blur_px(style, shadow.blur);
+        let blurred = (blur_px > 0.5).then(|| box_blur_alpha(shadow_src, width, height, blur_px));
+        let shadow_mask = blurred.as_deref().unwrap_or(shadow_src);
         // CapCut-style 45° down-right offset.
-        let offset = shadow.distance / std::f32::consts::SQRT_2;
+        let offset = signed_effect_extent(shadow.distance) / std::f32::consts::SQRT_2;
         let dx = offset.round() as i32;
         let dy = dx;
-        blit_tinted(&mut pixels, width, height, &blurred, dx, dy, shadow.rgba);
+        blit_tinted(&mut pixels, width, height, shadow_mask, dx, dy, shadow.rgba);
     }
 
-    if let Some(stroke) = style.stroke
-        && stroke.width > 0.0
-    {
-        let dilated = dilate_alpha(&cover, width, height, stroke.width);
-        blit_tinted(&mut pixels, width, height, &dilated, 0, 0, stroke.rgba);
+    if let (Some(stroke), Some(dilated)) = (style.stroke, stroke_mask.as_deref()) {
+        blit_tinted(&mut pixels, width, height, dilated, 0, 0, stroke.rgba);
     }
 
     blit_clusters(&mut pixels, width, height, shaped, pad);
@@ -65,22 +80,63 @@ pub(crate) fn paint(shaped: &ShapedText, style: &TextStyle) -> RgbaImage {
 
 /// Bitmap headroom needed so stroke / shadow / background don't clip.
 pub(crate) fn effect_padding(style: &TextStyle) -> u32 {
-    let mut pad = style.padding;
-    if let Some(stroke) = style.stroke {
-        pad = pad.max(stroke.width.ceil().max(0.0) as u32 + 1);
+    let stroke_radius = style
+        .stroke
+        .map_or(0.0, |stroke| effect_extent(stroke.width));
+    let mut need = (style.padding as f32).min(MAX_EFFECT_EXTENT_PX);
+    if stroke_radius > 0.0 {
+        need = need.max(stroke_radius + 1.0);
     }
     if let Some(shadow) = style.shadow {
-        let blur_px = shadow.blur.clamp(0.0, 1.0) * style.font_size;
-        // Separable box blur spreads ~radius on each side; offset is 45°.
-        let offset = shadow.distance.abs() / std::f32::consts::SQRT_2;
-        let need = (offset + blur_px + 1.0).ceil().max(0.0) as u32;
-        pad = pad.max(need);
+        let blur_px = shadow_blur_px(style, shadow.blur);
+        let blur_support = box_blur_support(blur_px);
+        let offset = effect_extent(shadow.distance.abs()) / std::f32::consts::SQRT_2;
+        // The shadow source is the stroked silhouette, so these extents are
+        // additive rather than alternatives. `max(stroke, blur + offset)`
+        // clips combined outline/shadow treatments at the bitmap edge.
+        need = need.max(stroke_radius + blur_support + offset + 1.0);
     }
     if style.background.is_some() {
-        let inset = (style.font_size * BG_INSET_FRAC).ceil().max(2.0) as u32;
-        pad = pad.max(inset);
+        let inset = effect_extent(style.font_size * BG_INSET_FRAC).max(2.0);
+        need = need.max(inset);
     }
-    pad
+    need.min(MAX_EFFECT_EXTENT_PX).ceil() as u32
+}
+
+fn effect_extent(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, MAX_EFFECT_EXTENT_PX)
+    } else {
+        0.0
+    }
+}
+
+fn signed_effect_extent(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(-MAX_EFFECT_EXTENT_PX, MAX_EFFECT_EXTENT_PX)
+    } else {
+        0.0
+    }
+}
+
+fn unit_fraction(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn shadow_blur_px(style: &TextStyle, blur: f32) -> f32 {
+    effect_extent(unit_fraction(blur) * effect_extent(style.font_size))
+}
+
+fn box_blur_support(radius: f32) -> f32 {
+    if radius > 0.5 {
+        BOX_BLUR_ITERATIONS as f32 * radius.round().max(1.0)
+    } else {
+        0.0
+    }
 }
 
 fn glyph_coverage(shaped: &ShapedText, pad: u32, width: u32, height: u32) -> Vec<u8> {
@@ -174,39 +230,84 @@ fn blit_tinted(
 }
 
 /// Morphological dilation of an alpha mask by `radius` px (circular kernel).
+///
+/// For each integer y-offset in the circle, a monotonic-queue horizontal max
+/// filter produces that row's exact chord in O(width), then the chord is
+/// merged into the two symmetric destination offsets. This preserves the old
+/// circular result while reducing O(width * height * radius²) to
+/// O(width * height * radius).
 fn dilate_alpha(src: &[u8], w: u32, h: u32, radius: f32) -> Vec<u8> {
-    let r = radius.ceil().max(0.0) as i32;
+    let radius = effect_extent(radius);
+    let r = radius.ceil() as usize;
     if r == 0 {
         return src.to_vec();
     }
     let r2 = radius * radius;
     let mut dst = vec![0u8; src.len()];
-    for y in 0..h as i32 {
-        for x in 0..w as i32 {
-            let mut max_a = 0u8;
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    if (dx * dx + dy * dy) as f32 > r2 {
-                        continue;
-                    }
-                    let nx = x + dx;
-                    let ny = y + dy;
-                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-                        continue;
-                    }
-                    max_a = max_a.max(src[(ny as u32 * w + nx as u32) as usize]);
-                    if max_a == 255 {
-                        break;
-                    }
-                }
-                if max_a == 255 {
-                    break;
-                }
+    let mut chord = vec![0u8; src.len()];
+    let height = h as usize;
+    let width = w as usize;
+
+    for dy in 0..=r {
+        let dy2 = (dy * dy) as f32;
+        if dy2 > r2 {
+            continue;
+        }
+        let half_chord = (r2 - dy2).sqrt().floor() as usize;
+        horizontal_max_filter(src, width, height, half_chord, &mut chord);
+
+        for y in 0..height {
+            if let Some(source_y) = y.checked_add(dy).filter(|source_y| *source_y < height) {
+                merge_mask_row(&mut dst, &chord, width, y, source_y);
             }
-            dst[(y as u32 * w + x as u32) as usize] = max_a;
+            if dy > 0
+                && let Some(source_y) = y.checked_sub(dy)
+            {
+                merge_mask_row(&mut dst, &chord, width, y, source_y);
+            }
         }
     }
     dst
+}
+
+/// Row-wise centered maximum filter with clipped edges, using a monotonic
+/// queue so every input sample enters and leaves once.
+fn horizontal_max_filter(src: &[u8], w: usize, h: usize, radius: usize, dst: &mut [u8]) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let mut queue = VecDeque::<usize>::with_capacity(radius.saturating_mul(2).saturating_add(1));
+    for y in 0..h {
+        queue.clear();
+        let row = y * w;
+        let mut next = 0usize;
+        for x in 0..w {
+            let upper = x.saturating_add(radius).min(w - 1);
+            while next <= upper {
+                while queue
+                    .back()
+                    .is_some_and(|index| src[row + *index] <= src[row + next])
+                {
+                    queue.pop_back();
+                }
+                queue.push_back(next);
+                next += 1;
+            }
+            let lower = x.saturating_sub(radius);
+            while queue.front().is_some_and(|index| *index < lower) {
+                queue.pop_front();
+            }
+            dst[row + x] = src[row + queue[0]];
+        }
+    }
+}
+
+fn merge_mask_row(dst: &mut [u8], src: &[u8], width: usize, dst_y: usize, src_y: usize) {
+    let dst_row = dst_y * width;
+    let src_row = src_y * width;
+    for x in 0..width {
+        dst[dst_row + x] = dst[dst_row + x].max(src[src_row + x]);
+    }
 }
 
 /// Approximate Gaussian blur with two separable box passes.
@@ -214,7 +315,7 @@ fn box_blur_alpha(src: &[u8], w: u32, h: u32, radius: f32) -> Vec<u8> {
     let r = radius.round().max(1.0) as i32;
     let mut tmp = vec![0u8; src.len()];
     let mut out = src.to_vec();
-    for _ in 0..2 {
+    for _ in 0..BOX_BLUR_ITERATIONS {
         box_blur_pass(&out, &mut tmp, w, h, r, true);
         box_blur_pass(&tmp, &mut out, w, h, r, false);
     }
@@ -295,7 +396,7 @@ fn fill_rounded_rect(
     let rw = x1 - x0;
     let rh = y1 - y0;
     let max_r = rw.min(rh) * 0.5;
-    let radius = (radius_frac.clamp(0.0, 1.0) * max_r).max(0.0);
+    let radius = unit_fraction(radius_frac) * max_r;
 
     let min_x = x0.floor().max(0.0) as i32;
     let min_y = y0.floor().max(0.0) as i32;
@@ -367,6 +468,83 @@ mod tests {
             .count()
     }
 
+    fn dilate_alpha_reference(src: &[u8], w: u32, h: u32, radius: f32) -> Vec<u8> {
+        let r = radius.ceil().max(0.0) as i32;
+        if r == 0 {
+            return src.to_vec();
+        }
+        let r2 = radius * radius;
+        let mut dst = vec![0u8; src.len()];
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let mut max_a = 0u8;
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        if (dx * dx + dy * dy) as f32 > r2 {
+                            continue;
+                        }
+                        let nx = x + dx;
+                        let ny = y + dy;
+                        if nx >= 0 && ny >= 0 && nx < w as i32 && ny < h as i32 {
+                            max_a = max_a.max(src[(ny as u32 * w + nx as u32) as usize]);
+                        }
+                    }
+                }
+                dst[(y as u32 * w + x as u32) as usize] = max_a;
+            }
+        }
+        dst
+    }
+
+    #[test]
+    fn fast_dilation_matches_circular_reference() {
+        let (w, h) = (9, 7);
+        let mut src = vec![0u8; (w * h) as usize];
+        for (index, alpha) in [(0, 17), (7, 93), (22, 255), (41, 128), (62, 211)] {
+            src[index] = alpha;
+        }
+        for radius in [0.25, 1.0, 1.75, 2.0, 3.4, 5.0] {
+            assert_eq!(
+                dilate_alpha(&src, w, h, radius),
+                dilate_alpha_reference(&src, w, h, radius),
+                "radius {radius}"
+            );
+        }
+    }
+
+    #[test]
+    fn combined_stroke_shadow_padding_adds_every_extent() {
+        let style = TextStyle::new(100.0)
+            .with_stroke(TextStroke {
+                rgba: [0, 0, 0, 255],
+                width: 10.0,
+            })
+            .with_shadow(TextShadow {
+                rgba: [0, 0, 0, 255],
+                blur: 0.2,
+                distance: 10.0 * std::f32::consts::SQRT_2,
+            });
+        // stroke 10 + two 20px blur iterations + per-axis offset 10 + 1px AA guard.
+        assert_eq!(effect_padding(&style), 61);
+    }
+
+    #[test]
+    fn non_finite_effect_metrics_are_bounded() {
+        let style = TextStyle::new(48.0)
+            .with_stroke(TextStroke {
+                rgba: [0, 0, 0, 255],
+                width: f32::INFINITY,
+            })
+            .with_shadow(TextShadow {
+                rgba: [0, 0, 0, 255],
+                blur: f32::NAN,
+                distance: f32::NEG_INFINITY,
+            });
+        assert_eq!(effect_padding(&style), 1);
+        let img = renderer().rasterize("Safe", &style);
+        assert!(img.width > 0 && img.height > 0);
+    }
+
     #[test]
     fn stroke_adds_outline_pixels_beyond_fill() {
         let mut r = renderer();
@@ -386,6 +564,21 @@ mod tests {
             count_near(&stroked, [255, 0, 0], 40) > 20,
             "expected red stroke pixels"
         );
+    }
+
+    #[test]
+    fn inspector_max_stroke_rasterizes_a_title() {
+        let mut r = renderer();
+        let img = r.rasterize(
+            "Responsive stroke preview",
+            &TextStyle::new(96.0)
+                .with_color([255, 255, 255, 255])
+                .with_stroke(TextStroke {
+                    rgba: [0, 0, 0, 255],
+                    width: 40.0,
+                }),
+        );
+        assert!(img.width > 0 && img.height > 0);
     }
 
     #[test]

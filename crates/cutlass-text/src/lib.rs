@@ -34,6 +34,7 @@ mod effects;
 mod style;
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::ops::Range;
 
 use cosmic_text::{
@@ -119,9 +120,9 @@ pub struct TextRenderer {
     /// Memoized [`shape`](Self::shape) results, keyed by (text, style).
     /// Cleared by [`load_font`](Self::load_font) — a new face can change
     /// shaping/fallback for any string.
-    shape_memo: HashMap<MemoKey, ShapedText>,
+    shape_memo: HashMap<ShapeKey, ShapedText>,
     /// Memoized [`rasterize`](Self::rasterize) results (padding folded in).
-    raster_memo: HashMap<MemoKey, RgbaImage>,
+    raster_memo: HashMap<RasterKey, RgbaImage>,
 }
 
 impl TextRenderer {
@@ -168,7 +169,7 @@ impl TextRenderer {
     /// shaping entirely and costs one copy-out of the cached clusters, so
     /// per-frame animators can call this unconditionally.
     pub fn shape(&mut self, text: &str, style: &TextStyle) -> ShapedText {
-        let key = MemoKey::new(text, style);
+        let key = ShapeKey::new(text, style);
         if let Some(hit) = self.shape_memo.get(&key) {
             return hit.clone();
         }
@@ -314,7 +315,7 @@ impl TextRenderer {
     /// Results are memoized: repeating a call with identical input costs one
     /// bitmap copy, not a re-shape — safe to call every frame.
     pub fn rasterize(&mut self, text: &str, style: &TextStyle) -> RgbaImage {
-        let key = MemoKey::new(text, style);
+        let key = RasterKey::new(text, style);
         if let Some(hit) = self.raster_memo.get(&key) {
             return hit.clone();
         }
@@ -336,7 +337,7 @@ impl TextRenderer {
     /// Insert into a memo map, bounding memory with a wholesale clear at the
     /// cap. Frame loops keep a handful of live keys, so an LRU would buy
     /// nothing; the clear only ever costs one re-shape per entry after it.
-    fn memo_insert<V>(memo: &mut HashMap<MemoKey, V>, key: MemoKey, value: V) {
+    fn memo_insert<K: Eq + Hash, V>(memo: &mut HashMap<K, V>, key: K, value: V) {
         const MEMO_CAP: usize = 64;
         if memo.len() >= MEMO_CAP {
             memo.clear();
@@ -405,11 +406,14 @@ impl Default for TextRenderer {
     }
 }
 
-/// Hashable identity of a (text, style) request for the memo caches. `f32`s
-/// are keyed by bit pattern, so styles that differ only in float encoding are
-/// simply distinct keys (never a wrong hit).
-#[derive(PartialEq, Eq, Hash)]
-struct MemoKey {
+/// Hashable identity of the fields that affect shaping and glyph pixels.
+/// Bitmap-only treatments deliberately stay out: dragging a stroke/shadow/
+/// background control must reuse the already-shaped glyph run.
+///
+/// `f32`s are keyed by bit pattern, so styles that differ only in float
+/// encoding are simply distinct keys (never a wrong hit).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ShapeKey {
     text: String,
     font_size: u32,
     line_height: u32,
@@ -417,13 +421,9 @@ struct MemoKey {
     family: FontFamily,
     align: TextAlign,
     max_width: Option<u32>,
-    padding: u32,
-    stroke: Option<([u8; 4], u32)>,
-    background: Option<([u8; 4], u32)>,
-    shadow: Option<([u8; 4], u32, u32)>,
 }
 
-impl MemoKey {
+impl ShapeKey {
     fn new(text: &str, style: &TextStyle) -> Self {
         Self {
             text: text.to_owned(),
@@ -433,6 +433,24 @@ impl MemoKey {
             family: style.family.clone(),
             align: style.align,
             max_width: style.max_width.map(f32::to_bits),
+        }
+    }
+}
+
+/// Full bitmap identity: the shaped run plus bitmap padding/treatments.
+#[derive(PartialEq, Eq, Hash)]
+struct RasterKey {
+    shape: ShapeKey,
+    padding: u32,
+    stroke: Option<([u8; 4], u32)>,
+    background: Option<([u8; 4], u32)>,
+    shadow: Option<([u8; 4], u32, u32)>,
+}
+
+impl RasterKey {
+    fn new(text: &str, style: &TextStyle) -> Self {
+        Self {
+            shape: ShapeKey::new(text, style),
             padding: style.padding,
             stroke: style.stroke.map(|s| (s.rgba, s.width.to_bits())),
             background: style.background.map(|b| (b.rgba, b.radius.to_bits())),
@@ -789,12 +807,20 @@ mod tests {
         assert_eq!(first, again);
         assert_eq!(r.memo_sizes(), (1, 1));
 
-        // Same key through shape() hits the shared entry; a new style is a
-        // new key.
+        // Same key through shape() hits the shared entry. Bitmap-only style
+        // changes create raster entries but keep reusing that shaped run.
         let _ = r.shape("Hi", &style);
         assert_eq!(r.memo_sizes(), (1, 1));
         let _ = r.rasterize("Hi", &style.clone().with_padding(3));
-        assert_eq!(r.memo_sizes(), (2, 2));
+        assert_eq!(r.memo_sizes(), (1, 2));
+        let _ = r.rasterize(
+            "Hi",
+            &style.clone().with_stroke(TextStroke {
+                rgba: [0, 0, 0, 255],
+                width: 6.0,
+            }),
+        );
+        assert_eq!(r.memo_sizes(), (1, 3));
 
         // Loading a font can change shaping for any string: memos must drop.
         assert!(r.load_font(TEST_FONT.to_vec()) > 0);

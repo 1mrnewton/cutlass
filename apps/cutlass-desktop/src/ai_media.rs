@@ -463,10 +463,12 @@ fn stable_key(url: &str) -> String {
 
 fn extension_of(kind: GenerationKind, url: &str) -> String {
     let path_part = url.split(['?', '#']).next().unwrap_or("");
-    if let Some((_, ext)) = path_part.rsplit_once('.') {
-        if !ext.is_empty() && ext.len() <= 4 && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return ext.to_lowercase();
-        }
+    if let Some((_, ext)) = path_part.rsplit_once('.')
+        && !ext.is_empty()
+        && ext.len() <= 4
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return ext.to_lowercase();
     }
     match kind {
         GenerationKind::Image => "png".into(),

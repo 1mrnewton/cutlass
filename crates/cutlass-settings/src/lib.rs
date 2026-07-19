@@ -567,18 +567,18 @@ fn write_synced_temp(
         ));
     }
 
-    if let Some(permissions) = permissions {
-        if let Err(e) = file.set_permissions(permissions) {
-            drop(file);
-            return Err(cleanup_temp_after_error(
-                &StdPersistenceFs,
-                &temporary,
-                format!(
-                    "could not preserve permissions for {}: {e}",
-                    destination.display()
-                ),
-            ));
-        }
+    if let Some(permissions) = permissions
+        && let Err(e) = file.set_permissions(permissions)
+    {
+        drop(file);
+        return Err(cleanup_temp_after_error(
+            &StdPersistenceFs,
+            &temporary,
+            format!(
+                "could not preserve permissions for {}: {e}",
+                destination.display()
+            ),
+        ));
     }
 
     if let Err(e) = file.sync_all() {
@@ -827,13 +827,12 @@ impl Settings {
             }
         }
 
-        if let Some(t) = section(doc, "appearance") {
-            if let Some(theme) = string_at(t, "theme")
+        if let Some(t) = section(doc, "appearance")
+            && let Some(theme) = string_at(t, "theme")
                 .as_deref()
                 .and_then(ThemeChoice::from_key)
-            {
-                s.appearance.theme = theme;
-            }
+        {
+            s.appearance.theme = theme;
         }
 
         if let Some(t) = section(doc, "storage") {
@@ -1056,10 +1055,10 @@ impl Settings {
                     set_str(t, key, value);
                 }
             }
-            if let Some(t) = doc.get_mut("account").and_then(Item::as_table_mut) {
-                if t.is_empty() {
-                    doc.remove("account");
-                }
+            if let Some(t) = doc.get_mut("account").and_then(Item::as_table_mut)
+                && t.is_empty()
+            {
+                doc.remove("account");
             }
         }
         Ok(())

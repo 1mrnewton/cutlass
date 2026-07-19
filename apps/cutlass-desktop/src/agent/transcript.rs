@@ -268,17 +268,17 @@ pub(crate) fn chat_choices(
     mut chats: Vec<ChatMeta>,
     active_chat_id: Option<&str>,
 ) -> Vec<ChatChoice> {
-    if let Some(active_id) = active_chat_id {
-        if !chats.iter().any(|chat| chat.id == active_id) {
-            chats.insert(
-                0,
-                ChatMeta {
-                    id: active_id.to_string(),
-                    title: "New chat".to_string(),
-                    updated_millis: u64::MAX,
-                },
-            );
-        }
+    if let Some(active_id) = active_chat_id
+        && !chats.iter().any(|chat| chat.id == active_id)
+    {
+        chats.insert(
+            0,
+            ChatMeta {
+                id: active_id.to_string(),
+                title: "New chat".to_string(),
+                updated_millis: u64::MAX,
+            },
+        );
     }
 
     let mut used = HashSet::new();

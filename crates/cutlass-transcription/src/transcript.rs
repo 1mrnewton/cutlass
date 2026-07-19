@@ -257,10 +257,8 @@ fn normalize_words(
 
         let start_cs = nonnegative_centiseconds(raw_start);
         let end_cs = nonnegative_centiseconds(raw_end).max(start_cs);
-        if starts_word {
-            if let Some(word) = current.take() {
-                accumulators.push(word);
-            }
+        if starts_word && let Some(word) = current.take() {
+            accumulators.push(word);
         }
 
         if let Some(word) = current.as_mut() {

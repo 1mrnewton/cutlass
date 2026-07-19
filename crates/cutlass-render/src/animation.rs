@@ -43,12 +43,12 @@ pub(crate) fn apply_look_animations(
         let phase = (local_tick_f % period as f64) / period as f64;
         deltas.push(sample_combo(&combo.id, phase));
     } else {
-        if let Some(anim) = &clip.animation_in {
-            if local_tick < window {
-                let raw = (local_tick_f / window as f64).clamp(0.0, 1.0);
-                let eased = f64::from(Easing::EaseOut.apply(raw as f32));
-                deltas.push(sample_entrance(&anim.id, eased));
-            }
+        if let Some(anim) = &clip.animation_in
+            && local_tick < window
+        {
+            let raw = (local_tick_f / window as f64).clamp(0.0, 1.0);
+            let eased = f64::from(Easing::EaseOut.apply(raw as f32));
+            deltas.push(sample_entrance(&anim.id, eased));
         }
         if let Some(anim) = &clip.animation_out {
             let out_start = duration - window;

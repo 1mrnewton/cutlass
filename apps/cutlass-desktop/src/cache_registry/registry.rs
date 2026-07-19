@@ -313,10 +313,10 @@ impl CacheRegistry {
             drop(project_guard);
             return Err("cache relocation completed without accounting".into());
         };
-        if id == CacheId::Proxies {
-            if let Some(guard) = project_guard.as_mut() {
-                guard.refresh_proxies_on_resume();
-            }
+        if id == CacheId::Proxies
+            && let Some(guard) = project_guard.as_mut()
+        {
+            guard.refresh_proxies_on_resume();
         }
         drop(project_guard);
 

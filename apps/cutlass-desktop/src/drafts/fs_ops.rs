@@ -148,16 +148,15 @@ where
         Ok(slot.project.clone())
     })();
 
-    if let Some(path) = staged_path {
-        if let Err(error) = fs::remove_file(&path) {
-            if error.kind() != io::ErrorKind::NotFound {
-                warn!(
-                    path = %bounded_path(&path),
-                    error = %error,
-                    "failed to remove a staged import file"
-                );
-            }
-        }
+    if let Some(path) = staged_path
+        && let Err(error) = fs::remove_file(&path)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        warn!(
+            path = %bounded_path(&path),
+            error = %error,
+            "failed to remove a staged import file"
+        );
     }
 
     match operation {

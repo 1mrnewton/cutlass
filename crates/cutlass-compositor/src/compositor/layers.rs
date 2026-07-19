@@ -610,6 +610,22 @@ fn rgba_upload_pixels(
     Ok((resized.into_raw(), width, height))
 }
 
+fn pack_fx_uniforms(effects: &LayerEffects, placement: &LayerPlacement) -> FxEffectsUniform {
+    let mask = effects
+        .mask
+        .map(|m| [m.kind as f32, m.feather, m.invert as f32, 1.0]);
+    let chroma = effects
+        .chroma_key
+        .map(|c| [c.rgb[0], c.rgb[1], c.rgb[2], 1.0]);
+    let chroma_params = effects.chroma_key.map(|c| [c.strength, c.shadow, 0.0, 0.0]);
+    FxEffectsUniform {
+        mask: mask.unwrap_or([0.0, 0.0, 0.0, 0.0]),
+        chroma: chroma.unwrap_or([0.0, 0.0, 0.0, 0.0]),
+        chroma_params: chroma_params.unwrap_or([0.0, 0.0, 0.0, 0.0]),
+        half: [placement.size[0] * 0.5, placement.size[1] * 0.5, 0.0, 0.0],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::rgba_upload_pixels;
@@ -648,21 +664,5 @@ mod tests {
             .render(&gpu, &config, &[layer])
             .expect("oversized RGBA layer should be fitted before upload");
         assert_eq!(rendered.pixel(4, 4), [255, 255, 255, 255]);
-    }
-}
-
-fn pack_fx_uniforms(effects: &LayerEffects, placement: &LayerPlacement) -> FxEffectsUniform {
-    let mask = effects
-        .mask
-        .map(|m| [m.kind as f32, m.feather, m.invert as f32, 1.0]);
-    let chroma = effects
-        .chroma_key
-        .map(|c| [c.rgb[0], c.rgb[1], c.rgb[2], 1.0]);
-    let chroma_params = effects.chroma_key.map(|c| [c.strength, c.shadow, 0.0, 0.0]);
-    FxEffectsUniform {
-        mask: mask.unwrap_or([0.0, 0.0, 0.0, 0.0]),
-        chroma: chroma.unwrap_or([0.0, 0.0, 0.0, 0.0]),
-        chroma_params: chroma_params.unwrap_or([0.0, 0.0, 0.0, 0.0]),
-        half: [placement.size[0] * 0.5, placement.size[1] * 0.5, 0.0, 0.0],
     }
 }

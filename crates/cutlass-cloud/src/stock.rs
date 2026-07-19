@@ -197,10 +197,10 @@ impl StockProvider for DirectStockProvider {
 
         // One provider failing shouldn't blank the other's results; only
         // a totally empty outcome surfaces the error.
-        if items.is_empty() {
-            if let Some(e) = first_error {
-                return Err(e);
-            }
+        if items.is_empty()
+            && let Some(e) = first_error
+        {
+            return Err(e);
         }
         Ok(StockSearchResponse {
             items,

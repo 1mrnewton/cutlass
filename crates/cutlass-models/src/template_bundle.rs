@@ -181,10 +181,10 @@ pub fn install(path: &Path, dest_dir: &Path) -> Result<Template, ModelError> {
     let mut template = Template::load_from_file(&template_path)?;
     let ids: Vec<crate::ids::MediaId> = template.project().media_iter().map(|m| m.id).collect();
     for id in ids {
-        if let Some(media) = template.project.media_mut(id) {
-            if media.path.is_relative() {
-                media.path = dest_dir.join(&media.path);
-            }
+        if let Some(media) = template.project.media_mut(id)
+            && media.path.is_relative()
+        {
+            media.path = dest_dir.join(&media.path);
         }
     }
     template.save_to_file(&template_path).map_err(io_err)?;

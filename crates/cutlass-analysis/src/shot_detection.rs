@@ -661,13 +661,13 @@ impl ShotDetector {
         &mut self,
         frame: Rgba8Frame<'_>,
     ) -> Result<Option<ShotBoundary>, ShotDetectionError> {
-        if let Some(previous) = self.previous_metadata {
-            if frame.timestamp_seconds < previous.timestamp_seconds {
-                return Err(ShotDetectionError::OutOfOrderTimestamp {
-                    previous_timestamp_seconds: previous.timestamp_seconds,
-                    current_timestamp_seconds: frame.timestamp_seconds,
-                });
-            }
+        if let Some(previous) = self.previous_metadata
+            && frame.timestamp_seconds < previous.timestamp_seconds
+        {
+            return Err(ShotDetectionError::OutOfOrderTimestamp {
+                previous_timestamp_seconds: previous.timestamp_seconds,
+                current_timestamp_seconds: frame.timestamp_seconds,
+            });
         }
 
         extract_features(frame, self.config, &mut self.scratch_features);

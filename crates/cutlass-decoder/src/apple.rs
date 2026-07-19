@@ -301,10 +301,10 @@ impl AvfDecoder {
 
                 // Trim frames below the recovery bound without paying the
                 // plane copy / surface wrap for them.
-                if let Some(bound) = emit_from {
-                    if !bound.admits(pts) {
-                        continue;
-                    }
+                if let Some(bound) = emit_from
+                    && !bound.admits(pts)
+                {
+                    continue;
                 }
 
                 let frame = self.image_buffer_to_frame(image_buffer, pts)?;

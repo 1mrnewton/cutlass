@@ -61,10 +61,10 @@ fn wire_string_filter(app: &GalleryWindow) {
             } else if i >= len_i {
                 i = 0;
             }
-            if let Some(row) = items.row_data(i as usize) {
-                if contains_ci(row.as_str(), query) {
-                    return i;
-                }
+            if let Some(row) = items.row_data(i as usize)
+                && contains_ci(row.as_str(), query)
+            {
+                return i;
             }
             i += direction;
         }
@@ -75,7 +75,7 @@ fn wire_string_filter(app: &GalleryWindow) {
 fn wire_data_transfer(app: &GalleryWindow) {
     let bridge = app.global::<DataTransferBridge>();
 
-    bridge.on_plain_text(|text| DataTransfer::from(text));
+    bridge.on_plain_text(DataTransfer::from);
 
     bridge.on_has_plain_text(|data| data.has_plain_text());
 

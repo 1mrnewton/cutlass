@@ -118,16 +118,15 @@ pub(super) fn write_meta_in_root_with_ops(
         Ok(())
     })();
 
-    if !committed {
-        if let Err(error) = fs::remove_file(&temp_path) {
-            if error.kind() != io::ErrorKind::NotFound {
-                warn!(
-                    path = %bounded_path(&temp_path),
-                    error = %error,
-                    "failed to remove a staged metadata file"
-                );
-            }
-        }
+    if !committed
+        && let Err(error) = fs::remove_file(&temp_path)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        warn!(
+            path = %bounded_path(&temp_path),
+            error = %error,
+            "failed to remove a staged metadata file"
+        );
     }
     write_result
 }

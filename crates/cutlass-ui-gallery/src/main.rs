@@ -151,7 +151,8 @@ fn make_demo_image(width: u32, height: u32, kind: u8) -> Image {
                     )
                 }
             };
-            buffer.make_mut_slice()[y as usize * stride + x as usize] = Rgba8Pixel { r, g, b, a: 255 };
+            buffer.make_mut_slice()[y as usize * stride + x as usize] =
+                Rgba8Pixel { r, g, b, a: 255 };
         }
     }
     Image::from_rgba8(buffer)

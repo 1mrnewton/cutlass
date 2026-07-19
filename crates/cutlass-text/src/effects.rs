@@ -34,7 +34,7 @@ pub(crate) fn paint(shaped: &ShapedText, style: &TextStyle) -> RgbaImage {
     let mut pixels = vec![0u8; pixel_len];
 
     // Coverage of the fill glyphs — substrate for stroke dilation and shadow blur.
-    let cover = glyph_coverage(shaped, pad, width, height);
+    let cover = glyph_coverage(shaped, style, pad, width, height);
 
     if let Some(bg) = style.background {
         let inset = effect_extent(style.font_size * BG_INSET_FRAC).max(2.0);
@@ -75,6 +75,7 @@ pub(crate) fn paint(shaped: &ShapedText, style: &TextStyle) -> RgbaImage {
     }
 
     blit_clusters(&mut pixels, width, height, shaped, pad);
+    blit_underlines(&mut pixels, width, height, shaped, style, pad);
     RgbaImage::new(width, height, pixels)
 }
 
@@ -84,8 +85,16 @@ pub(crate) fn effect_padding(style: &TextStyle) -> u32 {
         .stroke
         .map_or(0.0, |stroke| effect_extent(stroke.width));
     let mut need = (style.padding as f32).min(MAX_EFFECT_EXTENT_PX);
+    let underline_extent = if style.underline {
+        // The line sits just below the baseline. Capital-only runs otherwise
+        // have no descender ink reserving that part of the bitmap.
+        effect_extent(style.font_size * 0.18)
+    } else {
+        0.0
+    };
+    need = need.max(underline_extent);
     if stroke_radius > 0.0 {
-        need = need.max(stroke_radius + 1.0);
+        need = need.max(underline_extent + stroke_radius + 1.0);
     }
     if let Some(shadow) = style.shadow {
         let blur_px = shadow_blur_px(style, shadow.blur);
@@ -94,7 +103,7 @@ pub(crate) fn effect_padding(style: &TextStyle) -> u32 {
         // The shadow source is the stroked silhouette, so these extents are
         // additive rather than alternatives. `max(stroke, blur + offset)`
         // clips combined outline/shadow treatments at the bitmap edge.
-        need = need.max(stroke_radius + blur_support + offset + 1.0);
+        need = need.max(underline_extent + stroke_radius + blur_support + offset + 1.0);
     }
     if style.background.is_some() {
         let inset = effect_extent(style.font_size * BG_INSET_FRAC).max(2.0);
@@ -139,7 +148,13 @@ fn box_blur_support(radius: f32) -> f32 {
     }
 }
 
-fn glyph_coverage(shaped: &ShapedText, pad: u32, width: u32, height: u32) -> Vec<u8> {
+fn glyph_coverage(
+    shaped: &ShapedText,
+    style: &TextStyle,
+    pad: u32,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
     let mut cover = vec![0u8; (width as usize) * (height as usize)];
     for cluster in &shaped.clusters {
         let (cw, ch) = (cluster.image.width, cluster.image.height);
@@ -160,6 +175,13 @@ fn glyph_coverage(shaped: &ShapedText, pad: u32, width: u32, height: u32) -> Vec
                 }
                 let idx = (py as u32 * width + px as u32) as usize;
                 cover[idx] = cover[idx].max(src[3]);
+            }
+        }
+    }
+    for rect in underline_rects(shaped, style, pad, width, height) {
+        for y in rect.y0..rect.y1 {
+            for x in rect.x0..rect.x1 {
+                cover[(y * width + x) as usize] = u8::MAX;
             }
         }
     }
@@ -186,6 +208,76 @@ fn blit_clusters(pixels: &mut [u8], width: u32, height: u32, shaped: &ShapedText
                 }
                 let idx = ((py as u32 * width + px as u32) * 4) as usize;
                 over_straight(&mut pixels[idx..idx + 4], src);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct UnderlineRect {
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+}
+
+/// One ink-width underline per visual line. Whitespace-only lines have no
+/// visible span and are deliberately skipped.
+fn underline_rects(
+    shaped: &ShapedText,
+    style: &TextStyle,
+    pad: u32,
+    width: u32,
+    height: u32,
+) -> Vec<UnderlineRect> {
+    if !style.underline {
+        return Vec::new();
+    }
+    let mut lines: Vec<(usize, f32, f32, f32)> = Vec::new();
+    for cluster in shaped.clusters.iter().filter(|c| c.image.width > 0) {
+        let left = cluster.offset[0];
+        let right = left + cluster.image.width as f32;
+        if let Some((_, x0, x1, baseline)) = lines.iter_mut().find(|line| line.0 == cluster.line) {
+            *x0 = x0.min(left);
+            *x1 = x1.max(right);
+            *baseline = baseline.max(cluster.baseline);
+        } else {
+            lines.push((cluster.line, left, right, cluster.baseline));
+        }
+    }
+
+    let offset = effect_extent(style.font_size * 0.08);
+    let thickness = effect_extent(style.font_size * 0.06).round().max(1.0);
+    lines
+        .into_iter()
+        .filter_map(|(_, left, right, baseline)| {
+            let x0 = (left + pad as f32).floor().clamp(0.0, width as f32) as u32;
+            let x1 = (right + pad as f32).ceil().clamp(0.0, width as f32) as u32;
+            let y0 = (baseline + offset + pad as f32)
+                .round()
+                .clamp(0.0, height as f32) as u32;
+            let y1 = (y0 as f32 + thickness).clamp(0.0, height as f32) as u32;
+            (x1 > x0 && y1 > y0).then_some(UnderlineRect { x0, y0, x1, y1 })
+        })
+        .collect()
+}
+
+fn blit_underlines(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    shaped: &ShapedText,
+    style: &TextStyle,
+    pad: u32,
+) {
+    if style.color[3] == 0 {
+        return;
+    }
+    for rect in underline_rects(shaped, style, pad, width, height) {
+        for y in rect.y0..rect.y1 {
+            for x in rect.x0..rect.x1 {
+                let index = ((y * width + x) * 4) as usize;
+                over_straight(&mut pixels[index..index + 4], style.color);
             }
         }
     }
@@ -624,5 +716,20 @@ mod tests {
             count_near(&img, [0, 255, 0], 40) > 10,
             "expected green shadow pixels"
         );
+    }
+
+    #[test]
+    fn underline_adds_a_fill_colored_rule_below_the_glyphs() {
+        let mut r = renderer();
+        let plain = r.rasterize("HH", &TextStyle::new(48.0).with_color([255, 0, 0, 255]));
+        let underlined = r.rasterize(
+            "HH",
+            &TextStyle::new(48.0)
+                .with_color([255, 0, 0, 255])
+                .with_underline(true),
+        );
+        assert!(underlined.height > plain.height);
+        assert!(covered(&underlined) > covered(&plain));
+        assert!(count_near(&underlined, [255, 0, 0], 20) > covered(&plain));
     }
 }

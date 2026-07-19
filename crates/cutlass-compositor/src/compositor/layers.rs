@@ -432,20 +432,18 @@ impl Compositor {
 
         // Premultiply straight-alpha input so bilinear sampling and src-over
         // blending don't leak color from transparent texels into glyph edges.
-        let mut premul = vec![0u8; expected];
-        for (dst, src) in premul.chunks_exact_mut(4).zip(image.pixels.chunks_exact(4)) {
-            let a = u16::from(src[3]);
-            dst[0] = ((u16::from(src[0]) * a + 127) / 255) as u8;
-            dst[1] = ((u16::from(src[1]) * a + 127) / 255) as u8;
-            dst[2] = ((u16::from(src[2]) * a + 127) / 255) as u8;
-            dst[3] = src[3];
-        }
+        // Unwrapped text can be wider than the adapter's texture limit. Fit
+        // only the upload bitmap while retaining the original layer placement
+        // below, so the title keeps its authored on-canvas dimensions.
+        let max_dimension = gpu.device.limits().max_texture_dimension_2d;
+        let (premul, upload_width, upload_height) =
+            rgba_upload_pixels(image, expected, max_dimension)?;
 
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("cutlass.rgba.tex"),
             size: wgpu::Extent3d {
-                width: image.width,
-                height: image.height,
+                width: upload_width,
+                height: upload_height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -465,12 +463,12 @@ impl Compositor {
             &premul,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(image.width * 4),
-                rows_per_image: Some(image.height),
+                bytes_per_row: Some(upload_width * 4),
+                rows_per_image: Some(upload_height),
             },
             wgpu::Extent3d {
-                width: image.width,
-                height: image.height,
+                width: upload_width,
+                height: upload_height,
                 depth_or_array_layers: 1,
             },
         );
@@ -569,6 +567,87 @@ impl Compositor {
             _uniform: placement_buffer,
             _keep_alive: Some(Box::new(fx_buffer)),
         })
+    }
+}
+
+/// Convert straight-alpha RGBA to the compositor's premultiplied upload
+/// format, reducing oversized bitmaps to the device's 2D texture limit.
+fn rgba_upload_pixels(
+    image: &RgbaImage,
+    expected: usize,
+    max_dimension: u32,
+) -> Result<(Vec<u8>, u32, u32), CompositorError> {
+    let mut premul = vec![0u8; expected];
+    for (dst, src) in premul.chunks_exact_mut(4).zip(image.pixels.chunks_exact(4)) {
+        let a = u16::from(src[3]);
+        dst[0] = ((u16::from(src[0]) * a + 127) / 255) as u8;
+        dst[1] = ((u16::from(src[1]) * a + 127) / 255) as u8;
+        dst[2] = ((u16::from(src[2]) * a + 127) / 255) as u8;
+        dst[3] = src[3];
+    }
+
+    if image.width <= max_dimension && image.height <= max_dimension {
+        return Ok((premul, image.width, image.height));
+    }
+    if max_dimension == 0 {
+        return Err(CompositorError::MalformedFrame(
+            "GPU reports a zero 2D texture limit".into(),
+        ));
+    }
+
+    let scale = (max_dimension as f64 / f64::from(image.width))
+        .min(max_dimension as f64 / f64::from(image.height));
+    let width = ((f64::from(image.width) * scale).round() as u32).clamp(1, max_dimension);
+    let height = ((f64::from(image.height) * scale).round() as u32).clamp(1, max_dimension);
+    let source = image::RgbaImage::from_raw(image.width, image.height, premul)
+        .ok_or_else(|| CompositorError::MalformedFrame("invalid RGBA upload buffer".into()))?;
+    let resized = image::imageops::resize(
+        &source,
+        width,
+        height,
+        image::imageops::FilterType::Lanczos3,
+    );
+    Ok((resized.into_raw(), width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rgba_upload_pixels;
+    use crate::{CompositeLayer, Compositor, CompositorConfig, GpuContext, LayerPlacement};
+    use cutlass_core::RgbaImage;
+
+    #[test]
+    fn rgba_upload_premultiplies_without_resizing_small_images() {
+        let image = RgbaImage::new(1, 1, vec![200, 100, 50, 128]);
+        let (pixels, width, height) = rgba_upload_pixels(&image, 4, 16_384).unwrap();
+        assert_eq!((width, height), (1, 1));
+        assert_eq!(pixels, [100, 50, 25, 128]);
+    }
+
+    #[test]
+    fn rgba_upload_fits_unwrapped_text_to_gpu_texture_limit() {
+        let image = RgbaImage::new(19_285, 4, vec![255; 19_285 * 4 * 4]);
+        let (pixels, width, height) =
+            rgba_upload_pixels(&image, image.pixels.len(), 16_384).unwrap();
+        assert_eq!(width, 16_384);
+        assert!(height <= 16_384);
+        assert_eq!(pixels.len(), width as usize * height as usize * 4);
+    }
+
+    #[test]
+    fn compositor_accepts_bitmap_wider_than_device_texture_limit() {
+        let Ok(gpu) = GpuContext::new_headless_blocking() else {
+            return;
+        };
+        let width = gpu.device.limits().max_texture_dimension_2d + 1;
+        let bitmap = RgbaImage::new(width, 2, vec![255; width as usize * 2 * 4]);
+        let config = CompositorConfig::new(8, 8);
+        let layer = CompositeLayer::rgba(&bitmap, LayerPlacement::full_canvas(&config));
+        let mut compositor = Compositor::new(&gpu);
+        let rendered = compositor
+            .render(&gpu, &config, &[layer])
+            .expect("oversized RGBA layer should be fitted before upload");
+        assert_eq!(rendered.pixel(4, 4), [255, 255, 255, 255]);
     }
 }
 

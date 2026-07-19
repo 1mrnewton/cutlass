@@ -214,6 +214,11 @@ fn generated_clip(id: &str, kind: &str, w: i32, h: i32) -> Clip {
     let mut clip = media_clip(id, 0, 100, w, h);
     clip.media_id = SharedString::default();
     clip.generator_kind = SharedString::from(kind);
+    if kind == "text" {
+        // Engine TextStyle defaults: centered horizontally and vertically.
+        clip.text_style.align_h = 1;
+        clip.text_style.align_v = 1;
+    }
     clip
 }
 
@@ -329,6 +334,22 @@ fn generator_content_box_rides_the_transform_scale() {
             (600.0, 337.5),
             (360.0, 337.5)
         ]
+    );
+}
+
+#[test]
+fn text_selection_box_follows_canvas_alignment() {
+    let mut clip = generated_clip("T", "text", 400, 200);
+    clip.text_style.align_h = 0;
+    clip.text_style.align_v = 2;
+    let seq = sequence(vec![track("1", TrackKind::Text, vec![clip])]);
+    let b = selection_box(&seq, "T", 10, VW, VH, None);
+    assert!(b.visible);
+    // Canvas 1920x1080 is shown at 0.5x: the 400x200 text box hugs the
+    // bottom-left corner and remains ink-tight (200x100 in the viewport).
+    assert_eq!(
+        corners(&b),
+        [(0.0, 440.0), (200.0, 440.0), (200.0, 540.0), (0.0, 540.0)]
     );
 }
 

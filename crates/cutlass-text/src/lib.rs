@@ -38,12 +38,14 @@ use std::hash::Hash;
 use std::ops::Range;
 
 use cosmic_text::{
-    Align, Attrs, Buffer, CacheKey, Family, FontSystem, LineIter, Metrics, Shaping, SwashCache,
-    SwashContent, SwashImage,
+    Align, Attrs, Buffer, CacheKey, Family, FontSystem, LineIter, Metrics, Shaping,
+    Style as FontStyle, SwashCache, SwashContent, SwashImage, Weight,
 };
 use cutlass_core::RgbaImage;
 
-pub use style::{FontFamily, TextAlign, TextBackground, TextShadow, TextStroke, TextStyle};
+pub use style::{
+    FontFamily, TextAlign, TextBackground, TextShadow, TextStroke, TextStyle, TextVerticalAlign,
+};
 
 /// Enumerate installed font family names (deduped, sorted) for a font picker.
 /// Scanning the system font directories is slow (hundreds of ms), so callers
@@ -367,7 +369,26 @@ impl TextRenderer {
             FontFamily::Monospace => Family::Monospace,
             FontFamily::Named(name) => Family::Name(name),
         };
-        let attrs = Attrs::new().family(family);
+        let font_size = style.font_size.max(1.0);
+        let tracking_px = if style.letter_spacing.is_finite() {
+            style.letter_spacing.clamp(-4096.0, 4096.0)
+        } else {
+            0.0
+        };
+        let attrs = Attrs::new()
+            .family(family)
+            .weight(if style.bold {
+                Weight::BOLD
+            } else {
+                Weight::NORMAL
+            })
+            .style(if style.italic {
+                FontStyle::Italic
+            } else {
+                FontStyle::Normal
+            })
+            // cosmic-text expresses tracking in em, while Cutlass exposes px.
+            .letter_spacing(tracking_px / font_size);
         let align = match style.align {
             TextAlign::Left => Align::Left,
             TextAlign::Center => Align::Center,
@@ -419,6 +440,9 @@ struct ShapeKey {
     line_height: u32,
     color: [u8; 4],
     family: FontFamily,
+    bold: bool,
+    italic: bool,
+    letter_spacing: u32,
     align: TextAlign,
     max_width: Option<u32>,
 }
@@ -431,6 +455,9 @@ impl ShapeKey {
             line_height: style.line_height.to_bits(),
             color: style.color,
             family: style.family.clone(),
+            bold: style.bold,
+            italic: style.italic,
+            letter_spacing: style.letter_spacing.to_bits(),
             align: style.align,
             max_width: style.max_width.map(f32::to_bits),
         }
@@ -441,6 +468,7 @@ impl ShapeKey {
 #[derive(PartialEq, Eq, Hash)]
 struct RasterKey {
     shape: ShapeKey,
+    underline: bool,
     padding: u32,
     stroke: Option<([u8; 4], u32)>,
     background: Option<([u8; 4], u32)>,
@@ -451,6 +479,7 @@ impl RasterKey {
     fn new(text: &str, style: &TextStyle) -> Self {
         Self {
             shape: ShapeKey::new(text, style),
+            underline: style.underline,
             padding: style.padding,
             stroke: style.stroke.map(|s| (s.rgba, s.width.to_bits())),
             background: style.background.map(|b| (b.rgba, b.radius.to_bits())),
@@ -792,6 +821,29 @@ mod tests {
             "centered H did not move: flush={} centered={}",
             lone_h(&flush),
             lone_h(&centered)
+        );
+    }
+
+    #[test]
+    fn letter_spacing_changes_shaped_width() {
+        let mut r = test_renderer();
+        let compact = r.shape("HHHH", &TextStyle::new(48.0));
+        let tracked = r.shape("HHHH", &TextStyle::new(48.0).with_letter_spacing(12.0));
+        assert!(
+            tracked.extent.0 > compact.extent.0 + 20,
+            "tracking did not widen text: compact={} tracked={}",
+            compact.extent.0,
+            tracked.extent.0
+        );
+    }
+
+    #[test]
+    fn max_width_wraps_text_onto_multiple_lines() {
+        let mut r = test_renderer();
+        let shaped = r.shape("HH HH HH", &TextStyle::new(48.0).with_max_width(70.0));
+        assert!(
+            shaped.clusters.iter().any(|cluster| cluster.line > 0),
+            "wrap width left all clusters on one line"
         );
     }
 

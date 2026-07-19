@@ -10,6 +10,7 @@ description = "WGPU compositor: turns decoded cutlass-core VideoFrames into a co
 [dependencies]
 cutlass-core = { path = "../cutlass-core" }
 cutlass-shapes = { path = "../cutlass-shapes" }
+image = { version = "0.25", default-features = false }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }

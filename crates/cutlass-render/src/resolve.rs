@@ -24,11 +24,13 @@ use cutlass_compositor::ColorGrade;
 use cutlass_core::{RationalTime, resample};
 use cutlass_models::{
     ClipId, ClipSource, ClipTransform, ColorAdjustments, EffectInstance, Filter, Generator,
-    MediaKind, Param, Project, Shape, ShapePath, ShapeStroke, TextAlignH,
+    MediaKind, Param, Project, Shape, ShapePath, ShapeStroke, TextAlignH, TextAlignV,
     TextStyle as ModelTextStyle,
 };
 use cutlass_shapes::{BezierPath, PathPoint, SDF_AA, SdfParams, Stroke};
-use cutlass_text::{FontFamily, TextAlign, TextBackground, TextShadow, TextStroke, TextStyle};
+use cutlass_text::{
+    FontFamily, TextAlign, TextBackground, TextShadow, TextStroke, TextStyle, TextVerticalAlign,
+};
 
 use crate::animation::apply_look_animations;
 use crate::grade::resolve_color_grade;
@@ -786,15 +788,10 @@ fn to_bezier(path: &ShapePath) -> BezierPath {
 
 /// Map a model [`ModelTextStyle`] onto a [`cutlass_text`] render style.
 ///
-/// Font size, stroke width, and shadow distance are scaled from reference
-/// (1080-tall) pixels to the canvas. Lossy for now: bold/italic/underline,
-/// letter-spacing, wrap, and vertical alignment are not rendered yet.
-///
-/// The rasterized bitmap is kept tight to the glyphs (no canvas-width wrap):
-/// the layer's placement centers it on the canvas, so passing the canvas width
-/// as a wrap constraint here would only double-center the run. Multi-line wrap
-/// within a fixed width is a follow-up.
-fn map_text_style(style: &ModelTextStyle, _cw: f32, ch: f32) -> TextStyle {
+/// Reference-pixel metrics are scaled against the 1080px authoring height.
+/// The raster remains ink-tight even when wrapping uses the canvas width;
+/// alignment is applied later to the finished bitmap's placement.
+fn map_text_style(style: &ModelTextStyle, cw: f32, ch: f32) -> TextStyle {
     let scale = ch / REFERENCE_HEIGHT;
     let font_size = style.size * scale;
     let family = if style.font.is_empty() {
@@ -807,11 +804,24 @@ fn map_text_style(style: &ModelTextStyle, _cw: f32, ch: f32) -> TextStyle {
         TextAlignH::Center => TextAlign::Center,
         TextAlignH::Right => TextAlign::Right,
     };
+    let vertical_align = match style.align_v {
+        TextAlignV::Top => TextVerticalAlign::Top,
+        TextAlignV::Middle => TextVerticalAlign::Middle,
+        TextAlignV::Bottom => TextVerticalAlign::Bottom,
+    };
     let mut mapped = TextStyle::new(font_size)
         .with_color(style.fill)
         .with_family(family)
+        .with_bold(style.bold)
+        .with_italic(style.italic)
+        .with_underline(style.underline)
+        .with_letter_spacing(style.letter_spacing * scale)
         .with_align(align)
+        .with_vertical_align(vertical_align)
         .with_line_height(font_size * style.line_spacing);
+    if style.wrap {
+        mapped = mapped.with_max_width(cw.max(1.0));
+    }
     if let Some(stroke) = style.stroke {
         mapped = mapped.with_stroke(TextStroke {
             rgba: stroke.rgba,

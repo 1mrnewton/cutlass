@@ -127,7 +127,36 @@ pub(crate) fn clip_placement(clip: &Clip, canvas: &CompositorConfig) -> LayerPla
     } else {
         (canvas.width, canvas.height)
     };
-    generator_layer_placement(&transform, w, h, canvas)
+    let mut placement = generator_layer_placement(&transform, w, h, canvas);
+    let offset = text_alignment_offset(clip, &placement, canvas);
+    placement.center[0] += offset[0];
+    placement.center[1] += offset[1];
+    placement
+}
+
+/// Canvas-layout offset applied after the ordinary clip transform for text.
+/// Gesture code needs this separately: the visible text anchor includes the
+/// offset, while `ClipTransform::position` stores only the transform portion.
+pub(crate) fn text_alignment_offset(
+    clip: &Clip,
+    placement: &LayerPlacement,
+    canvas: &CompositorConfig,
+) -> [f32; 2] {
+    if clip.generator_kind.as_str() != "text" {
+        return [0.0, 0.0];
+    }
+    [
+        match clip.text_style.align_h {
+            0 => (placement.size[0] - canvas.width as f32) * 0.5,
+            2 => (canvas.width as f32 - placement.size[0]) * 0.5,
+            _ => 0.0,
+        },
+        match clip.text_style.align_v {
+            0 => (placement.size[1] - canvas.height as f32) * 0.5,
+            2 => (canvas.height as f32 - placement.size[1]) * 0.5,
+            _ => 0.0,
+        },
+    ]
 }
 
 /// The clip's crop window. Projections written before crop existed (and

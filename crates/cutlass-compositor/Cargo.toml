@@ -18,14 +18,16 @@ tracing = { workspace = true }
 
 # Apple zero-copy import: map IOSurface-backed CVPixelBuffers straight into
 # wgpu textures via CVMetalTextureCache + wgpu-hal's Metal interop. Pinned to
-# the same `metal` 0.33 crate wgpu-hal 28 links, so the `metal::Texture` we hand
-# to `texture_from_raw` is the exact type it expects (cargo unifies the two).
+# the same `objc2-metal` 0.3 line wgpu-hal 29 links, so the
+# `Retained<ProtocolObject<dyn MTLTexture>>` we hand to `texture_from_raw` is
+# the exact type it expects (cargo unifies the two).
 [target.'cfg(target_vendor = "apple")'.dependencies]
-metal = "0.33"
+objc2 = "0.6"
+objc2-metal = { version = "0.3.2", features = ["MTLDevice", "MTLTexture", "MTLTypes"] }
 
 # Windows zero-copy import: open the decoder's shared D3D11 NV12 textures on
 # wgpu's D3D12 device (OpenSharedHandle) and adopt them via wgpu-hal's dx12
-# interop. Pinned to the same `windows` 0.62 crate wgpu-hal 28 links, so the
+# interop. Pinned to the same `windows` 0.62 crate wgpu-hal 29 links, so the
 # `ID3D12Resource` we hand to `texture_from_raw` is the exact type it expects
 # (cargo unifies the two).
 [target.'cfg(target_os = "windows")'.dependencies]

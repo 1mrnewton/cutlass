@@ -3,8 +3,8 @@
 //! The compositor is headless by default ([`GpuContext::new_headless_blocking`])
 //! — no window, no surface — which is what export and tests want. When the
 //! desktop Slint UI comes online it creates the device once and shares it via
-//! [`GpuContext::from_parts`] (Slint's `unstable-wgpu-28` hands back the same
-//! `wgpu` 28 `Device`/`Queue`), so a preview frame can stay on the GPU from
+//! [`GpuContext::from_parts`] (Slint's `unstable-wgpu-29` hands back the same
+//! `wgpu` 29 `Device`/`Queue`), so a preview frame can stay on the GPU from
 //! decode through present with no readback.
 
 use crate::error::CompositorError;
@@ -34,9 +34,9 @@ impl GpuContext {
     }
 
     async fn new_headless_with(backends: wgpu::Backends) -> Result<Self, CompositorError> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         let adapter = instance

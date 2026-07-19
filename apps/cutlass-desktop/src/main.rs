@@ -47,7 +47,7 @@ mod window;
 use slint::BackendSelector;
 use slint::ModelRc;
 use slint::VecModel;
-use slint::wgpu_28::WGPUConfiguration;
+use slint::wgpu_29::WGPUConfiguration;
 use slint::winit_030::WinitWindowAccessor;
 
 slint::include_modules!();
@@ -84,7 +84,7 @@ use wire_ui::wire_ui;
 fn main() -> Result<(), slint::PlatformError> {
     setup_tracing();
     BackendSelector::new()
-        .require_wgpu_28(WGPUConfiguration::default())
+        .require_wgpu_29(WGPUConfiguration::default())
         .select()?;
 
     let app = AppWindow::new()?;

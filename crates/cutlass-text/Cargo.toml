@@ -8,8 +8,8 @@ repository.workspace = true
 description = "Text generator for Cutlass: shapes and rasterizes styled text runs into straight-alpha RgbaImage bitmaps the compositor can place as a layer."
 
 [dependencies]
-# Pinned to 0.17 by the MSRV-aware resolver (workspace rust-version = 1.85);
-# newer cosmic-text pulls deps that require a higher MSRV.
+# Pinned to 0.17 for API stability; bump deliberately when adopting a newer
+# cosmic-text release.
 cosmic-text = "0.17.0"
 cutlass-core = { path = "../cutlass-core" }
 

@@ -31,7 +31,7 @@ resolver = "3"
 [workspace.package]
 version = "0.6.0-alpha.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/1mrnewton/cutlass"
 
@@ -41,9 +41,9 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 rustc-hash = "2"
 tracing = "0.1"
-# GPU compositor. wgpu 28 matches Slint 1.16's `unstable-wgpu-28` so the future
+# GPU compositor. wgpu 29 matches Slint 1.17's `unstable-wgpu-29` so the
 # desktop UI can hand the compositor its own device/queue and share textures
 # (zero-copy present) instead of round-tripping pixels through the CPU.
-wgpu = "28"
+wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"

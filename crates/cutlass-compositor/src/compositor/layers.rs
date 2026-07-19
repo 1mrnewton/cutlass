@@ -375,7 +375,7 @@ impl Compositor {
         // `VkImage` with external memory, bind the imported allocation, and
         // adopt it with `wgpu::hal::vulkan::Device::texture_from_raw`.
         //
-        // Blocker (researched against wgpu 28, gfx-rs/wgpu#2320 / #3145 / #7324):
+        // Blocker (researched against wgpu 29, gfx-rs/wgpu#2320 / #3145 / #7324):
         // robust YCbCr sampling needs a `VkSamplerYcbcrConversion` bound as an
         // *immutable* sampler, and real devices hand back vendor formats
         // (`VK_FORMAT_UNDEFINED` + `VkExternalFormatANDROID`, e.g. UBWC) that

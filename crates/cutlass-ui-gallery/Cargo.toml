@@ -9,12 +9,12 @@ description = "Storybook-style Slint gallery for Cutlass custom UI components."
 publish = false
 
 [dependencies]
-# Match cutlass-desktop: Slint 1.16 + wgpu 28 for visual parity with the editor.
-slint = { version = "=1.16.1", features = [
+# Match cutlass-desktop: Slint 1.17 + wgpu 29 for visual parity with the editor.
+slint = { version = "=1.17.1", features = [
     "unstable-winit-030",
-    "unstable-wgpu-28",
+    "unstable-wgpu-29",
     "renderer-femtovg-wgpu",
 ] }
 
 [build-dependencies]
-slint-build = "=1.16.1"
+slint-build = "=1.17.1"

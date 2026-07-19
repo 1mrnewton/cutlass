@@ -485,9 +485,8 @@ component DisabledEffectCard inherits Rectangle {
     }
 }
 
-// CapCut-inspired property sheet for text / title clips. Only fields backed
-// by the current model are interactive; style/effect controls are shown as
-// disabled placeholders until text generator styling is persisted.
+// CapCut-inspired property sheet for text / title clips. Style treatments
+// (stroke / background / shadow) persist and render; Glow is still a stub.
 export component TextInspector inherits VerticalLayout {
     in property <string> track-id;
     // Named `model` — `clip` is a built-in boolean on Slint elements.

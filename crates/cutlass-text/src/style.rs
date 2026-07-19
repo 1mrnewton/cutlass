@@ -1,4 +1,5 @@
-//! How a text run should look: size, color, family, alignment, wrapping.
+//! How a text run should look: size, color, family, alignment, wrapping,
+//! and optional stroke / background / shadow treatments.
 
 /// Horizontal alignment of wrapped / multi-line text inside its bitmap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -21,6 +22,35 @@ pub enum FontFamily {
     Named(String),
 }
 
+/// Outline drawn around glyphs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextStroke {
+    /// Stroke color (straight-alpha RGBA).
+    pub rgba: [u8; 4],
+    /// Stroke width in pixels (already canvas-scaled by the caller).
+    pub width: f32,
+}
+
+/// A filled card drawn behind the title block.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextBackground {
+    /// Card color (straight-alpha RGBA); alpha is the opacity.
+    pub rgba: [u8; 4],
+    /// Corner rounding, `0.0` (square) ..= `1.0` (pill).
+    pub radius: f32,
+}
+
+/// Soft drop shadow behind the title, offset down-right at 45°.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextShadow {
+    /// Shadow color (straight-alpha RGBA); alpha is the opacity.
+    pub rgba: [u8; 4],
+    /// Blur radius as a fraction of the font size, `0.0`..=`1.0`.
+    pub blur: f32,
+    /// Offset distance in pixels (already canvas-scaled by the caller).
+    pub distance: f32,
+}
+
 /// The styling for a rasterized text run.
 ///
 /// Construct with [`TextStyle::new`] (a size, white, left-aligned, sans-serif,
@@ -39,8 +69,15 @@ pub struct TextStyle {
     /// word-wraps to that width.
     pub max_width: Option<f32>,
     /// Transparent margin (px) added on every side of the measured text box —
-    /// headroom for glyph overhang, soft shadows, or strokes added later.
+    /// headroom for glyph overhang. Stroke / shadow / background compute their
+    /// own additional headroom on top of this.
     pub padding: u32,
+    /// Optional glyph outline (composited under the fill).
+    pub stroke: Option<TextStroke>,
+    /// Optional background card behind the text block.
+    pub background: Option<TextBackground>,
+    /// Optional drop shadow / glow behind the text.
+    pub shadow: Option<TextShadow>,
 }
 
 impl TextStyle {
@@ -55,6 +92,9 @@ impl TextStyle {
             align: TextAlign::Left,
             max_width: None,
             padding: 0,
+            stroke: None,
+            background: None,
+            shadow: None,
         }
     }
 
@@ -86,6 +126,21 @@ impl TextStyle {
 
     pub fn with_padding(mut self, padding: u32) -> Self {
         self.padding = padding;
+        self
+    }
+
+    pub fn with_stroke(mut self, stroke: TextStroke) -> Self {
+        self.stroke = Some(stroke);
+        self
+    }
+
+    pub fn with_background(mut self, background: TextBackground) -> Self {
+        self.background = Some(background);
+        self
+    }
+
+    pub fn with_shadow(mut self, shadow: TextShadow) -> Self {
+        self.shadow = Some(shadow);
         self
     }
 }

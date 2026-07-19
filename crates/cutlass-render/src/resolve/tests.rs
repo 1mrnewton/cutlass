@@ -116,6 +116,19 @@ fn text_generator_maps_style_and_defers_size() {
     let style = ModelTextStyle {
         size: 90.0,
         fill: [255, 0, 0, 255],
+        stroke: Some(cutlass_models::TextStroke {
+            rgba: [0, 0, 0, 255],
+            width: 8.0,
+        }),
+        background: Some(cutlass_models::TextBackground {
+            rgba: [0, 0, 255, 200],
+            radius: 0.5,
+        }),
+        shadow: Some(cutlass_models::TextShadow {
+            rgba: [0, 0, 0, 230],
+            blur: 0.15,
+            distance: 10.0,
+        }),
         ..ModelTextStyle::default()
     };
     project
@@ -140,6 +153,16 @@ fn text_generator_maps_style_and_defers_size() {
             assert_eq!(content, "Hi");
             approx(style.font_size, 90.0);
             assert_eq!(style.color, [255, 0, 0, 255]);
+            let stroke = style.stroke.expect("stroke mapped");
+            assert_eq!(stroke.rgba, [0, 0, 0, 255]);
+            approx(stroke.width, 8.0);
+            let bg = style.background.expect("background mapped");
+            assert_eq!(bg.rgba, [0, 0, 255, 200]);
+            approx(bg.radius, 0.5);
+            let shadow = style.shadow.expect("shadow mapped");
+            assert_eq!(shadow.rgba, [0, 0, 0, 230]);
+            approx(shadow.blur, 0.15);
+            approx(shadow.distance, 10.0);
         }
         other => panic!("expected text source, got {other:?}"),
     }

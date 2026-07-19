@@ -30,6 +30,7 @@
 //! [`TextRenderer::load_font`] to add bundled/custom faces for deterministic,
 //! platform-independent output.
 
+mod effects;
 mod style;
 
 use std::collections::HashMap;
@@ -41,7 +42,7 @@ use cosmic_text::{
 };
 use cutlass_core::RgbaImage;
 
-pub use style::{FontFamily, TextAlign, TextStyle};
+pub use style::{FontFamily, TextAlign, TextBackground, TextShadow, TextStroke, TextStyle};
 
 /// Enumerate installed font family names (deduped, sorted) for a font picker.
 /// Scanning the system font directories is slow (hundreds of ms), so callers
@@ -327,42 +328,9 @@ impl TextRenderer {
         if !shaped.has_ink() {
             return RgbaImage::transparent(0, 0);
         }
-
-        let pad = style.padding;
-        let width = shaped.extent.0 + 2 * pad;
-        let height = shaped.extent.1 + 2 * pad;
-        let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
-
-        for cluster in &shaped.clusters {
-            let (cw, ch) = (cluster.image.width, cluster.image.height);
-            if cw == 0 || ch == 0 {
-                continue;
-            }
-            // Ink offsets are integral by construction (pixel box minus pixel
-            // box); rounding is belt and braces.
-            let ox = cluster.offset[0].round() as i64 + i64::from(pad);
-            let oy = cluster.offset[1].round() as i64 + i64::from(pad);
-            for row in 0..ch {
-                for col in 0..cw {
-                    let src = cluster.image.pixel(col, row);
-                    if src[3] == 0 {
-                        continue;
-                    }
-                    let (px, py) = (ox + i64::from(col), oy + i64::from(row));
-                    debug_assert!(
-                        px >= 0 && py >= 0 && px < i64::from(width) && py < i64::from(height),
-                        "cluster ink escaped the measured extent"
-                    );
-                    if px < 0 || py < 0 || px >= i64::from(width) || py >= i64::from(height) {
-                        continue;
-                    }
-                    let idx = ((py as u32 * width + px as u32) * 4) as usize;
-                    over_straight(&mut pixels[idx..idx + 4], src);
-                }
-            }
-        }
-
-        RgbaImage::new(width, height, pixels)
+        // Stroke / background / shadow (and plain padding) are painted here —
+        // `shape` stays ink-tight so cluster animation can place glyphs freely.
+        effects::paint(&shaped, style)
     }
 
     /// Insert into a memo map, bounding memory with a wholesale clear at the
@@ -450,6 +418,9 @@ struct MemoKey {
     align: TextAlign,
     max_width: Option<u32>,
     padding: u32,
+    stroke: Option<([u8; 4], u32)>,
+    background: Option<([u8; 4], u32)>,
+    shadow: Option<([u8; 4], u32, u32)>,
 }
 
 impl MemoKey {
@@ -463,6 +434,11 @@ impl MemoKey {
             align: style.align,
             max_width: style.max_width.map(f32::to_bits),
             padding: style.padding,
+            stroke: style.stroke.map(|s| (s.rgba, s.width.to_bits())),
+            background: style.background.map(|b| (b.rgba, b.radius.to_bits())),
+            shadow: style
+                .shadow
+                .map(|s| (s.rgba, s.blur.to_bits(), s.distance.to_bits())),
         }
     }
 }
@@ -582,7 +558,7 @@ fn write_glyph(
 /// Straight-alpha "source over destination" compositing of one pixel. Both
 /// `dst` and `src` are non-premultiplied RGBA; `dst` is updated in place.
 /// Callers skip fully transparent sources (`src[3] > 0` is a precondition).
-fn over_straight(dst: &mut [u8], src: [u8; 4]) {
+pub(crate) fn over_straight(dst: &mut [u8], src: [u8; 4]) {
     // Fast path: an opaque source (the common interior-of-glyph case) replaces.
     if src[3] == 255 {
         dst.copy_from_slice(&src);

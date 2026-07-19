@@ -86,12 +86,13 @@ README / overview claims that still oversell it.
 
 ### Richer text style rendering
 
-- **Wanted:** Bold, italic, underline, stroke, background, shadow, vertical
-  alignment, wrap — as stored on `TextStyle`.
-- **Today:** Model persists them; compositor renders a subset (font, size,
-  fill, horizontal alignment). Documented in cutlass-py API notes.
-- **Where:** text resolve / compositor text path;
-  `crates/cutlass-py/api-design.md` “v1 render coverage”.
+- **Wanted:** Bold, italic, underline, letter-spacing, vertical alignment,
+  wrap — as stored on `TextStyle`.
+- **Today:** Font, size, fill, horizontal alignment, line spacing, case,
+  stroke, background, and shadow render. Remaining fields persist in the
+  model but are not mapped through `map_text_style` / `cutlass-text` yet.
+- **Where:** `crates/cutlass-render/src/resolve.rs` (`map_text_style`),
+  `crates/cutlass-text`; `crates/cutlass-py/api-design.md` “v1 render coverage”.
 
 ## AI assistant
 

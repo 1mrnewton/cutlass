@@ -154,10 +154,10 @@ m[3.0:8.0]             # same thing, slice sugar
 `subclip` produces a lightweight *content descriptor* — nothing happens until
 a track places it. Out-of-range windows error at `add` time.
 
-> **v1 render coverage:** `TextStyle` fields beyond font, size, fill color,
-> and horizontal alignment (bold, italic, underline, stroke, background, shadow,
-> vertical alignment, wrap toggle) are stored by the model but not yet rendered
-> by the compositor.
+> **v1 render coverage:** font, size, fill, horizontal alignment, line spacing,
+> case, stroke, background, and shadow render. Remaining `TextStyle` fields
+> (bold, italic, underline, letter-spacing, vertical alignment, wrap toggle)
+> are stored by the model but not yet rendered.
 
 ## `Track`
 

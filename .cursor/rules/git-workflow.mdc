@@ -28,5 +28,9 @@ cargo clippy --workspace --all-targets
 
 - **NEVER `git push`** (any remote, any branch) unless the user explicitly asks in the current conversation. "Commit" does not imply "push".
 - **NEVER create, move, or delete tags** and **never cut releases** (GitHub releases, version bumps intended for release, publishing) on your own initiative. These happen only on an explicit user command.
+- When the user **does** ask to cut / publish a public desktop alpha, follow
+  [`.agents/skills/cutlass-release/SKILL.md`](../../.agents/skills/cutlass-release/SKILL.md)
+  and [`.cursor/rules/release.mdc`](release.mdc) (PR → green CI → merge `main`
+  → tag `main` → `release.yml`). Do not improvise a shorter path.
 - Never use destructive git operations (`push --force`, `reset --hard`, history rewrites, tag deletion) unless the user explicitly requests them.
 - When a task is finished and committed, simply report what was committed; do not ask "should I push?" — the user will say so when they want it.

@@ -4,6 +4,11 @@ Cutlass alpha builds ship as prebuilt binaries. The desktop editor is
 `cutlass-desktop`; the iOS/macOS SwiftUI app ships through Xcode/TestFlight
 and is not covered here.
 
+**Agent / release checklist:** when cutting a public desktop alpha, follow
+[`.agents/skills/cutlass-release/SKILL.md`](../.agents/skills/cutlass-release/SKILL.md)
+(PR into `main`, green CI, tag from `main`). This file is the packaging
+reference for version strings and local package scripts.
+
 macOS (AVFoundation/VideoToolbox) and Windows (Media Foundation) have working
 media stacks. Linux packages are **dormant**: the app compiles and the UI
 runs there, but imported media cannot decode until the Linux backend lands.

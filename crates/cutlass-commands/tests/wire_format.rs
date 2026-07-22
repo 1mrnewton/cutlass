@@ -205,7 +205,7 @@ fn edit_samples() -> Vec<EditCommand> {
             clip: clip(4),
             mask: Some(Mask {
                 kind: MaskKind::Circle,
-                feather: 0.5,
+                feather: 0.5.into(),
                 invert: true,
             }),
         },
@@ -213,8 +213,8 @@ fn edit_samples() -> Vec<EditCommand> {
             clip: clip(4),
             chroma: Some(ChromaKey {
                 rgb: [0, 255, 0],
-                strength: 0.7,
-                shadow: 0.2,
+                strength: 0.7.into(),
+                shadow: 0.2.into(),
             }),
         },
         EditCommand::SetClipStabilize {
@@ -225,24 +225,24 @@ fn edit_samples() -> Vec<EditCommand> {
             clip: clip(4),
             filter: Some(Filter {
                 id: "vivid".into(),
-                intensity: 0.6,
+                intensity: 0.6.into(),
             }),
         },
         EditCommand::SetClipLut {
             clip: clip(4),
             lut: Some(Lut {
                 path: "/luts/teal-orange.cube".into(),
-                intensity: 0.7,
+                intensity: 0.7.into(),
             }),
         },
         EditCommand::SetClipAdjustments {
             clip: clip(4),
             adjust: ColorAdjustments {
-                brightness: 0.1,
-                contrast: -0.2,
-                saturation: 0.3,
-                exposure: 0.0,
-                temperature: -0.4,
+                brightness: 0.1.into(),
+                contrast: (-0.2).into(),
+                saturation: 0.3.into(),
+                exposure: 0.0.into(),
+                temperature: (-0.4).into(),
             },
         },
         EditCommand::SetClipAnimation {
@@ -743,8 +743,8 @@ fn golden_look_commands() {
         clip: clip(4),
         chroma: Some(ChromaKey {
             rgb: [0, 255, 0],
-            strength: 0.5,
-            shadow: 0.0,
+            strength: 0.5.into(),
+            shadow: 0.0.into(),
         }),
     });
     assert_eq!(
@@ -769,7 +769,7 @@ fn golden_look_commands() {
         clip: clip(4),
         filter: Some(Filter {
             id: "vivid".into(),
-            intensity: 0.75,
+            intensity: 0.75.into(),
         }),
     });
     assert_eq!(
@@ -784,7 +784,7 @@ fn golden_look_commands() {
     let adjust = Command::Edit(EditCommand::SetClipAdjustments {
         clip: clip(4),
         adjust: ColorAdjustments {
-            brightness: 0.25,
+            brightness: 0.25.into(),
             ..Default::default()
         },
     });

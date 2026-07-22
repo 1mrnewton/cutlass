@@ -101,18 +101,18 @@ fn freeze_helper_bakes_visual_state_and_clears_dynamic_semantics() {
     source.mask = Some(Mask::new(MaskKind::Circle));
     source.chroma_key = Some(ChromaKey {
         rgb: [0, 255, 0],
-        strength: 0.7,
-        shadow: 0.2,
+        strength: 0.7.into(),
+        shadow: 0.2.into(),
     });
     source.stabilize = Some(StabilizeLevel::Smooth);
     source.filter = Some(Filter::new("vivid"));
     source.lut = Some(Lut::new("/tmp/look.cube"));
     source.adjust = ColorAdjustments {
-        brightness: 0.2,
-        contrast: -0.1,
-        saturation: 0.3,
-        exposure: 0.1,
-        temperature: -0.2,
+        brightness: 0.2.into(),
+        contrast: (-0.1).into(),
+        saturation: 0.3.into(),
+        exposure: 0.1.into(),
+        temperature: (-0.2).into(),
     };
     source.animation_in = Some(AnimationRef::new("fade_in"));
     source.animation_out = Some(AnimationRef::new("fade_out"));

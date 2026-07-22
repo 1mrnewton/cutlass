@@ -65,7 +65,7 @@ fn clip_lut_remaps_layer_colors() {
             clip,
             Some(Lut {
                 path: file.to_string_lossy().into_owned(),
-                intensity: 1.0,
+                intensity: 1.0.into(),
             }),
         )
         .unwrap();
@@ -89,7 +89,7 @@ fn clip_lut_remaps_layer_colors() {
             clip,
             Some(Lut {
                 path: file.to_string_lossy().into_owned(),
-                intensity: 0.5,
+                intensity: 0.5.into(),
             }),
         )
         .unwrap();
@@ -119,7 +119,7 @@ fn filter_lane_lut_grades_the_canvas() {
             bar,
             Some(Lut {
                 path: file.to_string_lossy().into_owned(),
-                intensity: 1.0,
+                intensity: 1.0.into(),
             }),
         )
         .unwrap();

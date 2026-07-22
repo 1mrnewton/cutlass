@@ -147,8 +147,8 @@ fn export_with_mask_and_chroma_differs_from_unmasked() {
             clip,
             Some(ChromaKey {
                 rgb: [0, 255, 0],
-                strength: 0.5,
-                shadow: 0.0,
+                strength: 0.5.into(),
+                shadow: 0.0.into(),
             }),
         )
         .unwrap();

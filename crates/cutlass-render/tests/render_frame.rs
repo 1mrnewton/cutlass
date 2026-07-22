@@ -101,8 +101,8 @@ fn renders_still_with_circle_mask_and_chroma_key() {
             clip,
             Some(ChromaKey {
                 rgb: [0, 255, 0],
-                strength: 0.5,
-                shadow: 0.0,
+                strength: 0.5.into(),
+                shadow: 0.0.into(),
             }),
         )
         .unwrap();
@@ -148,7 +148,7 @@ fn renders_adjustment_lane_over_still_media() {
         .set_clip_adjustments(
             bar,
             ColorAdjustments {
-                saturation: -1.0,
+                saturation: (-1.0).into(),
                 ..ColorAdjustments::default()
             },
         )
@@ -414,7 +414,7 @@ fn saturation_minus_one_desaturates_red_solid() {
         .set_clip_adjustments(
             clip,
             ColorAdjustments {
-                saturation: -1.0,
+                saturation: (-1.0).into(),
                 ..ColorAdjustments::default()
             },
         )
@@ -489,7 +489,7 @@ fn mono_filter_at_zero_intensity_matches_no_filter() {
             clip,
             Some(Filter {
                 id: "mono".into(),
-                intensity: 0.0,
+                intensity: 0.0.into(),
             }),
         )
         .unwrap();

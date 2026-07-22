@@ -1044,10 +1044,11 @@ fn duplicate(engine: &mut Engine, clip: ClipId) -> Result<serde_json::Value, Eng
                 fade_in: RationalTime::new(snapshot.fade_in, rate),
                 fade_out: RationalTime::new(snapshot.fade_out, rate),
             }))?;
-            if !snapshot.crop.is_full() || snapshot.flip_h || snapshot.flip_v {
+            let crop = snapshot.crop.sample(0);
+            if !crop.is_full() || snapshot.flip_h || snapshot.flip_v {
                 engine.apply(Command::Edit(EditCommand::SetClipCrop {
                     clip: new,
-                    crop: snapshot.crop,
+                    crop,
                     flip_h: snapshot.flip_h,
                     flip_v: snapshot.flip_v,
                 }))?;

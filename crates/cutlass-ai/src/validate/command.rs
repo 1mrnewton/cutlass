@@ -140,8 +140,9 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 )));
             }
             // Omitted edges keep the clip's current framing. Current insets
-            // derive from the stored kept-region rect.
-            let current = clip.crop;
+            // derive from the stored kept-region rect (sample at clip start
+            // when keyframed — set_clip_crop itself flattens to a constant).
+            let current = clip.crop.sample(0);
             let inset = |requested: Option<f64>, current: f32, what: &str| {
                 let Some(v) = requested else {
                     return Ok(current);

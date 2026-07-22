@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::ModelError;
+use crate::param::Lerp;
 
 /// Normalized crop window into a clip's content (CapCut crop, M1).
 ///
@@ -19,6 +20,21 @@ pub struct CropRect {
     pub w: f32,
     /// Kept height fraction, `(0.0..=1.0]`.
     pub h: f32,
+}
+
+/// Component-wise lerp. Intermediate values are not re-clamped: keyframe
+/// values are validated at set time, and the valid-rect set
+/// (`w`/`h` ≥ [`MIN_CROP_FRACTION`], `x`/`y` ≥ 0, `x+w`/`y+h` ≤ 1) is
+/// convex, so a lerp of two valid rects stays valid.
+impl Lerp for CropRect {
+    fn lerp(a: Self, b: Self, t: f32) -> Self {
+        Self {
+            x: Lerp::lerp(a.x, b.x, t),
+            y: Lerp::lerp(a.y, b.y, t),
+            w: Lerp::lerp(a.w, b.w, t),
+            h: Lerp::lerp(a.h, b.h, t),
+        }
+    }
 }
 
 /// Smallest croppable extent per axis (1% of the content) — keeps the kept

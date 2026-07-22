@@ -6,7 +6,7 @@ use common::{image_asset, import_asset, rt, small_video_asset, temp_engine, tr};
 use cutlass_commands::{Command, EditCommand, EditOutcome};
 use cutlass_engine::ApplyOutcome;
 use cutlass_models::{
-    CanvasAspect, ClipParam, ClipTransform, CropRect, Easing, Generator, ParamValue, Shape,
+    CanvasAspect, ClipParam, ClipTransform, CropRect, Easing, Generator, Param, ParamValue, Shape,
     ShapeParam, TrackKind,
 };
 
@@ -904,7 +904,7 @@ fn set_clip_crop_undo_redo_roundtrip() {
         }))
         .expect("set crop");
     let clip = |engine: &cutlass_engine::Engine| engine.project().clip(clip_id).unwrap().clone();
-    assert_eq!(clip(&engine).crop, crop);
+    assert_eq!(clip(&engine).crop, Param::Constant(crop));
     assert!(clip(&engine).flip_h && !clip(&engine).flip_v);
 
     // One undo restores the full frame and both flips.
@@ -913,7 +913,7 @@ fn set_clip_crop_undo_redo_roundtrip() {
     assert!(!restored.has_custom_crop());
 
     assert!(engine.redo());
-    assert_eq!(clip(&engine).crop, crop);
+    assert_eq!(clip(&engine).crop, Param::Constant(crop));
     assert!(clip(&engine).flip_h);
 }
 

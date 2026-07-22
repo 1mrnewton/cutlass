@@ -80,6 +80,14 @@ pub(crate) fn clip_param_value(
         "rotation" => (ClipParam::Rotation, ParamValue::Scalar(value_x)),
         "opacity" => (ClipParam::Opacity, ParamValue::Scalar(value_x)),
         "volume" => (ClipParam::Volume, ParamValue::Scalar(value_x)),
+        // Crop keyframes carry `[x,y,w,h]` via `ParamValue::Rect`. The Slint
+        // two-float channel cannot express a full rect — this arm resolves the
+        // param for remove/diamond tooling; commits that need a real rect use
+        // `ParamValue::Rect` directly (crop tool / AI wire).
+        "crop" => (
+            ClipParam::Crop,
+            ParamValue::Rect([value_x, value_y, 1.0, 1.0]),
+        ),
         "text_size" => (
             ClipParam::Text {
                 param: TextParam::Size,

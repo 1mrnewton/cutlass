@@ -317,10 +317,13 @@ fn clip_to_slint(
         transform_scale: transform.scale,
         transform_rotation: transform.rotation,
         transform_opacity: transform.opacity,
-        crop_x: clip.crop.x,
-        crop_y: clip.crop.y,
-        crop_w: clip.crop.w,
-        crop_h: clip.crop.h,
+        // Clip-start sample (same convention as transform/volume above).
+        // Playhead-accurate crop sampling is UI-side; no kf-crop list yet
+        // (crop inspector is constant-commit / gizmo-only).
+        crop_x: clip.crop.sample(0).x,
+        crop_y: clip.crop.sample(0).y,
+        crop_w: clip.crop.sample(0).w,
+        crop_h: clip.crop.sample(0).h,
         flip_h: clip.flip_h,
         flip_v: clip.flip_v,
         blend_mode: blend_mode.into(),

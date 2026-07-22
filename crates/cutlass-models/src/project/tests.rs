@@ -680,7 +680,8 @@ fn duplicate_clip_preserves_full_property_snapshot() {
             y: 0.2,
             w: 0.7,
             h: 0.6,
-        };
+        }
+        .into();
         clip.flip_h = true;
         clip.flip_v = true;
 
@@ -985,7 +986,8 @@ fn split_clip_preserves_full_property_snapshot_and_rebases_tail_curves() {
             y: 0.2,
             w: 0.7,
             h: 0.6,
-        };
+        }
+        .into();
         clip.flip_h = true;
         clip.flip_v = true;
 
@@ -1829,7 +1831,7 @@ fn set_clip_crop_sets_framing() {
     };
     project.set_clip_crop(clip, crop, true, false).unwrap();
     let c = project.clip(clip).unwrap();
-    assert_eq!(c.crop, crop);
+    assert_eq!(c.crop, Param::Constant(crop));
     assert!(c.flip_h && !c.flip_v);
     assert!(c.has_custom_crop());
 
@@ -1894,9 +1896,57 @@ fn split_keeps_crop_and_flips_on_both_halves() {
     let right = project.split_clip(clip, rt(60)).unwrap();
     for id in [clip, right] {
         let c = project.clip(id).unwrap();
-        assert_eq!(c.crop, crop);
+        assert_eq!(c.crop, Param::Constant(crop));
         assert!(c.flip_h && c.flip_v);
     }
+}
+
+#[test]
+fn crop_param_keyframe_validates_each_value() {
+    let (mut project, media_id, track) = project_with_media(500);
+    let clip = project
+        .add_clip(track, media_id, tr(0, 100), rt(0))
+        .unwrap();
+    let ok = CropRect {
+        x: 0.1,
+        y: 0.1,
+        w: 0.5,
+        h: 0.5,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Crop,
+            rt(0),
+            ParamValue::Rect([ok.x, ok.y, ok.w, ok.h]),
+            Easing::Linear,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Crop,
+            rt(50),
+            ParamValue::Rect([0.2, 0.2, 0.4, 0.4]),
+            Easing::Linear,
+        )
+        .unwrap();
+    assert!(project.clip(clip).unwrap().crop.is_animated());
+    assert!(matches!(
+        project.set_param_keyframe(
+            clip,
+            ClipParam::Crop,
+            rt(25),
+            ParamValue::Rect([0.0, 0.0, 0.001, 1.0]),
+            Easing::Linear,
+        ),
+        Err(ModelError::InvalidParam(_))
+    ));
+    // Scalar value rejected for crop.
+    assert!(matches!(
+        project.set_param_constant(clip, ClipParam::Crop, ParamValue::Scalar(0.5)),
+        Err(ModelError::InvalidParam(_))
+    ));
 }
 
 #[test]

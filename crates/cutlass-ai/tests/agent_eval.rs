@@ -1531,8 +1531,8 @@ fn crop_to_center_and_mirror_clip() {
         .project()
         .clip(cutlass_models::ClipId::from_raw(clip))
         .unwrap();
-    assert_eq!(placed.crop.x, 0.25);
-    assert_eq!(placed.crop.w, 0.5);
+    assert_eq!(placed.crop.sample(0).x, 0.25);
+    assert_eq!(placed.crop.sample(0).w, 0.5);
     assert!(placed.flip_h && !placed.flip_v);
     let summary = summarize(host.engine.project());
     let described = &summary.tracks[0].clips[0];

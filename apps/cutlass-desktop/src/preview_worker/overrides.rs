@@ -46,10 +46,8 @@ pub(super) fn fit_clip_transform(
         // Generators raster at canvas size: fit and fill are both 1.0.
         None => (canvas_w, canvas_h),
     };
-    let (w, h) = (
-        content_w as f32 * clip.crop.w,
-        content_h as f32 * clip.crop.h,
-    );
+    let crop = clip.crop.sample(clip.animation_tick(tick));
+    let (w, h) = (content_w as f32 * crop.w, content_h as f32 * crop.h);
     if w <= 0.0 || h <= 0.0 || canvas_w == 0 || canvas_h == 0 {
         return None;
     }

@@ -62,7 +62,8 @@ fn extracted_audio_companion_copies_only_audio_and_retime_state() {
         y: 0.2,
         w: 0.7,
         h: 0.6,
-    };
+    }
+    .into();
     source.flip_h = true;
     source.filter = Some(crate::look::Filter {
         id: "vivid".into(),
@@ -833,7 +834,7 @@ fn default_crop_serializes_without_fields() {
 
     // And a pre-crop save loads with the defaults.
     let loaded: Clip = serde_json::from_value(value).expect("deserialize");
-    assert_eq!(loaded.crop, CropRect::FULL);
+    assert_eq!(loaded.crop, Param::Constant(CropRect::FULL));
     assert!(!loaded.flip_h && !loaded.flip_v);
 }
 
@@ -845,13 +846,69 @@ fn custom_crop_roundtrips_through_serde() {
         y: 0.2,
         w: 0.5,
         h: 0.25,
-    };
+    }
+    .into();
     clip.flip_h = true;
     assert!(clip.has_custom_crop());
     let json = serde_json::to_string(&clip).expect("serialize");
     let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(loaded.crop, clip.crop);
     assert!(loaded.flip_h && !loaded.flip_v);
+}
+
+#[test]
+fn legacy_bare_crop_rect_json_loads_as_constant() {
+    // Pre-Param saves wrote the bare rect; Constant serializes identically.
+    let json = r#"{"x":0.1,"y":0.2,"w":0.5,"h":0.5}"#;
+    let crop: Param<CropRect> = serde_json::from_str(json).expect("legacy crop");
+    assert_eq!(
+        crop,
+        Param::Constant(CropRect {
+            x: 0.1,
+            y: 0.2,
+            w: 0.5,
+            h: 0.5,
+        })
+    );
+}
+
+#[test]
+fn keyframed_crop_roundtrips_and_lerps() {
+    let a = CropRect {
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 1.0,
+    };
+    let b = CropRect {
+        x: 0.2,
+        y: 0.2,
+        w: 0.6,
+        h: 0.6,
+    };
+    let mut clip = media_clip(MediaId::from_raw(1), tr(0, 100, R24), tr(0, 100, R24));
+    clip.crop = Param::Keyframed {
+        keyframes: vec![
+            Keyframe {
+                tick: 0,
+                value: a,
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                tick: 10,
+                value: b,
+                easing: Easing::Linear,
+            },
+        ],
+    };
+    let json = serde_json::to_string(&clip).expect("serialize");
+    let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(loaded.crop, clip.crop);
+    let mid = loaded.crop.sample(5);
+    assert!((mid.x - 0.1).abs() < 1e-5);
+    assert!((mid.y - 0.1).abs() < 1e-5);
+    assert!((mid.w - 0.8).abs() < 1e-5);
+    assert!((mid.h - 0.8).abs() < 1e-5);
 }
 
 #[test]

@@ -95,7 +95,8 @@ fn freeze_helper_bakes_visual_state_and_clears_dynamic_semantics() {
         y: 0.2,
         w: 0.7,
         h: 0.6,
-    };
+    }
+    .into();
     source.flip_h = true;
     source.flip_v = true;
     source.mask = Some(Mask::new(MaskKind::Circle));
@@ -162,7 +163,8 @@ fn freeze_helper_bakes_visual_state_and_clears_dynamic_semantics() {
     assert_eq!(frozen.audio_role, None);
     assert!(frozen.is_silent());
 
-    assert_eq!(frozen.crop, source.crop);
+    assert_eq!(frozen.crop, Param::Constant(source.crop.sample(20)));
+    assert!(!frozen.crop.is_animated());
     assert_eq!((frozen.flip_h, frozen.flip_v), (true, true));
     assert_eq!(frozen.mask, source.mask);
     assert_eq!(frozen.chroma_key, source.chroma_key);
@@ -180,6 +182,50 @@ fn freeze_helper_bakes_visual_state_and_clears_dynamic_semantics() {
         assert_eq!(frozen.source_time_at(rt(tick)).unwrap(), Some(rt(140)));
     }
     assert_eq!(frozen.source_time_at(rt(80)).unwrap(), None);
+}
+
+#[test]
+fn frozen_frame_holds_keyframed_crop_at_freeze_tick() {
+    let (mut project, media) = video_project();
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    let a = CropRect {
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 1.0,
+    };
+    let b = CropRect {
+        x: 0.4,
+        y: 0.4,
+        w: 0.5,
+        h: 0.5,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            cutlass_models::ClipParam::Crop,
+            rt(0),
+            cutlass_models::ParamValue::Rect([a.x, a.y, a.w, a.h]),
+            Easing::Linear,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            cutlass_models::ClipParam::Crop,
+            rt(40),
+            cutlass_models::ParamValue::Rect([b.x, b.y, b.w, b.h]),
+            Easing::Linear,
+        )
+        .unwrap();
+    let source = project.clip(clip).unwrap().clone();
+    // Freeze at timeline tick 20 → clip-relative 20 → midpoint crop.
+    let frozen = source.frozen_frame(rt(20), tr(20, 30)).unwrap();
+    let expected = source.crop.sample(20);
+    assert_eq!(frozen.crop, Param::Constant(expected));
+    assert!((expected.x - 0.2).abs() < 1e-5);
+    assert!((expected.w - 0.75).abs() < 1e-5);
 }
 
 #[test]

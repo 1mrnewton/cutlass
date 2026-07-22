@@ -144,10 +144,15 @@ pub struct Clip {
     pub denoise: bool,
     /// Normalized crop window into the content (CapCut crop, M1): only the
     /// kept region renders, aspect-fit and transformed like the full frame
-    /// was. Meaningful on visual clips; full-frame (and absent from saves)
-    /// when never cropped, so old files load unchanged.
-    #[serde(default, skip_serializing_if = "CropRect::is_full")]
-    pub crop: CropRect,
+    /// was. Meaningful on visual clips; full-frame constant (and absent from
+    /// saves) when never cropped, so old files load unchanged. Constants
+    /// serialize as the bare rect (`{"x", "y", "w", "h"}`); keyframed as
+    /// `{"kf":[...]}`.
+    #[serde(
+        default = "default_crop",
+        skip_serializing_if = "is_constant_full_crop"
+    )]
+    pub crop: Param<CropRect>,
     /// Mirror the content left-right (after crop). Absent from saves while
     /// false.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -292,6 +297,16 @@ fn is_unit_volume(volume: &Param<f32>) -> bool {
     matches!(volume, Param::Constant(v) if *v == 1.0)
 }
 
+fn default_crop() -> Param<CropRect> {
+    Param::Constant(CropRect::FULL)
+}
+
+/// Full-frame constant crop — absent from saves. Keyframed crops always
+/// serialize (even when every keyframe is full).
+fn is_constant_full_crop(crop: &Param<CropRect>) -> bool {
+    matches!(crop, Param::Constant(c) if c.is_full())
+}
+
 /// Range check for one volume value: finite, within `0..=`[`MAX_CLIP_VOLUME`].
 /// Shared by `set_clip_audio`, the envelope keyframe routing, and load-time
 /// envelope validation.
@@ -370,7 +385,7 @@ impl Clip {
             fade_in: 0,
             fade_out: 0,
             denoise: false,
-            crop: CropRect::FULL,
+            crop: default_crop(),
             flip_h: false,
             flip_v: false,
             effects: Vec::new(),
@@ -476,6 +491,8 @@ impl Clip {
         frozen.link = None;
 
         frozen.transform.set_constant(held_transform);
+        let held_crop = self.crop.sample(animation_tick);
+        frozen.crop.set_constant(held_crop);
         for effect in &mut frozen.effects {
             for param in effect.params.values_mut() {
                 let held = param.sample(animation_tick);
@@ -521,7 +538,7 @@ impl Clip {
             fade_in: 0,
             fade_out: 0,
             denoise: false,
-            crop: CropRect::FULL,
+            crop: default_crop(),
             flip_h: false,
             flip_v: false,
             effects: Vec::new(),
@@ -549,6 +566,7 @@ impl Clip {
     pub(crate) fn shift_timeline_params(&mut self, delta: i64) -> Result<(), ModelError> {
         self.transform.shift_ticks(delta)?;
         self.volume.shift_ticks(delta)?;
+        self.crop.shift_ticks(delta)?;
         for effect in &mut self.effects {
             effect.shift_param_ticks(delta)?;
         }
@@ -561,7 +579,7 @@ impl Clip {
     /// True iff the clip's framing differs from the default (full frame,
     /// no mirroring) — drives the inspector reset state.
     pub fn has_custom_crop(&self) -> bool {
-        !self.crop.is_full() || self.flip_h || self.flip_v
+        !is_constant_full_crop(&self.crop) || self.flip_h || self.flip_v
     }
 
     /// True iff the clip's audio mix differs from the default (full volume,

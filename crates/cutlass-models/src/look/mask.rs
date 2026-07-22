@@ -258,7 +258,7 @@ pub(crate) fn validate_mask_value(param: LookParam, value: f32) -> Result<(), Mo
 fn expect_scalar(value: ParamValue) -> Result<f32, ModelError> {
     match value {
         ParamValue::Scalar(v) => Ok(v),
-        ParamValue::Vec2(_) | ParamValue::Color(_) => {
+        ParamValue::Vec2(_) | ParamValue::Color(_) | ParamValue::Rect(_) => {
             Err(ModelError::InvalidParam("expected a scalar value".into()))
         }
     }
@@ -267,7 +267,7 @@ fn expect_scalar(value: ParamValue) -> Result<f32, ModelError> {
 fn expect_vec2(value: ParamValue) -> Result<[f32; 2], ModelError> {
     match value {
         ParamValue::Vec2(v) => Ok(v),
-        ParamValue::Scalar(_) | ParamValue::Color(_) => {
+        ParamValue::Scalar(_) | ParamValue::Color(_) | ParamValue::Rect(_) => {
             Err(ModelError::InvalidParam("expected a vec2 value".into()))
         }
     }

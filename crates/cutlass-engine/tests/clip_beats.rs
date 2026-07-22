@@ -61,7 +61,8 @@ fn clear_beats_undo_redo_only_swaps_the_normalized_grid() {
             y: 0.2,
             w: 0.8,
             h: 0.7,
-        };
+        }
+        .into();
         clip.flip_h = true;
         clip.effects.push(EffectInstance::new("gaussian_blur"));
         clip.mask = Some(Mask {

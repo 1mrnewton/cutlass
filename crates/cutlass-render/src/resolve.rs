@@ -351,7 +351,7 @@ fn resolve_clip(
     let anchor_point = xf.anchor_point;
     let rotation = xf.rotation.to_radians();
     let opacity = xf.opacity.clamp(0.0, 1.0);
-    let uv = crop_flip_uv(clip);
+    let uv = crop_flip_uv(clip, local_tick);
     let effects = resolve_effects(clip, local_tick);
     let (filter, adjust) = match overrides.look {
         Some((id, filter, adjust)) if id == clip.id => (filter, adjust),
@@ -626,9 +626,10 @@ fn pack_effect(fx: &EffectInstance, tick: f64) -> Result<ResolvedPass, cutlass_m
     })
 }
 
-/// UV rect from a clip's crop, with axes reversed for mirror flags.
-fn crop_flip_uv(clip: &cutlass_models::Clip) -> [f32; 4] {
-    let c = clip.crop;
+/// UV rect from a clip's crop sampled at a clip-relative tick, with axes
+/// reversed for mirror flags.
+fn crop_flip_uv(clip: &cutlass_models::Clip, tick: i64) -> [f32; 4] {
+    let c = clip.crop.sample(tick);
     let (mut u0, mut u1) = (c.x, c.x + c.w);
     let (mut v0, mut v1) = (c.y, c.y + c.h);
     if clip.flip_h {

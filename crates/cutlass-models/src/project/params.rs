@@ -245,6 +245,19 @@ impl Project {
             clip.volume.set_keyframe(tick, v, easing);
             return Ok(());
         }
+        // Crop rides the clip's framing param (validated like set_clip_crop).
+        if param == ClipParam::Crop {
+            easing.validate()?;
+            let crop = super::helpers::crop_rect_param(value)?;
+            self.check_param_target(clip_id)?;
+            let tick = self.keyframe_tick(clip_id, at)?;
+            let clip = self
+                .timeline
+                .clip_mut(clip_id)
+                .ok_or(ModelError::UnknownClip(clip_id))?;
+            clip.crop.set_keyframe(tick, crop, easing);
+            return Ok(());
+        }
         self.check_param_target(clip_id)?;
         let tick = self.keyframe_tick(clip_id, at)?;
         let clip = self
@@ -300,6 +313,22 @@ impl Project {
                 )))
             };
         }
+        if param == ClipParam::Crop {
+            self.check_param_target(clip_id)?;
+            let tick = self.keyframe_tick(clip_id, at)?;
+            let clip = self
+                .timeline
+                .clip_mut(clip_id)
+                .ok_or(ModelError::UnknownClip(clip_id))?;
+            return if clip.crop.remove_keyframe(tick) {
+                Ok(())
+            } else {
+                Err(ModelError::InvalidParam(format!(
+                    "no crop keyframe at {} to remove",
+                    at.value
+                )))
+            };
+        }
         self.check_param_target(clip_id)?;
         let tick = self.keyframe_tick(clip_id, at)?;
         let clip = self
@@ -351,6 +380,16 @@ impl Project {
                 .clip_mut(clip_id)
                 .ok_or(ModelError::UnknownClip(clip_id))?;
             clip.volume.set_constant(v);
+            return Ok(());
+        }
+        if param == ClipParam::Crop {
+            let crop = super::helpers::crop_rect_param(value)?;
+            self.check_param_target(clip_id)?;
+            let clip = self
+                .timeline
+                .clip_mut(clip_id)
+                .ok_or(ModelError::UnknownClip(clip_id))?;
+            clip.crop.set_constant(crop);
             return Ok(());
         }
         self.check_param_target(clip_id)?;

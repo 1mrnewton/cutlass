@@ -376,15 +376,20 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                     volume: clip.volume.constant().filter(|v| *v != 1.0).map(f64::from),
                     fade_in: (clip.fade_in > 0).then(|| seconds(clip.fade_in, rate)),
                     fade_out: (clip.fade_out > 0).then(|| seconds(clip.fade_out, rate)),
-                    crop: (!clip.crop.is_full()).then(|| {
-                        let c = clip.crop;
-                        [
-                            f64::from(c.x),
-                            f64::from(c.y),
-                            f64::from(1.0 - c.x - c.w),
-                            f64::from(1.0 - c.y - c.h),
-                        ]
-                    }),
+                    crop: {
+                        // Constants: describe the stored framing. Keyframed:
+                        // sample at clip-relative 0 (playhead-aware describe
+                        // is a later pass).
+                        let c = clip.crop.sample(0);
+                        (!c.is_full() || clip.crop.is_animated()).then(|| {
+                            [
+                                f64::from(c.x),
+                                f64::from(c.y),
+                                f64::from(1.0 - c.x - c.w),
+                                f64::from(1.0 - c.y - c.h),
+                            ]
+                        })
+                    },
                     flip_h: clip.flip_h.then_some(true),
                     flip_v: clip.flip_v.then_some(true),
                     effects: clip

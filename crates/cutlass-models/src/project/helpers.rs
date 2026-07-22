@@ -137,8 +137,16 @@ pub(super) fn retimed_duration(
 pub(super) fn scalar_param(value: ParamValue) -> Result<f32, ModelError> {
     match value {
         ParamValue::Scalar(v) => Ok(v),
-        ParamValue::Vec2(_) | ParamValue::Color(_) => {
+        ParamValue::Vec2(_) | ParamValue::Color(_) | ParamValue::Rect(_) => {
             Err(ModelError::InvalidParam("expected a scalar value".into()))
         }
     }
+}
+
+/// Unwrap a rect [`ParamValue`] as a validated [`CropRect`].
+pub(super) fn crop_rect_param(value: ParamValue) -> Result<CropRect, ModelError> {
+    let [x, y, w, h] = value.rect()?;
+    let crop = CropRect { x, y, w, h };
+    crop.validate()?;
+    Ok(crop)
 }

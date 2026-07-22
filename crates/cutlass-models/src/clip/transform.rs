@@ -91,6 +91,10 @@ pub enum ClipParam {
     Scale,
     Rotation,
     Opacity,
+    /// The clip's crop window (kept-region rect in content fractions).
+    /// Routed to [`Clip::crop`] instead of the transform. Always carries a
+    /// [`ParamValue::Rect`] `[x, y, w, h]`.
+    Crop,
     /// The clip's playback-rate ramp (M2 speed curves). Animates the
     /// instantaneous speed *multiplier* over the clip's normalized span
     /// (`speed_curve`), not the clip transform — its keyframe ticks live in
@@ -246,14 +250,17 @@ pub enum StyleParam {
 }
 
 /// A value for a [`ClipParam`]: scalar properties take `Scalar`, `position`
-/// takes `Vec2`, color properties (shape fill/stroke) take `Color`. Commands
-/// carry this so one command shape serves every param kind.
+/// takes `Vec2`, color properties (shape fill/stroke) take `Color`, and
+/// crop (and any future 4-float rect) take `Rect` as `[x, y, w, h]`.
+/// Commands carry this so one command shape serves every param kind.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParamValue {
     Scalar(f32),
     Vec2([f32; 2]),
     Color([u8; 4]),
+    /// Axis-aligned rect as `[x, y, w, h]` (e.g. [`ClipParam::Crop`]).
+    Rect([f32; 4]),
 }
 
 impl ParamValue {
@@ -275,6 +282,13 @@ impl ParamValue {
         match self {
             ParamValue::Color(v) => Ok(v),
             _ => Err(ModelError::InvalidParam("expected a color value".into())),
+        }
+    }
+
+    pub(crate) fn rect(self) -> Result<[f32; 4], ModelError> {
+        match self {
+            ParamValue::Rect(v) => Ok(v),
+            _ => Err(ModelError::InvalidParam("expected a rect value".into())),
         }
     }
 }
@@ -449,6 +463,7 @@ impl AnimatedTransform {
                 self.opacity.set_keyframe(tick, v, easing);
             }
             ClipParam::Effect { .. }
+            | ClipParam::Crop
             | ClipParam::Speed
             | ClipParam::Volume
             | ClipParam::Shape { .. }
@@ -471,6 +486,7 @@ impl AnimatedTransform {
             ClipParam::Rotation => self.rotation.remove_keyframe(tick),
             ClipParam::Opacity => self.opacity.remove_keyframe(tick),
             ClipParam::Effect { .. }
+            | ClipParam::Crop
             | ClipParam::Speed
             | ClipParam::Volume
             | ClipParam::Shape { .. }
@@ -522,6 +538,7 @@ impl AnimatedTransform {
                 self.opacity.set_constant(v);
             }
             ClipParam::Effect { .. }
+            | ClipParam::Crop
             | ClipParam::Speed
             | ClipParam::Volume
             | ClipParam::Shape { .. }

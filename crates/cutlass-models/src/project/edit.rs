@@ -533,7 +533,8 @@ impl Project {
             .timeline
             .clip_mut(clip_id)
             .ok_or(ModelError::UnknownClip(clip_id))?;
-        clip.crop = crop;
+        // Constant setter: flattens any crop keyframes to this framing.
+        clip.crop.set_constant(crop);
         clip.flip_h = flip_h;
         clip.flip_v = flip_v;
         Ok(())

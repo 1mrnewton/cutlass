@@ -349,6 +349,13 @@ fn dispatch_edit(
                 Some(inverse),
             ))
         }
+        EditCommand::SetClipMotionBlur { clip, motion_blur } => {
+            let inverse = edit::set_look::set_motion_blur(ctx, clip, motion_blur)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(clip)),
+                Some(inverse),
+            ))
+        }
         EditCommand::SetClipLayerStyles { clip, styles } => {
             let inverse = edit::set_look::set_layer_styles(ctx, clip, styles)?;
             Ok((

@@ -8,7 +8,7 @@
 
 use cutlass_models::{
     AnimationRef, AnimationSlot, AudioRole, BlendMode, ChromaKey, Clip, ClipId, ColorAdjustments,
-    Filter, LayerStyles, Lut, Mask, ModelError, Project, StabilizeLevel,
+    Filter, LayerStyles, Lut, Mask, ModelError, MotionBlur, Project, StabilizeLevel,
 };
 
 use crate::action::edit::restore_clip::RestoreClipAction;
@@ -45,6 +45,14 @@ pub fn set_blend_mode(
     mode: BlendMode,
 ) -> Result<Box<dyn EditAction>, EngineError> {
     with_restore(ctx, clip, |p| p.set_blend_mode(clip, mode))
+}
+
+pub fn set_motion_blur(
+    ctx: &mut ApplyContext<'_>,
+    clip: ClipId,
+    motion_blur: MotionBlur,
+) -> Result<Box<dyn EditAction>, EngineError> {
+    with_restore(ctx, clip, |p| p.set_motion_blur(clip, motion_blur))
 }
 
 pub fn set_layer_styles(

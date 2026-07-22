@@ -1143,6 +1143,47 @@ fn clip_without_blend_mode_field_deserializes_to_normal() {
 }
 
 #[test]
+fn default_motion_blur_is_elided_from_serde() {
+    let clip = Clip::generated(Generator::text("blur"), tr(0, 10, R24));
+    assert!(clip.motion_blur.is_default());
+    let json = serde_json::to_string(&clip).expect("serialize");
+    assert!(
+        !json.contains("motion_blur"),
+        "default motion blur must be absent from saves: {json}"
+    );
+}
+
+#[test]
+fn enabled_motion_blur_roundtrips_through_serde() {
+    let mut clip = Clip::generated(Generator::text("blur"), tr(0, 10, R24));
+    clip.motion_blur = crate::look::MotionBlur {
+        enabled: true,
+        shutter_deg: 270.0,
+        samples: 12,
+    };
+    let json = serde_json::to_string(&clip).expect("serialize");
+    assert!(json.contains("\"motion_blur\""));
+    let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
+    assert!(loaded.motion_blur.enabled);
+    assert_eq!(loaded.motion_blur.shutter_deg, 270.0);
+    assert_eq!(loaded.motion_blur.samples, 12);
+}
+
+#[test]
+fn clip_without_motion_blur_field_deserializes_to_default() {
+    let clip = Clip::generated(Generator::text("old"), tr(0, 10, R24));
+    let mut value = serde_json::to_value(&clip).expect("serialize");
+    value
+        .as_object_mut()
+        .expect("clip serializes to a map")
+        .remove("motion_blur");
+
+    let loaded: Clip = serde_json::from_value(value).expect("deserialize legacy clip");
+    assert!(loaded.motion_blur.is_default());
+    assert_eq!(loaded.content, clip.content);
+}
+
+#[test]
 fn empty_layer_styles_are_elided_from_serde() {
     let clip = Clip::generated(Generator::text("plain"), tr(0, 10, R24));
     assert!(clip.styles.is_empty());

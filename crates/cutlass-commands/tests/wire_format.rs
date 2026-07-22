@@ -13,8 +13,8 @@ use cutlass_commands::{
     AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
     ClipTransform, ColorAdjustments, Command, CropRect, Easing, EditCommand, EditOutcome, Filter,
     Generator, LayerShadow, LayerStyles, Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId,
-    Param, ParamValue, ProjectCommand, Rational, RationalTime, Replaceable, SpatialTangents,
-    StabilizeLevel, TemplateMeta, TemplatePick, TimeRange, TrackId, TrackKind,
+    MotionBlur, Param, ParamValue, ProjectCommand, Rational, RationalTime, Replaceable,
+    SpatialTangents, StabilizeLevel, TemplateMeta, TemplatePick, TimeRange, TrackId, TrackKind,
 };
 use serde_json::{Value, json};
 
@@ -226,6 +226,14 @@ fn edit_samples() -> Vec<EditCommand> {
         EditCommand::SetClipBlendMode {
             clip: clip(4),
             mode: BlendMode::Multiply,
+        },
+        EditCommand::SetClipMotionBlur {
+            clip: clip(4),
+            motion_blur: MotionBlur {
+                enabled: true,
+                shutter_deg: 180.0,
+                samples: 8,
+            },
         },
         EditCommand::SetClipLayerStyles {
             clip: clip(4),
@@ -444,6 +452,7 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
         EditCommand::SetClipDenoise { .. } => "SetClipDenoise",
         EditCommand::SetClipMask { .. } => "SetClipMask",
         EditCommand::SetClipBlendMode { .. } => "SetClipBlendMode",
+        EditCommand::SetClipMotionBlur { .. } => "SetClipMotionBlur",
         EditCommand::SetClipLayerStyles { .. } => "SetClipLayerStyles",
         EditCommand::SetClipChroma { .. } => "SetClipChroma",
         EditCommand::SetClipStabilize { .. } => "SetClipStabilize",
@@ -491,7 +500,7 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
 #[test]
 fn command_variant_counts_are_locked() {
     assert_eq!(project_samples().len(), 9);
-    assert_eq!(edit_samples().len(), 62);
+    assert_eq!(edit_samples().len(), 63);
 }
 
 #[test]
@@ -807,6 +816,27 @@ fn golden_look_commands() {
     assert_eq!(
         serde_json::to_value(&blend).unwrap(),
         json!({"type": "SetClipBlendMode", "clip": 4, "mode": "multiply"})
+    );
+
+    let motion_blur = Command::Edit(EditCommand::SetClipMotionBlur {
+        clip: clip(4),
+        motion_blur: MotionBlur {
+            enabled: true,
+            shutter_deg: 180.0,
+            samples: 8,
+        },
+    });
+    assert_eq!(
+        serde_json::to_value(&motion_blur).unwrap(),
+        json!({
+            "type": "SetClipMotionBlur",
+            "clip": 4,
+            "motion_blur": {
+                "enabled": true,
+                "shutter_deg": 180.0,
+                "samples": 8
+            }
+        })
     );
 
     let styles = Command::Edit(EditCommand::SetClipLayerStyles {

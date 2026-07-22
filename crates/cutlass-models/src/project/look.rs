@@ -11,7 +11,7 @@ use crate::error::ModelError;
 use crate::ids::{ClipId, MediaId, ProjectId, TrackId};
 use crate::look::{
     AnimationRef, AnimationSlot, AudioRole, BlendMode, ChromaKey, ColorAdjustments, Filter,
-    LayerStyles, Lut, Mask, StabilizeLevel, animation_spec,
+    LayerStyles, Lut, Mask, MotionBlur, StabilizeLevel, animation_spec,
 };
 use crate::media::MediaSource;
 use crate::metadata::ProjectMetadata;
@@ -95,6 +95,23 @@ impl Project {
             .clip_mut(clip_id)
             .expect("clip existence checked above")
             .blend_mode = mode;
+        Ok(())
+    }
+
+    /// Set per-clip motion blur (temporal supersampling of the animated
+    /// transform). Visual clips only; validated before store. Params are
+    /// plain values — not animatable.
+    pub fn set_motion_blur(
+        &mut self,
+        clip_id: ClipId,
+        motion_blur: MotionBlur,
+    ) -> Result<(), ModelError> {
+        self.require_visual(clip_id, "motion blur")?;
+        motion_blur.validate()?;
+        self.timeline
+            .clip_mut(clip_id)
+            .expect("clip existence checked above")
+            .motion_blur = motion_blur;
         Ok(())
     }
 

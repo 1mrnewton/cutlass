@@ -2122,6 +2122,49 @@ fn set_clip_blend_mode_undo_redo_roundtrip() {
 }
 
 #[test]
+fn set_clip_motion_blur_undo_redo_roundtrip() {
+    use cutlass_models::MotionBlur;
+
+    let Some(path) = small_video_asset() else {
+        return;
+    };
+    let (_dir, mut engine) = temp_engine();
+    let media_id = import_asset(&mut engine, &path);
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
+    let clip_id = created(
+        engine
+            .apply(Command::Edit(EditCommand::AddClip {
+                track,
+                media: media_id,
+                source: tr(0, 48),
+                start: rt(0),
+            }))
+            .expect("add"),
+    );
+    let before = engine.project().clip(clip_id).unwrap().clone();
+    assert!(before.motion_blur.is_default());
+
+    let blur = MotionBlur {
+        enabled: true,
+        shutter_deg: 270.0,
+        samples: 12,
+    };
+    engine
+        .apply(Command::Edit(EditCommand::SetClipMotionBlur {
+            clip: clip_id,
+            motion_blur: blur,
+        }))
+        .expect("motion blur");
+    assert_eq!(engine.project().clip(clip_id).unwrap().motion_blur, blur);
+
+    // Inverse (undo) restores the pre-edit clip snapshot.
+    assert!(engine.undo());
+    assert_eq!(engine.project().clip(clip_id).unwrap(), &before);
+    assert!(engine.redo());
+    assert_eq!(engine.project().clip(clip_id).unwrap().motion_blur, blur);
+}
+
+#[test]
 fn set_clip_layer_styles_undo_redo_roundtrip() {
     use cutlass_models::{LayerShadow, LayerStyles, Param};
 

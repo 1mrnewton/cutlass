@@ -52,6 +52,86 @@ fn blend_mode_id_label_roundtrip() {
 }
 
 #[test]
+fn motion_blur_defaults_and_validation() {
+    let defaults = MotionBlur::default();
+    assert!(defaults.is_default());
+    assert!(defaults.validate().is_ok());
+
+    assert!(
+        MotionBlur {
+            enabled: true,
+            ..MotionBlur::default()
+        }
+        .validate()
+        .is_ok()
+    );
+    assert!(
+        MotionBlur {
+            enabled: false,
+            shutter_deg: 0.0,
+            samples: 2,
+        }
+        .validate()
+        .is_ok()
+    );
+    assert!(
+        MotionBlur {
+            enabled: true,
+            shutter_deg: 720.0,
+            samples: 32,
+        }
+        .validate()
+        .is_ok()
+    );
+
+    assert!(
+        MotionBlur {
+            enabled: true,
+            shutter_deg: -1.0,
+            samples: 8,
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        MotionBlur {
+            enabled: true,
+            shutter_deg: 721.0,
+            samples: 8,
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        MotionBlur {
+            enabled: true,
+            shutter_deg: f32::NAN,
+            samples: 8,
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        MotionBlur {
+            enabled: true,
+            shutter_deg: 180.0,
+            samples: 1,
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        MotionBlur {
+            enabled: true,
+            shutter_deg: 180.0,
+            samples: 33,
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+#[test]
 fn defaults_are_elided_from_the_wire() {
     let mask = Mask::new(MaskKind::Circle);
     assert_eq!(

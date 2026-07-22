@@ -17,8 +17,9 @@ use std::path::PathBuf;
 use cutlass_models::{
     AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
     ClipTransform, ColorAdjustments, CropRect, Easing, Filter, Generator, LayerStyles, Lut,
-    MarkerColor, MarkerId, Mask, MediaId, Param, ParamValue, PiecewiseEasingPreset, Rational,
-    RationalTime, Replaceable, StabilizeLevel, TemplateMeta, TimeRange, TrackId, TrackKind,
+    MarkerColor, MarkerId, Mask, MediaId, MotionBlur, Param, ParamValue, PiecewiseEasingPreset,
+    Rational, RationalTime, Replaceable, StabilizeLevel, TemplateMeta, TimeRange, TrackId,
+    TrackKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -289,6 +290,13 @@ pub enum EditCommand {
     SetClipMask { clip: ClipId, mask: Option<Mask> },
     /// Set how a clip composites over the stack below (visual clips only).
     SetClipBlendMode { clip: ClipId, mode: BlendMode },
+    /// Set per-clip motion blur (temporal supersampling of the animated
+    /// transform). Visual clips only. Params are plain values — not
+    /// animatable. The inverse restores the previous clip state.
+    SetClipMotionBlur {
+        clip: ClipId,
+        motion_blur: MotionBlur,
+    },
     /// Set layer-quad styles (shadow/glow/outline/background) on a visual
     /// clip. Empty styles clear every block. The inverse restores the
     /// previous clip state.

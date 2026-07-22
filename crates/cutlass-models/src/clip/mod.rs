@@ -71,6 +71,11 @@ pub struct Clip {
     /// so old projects load unchanged.
     #[serde(default, skip_serializing_if = "is_normal_blend")]
     pub blend_mode: crate::look::BlendMode,
+    /// Per-clip motion blur (temporal supersampling of the animated
+    /// transform). Off (and absent from saves) by default. Visual clips
+    /// only; params are plain values — not animatable.
+    #[serde(default, skip_serializing_if = "crate::look::MotionBlur::is_default")]
+    pub motion_blur: crate::look::MotionBlur,
     /// Layer-quad styles (shadow/glow/outline/background) rendered from this
     /// clip's alpha by the compositor. Empty (and absent from saves) when
     /// never styled, so old projects load unchanged. Visual clips only.
@@ -417,6 +422,7 @@ impl Clip {
             link: None,
             transform: AnimatedTransform::identity(),
             blend_mode: crate::look::BlendMode::default(),
+            motion_blur: crate::look::MotionBlur::default(),
             styles: crate::look::LayerStyles::default(),
             speed: unit_speed(),
             reversed: false,
@@ -573,6 +579,7 @@ impl Clip {
             link: None,
             transform: AnimatedTransform::identity(),
             blend_mode: crate::look::BlendMode::default(),
+            motion_blur: crate::look::MotionBlur::default(),
             styles: crate::look::LayerStyles::default(),
             speed: unit_speed(),
             reversed: false,

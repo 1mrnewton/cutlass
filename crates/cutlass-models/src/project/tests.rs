@@ -2468,7 +2468,7 @@ fn project_clone_is_independent_snapshot() {
 
 use crate::look::{
     AnimationRef, AnimationSlot, AudioRole, BlendMode, ChromaKey, ColorAdjustments, Filter,
-    LayerShadow, LayerStyles, Mask, MaskKind, StabilizeLevel,
+    LayerShadow, LayerStyles, Mask, MaskKind, MotionBlur, StabilizeLevel,
 };
 
 #[test]
@@ -2506,6 +2506,16 @@ fn look_setters_persist_on_a_media_clip() {
         .unwrap();
     project.set_blend_mode(clip, BlendMode::Multiply).unwrap();
     project
+        .set_motion_blur(
+            clip,
+            MotionBlur {
+                enabled: true,
+                shutter_deg: 180.0,
+                samples: 8,
+            },
+        )
+        .unwrap();
+    project
         .set_layer_styles(
             clip,
             LayerStyles {
@@ -2522,6 +2532,7 @@ fn look_setters_persist_on_a_media_clip() {
     assert_eq!(c.filter.as_ref().unwrap().id, "vivid");
     assert_eq!(c.adjust.brightness, 0.25.into());
     assert_eq!(c.blend_mode, BlendMode::Multiply);
+    assert!(c.motion_blur.enabled);
     assert!(c.styles.shadow.is_some());
 
     // Clearing works and the fields vanish from saves again.
@@ -2531,6 +2542,10 @@ fn look_setters_persist_on_a_media_clip() {
         .set_layer_styles(clip, LayerStyles::default())
         .unwrap();
     assert!(project.clip(clip).unwrap().styles.is_empty());
+    project
+        .set_motion_blur(clip, MotionBlur::default())
+        .unwrap();
+    assert!(project.clip(clip).unwrap().motion_blur.is_default());
 }
 
 #[test]
@@ -2762,6 +2777,19 @@ fn look_setters_reject_wrong_content() {
             Err(ModelError::IncompatibleTrackKind { .. })
         ),
         "blend modes need pixels"
+    );
+    assert!(
+        matches!(
+            project.set_motion_blur(
+                aclip,
+                MotionBlur {
+                    enabled: true,
+                    ..MotionBlur::default()
+                }
+            ),
+            Err(ModelError::IncompatibleTrackKind { .. })
+        ),
+        "motion blur needs pixels"
     );
     assert!(
         matches!(

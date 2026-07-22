@@ -7,6 +7,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Debuginfo is the biggest memory/disk consumer when linking the desktop app,
+  # CLI, and Criterion benches (--all-targets). The hosted runner has been
+  # OOM-killed ("runner received a shutdown signal", exit 143) with full debug;
+  # CI never inspects binaries in a debugger, so drop it. Release jobs are
+  # unaffected (release profile).
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   check:

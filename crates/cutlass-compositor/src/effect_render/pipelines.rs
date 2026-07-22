@@ -37,6 +37,9 @@ pub(crate) struct PassRegistry {
     pub offset_blit_layout: wgpu::BindGroupLayout,
     /// Additive premultiplied blit (glow).
     pub additive_blit_pipeline: wgpu::RenderPipeline,
+    /// Harden blurred silhouette into an outside stroke (outline).
+    pub harden_pipeline: wgpu::RenderPipeline,
+    pub harden_layout: wgpu::BindGroupLayout,
 }
 
 impl PassRegistry {
@@ -96,6 +99,16 @@ impl PassRegistry {
                 label: Some("cutlass.offset_blit.bgl"),
                 entries: &[tex_entry(0), sampler_entry(1), uniform_entry(2)],
             });
+
+        let harden_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cutlass.harden.bgl"),
+            entries: &[
+                tex_entry(0),
+                tex_entry(1),
+                sampler_entry(2),
+                uniform_entry(3),
+            ],
+        });
 
         let passthrough = build_effect_pipeline(
             device,
@@ -162,6 +175,12 @@ impl PassRegistry {
         );
         let offset_blit_pipeline = build_offset_blit_pipeline(device, &offset_blit_layout);
         let additive_blit_pipeline = build_additive_blit_pipeline(device, &blit_layout);
+        let harden_pipeline = build_effect_pipeline(
+            device,
+            "cutlass.style_harden",
+            &harden_layout,
+            include_str!("../../shaders/style_harden.wgsl"),
+        );
 
         Self {
             passthrough,
@@ -186,6 +205,8 @@ impl PassRegistry {
             offset_blit_pipeline,
             offset_blit_layout,
             additive_blit_pipeline,
+            harden_pipeline,
+            harden_layout,
         }
     }
 

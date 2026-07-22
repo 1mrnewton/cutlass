@@ -108,15 +108,21 @@ pub struct LayerGlow {
 }
 
 /// Hard outline / stroke around the layer's alpha silhouette, in canvas pixels.
-/// Composited in a follow-up.
+///
+/// Drawn as silhouette → box blur (`width`) → harden threshold, composited
+/// after the layer content (outside stroke). Width or alpha 0 skips the pass.
+/// Blur+threshold approximates morphological dilation; the effective width is
+/// capped by the style blur iteration limit (see `run_style_blur`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct LayerOutline {
     pub rgba: [u8; 4],
     pub width: f32,
 }
 
-/// Solid plate behind the layer (padded AABB), in canvas pixels.
-/// Composited in a follow-up.
+/// Solid rounded-rect plate behind the layer, in canvas pixels.
+///
+/// Sized as the content placement plus `2 * padding` per axis (same center and
+/// rotation), with SDF AA pad on the quad. Alpha 0 skips the pass.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct LayerBackground {
     pub rgba: [u8; 4],
@@ -312,8 +318,8 @@ pub struct CompositeLayer<'a> {
     /// How this layer composites over the accumulated canvas. `Normal` keeps
     /// the direct src-over fast path; other modes force the offscreen blend pass.
     pub blend_mode: BlendMode,
-    /// Shadow/glow/outline/background drawn from the layer alpha before content
-    /// composites. Non-empty styles force the offscreen path.
+    /// Shadow/glow/outline/background styles. Order on canvas: background →
+    /// shadow → glow → content → outline. Non-empty styles force the offscreen path.
     pub styles: LayerStyles,
 }
 

@@ -1,7 +1,8 @@
 use crate::effect_render::{
-    OffscreenPool, blit_premultiplied_to_canvas, blit_replace, composite_layer_styles,
-    draw_layer_to_offscreen, effects_need_offscreen, run_blend_composite, run_effect_chain,
-    run_grade_pass, run_lut_pass, run_transition_pass,
+    OffscreenPool, background_plate_layer, blit_premultiplied_to_canvas, blit_replace,
+    composite_layer_outline, composite_layer_styles, draw_layer_to_offscreen,
+    effects_need_offscreen, run_blend_composite, run_effect_chain, run_grade_pass, run_lut_pass,
+    run_transition_pass,
 };
 use crate::error::CompositorError;
 use crate::gpu::GpuContext;
@@ -321,16 +322,38 @@ impl Compositor {
                             lut.intensity,
                         );
                     }
-                    // Style slot lifetimes: content stays on S. Shadow/glow
-                    // silhouette+blur use A=(S+1)%3 and B=(S+2)%3, then blit
-                    // onto the canvas. A and B are free again before the
-                    // content composite, so non-Normal blend may still
-                    // snapshot into (S+1)%3. outline/background: composited
-                    // in a follow-up.
+                    // Style order: background → shadow → glow → content →
+                    // outline. Content stays on S. Shadow/glow/outline
+                    // silhouette+blur use A=(S+1)%3 and B=(S+2)%3. A/B are
+                    // free again before content (and after blend's snapshot).
                     let src_slot = offscreen
                         .index_of(result)
                         .expect("effect/lut output is an offscreen pool view");
-                    if !layer.styles.is_empty() {
+                    if let Some(bg) = layer.styles.background.filter(|b| b.rgba[3] > 0) {
+                        let plate = background_plate_layer(&layer.placement, bg);
+                        let built = self.build_layer(gpu, config, &plate)?;
+                        let pipeline = pipeline_for(&built.pipeline, self);
+                        {
+                            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("cutlass.style.background"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &target.view,
+                                    depth_slice: None,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                                multiview_mask: None,
+                            });
+                            draw_built_layer(&mut pass, pipeline, &built);
+                        }
+                    }
+                    if layer.styles.shadow.is_some() || layer.styles.glow.is_some() {
                         composite_layer_styles(
                             device,
                             &mut encoder,
@@ -384,6 +407,20 @@ impl Compositor {
                             result,
                             &target.view,
                             layer.blend_mode,
+                        );
+                    }
+                    if let Some(outline) = layer.styles.outline {
+                        composite_layer_outline(
+                            device,
+                            &mut encoder,
+                            &self.pass_registry,
+                            offscreen,
+                            result,
+                            src_slot,
+                            &target.view,
+                            outline,
+                            config.width,
+                            config.height,
                         );
                     }
                 }

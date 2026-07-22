@@ -1,8 +1,8 @@
-//! GPU readback checks for per-layer shadow and glow style passes.
+//! GPU readback checks for per-layer shadow, glow, outline, and background styles.
 
 use cutlass_compositor::{
-    CompositeLayer, Compositor, CompositorConfig, GpuContext, LayerGlow, LayerPlacement,
-    LayerShadow, LayerStyles, RgbaImage,
+    CompositeLayer, Compositor, CompositorConfig, GpuContext, LayerBackground, LayerGlow,
+    LayerOutline, LayerPlacement, LayerShadow, LayerStyles, RgbaImage,
 };
 
 /// Try to bring up a headless GPU; `None` (skip) if the host has no adapter.
@@ -157,4 +157,106 @@ fn empty_styles_matches_styles_free_render() {
     assert_px(&with_empty, 200, 200, control.pixel(200, 200), 3);
     assert_px(&with_empty, 10, 10, control.pixel(10, 10), 3);
     assert_px(&with_empty, 250, 200, control.pixel(250, 200), 3);
+}
+
+#[test]
+fn outline_white_ring_outside_red_on_black() {
+    let gpu = gpu_or_skip!();
+    let mut comp = Compositor::new(&gpu);
+    let config = CompositorConfig::new(400, 400).with_background([0, 0, 0, 255]);
+    let layer = centered_red_layer(&config).with_styles(LayerStyles {
+        outline: Some(LayerOutline {
+            rgba: [255, 255, 255, 255],
+            width: 6.0,
+        }),
+        ..Default::default()
+    });
+    let img = comp.render(&gpu, &config, &[layer]).expect("render");
+
+    let cx = 200u32;
+    let cy = 200u32;
+    // Content center stays red.
+    assert_px(&img, cx, cy, [255, 0, 0, 255], 3);
+    // ~2–3px outside the right content edge (edge near x=250). With
+    // smoothstep(0.02, 0.35) harden, full white covers the inner ring.
+    let ring = img.pixel(252, cy);
+    assert!(
+        ring[0] > 200 && ring[1] > 200 && ring[2] > 200,
+        "expected white-ish outline ring, got {ring:?}"
+    );
+    // Well outside the dilation.
+    assert_px(&img, cx + 80, cy, [0, 0, 0, 255], 3);
+}
+
+#[test]
+fn background_plate_padded_white_behind_red() {
+    let gpu = gpu_or_skip!();
+    let mut comp = Compositor::new(&gpu);
+    let config = CompositorConfig::new(400, 400).with_background([0, 0, 0, 255]);
+    let layer = centered_red_layer(&config).with_styles(LayerStyles {
+        background: Some(LayerBackground {
+            rgba: [255, 255, 255, 255],
+            padding: 20.0,
+            radius: 0.0,
+        }),
+        ..Default::default()
+    });
+    let img = comp.render(&gpu, &config, &[layer]).expect("render");
+
+    let cx = 200u32;
+    let cy = 200u32;
+    assert_px(&img, cx, cy, [255, 0, 0, 255], 3);
+    // Content right edge at 250; +10px is inside the padding plate.
+    assert_px(&img, 260, cy, [255, 255, 255, 255], 3);
+    // Far corner stays black.
+    assert_px(&img, 10, 10, [0, 0, 0, 255], 3);
+}
+
+#[test]
+fn background_plate_rotates_with_layer() {
+    let gpu = gpu_or_skip!();
+    let mut comp = Compositor::new(&gpu);
+    let config = CompositorConfig::new(400, 400).with_background([0, 0, 0, 255]);
+    let mut layer = centered_red_layer(&config);
+    layer.placement.rotation = std::f32::consts::FRAC_PI_4;
+    let layer = layer.with_styles(LayerStyles {
+        background: Some(LayerBackground {
+            rgba: [255, 255, 255, 255],
+            padding: 20.0,
+            radius: 0.0,
+        }),
+        ..Default::default()
+    });
+    let img = comp.render(&gpu, &config, &[layer]).expect("render");
+
+    // Unrotated plate corner (130,130) lies outside the 45°-rotated plate.
+    assert_px(&img, 130, 130, [0, 0, 0, 255], 3);
+    // Content center still red.
+    assert_px(&img, 200, 200, [255, 0, 0, 255], 3);
+}
+
+#[test]
+fn shadow_outline_background_combined() {
+    let gpu = gpu_or_skip!();
+    let mut comp = Compositor::new(&gpu);
+    let config = CompositorConfig::new(400, 400).with_background([0, 0, 0, 255]);
+    let layer = centered_red_layer(&config).with_styles(LayerStyles {
+        shadow: Some(LayerShadow {
+            rgba: [0, 0, 0, 180],
+            offset: [8.0, 8.0],
+            blur: 4.0,
+        }),
+        outline: Some(LayerOutline {
+            rgba: [255, 255, 255, 255],
+            width: 4.0,
+        }),
+        background: Some(LayerBackground {
+            rgba: [40, 40, 40, 255],
+            padding: 12.0,
+            radius: 4.0,
+        }),
+        ..Default::default()
+    });
+    let img = comp.render(&gpu, &config, &[layer]).expect("render");
+    assert_px(&img, 200, 200, [255, 0, 0, 255], 3);
 }

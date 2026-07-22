@@ -19,7 +19,7 @@ pub(crate) use blit::{blit_premultiplied_to_canvas, blit_replace};
 pub(crate) use lut::run_lut_pass;
 pub(crate) use pipelines::PassRegistry;
 pub(crate) use pool::OffscreenPool;
-pub(crate) use styles::composite_layer_styles;
+pub(crate) use styles::{background_plate_layer, composite_layer_outline, composite_layer_styles};
 
 const RT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 

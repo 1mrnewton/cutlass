@@ -16,7 +16,7 @@ use cutlass_shapes::ShapeStyle;
 use crate::error::RenderError;
 use crate::scene::{LayerSource, Scene, SceneLut, SizeSpec};
 
-use super::effects::{EffectChain, blend_mode, layer_effects, pack_effects};
+use super::effects::{EffectChain, blend_mode, layer_effects, layer_styles, pack_effects};
 use super::media_cache::layer_lut;
 use super::{FrameStats, Renderer, SLOW_FRAME_LOG_MS, SeekPolicy};
 
@@ -45,6 +45,7 @@ impl Renderer {
             let fx = layer_effects(layer);
             let color_grade = layer.color_grade;
             let mode = blend_mode(layer.blend_mode);
+            let styles = layer_styles(layer.styles.as_ref());
             // Load (or recall) the layer's .cube table; unreadable files
             // resolve to None and grade nothing.
             let scene_lut = self.resolve_scene_lut(&layer.lut);
@@ -89,6 +90,7 @@ impl Renderer {
                         color_grade,
                         lut: scene_lut,
                         blend_mode: mode,
+                        styles,
                     });
                 }
                 LayerSource::Text {
@@ -108,6 +110,7 @@ impl Renderer {
                         color_grade,
                         scene_lut,
                         mode,
+                        styles,
                     ) else {
                         continue;
                     };
@@ -129,6 +132,7 @@ impl Renderer {
                         color_grade,
                         lut: scene_lut,
                         blend_mode: mode,
+                        styles,
                     });
                 }
                 LayerSource::Still { media } => {
@@ -143,6 +147,7 @@ impl Renderer {
                         color_grade,
                         lut: scene_lut,
                         blend_mode: mode,
+                        styles,
                     });
                 }
                 LayerSource::Lottie { path, local_time } => {
@@ -162,6 +167,7 @@ impl Renderer {
                         color_grade,
                         lut: scene_lut,
                         blend_mode: mode,
+                        styles,
                     });
                 }
                 LayerSource::Sticker { asset, local_time } => {
@@ -183,6 +189,7 @@ impl Renderer {
                         color_grade,
                         lut: scene_lut,
                         blend_mode: mode,
+                        styles,
                     });
                 }
                 LayerSource::Shape {
@@ -210,6 +217,7 @@ impl Renderer {
                         color_grade,
                         lut: scene_lut,
                         blend_mode: mode,
+                        styles,
                     });
                 }
                 LayerSource::PathShape {
@@ -240,6 +248,7 @@ impl Renderer {
                         color_grade,
                         lut: scene_lut,
                         blend_mode: mode,
+                        styles,
                     });
                 }
             }

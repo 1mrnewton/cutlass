@@ -1,6 +1,8 @@
 //! Text / glyph realize arms — bitmap (static) and per-character GPU glyphs.
 
-use cutlass_compositor::{BlendMode, ColorGrade, LayerEffects, LayerPlacement, RgbaImage};
+use cutlass_compositor::{
+    BlendMode, ColorGrade, LayerEffects, LayerPlacement, LayerStyles, RgbaImage,
+};
 use cutlass_text::{TextRenderer, TextStyle};
 
 use crate::error::RenderError;
@@ -26,6 +28,7 @@ pub(super) fn realize_text_layer(
     color_grade: Option<ColorGrade>,
     lut: Option<crate::scene::SceneLut>,
     blend_mode: BlendMode,
+    styles: LayerStyles,
 ) -> Option<Realized> {
     let scale = match layer.size {
         SizeSpec::BitmapScaled(s) => s,
@@ -96,6 +99,7 @@ pub(super) fn realize_text_layer(
             color_grade,
             lut,
             blend_mode,
+            styles,
         })
     } else {
         let image = text.rasterize(content, style);
@@ -118,6 +122,7 @@ pub(super) fn realize_text_layer(
             color_grade,
             lut,
             blend_mode,
+            styles,
         })
     }
 }
@@ -136,6 +141,7 @@ pub(super) fn realize_text_bitmap(
     fx: LayerEffects,
     color_grade: Option<ColorGrade>,
     blend_mode: BlendMode,
+    styles: LayerStyles,
 ) -> Result<Realized, RenderError> {
     let image = text.rasterize(content, style);
     if image.width == 0 || image.height == 0 {
@@ -161,5 +167,6 @@ pub(super) fn realize_text_bitmap(
         color_grade,
         lut: None,
         blend_mode,
+        styles,
     })
 }

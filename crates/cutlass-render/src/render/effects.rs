@@ -1,9 +1,10 @@
 use cutlass_compositor::{
-    BlendMode, LayerChromaKey, LayerEffects, LayerMask, PassInstance, mask_kind,
+    BlendMode, LayerBackground, LayerChromaKey, LayerEffects, LayerGlow, LayerMask, LayerOutline,
+    LayerShadow, LayerStyles, PassInstance, mask_kind,
 };
 use cutlass_models::MaskKind;
 
-use crate::scene::ResolvedPass;
+use crate::scene::{ResolvedPass, SceneStyles};
 
 /// Packed effect chain: catalog-static ids plus owned parameter values.
 ///
@@ -84,5 +85,35 @@ pub(super) fn blend_mode(mode: cutlass_models::BlendMode) -> BlendMode {
         cutlass_models::BlendMode::HardLight => BlendMode::HardLight,
         cutlass_models::BlendMode::Difference => BlendMode::Difference,
         cutlass_models::BlendMode::Exclusion => BlendMode::Exclusion,
+    }
+}
+
+/// Map resolved scene styles onto the compositor's layer-style uniforms.
+///
+/// `None` (or an empty styles block) keeps the compositor fast path.
+pub(super) fn layer_styles(styles: Option<&SceneStyles>) -> LayerStyles {
+    let Some(styles) = styles else {
+        return LayerStyles::default();
+    };
+    LayerStyles {
+        shadow: styles.shadow.map(|shadow| LayerShadow {
+            rgba: shadow.rgba,
+            offset: shadow.offset,
+            blur: shadow.blur,
+        }),
+        glow: styles.glow.map(|glow| LayerGlow {
+            rgba: glow.rgba,
+            radius: glow.radius,
+            intensity: glow.intensity,
+        }),
+        outline: styles.outline.map(|outline| LayerOutline {
+            rgba: outline.rgba,
+            width: outline.width,
+        }),
+        background: styles.background.map(|background| LayerBackground {
+            rgba: background.rgba,
+            padding: background.padding,
+            radius: background.radius,
+        }),
     }
 }

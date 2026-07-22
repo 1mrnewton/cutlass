@@ -29,6 +29,16 @@ impl ClusterDelta {
         rotation: 0.0,
         opacity: 1.0,
     };
+
+    fn with_intensity(self, intensity: f32) -> Self {
+        let i = intensity.clamp(0.0, 2.0);
+        Self {
+            position: [self.position[0] * i, self.position[1] * i],
+            scale: 1.0 + (self.scale - 1.0) * i,
+            rotation: self.rotation * i,
+            opacity: 1.0 + (self.opacity - 1.0) * i,
+        }
+    }
 }
 
 /// Compute per-cluster deltas for `anim` over `shaped`.
@@ -47,11 +57,14 @@ pub(super) fn cluster_deltas(shaped: &ShapedText, anim: &TextAnimation) -> Vec<C
 
 fn sample_cluster(anim: &TextAnimation, stagger: f32, _line: usize, index: usize) -> ClusterDelta {
     let t = anim.t.clamp(0.0, 1.0);
-    match anim.slot {
-        AnimationSlot::In => sample_entrance(&anim.id, t, stagger),
-        AnimationSlot::Out => sample_exit(&anim.id, t, stagger),
-        AnimationSlot::Combo => sample_combo(&anim.id, t, stagger, index),
-    }
+    // Catalog stagger window 0.55, stretched by the clip's stagger knob.
+    let window = (0.55 * anim.stagger.clamp(0.05, 2.0)).clamp(0.05, 0.95);
+    let delta = match anim.slot {
+        AnimationSlot::In => sample_entrance(&anim.id, t, stagger, window),
+        AnimationSlot::Out => sample_exit(&anim.id, t, stagger, window),
+        AnimationSlot::Combo => sample_combo(&anim.id, t, stagger, index, window),
+    };
+    delta.with_intensity(anim.intensity)
 }
 
 /// Map global progress `t` and per-cluster `stagger` ∈ [0,1) into a local
@@ -62,8 +75,8 @@ fn stagger_progress(t: f32, stagger: f32, window: f32) -> f32 {
     ((t - start) / window).clamp(0.0, 1.0)
 }
 
-fn sample_entrance(id: &str, t: f32, stagger: f32) -> ClusterDelta {
-    let local = stagger_progress(t, stagger, 0.55);
+fn sample_entrance(id: &str, t: f32, stagger: f32, window: f32) -> ClusterDelta {
+    let local = stagger_progress(t, stagger, window);
     let inv = 1.0 - local;
     match id {
         "typewriter" | "char_typewriter" => ClusterDelta {
@@ -94,9 +107,9 @@ fn sample_entrance(id: &str, t: f32, stagger: f32) -> ClusterDelta {
     }
 }
 
-fn sample_exit(id: &str, t: f32, stagger: f32) -> ClusterDelta {
+fn sample_exit(id: &str, t: f32, stagger: f32, window: f32) -> ClusterDelta {
     // Exit staggers in reverse so the last character leaves first.
-    let local = stagger_progress(t, 1.0 - stagger, 0.55);
+    let local = stagger_progress(t, 1.0 - stagger, window);
     let inv = 1.0 - local;
     match id {
         "char_fade_out" => ClusterDelta {
@@ -117,14 +130,14 @@ fn sample_exit(id: &str, t: f32, stagger: f32) -> ClusterDelta {
     }
 }
 
-fn sample_combo(id: &str, phase: f32, stagger: f32, index: usize) -> ClusterDelta {
+fn sample_combo(id: &str, phase: f32, stagger: f32, index: usize, window: f32) -> ClusterDelta {
     let phase = phase.fract();
     let wave = ((phase + stagger) * std::f32::consts::TAU).sin();
     match id {
         "typewriter" => {
             // Looping reveal: phase 0..0.85 types in, then holds / resets.
             let reveal = (phase / 0.85).clamp(0.0, 1.0);
-            let local = stagger_progress(reveal, stagger, 0.4);
+            let local = stagger_progress(reveal, stagger, (window * 0.4 / 0.55).clamp(0.05, 0.95));
             ClusterDelta {
                 opacity: if local > 0.0 { 1.0 } else { 0.0 },
                 ..ClusterDelta::IDENTITY
@@ -312,6 +325,8 @@ mod tests {
             id: id.into(),
             slot,
             t,
+            intensity: 1.0,
+            stagger: 1.0,
         }
     }
 

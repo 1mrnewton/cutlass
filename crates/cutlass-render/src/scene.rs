@@ -15,15 +15,20 @@ use cutlass_text::{TextAlign, TextStyle, TextVerticalAlign};
 
 /// Sampled per-character text animation attached to a [`LayerSource::Text`].
 ///
-/// Pure resolve-time data: the preset id, which slot it came from, and a
-/// normalized progress / phase in `0…1`. Realize expands this into per-cluster
-/// placement deltas — the Scene stays GPU-free and unit-testable.
+/// Pure resolve-time data: the preset id, which slot it came from, a
+/// normalized progress / phase in `0…1`, and the clip's tunable knobs.
+/// Realize expands this into per-cluster placement deltas — the Scene stays
+/// GPU-free and unit-testable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextAnimation {
     pub id: String,
     pub slot: AnimationSlot,
     /// Eased entrance/exit progress, or combo phase (both in `0…1`).
     pub t: f32,
+    /// Magnitude multiplier (`1` = catalog feel).
+    pub intensity: f32,
+    /// Per-character stagger stretch (`1` = catalog feel).
+    pub stagger: f32,
 }
 
 pub use cutlass_core::RationalTime;

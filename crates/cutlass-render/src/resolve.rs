@@ -33,7 +33,7 @@ use cutlass_text::{
     FontFamily, TextAlign, TextBackground, TextShadow, TextStroke, TextStyle, TextVerticalAlign,
 };
 
-use crate::animation::{apply_look_animations, is_per_character};
+use crate::animation::{apply_look_animations, is_per_character, scaled_ticks, text_knobs};
 use crate::grade::resolve_color_grade;
 use crate::scene::{
     LayerSource, ResolvedPass, Scene, SceneLayer, SceneLut, SizeSpec, TextAnimation,
@@ -447,16 +447,19 @@ fn sample_text_animation(
     rate: cutlass_core::Rational,
 ) -> Option<TextAnimation> {
     let duration = clip.timeline.duration.value.max(1);
-    let window = look_animation_window_ticks(duration, rate);
+    let base_window = look_animation_window_ticks(duration, rate);
 
     if let Some(combo) = &clip.animation_combo {
         if is_per_character(&combo.id) {
-            let period = look_animation_combo_period_ticks(rate);
+            let period = scaled_ticks(look_animation_combo_period_ticks(rate), combo.speed);
             let phase = ((local_tick_f % period as f64) / period as f64).clamp(0.0, 1.0) as f32;
+            let (intensity, stagger) = text_knobs(combo);
             return Some(TextAnimation {
                 id: combo.id.clone(),
                 slot: AnimationSlot::Combo,
                 t: phase,
+                intensity,
+                stagger,
             });
         }
         return None;
@@ -464,29 +467,38 @@ fn sample_text_animation(
 
     if let Some(anim) = &clip.animation_in
         && is_per_character(&anim.id)
-        && local_tick < window
     {
-        let raw = (local_tick_f / window as f64).clamp(0.0, 1.0) as f32;
-        let eased = Easing::EaseOut.apply(raw);
-        return Some(TextAnimation {
-            id: anim.id.clone(),
-            slot: AnimationSlot::In,
-            t: eased,
-        });
+        let window = scaled_ticks(base_window, anim.speed).min(duration);
+        if local_tick < window {
+            let raw = (local_tick_f / window as f64).clamp(0.0, 1.0) as f32;
+            let eased = Easing::EaseOut.apply(raw);
+            let (intensity, stagger) = text_knobs(anim);
+            return Some(TextAnimation {
+                id: anim.id.clone(),
+                slot: AnimationSlot::In,
+                t: eased,
+                intensity,
+                stagger,
+            });
+        }
     }
 
     if let Some(anim) = &clip.animation_out
         && is_per_character(&anim.id)
     {
+        let window = scaled_ticks(base_window, anim.speed).min(duration);
         let out_start = duration - window;
         if local_tick >= out_start {
             let raw = ((local_tick_f - out_start as f64) / (window - 1).max(1) as f64)
                 .clamp(0.0, 1.0) as f32;
             let eased = Easing::EaseIn.apply(raw);
+            let (intensity, stagger) = text_knobs(anim);
             return Some(TextAnimation {
                 id: anim.id.clone(),
                 slot: AnimationSlot::Out,
                 t: eased,
+                intensity,
+                stagger,
             });
         }
     }

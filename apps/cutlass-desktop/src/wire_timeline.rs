@@ -370,6 +370,7 @@ fn apply_graph_geometry(g: &GraphBackend, geo: crate::graph_editor::GraphGeometr
         g.set_handle_stem_a(SharedString::default());
         g.set_handle_stem_b(SharedString::default());
     }
+    g.set_preset_available(geo.preset_available);
 }
 
 fn commit_graph_edit(
@@ -785,6 +786,30 @@ fn wire_graph_editor(app: &AppWindow, preview_worker: &crate::preview_worker::Pr
             session.from_tick,
         );
         apply_graph_geometry(&app.global::<GraphBackend>(), geo);
+    });
+
+    let preset_handle = preview_worker.handle();
+    let preset_app = app.as_weak();
+    graph.on_apply_preset(move |preset| {
+        let Some(app) = preset_app.upgrade() else {
+            return;
+        };
+        let g = app.global::<GraphBackend>();
+        let selected = g.get_selected_tick();
+        if selected < 0 {
+            return;
+        }
+        let clip_id = app.global::<TimelineStore>().get_selected_clip_id();
+        let key = g.get_selected_key();
+        let Some((param, _)) = clip_param_value(key.as_str(), 0.0, 0.0) else {
+            return;
+        };
+        let preset = match preset {
+            0 => cutlass_models::PiecewiseEasingPreset::BounceOut,
+            1 => cutlass_models::PiecewiseEasingPreset::ElasticOut,
+            _ => cutlass_models::PiecewiseEasingPreset::BackOut,
+        };
+        preset_handle.apply_easing_preset(clip_id.to_string(), param, i64::from(selected), preset);
     });
 
     let h_end_handle = preview_worker.handle();

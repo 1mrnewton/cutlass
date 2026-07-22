@@ -11,8 +11,9 @@ pub use command::{Command, EditCommand, EditOutcome, ProjectCommand, TemplatePic
 pub use cutlass_models::{
     AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
     ClipTransform, ColorAdjustments, CropRect, Easing, Filter, Generator, LayerShadow, LayerStyles,
-    Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId, Param, ParamValue, Rational, RationalTime,
-    Replaceable, SpatialTangents, StabilizeLevel, TemplateMeta, TimeRange, TrackId, TrackKind,
+    Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId, Param, ParamValue, PiecewiseEasingPreset,
+    Rational, RationalTime, Replaceable, SpatialTangents, StabilizeLevel, TemplateMeta, TimeRange,
+    TrackId, TrackKind,
 };
 
 use tracing::info;

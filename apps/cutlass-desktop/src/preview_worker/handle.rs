@@ -467,6 +467,22 @@ impl WorkerHandle {
         });
     }
 
+    /// Graph-editor piecewise easing preset (bounce / elastic / back).
+    pub fn apply_easing_preset(
+        &self,
+        clip: String,
+        param: ClipParam,
+        tick: i64,
+        preset: cutlass_models::PiecewiseEasingPreset,
+    ) {
+        let _ = self.tx.send(WorkerMsg::ApplyEasingPreset {
+            clip,
+            param,
+            tick,
+            preset,
+        });
+    }
+
     pub fn retime_keyframes(&self, clip: String, from_tick: i64, to_tick: i64) {
         let _ = self.tx.send(WorkerMsg::RetimeKeyframes {
             clip,

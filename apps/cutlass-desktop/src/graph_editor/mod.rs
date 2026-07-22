@@ -115,6 +115,8 @@ pub struct GraphGeometry {
     pub mapping: Option<edit::PlotMapping>,
     /// Outgoing-segment bezier handles for the selected keyframe (Hold → none).
     pub handles: Option<edit::SegmentHandles>,
+    /// Selected keyframe has a following segment (preset dropdown enabled).
+    pub preset_available: bool,
 }
 
 impl Default for GraphGeometry {
@@ -134,6 +136,7 @@ impl Default for GraphGeometry {
             plot_h: 0.0,
             mapping: None,
             handles: None,
+            preset_available: false,
         }
     }
 }
@@ -205,6 +208,8 @@ pub fn build_geometry(
     } else {
         None
     };
+    let preset_available =
+        selected_tick >= 0 && edit::can_apply_preset(param, i64::from(selected_tick));
     GraphGeometry {
         path_commands: svg_path_commands(&points),
         dots,
@@ -220,6 +225,7 @@ pub fn build_geometry(
         plot_h: height,
         mapping: Some(mapping),
         handles,
+        preset_available,
     }
 }
 

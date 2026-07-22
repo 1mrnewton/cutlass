@@ -2819,3 +2819,56 @@ fn typed_effect_params_accept_rgba_and_position_on_wire() {
     assert!(msg.contains("color"), "{msg}");
     assert!(msg.contains("rgba"), "{msg}");
 }
+
+#[test]
+fn apply_easing_preset_lowers_to_engine_command() {
+    let (project, _, _, _, clip, _) = fixture();
+    let edit = lower(
+        &project,
+        WireCommand::ApplyEasingPreset(wire::ApplyEasingPreset {
+            clip,
+            param: wire::WireClipParam::Opacity,
+            from_tick: 0.0,
+            preset: wire::WireEasingPreset::BounceOut,
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::ApplyEasingPreset {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Opacity,
+            at: RationalTime::new(0, R24),
+            preset: cutlass_models::PiecewiseEasingPreset::BounceOut,
+        }
+    );
+}
+
+#[test]
+fn apply_easing_preset_rejects_crop_and_colors() {
+    let (project, _, _, _, clip, _) = fixture();
+    let crop_msg = reject(
+        &project,
+        WireCommand::ApplyEasingPreset(wire::ApplyEasingPreset {
+            clip,
+            param: wire::WireClipParam::Crop,
+            from_tick: 0.0,
+            preset: wire::WireEasingPreset::BackOut,
+        }),
+    );
+    assert!(
+        crop_msg.contains("scalar/vec2") || crop_msg.contains("not support"),
+        "{crop_msg}"
+    );
+    let color_msg = reject(
+        &project,
+        WireCommand::ApplyEasingPreset(wire::ApplyEasingPreset {
+            clip,
+            param: wire::WireClipParam::Style {
+                param: wire::WireStyleParam::ShadowColor,
+            },
+            from_tick: 0.0,
+            preset: wire::WireEasingPreset::ElasticOut,
+        }),
+    );
+    assert!(color_msg.contains("color"), "{color_msg}");
+}

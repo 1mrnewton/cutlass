@@ -435,6 +435,7 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
         EditCommand::SetParamKeyframe { .. } => "SetParamKeyframe",
         EditCommand::RemoveParamKeyframe { .. } => "RemoveParamKeyframe",
         EditCommand::SetParamConstant { .. } => "SetParamConstant",
+        EditCommand::ApplyEasingPreset { .. } => "ApplyEasingPreset",
         EditCommand::SetClipSpeed { .. } => "SetClipSpeed",
         EditCommand::SetSpeedCurve { .. } => "SetSpeedCurve",
         EditCommand::SetClipPitch { .. } => "SetClipPitch",

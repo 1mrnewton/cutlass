@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use cutlass_models::{
     AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
     ClipTransform, ColorAdjustments, CropRect, Easing, Filter, Generator, LayerStyles, Lut,
-    MarkerColor, MarkerId, Mask, MediaId, Param, ParamValue, Rational, RationalTime, Replaceable,
-    StabilizeLevel, TemplateMeta, TimeRange, TrackId, TrackKind,
+    MarkerColor, MarkerId, Mask, MediaId, Param, ParamValue, PiecewiseEasingPreset, Rational,
+    RationalTime, Replaceable, StabilizeLevel, TemplateMeta, TimeRange, TrackId, TrackKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -208,6 +208,15 @@ pub enum EditCommand {
         clip: ClipId,
         param: ClipParam,
         value: ParamValue,
+    },
+    /// Expand the outgoing keyframe segment at `at` into a multi-keyframe
+    /// bounce / elastic / back approximation. Scalar and vec2 params only;
+    /// inverse is a full-clip restore.
+    ApplyEasingPreset {
+        clip: ClipId,
+        param: ClipParam,
+        at: RationalTime,
+        preset: PiecewiseEasingPreset,
     },
     /// Retime a media clip (CapCut speed, M1): `speed` is the positive
     /// playback-rate multiplier (2/1 = double speed), `reversed` plays the

@@ -74,8 +74,8 @@ pub use look::{
 pub use media::{MediaKind, MediaSource, STILL_DEFAULT_DURATION_TICKS, STILL_TICK_RATE};
 pub use metadata::ProjectMetadata;
 pub use param::{
-    EASING_PRESETS, Easing, EasingPreset, Keyframe, Lerp, Param, SegmentSample, SpatialTangents,
-    easing_preset,
+    EASING_PRESETS, Easing, EasingPreset, Extrapolate, Keyframe, Lerp, MIN_PRESET_SEGMENT_TICKS,
+    Param, PiecewiseEasingPreset, SegmentSample, SpatialTangents, easing_preset, expand_preset,
 };
 pub use persist::{PROJECT_FILE_EXTENSION, PROJECT_FILE_VERSION};
 pub use project::Project;

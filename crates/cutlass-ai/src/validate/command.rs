@@ -394,6 +394,46 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 value,
             }
         }
+        WireCommand::ApplyEasingPreset(args) => {
+            let clip = clip_ref(project, args.clip)?;
+            let at = keyframe_position(project, clip, args.from_tick)?;
+            let param = clip_param(&args.param, clip, args.clip)?;
+            // Fail closed early with a clear message for unsupported kinds.
+            if matches!(param, ClipParam::Crop | ClipParam::Speed)
+                || matches!(
+                    param,
+                    ClipParam::Effect { .. } | ClipParam::Shape { .. } | ClipParam::Text { .. }
+                )
+            {
+                return Err(Rejection::new(
+                    "apply_easing_preset supports scalar/vec2 transform, volume, pan, look, \
+                     and non-color style params only",
+                ));
+            }
+            if matches!(
+                param,
+                ClipParam::Style {
+                    param: StyleParam::ShadowColor
+                        | StyleParam::GlowColor
+                        | StyleParam::OutlineColor
+                        | StyleParam::BackgroundColor,
+                }
+            ) {
+                return Err(Rejection::new(
+                    "apply_easing_preset does not support color parameters",
+                ));
+            }
+            EditCommand::ApplyEasingPreset {
+                clip: clip.id,
+                param,
+                at,
+                preset: match args.preset {
+                    WireEasingPreset::BounceOut => PiecewiseEasingPreset::BounceOut,
+                    WireEasingPreset::ElasticOut => PiecewiseEasingPreset::ElasticOut,
+                    WireEasingPreset::BackOut => PiecewiseEasingPreset::BackOut,
+                },
+            }
+        }
         WireCommand::SplitClip(args) => {
             let clip = clip_ref(project, args.clip)?;
             let at = timeline_time(project, args.at, "at")?;

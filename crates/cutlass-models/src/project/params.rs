@@ -4,17 +4,19 @@ use std::path::Path;
 
 use crate::clip::{
     Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator, LookParam, ParamValue,
-    Replaceable, SlotMedia, look_animation_combo_period_ticks, look_animation_window_ticks,
-    split_speed_curve,
+    Replaceable, SlotMedia, StyleParam, look_animation_combo_period_ticks,
+    look_animation_window_ticks, split_speed_curve,
 };
 use crate::effects::EffectInstance;
 use crate::error::ModelError;
 use crate::ids::{ClipId, MediaId, ProjectId, TrackId};
 use crate::look::mask::{
-    is_mask_param, remove_mask_param_keyframe, set_mask_param_constant, set_mask_param_keyframe,
+    is_mask_param, mask_scalar_mut, mask_vec2_mut, remove_mask_param_keyframe,
+    set_mask_param_constant, set_mask_param_keyframe,
 };
 use crate::look::styles::{
     remove_style_param_keyframe, set_style_param_constant, set_style_param_keyframe,
+    style_scalar_mut, style_vec2_mut,
 };
 use crate::look::{
     AnimationRef, AnimationSlot, AudioRole, ChromaKey, ColorAdjustments, Filter, Lut, Mask,
@@ -22,7 +24,7 @@ use crate::look::{
 };
 use crate::media::MediaSource;
 use crate::metadata::ProjectMetadata;
-use crate::param::{Easing, Param, SpatialTangents};
+use crate::param::{Easing, Param, PiecewiseEasingPreset, SpatialTangents};
 use crate::schema::ProjectSchema;
 use crate::time::{
     Rational, RationalTime, TimeRange, check_same_rate, resample, time_add, time_sub,
@@ -513,6 +515,131 @@ impl Project {
         }
     }
 
+    /// Expand the outgoing keyframe segment at `at` with a piecewise easing
+    /// preset (bounce / elastic / back). Scalar and vec2 params only — color
+    /// and crop params are rejected (they do not implement [`crate::Extrapolate`]).
+    pub fn apply_easing_preset(
+        &mut self,
+        clip_id: ClipId,
+        param: ClipParam,
+        at: RationalTime,
+        preset: PiecewiseEasingPreset,
+    ) -> Result<(), ModelError> {
+        if matches!(param, ClipParam::Crop) {
+            return Err(ModelError::InvalidParam(
+                "easing presets are not supported on crop (no safe extrapolation)".into(),
+            ));
+        }
+        if is_color_clip_param(param) {
+            return Err(ModelError::InvalidParam(
+                "easing presets are not supported on color parameters".into(),
+            ));
+        }
+        let tick = self.keyframe_tick(clip_id, at)?;
+        match param {
+            ClipParam::Volume => {
+                self.check_audio_param_target(clip_id)?;
+                let clip = self
+                    .timeline
+                    .clip_mut(clip_id)
+                    .ok_or(ModelError::UnknownClip(clip_id))?;
+                clip.volume.apply_easing_preset(tick, preset)
+            }
+            ClipParam::Pan => {
+                self.check_audio_param_target(clip_id)?;
+                let clip = self
+                    .timeline
+                    .clip_mut(clip_id)
+                    .ok_or(ModelError::UnknownClip(clip_id))?;
+                clip.pan.apply_easing_preset(tick, preset)
+            }
+            ClipParam::Position => {
+                self.check_param_target(clip_id)?;
+                let clip = self
+                    .timeline
+                    .clip_mut(clip_id)
+                    .ok_or(ModelError::UnknownClip(clip_id))?;
+                clip.transform.position.apply_easing_preset(tick, preset)
+            }
+            ClipParam::AnchorPoint => {
+                self.check_param_target(clip_id)?;
+                let clip = self
+                    .timeline
+                    .clip_mut(clip_id)
+                    .ok_or(ModelError::UnknownClip(clip_id))?;
+                clip.transform
+                    .anchor_point
+                    .apply_easing_preset(tick, preset)
+            }
+            ClipParam::Scale => {
+                self.check_param_target(clip_id)?;
+                let clip = self
+                    .timeline
+                    .clip_mut(clip_id)
+                    .ok_or(ModelError::UnknownClip(clip_id))?;
+                clip.transform.scale.apply_easing_preset(tick, preset)
+            }
+            ClipParam::Rotation => {
+                self.check_param_target(clip_id)?;
+                let clip = self
+                    .timeline
+                    .clip_mut(clip_id)
+                    .ok_or(ModelError::UnknownClip(clip_id))?;
+                clip.transform.rotation.apply_easing_preset(tick, preset)
+            }
+            ClipParam::Opacity => {
+                self.check_param_target(clip_id)?;
+                let clip = self
+                    .timeline
+                    .clip_mut(clip_id)
+                    .ok_or(ModelError::UnknownClip(clip_id))?;
+                clip.transform.opacity.apply_easing_preset(tick, preset)
+            }
+            ClipParam::Look { param: look } if is_mask_param(look) => {
+                self.check_param_target(clip_id)?;
+                let clip = self
+                    .timeline
+                    .clip_mut(clip_id)
+                    .ok_or(ModelError::UnknownClip(clip_id))?;
+                apply_mask_easing_preset(&mut clip.mask, look, tick, preset)
+            }
+            ClipParam::Look { param: look } => {
+                self.check_param_target(clip_id)?;
+                let clip = self
+                    .timeline
+                    .clip_mut(clip_id)
+                    .ok_or(ModelError::UnknownClip(clip_id))?;
+                look_param_mut(clip, look)?.apply_easing_preset(tick, preset)
+            }
+            ClipParam::Style {
+                param: StyleParam::ShadowOffset,
+            } => {
+                self.check_param_target(clip_id)?;
+                let clip = self
+                    .timeline
+                    .clip_mut(clip_id)
+                    .ok_or(ModelError::UnknownClip(clip_id))?;
+                style_vec2_mut(&mut clip.styles, StyleParam::ShadowOffset)?
+                    .apply_easing_preset(tick, preset)
+            }
+            ClipParam::Style { param: style } => {
+                self.check_param_target(clip_id)?;
+                let clip = self
+                    .timeline
+                    .clip_mut(clip_id)
+                    .ok_or(ModelError::UnknownClip(clip_id))?;
+                style_scalar_mut(&mut clip.styles, style)?.apply_easing_preset(tick, preset)
+            }
+            ClipParam::Effect { .. }
+            | ClipParam::Shape { .. }
+            | ClipParam::Text { .. }
+            | ClipParam::Speed
+            | ClipParam::Crop => Err(ModelError::InvalidParam(
+                "easing presets are not supported on this parameter".into(),
+            )),
+        }
+    }
+
     /// Append an effect (M4) to a visual clip's chain; the id must exist in
     /// the catalog. Returns the new effect's index. Rejected on audio clips.
     pub fn add_effect(&mut self, clip_id: ClipId, effect_id: &str) -> Result<usize, ModelError> {
@@ -591,5 +718,43 @@ impl Project {
             .clip_mut(clip_id)
             .ok_or(ModelError::UnknownClip(clip_id))?;
         super::helpers::effect_mut(clip, index as u32)?.set_param_constant(param, value)
+    }
+}
+
+fn is_color_clip_param(param: ClipParam) -> bool {
+    matches!(
+        param,
+        ClipParam::Style {
+            param: StyleParam::ShadowColor
+                | StyleParam::GlowColor
+                | StyleParam::OutlineColor
+                | StyleParam::BackgroundColor,
+        } | ClipParam::Shape {
+            param: crate::clip::ShapeParam::Fill | crate::clip::ShapeParam::StrokeColor,
+        } | ClipParam::Text {
+            param: crate::clip::TextParam::Fill
+                | crate::clip::TextParam::StrokeColor
+                | crate::clip::TextParam::ShadowColor
+                | crate::clip::TextParam::BackgroundColor,
+        }
+    )
+}
+
+fn apply_mask_easing_preset(
+    mask: &mut Option<Mask>,
+    param: LookParam,
+    tick: i64,
+    preset: PiecewiseEasingPreset,
+) -> Result<(), ModelError> {
+    match param {
+        LookParam::MaskCenter | LookParam::MaskSize => {
+            mask_vec2_mut(mask, param)?.apply_easing_preset(tick, preset)
+        }
+        LookParam::MaskFeather | LookParam::MaskRotation | LookParam::MaskRoundness => {
+            mask_scalar_mut(mask, param)?.apply_easing_preset(tick, preset)
+        }
+        _ => Err(ModelError::InvalidParam(format!(
+            "look parameter {param:?} is not a mask geometry param"
+        ))),
     }
 }

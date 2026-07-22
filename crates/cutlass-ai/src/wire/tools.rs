@@ -142,6 +142,8 @@ tools! {
         "Remove the keyframe at a timeline position (seconds) on any animatable clip property. Use the same `param` selector as set_param_keyframe. Removing the last keyframe freezes the property at that value.";
     "set_param_constant" => SetParamConstant(SetParamConstant),
         "Set any animatable clip property to a fixed value and remove all its keyframes (stops its animation). Use the same `param` selector as set_param_keyframe, with `value` for scalars (including uniform scale), `position` for position/anchor_point/per-axis scale and other vec2 params, `rgba` for colors, or `rect` as [x,y,w,h] for crop.";
+    "apply_easing_preset" => ApplyEasingPreset(ApplyEasingPreset),
+        "Replace the outgoing keyframe segment at from_tick with a multi-keyframe bounce_out / elastic_out / back_out approximation. Requires a keyframe at from_tick and a following keyframe. Scalar and vec2 params only (not colors or crop). One undoable edit.";
     "set_clip_speed" => SetClipSpeed(SetClipSpeed),
         "Change a media clip's playback speed (2.0 = double speed, 0.5 = slow motion) and/or play it in reverse. The clip's timeline length re-derives from the speed; its audio time-stretches to match (pitch preserved by default). Not valid for generated clips.";
     "set_speed_curve" => SetSpeedCurve(SetSpeedCurve),

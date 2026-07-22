@@ -86,6 +86,8 @@ impl Lerp for Scale2 {
     }
 }
 
+impl crate::param::Extrapolate for Scale2 {}
+
 impl SegmentSample for Scale2 {}
 
 impl Serialize for Scale2 {

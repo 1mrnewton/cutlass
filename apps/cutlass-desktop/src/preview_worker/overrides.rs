@@ -387,6 +387,37 @@ pub(super) fn move_param_keyframe_and_publish(
     }
 }
 
+/// Expand a keyframe segment with a piecewise easing preset (graph editor).
+/// One undoable edit via full-clip restore inverse.
+pub(super) fn apply_easing_preset_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    param: ClipParam,
+    at: RationalTime,
+    preset: PiecewiseEasingPreset,
+    ui: &UiSink,
+) {
+    if matches!(param, ClipParam::Style { .. }) {
+        engine.set_styles_override(None);
+    }
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "apply-easing-preset ignored: unparsable clip id");
+        return;
+    };
+    match engine.apply(Command::Edit(EditCommand::ApplyEasingPreset {
+        clip: clip_id,
+        param,
+        at,
+        preset,
+    })) {
+        Ok(_) => {
+            info!(%clip_id, ?param, tick = at.value, ?preset, "applied easing preset");
+            publish_projection(engine, ui);
+        }
+        Err(e) => error!(%clip_id, ?param, "apply easing preset failed: {e}"),
+    }
+}
+
 /// Remove the keyframe at exactly `at` on one property (inspector diamond
 /// toggled off). The engine rejects when nothing sits there.
 pub(super) fn remove_param_keyframe_and_publish(

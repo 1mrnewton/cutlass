@@ -89,4 +89,9 @@ export global GraphBackend {
     callback handle-drag-begin(which: int);
     callback handle-drag-move(x: float, y: float);
     callback handle-drag-end(commit: bool);
+
+    // Piecewise easing presets (commit 4). Enabled when the selected
+    // keyframe has a following segment. `preset` is 0=bounce, 1=elastic, 2=back.
+    in-out property <bool> preset-available: false;
+    callback apply-preset(preset: int);
 }

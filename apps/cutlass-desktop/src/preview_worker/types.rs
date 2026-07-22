@@ -541,6 +541,14 @@ pub(super) enum WorkerMsg {
         easing: Easing,
         tangents: Option<cutlass_models::SpatialTangents>,
     },
+    /// Expand the outgoing segment at `tick` with a piecewise easing preset
+    /// (graph editor). One undoable engine edit (full-clip restore inverse).
+    ApplyEasingPreset {
+        clip: String,
+        param: ClipParam,
+        tick: i64,
+        preset: PiecewiseEasingPreset,
+    },
     /// Move every keyframe sitting at `from_tick` (across all animated
     /// properties of `clip`) to `to_tick` — the timeline diamond drag
     /// (keyframes roadmap Phase 2). One history group: a single undo puts

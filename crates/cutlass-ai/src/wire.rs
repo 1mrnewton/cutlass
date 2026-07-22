@@ -65,26 +65,28 @@ use serde::{Deserialize, Serialize};
 ///     `[x, y]`; scale keyframes accept `value` (uniform) or `position`.
 /// 37: spatial motion-path tangents — optional `tangent_out` / `tangent_in`
 ///     on `set_param_keyframe` (position only, canvas-fraction handles).
-pub const TOOL_SCHEMA_VERSION: u32 = 37;
+/// 38: multi-keyframe easing presets — `apply_easing_preset` (bounce_out /
+///     elastic_out / back_out) on scalar/vec2 animated params.
+pub const TOOL_SCHEMA_VERSION: u32 = 38;
 
 mod dtos;
 mod tools;
 
 pub(crate) use dtos::MAX_MULTI_CLIP_REFS;
 pub use dtos::{
-    AddClip, AddEffect, AddGenerated, AddMarker, AddTrack, AddTransition, DuplicateClip,
-    ExtractAudio, LinkClips, MoveClip, MoveEffect, RemoveClip, RemoveEffect, RemoveMarker,
-    RemoveParamKeyframe, RemoveTrack, RemoveTransition, RippleDelete, RippleInsert, SetAudioRole,
-    SetCanvas, SetClipAdjustments, SetClipAnimation, SetClipAudio, SetClipBlendMode, SetClipChroma,
-    SetClipCrop, SetClipFilter, SetClipLayerStyles, SetClipMask, SetClipPitch, SetClipSpeed,
-    SetClipStabilize, SetClipTransform, SetDenoise, SetEffectParam, SetGenerator, SetMarker,
-    SetParamConstant, SetParamKeyframe, SetSpeedCurve, SetTrackEnabled, SetTrackLocked,
+    AddClip, AddEffect, AddGenerated, AddMarker, AddTrack, AddTransition, ApplyEasingPreset,
+    DuplicateClip, ExtractAudio, LinkClips, MoveClip, MoveEffect, RemoveClip, RemoveEffect,
+    RemoveMarker, RemoveParamKeyframe, RemoveTrack, RemoveTransition, RippleDelete, RippleInsert,
+    SetAudioRole, SetCanvas, SetClipAdjustments, SetClipAnimation, SetClipAudio, SetClipBlendMode,
+    SetClipChroma, SetClipCrop, SetClipFilter, SetClipLayerStyles, SetClipMask, SetClipPitch,
+    SetClipSpeed, SetClipStabilize, SetClipTransform, SetDenoise, SetEffectParam, SetGenerator,
+    SetMarker, SetParamConstant, SetParamKeyframe, SetSpeedCurve, SetTrackEnabled, SetTrackLocked,
     SetTrackMuted, SetTransition, ShiftClips, SplitClip, TrimClip, UnlinkClips, WireAnimationSlot,
     WireAudioRole, WireBlendMode, WireCanvasAspect, WireChromaKey, WireClipParam, WireEasing,
-    WireFilter, WireGenerator, WireLayerBackground, WireLayerGlow, WireLayerOutline,
-    WireLayerShadow, WireLayerStyles, WireLookParam, WireMarkerColor, WireMask, WireMaskKind,
-    WireScale, WireShape, WireShapeParam, WireStabilizeLevel, WireStyleParam, WireTextParam,
-    WireTrackKind,
+    WireEasingPreset, WireFilter, WireGenerator, WireLayerBackground, WireLayerGlow,
+    WireLayerOutline, WireLayerShadow, WireLayerStyles, WireLookParam, WireMarkerColor, WireMask,
+    WireMaskKind, WireScale, WireShape, WireShapeParam, WireStabilizeLevel, WireStyleParam,
+    WireTextParam, WireTrackKind,
 };
 pub use tools::{ToolSpec, describe_project_spec, tool_specs};
 
@@ -114,6 +116,7 @@ pub enum WireCommand {
     SetParamKeyframe(SetParamKeyframe),
     RemoveParamKeyframe(RemoveParamKeyframe),
     SetParamConstant(SetParamConstant),
+    ApplyEasingPreset(ApplyEasingPreset),
     SetClipSpeed(SetClipSpeed),
     SetSpeedCurve(SetSpeedCurve),
     SetClipPitch(SetClipPitch),
@@ -202,6 +205,7 @@ impl WireCommand {
             WireCommand::SetParamKeyframe(a) => clip(&mut a.clip),
             WireCommand::RemoveParamKeyframe(a) => clip(&mut a.clip),
             WireCommand::SetParamConstant(a) => clip(&mut a.clip),
+            WireCommand::ApplyEasingPreset(a) => clip(&mut a.clip),
             WireCommand::SetClipSpeed(a) => clip(&mut a.clip),
             WireCommand::SetSpeedCurve(a) => clip(&mut a.clip),
             WireCommand::SetClipPitch(a) => clip(&mut a.clip),

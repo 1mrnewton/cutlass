@@ -263,6 +263,18 @@ fn dispatch_edit(
                 Some(inverse),
             ))
         }
+        EditCommand::ApplyEasingPreset {
+            clip,
+            param,
+            at,
+            preset,
+        } => {
+            let inverse = edit::set_param::apply_easing_preset(ctx, clip, param, at, preset)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(clip)),
+                Some(inverse),
+            ))
+        }
         EditCommand::SetClipSpeed {
             clip,
             speed,

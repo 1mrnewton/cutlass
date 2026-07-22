@@ -510,6 +510,27 @@ pub struct RemoveParamKeyframe {
     pub at: f64,
 }
 
+/// Multi-keyframe easing preset applied to the outgoing segment at `from_tick`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WireEasingPreset {
+    BounceOut,
+    ElasticOut,
+    BackOut,
+}
+
+/// Expand the keyframe segment leaving `from_tick` into a bounce / elastic /
+/// back approximation (multiple keyframes). Scalar and vec2 params only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ApplyEasingPreset {
+    pub clip: u64,
+    pub param: WireClipParam,
+    /// Timeline position of the departing keyframe, in seconds. Must have a
+    /// following keyframe on the same param.
+    pub from_tick: f64,
+    pub preset: WireEasingPreset,
+}
+
 /// Set one animatable property to a fixed value, removing all its
 /// keyframes (stops the animation).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

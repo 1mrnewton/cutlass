@@ -274,7 +274,7 @@ fn remap_ids_rewrites_only_mapped_references() {
 #[test]
 fn tool_specs_cover_every_command_with_object_schemas() {
     let specs = tool_specs();
-    assert_eq!(specs.len(), 49);
+    assert_eq!(specs.len(), 50);
     for spec in &specs {
         assert!(
             !spec.description.is_empty(),

@@ -412,6 +412,19 @@ pub(super) fn dispatch(
             tl_rate,
             ui,
         ),
+        WorkerMsg::ApplyEasingPreset {
+            clip,
+            param,
+            tick,
+            preset,
+        } => apply_easing_preset_and_publish(
+            engine,
+            &clip,
+            param,
+            RationalTime::new(tick, tl_rate),
+            preset,
+            ui,
+        ),
         WorkerMsg::RetimeKeyframes {
             clip,
             from_tick,

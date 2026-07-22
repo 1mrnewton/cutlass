@@ -1,4 +1,4 @@
-use super::edit::clamp_bezier_points;
+use super::edit::{can_apply_preset, clamp_bezier_points};
 use super::*;
 use crate::{Clip, ParamKeyframe, Rational, RationalTime, TimeRange};
 use cutlass_models::{Easing, Keyframe, Param, ParamValue, SpatialTangents};
@@ -317,6 +317,19 @@ fn ease_in_segment_samples_match_quadratic() {
     let py = PAD_T + (1.0 - (mid_sample.1 - y0) / y_span) * (180.0 - PAD_T - PAD_B);
     // Larger py = lower on screen = smaller value for ease-in at midpoint.
     assert!(py > chord_mid_y, "ease-in mid should sit below chord");
+}
+
+#[test]
+fn preset_available_requires_successor_segment() {
+    let param = Param::Keyframed {
+        keyframes: vec![
+            Keyframe::new(0, 0.0, Easing::Linear),
+            Keyframe::new(40, 1.0, Easing::Linear),
+        ],
+    };
+    assert!(can_apply_preset(&param, 0));
+    assert!(!can_apply_preset(&param, 40));
+    assert!(!can_apply_preset(&param, 10));
 }
 
 #[test]

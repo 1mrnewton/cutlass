@@ -26,13 +26,25 @@ use serde::{Deserialize, Serialize};
 use crate::error::ModelError;
 
 mod easing;
+mod presets;
 
 pub use easing::{EASING_PRESETS, Easing, EasingPreset, easing_preset};
+pub use presets::{MIN_PRESET_SEGMENT_TICKS, PiecewiseEasingPreset, expand_preset};
 
 /// Values a [`Param`] can animate: lerp-able, plain-old-data.
 pub trait Lerp: Copy {
     fn lerp(a: Self, b: Self, t: f32) -> Self;
 }
+
+/// Marker for [`Lerp`] types whose `lerp(a, b, t)` is safe for `t` outside
+/// `[0, 1]` (overshoot for elastic / back presets). Implemented for scalars,
+/// vec2, and [`crate::Scale2`]. Not implemented for colors (`[u8; 4]`) or
+/// [`crate::CropRect`] — those clamp / wrap and must not receive piecewise
+/// overshoot presets.
+pub trait Extrapolate: Lerp {}
+
+impl Extrapolate for f32 {}
+impl Extrapolate for [f32; 2] {}
 
 impl Lerp for f32 {
     fn lerp(a: Self, b: Self, t: f32) -> Self {
@@ -372,6 +384,54 @@ impl<T: Copy> Param<T> {
     /// Replace the param (and any keyframes) with a constant.
     pub fn set_constant(&mut self, value: T) {
         *self = Param::Constant(value);
+    }
+}
+
+impl<T: Lerp + Extrapolate> Param<T> {
+    /// Expand the outgoing segment at `from_tick` with a piecewise easing
+    /// preset. Requires a successor keyframe. Removes any intermediates
+    /// strictly between `from` and `to`, then writes the expanded sequence.
+    /// Short segments (< [`MIN_PRESET_SEGMENT_TICKS`]) leave the pair unchanged
+    /// (still `Ok`).
+    pub fn apply_easing_preset(
+        &mut self,
+        from_tick: i64,
+        preset: PiecewiseEasingPreset,
+    ) -> Result<(), ModelError> {
+        let Param::Keyframed { keyframes } = self else {
+            return Err(ModelError::InvalidParam(
+                "easing preset requires a keyframed parameter".into(),
+            ));
+        };
+        let idx = keyframes
+            .iter()
+            .position(|kf| kf.tick == from_tick)
+            .ok_or_else(|| {
+                ModelError::InvalidParam(format!(
+                    "no keyframe at tick {from_tick} for easing preset"
+                ))
+            })?;
+        let Some(to) = keyframes.get(idx + 1).copied() else {
+            return Err(ModelError::InvalidParam(
+                "easing preset requires a following keyframe on the segment".into(),
+            ));
+        };
+        let from = keyframes[idx];
+        let expanded = expand_preset(preset, &from, &to);
+        let remove: Vec<i64> = keyframes
+            .iter()
+            .filter(|kf| kf.tick > from.tick && kf.tick < to.tick)
+            .map(|kf| kf.tick)
+            .collect();
+        for tick in remove {
+            self.remove_keyframe(tick);
+        }
+        for kf in expanded {
+            // `set_keyframe` preserves existing spatial tangents on replace;
+            // new intermediate ticks start with `None`.
+            self.set_keyframe(kf.tick, kf.value, kf.easing);
+        }
+        Ok(())
     }
 }
 

@@ -83,6 +83,17 @@ export component GraphEditor inherits Rectangle {
                 foreground: AppStore.theme.text.secondary;
                 vertical-alignment: TextVerticalAlignment.center;
             }
+
+            if GraphBackend.preset-available: ComboBox {
+                model: ["Preset ▾", "Bounce", "Elastic", "Back"];
+                current-index: 0;
+                selected => {
+                    if (self.current-index >= 1) {
+                        GraphBackend.apply-preset(self.current-index - 1);
+                        self.current-index = 0;
+                    }
+                }
+            }
         }
 
         plot := Rectangle {

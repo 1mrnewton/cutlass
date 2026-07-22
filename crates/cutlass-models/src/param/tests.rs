@@ -697,6 +697,97 @@ fn set_keyframe_tangents_errors_when_missing() {
     );
 }
 
+// --- piecewise easing presets ----------------------------------------------
+
+#[test]
+fn bounce_out_expansion_count_monotone_ticks_ends_at_target() {
+    let from = Keyframe::new(0, 0.0, Easing::Linear);
+    let to = Keyframe::new(100, 1.0, Easing::Linear);
+    let kfs = expand_preset(PiecewiseEasingPreset::BounceOut, &from, &to);
+    assert_eq!(kfs.len(), 8);
+    assert_eq!(kfs.first().map(|k| (k.tick, k.value)), Some((0, 0.0)));
+    assert_eq!(kfs.last().map(|k| (k.tick, k.value)), Some((100, 1.0)));
+    for w in kfs.windows(2) {
+        assert!(w[1].tick > w[0].tick, "ticks must be strictly increasing");
+    }
+    // Landings / valleys at expected value fractions.
+    assert!((kfs[1].value - 1.0).abs() < 1e-5);
+    assert!((kfs[2].value - 0.75).abs() < 1e-5);
+    assert!((kfs[3].value - 1.0).abs() < 1e-5);
+}
+
+#[test]
+fn elastic_out_overshoots_then_converges() {
+    let from = Keyframe::new(0, 0.0, Easing::Linear);
+    let to = Keyframe::new(100, 10.0, Easing::Linear);
+    let kfs = expand_preset(PiecewiseEasingPreset::ElasticOut, &from, &to);
+    assert_eq!(kfs.len(), 6);
+    let peak = kfs[1].value;
+    assert!(peak > 10.0, "first extremum should overshoot: {peak}");
+    assert!((kfs.last().unwrap().value - 10.0).abs() < 1e-5);
+    // Overshoot magnitude decays toward the target.
+    let overs: Vec<f32> = kfs[1..kfs.len() - 1]
+        .iter()
+        .map(|k| (k.value - 10.0).abs())
+        .collect();
+    for w in overs.windows(2) {
+        assert!(w[1] < w[0] + 1e-5, "overshoot should decay");
+    }
+}
+
+#[test]
+fn back_out_overshoots_ten_percent() {
+    let from = Keyframe::new(0, 0.0, Easing::Linear);
+    let to = Keyframe::new(100, 1.0, Easing::Linear);
+    let kfs = expand_preset(PiecewiseEasingPreset::BackOut, &from, &to);
+    assert_eq!(kfs.len(), 3);
+    assert!((kfs[1].value - 1.1).abs() < 1e-5);
+    assert!((kfs[2].value - 1.0).abs() < 1e-5);
+}
+
+#[test]
+fn short_segment_preset_is_noop() {
+    let from = Keyframe::new(0, 0.0, Easing::EaseIn);
+    let to = Keyframe::new(5, 1.0, Easing::Linear);
+    let kfs = expand_preset(PiecewiseEasingPreset::BounceOut, &from, &to);
+    assert_eq!(kfs.len(), 2);
+    assert_eq!(kfs[0].easing, Easing::EaseIn);
+    assert_eq!((kfs[0].tick, kfs[1].tick), (0, 5));
+}
+
+#[test]
+fn color_params_do_not_implement_extrapolate() {
+    // Compile-time gate: `[u8; 4]` is Lerp but not Extrapolate, so
+    // `expand_preset` cannot be called on color keyframes.
+    fn assert_extrapolate<T: Extrapolate>() {}
+    assert_extrapolate::<f32>();
+    assert_extrapolate::<[f32; 2]>();
+    // Uncommenting the next line must fail to compile:
+    // assert_extrapolate::<[u8; 4]>();
+}
+
+#[test]
+fn apply_easing_preset_expands_outgoing_segment() {
+    let mut p = Param::Keyframed {
+        keyframes: vec![
+            Keyframe::new(0, 0.0, Easing::Linear),
+            Keyframe::new(100, 1.0, Easing::Linear),
+            Keyframe::new(200, 0.0, Easing::Linear),
+        ],
+    };
+    p.apply_easing_preset(0, PiecewiseEasingPreset::BackOut)
+        .unwrap();
+    let ticks: Vec<i64> = p.keyframes().iter().map(|k| k.tick).collect();
+    assert_eq!(ticks[0], 0);
+    assert!(ticks.contains(&100));
+    assert!(ticks.contains(&200), "later segments untouched");
+    // BackOut: from + overshoot + to, plus the trailing keyframe at 200.
+    assert_eq!(p.keyframes().len(), 4);
+    let mid = p.keyframes().iter().find(|k| k.tick > 0 && k.tick < 100);
+    assert!(mid.is_some(), "overshoot keyframe inserted");
+    assert!((mid.unwrap().value - 1.1).abs() < 1e-4);
+}
+
 // --- validation -------------------------------------------------------------
 
 #[test]

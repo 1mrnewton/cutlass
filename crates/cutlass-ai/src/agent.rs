@@ -1160,6 +1160,17 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
             param_name(&a.param),
             param_value_phrase(&a.param, a.value, a.position, a.rgba, a.rect),
         ),
+        WireCommand::ApplyEasingPreset(a) => format!(
+            "applied {} easing preset on clip {} {} from {}",
+            match a.preset {
+                crate::wire::WireEasingPreset::BounceOut => "bounce_out",
+                crate::wire::WireEasingPreset::ElasticOut => "elastic_out",
+                crate::wire::WireEasingPreset::BackOut => "back_out",
+            },
+            a.clip,
+            param_name(&a.param),
+            secs(a.from_tick),
+        ),
         WireCommand::SetClipSpeed(a) => {
             let mut parts = Vec::new();
             if let Some(s) = a.speed {

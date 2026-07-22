@@ -1725,6 +1725,265 @@
       }
     },
     {
+      "description": "Replace the outgoing keyframe segment at from_tick with a multi-keyframe bounce_out / elastic_out / back_out approximation. Requires a keyframe at from_tick and a following keyframe. Scalar and vec2 params only (not colors or crop). One undoable edit.",
+      "name": "apply_easing_preset",
+      "parameters": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Expand the keyframe segment leaving `from_tick` into a bounce / elastic /\nback approximation (multiple keyframes). Scalar and vec2 params only.",
+        "properties": {
+          "clip": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "from_tick": {
+            "description": "Timeline position of the departing keyframe, in seconds. Must have a\nfollowing keyframe on the same param.",
+            "format": "double",
+            "type": "number"
+          },
+          "param": {
+            "description": "An animatable clip property the keyframe commands can address.",
+            "oneOf": [
+              {
+                "const": "position",
+                "description": "Canvas placement of the content center (vec2: use the `position`\nargument, not `value`).",
+                "type": "string"
+              },
+              {
+                "const": "anchor_point",
+                "description": "Canvas point around which the clip scales and rotates (vec2: use the\n`position` argument, not `value`).",
+                "type": "string"
+              },
+              {
+                "const": "scale",
+                "description": "Scale (1.0 = fit inside the canvas). Use `value` for a uniform number\nor `position` as `[x, y]` for per-axis.",
+                "type": "string"
+              },
+              {
+                "const": "rotation",
+                "description": "Clockwise rotation in degrees.",
+                "type": "string"
+              },
+              {
+                "const": "opacity",
+                "description": "Layer opacity 0.0–1.0.",
+                "type": "string"
+              },
+              {
+                "const": "crop",
+                "description": "Kept-region crop window as content fractions (rect: use the `rect`\nargument `[x, y, w, h]`, not `value`). Visual clips only.",
+                "type": "string"
+              },
+              {
+                "const": "volume",
+                "description": "Audio gain envelope (0.0 = mute, 1.0 = unchanged, up to 10.0 boost).\nKeyframing it draws volume automation; this is how you fade audio in\nor out over time or duck music under a voice. Media-backed clips only.",
+                "type": "string"
+              },
+              {
+                "const": "pan",
+                "description": "Stereo pan envelope (−1.0 = full left, 0.0 = center, +1.0 = full\nright). Keyframing it draws balance automation. Media-backed clips\nonly (including video clips with sound — same target rule as volume).",
+                "type": "string"
+              },
+              {
+                "const": "speed",
+                "description": "Playback-rate ramp (scalar: 1.0 = normal speed). Media-backed clips\nonly; keyframes use normalized positions within the clip.",
+                "type": "string"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A parameter of an effect already on the clip. `index` is the\neffect-chain position and `param` is its catalog name, as in\n`set_effect_param`. Use `value` for scalars, `position` for vec2\nparams, and `rgba` for color params.",
+                "properties": {
+                  "effect": {
+                    "properties": {
+                      "index": {
+                        "format": "uint32",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "param": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "index",
+                      "param"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "effect"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A visual property of a generated shape clip.",
+                "properties": {
+                  "shape": {
+                    "properties": {
+                      "param": {
+                        "description": "Animatable properties of a generated shape clip.",
+                        "enum": [
+                          "width",
+                          "height",
+                          "corner_radius",
+                          "inner_ratio",
+                          "fill",
+                          "stroke_color",
+                          "stroke_width"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "param"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "shape"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A visual style property of a generated text clip.",
+                "properties": {
+                  "text": {
+                    "properties": {
+                      "param": {
+                        "description": "Animatable visual-style properties of a generated text clip.",
+                        "enum": [
+                          "size",
+                          "fill",
+                          "letter_spacing",
+                          "line_spacing",
+                          "stroke_width",
+                          "stroke_color",
+                          "shadow_blur",
+                          "shadow_distance",
+                          "shadow_color",
+                          "background_color",
+                          "background_radius"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "param"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A scalar property of the clip's color look.",
+                "properties": {
+                  "look": {
+                    "properties": {
+                      "param": {
+                        "description": "Animatable properties of a clip's color look / mask.\n\n`mask_center` / `mask_size` carry vec2 values; the rest are scalars.",
+                        "enum": [
+                          "filter_intensity",
+                          "lut_intensity",
+                          "adjust_brightness",
+                          "adjust_contrast",
+                          "adjust_saturation",
+                          "adjust_exposure",
+                          "adjust_temperature",
+                          "adjust_tint",
+                          "adjust_hue",
+                          "adjust_highlights",
+                          "adjust_shadows",
+                          "adjust_sharpness",
+                          "adjust_vignette",
+                          "mask_feather",
+                          "mask_center",
+                          "mask_size",
+                          "mask_rotation",
+                          "mask_roundness",
+                          "chroma_strength",
+                          "chroma_shadow"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "param"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "look"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A property of the clip's layer-quad styles (shadow/glow/outline/\nbackground). Color params use `rgba`; `shadow_offset` uses\n`position`; the rest use scalar `value`.",
+                "properties": {
+                  "style": {
+                    "properties": {
+                      "param": {
+                        "description": "Animatable properties of a clip's layer-quad styles.",
+                        "enum": [
+                          "shadow_color",
+                          "shadow_offset",
+                          "shadow_blur",
+                          "glow_color",
+                          "glow_radius",
+                          "glow_intensity",
+                          "outline_color",
+                          "outline_width",
+                          "background_color",
+                          "background_padding",
+                          "background_radius"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "param"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "style"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "preset": {
+            "description": "Multi-keyframe easing preset applied to the outgoing segment at `from_tick`.",
+            "enum": [
+              "bounce_out",
+              "elastic_out",
+              "back_out"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "clip",
+          "param",
+          "from_tick",
+          "preset"
+        ],
+        "title": "ApplyEasingPreset",
+        "type": "object"
+      }
+    },
+    {
       "description": "Change a media clip's playback speed (2.0 = double speed, 0.5 = slow motion) and/or play it in reverse. The clip's timeline length re-derives from the speed; its audio time-stretches to match (pitch preserved by default). Not valid for generated clips.",
       "name": "set_clip_speed",
       "parameters": {
@@ -3087,5 +3346,5 @@
       }
     }
   ],
-  "version": 37
+  "version": 38
 }

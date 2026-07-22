@@ -205,6 +205,15 @@ pub fn live_handle_param(
     Some(out)
 }
 
+/// True when `selected_tick` has a following keyframe (preset can expand).
+pub fn can_apply_preset(param: &Param<f32>, selected_tick: i64) -> bool {
+    let kfs = param.keyframes();
+    let Some(idx) = kfs.iter().position(|kf| kf.tick == selected_tick) else {
+        return false;
+    };
+    kfs.get(idx + 1).is_some()
+}
+
 /// Commit that writes a new [`Easing::Bezier`] at the selected keyframe
 /// (same tick/value; preserves the other vec2 axis / spatial tangents).
 pub fn plan_handle_commit(

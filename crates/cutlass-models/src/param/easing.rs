@@ -34,7 +34,7 @@ pub struct EasingPreset {
 }
 
 /// Named bezier easings offered in the inspector flyout / AI wire.
-/// Bounce-like multi-segment curves are deferred to a future graph editor.
+/// Multi-keyframe bounce / elastic / back live in [`super::presets`].
 pub const EASING_PRESETS: &[EasingPreset] = &[
     EasingPreset {
         id: "snappy",

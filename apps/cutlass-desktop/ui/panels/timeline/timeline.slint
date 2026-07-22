@@ -11,7 +11,6 @@ import { TrackLane } from "track-lane.slint";
 import { TrackHead } from "track-head.slint";
 import { Ruler } from "ruler.slint";
 import { ClipView } from "clip.slint";
-import { TransitionPill } from "transition-pill.slint";
 import { TimelineViewState } from "state.slint";
 import { Sequence } from "../../models/index.slint";
 import { TimelineLib } from "../../lib/timeline-lib.slint";
@@ -19,6 +18,7 @@ import { DragBackend, SnapResult, ClipDragResolution, ClipTrimResolution, Librar
 import { EffectsBackend } from "../../lib/effects-backend.slint";
 import { SelectionBackend } from "../../lib/selection-backend.slint";
 import { AppState } from "../../state.slint";
+import { LaneOverlays } from "lane-overlays.slint";
 
 
 
@@ -33,19 +33,6 @@ component ForceHeadSpace inherits Rectangle {
 // edge/clip. Shared by trims (duration + signed delta) and moves/library
 // drops (landing timecode). The caller positions it (usually centered on an
 // edge via `x: edge - self.width / 2`).
-component DragTooltip inherits Rectangle {
-    in property <string> text;
-
-    width: tip-text.preferred-width + 12px;
-    height: tip-text.preferred-height + 6px;
-    background: #000000d0;
-    border-radius: 4px;
-
-    tip-text := Text {
-        color: #ffffff;
-        text: root.text;
-    }
-}
 
 export component TimelinePanel inherits PanelBase {
 
@@ -779,435 +766,29 @@ export component TimelinePanel inherits PanelBase {
                         }
                     }
 
-                // --- transition junction pills (M4, above the clips) ---------
-                // One overlay band per lane; each transition pill is centered
-                // on its cut tick in content space and resizes / removes the
-                // junction in place.
-                for t[lane-idx] in sequence.tracks: Rectangle {
-                    x: 0;
-                    y: (lane-idx + 1) * row-pitch;
-                    width: max(parent.width, content-width);
-                    height: track-height - 5px;
-                    for tr in t.transitions: TransitionPill {
-                        model: tr;
-                        lane-height: parent.height;
-                    }
+                LaneOverlays {
+                    sequence: root.sequence;
+                    row-pitch: root.row-pitch;
+                    track-height: root.track-height;
+                    track-spacing: root.track-spacing;
+                    content-width: root.content-width;
+                    content-height: root.content-height;
+                    single-dragging: root.single-dragging;
+                    group-dragging: root.group-dragging;
+                    clip-trimming: root.clip-trimming;
+                    library-drag-over: root.library-drag-over;
+                    os-drop-cursor-inside: root.os-drop-cursor-inside;
+                    transition-drag-over: root.transition-drag-over;
+                    preview-axis-gesture-free: root.preview-axis-gesture-free;
+                    os-drop-ghost-ticks: root.os-drop-ghost-ticks;
+                    clip-drag-res: root.clip-drag-res;
+                    library-drop-res: root.library-drop-res;
+                    os-drop-res: root.os-drop-res;
+                    group-drag-res: root.group-drag-res;
+                    clip-trim-res: root.clip-trim-res;
+                    transition-drop-res: root.transition-drop-res;
                 }
 
-                // --- clip drag visuals (content space, above the lanes) ------
-
-                // Landing ghost on an existing lane: exactly where a release
-                // puts the clip. (Insert mode renders a caret instead.)
-                if single-dragging && clip-drag-res.valid && !clip-drag-res.is-new-lane && !clip-drag-res.is-insert: Rectangle {
-                    x: clip-drag-res.resolved-start * TimelineStore.zoom * 1px;
-                    y: (clip-drag-res.target-row + 1) * row-pitch;
-                    width: clip-drag-res.duration-ticks * TimelineStore.zoom * 1px;
-                    height: track-height - 5px;
-                    background: TimelineViewState.dragging-color.with-alpha(0.3);
-                    border-width: 1px;
-                    border-color: #ffffff;
-                    border-radius: AppStore.theme.track-lane.clip.radius;
-                }
-
-                // New-lane insertion: horizontal guide across the gap where
-                // the lane appears, with a slim ghost riding on it.
-                if single-dragging && clip-drag-res.valid && clip-drag-res.is-new-lane: Rectangle {
-                    x: 0;
-                    y: (clip-drag-res.target-row + 1) * row-pitch - track-spacing / 2 - self.height / 2;
-                    width: max(parent.width, content-width);
-                    height: 2px;
-                    background: AppStore.theme.accent.primary;
-                }
-                if single-dragging && clip-drag-res.valid && clip-drag-res.is-new-lane: Rectangle {
-                    x: clip-drag-res.resolved-start * TimelineStore.zoom * 1px;
-                    y: (clip-drag-res.target-row + 1) * row-pitch - track-spacing / 2 - self.height / 2;
-                    width: clip-drag-res.duration-ticks * TimelineStore.zoom * 1px;
-                    height: (track-height - 5px) * 0.5;
-                    background: TimelineViewState.dragging-color.with-alpha(0.3);
-                    border-width: 1px;
-                    border-color: AppStore.theme.accent.primary;
-                    border-radius: AppStore.theme.track-lane.clip.radius;
-                }
-
-                // Main-track magnet: insertion between clips instead of a
-                // free landing — the commit shifts later clips right to open
-                // the hole at the caret. A clip-sized slot ghost previews the
-                // inserted span so the landing is unmistakable, and a no-op
-                // slot (the clip's own position — e.g. the only clip on the
-                // main lane) renders muted so the release reads as "nothing
-                // will change" instead of a silent snap-back.
-                if single-dragging && clip-drag-res.valid && clip-drag-res.is-insert: Rectangle {
-                    // Slot ghost: the span the clip occupies after the shift.
-                    Rectangle {
-                        x: clip-drag-res.caret-tick * TimelineStore.zoom * 1px;
-                        y: (clip-drag-res.target-row + 1) * row-pitch;
-                        width: clip-drag-res.duration-ticks * TimelineStore.zoom * 1px;
-                        height: track-height - 5px;
-                        background: clip-drag-res.is-noop
-                            ? #9aa0a633 : AppStore.theme.accent.primary.with-alpha(0.28);
-                        border-width: 1px;
-                        border-color: clip-drag-res.is-noop
-                            ? #9aa0a6 : AppStore.theme.accent.primary;
-                        border-radius: AppStore.theme.track-lane.clip.radius;
-                    }
-                    // Caret glow + core at the insertion boundary.
-                    Rectangle {
-                        x: clip-drag-res.caret-tick * TimelineStore.zoom * 1px - self.width / 2;
-                        y: (clip-drag-res.target-row + 1) * row-pitch - 2px;
-                        width: 9px;
-                        height: track-height - 1px;
-                        border-radius: 4.5px;
-                        background: clip-drag-res.is-noop
-                            ? #9aa0a64d : AppStore.theme.accent.primary.with-alpha(0.35);
-                    }
-                    Rectangle {
-                        x: clip-drag-res.caret-tick * TimelineStore.zoom * 1px - self.width / 2;
-                        y: (clip-drag-res.target-row + 1) * row-pitch - 2px;
-                        width: 3px;
-                        height: track-height - 1px;
-                        background: clip-drag-res.is-noop
-                            ? #9aa0a6 : AppStore.theme.accent.primary;
-                    }
-                }
-
-                // Same insertion preview for library drags over the main lane.
-                if library-drag-over && library-drop-res.is-insert: Rectangle {
-                    Rectangle {
-                        x: library-drop-res.caret-tick * TimelineStore.zoom * 1px;
-                        y: (library-drop-res.target-row + 1) * row-pitch;
-                        width: AppState.library-drag-duration-ticks * TimelineStore.zoom * 1px;
-                        height: track-height - 5px;
-                        background: AppStore.theme.accent.primary.with-alpha(0.28);
-                        border-width: 1px;
-                        border-color: AppStore.theme.accent.primary;
-                        border-radius: AppStore.theme.track-lane.clip.radius;
-                    }
-                    Rectangle {
-                        x: library-drop-res.caret-tick * TimelineStore.zoom * 1px - self.width / 2;
-                        y: (library-drop-res.target-row + 1) * row-pitch - 2px;
-                        width: 9px;
-                        height: track-height - 1px;
-                        border-radius: 4.5px;
-                        background: AppStore.theme.accent.primary.with-alpha(0.35);
-                    }
-                    Rectangle {
-                        x: library-drop-res.caret-tick * TimelineStore.zoom * 1px - self.width / 2;
-                        y: (library-drop-res.target-row + 1) * row-pitch - 2px;
-                        width: 3px;
-                        height: track-height - 1px;
-                        background: AppStore.theme.accent.primary;
-                    }
-                }
-
-                // Honest landing ghost for a freeform library drop: the snapped,
-                // row-aligned spot the drop actually commits to (the window-level
-                // ghost in app.slint hides while over the timeline).
-                if library-drag-over && !library-drop-res.is-insert: Rectangle {
-                    x: library-drop-res.resolved-start * TimelineStore.zoom * 1px;
-                    y: (library-drop-res.target-row + 1) * row-pitch;
-                    width: AppState.library-drag-duration-ticks * TimelineStore.zoom * 1px;
-                    height: track-height - 5px;
-                    background: AppStore.theme.accent.primary.with-alpha(0.3);
-                    border-width: 1px;
-                    border-color: AppStore.theme.accent.primary;
-                    border-radius: AppStore.theme.track-lane.clip.radius;
-                }
-
-                // Vertical magnet guide for library drags (mirrors clip drags).
-                if library-drag-over && library-drop-res.has-snap: Rectangle {
-                    x: library-drop-res.snap-line-tick * TimelineStore.zoom * 1px;
-                    y: 0;
-                    width: 1px;
-                    height: max(parent.height, content-height);
-                    background: AppStore.theme.accent.primary;
-                }
-
-                // --- OS file-drop landing preview -----------------------------
-                // Same visuals as a library drag: caret + slot on the main lane
-                // (magnet insert), placeholder-length ghost elsewhere. Position
-                // is honest (the worker lands the first file exactly here);
-                // length is a stand-in until the drop probes the files.
-                if os-drop-cursor-inside && os-drop-res.is-insert: Rectangle {
-                    Rectangle {
-                        x: os-drop-res.caret-tick * TimelineStore.zoom * 1px;
-                        y: (os-drop-res.target-row + 1) * row-pitch;
-                        width: root.os-drop-ghost-ticks * TimelineStore.zoom * 1px;
-                        height: track-height - 5px;
-                        background: AppStore.theme.accent.primary.with-alpha(0.28);
-                        border-width: 1px;
-                        border-color: AppStore.theme.accent.primary;
-                        border-radius: AppStore.theme.track-lane.clip.radius;
-                    }
-                    Rectangle {
-                        x: os-drop-res.caret-tick * TimelineStore.zoom * 1px - self.width / 2;
-                        y: (os-drop-res.target-row + 1) * row-pitch - 2px;
-                        width: 9px;
-                        height: track-height - 1px;
-                        border-radius: 4.5px;
-                        background: AppStore.theme.accent.primary.with-alpha(0.35);
-                    }
-                    Rectangle {
-                        x: os-drop-res.caret-tick * TimelineStore.zoom * 1px - self.width / 2;
-                        y: (os-drop-res.target-row + 1) * row-pitch - 2px;
-                        width: 3px;
-                        height: track-height - 1px;
-                        background: AppStore.theme.accent.primary;
-                    }
-                }
-
-                if os-drop-cursor-inside && !os-drop-res.is-insert: Rectangle {
-                    x: os-drop-res.resolved-start * TimelineStore.zoom * 1px;
-                    y: (os-drop-res.target-row + 1) * row-pitch;
-                    width: root.os-drop-ghost-ticks * TimelineStore.zoom * 1px;
-                    height: track-height - 5px;
-                    background: AppStore.theme.accent.primary.with-alpha(0.3);
-                    border-width: 1px;
-                    border-color: AppStore.theme.accent.primary;
-                    border-radius: AppStore.theme.track-lane.clip.radius;
-                }
-
-                // File-count badge above the landing spot.
-                if os-drop-cursor-inside: DragTooltip {
-                    x: (os-drop-res.is-insert
-                            ? os-drop-res.caret-tick : os-drop-res.resolved-start)
-                        * TimelineStore.zoom * 1px;
-                    y: (os-drop-res.target-row + 1) * row-pitch - self.height - 4px;
-                    text: AppState.os-drop-file-count <= 1
-                        ? "Drop to add"
-                        : "Drop to add " + AppState.os-drop-file-count + " files";
-                }
-
-                // Vertical magnet guide at the snapped edge (CapCut-style).
-                if single-dragging && clip-drag-res.valid && clip-drag-res.has-snap: Rectangle {
-                    x: clip-drag-res.snap-line-tick * TimelineStore.zoom * 1px;
-                    y: 0;
-                    width: 1px;
-                    height: max(parent.height, content-height);
-                    background: AppStore.theme.accent.primary;
-                }
-
-                // --- group drag visuals (multi-selection) ---------------------
-
-                // Landing ghosts: one per selected clip, exactly where a
-                // release puts the set. Hidden while the resolution is
-                // invalid (the floating copies flag the conflict instead).
-                if group-dragging && group-drag-res.valid: Rectangle {
-                    for g in group-drag-res.ghosts: Rectangle {
-                        x: g.start-tick * TimelineStore.zoom * 1px;
-                        y: (g.row + 1) * row-pitch;
-                        width: g.duration-ticks * TimelineStore.zoom * 1px;
-                        height: track-height - 5px;
-                        background: g.color.with-alpha(0.3);
-                        border-width: 1px;
-                        border-color: #ffffff;
-                        border-radius: AppStore.theme.track-lane.clip.radius;
-                    }
-                }
-
-                // Same magnet guide as single drags, driven by the group
-                // resolution (snapped on the grabbed clip's edges).
-                if group-dragging && group-drag-res.valid && group-drag-res.has-snap: Rectangle {
-                    x: group-drag-res.snap-line-tick * TimelineStore.zoom * 1px;
-                    y: 0;
-                    width: 1px;
-                    height: max(parent.height, content-height);
-                    background: AppStore.theme.accent.primary;
-                }
-
-                // Floating copies of every selected clip, following the
-                // cursor on both axes. A red outline means the set has no
-                // valid landing here (release commits nothing).
-                if group-dragging: Rectangle {
-                    for f in DragBackend.group-floaters(root.sequence, TimelineStore.selected-ids): Rectangle {
-                        x: f.start-tick * TimelineStore.zoom * 1px + TimelineViewState.drag-dx-px;
-                        y: (f.row + 1) * row-pitch + TimelineViewState.drag-dy-px;
-                        width: f.duration-ticks * TimelineStore.zoom * 1px;
-                        height: track-height - 5px;
-                        background: f.color.with-alpha(0.85);
-                        border-width: 1px;
-                        border-color: group-drag-res.valid ? #ffffff : #FF5555;
-                        border-radius: AppStore.theme.track-lane.clip.radius;
-                    }
-                }
-
-                // Landing timecode of the grabbed clip, above its floater.
-                if group-dragging && group-drag-res.valid: DragTooltip {
-                    x: (TimelineViewState.dragging-start-value * TimelineStore.zoom * 1px
-                            + TimelineViewState.drag-dx-px) + self.width / 2;
-                    y: (TimelineViewState.dragging-source-row + 1) * row-pitch
-                        + TimelineViewState.drag-dy-px - self.height - 4px;
-                    text: TimelineLib.format-timecode(
-                        TimelineViewState.dragging-start-value + group-drag-res.resolved-dx-ticks,
-                        sequence.fps.num,
-                        sequence.fps.den,
-                        sequence.drop-frame);
-                }
-
-                // --- clip trim visuals ----------------------------------------
-
-                // Live stretch: the clip's post-trim extent, opaque over the
-                // dimmed original so it reads as the clip resizing in place.
-                if clip-trimming && clip-trim-res.valid: Rectangle {
-                    x: clip-trim-res.new-start * TimelineStore.zoom * 1px;
-                    y: (TimelineViewState.trimming-source-row + 1) * row-pitch;
-                    width: clip-trim-res.new-duration * TimelineStore.zoom * 1px;
-                    height: track-height - 5px;
-                    background: TimelineViewState.trimming-color.with-alpha(0.9);
-                    border-width: 1px;
-                    border-color: TimelineViewState.trimming-head ? transparent : #ffffff;
-                    border-radius: AppStore.theme.track-lane.clip.radius;
-
-                    // Dragged-edge accent.
-                    Rectangle {
-                        x: TimelineViewState.trimming-head ? 0 : parent.width - self.width;
-                        y: 0;
-                        width: 2px;
-                        height: parent.height;
-                        background: #ffffff;
-                    }
-                }
-
-                // CapCut detail: duration + delta readout above the dragged edge.
-                if clip-trimming && clip-trim-res.valid: DragTooltip {
-                    x: (TimelineViewState.trimming-head
-                            ? clip-trim-res.new-start
-                            : clip-trim-res.new-start + clip-trim-res.new-duration)
-                        * TimelineStore.zoom * 1px - self.width / 2;
-                    y: (TimelineViewState.trimming-source-row + 1) * row-pitch - self.height - 4px;
-                    text: TimelineLib.format-timecode(
-                            clip-trim-res.new-duration,
-                            sequence.fps.num,
-                            sequence.fps.den,
-                            sequence.drop-frame)
-                        + "  "
-                        + (clip-trim-res.new-duration >= TimelineViewState.trimming-duration-ticks ? "+" : "")
-                        + (clip-trim-res.new-duration - TimelineViewState.trimming-duration-ticks);
-                }
-
-                // Linked partners' stretch previews: the same edge delta the
-                // dragged clip previews, applied to each link-group member.
-                if clip-trimming && clip-trim-res.valid: Rectangle {
-                    for g in clip-trim-res.ghosts: Rectangle {
-                        x: g.start-tick * TimelineStore.zoom * 1px;
-                        y: (g.row + 1) * row-pitch;
-                        width: g.duration-ticks * TimelineStore.zoom * 1px;
-                        height: track-height - 5px;
-                        background: g.color.with-alpha(0.9);
-                        border-width: 1px;
-                        border-color: #ffffff;
-                        border-radius: AppStore.theme.track-lane.clip.radius;
-                    }
-                }
-
-                // Same magnet guide as the move, driven by the trim resolution.
-                if clip-trimming && clip-trim-res.valid && clip-trim-res.has-snap: Rectangle {
-                    x: clip-trim-res.snap-line-tick * TimelineStore.zoom * 1px;
-                    y: 0;
-                    width: 1px;
-                    height: max(parent.height, content-height);
-                    background: AppStore.theme.accent.primary;
-                }
-
-                // Floating copy of the grabbed clip, following the cursor on
-                // both axes (the original stays in place, dimmed).
-                if single-dragging: Rectangle {
-                    x: TimelineViewState.dragging-start-value * TimelineStore.zoom * 1px
-                        + TimelineViewState.drag-dx-px;
-                    y: (TimelineViewState.dragging-source-row + 1) * row-pitch
-                        + TimelineViewState.drag-dy-px;
-                    width: TimelineViewState.dragging-duration-ticks * TimelineStore.zoom * 1px;
-                    height: track-height - 5px;
-                    background: TimelineViewState.dragging-color.with-alpha(0.85);
-                    border-width: 1px;
-                    border-color: #ffffff;
-                    border-radius: AppStore.theme.track-lane.clip.radius;
-
-                    // Same constraints as the in-place clip label: without an
-                    // explicit width Slint gives the Text its natural size and
-                    // centers it, painting the full name far outside a narrow
-                    // floater. No `clip: true` here — combined with the
-                    // border-radius it would allocate a floater-sized GPU
-                    // layer (the 16384px wgpu trap from clip.slint).
-                    if TimelineViewState.dragging-duration-ticks * TimelineStore.zoom * 1px > 40px: Text {
-                        x: 4px;
-                        width: min(self.preferred-width, parent.width - 8px);
-                        height: parent.height;
-                        vertical-alignment: center;
-                        text: TimelineViewState.dragging-name;
-                        font-size: 9px;
-                        overflow: elide;
-                    }
-                }
-
-                // Landing timecode above the moved clip (insert mode reads the
-                // caret slot, otherwise the resolved start).
-                if single-dragging && clip-drag-res.valid: DragTooltip {
-                    x: (TimelineViewState.dragging-start-value * TimelineStore.zoom * 1px
-                            + TimelineViewState.drag-dx-px) + self.width / 2;
-                    y: (TimelineViewState.dragging-source-row + 1) * row-pitch
-                        + TimelineViewState.drag-dy-px - self.height - 4px;
-                    text: TimelineLib.format-timecode(
-                        clip-drag-res.is-insert ? clip-drag-res.caret-tick : clip-drag-res.resolved-start,
-                        sequence.fps.num,
-                        sequence.fps.den,
-                        sequence.drop-frame);
-                }
-
-                // Landing timecode for a library drag (above the ghost / caret).
-                if library-drag-over: DragTooltip {
-                    x: (library-drop-res.is-insert ? library-drop-res.caret-tick : library-drop-res.resolved-start)
-                        * TimelineStore.zoom * 1px - self.width / 2;
-                    y: (library-drop-res.target-row + 1) * row-pitch - self.height - 4px;
-                    text: TimelineLib.format-timecode(
-                        library-drop-res.is-insert ? library-drop-res.caret-tick : library-drop-res.resolved-start,
-                        sequence.fps.num,
-                        sequence.fps.den,
-                        sequence.drop-frame);
-                }
-
-                // Marquee rectangle (content space, above everything).
-                if TimelineViewState.marquee-active: Rectangle {
-                    x: min(TimelineViewState.marquee-anchor-x, TimelineViewState.marquee-x);
-                    y: min(TimelineViewState.marquee-anchor-y, TimelineViewState.marquee-y);
-                    width: max(TimelineViewState.marquee-anchor-x, TimelineViewState.marquee-x) - self.x;
-                    height: max(TimelineViewState.marquee-anchor-y, TimelineViewState.marquee-y) - self.y;
-                    background: AppStore.theme.accent.primary.with-alpha(0.1);
-                    border-width: 1px;
-                    border-color: AppStore.theme.accent.primary;
-                }
-
-                // Playhead line — content-space x; scrolls with the lanes.
-                Rectangle {
-                    x: TimelineStore.playhead-tick * TimelineStore.zoom * 1px;
-                    y: 0;
-                    width: 1px;
-                    height: max(parent.height, content-height);
-                    background: #ffffff;
-                }
-
-                // Preview axis hover line (CapCut yellow/accent — does not move playhead).
-                if TimelineStore.preview-axis-enabled
-                        && TimelineViewState.hover-preview-tick >= 0
-                        && root.preview-axis-gesture-free
-                        && !TimelineStore.playing: Rectangle {
-                    x: TimelineViewState.hover-preview-tick * TimelineStore.zoom * 1px;
-                    y: 0;
-                    width: 2px;
-                    height: max(parent.height, content-height);
-                    background: AppStore.theme.accent.primary.with-alpha(0.85);
-                }
-
-                // Transition junction highlight while dragging from the library.
-                if transition-drag-over && transition-drop-res.valid: Rectangle {
-                    x: transition-drop-res.cut-tick * TimelineStore.zoom * 1px - 6px;
-                    y: (transition-drop-res.row + 1) * row-pitch;
-                    width: 12px;
-                    height: track-height - 5px;
-                    border-width: 2px;
-                    border-color: #C84A8F;
-                    background: #C84A8F22;
-                    border-radius: 2px;
-                }
                 }
             }
 

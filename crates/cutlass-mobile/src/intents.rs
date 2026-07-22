@@ -1084,13 +1084,13 @@ fn copy_look(engine: &mut Engine, snapshot: &Clip, new: ClipId) -> Result<(), En
     if snapshot.mask.is_some() {
         engine.apply(Command::Edit(EditCommand::SetClipMask {
             clip: new,
-            mask: snapshot.mask,
+            mask: snapshot.mask.clone(),
         }))?;
     }
     if snapshot.chroma_key.is_some() {
         engine.apply(Command::Edit(EditCommand::SetClipChroma {
             clip: new,
-            chroma: snapshot.chroma_key,
+            chroma: snapshot.chroma_key.clone(),
         }))?;
     }
     if snapshot.stabilize.is_some() {
@@ -1108,7 +1108,7 @@ fn copy_look(engine: &mut Engine, snapshot: &Clip, new: ClipId) -> Result<(), En
     if !snapshot.adjust.is_neutral() {
         engine.apply(Command::Edit(EditCommand::SetClipAdjustments {
             clip: new,
-            adjust: snapshot.adjust,
+            adjust: snapshot.adjust.clone(),
         }))?;
     }
     for (slot, animation) in [

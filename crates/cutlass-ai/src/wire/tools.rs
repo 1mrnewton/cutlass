@@ -129,7 +129,7 @@ tools! {
     "move_effect" => MoveEffect(MoveEffect),
         "Reorder a clip's effect chain. Both from_index and to_index address the current pre-move chain; to_index is the effect's final index. See describe_project for the current order.";
     "set_effect_param" => SetEffectParam(SetEffectParam),
-        "Set a parameter of an effect on a clip to a value (e.g. gaussian_blur 'radius', vignette 'amount'). Use describe_project to see effect indices and current params.";
+        "Set a parameter of an effect on a clip. Use `value` for scalars (e.g. gaussian_blur 'radius'), `position` for vec2 params (e.g. color_overlay 'offset'), and `rgba` for color params (e.g. duotone 'shadow_color'). Use describe_project to see effect indices and current params.";
     "add_transition" => AddTransition(AddTransition),
         "Add a transition at the cut where a clip meets the next clip on its track. Available transitions: crossfade, dip_to_black, dip_to_white, wipe_left, wipe_right, wipe_up, wipe_down, slide. The clip must butt directly against a following clip. Not valid on audio tracks.";
     "remove_transition" => RemoveTransition(RemoveTransition),
@@ -137,11 +137,11 @@ tools! {
     "set_transition" => SetTransition(SetTransition),
         "Set the duration in seconds of the transition at a clip's right cut (centered on the cut).";
     "set_param_keyframe" => SetParamKeyframe(SetParamKeyframe),
-        "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), volume, speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, and color-look `{look:{param}}` properties. Use `value` for scalars, `position` for position/anchor_point, and `rgba` for text or shape colors. Effect names and valid properties are visible in describe_project.";
+        "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), volume, speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, and color-look `{look:{param}}` properties. Use `value` for scalars, `position` for position/anchor_point and vec2 effect params, and `rgba` for text, shape, style, or effect colors. Effect names and valid properties are visible in describe_project.";
     "remove_param_keyframe" => RemoveParamKeyframe(RemoveParamKeyframe),
         "Remove the keyframe at a timeline position (seconds) on any animatable clip property. Use the same `param` selector as set_param_keyframe. Removing the last keyframe freezes the property at that value.";
     "set_param_constant" => SetParamConstant(SetParamConstant),
-        "Set any animatable clip property to a fixed value and remove all its keyframes (stops its animation). Use the same `param` selector as set_param_keyframe, with `value` for scalars, `position` for position/anchor_point, or `rgba` for text and shape colors.";
+        "Set any animatable clip property to a fixed value and remove all its keyframes (stops its animation). Use the same `param` selector as set_param_keyframe, with `value` for scalars, `position` for position/anchor_point and vec2 effect params, or `rgba` for text, shape, style, or effect colors.";
     "set_clip_speed" => SetClipSpeed(SetClipSpeed),
         "Change a media clip's playback speed (2.0 = double speed, 0.5 = slow motion) and/or play it in reverse. The clip's timeline length re-derives from the speed; its audio time-stretches to match (pitch preserved by default). Not valid for generated clips.";
     "set_speed_curve" => SetSpeedCurve(SetSpeedCurve),

@@ -55,7 +55,9 @@ use serde::{Deserialize, Serialize};
 ///     `set_clip_mask`.
 /// 31: six new adjust sliders (tint/hue/highlights/shadows/sharpness/vignette)
 ///     on `set_clip_adjustments` and look keyframe params.
-pub const TOOL_SCHEMA_VERSION: u32 = 31;
+/// 32: typed effect params — Color via `rgba`, Vec2 via `position` on
+///     `set_effect_param` / `set_param_keyframe` / `set_param_constant`.
+pub const TOOL_SCHEMA_VERSION: u32 = 32;
 
 mod dtos;
 mod tools;

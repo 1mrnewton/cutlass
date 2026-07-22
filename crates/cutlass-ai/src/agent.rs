@@ -1346,9 +1346,16 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
             a.from_index, a.to_index, a.clip
         ),
         WireCommand::SetEffectParam(a) => {
+            let shown = if let Some(c) = a.rgba {
+                rgba(c)
+            } else if let Some(p) = a.position {
+                format!("[{:.2}, {:.2}]", p[0], p[1])
+            } else {
+                a.value.map(|v| v.to_string()).unwrap_or_else(|| "?".into())
+            };
             format!(
                 "set clip {} effect {} {} = {}",
-                a.clip, a.index, a.param, a.value
+                a.clip, a.index, a.param, shown
             )
         }
         WireCommand::AddTransition(a) => {

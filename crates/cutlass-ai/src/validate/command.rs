@@ -218,40 +218,74 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         }
         WireCommand::SetEffectParam(args) => {
             let clip = clip_ref(project, args.clip)?;
-            let index = effect_index(clip, args.index, args.clip)?;
-            let instance = &clip.effects[index];
-            let spec = cutlass_models::effect_spec(&instance.effect_id).ok_or_else(|| {
-                Rejection::new(format!(
-                    "effect '{}' on clip {} is not in the catalog",
-                    instance.effect_id, args.clip
-                ))
-            })?;
-            let slot = spec
-                .params
-                .iter()
-                .position(|p| p.name == args.param)
-                .ok_or_else(|| {
-                    let names: Vec<&str> = spec.params.iter().map(|p| p.name).collect();
-                    Rejection::new(format!(
-                        "effect '{}' has no parameter '{}'; parameters: {}",
-                        instance.effect_id,
-                        args.param,
-                        names.join(", ")
-                    ))
-                })?;
-            let p = &spec.params[slot];
-            let v = args.value;
-            if !v.is_finite() || v < f64::from(p.min) || v > f64::from(p.max) {
-                return Err(Rejection::new(format!(
-                    "{} must be between {} and {} (got {})",
-                    args.param, p.min, p.max, v
-                )));
-            }
-            EditCommand::SetEffectParam {
-                clip: clip.id,
-                index,
-                param: slot,
-                value: v as f32,
+            let (index, slot, p) = effect_param_slot(clip, args.index, &args.param, args.clip)?;
+            match p.kind {
+                cutlass_models::EffectParamKind::Scalar => {
+                    let v = args.value.ok_or_else(|| {
+                        Rejection::new(format!(
+                            "effect param '{}' is a scalar; pass 'value' (a number)",
+                            args.param
+                        ))
+                    })?;
+                    if !v.is_finite() || v < f64::from(p.min) || v > f64::from(p.max) {
+                        return Err(Rejection::new(format!(
+                            "{} must be between {} and {} (got {})",
+                            args.param, p.min, p.max, v
+                        )));
+                    }
+                    EditCommand::SetEffectParam {
+                        clip: clip.id,
+                        index,
+                        param: slot,
+                        value: v as f32,
+                    }
+                }
+                cutlass_models::EffectParamKind::Color => {
+                    let rgba = args.rgba.ok_or_else(|| {
+                        Rejection::new(format!(
+                            "effect param '{}' is a color; pass 'rgba' as \
+                             [red, green, blue, alpha]",
+                            args.param
+                        ))
+                    })?;
+                    EditCommand::SetParamConstant {
+                        clip: clip.id,
+                        param: ClipParam::Effect {
+                            effect: index as u32,
+                            param: slot as u32,
+                        },
+                        value: ParamValue::Color(rgba),
+                    }
+                }
+                cutlass_models::EffectParamKind::Vec2 => {
+                    let position = args.position.ok_or_else(|| {
+                        Rejection::new(format!(
+                            "effect param '{}' is a vec2; pass 'position' as [x, y]",
+                            args.param
+                        ))
+                    })?;
+                    let v = [position[0] as f32, position[1] as f32];
+                    if !v[0].is_finite()
+                        || !v[1].is_finite()
+                        || v[0] < p.min
+                        || v[0] > p.max
+                        || v[1] < p.min
+                        || v[1] > p.max
+                    {
+                        return Err(Rejection::new(format!(
+                            "{} components must be between {} and {} (got [{}, {}])",
+                            args.param, p.min, p.max, v[0], v[1]
+                        )));
+                    }
+                    EditCommand::SetParamConstant {
+                        clip: clip.id,
+                        param: ClipParam::Effect {
+                            effect: index as u32,
+                            param: slot as u32,
+                        },
+                        value: ParamValue::Vec2(v),
+                    }
+                }
             }
         }
         WireCommand::AddTransition(args) => {
@@ -299,7 +333,14 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         WireCommand::SetParamKeyframe(args) => {
             let clip = clip_ref(project, args.clip)?;
             let at = keyframe_position(project, clip, args.at)?;
-            let value = param_value(&args.param, args.value, args.position, args.rgba)?;
+            let value = param_value(
+                clip,
+                args.clip,
+                &args.param,
+                args.value,
+                args.position,
+                args.rgba,
+            )?;
             EditCommand::SetParamKeyframe {
                 clip: clip.id,
                 param: clip_param(&args.param, clip, args.clip)?,
@@ -333,7 +374,14 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         WireCommand::SetClipAudio(args) => set_clip_audio(project, args)?,
         WireCommand::SetParamConstant(args) => {
             let clip = clip_ref(project, args.clip)?;
-            let value = param_value(&args.param, args.value, args.position, args.rgba)?;
+            let value = param_value(
+                clip,
+                args.clip,
+                &args.param,
+                args.value,
+                args.position,
+                args.rgba,
+            )?;
             EditCommand::SetParamConstant {
                 clip: clip.id,
                 param: clip_param(&args.param, clip, args.clip)?,

@@ -237,17 +237,27 @@ pub struct MoveEffect {
 }
 
 /// Set one parameter of an effect already on a clip to a fixed value. The
-/// value is range-checked against the catalog. Use `set_param_keyframe`
+/// value is range-checked against the catalog. Use `value` for scalars,
+/// `position` for vec2 params (e.g. color_overlay `offset`), and `rgba` for
+/// color params (e.g. duotone `shadow_color`). Use `set_param_keyframe`
 /// with an effect param to animate it instead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetEffectParam {
     pub clip: u64,
     /// Index of the effect in the clip's chain (0 = first).
     pub index: u32,
-    /// Parameter name, e.g. `radius` (gaussian_blur) or `amount` (vignette).
+    /// Parameter name, e.g. `radius` (gaussian_blur) or `shadow_color` (duotone).
     pub param: String,
-    /// New value (clamped to the parameter's catalog range).
-    pub value: f64,
+    /// New scalar value. Required for scalar params; ignored for color/vec2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    /// New `[x, y]` for vec2 effect params. Ignored for scalar and color.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<[f64; 2]>,
+    /// New `[red, green, blue, alpha]` for color effect params. Ignored for
+    /// scalar and vec2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rgba: Option<[u8; 4]>,
 }
 
 /// Add a transition at the junction where `clip` abuts the next clip on its
@@ -300,9 +310,10 @@ pub enum WireClipParam {
     /// Playback-rate ramp (scalar: 1.0 = normal speed). Media-backed clips
     /// only; keyframes use normalized positions within the clip.
     Speed,
-    /// A scalar parameter of an effect already on the clip. `index` is the
+    /// A parameter of an effect already on the clip. `index` is the
     /// effect-chain position and `param` is its catalog name, as in
-    /// `set_effect_param`.
+    /// `set_effect_param`. Use `value` for scalars, `position` for vec2
+    /// params, and `rgba` for color params.
     Effect { index: u32, param: String },
     /// A visual property of a generated shape clip.
     Shape { param: WireShapeParam },
@@ -422,16 +433,17 @@ pub struct SetParamKeyframe {
     /// Timeline position of the keyframe, in seconds. Must fall inside the
     /// clip.
     pub at: f64,
-    /// New value for scalar parameters. Ignored for position and color
+    /// New value for scalar parameters. Ignored for position/vec2 and color
     /// parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`, or
-    /// look `mask_center` / `mask_size`. Ignored for scalar and color params.
+    /// New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`,
+    /// look `mask_center` / `mask_size`, or vec2 effect params. Ignored for
+    /// scalar and color params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f64; 2]>,
-    /// New `[red, green, blue, alpha]` color for shape or text color
-    /// parameters. Ignored for scalar and vec2 params.
+    /// New `[red, green, blue, alpha]` for shape, text, style, or effect
+    /// color parameters. Ignored for scalar and vec2 params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rgba: Option<[u8; 4]>,
     /// Interpolation toward the next keyframe. Defaults to linear.
@@ -455,16 +467,17 @@ pub struct RemoveParamKeyframe {
 pub struct SetParamConstant {
     pub clip: u64,
     pub param: WireClipParam,
-    /// New value for scalar parameters. Ignored for position and color
+    /// New value for scalar parameters. Ignored for position/vec2 and color
     /// parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`, or
-    /// look `mask_center` / `mask_size`. Ignored for scalar and color params.
+    /// New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`,
+    /// look `mask_center` / `mask_size`, or vec2 effect params. Ignored for
+    /// scalar and color params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f64; 2]>,
-    /// New `[red, green, blue, alpha]` color for shape or text color
-    /// parameters. Ignored for scalar and vec2 params.
+    /// New `[red, green, blue, alpha]` for shape, text, style, or effect
+    /// color parameters. Ignored for scalar and vec2 params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rgba: Option<[u8; 4]>,
 }

@@ -2265,3 +2265,121 @@ fn non_finite_and_negative_times_are_rejected() {
     );
     assert!(msg.contains("must not be negative"), "{msg}");
 }
+
+#[test]
+fn typed_effect_params_accept_rgba_and_position_on_wire() {
+    let (mut project, _, _, _, clip, _) = fixture();
+    project
+        .add_effect(ClipId::from_raw(clip), "duotone")
+        .unwrap();
+    project
+        .add_effect(ClipId::from_raw(clip), "color_overlay")
+        .unwrap();
+
+    let kf = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Effect {
+                index: 0,
+                param: "shadow_color".into(),
+            },
+            at: 1.0,
+            value: None,
+            position: None,
+            rgba: Some([20, 16, 60, 255]),
+            easing: None,
+        }),
+    );
+    assert_eq!(
+        kf,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Effect {
+                effect: 0,
+                param: 0,
+            },
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Color([20, 16, 60, 255]),
+            easing: Easing::Linear,
+        }
+    );
+
+    let msg = reject(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Effect {
+                index: 0,
+                param: "shadow_color".into(),
+            },
+            at: 1.0,
+            value: Some(0.5),
+            position: None,
+            rgba: None,
+            easing: None,
+        }),
+    );
+    assert!(msg.contains("color"), "{msg}");
+    assert!(msg.contains("rgba"), "{msg}");
+
+    let offset = lower(
+        &project,
+        WireCommand::SetEffectParam(wire::SetEffectParam {
+            clip,
+            index: 1,
+            param: "offset".into(),
+            value: None,
+            position: Some([0.25, -0.5]),
+            rgba: None,
+        }),
+    );
+    assert_eq!(
+        offset,
+        EditCommand::SetParamConstant {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Effect {
+                effect: 1,
+                param: 1,
+            },
+            value: ParamValue::Vec2([0.25, -0.5]),
+        }
+    );
+
+    let color_const = lower(
+        &project,
+        WireCommand::SetEffectParam(wire::SetEffectParam {
+            clip,
+            index: 0,
+            param: "highlight_color".into(),
+            value: None,
+            position: None,
+            rgba: Some([255, 220, 160, 255]),
+        }),
+    );
+    assert_eq!(
+        color_const,
+        EditCommand::SetParamConstant {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Effect {
+                effect: 0,
+                param: 1,
+            },
+            value: ParamValue::Color([255, 220, 160, 255]),
+        }
+    );
+
+    let msg = reject(
+        &project,
+        WireCommand::SetEffectParam(wire::SetEffectParam {
+            clip,
+            index: 0,
+            param: "shadow_color".into(),
+            value: Some(0.5),
+            position: None,
+            rgba: None,
+        }),
+    );
+    assert!(msg.contains("color"), "{msg}");
+    assert!(msg.contains("rgba"), "{msg}");
+}

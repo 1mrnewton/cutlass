@@ -49,15 +49,45 @@ pub(super) fn easing(easing: Option<WireEasing>) -> Result<Easing, Rejection> {
     Ok(easing)
 }
 
-/// Build the typed parameter value from the wire's `value` / `position`
-/// fields, rejecting the wrong shape with a message naming the right one.
+/// Build the typed parameter value from the wire's `value` / `position` /
+/// `rgba` fields, rejecting the wrong shape with a message naming the right
+/// one. Effect params look up the catalog kind on `clip`.
 pub(super) fn param_value(
+    clip: &Clip,
+    wire_clip: u64,
     param: &WireClipParam,
     value: Option<f64>,
     position: Option<[f64; 2]>,
     rgba: Option<[u8; 4]>,
 ) -> Result<ParamValue, Rejection> {
     match param {
+        WireClipParam::Effect { index, param: name } => {
+            let (_, _, pspec) = effect_param_slot(clip, *index, name, wire_clip)?;
+            match pspec.kind {
+                cutlass_models::EffectParamKind::Scalar => {
+                    value.map(|v| ParamValue::Scalar(v as f32)).ok_or_else(|| {
+                        Rejection::new(format!(
+                            "effect param '{name}' is a scalar; pass 'value' (a number)"
+                        ))
+                    })
+                }
+                cutlass_models::EffectParamKind::Vec2 => position
+                    .map(|p| ParamValue::Vec2([p[0] as f32, p[1] as f32]))
+                    .ok_or_else(|| {
+                        Rejection::new(format!(
+                            "effect param '{name}' is a vec2; pass 'position' as [x, y]"
+                        ))
+                    }),
+                cutlass_models::EffectParamKind::Color => {
+                    rgba.map(ParamValue::Color).ok_or_else(|| {
+                        Rejection::new(format!(
+                            "effect param '{name}' is a color; pass 'rgba' as \
+                             [red, green, blue, alpha]"
+                        ))
+                    })
+                }
+            }
+        }
         WireClipParam::Position
         | WireClipParam::AnchorPoint
         | WireClipParam::Style {
@@ -78,7 +108,6 @@ pub(super) fn param_value(
         | WireClipParam::Opacity
         | WireClipParam::Volume
         | WireClipParam::Speed
-        | WireClipParam::Effect { .. }
         | WireClipParam::Shape {
             param:
                 WireShapeParam::Width

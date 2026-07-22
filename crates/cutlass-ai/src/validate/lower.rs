@@ -19,27 +19,7 @@ pub(super) fn clip_param(
         WireClipParam::Volume => ClipParam::Volume,
         WireClipParam::Speed => ClipParam::Speed,
         WireClipParam::Effect { index, param } => {
-            let effect = effect_index(clip, *index, wire_clip)?;
-            let instance = &clip.effects[effect];
-            let spec = cutlass_models::effect_spec(&instance.effect_id).ok_or_else(|| {
-                Rejection::new(format!(
-                    "effect '{}' on clip {wire_clip} is not in the catalog",
-                    instance.effect_id
-                ))
-            })?;
-            let slot = spec
-                .params
-                .iter()
-                .position(|p| p.name == param)
-                .ok_or_else(|| {
-                    let names: Vec<&str> = spec.params.iter().map(|p| p.name).collect();
-                    Rejection::new(format!(
-                        "effect '{}' has no parameter '{}'; parameters: {}",
-                        instance.effect_id,
-                        param,
-                        names.join(", ")
-                    ))
-                })?;
+            let (effect, slot, _) = effect_param_slot(clip, *index, param, wire_clip)?;
             ClipParam::Effect {
                 effect: effect as u32,
                 param: slot as u32,

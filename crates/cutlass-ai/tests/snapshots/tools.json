@@ -648,11 +648,11 @@
       }
     },
     {
-      "description": "Set a parameter of an effect on a clip to a value (e.g. gaussian_blur 'radius', vignette 'amount'). Use describe_project to see effect indices and current params.",
+      "description": "Set a parameter of an effect on a clip. Use `value` for scalars (e.g. gaussian_blur 'radius'), `position` for vec2 params (e.g. color_overlay 'offset'), and `rgba` for color params (e.g. duotone 'shadow_color'). Use describe_project to see effect indices and current params.",
       "name": "set_effect_param",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Set one parameter of an effect already on a clip to a fixed value. The\nvalue is range-checked against the catalog. Use `set_param_keyframe`\nwith an effect param to animate it instead.",
+        "description": "Set one parameter of an effect already on a clip to a fixed value. The\nvalue is range-checked against the catalog. Use `value` for scalars,\n`position` for vec2 params (e.g. color_overlay `offset`), and `rgba` for\ncolor params (e.g. duotone `shadow_color`). Use `set_param_keyframe`\nwith an effect param to animate it instead.",
         "properties": {
           "clip": {
             "format": "uint64",
@@ -666,20 +666,50 @@
             "type": "integer"
           },
           "param": {
-            "description": "Parameter name, e.g. `radius` (gaussian_blur) or `amount` (vignette).",
+            "description": "Parameter name, e.g. `radius` (gaussian_blur) or `shadow_color` (duotone).",
             "type": "string"
           },
+          "position": {
+            "description": "New `[x, y]` for vec2 effect params. Ignored for scalar and color.",
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "rgba": {
+            "description": "New `[red, green, blue, alpha]` for color effect params. Ignored for\nscalar and vec2.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 4,
+            "minItems": 4,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "value": {
-            "description": "New value (clamped to the parameter's catalog range).",
+            "description": "New scalar value. Required for scalar params; ignored for color/vec2.",
             "format": "double",
-            "type": "number"
+            "type": [
+              "number",
+              "null"
+            ]
           }
         },
         "required": [
           "clip",
           "index",
-          "param",
-          "value"
+          "param"
         ],
         "title": "SetEffectParam",
         "type": "object"
@@ -757,7 +787,7 @@
       }
     },
     {
-      "description": "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), volume, speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, and color-look `{look:{param}}` properties. Use `value` for scalars, `position` for position/anchor_point, and `rgba` for text or shape colors. Effect names and valid properties are visible in describe_project.",
+      "description": "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), volume, speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, and color-look `{look:{param}}` properties. Use `value` for scalars, `position` for position/anchor_point and vec2 effect params, and `rgba` for text, shape, style, or effect colors. Effect names and valid properties are visible in describe_project.",
       "name": "set_param_keyframe",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -866,7 +896,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "A scalar parameter of an effect already on the clip. `index` is the\neffect-chain position and `param` is its catalog name, as in\n`set_effect_param`.",
+                "description": "A parameter of an effect already on the clip. `index` is the\neffect-chain position and `param` is its catalog name, as in\n`set_effect_param`. Use `value` for scalars, `position` for vec2\nparams, and `rgba` for color params.",
                 "properties": {
                   "effect": {
                     "properties": {
@@ -1037,7 +1067,7 @@
             ]
           },
           "position": {
-            "description": "New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`, or\nlook `mask_center` / `mask_size`. Ignored for scalar and color params.",
+            "description": "New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`,\nlook `mask_center` / `mask_size`, or vec2 effect params. Ignored for\nscalar and color params.",
             "items": {
               "format": "double",
               "type": "number"
@@ -1050,7 +1080,7 @@
             ]
           },
           "rgba": {
-            "description": "New `[red, green, blue, alpha]` color for shape or text color\nparameters. Ignored for scalar and vec2 params.",
+            "description": "New `[red, green, blue, alpha]` for shape, text, style, or effect\ncolor parameters. Ignored for scalar and vec2 params.",
             "items": {
               "format": "uint8",
               "maximum": 255,
@@ -1065,7 +1095,7 @@
             ]
           },
           "value": {
-            "description": "New value for scalar parameters. Ignored for position and color\nparameters.",
+            "description": "New value for scalar parameters. Ignored for position/vec2 and color\nparameters.",
             "format": "double",
             "type": [
               "number",
@@ -1139,7 +1169,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "A scalar parameter of an effect already on the clip. `index` is the\neffect-chain position and `param` is its catalog name, as in\n`set_effect_param`.",
+                "description": "A parameter of an effect already on the clip. `index` is the\neffect-chain position and `param` is its catalog name, as in\n`set_effect_param`. Use `value` for scalars, `position` for vec2\nparams, and `rgba` for color params.",
                 "properties": {
                   "effect": {
                     "properties": {
@@ -1320,7 +1350,7 @@
       }
     },
     {
-      "description": "Set any animatable clip property to a fixed value and remove all its keyframes (stops its animation). Use the same `param` selector as set_param_keyframe, with `value` for scalars, `position` for position/anchor_point, or `rgba` for text and shape colors.",
+      "description": "Set any animatable clip property to a fixed value and remove all its keyframes (stops its animation). Use the same `param` selector as set_param_keyframe, with `value` for scalars, `position` for position/anchor_point and vec2 effect params, or `rgba` for text, shape, style, or effect colors.",
       "name": "set_param_constant",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1371,7 +1401,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "A scalar parameter of an effect already on the clip. `index` is the\neffect-chain position and `param` is its catalog name, as in\n`set_effect_param`.",
+                "description": "A parameter of an effect already on the clip. `index` is the\neffect-chain position and `param` is its catalog name, as in\n`set_effect_param`. Use `value` for scalars, `position` for vec2\nparams, and `rgba` for color params.",
                 "properties": {
                   "effect": {
                     "properties": {
@@ -1542,7 +1572,7 @@
             ]
           },
           "position": {
-            "description": "New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`, or\nlook `mask_center` / `mask_size`. Ignored for scalar and color params.",
+            "description": "New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`,\nlook `mask_center` / `mask_size`, or vec2 effect params. Ignored for\nscalar and color params.",
             "items": {
               "format": "double",
               "type": "number"
@@ -1555,7 +1585,7 @@
             ]
           },
           "rgba": {
-            "description": "New `[red, green, blue, alpha]` color for shape or text color\nparameters. Ignored for scalar and vec2 params.",
+            "description": "New `[red, green, blue, alpha]` for shape, text, style, or effect\ncolor parameters. Ignored for scalar and vec2 params.",
             "items": {
               "format": "uint8",
               "maximum": 255,
@@ -1570,7 +1600,7 @@
             ]
           },
           "value": {
-            "description": "New value for scalar parameters. Ignored for position and color\nparameters.",
+            "description": "New value for scalar parameters. Ignored for position/vec2 and color\nparameters.",
             "format": "double",
             "type": [
               "number",
@@ -2949,5 +2979,5 @@
       }
     }
   ],
-  "version": 31
+  "version": 32
 }

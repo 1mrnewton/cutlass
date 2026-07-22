@@ -105,6 +105,37 @@ pub(super) fn effect_index(clip: &Clip, index: u32, raw_clip: u64) -> Result<usi
     Ok(index)
 }
 
+/// Resolve `(effect index, param name)` to the catalog slot and its spec.
+pub(super) fn effect_param_slot(
+    clip: &Clip,
+    index: u32,
+    param: &str,
+    raw_clip: u64,
+) -> Result<(usize, usize, &'static cutlass_models::EffectParamSpec), Rejection> {
+    let effect = effect_index(clip, index, raw_clip)?;
+    let instance = &clip.effects[effect];
+    let spec = cutlass_models::effect_spec(&instance.effect_id).ok_or_else(|| {
+        Rejection::new(format!(
+            "effect '{}' on clip {raw_clip} is not in the catalog",
+            instance.effect_id
+        ))
+    })?;
+    let slot = spec
+        .params
+        .iter()
+        .position(|p| p.name == param)
+        .ok_or_else(|| {
+            let names: Vec<&str> = spec.params.iter().map(|p| p.name).collect();
+            Rejection::new(format!(
+                "effect '{}' has no parameter '{}'; parameters: {}",
+                instance.effect_id,
+                param,
+                names.join(", ")
+            ))
+        })?;
+    Ok((effect, slot, &spec.params[slot]))
+}
+
 /// Reject clips on an audio lane, which have no frame to operate on.
 pub(super) fn reject_audio_lane(
     project: &Project,

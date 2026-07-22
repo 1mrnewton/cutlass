@@ -124,6 +124,15 @@ pub struct Clip {
     /// other [`Param`]. `1.0` (and absent from saves) when never touched.
     #[serde(default = "default_volume", skip_serializing_if = "is_unit_volume")]
     pub volume: Param<f32>,
+    /// Stereo pan envelope (CapCut left/right balance): `−1.0` full left,
+    /// `0.0` center, `+1.0` full right. Read by both audio mixers for
+    /// media-backed clips (video with sound and audio-lane clips); meaningless
+    /// elsewhere. A constant for the common case (absent from saves while
+    /// centered), or a keyframed [`Param`] envelope: the mixers sample it per
+    /// sample-frame. Keyframe ticks are clip-relative timeline ticks, like
+    /// every other [`Param`]. `0.0` (and absent from saves) when never touched.
+    #[serde(default = "default_pan", skip_serializing_if = "is_zero_pan")]
+    pub pan: Param<f32>,
     /// Fade-in duration in timeline ticks from the clip's start: a linear
     /// gain ramp 0 → `volume`. First-class field like CapCut, not keyframe
     /// sugar. Absent from saves while 0.
@@ -242,6 +251,10 @@ pub struct Clip {
 /// Upper bound for [`Clip::volume`] (CapCut's 1000% ceiling).
 pub const MAX_CLIP_VOLUME: f32 = 10.0;
 
+/// Bounds for [`Clip::pan`]: full left … full right.
+pub const MIN_CLIP_PAN: f32 = -1.0;
+pub const MAX_CLIP_PAN: f32 = 1.0;
+
 /// Default entrance/exit look-animation window (~0.5 seconds), shortened to
 /// half the clip for short placements. Kept in the model so structural edits
 /// and the renderer use exactly the same timing rule.
@@ -297,6 +310,16 @@ fn is_unit_volume(volume: &Param<f32>) -> bool {
     matches!(volume, Param::Constant(v) if *v == 1.0)
 }
 
+fn default_pan() -> Param<f32> {
+    Param::Constant(0.0)
+}
+
+/// A flat center pan — no stereo edit. `&` form for serde's
+/// `skip_serializing_if`.
+fn is_zero_pan(pan: &Param<f32>) -> bool {
+    matches!(pan, Param::Constant(v) if *v == 0.0)
+}
+
 fn default_crop() -> Param<CropRect> {
     Param::Constant(CropRect::FULL)
 }
@@ -325,6 +348,24 @@ pub fn validate_volume(v: f32) -> Result<(), ModelError> {
 pub fn validate_volume_envelope(volume: &Param<f32>) -> Result<(), ModelError> {
     volume.validate_shape()?;
     volume.for_each_value(|v| validate_volume(*v))
+}
+
+/// Range check for one pan value: finite, within [`MIN_CLIP_PAN`]..=[`MAX_CLIP_PAN`].
+/// Shared by the envelope keyframe routing and load-time envelope validation.
+pub fn validate_pan(v: f32) -> Result<(), ModelError> {
+    if !v.is_finite() || !(MIN_CLIP_PAN..=MAX_CLIP_PAN).contains(&v) {
+        return Err(ModelError::InvalidParam(format!(
+            "pan must be between {MIN_CLIP_PAN} and {MAX_CLIP_PAN}"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a pan envelope before it is stored: structurally sound with every
+/// value in pan range.
+pub fn validate_pan_envelope(pan: &Param<f32>) -> Result<(), ModelError> {
+    pan.validate_shape()?;
+    pan.for_each_value(|v| validate_pan(*v))
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -382,6 +423,7 @@ impl Clip {
             speed_curve: default_speed_curve(),
             preserve_pitch: default_preserve_pitch(),
             volume: default_volume(),
+            pan: default_pan(),
             fade_in: 0,
             fade_out: 0,
             denoise: false,
@@ -432,6 +474,7 @@ impl Clip {
         companion.speed_curve = self.speed_curve.clone();
         companion.preserve_pitch = self.preserve_pitch;
         companion.volume = self.volume.clone();
+        companion.pan = self.pan.clone();
         companion.fade_in = self.fade_in;
         companion.fade_out = self.fade_out;
         companion.denoise = self.denoise;
@@ -505,6 +548,7 @@ impl Clip {
         frozen.speed_curve = default_speed_curve();
         frozen.preserve_pitch = default_preserve_pitch();
         frozen.volume = default_volume();
+        frozen.pan = default_pan();
         frozen.fade_in = 0;
         frozen.fade_out = 0;
         frozen.denoise = false;
@@ -535,6 +579,7 @@ impl Clip {
             speed_curve: default_speed_curve(),
             preserve_pitch: default_preserve_pitch(),
             volume: default_volume(),
+            pan: default_pan(),
             fade_in: 0,
             fade_out: 0,
             denoise: false,
@@ -566,6 +611,7 @@ impl Clip {
     pub(crate) fn shift_timeline_params(&mut self, delta: i64) -> Result<(), ModelError> {
         self.transform.shift_ticks(delta)?;
         self.volume.shift_ticks(delta)?;
+        self.pan.shift_ticks(delta)?;
         self.crop.shift_ticks(delta)?;
         for effect in &mut self.effects {
             effect.shift_param_ticks(delta)?;
@@ -583,15 +629,25 @@ impl Clip {
     }
 
     /// True iff the clip's audio mix differs from the default (full volume,
-    /// no fades) — drives the inspector reset state and timeline badges.
+    /// centered pan, no fades) — drives the inspector reset state and timeline
+    /// badges.
     pub fn has_custom_audio(&self) -> bool {
-        !is_unit_volume(&self.volume) || self.fade_in > 0 || self.fade_out > 0
+        !is_unit_volume(&self.volume)
+            || !is_zero_pan(&self.pan)
+            || self.fade_in > 0
+            || self.fade_out > 0
     }
 
     /// True iff the clip carries a keyframed volume envelope (M8), versus a
     /// flat constant gain. Drives the inspector envelope UI and the badge.
     pub fn has_volume_envelope(&self) -> bool {
         self.volume.is_animated()
+    }
+
+    /// True iff the clip carries a keyframed pan envelope, versus a flat
+    /// constant balance.
+    pub fn has_pan_envelope(&self) -> bool {
+        self.pan.is_animated()
     }
 
     /// True iff the clip is inaudible: a freeze frame or a constant gain of

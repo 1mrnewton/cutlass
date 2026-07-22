@@ -85,6 +85,7 @@ fn freeze_helper_bakes_visual_state_and_clears_dynamic_semantics() {
     };
     source.preserve_pitch = false;
     source.volume = Param::Constant(0.25);
+    source.pan = Param::Constant(-0.5);
     source.fade_in = 4;
     source.fade_out = 6;
     source.denoise = true;
@@ -157,6 +158,7 @@ fn freeze_helper_bakes_visual_state_and_clears_dynamic_semantics() {
     assert_eq!(frozen.speed_curve, Param::Constant(1.0));
     assert!(frozen.preserve_pitch);
     assert_eq!(frozen.volume, Param::Constant(1.0));
+    assert_eq!(frozen.pan, Param::Constant(0.0));
     assert_eq!((frozen.fade_in, frozen.fade_out), (0, 0));
     assert!(!frozen.denoise);
     assert!(frozen.beats.is_empty());

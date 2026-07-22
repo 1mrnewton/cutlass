@@ -1814,6 +1814,61 @@ fn split_keeps_volume_and_partitions_fades() {
     assert_eq!((right.fade_in, right.fade_out), (0, 20));
 }
 
+#[test]
+fn pan_param_keyframe_through_project_api() {
+    // Video-lane media clip (same target rule as volume — not audio-only).
+    let (mut project, media_id, track) = project_with_media(500);
+    let clip = project
+        .add_clip(track, media_id, tr(0, 100), rt(0))
+        .unwrap();
+
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Pan,
+            rt(0),
+            ParamValue::Scalar(-1.0),
+            Easing::Linear,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Pan,
+            rt(50),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+        )
+        .unwrap();
+    let c = project.clip(clip).unwrap();
+    assert!(c.has_pan_envelope());
+    assert_eq!(c.pan.sample(0), -1.0);
+    assert_eq!(c.pan.sample(50), 1.0);
+    assert_eq!(c.pan.sample(25), 0.0);
+
+    project
+        .set_param_constant(clip, ClipParam::Pan, ParamValue::Scalar(0.25))
+        .unwrap();
+    assert_eq!(project.clip(clip).unwrap().pan.constant(), Some(0.25));
+
+    for bad in [-1.01_f32, 1.01, f32::NAN, f32::INFINITY] {
+        assert!(matches!(
+            project.set_param_constant(clip, ClipParam::Pan, ParamValue::Scalar(bad)),
+            Err(ModelError::InvalidParam(_))
+        ));
+    }
+
+    // Generated clips reject pan exactly like volume/set_clip_audio.
+    let fx = project.add_track(TrackKind::Adjustment, "FX");
+    let generated = project
+        .add_generated(fx, Generator::Adjustment, tr(0, 100))
+        .unwrap();
+    assert!(matches!(
+        project.set_param_constant(generated, ClipParam::Pan, ParamValue::Scalar(0.5)),
+        Err(ModelError::InvalidParam(_))
+    ));
+}
+
 // --- set_clip_crop (M1) ---------------------------------------------------
 
 #[test]

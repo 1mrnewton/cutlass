@@ -79,6 +79,7 @@ fn expected_companion(source: &Clip, id: ClipId) -> Clip {
     expected.speed_curve = source.speed_curve.clone();
     expected.preserve_pitch = source.preserve_pitch;
     expected.volume = source.volume.clone();
+    expected.pan = source.pan.clone();
     expected.fade_in = source.fade_in;
     expected.fade_out = source.fade_out;
     expected.denoise = source.denoise;

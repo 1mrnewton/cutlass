@@ -42,6 +42,20 @@ fn extracted_audio_companion_copies_only_audio_and_retime_state() {
             },
         ],
     };
+    source.pan = Param::Keyframed {
+        keyframes: vec![
+            Keyframe {
+                tick: 0,
+                value: -0.5,
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                tick: 79,
+                value: 0.5,
+                easing: Easing::EaseOut,
+            },
+        ],
+    };
     source.fade_in = 7;
     source.fade_out = 11;
     source.denoise = true;
@@ -81,6 +95,7 @@ fn extracted_audio_companion_copies_only_audio_and_retime_state() {
     expected.speed_curve = source.speed_curve.clone();
     expected.preserve_pitch = source.preserve_pitch;
     expected.volume = source.volume.clone();
+    expected.pan = source.pan.clone();
     expected.fade_in = source.fade_in;
     expected.fade_out = source.fade_out;
     expected.denoise = source.denoise;
@@ -698,12 +713,14 @@ fn default_audio_serializes_without_fields() {
     let value = serde_json::to_value(&clip).expect("serialize");
     let map = value.as_object().expect("clip serializes to a map");
     assert!(!map.contains_key("volume"), "unit volume must stay absent");
+    assert!(!map.contains_key("pan"), "center pan must stay absent");
     assert!(!map.contains_key("fade_in"), "zero fade must stay absent");
     assert!(!map.contains_key("fade_out"), "zero fade must stay absent");
 
-    // And a pre-volume save loads with the defaults.
+    // And a pre-volume / pre-pan save loads with the defaults.
     let loaded: Clip = serde_json::from_value(value).expect("deserialize");
     assert_eq!(loaded.volume, Param::Constant(1.0));
+    assert_eq!(loaded.pan, Param::Constant(0.0));
     assert_eq!((loaded.fade_in, loaded.fade_out), (0, 0));
 }
 
@@ -711,12 +728,14 @@ fn default_audio_serializes_without_fields() {
 fn custom_audio_roundtrips_through_serde() {
     let mut clip = media_clip(MediaId::from_raw(1), tr(0, 48, R24), tr(0, 48, R24));
     clip.volume = Param::Constant(0.5);
+    clip.pan = Param::Constant(-0.25);
     clip.fade_in = 12;
     clip.fade_out = 24;
     assert!(clip.has_custom_audio());
     let json = serde_json::to_string(&clip).expect("serialize");
     let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(loaded.volume, Param::Constant(0.5));
+    assert_eq!(loaded.pan, Param::Constant(-0.25));
     assert_eq!((loaded.fade_in, loaded.fade_out), (12, 24));
 }
 
@@ -732,6 +751,22 @@ fn constant_volume_serializes_as_a_bare_value() {
     // A pre-M8 bare value still loads as a constant.
     let loaded: Clip = serde_json::from_value(value).expect("deserialize");
     assert_eq!(loaded.volume, Param::Constant(0.5));
+}
+
+#[test]
+fn constant_pan_serializes_as_a_bare_value() {
+    let mut clip = media_clip(MediaId::from_raw(1), tr(0, 48, R24), tr(0, 48, R24));
+    clip.pan = Param::Constant(0.5);
+    let value = serde_json::to_value(&clip).expect("serialize");
+    assert_eq!(value.get("pan"), Some(&serde_json::json!(0.5)));
+    // A legacy save without pan loads centered.
+    let mut legacy = value.as_object().cloned().expect("map");
+    legacy.remove("pan");
+    let loaded: Clip = serde_json::from_value(serde_json::Value::Object(legacy)).expect("load");
+    assert_eq!(loaded.pan, Param::Constant(0.0));
+    // Bare constant round-trips without a `{"kf":..}` wrapper.
+    let roundtrip: Clip = serde_json::from_value(value).expect("deserialize");
+    assert_eq!(roundtrip.pan, Param::Constant(0.5));
 }
 
 #[test]
@@ -767,6 +802,48 @@ fn volume_envelope_roundtrips_and_validates() {
         }],
     };
     assert!(validate_volume_envelope(&hot).is_err());
+}
+
+#[test]
+fn pan_envelope_roundtrips_and_validates() {
+    let mut clip = media_clip(MediaId::from_raw(1), tr(0, 48, R24), tr(0, 48, R24));
+    clip.pan = Param::Keyframed {
+        keyframes: vec![
+            Keyframe {
+                tick: 0,
+                value: -1.0,
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                tick: 24,
+                value: 1.0,
+                easing: Easing::EaseOut,
+            },
+        ],
+    };
+    assert!(clip.has_pan_envelope());
+    assert!(clip.has_custom_audio());
+    validate_pan_envelope(&clip.pan).expect("in-range envelope");
+    let json = serde_json::to_string(&clip).expect("serialize");
+    let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(loaded.pan, clip.pan);
+
+    for bad in [
+        MAX_CLIP_PAN + 0.01,
+        MIN_CLIP_PAN - 0.01,
+        f32::NAN,
+        f32::INFINITY,
+    ] {
+        assert!(validate_pan(bad).is_err());
+    }
+    let hot = Param::Keyframed {
+        keyframes: vec![Keyframe {
+            tick: 0,
+            value: MAX_CLIP_PAN + 1.0,
+            easing: Easing::Linear,
+        }],
+    };
+    assert!(validate_pan_envelope(&hot).is_err());
 }
 
 #[test]

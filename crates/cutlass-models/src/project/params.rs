@@ -185,10 +185,11 @@ impl Project {
         Ok(())
     }
 
-    /// Precondition for volume-envelope edits (M8): the clip exists and is
-    /// media-backed (generators have nothing to hear). Mirrors
-    /// [`Self::set_clip_audio`]'s target rule — volume rides any media clip,
-    /// since linkage lands the audible half on an audio lane.
+    /// Precondition for audio-param edits (volume / pan): the clip exists and
+    /// is media-backed (generators have nothing to hear). Mirrors
+    /// [`Self::set_clip_audio`]'s target rule — audio params ride any media
+    /// clip (including video with sound), since linkage lands the audible half
+    /// on an audio lane.
     fn check_audio_param_target(&self, clip_id: ClipId) -> Result<(), ModelError> {
         let clip = self
             .timeline
@@ -196,7 +197,7 @@ impl Project {
             .ok_or(ModelError::UnknownClip(clip_id))?;
         if clip.is_generated() {
             return Err(ModelError::InvalidParam(
-                "volume requires a media-backed clip".into(),
+                "audio parameters require a media-backed clip".into(),
             ));
         }
         Ok(())
@@ -243,6 +244,20 @@ impl Project {
                 .clip_mut(clip_id)
                 .ok_or(ModelError::UnknownClip(clip_id))?;
             clip.volume.set_keyframe(tick, v, easing);
+            return Ok(());
+        }
+        // Pan mirrors volume: audio property on media-backed clips.
+        if param == ClipParam::Pan {
+            easing.validate()?;
+            let v = super::helpers::scalar_param(value)?;
+            crate::clip::validate_pan(v)?;
+            self.check_audio_param_target(clip_id)?;
+            let tick = self.keyframe_tick(clip_id, at)?;
+            let clip = self
+                .timeline
+                .clip_mut(clip_id)
+                .ok_or(ModelError::UnknownClip(clip_id))?;
+            clip.pan.set_keyframe(tick, v, easing);
             return Ok(());
         }
         // Crop rides the clip's framing param (validated like set_clip_crop).
@@ -309,6 +324,22 @@ impl Project {
             } else {
                 Err(ModelError::InvalidParam(format!(
                     "no volume keyframe at {} to remove",
+                    at.value
+                )))
+            };
+        }
+        if param == ClipParam::Pan {
+            self.check_audio_param_target(clip_id)?;
+            let tick = self.keyframe_tick(clip_id, at)?;
+            let clip = self
+                .timeline
+                .clip_mut(clip_id)
+                .ok_or(ModelError::UnknownClip(clip_id))?;
+            return if clip.pan.remove_keyframe(tick) {
+                Ok(())
+            } else {
+                Err(ModelError::InvalidParam(format!(
+                    "no pan keyframe at {} to remove",
                     at.value
                 )))
             };
@@ -380,6 +411,17 @@ impl Project {
                 .clip_mut(clip_id)
                 .ok_or(ModelError::UnknownClip(clip_id))?;
             clip.volume.set_constant(v);
+            return Ok(());
+        }
+        if param == ClipParam::Pan {
+            let v = super::helpers::scalar_param(value)?;
+            crate::clip::validate_pan(v)?;
+            self.check_audio_param_target(clip_id)?;
+            let clip = self
+                .timeline
+                .clip_mut(clip_id)
+                .ok_or(ModelError::UnknownClip(clip_id))?;
+            clip.pan.set_constant(v);
             return Ok(());
         }
         if param == ClipParam::Crop {

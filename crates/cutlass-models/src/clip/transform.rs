@@ -107,6 +107,11 @@ pub enum ClipParam {
     /// volume keyframes. Media-backed clips only. Always carries a
     /// [`ParamValue::Scalar`] in `0..=`[`MAX_CLIP_VOLUME`].
     Volume,
+    /// The clip's stereo pan envelope. Routed to the clip's `pan: Param<f32>`
+    /// instead of the transform. Media-backed clips only (same target rule as
+    /// [`ClipParam::Volume`] — video clips with sound can pan too). Always
+    /// carries a [`ParamValue::Scalar`] in `−1..=1`.
+    Pan,
     /// A parameter of one of the clip's effects (M4): `effect` is the index
     /// into [`Clip::effects`], `param` the catalog slot. Routed to the
     /// effect's typed param maps instead of the transform. Carries
@@ -466,6 +471,7 @@ impl AnimatedTransform {
             | ClipParam::Crop
             | ClipParam::Speed
             | ClipParam::Volume
+            | ClipParam::Pan
             | ClipParam::Shape { .. }
             | ClipParam::Text { .. }
             | ClipParam::Look { .. }
@@ -489,6 +495,7 @@ impl AnimatedTransform {
             | ClipParam::Crop
             | ClipParam::Speed
             | ClipParam::Volume
+            | ClipParam::Pan
             | ClipParam::Shape { .. }
             | ClipParam::Text { .. }
             | ClipParam::Look { .. }
@@ -541,6 +548,7 @@ impl AnimatedTransform {
             | ClipParam::Crop
             | ClipParam::Speed
             | ClipParam::Volume
+            | ClipParam::Pan
             | ClipParam::Shape { .. }
             | ClipParam::Text { .. }
             | ClipParam::Look { .. }

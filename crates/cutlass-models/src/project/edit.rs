@@ -471,7 +471,7 @@ impl Project {
             .ok_or(ModelError::UnknownClip(clip_id))?;
         if clip.is_generated() {
             return Err(ModelError::InvalidParam(
-                "volume requires a media-backed clip".into(),
+                "audio parameters require a media-backed clip".into(),
             ));
         }
         let duration = clip.timeline.duration.value;

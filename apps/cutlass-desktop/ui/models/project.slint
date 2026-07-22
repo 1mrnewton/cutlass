@@ -338,6 +338,11 @@ export struct Clip {
     // `InspectorBackend.set-clip-blend-mode`.
     blend-mode: string,
     blend-label: string,
+    // Transform motion blur (temporal supersampling). Plain values — not
+    // animatable. Edits go through `InspectorBackend.set-clip-motion-blur`.
+    motion-blur-enabled: bool,
+    motion-blur-shutter: float,
+    motion-blur-samples: int,
     // CapCut mask: kind id (empty ⇔ none) + invert + geometry samples.
     // Kind / invert go through `set-clip-mask-*`; geometry rides look_mask_*
     // generic param callbacks.

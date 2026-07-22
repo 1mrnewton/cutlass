@@ -326,6 +326,12 @@ pub(super) enum WorkerMsg {
         clip: String,
         mode: String,
     },
+    /// Set per-clip transform motion blur (export supersampling).
+    /// One undoable history entry.
+    SetMotionBlur {
+        clip: String,
+        motion_blur: MotionBlur,
+    },
     /// Replace a visual clip's layer styles (shadow/glow/outline/background).
     /// One undoable history entry.
     SetLayerStyles {

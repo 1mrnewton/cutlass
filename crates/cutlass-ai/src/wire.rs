@@ -67,7 +67,8 @@ use serde::{Deserialize, Serialize};
 ///     on `set_param_keyframe` (position only, canvas-fraction handles).
 /// 38: multi-keyframe easing presets — `apply_easing_preset` (bounce_out /
 ///     elastic_out / back_out) on scalar/vec2 animated params.
-pub const TOOL_SCHEMA_VERSION: u32 = 38;
+/// 39: per-clip transform motion blur (`set_motion_blur`).
+pub const TOOL_SCHEMA_VERSION: u32 = 39;
 
 mod dtos;
 mod tools;
@@ -80,13 +81,13 @@ pub use dtos::{
     SetAudioRole, SetCanvas, SetClipAdjustments, SetClipAnimation, SetClipAudio, SetClipBlendMode,
     SetClipChroma, SetClipCrop, SetClipFilter, SetClipLayerStyles, SetClipMask, SetClipPitch,
     SetClipSpeed, SetClipStabilize, SetClipTransform, SetDenoise, SetEffectParam, SetGenerator,
-    SetMarker, SetParamConstant, SetParamKeyframe, SetSpeedCurve, SetTrackEnabled, SetTrackLocked,
-    SetTrackMuted, SetTransition, ShiftClips, SplitClip, TrimClip, UnlinkClips, WireAnimationSlot,
-    WireAudioRole, WireBlendMode, WireCanvasAspect, WireChromaKey, WireClipParam, WireEasing,
-    WireEasingPreset, WireFilter, WireGenerator, WireLayerBackground, WireLayerGlow,
-    WireLayerOutline, WireLayerShadow, WireLayerStyles, WireLookParam, WireMarkerColor, WireMask,
-    WireMaskKind, WireScale, WireShape, WireShapeParam, WireStabilizeLevel, WireStyleParam,
-    WireTextParam, WireTrackKind,
+    SetMarker, SetMotionBlur, SetParamConstant, SetParamKeyframe, SetSpeedCurve, SetTrackEnabled,
+    SetTrackLocked, SetTrackMuted, SetTransition, ShiftClips, SplitClip, TrimClip, UnlinkClips,
+    WireAnimationSlot, WireAudioRole, WireBlendMode, WireCanvasAspect, WireChromaKey,
+    WireClipParam, WireEasing, WireEasingPreset, WireFilter, WireGenerator, WireLayerBackground,
+    WireLayerGlow, WireLayerOutline, WireLayerShadow, WireLayerStyles, WireLookParam,
+    WireMarkerColor, WireMask, WireMaskKind, WireScale, WireShape, WireShapeParam,
+    WireStabilizeLevel, WireStyleParam, WireTextParam, WireTrackKind,
 };
 pub use tools::{ToolSpec, describe_project_spec, tool_specs};
 
@@ -127,6 +128,7 @@ pub enum WireCommand {
     SetClipStabilize(SetClipStabilize),
     SetClipFilter(SetClipFilter),
     SetClipBlendMode(SetClipBlendMode),
+    SetMotionBlur(SetMotionBlur),
     SetClipLayerStyles(SetClipLayerStyles),
     SetClipAdjustments(SetClipAdjustments),
     SetClipAnimation(SetClipAnimation),
@@ -216,6 +218,7 @@ impl WireCommand {
             WireCommand::SetClipStabilize(a) => clip(&mut a.clip),
             WireCommand::SetClipFilter(a) => clip(&mut a.clip),
             WireCommand::SetClipBlendMode(a) => clip(&mut a.clip),
+            WireCommand::SetMotionBlur(a) => clip(&mut a.clip),
             WireCommand::SetClipLayerStyles(a) => clip(&mut a.clip),
             WireCommand::SetClipAdjustments(a) => clip(&mut a.clip),
             WireCommand::SetClipAnimation(a) => clip(&mut a.clip),

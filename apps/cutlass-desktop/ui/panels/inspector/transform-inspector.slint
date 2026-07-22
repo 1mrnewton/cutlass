@@ -15,7 +15,7 @@ import {
     InspectorBackend,
     TransformSample,
 } from "../../lib/inspector-backend.slint";
-import { SliderRow } from "inspector-widgets.slint";
+import { SectionHeader, SliderRow } from "inspector-widgets.slint";
 
 export component TransformInspector inherits VerticalLayout {
     // Named `model` — `clip` is a built-in boolean on Slint elements.
@@ -473,6 +473,61 @@ export component TransformInspector inherits VerticalLayout {
         }
         kf-set-easing(e) => {
             root.ease-kf("opacity", e, root.opacity-v, 0);
+        }
+    }
+
+    // Transform-only motion blur (export supersampling). Plain values —
+    // not keyframable. Applies when the transform is animated.
+    SectionHeader {
+        title: "Motion blur";
+        checkable: true;
+        interactive: true;
+        active: root.model.motion-blur-enabled;
+        toggled => {
+            InspectorBackend.set-clip-motion-blur(
+                root.model.id,
+                !root.model.motion-blur-enabled,
+                root.model.motion-blur-shutter,
+                root.model.motion-blur-samples,
+            );
+        }
+    }
+
+    if root.model.motion-blur-enabled: SliderRow {
+        label: "Shutter";
+        suffix: "°";
+        value: root.model.motion-blur-shutter;
+        minimum: 0;
+        maximum: 360;
+        reset-value: 180;
+        kf-visible: false;
+        preview(v) => { }
+        commit(v) => {
+            // Step 10° for a CapCut-like shutter angle picker.
+            InspectorBackend.set-clip-motion-blur(
+                root.model.id,
+                true,
+                Math.round(clamp(v, 0, 360) / 10) * 10,
+                root.model.motion-blur-samples,
+            );
+        }
+    }
+
+    if root.model.motion-blur-enabled: SliderRow {
+        label: "Samples";
+        value: root.model.motion-blur-samples;
+        minimum: 2;
+        maximum: 16;
+        reset-value: 8;
+        kf-visible: false;
+        preview(v) => { }
+        commit(v) => {
+            InspectorBackend.set-clip-motion-blur(
+                root.model.id,
+                true,
+                root.model.motion-blur-shutter,
+                Math.round(clamp(v, 2, 16)),
+            );
         }
     }
 }

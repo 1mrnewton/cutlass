@@ -226,6 +226,23 @@ fn remap_ids_rewrites_only_mapped_references() {
         })
     );
 
+    let mut motion_blur = WireCommand::SetMotionBlur(SetMotionBlur {
+        clip: 10,
+        enabled: true,
+        shutter_deg: Some(180.0),
+        samples: Some(8),
+    });
+    motion_blur.remap_ids(&clip_map, &track_map, &marker_map);
+    assert_eq!(
+        motion_blur,
+        WireCommand::SetMotionBlur(SetMotionBlur {
+            clip: 99,
+            enabled: true,
+            shutter_deg: Some(180.0),
+            samples: Some(8),
+        })
+    );
+
     let mut styles = WireCommand::SetClipLayerStyles(SetClipLayerStyles {
         clip: 10,
         styles: WireLayerStyles {
@@ -274,7 +291,7 @@ fn remap_ids_rewrites_only_mapped_references() {
 #[test]
 fn tool_specs_cover_every_command_with_object_schemas() {
     let specs = tool_specs();
-    assert_eq!(specs.len(), 50);
+    assert_eq!(specs.len(), 51);
     for spec in &specs {
         assert!(
             !spec.description.is_empty(),

@@ -1363,6 +1363,64 @@ fn set_clip_blend_mode_lowers_and_guards() {
 }
 
 #[test]
+fn set_motion_blur_lowers_and_guards() {
+    use cutlass_models::MotionBlur;
+
+    let (mut project, media, _, _, clip, _) = fixture();
+    let edit = lower(
+        &project,
+        WireCommand::SetMotionBlur(wire::SetMotionBlur {
+            clip,
+            enabled: true,
+            shutter_deg: Some(270.0),
+            samples: Some(12),
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetClipMotionBlur {
+            clip: ClipId::from_raw(clip),
+            motion_blur: MotionBlur {
+                enabled: true,
+                shutter_deg: 270.0,
+                samples: 12,
+            },
+        }
+    );
+
+    let lane = project.add_track(TrackKind::Audio, "A1");
+    let audio_clip = project
+        .add_clip(
+            lane,
+            cutlass_models::MediaId::from_raw(media),
+            TimeRange::at_rate(0, 240, R24),
+            RationalTime::new(0, R24),
+        )
+        .unwrap();
+    let msg = reject(
+        &project,
+        WireCommand::SetMotionBlur(wire::SetMotionBlur {
+            clip: audio_clip.raw(),
+            enabled: true,
+            shutter_deg: None,
+            samples: None,
+        }),
+    );
+    assert!(msg.contains("visual frame"), "{msg}");
+
+    let msg = reject(
+        &project,
+        WireCommand::SetMotionBlur(wire::SetMotionBlur {
+            clip,
+            enabled: true,
+            shutter_deg: Some(900.0),
+            samples: None,
+        }),
+    );
+    assert!(msg.contains("shutter") || msg.contains("720"), "{msg}");
+}
+
+#[test]
 fn set_layer_styles_lowers_and_guards() {
     use cutlass_models::{LayerShadow, LayerStyles, Param};
 

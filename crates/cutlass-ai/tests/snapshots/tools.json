@@ -2425,6 +2425,50 @@
       }
     },
     {
+      "description": "Enable or configure transform motion blur on a visual clip: when the clip's transform is animated, export supersamples its placement across the shutter and averages the samples (texture stays at the frame time — transform-only, like After Effects). Fields: enabled (bool), optional shutter_deg (0..720, default 180), optional samples (2..32, default 8; render clamps to 16). Plain values — not animatable. Visual clips only; requires an animated transform to have any visible effect.",
+      "name": "set_motion_blur",
+      "parameters": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Set per-clip transform motion blur (temporal supersampling). Plain values\n— not animatable. Omitted `shutter_deg` / `samples` keep the clip's\ncurrent values (or model defaults when first enabling).",
+        "properties": {
+          "clip": {
+            "description": "Target clip id.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "enabled": {
+            "description": "When false, supersampling is skipped entirely.",
+            "type": "boolean"
+          },
+          "samples": {
+            "description": "Sub-frame sample count (`2..=32`; render clamps to `2..=16`). Omit to\nkeep the current value.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "shutter_deg": {
+            "description": "Shutter angle in degrees (`0..=720`). `360` = full frame interval.\n`0` disables even when enabled. Omit to keep the current value.",
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "clip",
+          "enabled"
+        ],
+        "title": "SetMotionBlur",
+        "type": "object"
+      }
+    },
+    {
       "description": "Set layer-quad shadow/glow/outline/background styles on any visual clip (distinct from text glyph treatments). Each block is optional constants in reference pixels (1080p baseline); omitted blocks are removed. Empty styles clears every block. Constants only — animate with set_param_keyframe using style params (shadow_blur, glow_color, …).",
       "name": "set_layer_styles",
       "parameters": {
@@ -3346,5 +3390,5 @@
       }
     }
   ],
-  "version": 38
+  "version": 39
 }

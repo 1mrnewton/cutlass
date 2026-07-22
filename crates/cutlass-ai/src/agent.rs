@@ -1260,6 +1260,20 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
                 crate::wire::WireBlendMode::Exclusion => "exclusion",
             }
         ),
+        WireCommand::SetMotionBlur(a) => {
+            if a.enabled {
+                let mut parts = vec![format!("enable motion blur on clip {}", a.clip)];
+                if let Some(s) = a.shutter_deg {
+                    parts.push(format!("shutter={s}"));
+                }
+                if let Some(n) = a.samples {
+                    parts.push(format!("samples={n}"));
+                }
+                parts.join(" ")
+            } else {
+                format!("disable motion blur on clip {}", a.clip)
+            }
+        }
         WireCommand::SetClipLayerStyles(a) => {
             let mut blocks = Vec::new();
             if a.styles.shadow.is_some() {

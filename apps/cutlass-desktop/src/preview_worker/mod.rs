@@ -46,8 +46,9 @@ use cutlass_engine::{ApplyOutcome, Engine, EngineConfig, SeekPolicy};
 use cutlass_models::{
     AnimatedTransform, BlendMode, ChromaKey, ClipId, ClipParam, ClipSource, ClipTransform,
     ColorAdjustments, CropRect, Easing, Filter, Generator, LayerStyles, LinkId, Lut, MAX_SPEED,
-    MIN_SPEED, MarkerColor, MarkerId, Mask, MediaId, Param, ParamValue, PiecewiseEasingPreset,
-    Project, Rational, RationalTime, TimeRange, Track, TrackId, TrackKind, resample,
+    MIN_SPEED, MarkerColor, MarkerId, Mask, MediaId, MotionBlur, Param, ParamValue,
+    PiecewiseEasingPreset, Project, Rational, RationalTime, TimeRange, Track, TrackId, TrackKind,
+    resample,
 };
 use cutlass_render::{ExportSettings, RenderError, Renderer};
 use slint::{Rgba8Pixel, SharedPixelBuffer};

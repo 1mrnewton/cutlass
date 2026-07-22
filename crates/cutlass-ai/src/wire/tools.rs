@@ -164,6 +164,8 @@ tools! {
         "Set or clear a color-grade filter preset on any visual clip. Filter ids include vivid, warm, cool, noir, sunset, and others from the catalog. Pass null for filter to clear.";
     "set_clip_blend_mode" => SetClipBlendMode(SetClipBlendMode),
         "Set how a visual clip composites over the layers below it (CapCut Blend). Modes: normal, darken, multiply, color_burn, lighten, screen, color_dodge, add, overlay, soft_light, hard_light, difference, exclusion. Visual clips only; normal resets to plain source-over.";
+    "set_motion_blur" => SetMotionBlur(SetMotionBlur),
+        "Enable or configure transform motion blur on a visual clip: when the clip's transform is animated, export supersamples its placement across the shutter and averages the samples (texture stays at the frame time — transform-only, like After Effects). Fields: enabled (bool), optional shutter_deg (0..720, default 180), optional samples (2..32, default 8; render clamps to 16). Plain values — not animatable. Visual clips only; requires an animated transform to have any visible effect.";
     "set_layer_styles" => SetClipLayerStyles(SetClipLayerStyles),
         "Set layer-quad shadow/glow/outline/background styles on any visual clip (distinct from text glyph treatments). Each block is optional constants in reference pixels (1080p baseline); omitted blocks are removed. Empty styles clears every block. Constants only — animate with set_param_keyframe using style params (shadow_blur, glow_color, …).";
     "set_clip_adjustments" => SetClipAdjustments(SetClipAdjustments),

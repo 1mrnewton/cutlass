@@ -699,6 +699,13 @@ fn look_edits_invalidate_preview() {
         clip: "1".into(),
         mode: "multiply".into(),
     }));
+    assert!(message_invalidates_preview(&WorkerMsg::SetMotionBlur {
+        clip: "1".into(),
+        motion_blur: MotionBlur {
+            enabled: true,
+            ..MotionBlur::default()
+        },
+    }));
     assert!(message_invalidates_preview(&WorkerMsg::SetLayerStyles {
         clip: "1".into(),
         styles: LayerStyles {
@@ -730,6 +737,23 @@ fn set_blend_mode_enqueues_worker_msg() {
     };
     assert_eq!(clip, "42");
     assert_eq!(mode, "screen");
+}
+
+#[test]
+fn set_motion_blur_enqueues_worker_msg() {
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let blur = MotionBlur {
+        enabled: true,
+        shutter_deg: 270.0,
+        samples: 12,
+    };
+    handle.set_motion_blur("42".into(), blur);
+    let WorkerMsg::SetMotionBlur { clip, motion_blur } = rx.try_recv().unwrap() else {
+        panic!("expected SetMotionBlur");
+    };
+    assert_eq!(clip, "42");
+    assert_eq!(motion_blur, blur);
 }
 
 #[test]
@@ -916,6 +940,53 @@ fn set_blend_mode_updates_projected_clip() {
     let c = track.clips.row_data(0).unwrap();
     assert_eq!(c.blend_mode.as_str(), "multiply");
     assert_eq!(c.blend_label.as_str(), "Multiply");
+}
+
+#[test]
+fn set_motion_blur_updates_projected_clip() {
+    use crate::projection::project_to_slint;
+    use slint::Model;
+    use std::collections::{HashMap, HashSet};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("motion-blur", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/mb.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+
+    let blur = MotionBlur {
+        enabled: true,
+        shutter_deg: 270.0,
+        samples: 12,
+    };
+    engine
+        .apply(Command::Edit(EditCommand::SetClipMotionBlur {
+            clip,
+            motion_blur: blur,
+        }))
+        .expect("set motion blur");
+
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let track = projected.sequence.tracks.row_data(0).unwrap();
+    let c = track.clips.row_data(0).unwrap();
+    assert!(c.motion_blur_enabled);
+    assert!((c.motion_blur_shutter - 270.0).abs() < f32::EPSILON);
+    assert_eq!(c.motion_blur_samples, 12);
 }
 
 #[test]

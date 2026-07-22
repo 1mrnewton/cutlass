@@ -275,6 +275,10 @@ impl WorkerHandle {
         let _ = self.tx.send(WorkerMsg::SetBlendMode { clip, mode });
     }
 
+    pub fn set_motion_blur(&self, clip: String, motion_blur: MotionBlur) {
+        let _ = self.tx.send(WorkerMsg::SetMotionBlur { clip, motion_blur });
+    }
+
     pub fn set_layer_styles(&self, clip: String, styles: LayerStyles) {
         let _ = self.tx.send(WorkerMsg::SetLayerStyles { clip, styles });
     }

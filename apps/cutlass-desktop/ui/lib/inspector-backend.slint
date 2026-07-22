@@ -257,6 +257,10 @@ export global InspectorBackend {
     // One undoable edit.
     callback set-clip-blend-mode(clip-id: string, mode: string);
 
+    // Set per-clip transform motion blur. `shutter` is degrees (0..=720);
+    // `samples` is quality (2..=16 in the UI). One undoable edit.
+    callback set-clip-motion-blur(clip-id: string, enabled: bool, shutter: float, samples: int);
+
     // Set (or clear with an empty id) a visual clip's mask kind. Switching
     // kind preserves feather / invert / geometry; enabling from none uses
     // `Mask::new`. One undoable edit.

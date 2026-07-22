@@ -782,6 +782,26 @@ pub struct SetClipBlendMode {
     pub mode: WireBlendMode,
 }
 
+/// Set per-clip transform motion blur (temporal supersampling). Plain values
+/// — not animatable. Omitted `shutter_deg` / `samples` keep the clip's
+/// current values (or model defaults when first enabling).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetMotionBlur {
+    /// Target clip id.
+    pub clip: u64,
+    /// When false, supersampling is skipped entirely.
+    pub enabled: bool,
+    /// Shutter angle in degrees (`0..=720`). `360` = full frame interval.
+    /// `0` disables even when enabled. Omit to keep the current value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shutter_deg: Option<f32>,
+    /// Sub-frame sample count (`2..=32`; render clamps to `2..=16`). Omit to
+    /// keep the current value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<u32>,
+}
+
 /// Drop shadow drawn from the layer's alpha. Lengths are reference pixels
 /// (1080p baseline); color is RGBA 0–255.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

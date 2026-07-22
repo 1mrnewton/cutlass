@@ -54,6 +54,71 @@ fn projects_clip_blend_mode() {
 }
 
 #[test]
+fn projects_clip_motion_blur() {
+    use cutlass_models::{MediaSource, MotionBlur, RationalTime, TimeRange, TrackKind};
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("motion-blur", EngineRational::FPS_24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/mb.mp4",
+        1920,
+        1080,
+        EngineRational::FPS_24,
+        480,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            RationalTime::new(0, EngineRational::FPS_24),
+        )
+        .expect("clip");
+    project
+        .set_motion_blur(
+            clip_id,
+            MotionBlur {
+                enabled: true,
+                shutter_deg: 270.0,
+                samples: 12,
+            },
+        )
+        .expect("set motion blur");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clips = projected.sequence.tracks.row_data(0).unwrap().clips;
+    let clip = clips.row_data(0).unwrap();
+    assert!(clip.motion_blur_enabled);
+    assert!((clip.motion_blur_shutter - 270.0).abs() < f32::EPSILON);
+    assert_eq!(clip.motion_blur_samples, 12);
+
+    let flat = clip_to_slint(
+        &project,
+        project.clip(clip_id).unwrap(),
+        EngineKind::Video,
+        &HashMap::new(),
+    );
+    // After reset to default, projection should show blur off.
+    project
+        .set_motion_blur(clip_id, MotionBlur::default())
+        .expect("clear");
+    let cleared = clip_to_slint(
+        &project,
+        project.clip(clip_id).unwrap(),
+        EngineKind::Video,
+        &HashMap::new(),
+    );
+    assert!(!cleared.motion_blur_enabled);
+    assert!((cleared.motion_blur_shutter - 180.0).abs() < f32::EPSILON);
+    assert_eq!(cleared.motion_blur_samples, 8);
+    // Sanity: the earlier enabled projection was not default.
+    assert!(flat.motion_blur_enabled);
+}
+
+#[test]
 fn projects_clip_layer_styles() {
     use cutlass_models::{
         LayerShadow, LayerStyles, MediaSource, RationalTime, TimeRange, TrackKind,

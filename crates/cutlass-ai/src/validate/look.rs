@@ -5,7 +5,7 @@ use super::*;
 
 use crate::wire::{
     SetAudioRole, SetClipAdjustments, SetClipAnimation, SetClipBlendMode, SetClipChroma,
-    SetClipFilter, SetClipLayerStyles, SetClipMask, SetClipStabilize,
+    SetClipFilter, SetClipLayerStyles, SetClipMask, SetClipStabilize, SetMotionBlur,
 };
 
 pub(super) fn set_clip_mask(
@@ -112,6 +112,29 @@ pub(super) fn set_clip_blend_mode(
     Ok(EditCommand::SetClipBlendMode {
         clip: clip.id,
         mode: lower_blend_mode(args.mode),
+    })
+}
+
+pub(super) fn set_motion_blur(
+    project: &Project,
+    args: &SetMotionBlur,
+) -> Result<EditCommand, Rejection> {
+    let clip = clip_ref(project, args.clip)?;
+    reject_audio_lane(project, clip, "motion blur needs a visual frame", args.clip)?;
+    let mut motion_blur = clip.motion_blur;
+    motion_blur.enabled = args.enabled;
+    if let Some(shutter) = args.shutter_deg {
+        motion_blur.shutter_deg = shutter;
+    }
+    if let Some(samples) = args.samples {
+        motion_blur.samples = samples;
+    }
+    motion_blur
+        .validate()
+        .map_err(|e| Rejection::new(e.to_string()))?;
+    Ok(EditCommand::SetClipMotionBlur {
+        clip: clip.id,
+        motion_blur,
     })
 }
 

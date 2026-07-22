@@ -166,6 +166,10 @@ pub struct ClipSummary {
     /// Blend mode id (set_clip_blend_mode); absent when normal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend: Option<String>,
+    /// Motion blur summary when enabled (set_motion_blur), e.g.
+    /// "shutter=180 samples=8"; absent when off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion_blur: Option<String>,
     /// Active layer-style blocks (set_layer_styles), e.g. "shadow, outline";
     /// absent when none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -471,6 +475,12 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                     filter: clip.filter.as_ref().map(|f| f.id.clone()),
                     adjust: summarize_adjust(&clip.adjust),
                     blend: (!clip.blend_mode.is_normal()).then(|| clip.blend_mode.id().to_string()),
+                    motion_blur: clip.motion_blur.enabled.then(|| {
+                        format!(
+                            "shutter={} samples={}",
+                            clip.motion_blur.shutter_deg, clip.motion_blur.samples
+                        )
+                    }),
                     styles: {
                         let mut blocks = Vec::new();
                         if clip.styles.shadow.is_some() {

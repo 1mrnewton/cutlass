@@ -179,6 +179,9 @@ pub(super) fn dispatch(
         WorkerMsg::SetBlendMode { clip, mode } => {
             set_blend_mode_and_publish(engine, &clip, &mode, ui)
         }
+        WorkerMsg::SetMotionBlur { clip, motion_blur } => {
+            set_motion_blur_and_publish(engine, &clip, motion_blur, ui)
+        }
         WorkerMsg::SetLayerStyles { clip, styles } => {
             set_layer_styles_and_publish(engine, &clip, styles, ui)
         }

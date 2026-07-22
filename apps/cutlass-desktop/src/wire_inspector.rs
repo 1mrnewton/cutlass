@@ -198,6 +198,21 @@ pub(crate) fn wire_inspector(
             set_blend_handle.set_blend_mode(clip_id.to_string(), mode.to_string());
         });
 
+    let set_motion_blur_handle = preview_worker.handle();
+    app.global::<InspectorBackend>().on_set_clip_motion_blur(
+        move |clip_id, enabled, shutter, samples| {
+            let samples = u32::try_from(samples).unwrap_or(8).clamp(2, 32);
+            set_motion_blur_handle.set_motion_blur(
+                clip_id.to_string(),
+                cutlass_models::MotionBlur {
+                    enabled,
+                    shutter_deg: shutter,
+                    samples,
+                },
+            );
+        },
+    );
+
     let set_mask_kind_handle = preview_worker.handle();
     app.global::<InspectorBackend>()
         .on_set_clip_mask_kind(move |clip_id, kind| {

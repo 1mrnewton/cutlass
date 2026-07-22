@@ -90,6 +90,32 @@ pub(super) fn set_blend_mode_and_publish(engine: &mut Engine, clip: &str, mode: 
     publish_projection(engine, ui);
 }
 
+/// Set per-clip transform motion blur. Validation lives in the model
+/// setter; failures just log (stale-projection race).
+pub(super) fn set_motion_blur_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    motion_blur: MotionBlur,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-motion-blur ignored: unparsable clip id");
+        return;
+    };
+    let enabled = motion_blur.enabled;
+    let shutter = motion_blur.shutter_deg;
+    let samples = motion_blur.samples;
+    if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipMotionBlur {
+        clip: clip_id,
+        motion_blur,
+    })) {
+        error!(%clip_id, "set clip motion blur failed: {e}");
+        return;
+    }
+    info!(%clip_id, enabled, shutter, samples, "set clip motion blur");
+    publish_projection(engine, ui);
+}
+
 /// Replace a visual clip's layer styles (CapCut shadow/glow/outline/background).
 /// A live styles drag may have left an override in place; clear it first so
 /// the commit becomes authoritative (mirrors look filter/adjust commits).

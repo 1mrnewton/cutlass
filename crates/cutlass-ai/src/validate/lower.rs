@@ -8,7 +8,7 @@ pub(super) fn clip_param(
     clip: &Clip,
     wire_clip: u64,
 ) -> Result<ClipParam, Rejection> {
-    use crate::wire::{WireLookParam, WireShapeParam, WireTextParam};
+    use crate::wire::{WireLookParam, WireShapeParam, WireStyleParam, WireTextParam};
 
     Ok(match param {
         WireClipParam::Position => ClipParam::Position,
@@ -81,6 +81,21 @@ pub(super) fn clip_param(
                 WireLookParam::MaskFeather => cutlass_models::LookParam::MaskFeather,
                 WireLookParam::ChromaStrength => cutlass_models::LookParam::ChromaStrength,
                 WireLookParam::ChromaShadow => cutlass_models::LookParam::ChromaShadow,
+            },
+        },
+        WireClipParam::Style { param } => ClipParam::Style {
+            param: match param {
+                WireStyleParam::ShadowColor => cutlass_models::StyleParam::ShadowColor,
+                WireStyleParam::ShadowOffset => cutlass_models::StyleParam::ShadowOffset,
+                WireStyleParam::ShadowBlur => cutlass_models::StyleParam::ShadowBlur,
+                WireStyleParam::GlowColor => cutlass_models::StyleParam::GlowColor,
+                WireStyleParam::GlowRadius => cutlass_models::StyleParam::GlowRadius,
+                WireStyleParam::GlowIntensity => cutlass_models::StyleParam::GlowIntensity,
+                WireStyleParam::OutlineColor => cutlass_models::StyleParam::OutlineColor,
+                WireStyleParam::OutlineWidth => cutlass_models::StyleParam::OutlineWidth,
+                WireStyleParam::BackgroundColor => cutlass_models::StyleParam::BackgroundColor,
+                WireStyleParam::BackgroundPadding => cutlass_models::StyleParam::BackgroundPadding,
+                WireStyleParam::BackgroundRadius => cutlass_models::StyleParam::BackgroundRadius,
             },
         },
     })

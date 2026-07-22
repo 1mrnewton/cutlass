@@ -1,5 +1,5 @@
 use super::*;
-use crate::wire::{WireShapeParam, WireTextParam};
+use crate::wire::{WireShapeParam, WireStyleParam, WireTextParam};
 
 // --- seconds → ticks ---------------------------------------------------------
 
@@ -58,11 +58,15 @@ pub(super) fn param_value(
     rgba: Option<[u8; 4]>,
 ) -> Result<ParamValue, Rejection> {
     match param {
-        WireClipParam::Position | WireClipParam::AnchorPoint => position
+        WireClipParam::Position
+        | WireClipParam::AnchorPoint
+        | WireClipParam::Style {
+            param: WireStyleParam::ShadowOffset,
+        } => position
             .map(|p| ParamValue::Vec2([p[0] as f32, p[1] as f32]))
             .ok_or_else(|| {
                 Rejection::new(
-                    "position and anchor_point params need the 'position' argument as [x, y]",
+                    "position, anchor_point, and style shadow_offset params need the 'position' argument as [x, y]",
                 )
             }),
         WireClipParam::Scale
@@ -88,7 +92,16 @@ pub(super) fn param_value(
                 | WireTextParam::ShadowBlur
                 | WireTextParam::ShadowDistance,
         }
-        | WireClipParam::Look { .. } => {
+        | WireClipParam::Look { .. }
+        | WireClipParam::Style {
+            param:
+                WireStyleParam::ShadowBlur
+                | WireStyleParam::GlowRadius
+                | WireStyleParam::GlowIntensity
+                | WireStyleParam::OutlineWidth
+                | WireStyleParam::BackgroundPadding
+                | WireStyleParam::BackgroundRadius,
+        } => {
             value.map(|v| ParamValue::Scalar(v as f32)).ok_or_else(|| {
                 Rejection::new(
                     format!("param '{param:?}' needs the 'value' argument (a number)",)
@@ -101,6 +114,13 @@ pub(super) fn param_value(
         }
         | WireClipParam::Text {
             param: WireTextParam::Fill | WireTextParam::StrokeColor | WireTextParam::ShadowColor,
+        }
+        | WireClipParam::Style {
+            param:
+                WireStyleParam::ShadowColor
+                | WireStyleParam::GlowColor
+                | WireStyleParam::OutlineColor
+                | WireStyleParam::BackgroundColor,
         } => rgba.map(ParamValue::Color).ok_or_else(|| {
             Rejection::new(
                 format!("param '{param:?}' needs the 'rgba' argument as [red, green, blue, alpha]",)

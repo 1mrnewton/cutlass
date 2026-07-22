@@ -226,6 +226,33 @@ fn remap_ids_rewrites_only_mapped_references() {
         })
     );
 
+    let mut styles = WireCommand::SetClipLayerStyles(SetClipLayerStyles {
+        clip: 10,
+        styles: WireLayerStyles {
+            shadow: Some(WireLayerShadow {
+                rgba: [0, 0, 0, 128],
+                offset: [4.0, 4.0],
+                blur: 8.0,
+            }),
+            ..Default::default()
+        },
+    });
+    styles.remap_ids(&clip_map, &track_map, &marker_map);
+    assert_eq!(
+        styles,
+        WireCommand::SetClipLayerStyles(SetClipLayerStyles {
+            clip: 99,
+            styles: WireLayerStyles {
+                shadow: Some(WireLayerShadow {
+                    rgba: [0, 0, 0, 128],
+                    offset: [4.0, 4.0],
+                    blur: 8.0,
+                }),
+                ..Default::default()
+            },
+        })
+    );
+
     let mut set = WireCommand::SetMarker(SetMarker {
         marker: 4,
         at: Some(2.0),
@@ -247,7 +274,7 @@ fn remap_ids_rewrites_only_mapped_references() {
 #[test]
 fn tool_specs_cover_every_command_with_object_schemas() {
     let specs = tool_specs();
-    assert_eq!(specs.len(), 48);
+    assert_eq!(specs.len(), 49);
     for spec in &specs {
         assert!(
             !spec.description.is_empty(),

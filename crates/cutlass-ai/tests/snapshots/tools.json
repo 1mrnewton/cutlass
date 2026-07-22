@@ -988,6 +988,41 @@
                   "look"
                 ],
                 "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A property of the clip's layer-quad styles (shadow/glow/outline/\nbackground). Color params use `rgba`; `shadow_offset` uses\n`position`; the rest use scalar `value`.",
+                "properties": {
+                  "style": {
+                    "properties": {
+                      "param": {
+                        "description": "Animatable properties of a clip's layer-quad styles.",
+                        "enum": [
+                          "shadow_color",
+                          "shadow_offset",
+                          "shadow_blur",
+                          "glow_color",
+                          "glow_radius",
+                          "glow_intensity",
+                          "outline_color",
+                          "outline_width",
+                          "background_color",
+                          "background_padding",
+                          "background_radius"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "param"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "style"
+                ],
+                "type": "object"
               }
             ]
           },
@@ -1216,6 +1251,41 @@
                   "look"
                 ],
                 "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A property of the clip's layer-quad styles (shadow/glow/outline/\nbackground). Color params use `rgba`; `shadow_offset` uses\n`position`; the rest use scalar `value`.",
+                "properties": {
+                  "style": {
+                    "properties": {
+                      "param": {
+                        "description": "Animatable properties of a clip's layer-quad styles.",
+                        "enum": [
+                          "shadow_color",
+                          "shadow_offset",
+                          "shadow_blur",
+                          "glow_color",
+                          "glow_radius",
+                          "glow_intensity",
+                          "outline_color",
+                          "outline_width",
+                          "background_color",
+                          "background_padding",
+                          "background_radius"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "param"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "style"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -1401,6 +1471,41 @@
                 },
                 "required": [
                   "look"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A property of the clip's layer-quad styles (shadow/glow/outline/\nbackground). Color params use `rgba`; `shadow_offset` uses\n`position`; the rest use scalar `value`.",
+                "properties": {
+                  "style": {
+                    "properties": {
+                      "param": {
+                        "description": "Animatable properties of a clip's layer-quad styles.",
+                        "enum": [
+                          "shadow_color",
+                          "shadow_offset",
+                          "shadow_blur",
+                          "glow_color",
+                          "glow_radius",
+                          "glow_intensity",
+                          "outline_color",
+                          "outline_width",
+                          "background_color",
+                          "background_padding",
+                          "background_radius"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "param"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "style"
                 ],
                 "type": "object"
               }
@@ -1847,6 +1952,179 @@
           "mode"
         ],
         "title": "SetClipBlendMode",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Set layer-quad shadow/glow/outline/background styles on any visual clip (distinct from text glyph treatments). Each block is optional constants in reference pixels (1080p baseline); omitted blocks are removed. Empty styles clears every block. Constants only — animate with set_param_keyframe using style params (shadow_blur, glow_color, …).",
+      "name": "set_layer_styles",
+      "parameters": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Replace a visual clip's layer styles (shadow/glow/outline/background).\nPass an empty `styles` object to clear every block.",
+        "properties": {
+          "clip": {
+            "description": "Target clip id.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "styles": {
+            "additionalProperties": false,
+            "description": "Style blocks to install. Omitted blocks are removed.",
+            "properties": {
+              "background": {
+                "additionalProperties": false,
+                "description": "Solid plate behind the layer (padded AABB of the alpha bounds).",
+                "properties": {
+                  "padding": {
+                    "description": "Padding around the alpha bounds in reference pixels (`>= 0`).",
+                    "format": "float",
+                    "type": "number"
+                  },
+                  "radius": {
+                    "description": "Corner radius in reference pixels (`>= 0`).",
+                    "format": "float",
+                    "type": "number"
+                  },
+                  "rgba": {
+                    "items": {
+                      "format": "uint8",
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "maxItems": 4,
+                    "minItems": 4,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "rgba",
+                  "padding",
+                  "radius"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "glow": {
+                "additionalProperties": false,
+                "description": "Soft glow bloom drawn from the layer's alpha.",
+                "properties": {
+                  "intensity": {
+                    "description": "Strength multiplier, `0` … `4`.",
+                    "format": "float",
+                    "type": "number"
+                  },
+                  "radius": {
+                    "description": "Glow radius in reference pixels (`>= 0`).",
+                    "format": "float",
+                    "type": "number"
+                  },
+                  "rgba": {
+                    "items": {
+                      "format": "uint8",
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "maxItems": 4,
+                    "minItems": 4,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "rgba",
+                  "radius",
+                  "intensity"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "outline": {
+                "additionalProperties": false,
+                "description": "Hard outline / stroke around the layer's alpha silhouette.",
+                "properties": {
+                  "rgba": {
+                    "items": {
+                      "format": "uint8",
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "maxItems": 4,
+                    "minItems": 4,
+                    "type": "array"
+                  },
+                  "width": {
+                    "description": "Outline width in reference pixels (`>= 0`).",
+                    "format": "float",
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "rgba",
+                  "width"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "shadow": {
+                "additionalProperties": false,
+                "description": "Drop shadow drawn from the layer's alpha. Lengths are reference pixels\n(1080p baseline); color is RGBA 0–255.",
+                "properties": {
+                  "blur": {
+                    "description": "Blur radius in reference pixels (`>= 0`).",
+                    "format": "float",
+                    "type": "number"
+                  },
+                  "offset": {
+                    "description": "Offset in reference pixels (`+x` right, `+y` down).",
+                    "items": {
+                      "format": "float",
+                      "type": "number"
+                    },
+                    "maxItems": 2,
+                    "minItems": 2,
+                    "type": "array"
+                  },
+                  "rgba": {
+                    "items": {
+                      "format": "uint8",
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "maxItems": 4,
+                    "minItems": 4,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "rgba",
+                  "offset",
+                  "blur"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "clip",
+          "styles"
+        ],
+        "title": "SetClipLayerStyles",
         "type": "object"
       }
     },
@@ -2553,5 +2831,5 @@
       }
     }
   ],
-  "version": 28
+  "version": 29
 }

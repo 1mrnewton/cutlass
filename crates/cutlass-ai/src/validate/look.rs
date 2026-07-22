@@ -5,7 +5,7 @@ use super::*;
 
 use crate::wire::{
     SetAudioRole, SetClipAdjustments, SetClipAnimation, SetClipBlendMode, SetClipChroma,
-    SetClipFilter, SetClipMask, SetClipStabilize,
+    SetClipFilter, SetClipLayerStyles, SetClipMask, SetClipStabilize,
 };
 
 pub(super) fn set_clip_mask(
@@ -113,6 +113,42 @@ pub(super) fn set_clip_blend_mode(
         clip: clip.id,
         mode: lower_blend_mode(args.mode),
     })
+}
+
+pub(super) fn set_clip_layer_styles(
+    project: &Project,
+    args: &SetClipLayerStyles,
+) -> Result<EditCommand, Rejection> {
+    let clip = clip_ref(project, args.clip)?;
+    reject_audio_lane(project, clip, "layer styles need a visual frame", args.clip)?;
+    Ok(EditCommand::SetClipLayerStyles {
+        clip: clip.id,
+        styles: lower_layer_styles(&args.styles),
+    })
+}
+
+fn lower_layer_styles(wire: &WireLayerStyles) -> LayerStyles {
+    LayerStyles {
+        shadow: wire.shadow.as_ref().map(|s| LayerShadow {
+            rgba: Param::Constant(s.rgba),
+            offset: Param::Constant(s.offset),
+            blur: Param::Constant(s.blur),
+        }),
+        glow: wire.glow.as_ref().map(|g| LayerGlow {
+            rgba: Param::Constant(g.rgba),
+            radius: Param::Constant(g.radius),
+            intensity: Param::Constant(g.intensity),
+        }),
+        outline: wire.outline.as_ref().map(|o| LayerOutline {
+            rgba: Param::Constant(o.rgba),
+            width: Param::Constant(o.width),
+        }),
+        background: wire.background.as_ref().map(|b| LayerBackground {
+            rgba: Param::Constant(b.rgba),
+            padding: Param::Constant(b.padding),
+            radius: Param::Constant(b.radius),
+        }),
+    }
 }
 
 pub(super) fn set_clip_adjustments(

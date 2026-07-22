@@ -310,6 +310,10 @@ pub enum WireClipParam {
     Text { param: WireTextParam },
     /// A scalar property of the clip's color look.
     Look { param: WireLookParam },
+    /// A property of the clip's layer-quad styles (shadow/glow/outline/
+    /// background). Color params use `rgba`; `shadow_offset` uses
+    /// `position`; the rest use scalar `value`.
+    Style { param: WireStyleParam },
 }
 
 /// Animatable properties of a generated shape clip.
@@ -354,6 +358,23 @@ pub enum WireLookParam {
     MaskFeather,
     ChromaStrength,
     ChromaShadow,
+}
+
+/// Animatable properties of a clip's layer-quad styles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WireStyleParam {
+    ShadowColor,
+    ShadowOffset,
+    ShadowBlur,
+    GlowColor,
+    GlowRadius,
+    GlowIntensity,
+    OutlineColor,
+    OutlineWidth,
+    BackgroundColor,
+    BackgroundPadding,
+    BackgroundRadius,
 }
 
 /// Interpolation toward the next keyframe.
@@ -643,6 +664,78 @@ pub struct SetClipBlendMode {
     /// screen, color_dodge, add, overlay, soft_light, hard_light,
     /// difference, exclusion.
     pub mode: WireBlendMode,
+}
+
+/// Drop shadow drawn from the layer's alpha. Lengths are reference pixels
+/// (1080p baseline); color is RGBA 0–255.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WireLayerShadow {
+    pub rgba: [u8; 4],
+    /// Offset in reference pixels (`+x` right, `+y` down).
+    pub offset: [f32; 2],
+    /// Blur radius in reference pixels (`>= 0`).
+    pub blur: f32,
+}
+
+/// Soft glow bloom drawn from the layer's alpha.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WireLayerGlow {
+    pub rgba: [u8; 4],
+    /// Glow radius in reference pixels (`>= 0`).
+    pub radius: f32,
+    /// Strength multiplier, `0` … `4`.
+    pub intensity: f32,
+}
+
+/// Hard outline / stroke around the layer's alpha silhouette.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WireLayerOutline {
+    pub rgba: [u8; 4],
+    /// Outline width in reference pixels (`>= 0`).
+    pub width: f32,
+}
+
+/// Solid plate behind the layer (padded AABB of the alpha bounds).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WireLayerBackground {
+    pub rgba: [u8; 4],
+    /// Padding around the alpha bounds in reference pixels (`>= 0`).
+    pub padding: f32,
+    /// Corner radius in reference pixels (`>= 0`).
+    pub radius: f32,
+}
+
+/// Layer-quad styles (CapCut shadow/glow/outline/background) for any visual
+/// clip — distinct from text glyph treatments. Lengths are reference pixels
+/// (1080p baseline). Omitted blocks are removed; included blocks replace the
+/// previous block with the given constant values. Animate individual fields
+/// afterward with `set_param_keyframe` and style params.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WireLayerStyles {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<WireLayerShadow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glow: Option<WireLayerGlow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<WireLayerOutline>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<WireLayerBackground>,
+}
+
+/// Replace a visual clip's layer styles (shadow/glow/outline/background).
+/// Pass an empty `styles` object to clear every block.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetClipLayerStyles {
+    /// Target clip id.
+    pub clip: u64,
+    /// Style blocks to install. Omitted blocks are removed.
+    pub styles: WireLayerStyles,
 }
 
 /// Set manual color adjustments (CapCut adjust) on any visual clip. Omitted

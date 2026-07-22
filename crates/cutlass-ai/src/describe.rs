@@ -153,6 +153,10 @@ pub struct ClipSummary {
     /// Blend mode id (set_clip_blend_mode); absent when normal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend: Option<String>,
+    /// Active layer-style blocks (set_layer_styles), e.g. "shadow, outline";
+    /// absent when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub styles: Option<String>,
     /// Entrance animation id (set_clip_animation in slot); absent when none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation_in: Option<String>,
@@ -383,6 +387,22 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                     }),
                     filter: clip.filter.as_ref().map(|f| f.id.clone()),
                     blend: (!clip.blend_mode.is_normal()).then(|| clip.blend_mode.id().to_string()),
+                    styles: {
+                        let mut blocks = Vec::new();
+                        if clip.styles.shadow.is_some() {
+                            blocks.push("shadow");
+                        }
+                        if clip.styles.glow.is_some() {
+                            blocks.push("glow");
+                        }
+                        if clip.styles.outline.is_some() {
+                            blocks.push("outline");
+                        }
+                        if clip.styles.background.is_some() {
+                            blocks.push("background");
+                        }
+                        (!blocks.is_empty()).then(|| blocks.join(", "))
+                    },
                     animation_in: clip.animation_in.as_ref().map(|a| a.id.clone()),
                     animation_out: clip.animation_out.as_ref().map(|a| a.id.clone()),
                     animation_combo: clip.animation_combo.as_ref().map(|a| a.id.clone()),

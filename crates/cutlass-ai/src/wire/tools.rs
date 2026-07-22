@@ -162,6 +162,8 @@ tools! {
         "Set or clear a color-grade filter preset on any visual clip. Filter ids include vivid, warm, cool, noir, sunset, and others from the catalog. Pass null for filter to clear.";
     "set_clip_blend_mode" => SetClipBlendMode(SetClipBlendMode),
         "Set how a visual clip composites over the layers below it (CapCut Blend). Modes: normal, darken, multiply, color_burn, lighten, screen, color_dodge, add, overlay, soft_light, hard_light, difference, exclusion. Visual clips only; normal resets to plain source-over.";
+    "set_layer_styles" => SetClipLayerStyles(SetClipLayerStyles),
+        "Set layer-quad shadow/glow/outline/background styles on any visual clip (distinct from text glyph treatments). Each block is optional constants in reference pixels (1080p baseline); omitted blocks are removed. Empty styles clears every block. Constants only — animate with set_param_keyframe using style params (shadow_blur, glow_color, …).";
     "set_clip_adjustments" => SetClipAdjustments(SetClipAdjustments),
         "Set manual color adjustments (brightness, contrast, saturation, exposure, temperature) on any visual clip. Each slider is -1..1; omitted sliders keep their current value.";
     "set_clip_animation" => SetClipAnimation(SetClipAnimation),

@@ -953,6 +953,7 @@ fn param_name(param: &wire::WireClipParam) -> String {
         wire::WireClipParam::Shape { param } => format!("shape {param:?}").to_lowercase(),
         wire::WireClipParam::Text { param } => format!("text {param:?}").to_lowercase(),
         wire::WireClipParam::Look { param } => format!("look {param:?}").to_lowercase(),
+        wire::WireClipParam::Style { param } => format!("style {param:?}").to_lowercase(),
     }
 }
 
@@ -985,7 +986,19 @@ fn param_value_phrase(
                 wire::WireTextParam::Fill
                 | wire::WireTextParam::StrokeColor
                 | wire::WireTextParam::ShadowColor,
+        }
+        | wire::WireClipParam::Style {
+            param:
+                wire::WireStyleParam::ShadowColor
+                | wire::WireStyleParam::GlowColor
+                | wire::WireStyleParam::OutlineColor
+                | wire::WireStyleParam::BackgroundColor,
         } => color.map(rgba).unwrap_or_else(|| "?".into()),
+        wire::WireClipParam::Style {
+            param: wire::WireStyleParam::ShadowOffset,
+        } => position
+            .map(|p| format!("[{:.2}, {:.2}]", p[0], p[1]))
+            .unwrap_or_else(|| "?".into()),
         _ => value.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
     }
 }
@@ -1213,6 +1226,30 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
                 crate::wire::WireBlendMode::Exclusion => "exclusion",
             }
         ),
+        WireCommand::SetClipLayerStyles(a) => {
+            let mut blocks = Vec::new();
+            if a.styles.shadow.is_some() {
+                blocks.push("shadow");
+            }
+            if a.styles.glow.is_some() {
+                blocks.push("glow");
+            }
+            if a.styles.outline.is_some() {
+                blocks.push("outline");
+            }
+            if a.styles.background.is_some() {
+                blocks.push("background");
+            }
+            if blocks.is_empty() {
+                format!("cleared layer styles on clip {}", a.clip)
+            } else {
+                format!(
+                    "set layer styles ({}) on clip {}",
+                    blocks.join(", "),
+                    a.clip
+                )
+            }
+        }
         WireCommand::SetClipAdjustments(a) => {
             let mut parts = Vec::new();
             if let Some(v) = a.brightness {

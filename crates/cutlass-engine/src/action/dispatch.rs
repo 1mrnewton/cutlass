@@ -327,6 +327,13 @@ fn dispatch_edit(
                 Some(inverse),
             ))
         }
+        EditCommand::SetClipBlendMode { clip, mode } => {
+            let inverse = edit::set_look::set_blend_mode(ctx, clip, mode)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(clip)),
+                Some(inverse),
+            ))
+        }
         EditCommand::SetClipChroma { clip, chroma } => {
             let inverse = edit::set_look::set_chroma(ctx, clip, chroma)?;
             Ok((

@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use cutlass_commands::{
-    AnimationRef, AnimationSlot, AudioRole, CanvasAspect, ChromaKey, ClipId, ClipParam,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
     ClipTransform, ColorAdjustments, Command, CropRect, Easing, EditCommand, EditOutcome, Filter,
     Generator, Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId, Param, ParamValue,
     ProjectCommand, Rational, RationalTime, Replaceable, StabilizeLevel, TemplateMeta,
@@ -208,6 +208,10 @@ fn edit_samples() -> Vec<EditCommand> {
                 feather: 0.5.into(),
                 invert: true,
             }),
+        },
+        EditCommand::SetClipBlendMode {
+            clip: clip(4),
+            mode: BlendMode::Multiply,
         },
         EditCommand::SetClipChroma {
             clip: clip(4),
@@ -412,6 +416,7 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
         EditCommand::SetClipAudio { .. } => "SetClipAudio",
         EditCommand::SetClipDenoise { .. } => "SetClipDenoise",
         EditCommand::SetClipMask { .. } => "SetClipMask",
+        EditCommand::SetClipBlendMode { .. } => "SetClipBlendMode",
         EditCommand::SetClipChroma { .. } => "SetClipChroma",
         EditCommand::SetClipStabilize { .. } => "SetClipStabilize",
         EditCommand::SetClipFilter { .. } => "SetClipFilter",
@@ -458,7 +463,7 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
 #[test]
 fn command_variant_counts_are_locked() {
     assert_eq!(project_samples().len(), 9);
-    assert_eq!(edit_samples().len(), 59);
+    assert_eq!(edit_samples().len(), 60);
 }
 
 #[test]
@@ -737,6 +742,15 @@ fn golden_look_commands() {
     assert_eq!(
         serde_json::to_value(&mask).unwrap(),
         json!({"type": "SetClipMask", "clip": 4, "mask": {"kind": "circle"}})
+    );
+
+    let blend = Command::Edit(EditCommand::SetClipBlendMode {
+        clip: clip(4),
+        mode: BlendMode::Multiply,
+    });
+    assert_eq!(
+        serde_json::to_value(&blend).unwrap(),
+        json!({"type": "SetClipBlendMode", "clip": 4, "mode": "multiply"})
     );
 
     let chroma = Command::Edit(EditCommand::SetClipChroma {

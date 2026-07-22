@@ -2061,6 +2061,50 @@ fn effect_commands_reject_unknown_ids_without_history() {
 // --- Phase I look commands ---------------------------------------------------
 
 #[test]
+fn set_clip_blend_mode_undo_redo_roundtrip() {
+    use cutlass_models::BlendMode;
+
+    let Some(path) = small_video_asset() else {
+        return;
+    };
+    let (_dir, mut engine) = temp_engine();
+    let media_id = import_asset(&mut engine, &path);
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
+    let clip_id = created(
+        engine
+            .apply(Command::Edit(EditCommand::AddClip {
+                track,
+                media: media_id,
+                source: tr(0, 48),
+                start: rt(0),
+            }))
+            .expect("add"),
+    );
+    let before = engine.project().clip(clip_id).unwrap().clone();
+    assert_eq!(before.blend_mode, BlendMode::Normal);
+
+    engine
+        .apply(Command::Edit(EditCommand::SetClipBlendMode {
+            clip: clip_id,
+            mode: BlendMode::Multiply,
+        }))
+        .expect("blend");
+    assert_eq!(
+        engine.project().clip(clip_id).unwrap().blend_mode,
+        BlendMode::Multiply
+    );
+
+    // Inverse (undo) restores the pre-edit clip snapshot.
+    assert!(engine.undo());
+    assert_eq!(engine.project().clip(clip_id).unwrap(), &before);
+    assert!(engine.redo());
+    assert_eq!(
+        engine.project().clip(clip_id).unwrap().blend_mode,
+        BlendMode::Multiply
+    );
+}
+
+#[test]
 fn look_commands_undo_redo_roundtrip() {
     use cutlass_models::{
         AnimationRef, AnimationSlot, ChromaKey, ColorAdjustments, Filter, Mask, MaskKind,

@@ -9,7 +9,7 @@ pub use command::{Command, EditCommand, EditOutcome, ProjectCommand, TemplatePic
 // Every model type a command field carries, so callers (shell FFI, the AI
 // agent, tests) can build any command from this crate alone.
 pub use cutlass_models::{
-    AnimationRef, AnimationSlot, AudioRole, CanvasAspect, ChromaKey, ClipId, ClipParam,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
     ClipTransform, ColorAdjustments, CropRect, Easing, Filter, Generator, Lut, MarkerColor,
     MarkerId, Mask, MaskKind, MediaId, Param, ParamValue, Rational, RationalTime, Replaceable,
     StabilizeLevel, TemplateMeta, TimeRange, TrackId, TrackKind,

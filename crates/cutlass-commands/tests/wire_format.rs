@@ -207,6 +207,7 @@ fn edit_samples() -> Vec<EditCommand> {
                 kind: MaskKind::Circle,
                 feather: 0.5.into(),
                 invert: true,
+                ..Mask::new(MaskKind::Circle)
             }),
         },
         EditCommand::SetClipBlendMode {

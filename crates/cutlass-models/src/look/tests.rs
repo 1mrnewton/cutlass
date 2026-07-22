@@ -77,10 +77,66 @@ fn defaults_are_elided_from_the_wire() {
 }
 
 #[test]
+fn legacy_mask_json_deserializes_default_geometry() {
+    let mask: Mask = serde_json::from_value(serde_json::json!({"kind": "circle"})).unwrap();
+    assert_eq!(mask.kind, MaskKind::Circle);
+    assert_eq!(mask.center, Param::Constant([0.0, 0.0]));
+    assert_eq!(mask.size, Param::Constant([1.0, 1.0]));
+    assert_eq!(mask.rotation, Param::Constant(0.0));
+    assert_eq!(mask.roundness, Param::Constant(0.0));
+    assert_eq!(mask.feather, Param::Constant(0.0));
+    assert!(!mask.invert);
+}
+
+#[test]
+fn default_geometry_mask_omits_new_keys_and_keyframed_center_roundtrips() {
+    let mask = Mask::new(MaskKind::Rectangle);
+    let value = serde_json::to_value(&mask).unwrap();
+    let obj = value.as_object().unwrap();
+    assert!(!obj.contains_key("center"));
+    assert!(!obj.contains_key("size"));
+    assert!(!obj.contains_key("rotation"));
+    assert!(!obj.contains_key("roundness"));
+
+    let mut keyed = Mask::new(MaskKind::Circle);
+    keyed.center = Param::Keyframed {
+        keyframes: vec![
+            crate::param::Keyframe {
+                tick: 0,
+                value: [0.0, 0.0],
+                easing: crate::param::Easing::Linear,
+            },
+            crate::param::Keyframe {
+                tick: 10,
+                value: [0.25, -0.1],
+                easing: crate::param::Easing::EaseIn,
+            },
+        ],
+    };
+    let json = serde_json::to_string(&keyed).unwrap();
+    assert!(json.contains("\"center\""));
+    assert!(json.contains("\"kf\""));
+    let loaded: Mask = serde_json::from_str(&json).unwrap();
+    assert_eq!(loaded.center, keyed.center);
+}
+
+#[test]
 fn validation_rejects_out_of_range_values() {
     let mut mask = Mask::new(MaskKind::Linear);
     mask.feather = 1.5.into();
     assert!(mask.validate().is_err());
+
+    let mut size_zero = Mask::new(MaskKind::Circle);
+    size_zero.size = Param::Constant([0.0, 1.0]);
+    assert!(size_zero.validate().is_err());
+
+    let mut roundness = Mask::new(MaskKind::Rectangle);
+    roundness.roundness = 1.5.into();
+    assert!(roundness.validate().is_err());
+
+    let mut center = Mask::new(MaskKind::Circle);
+    center.center = Param::Constant([20.0, 0.0]);
+    assert!(center.validate().is_err());
 
     let chroma = ChromaKey {
         rgb: [0, 255, 0],

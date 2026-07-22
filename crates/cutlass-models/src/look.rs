@@ -23,7 +23,7 @@ mod animation;
 mod blend;
 mod chroma;
 mod filter;
-mod mask;
+pub(crate) mod mask;
 pub(crate) mod styles;
 mod text_effect;
 

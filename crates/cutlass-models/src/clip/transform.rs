@@ -179,7 +179,10 @@ pub enum TextParam {
     ShadowColor,
 }
 
-/// The animatable scalar properties in a clip's color look.
+/// The animatable properties in a clip's color look / mask.
+///
+/// [`LookParam::MaskCenter`] / [`LookParam::MaskSize`] carry [`ParamValue::Vec2`];
+/// the rest carry [`ParamValue::Scalar`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LookParam {
@@ -190,7 +193,16 @@ pub enum LookParam {
     AdjustSaturation,
     AdjustExposure,
     AdjustTemperature,
+    /// Mask edge softness (`0` … `1`). Scalar.
     MaskFeather,
+    /// Mask center offset as a fraction of layer size. Vec2.
+    MaskCenter,
+    /// Mask size as a fraction of layer size. Vec2.
+    MaskSize,
+    /// Mask rotation in degrees (clockwise). Scalar.
+    MaskRotation,
+    /// Rectangle corner rounding (`0` … `1`). Scalar.
+    MaskRoundness,
     ChromaStrength,
     ChromaShadow,
 }

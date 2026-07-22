@@ -182,6 +182,30 @@ pub(crate) fn clip_param_value(
             },
             ParamValue::Scalar(value_x),
         ),
+        "look_mask_center" => (
+            ClipParam::Look {
+                param: LookParam::MaskCenter,
+            },
+            ParamValue::Vec2([value_x, value_y]),
+        ),
+        "look_mask_size" => (
+            ClipParam::Look {
+                param: LookParam::MaskSize,
+            },
+            ParamValue::Vec2([value_x, value_y]),
+        ),
+        "look_mask_rotation" => (
+            ClipParam::Look {
+                param: LookParam::MaskRotation,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_mask_roundness" => (
+            ClipParam::Look {
+                param: LookParam::MaskRoundness,
+            },
+            ParamValue::Scalar(value_x),
+        ),
         "look_chroma_strength" => (
             ClipParam::Look {
                 param: LookParam::ChromaStrength,

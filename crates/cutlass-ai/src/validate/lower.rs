@@ -79,6 +79,10 @@ pub(super) fn clip_param(
                 WireLookParam::AdjustExposure => cutlass_models::LookParam::AdjustExposure,
                 WireLookParam::AdjustTemperature => cutlass_models::LookParam::AdjustTemperature,
                 WireLookParam::MaskFeather => cutlass_models::LookParam::MaskFeather,
+                WireLookParam::MaskCenter => cutlass_models::LookParam::MaskCenter,
+                WireLookParam::MaskSize => cutlass_models::LookParam::MaskSize,
+                WireLookParam::MaskRotation => cutlass_models::LookParam::MaskRotation,
+                WireLookParam::MaskRoundness => cutlass_models::LookParam::MaskRoundness,
                 WireLookParam::ChromaStrength => cutlass_models::LookParam::ChromaStrength,
                 WireLookParam::ChromaShadow => cutlass_models::LookParam::ChromaShadow,
             },
@@ -132,6 +136,7 @@ pub(super) fn lower_mask(wire: &WireMask) -> Result<Mask, Rejection> {
         kind: lower_mask_kind(wire.kind),
         feather: (feather as f32).into(),
         invert: wire.invert.unwrap_or(false),
+        ..Mask::new(lower_mask_kind(wire.kind))
     };
     mask.validate().map_err(|e| Rejection::new(e.to_string()))?;
     Ok(mask)

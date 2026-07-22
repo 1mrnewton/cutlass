@@ -68,6 +68,7 @@ fn clear_beats_undo_redo_only_swaps_the_normalized_grid() {
             kind: MaskKind::Circle,
             feather: 0.2.into(),
             invert: true,
+            ..Mask::new(MaskKind::Circle)
         });
         clip.chroma_key = Some(ChromaKey {
             rgb: [0, 255, 0],

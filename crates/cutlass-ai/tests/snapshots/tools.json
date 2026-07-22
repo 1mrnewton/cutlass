@@ -962,7 +962,7 @@
                   "look": {
                     "properties": {
                       "param": {
-                        "description": "Animatable scalar properties of a clip's color look.",
+                        "description": "Animatable properties of a clip's color look / mask.\n\n`mask_center` / `mask_size` carry vec2 values; the rest are scalars.",
                         "enum": [
                           "filter_intensity",
                           "lut_intensity",
@@ -972,6 +972,10 @@
                           "adjust_exposure",
                           "adjust_temperature",
                           "mask_feather",
+                          "mask_center",
+                          "mask_size",
+                          "mask_rotation",
+                          "mask_roundness",
                           "chroma_strength",
                           "chroma_shadow"
                         ],
@@ -1225,7 +1229,7 @@
                   "look": {
                     "properties": {
                       "param": {
-                        "description": "Animatable scalar properties of a clip's color look.",
+                        "description": "Animatable properties of a clip's color look / mask.\n\n`mask_center` / `mask_size` carry vec2 values; the rest are scalars.",
                         "enum": [
                           "filter_intensity",
                           "lut_intensity",
@@ -1235,6 +1239,10 @@
                           "adjust_exposure",
                           "adjust_temperature",
                           "mask_feather",
+                          "mask_center",
+                          "mask_size",
+                          "mask_rotation",
+                          "mask_roundness",
                           "chroma_strength",
                           "chroma_shadow"
                         ],
@@ -1447,7 +1455,7 @@
                   "look": {
                     "properties": {
                       "param": {
-                        "description": "Animatable scalar properties of a clip's color look.",
+                        "description": "Animatable properties of a clip's color look / mask.\n\n`mask_center` / `mask_size` carry vec2 values; the rest are scalars.",
                         "enum": [
                           "filter_intensity",
                           "lut_intensity",
@@ -1457,6 +1465,10 @@
                           "adjust_exposure",
                           "adjust_temperature",
                           "mask_feather",
+                          "mask_center",
+                          "mask_size",
+                          "mask_rotation",
+                          "mask_roundness",
                           "chroma_strength",
                           "chroma_shadow"
                         ],

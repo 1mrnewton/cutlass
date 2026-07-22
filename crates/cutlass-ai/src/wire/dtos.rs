@@ -344,7 +344,9 @@ pub enum WireTextParam {
     ShadowColor,
 }
 
-/// Animatable scalar properties of a clip's color look.
+/// Animatable properties of a clip's color look / mask.
+///
+/// `mask_center` / `mask_size` carry vec2 values; the rest are scalars.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WireLookParam {
@@ -356,6 +358,10 @@ pub enum WireLookParam {
     AdjustExposure,
     AdjustTemperature,
     MaskFeather,
+    MaskCenter,
+    MaskSize,
+    MaskRotation,
+    MaskRoundness,
     ChromaStrength,
     ChromaShadow,
 }

@@ -10,6 +10,9 @@ use crate::clip::{
 use crate::effects::EffectInstance;
 use crate::error::ModelError;
 use crate::ids::{ClipId, MediaId, ProjectId, TrackId};
+use crate::look::mask::{
+    is_mask_param, remove_mask_param_keyframe, set_mask_param_constant, set_mask_param_keyframe,
+};
 use crate::look::styles::{
     remove_style_param_keyframe, set_style_param_constant, set_style_param_keyframe,
 };
@@ -49,11 +52,6 @@ fn look_param_mut(clip: &mut Clip, param: LookParam) -> Result<&mut Param<f32>, 
         LookParam::AdjustSaturation => Ok(&mut clip.adjust.saturation),
         LookParam::AdjustExposure => Ok(&mut clip.adjust.exposure),
         LookParam::AdjustTemperature => Ok(&mut clip.adjust.temperature),
-        LookParam::MaskFeather => clip
-            .mask
-            .as_mut()
-            .map(|mask| &mut mask.feather)
-            .ok_or_else(|| missing("mask")),
         LookParam::ChromaStrength => clip
             .chroma_key
             .as_mut()
@@ -64,6 +62,13 @@ fn look_param_mut(clip: &mut Clip, param: LookParam) -> Result<&mut Param<f32>, 
             .as_mut()
             .map(|chroma| &mut chroma.shadow)
             .ok_or_else(|| missing("chroma key")),
+        LookParam::MaskFeather
+        | LookParam::MaskCenter
+        | LookParam::MaskSize
+        | LookParam::MaskRotation
+        | LookParam::MaskRoundness => Err(ModelError::InvalidParam(format!(
+            "look parameter {param:?} is routed through the mask param helpers"
+        ))),
     }
 }
 
@@ -71,7 +76,6 @@ fn validate_look_value(param: LookParam, value: f32) -> Result<(), ModelError> {
     let valid = match param {
         LookParam::FilterIntensity
         | LookParam::LutIntensity
-        | LookParam::MaskFeather
         | LookParam::ChromaStrength
         | LookParam::ChromaShadow => (0.0..=1.0).contains(&value),
         LookParam::AdjustBrightness
@@ -79,6 +83,15 @@ fn validate_look_value(param: LookParam, value: f32) -> Result<(), ModelError> {
         | LookParam::AdjustSaturation
         | LookParam::AdjustExposure
         | LookParam::AdjustTemperature => (-1.0..=1.0).contains(&value),
+        LookParam::MaskFeather
+        | LookParam::MaskCenter
+        | LookParam::MaskSize
+        | LookParam::MaskRotation
+        | LookParam::MaskRoundness => {
+            return Err(ModelError::InvalidParam(format!(
+                "look parameter {param:?} is routed through the mask param helpers"
+            )));
+        }
     };
     if value.is_finite() && valid {
         Ok(())
@@ -241,6 +254,9 @@ impl Project {
                 .set_shape_param_keyframe(param, tick, value, easing),
             ClipParam::Text { param } => super::helpers::generator_mut(clip)?
                 .set_text_param_keyframe(param, tick, value, easing),
+            ClipParam::Look { param } if is_mask_param(param) => {
+                set_mask_param_keyframe(&mut clip.mask, param, tick, value, easing)
+            }
             ClipParam::Look { param } => {
                 let value = super::helpers::scalar_param(value)?;
                 validate_look_value(param, value)?;
@@ -295,6 +311,9 @@ impl Project {
             ClipParam::Text { param } => {
                 super::helpers::generator_mut(clip)?.remove_text_param_keyframe(param, tick)
             }
+            ClipParam::Look { param } if is_mask_param(param) => {
+                remove_mask_param_keyframe(&mut clip.mask, param, tick)
+            }
             ClipParam::Look { param } => {
                 if look_param_mut(clip, param)?.remove_keyframe(tick) {
                     Ok(())
@@ -345,6 +364,9 @@ impl Project {
             }
             ClipParam::Text { param } => {
                 super::helpers::generator_mut(clip)?.set_text_param_constant(param, value)
+            }
+            ClipParam::Look { param } if is_mask_param(param) => {
+                set_mask_param_constant(&mut clip.mask, param, value)
             }
             ClipParam::Look { param } => {
                 let value = super::helpers::scalar_param(value)?;

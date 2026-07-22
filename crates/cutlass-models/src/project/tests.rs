@@ -639,6 +639,7 @@ fn duplicate_clip_preserves_full_property_snapshot() {
             kind: MaskKind::Heart,
             feather: 0.35.into(),
             invert: true,
+            ..Mask::new(MaskKind::Heart)
         });
         clip.chroma_key = Some(ChromaKey {
             rgb: [3, 240, 17],
@@ -942,6 +943,7 @@ fn split_clip_preserves_full_property_snapshot_and_rebases_tail_curves() {
             kind: crate::look::MaskKind::Heart,
             feather: 0.35.into(),
             invert: true,
+            ..Mask::new(crate::look::MaskKind::Heart)
         });
         clip.chroma_key = Some(ChromaKey {
             rgb: [3, 240, 17],
@@ -2170,6 +2172,91 @@ fn filter_intensity_keyframes_sample_at_clip_local_ticks() {
         .intensity
         .sample(5);
     assert!((intensity - 0.5).abs() < f32::EPSILON);
+}
+
+#[test]
+fn mask_geometry_keyframes_through_project_api() {
+    let (mut project, media_id, track) = project_with_media(100);
+    let clip = project
+        .add_clip(track, media_id, tr(0, 48), rt(100))
+        .unwrap();
+    project
+        .set_clip_mask(clip, Some(Mask::new(MaskKind::Rectangle)))
+        .unwrap();
+
+    let rotation = ClipParam::Look {
+        param: crate::LookParam::MaskRotation,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            rotation,
+            rt(100),
+            ParamValue::Scalar(0.0),
+            Easing::Linear,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            rotation,
+            rt(140),
+            ParamValue::Scalar(90.0),
+            Easing::Linear,
+        )
+        .unwrap();
+    assert!(
+        (project
+            .clip(clip)
+            .unwrap()
+            .mask
+            .as_ref()
+            .unwrap()
+            .rotation
+            .sample(20)
+            - 45.0)
+            .abs()
+            < f32::EPSILON
+    );
+
+    let center = ClipParam::Look {
+        param: crate::LookParam::MaskCenter,
+    };
+    assert!(
+        project
+            .set_param_keyframe(
+                clip,
+                center,
+                rt(100),
+                ParamValue::Scalar(0.5),
+                Easing::Linear
+            )
+            .is_err()
+    );
+    project
+        .set_param_keyframe(
+            clip,
+            center,
+            rt(100),
+            ParamValue::Vec2([0.1, -0.2]),
+            Easing::Linear,
+        )
+        .unwrap();
+
+    let bare = project
+        .add_clip(track, media_id, tr(0, 48), rt(200))
+        .unwrap();
+    assert!(
+        project
+            .set_param_keyframe(
+                bare,
+                rotation,
+                rt(200),
+                ParamValue::Scalar(15.0),
+                Easing::Linear
+            )
+            .is_err()
+    );
 }
 
 #[test]

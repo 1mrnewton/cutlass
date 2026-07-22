@@ -1031,7 +1031,7 @@
             ]
           },
           "position": {
-            "description": "New `[x, y]` for `position` or `anchor_point` (fractions of canvas size\nfrom center, +x right, +y down). Ignored for scalar and color params.",
+            "description": "New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`, or\nlook `mask_center` / `mask_size`. Ignored for scalar and color params.",
             "items": {
               "format": "double",
               "type": "number"
@@ -1524,7 +1524,7 @@
             ]
           },
           "position": {
-            "description": "New `[x, y]` for `position` or `anchor_point`. Ignored for scalar and\ncolor params.",
+            "description": "New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`, or\nlook `mask_center` / `mask_size`. Ignored for scalar and color params.",
             "items": {
               "format": "double",
               "type": "number"
@@ -1730,7 +1730,7 @@
       }
     },
     {
-      "description": "Set or clear a shaped alpha mask on a media-backed visual clip. Mask kinds: linear, mirror, circle, rectangle, heart, star. Pass null for mask to clear.",
+      "description": "Set or clear a shaped alpha mask on a media-backed visual clip. Mask kinds: linear, mirror, circle, rectangle, heart, star. Optional constants: feather (0..1), invert, center/size as fractions of the layer, rotation in degrees clockwise, roundness (0..1, rectangle only). Omitted geometry uses defaults. Constants only — animate with set_param_keyframe using look params (mask_feather, mask_center, mask_size, mask_rotation, mask_roundness). Pass null for mask to clear.",
       "name": "set_clip_mask",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1744,6 +1744,19 @@
           "mask": {
             "description": "Mask to apply. `null` clears the mask.",
             "properties": {
+              "center": {
+                "description": "Mask center offset from the layer center, as fractions of the layer\nsize per axis (`[0,0]` = centered, `[0.5,0]` = right edge). Omitted\nuses the default (`[0,0]`).",
+                "items": {
+                  "format": "float",
+                  "type": "number"
+                },
+                "maxItems": 2,
+                "minItems": 2,
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
               "feather": {
                 "description": "Edge softness, 0 (hard) … 1 (fully feathered). Defaults to 0.",
                 "format": "double",
@@ -1770,6 +1783,35 @@
                   "star"
                 ],
                 "type": "string"
+              },
+              "rotation": {
+                "description": "Mask rotation in degrees, clockwise about the mask center. Omitted\nuses the default (`0`).",
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "roundness": {
+                "description": "Rectangle corner rounding, `0` (sharp) … `1` (fully round). Ignored\nby other kinds. Omitted uses the default (`0`).",
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "size": {
+                "description": "Mask size as fractions of the layer size per axis (`[1,1]` covers the\nlayer). Omitted uses the default (`[1,1]`).",
+                "items": {
+                  "format": "float",
+                  "type": "number"
+                },
+                "maxItems": 2,
+                "minItems": 2,
+                "type": [
+                  "array",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -2843,5 +2885,5 @@
       }
     }
   ],
-  "version": 29
+  "version": 30
 }

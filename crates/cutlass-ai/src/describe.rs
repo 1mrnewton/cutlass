@@ -144,7 +144,7 @@ pub struct ClipSummary {
     /// catalog id of the blend into the next clip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<String>,
-    /// Mask kind (set_clip_mask); absent when no mask.
+    /// Mask kind plus non-default geometry (set_clip_mask); absent when no mask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask: Option<String>,
     /// Filter preset id (set_clip_filter); absent when none.
@@ -377,13 +377,37 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                     transition: track
                         .transition_at(clip.id)
                         .map(|t| t.transition_id.clone()),
-                    mask: clip.mask.as_ref().map(|m| match m.kind {
-                        cutlass_models::MaskKind::Linear => "linear".to_string(),
-                        cutlass_models::MaskKind::Mirror => "mirror".to_string(),
-                        cutlass_models::MaskKind::Circle => "circle".to_string(),
-                        cutlass_models::MaskKind::Rectangle => "rectangle".to_string(),
-                        cutlass_models::MaskKind::Heart => "heart".to_string(),
-                        cutlass_models::MaskKind::Star => "star".to_string(),
+                    mask: clip.mask.as_ref().map(|m| {
+                        let kind = match m.kind {
+                            cutlass_models::MaskKind::Linear => "linear",
+                            cutlass_models::MaskKind::Mirror => "mirror",
+                            cutlass_models::MaskKind::Circle => "circle",
+                            cutlass_models::MaskKind::Rectangle => "rectangle",
+                            cutlass_models::MaskKind::Heart => "heart",
+                            cutlass_models::MaskKind::Star => "star",
+                        };
+                        let mut parts = vec![kind.to_string()];
+                        if let Some(c) = m.center.constant()
+                            && c != [0.0, 0.0]
+                        {
+                            parts.push(format!("center=[{:.2}, {:.2}]", c[0], c[1]));
+                        }
+                        if let Some(s) = m.size.constant()
+                            && s != [1.0, 1.0]
+                        {
+                            parts.push(format!("size=[{:.2}, {:.2}]", s[0], s[1]));
+                        }
+                        if let Some(r) = m.rotation.constant()
+                            && r != 0.0
+                        {
+                            parts.push(format!("rot={r:.0}"));
+                        }
+                        if let Some(r) = m.roundness.constant()
+                            && r != 0.0
+                        {
+                            parts.push(format!("round={r:.2}"));
+                        }
+                        parts.join(" ")
                     }),
                     filter: clip.filter.as_ref().map(|f| f.id.clone()),
                     blend: (!clip.blend_mode.is_normal()).then(|| clip.blend_mode.id().to_string()),

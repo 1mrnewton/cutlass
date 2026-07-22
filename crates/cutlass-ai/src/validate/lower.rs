@@ -132,12 +132,22 @@ pub(super) fn lower_mask(wire: &WireMask) -> Result<Mask, Rejection> {
             "mask feather must be between 0 and 1 (got {feather})"
         )));
     }
-    let mask = Mask {
-        kind: lower_mask_kind(wire.kind),
-        feather: (feather as f32).into(),
-        invert: wire.invert.unwrap_or(false),
-        ..Mask::new(lower_mask_kind(wire.kind))
-    };
+    let mut mask = Mask::new(lower_mask_kind(wire.kind));
+    mask.feather = Param::Constant(feather as f32);
+    mask.invert = wire.invert.unwrap_or(false);
+    if let Some(center) = wire.center {
+        mask.center = Param::Constant(center);
+    }
+    if let Some(size) = wire.size {
+        mask.size = Param::Constant(size);
+    }
+    if let Some(rotation) = wire.rotation {
+        mask.rotation = Param::Constant(rotation);
+    }
+    if let Some(roundness) = wire.roundness {
+        mask.roundness = Param::Constant(roundness);
+    }
+    // Model `Mask::validate` range-checks every geometry field.
     mask.validate().map_err(|e| Rejection::new(e.to_string()))?;
     Ok(mask)
 }

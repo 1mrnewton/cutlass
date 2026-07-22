@@ -420,8 +420,8 @@ pub struct SetParamKeyframe {
     /// parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// New `[x, y]` for `position` or `anchor_point` (fractions of canvas size
-    /// from center, +x right, +y down). Ignored for scalar and color params.
+    /// New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`, or
+    /// look `mask_center` / `mask_size`. Ignored for scalar and color params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f64; 2]>,
     /// New `[red, green, blue, alpha]` color for shape or text color
@@ -453,8 +453,8 @@ pub struct SetParamConstant {
     /// parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// New `[x, y]` for `position` or `anchor_point`. Ignored for scalar and
-    /// color params.
+    /// New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`, or
+    /// look `mask_center` / `mask_size`. Ignored for scalar and color params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f64; 2]>,
     /// New `[red, green, blue, alpha]` color for shape or text color
@@ -575,6 +575,23 @@ pub struct WireMask {
     /// Keep the outside instead of the inside.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invert: Option<bool>,
+    /// Mask center offset from the layer center, as fractions of the layer
+    /// size per axis (`[0,0]` = centered, `[0.5,0]` = right edge). Omitted
+    /// uses the default (`[0,0]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub center: Option<[f32; 2]>,
+    /// Mask size as fractions of the layer size per axis (`[1,1]` covers the
+    /// layer). Omitted uses the default (`[1,1]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<[f32; 2]>,
+    /// Mask rotation in degrees, clockwise about the mask center. Omitted
+    /// uses the default (`0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f32>,
+    /// Rectangle corner rounding, `0` (sharp) … `1` (fully round). Ignored
+    /// by other kinds. Omitted uses the default (`0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roundness: Option<f32>,
 }
 
 /// Set (or clear) a per-clip mask on a media-backed visual clip.

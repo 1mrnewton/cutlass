@@ -51,7 +51,9 @@ use serde::{Deserialize, Serialize};
 /// 27: `hold` (step) easing on `set_param_keyframe`.
 /// 28: clip blend mode (`set_clip_blend_mode`).
 /// 29: layer styles (`set_layer_styles`) and style params on keyframes.
-pub const TOOL_SCHEMA_VERSION: u32 = 29;
+/// 30: mask geometry (`center` / `size` / `rotation` / `roundness`) on
+///     `set_clip_mask`.
+pub const TOOL_SCHEMA_VERSION: u32 = 30;
 
 mod dtos;
 mod tools;

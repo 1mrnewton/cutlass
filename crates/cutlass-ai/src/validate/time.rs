@@ -1,5 +1,5 @@
 use super::*;
-use crate::wire::{WireShapeParam, WireStyleParam, WireTextParam};
+use crate::wire::{WireLookParam, WireShapeParam, WireStyleParam, WireTextParam};
 
 // --- seconds → ticks ---------------------------------------------------------
 
@@ -62,11 +62,15 @@ pub(super) fn param_value(
         | WireClipParam::AnchorPoint
         | WireClipParam::Style {
             param: WireStyleParam::ShadowOffset,
+        }
+        | WireClipParam::Look {
+            param: WireLookParam::MaskCenter | WireLookParam::MaskSize,
         } => position
             .map(|p| ParamValue::Vec2([p[0] as f32, p[1] as f32]))
             .ok_or_else(|| {
                 Rejection::new(
-                    "position, anchor_point, and style shadow_offset params need the 'position' argument as [x, y]",
+                    "position, anchor_point, style shadow_offset, and look \
+                     mask_center/mask_size params need the 'position' argument as [x, y]",
                 )
             }),
         WireClipParam::Scale
@@ -101,14 +105,11 @@ pub(super) fn param_value(
                 | WireStyleParam::OutlineWidth
                 | WireStyleParam::BackgroundPadding
                 | WireStyleParam::BackgroundRadius,
-        } => {
-            value.map(|v| ParamValue::Scalar(v as f32)).ok_or_else(|| {
-                Rejection::new(
-                    format!("param '{param:?}' needs the 'value' argument (a number)",)
-                        .to_lowercase(),
-                )
-            })
-        }
+        } => value.map(|v| ParamValue::Scalar(v as f32)).ok_or_else(|| {
+            Rejection::new(
+                format!("param '{param:?}' needs the 'value' argument (a number)",).to_lowercase(),
+            )
+        }),
         WireClipParam::Shape {
             param: WireShapeParam::Fill | WireShapeParam::StrokeColor,
         }

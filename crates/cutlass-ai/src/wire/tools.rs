@@ -153,7 +153,7 @@ tools! {
     "set_denoise" => SetDenoise(SetDenoise),
         "Turn noise reduction on or off for a media clip: runs its audio through a speech-preserving denoiser that suppresses steady background noise (hum, hiss, air-conditioning, room tone) while keeping voice. Use on clips with a constant background drone. A video clip keeps its own sound, so target it directly. Not valid for generated clips.";
     "set_clip_mask" => SetClipMask(SetClipMask),
-        "Set or clear a shaped alpha mask on a media-backed visual clip. Mask kinds: linear, mirror, circle, rectangle, heart, star. Pass null for mask to clear.";
+        "Set or clear a shaped alpha mask on a media-backed visual clip. Mask kinds: linear, mirror, circle, rectangle, heart, star. Optional constants: feather (0..1), invert, center/size as fractions of the layer, rotation in degrees clockwise, roundness (0..1, rectangle only). Omitted geometry uses defaults. Constants only — animate with set_param_keyframe using look params (mask_feather, mask_center, mask_size, mask_rotation, mask_roundness). Pass null for mask to clear.";
     "set_clip_chroma" => SetClipChroma(SetClipChroma),
         "Set or clear chroma keying (green screen) on a media-backed visual clip. Pass null for chroma to clear.";
     "set_clip_stabilize" => SetClipStabilize(SetClipStabilize),

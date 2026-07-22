@@ -996,6 +996,9 @@ fn param_value_phrase(
         } => color.map(rgba).unwrap_or_else(|| "?".into()),
         wire::WireClipParam::Style {
             param: wire::WireStyleParam::ShadowOffset,
+        }
+        | wire::WireClipParam::Look {
+            param: wire::WireLookParam::MaskCenter | wire::WireLookParam::MaskSize,
         } => position
             .map(|p| format!("[{:.2}, {:.2}]", p[0], p[1]))
             .unwrap_or_else(|| "?".into()),

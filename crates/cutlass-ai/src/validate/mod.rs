@@ -8,7 +8,9 @@
 //! engine remains the authority (overlaps, source bounds, rate math) and
 //! re-validates everything on apply.
 
+mod audio;
 mod command;
+mod look;
 mod lookup;
 mod lower;
 #[cfg(test)]
@@ -31,6 +33,8 @@ use crate::wire::{
     WireShape, WireStabilizeLevel, WireTrackKind,
 };
 
+use audio::*;
+use look::*;
 use lookup::*;
 use lower::*;
 use time::*;

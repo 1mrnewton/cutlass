@@ -1979,8 +1979,8 @@ fn project_clone_is_independent_snapshot() {
 // --- Phase I look properties --------------------------------------------
 
 use crate::look::{
-    AnimationRef, AnimationSlot, AudioRole, ChromaKey, ColorAdjustments, Filter, Mask, MaskKind,
-    StabilizeLevel,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, ChromaKey, ColorAdjustments, Filter, Mask,
+    MaskKind, StabilizeLevel,
 };
 
 #[test]
@@ -2016,6 +2016,7 @@ fn look_setters_persist_on_a_media_clip() {
             },
         )
         .unwrap();
+    project.set_blend_mode(clip, BlendMode::Multiply).unwrap();
 
     let c = project.clip(clip).unwrap();
     assert_eq!(c.mask.as_ref().unwrap().kind, MaskKind::Circle);
@@ -2023,6 +2024,7 @@ fn look_setters_persist_on_a_media_clip() {
     assert_eq!(c.stabilize, Some(StabilizeLevel::Smooth));
     assert_eq!(c.filter.as_ref().unwrap().id, "vivid");
     assert_eq!(c.adjust.brightness, 0.25.into());
+    assert_eq!(c.blend_mode, BlendMode::Multiply);
 
     // Clearing works and the fields vanish from saves again.
     project.set_clip_mask(clip, None).unwrap();
@@ -2101,6 +2103,13 @@ fn look_setters_reject_wrong_content() {
         project
             .set_clip_filter(aclip, Some(Filter::new("warm")))
             .is_err()
+    );
+    assert!(
+        matches!(
+            project.set_blend_mode(aclip, BlendMode::Multiply),
+            Err(ModelError::IncompatibleTrackKind { .. })
+        ),
+        "blend modes need pixels"
     );
 
     // Stills have no motion to stabilize.

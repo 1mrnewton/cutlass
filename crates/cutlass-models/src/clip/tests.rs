@@ -952,6 +952,42 @@ fn clip_without_transform_field_deserializes_to_identity() {
 }
 
 #[test]
+fn normal_blend_mode_is_elided_from_serde() {
+    let clip = Clip::generated(Generator::text("blend"), tr(0, 10, R24));
+    assert_eq!(clip.blend_mode, crate::look::BlendMode::Normal);
+    let json = serde_json::to_string(&clip).expect("serialize");
+    assert!(
+        !json.contains("blend_mode"),
+        "Normal blend must be absent from saves: {json}"
+    );
+}
+
+#[test]
+fn multiply_blend_mode_roundtrips_through_serde() {
+    let mut clip = Clip::generated(Generator::text("blend"), tr(0, 10, R24));
+    clip.blend_mode = crate::look::BlendMode::Multiply;
+    let json = serde_json::to_string(&clip).expect("serialize");
+    assert!(json.contains("\"blend_mode\":\"multiply\""));
+    let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(loaded.blend_mode, crate::look::BlendMode::Multiply);
+}
+
+#[test]
+fn clip_without_blend_mode_field_deserializes_to_normal() {
+    let clip = Clip::generated(Generator::text("old"), tr(0, 10, R24));
+    let mut value = serde_json::to_value(&clip).expect("serialize");
+    // Normal is already skipped; ensure a legacy map without the key loads.
+    value
+        .as_object_mut()
+        .expect("clip serializes to a map")
+        .remove("blend_mode");
+
+    let loaded: Clip = serde_json::from_value(value).expect("deserialize legacy clip");
+    assert_eq!(loaded.blend_mode, crate::look::BlendMode::Normal);
+    assert_eq!(loaded.content, clip.content);
+}
+
+#[test]
 fn transform_roundtrips_through_serde() {
     let mut clip = Clip::generated(Generator::Adjustment, tr(0, 10, R24));
     clip.transform = ClipTransform {

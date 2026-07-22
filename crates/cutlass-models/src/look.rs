@@ -19,6 +19,7 @@ use crate::param::Param;
 
 mod adjust;
 mod animation;
+mod blend;
 mod chroma;
 mod filter;
 mod mask;
@@ -30,6 +31,7 @@ pub use animation::{
     ANIMATION_STAGGER_RANGE, AnimationKnobs, AnimationRef, AnimationSlot, AnimationSpec,
     animation_catalog, animation_spec,
 };
+pub use blend::BlendMode;
 pub use chroma::{ChromaKey, StabilizeLevel};
 pub use filter::{Filter, FilterSpec, Lut, filter_catalog, filter_spec};
 pub use mask::{Mask, MaskKind, MaskSpec, mask_catalog};

@@ -10,8 +10,8 @@ use crate::effects::EffectInstance;
 use crate::error::ModelError;
 use crate::ids::{ClipId, MediaId, ProjectId, TrackId};
 use crate::look::{
-    AnimationRef, AnimationSlot, AudioRole, ChromaKey, ColorAdjustments, Filter, Lut, Mask,
-    StabilizeLevel, animation_spec,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, ChromaKey, ColorAdjustments, Filter, Lut,
+    Mask, StabilizeLevel, animation_spec,
 };
 use crate::media::MediaSource;
 use crate::metadata::ProjectMetadata;
@@ -84,6 +84,17 @@ impl Project {
             .clip_mut(clip_id)
             .expect("clip existence checked above")
             .mask = mask;
+        Ok(())
+    }
+
+    /// Set how the clip composites over the stack below (M-blend). Visual
+    /// clips only; audio has nothing to blend.
+    pub fn set_blend_mode(&mut self, clip_id: ClipId, mode: BlendMode) -> Result<(), ModelError> {
+        self.require_visual(clip_id, "a blend mode")?;
+        self.timeline
+            .clip_mut(clip_id)
+            .expect("clip existence checked above")
+            .blend_mode = mode;
         Ok(())
     }
 

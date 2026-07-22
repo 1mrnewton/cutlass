@@ -65,6 +65,11 @@ pub struct Clip {
     /// exactly like the pre-M2 plain [`ClipTransform`].
     #[serde(default)]
     pub transform: AnimatedTransform,
+    /// How this clip's pixels blend with the stack below (CapCut "Blend",
+    /// visual clips only). `Normal` (and absent from saves) when never set,
+    /// so old projects load unchanged.
+    #[serde(default, skip_serializing_if = "is_normal_blend")]
+    pub blend_mode: crate::look::BlendMode,
     /// Playback rate (CapCut speed, M1): source time advances `speed`× per
     /// unit of timeline time — `2/1` plays double speed (the clip occupies
     /// half its source duration on the timeline), `1/2` is 50% slow motion.
@@ -334,6 +339,11 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_normal_blend(b: &crate::look::BlendMode) -> bool {
+    b.is_normal()
+}
+
 impl Clip {
     /// A clip backed by a trimmed range of imported media.
     pub fn from_media(media: MediaId, source: TimeRange, timeline: TimeRange) -> Self {
@@ -344,6 +354,7 @@ impl Clip {
             freeze_frame: false,
             link: None,
             transform: AnimatedTransform::identity(),
+            blend_mode: crate::look::BlendMode::default(),
             speed: unit_speed(),
             reversed: false,
             speed_curve: default_speed_curve(),
@@ -493,6 +504,7 @@ impl Clip {
             freeze_frame: false,
             link: None,
             transform: AnimatedTransform::identity(),
+            blend_mode: crate::look::BlendMode::default(),
             speed: unit_speed(),
             reversed: false,
             speed_curve: default_speed_curve(),

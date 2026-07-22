@@ -34,6 +34,21 @@ fn enum_ids_match_their_serde_names() {
         let json = serde_json::to_value(role).unwrap();
         assert_eq!(json, serde_json::json!(role.id()));
     }
+    for mode in BlendMode::ALL {
+        let json = serde_json::to_value(mode).unwrap();
+        assert_eq!(json, serde_json::json!(mode.id()));
+    }
+}
+
+#[test]
+fn blend_mode_id_label_roundtrip() {
+    for mode in BlendMode::ALL {
+        assert_eq!(BlendMode::from_id(mode.id()), Some(*mode));
+        assert!(!mode.label().is_empty());
+    }
+    assert!(BlendMode::from_id("nope").is_none());
+    assert!(BlendMode::Normal.is_normal());
+    assert!(!BlendMode::Multiply.is_normal());
 }
 
 #[test]

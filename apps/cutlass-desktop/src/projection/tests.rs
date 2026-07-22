@@ -116,6 +116,67 @@ fn projects_clip_layer_styles() {
 }
 
 #[test]
+fn projects_text_background_radius_keyframes() {
+    use cutlass_models::{
+        ClipParam, Easing, Generator, ParamValue, RationalTime, TextBackground, TextParam,
+        TextStyle, TimeRange, TrackKind,
+    };
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("text-bg", EngineRational::FPS_24);
+    let track = project.add_track(TrackKind::Text, "T1");
+    let clip_id = project
+        .add_generated(
+            track,
+            Generator::Text {
+                content: "Hi".into(),
+                style: TextStyle {
+                    background: Some(TextBackground::default()),
+                    ..Default::default()
+                },
+            },
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+        )
+        .expect("text");
+    project
+        .set_param_keyframe(
+            clip_id,
+            ClipParam::Text {
+                param: TextParam::BackgroundRadius,
+            },
+            RationalTime::new(0, EngineRational::FPS_24),
+            ParamValue::Scalar(0.0),
+            Easing::Linear,
+        )
+        .expect("kf0");
+    project
+        .set_param_keyframe(
+            clip_id,
+            ClipParam::Text {
+                param: TextParam::BackgroundRadius,
+            },
+            RationalTime::new(24, EngineRational::FPS_24),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+        )
+        .expect("kf1");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clip = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(clip.text_style.background_enabled);
+    assert_eq!(clip.kf_text_background_radius.row_count(), 2);
+    assert_eq!(clip.kf_text_background_color.row_count(), 0);
+}
+
+#[test]
 fn projects_new_adjust_sliders_and_keyframes() {
     use cutlass_models::{
         ClipParam, ColorAdjustments, Easing, LookParam, MediaSource, ParamValue, RationalTime,

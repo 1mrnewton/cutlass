@@ -360,6 +360,8 @@ pub enum WireTextParam {
     ShadowBlur,
     ShadowDistance,
     ShadowColor,
+    BackgroundColor,
+    BackgroundRadius,
 }
 
 /// Animatable properties of a clip's color look / mask.

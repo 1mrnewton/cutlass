@@ -138,7 +138,8 @@ pub(super) fn param_value(
                 | WireTextParam::LineSpacing
                 | WireTextParam::StrokeWidth
                 | WireTextParam::ShadowBlur
-                | WireTextParam::ShadowDistance,
+                | WireTextParam::ShadowDistance
+                | WireTextParam::BackgroundRadius,
         }
         | WireClipParam::Look { .. }
         | WireClipParam::Style {
@@ -158,7 +159,11 @@ pub(super) fn param_value(
             param: WireShapeParam::Fill | WireShapeParam::StrokeColor,
         }
         | WireClipParam::Text {
-            param: WireTextParam::Fill | WireTextParam::StrokeColor | WireTextParam::ShadowColor,
+            param:
+                WireTextParam::Fill
+                | WireTextParam::StrokeColor
+                | WireTextParam::ShadowColor
+                | WireTextParam::BackgroundColor,
         }
         | WireClipParam::Style {
             param:

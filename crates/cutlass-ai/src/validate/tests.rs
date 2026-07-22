@@ -133,6 +133,32 @@ fn extended_wire_clip_params_lower_to_model_params() {
             ParamValue::Scalar(72.0),
         ),
         (
+            title,
+            wire::WireClipParam::Text {
+                param: wire::WireTextParam::BackgroundRadius,
+            },
+            None,
+            Some(0.5),
+            None,
+            ClipParam::Text {
+                param: cutlass_models::TextParam::BackgroundRadius,
+            },
+            ParamValue::Scalar(0.5),
+        ),
+        (
+            title,
+            wire::WireClipParam::Text {
+                param: wire::WireTextParam::BackgroundColor,
+            },
+            None,
+            None,
+            Some([10, 20, 30, 200]),
+            ClipParam::Text {
+                param: cutlass_models::TextParam::BackgroundColor,
+            },
+            ParamValue::Color([10, 20, 30, 200]),
+        ),
+        (
             clip,
             wire::WireClipParam::Look {
                 param: wire::WireLookParam::AdjustContrast,

@@ -143,6 +143,10 @@ pub(crate) fn sampled_scalar_param(clip: &Clip, param: &str, playhead: i32) -> O
         "text_letter_spacing" => (&clip.kf_text_letter_spacing, clip.text_style.letter_spacing),
         "text_line_spacing" => (&clip.kf_text_line_spacing, clip.text_style.line_spacing),
         "text_stroke_width" => (&clip.kf_text_stroke_width, clip.text_style.stroke_width),
+        "text_background_radius" => (
+            &clip.kf_text_background_radius,
+            clip.text_style.background_radius,
+        ),
         "text_shadow_blur" => (&clip.kf_text_shadow_blur, clip.text_style.shadow_blur),
         "text_shadow_distance" => (
             &clip.kf_text_shadow_distance,
@@ -244,6 +248,8 @@ pub(crate) fn merged_keyframe_ticks(clip: &Clip) -> slint::ModelRc<i32> {
         &clip.kf_text_line_spacing,
         &clip.kf_text_stroke_width,
         &clip.kf_text_stroke_color,
+        &clip.kf_text_background_color,
+        &clip.kf_text_background_radius,
         &clip.kf_text_shadow_blur,
         &clip.kf_text_shadow_distance,
         &clip.kf_text_shadow_color,

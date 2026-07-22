@@ -174,6 +174,7 @@ pub fn sample_scalar_param(clip: &Clip, param: &str, playhead: i32) -> ScalarPar
         "text_letter_spacing" => &clip.kf_text_letter_spacing,
         "text_line_spacing" => &clip.kf_text_line_spacing,
         "text_stroke_width" => &clip.kf_text_stroke_width,
+        "text_background_radius" => &clip.kf_text_background_radius,
         "text_shadow_blur" => &clip.kf_text_shadow_blur,
         "text_shadow_distance" => &clip.kf_text_shadow_distance,
         "look_filter_intensity" => &clip.kf_look_filter_intensity,

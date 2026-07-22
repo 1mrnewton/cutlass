@@ -202,6 +202,73 @@ fn text_wrap_toggle_removes_the_canvas_width_constraint() {
 }
 
 #[test]
+fn keyframed_text_background_samples_card_per_tick() {
+    use cutlass_models::{ClipParam, Easing, ParamValue, TextParam};
+
+    let mut project = Project::new("p", FPS_24);
+    let track = project.add_track(TrackKind::Text, "T1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::Text {
+                content: "Card".into(),
+                style: ModelTextStyle {
+                    background: Some(cutlass_models::TextBackground::default()),
+                    ..ModelTextStyle::default()
+                },
+            },
+            tr(0, 100),
+        )
+        .unwrap();
+    let color = ClipParam::Text {
+        param: TextParam::BackgroundColor,
+    };
+    let radius = ClipParam::Text {
+        param: TextParam::BackgroundRadius,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            color,
+            rt(0),
+            ParamValue::Color([0, 0, 0, 255]),
+            Easing::Linear,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            color,
+            rt(50),
+            ParamValue::Color([200, 100, 0, 255]),
+            Easing::Linear,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(clip, radius, rt(0), ParamValue::Scalar(0.0), Easing::Linear)
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            radius,
+            rt(50),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+        )
+        .unwrap();
+
+    let scene = resolve(&project, rt(25)).unwrap();
+    match &scene.layers[0].source {
+        LayerSource::Text { style, .. } => {
+            let bg = style.background.expect("background");
+            assert_eq!(bg.rgba, [100, 50, 0, 255], "card color lerps per channel");
+            approx(bg.radius, 0.5);
+        }
+        other => panic!("expected text source, got {other:?}"),
+    }
+}
+
+#[test]
 fn solid_generator_fills_canvas() {
     let mut project = Project::new("p", FPS_24);
     let track = project.add_track(TrackKind::Sticker, "S1");

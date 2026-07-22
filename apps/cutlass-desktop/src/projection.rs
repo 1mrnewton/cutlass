@@ -412,6 +412,8 @@ fn clip_to_slint(
         kf_text_line_spacing: text_keyframes(clip, clip_start, |style| &style.line_spacing),
         kf_text_stroke_width: text_stroke_keyframes(clip, clip_start, |stroke| &stroke.width),
         kf_text_stroke_color: text_stroke_color_keyframes(clip, clip_start, |stroke| &stroke.rgba),
+        kf_text_background_color: text_background_color_keyframes(clip, clip_start, |bg| &bg.rgba),
+        kf_text_background_radius: text_background_keyframes(clip, clip_start, |bg| &bg.radius),
         kf_text_shadow_blur: text_shadow_keyframes(clip, clip_start, |shadow| &shadow.blur),
         kf_text_shadow_distance: text_shadow_keyframes(clip, clip_start, |shadow| &shadow.distance),
         kf_text_shadow_color: text_shadow_color_keyframes(clip, clip_start, |shadow| &shadow.rgba),
@@ -1025,6 +1027,38 @@ fn text_stroke_color_keyframes(
             .as_ref()
             .map_or_else(empty_keyframes, |stroke| {
                 keyframes_to_slint(param(stroke), clip_start, |_| (0.0, 0.0))
+            }),
+        _ => empty_keyframes(),
+    }
+}
+
+fn text_background_keyframes(
+    clip: &EngineClip,
+    clip_start: i64,
+    param: impl FnOnce(&cutlass_models::TextBackground) -> &Param<f32>,
+) -> ModelRc<ParamKeyframe> {
+    match &clip.content {
+        ClipSource::Generated(Generator::Text { style, .. }) => style
+            .background
+            .as_ref()
+            .map_or_else(empty_keyframes, |background| {
+                keyframes_to_slint(param(background), clip_start, |v| (*v, 0.0))
+            }),
+        _ => empty_keyframes(),
+    }
+}
+
+fn text_background_color_keyframes(
+    clip: &EngineClip,
+    clip_start: i64,
+    param: impl FnOnce(&cutlass_models::TextBackground) -> &Param<[u8; 4]>,
+) -> ModelRc<ParamKeyframe> {
+    match &clip.content {
+        ClipSource::Generated(Generator::Text { style, .. }) => style
+            .background
+            .as_ref()
+            .map_or_else(empty_keyframes, |background| {
+                keyframes_to_slint(param(background), clip_start, |_| (0.0, 0.0))
             }),
         _ => empty_keyframes(),
     }

@@ -994,7 +994,8 @@ fn param_value_phrase(
             param:
                 wire::WireTextParam::Fill
                 | wire::WireTextParam::StrokeColor
-                | wire::WireTextParam::ShadowColor,
+                | wire::WireTextParam::ShadowColor
+                | wire::WireTextParam::BackgroundColor,
         }
         | wire::WireClipParam::Style {
             param:

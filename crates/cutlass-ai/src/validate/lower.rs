@@ -49,6 +49,8 @@ pub(super) fn clip_param(
                 WireTextParam::ShadowBlur => cutlass_models::TextParam::ShadowBlur,
                 WireTextParam::ShadowDistance => cutlass_models::TextParam::ShadowDistance,
                 WireTextParam::ShadowColor => cutlass_models::TextParam::ShadowColor,
+                WireTextParam::BackgroundColor => cutlass_models::TextParam::BackgroundColor,
+                WireTextParam::BackgroundRadius => cutlass_models::TextParam::BackgroundRadius,
             },
         },
         WireClipParam::Look { param } => ClipParam::Look {

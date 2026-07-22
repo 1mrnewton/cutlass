@@ -979,7 +979,9 @@
                           "stroke_color",
                           "shadow_blur",
                           "shadow_distance",
-                          "shadow_color"
+                          "shadow_color",
+                          "background_color",
+                          "background_radius"
                         ],
                         "type": "string"
                       }
@@ -1275,7 +1277,9 @@
                           "stroke_color",
                           "shadow_blur",
                           "shadow_distance",
-                          "shadow_color"
+                          "shadow_color",
+                          "background_color",
+                          "background_radius"
                         ],
                         "type": "string"
                       }
@@ -1517,7 +1521,9 @@
                           "stroke_color",
                           "shadow_blur",
                           "shadow_distance",
-                          "shadow_color"
+                          "shadow_color",
+                          "background_color",
+                          "background_radius"
                         ],
                         "type": "string"
                       }
@@ -3035,5 +3041,5 @@
       }
     }
   ],
-  "version": 34
+  "version": 35
 }

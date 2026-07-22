@@ -97,6 +97,8 @@ export component TextTreatmentRows inherits VerticalLayout {
         && TimelineStore.playhead-tick < model.timeline-start.value + model.source-range.duration.value;
     private property <ScalarParamSample> stroke-width-sample: InspectorBackend.sample-scalar-param(
         model, "text_stroke_width", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> background-radius-sample: InspectorBackend.sample-scalar-param(
+        model, "text_background_radius", TimelineStore.playhead-tick);
     private property <ScalarParamSample> shadow-blur-sample: InspectorBackend.sample-scalar-param(
         model, "text_shadow_blur", TimelineStore.playhead-tick);
     private property <ScalarParamSample> shadow-distance-sample: InspectorBackend.sample-scalar-param(
@@ -266,7 +268,7 @@ export component TextTreatmentRows inherits VerticalLayout {
         if model.text-style.background-enabled: SliderRow {
             label: "Rounded";
             suffix: "%";
-            value: model.text-style.background-radius * 100;
+            value: root.background-radius-sample.value * 100;
             minimum: 0;
             maximum: 100;
             reset-value: 0;
@@ -279,6 +281,15 @@ export component TextTreatmentRows inherits VerticalLayout {
                 root.begin-edit();
                 root.style.background-radius = clamp(v, 0, 100) / 100;
                 root.commit-or-clear-style();
+            }
+            kf-visible: true;
+            kf: root.background-radius-sample.row;
+            kf-can-toggle: root.playhead-inside;
+            kf-toggle => {
+                root.toggle-kf("text_background_radius", root.background-radius-sample.row.on-keyframe, root.background-radius-sample.value);
+            }
+            kf-set-easing(e) => {
+                root.ease-kf("text_background_radius", e, root.background-radius-sample.value);
             }
         }
 

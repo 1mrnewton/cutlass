@@ -60,7 +60,7 @@ use serde::{Deserialize, Serialize};
 /// 33: animatable crop — `crop` on `WireClipParam` with `rect: [x,y,w,h]`
 ///     on `set_param_keyframe` / `set_param_constant`.
 /// 34: animatable pan — `pan` on `WireClipParam` (−1…+1 stereo balance).
-pub const TOOL_SCHEMA_VERSION: u32 = 34;
+pub const TOOL_SCHEMA_VERSION: u32 = 35;
 
 mod dtos;
 mod tools;

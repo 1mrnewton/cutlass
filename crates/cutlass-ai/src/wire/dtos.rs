@@ -144,6 +144,29 @@ pub struct SetGenerator {
     pub generator: WireGenerator,
 }
 
+/// Per-axis clip scale on the wire: a bare number (uniform, legacy agents)
+/// or `[x, y]` when split. Schema is `anyOf` number/array via untagged serde.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum WireScale {
+    /// Uniform scale on both axes (1.0 = aspect-fit / CapCut 100%).
+    Uniform(f64),
+    /// Per-axis scale `[x, y]`.
+    Axes([f64; 2]),
+}
+
+impl WireScale {
+    pub fn to_scale2(self) -> cutlass_models::Scale2 {
+        match self {
+            WireScale::Uniform(s) => cutlass_models::Scale2::uniform(s as f32),
+            WireScale::Axes([x, y]) => cutlass_models::Scale2 {
+                x: x as f32,
+                y: y as f32,
+            },
+        }
+    }
+}
+
 /// Change a clip's placement on the canvas. Omitted fields keep their
 /// current value. Rejected for clips on audio tracks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -164,9 +187,10 @@ pub struct SetClipTransform {
     /// Vertical anchor within the content bounds (0 = top, 0.5 = center).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_y: Option<f64>,
-    /// Uniform scale; 1.0 fits the content inside the canvas (100%).
+    /// Scale: a number for uniform (1.0 = fit inside the canvas) or `[x, y]`
+    /// for per-axis stretch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scale: Option<f64>,
+    pub scale: Option<WireScale>,
     /// Clockwise rotation in degrees about the content center.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation: Option<f64>,
@@ -297,7 +321,8 @@ pub enum WireClipParam {
     /// Canvas point around which the clip scales and rotates (vec2: use the
     /// `position` argument, not `value`).
     AnchorPoint,
-    /// Uniform scale (1.0 = fit inside the canvas).
+    /// Scale (1.0 = fit inside the canvas). Use `value` for a uniform number
+    /// or `position` as `[x, y]` for per-axis.
     Scale,
     /// Clockwise rotation in degrees.
     Rotation,

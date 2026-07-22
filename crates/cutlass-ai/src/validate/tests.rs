@@ -671,12 +671,107 @@ fn transform_merges_with_current_values() {
             position_y: None,
             anchor_x: None,
             anchor_y: None,
-            scale: Some(0.0),
+            scale: Some(wire::WireScale::Uniform(0.0)),
             rotation: None,
             opacity: None,
         }),
     );
     assert!(msg.contains("invalid transform"), "{msg}");
+}
+
+#[test]
+fn transform_scale_accepts_legacy_number_and_axes_array() {
+    let (project, _, _, _, clip, _) = fixture();
+
+    // Old agent payloads: bare number → uniform Scale2.
+    let legacy = WireCommand::from_tool_call(
+        "set_clip_transform",
+        serde_json::json!({ "clip": clip, "scale": 1.5 }),
+    )
+    .unwrap();
+    let edit = lower(&project, legacy);
+    assert_eq!(
+        edit,
+        EditCommand::SetClipTransform {
+            clip: ClipId::from_raw(clip),
+            transform: ClipTransform {
+                scale: cutlass_models::Scale2::uniform(1.5),
+                ..ClipTransform::IDENTITY
+            },
+            at: None,
+        }
+    );
+
+    let split = WireCommand::from_tool_call(
+        "set_clip_transform",
+        serde_json::json!({ "clip": clip, "scale": [2.0, 1.0] }),
+    )
+    .unwrap();
+    let edit = lower(&project, split);
+    assert_eq!(
+        edit,
+        EditCommand::SetClipTransform {
+            clip: ClipId::from_raw(clip),
+            transform: ClipTransform {
+                scale: cutlass_models::Scale2 { x: 2.0, y: 1.0 },
+                ..ClipTransform::IDENTITY
+            },
+            at: None,
+        }
+    );
+}
+
+#[test]
+fn scale_keyframe_accepts_scalar_and_position_vec2() {
+    let (project, _, _, _, clip, _) = fixture();
+
+    let uniform = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Scale,
+            at: 1.0,
+            value: Some(2.0),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: None,
+        }),
+    );
+    assert_eq!(
+        uniform,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Scale,
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Scalar(2.0),
+            easing: Easing::Linear,
+        }
+    );
+
+    let axes = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Scale,
+            at: 1.0,
+            value: None,
+            position: Some([2.0, 1.0]),
+            rgba: None,
+            rect: None,
+            easing: None,
+        }),
+    );
+    assert_eq!(
+        axes,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Scale,
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Vec2([2.0, 1.0]),
+            easing: Easing::Linear,
+        }
+    );
 }
 
 #[test]

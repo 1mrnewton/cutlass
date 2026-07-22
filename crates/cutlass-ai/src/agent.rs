@@ -976,11 +976,18 @@ fn param_value_phrase(
         wire::WireClipParam::Crop => rect
             .map(|r| format!("[{:.2}, {:.2}, {:.2}, {:.2}]", r[0], r[1], r[2], r[3]))
             .unwrap_or_else(|| "?".into()),
-        wire::WireClipParam::Scale | wire::WireClipParam::Opacity | wire::WireClipParam::Volume => {
-            value
-                .map(|v| format!("{:.0}%", v * 100.0))
-                .unwrap_or_else(|| "?".into())
+        wire::WireClipParam::Scale => {
+            if let Some(p) = position {
+                format!("[{}, {}]", p[0], p[1])
+            } else if let Some(v) = value {
+                format!("{:.0}%", v * 100.0)
+            } else {
+                "?".into()
+            }
         }
+        wire::WireClipParam::Opacity | wire::WireClipParam::Volume => value
+            .map(|v| format!("{:.0}%", v * 100.0))
+            .unwrap_or_else(|| "?".into()),
         wire::WireClipParam::Pan => value
             .map(|v| format!("{v:.2}"))
             .unwrap_or_else(|| "?".into()),
@@ -1082,7 +1089,10 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
                 parts.push("position".to_string());
             }
             if let Some(s) = a.scale {
-                parts.push(format!("scale {:.0}%", s * 100.0));
+                parts.push(match s {
+                    wire::WireScale::Uniform(u) => format!("scale {:.0}%", u * 100.0),
+                    wire::WireScale::Axes([x, y]) => format!("scale: [{x}, {y}]"),
+                });
             }
             if let Some(r) = a.rotation {
                 parts.push(format!("rotation {r:.0}°"));

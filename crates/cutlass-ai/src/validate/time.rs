@@ -117,8 +117,19 @@ pub(super) fn param_value(
                      mask_center/mask_size params need the 'position' argument as [x, y]",
                 )
             }),
-        WireClipParam::Scale
-        | WireClipParam::Rotation
+        WireClipParam::Scale => {
+            // Uniform number via `value`, or per-axis via `position: [x, y]`.
+            if let Some(p) = position {
+                Ok(ParamValue::Vec2([p[0] as f32, p[1] as f32]))
+            } else if let Some(v) = value {
+                Ok(ParamValue::Scalar(v as f32))
+            } else {
+                Err(Rejection::new(
+                    "scale param needs 'value' (uniform number) or 'position' as [x, y]",
+                ))
+            }
+        }
+        WireClipParam::Rotation
         | WireClipParam::Opacity
         | WireClipParam::Volume
         | WireClipParam::Pan

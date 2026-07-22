@@ -157,7 +157,7 @@ fn prompt_sized_scenario_round_trips_and_unwinds() {
             position_y: Some(0.3),
             anchor_x: None,
             anchor_y: None,
-            scale: Some(0.5),
+            scale: Some(wire::WireScale::Uniform(0.5)),
             rotation: None,
             opacity: None,
         }),

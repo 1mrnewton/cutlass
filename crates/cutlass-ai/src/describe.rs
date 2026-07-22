@@ -7,8 +7,10 @@
 //! editing. Output order is deterministic (stack order for tracks, start
 //! order for clips, id order for media) so eval tests can assert verbatim.
 
-use cutlass_models::{ClipSource, Generator, Project, Rational, Shape, Track};
+use cutlass_models::{ClipSource, Generator, Project, Rational, Scale2, Shape, Track};
 use serde::{Deserialize, Serialize};
+
+use crate::wire::WireScale;
 
 /// UI session state captured when the user hits send. This is how "the
 /// selected clip" and "at the playhead" resolve to ids and times.
@@ -138,6 +140,10 @@ pub struct ClipSummary {
     /// Mirrored top-bottom (set_clip_crop); absent when not flipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flip_v: Option<bool>,
+    /// Placement scale (set_clip_transform): a bare number when uniform, or
+    /// `[x, y]` when split. Absent at the default identity (1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<WireScale>,
     /// Visual effects in chain order (add_effect); the index of each entry is
     /// what remove_effect / move_effect / set_effect_param address. Absent
     /// when empty.
@@ -396,6 +402,18 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                     },
                     flip_h: clip.flip_h.then_some(true),
                     flip_v: clip.flip_v.then_some(true),
+                    scale: {
+                        let s = clip.transform.scale.sample(0);
+                        let interesting =
+                            s != Scale2::uniform(1.0) || clip.transform.scale.is_animated();
+                        interesting.then(|| {
+                            if s.is_uniform() {
+                                WireScale::Uniform(f64::from(s.x))
+                            } else {
+                                WireScale::Axes([f64::from(s.x), f64::from(s.y)])
+                            }
+                        })
+                    },
                     effects: clip
                         .effects
                         .iter()

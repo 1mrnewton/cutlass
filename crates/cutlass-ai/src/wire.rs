@@ -60,7 +60,10 @@ use serde::{Deserialize, Serialize};
 /// 33: animatable crop — `crop` on `WireClipParam` with `rect: [x,y,w,h]`
 ///     on `set_param_keyframe` / `set_param_constant`.
 /// 34: animatable pan — `pan` on `WireClipParam` (−1…+1 stereo balance).
-pub const TOOL_SCHEMA_VERSION: u32 = 35;
+/// 35: animatable text background radius/color on text keyframe params.
+/// 36: per-axis scale — `set_clip_transform.scale` accepts a number or
+///     `[x, y]`; scale keyframes accept `value` (uniform) or `position`.
+pub const TOOL_SCHEMA_VERSION: u32 = 36;
 
 mod dtos;
 mod tools;
@@ -78,7 +81,8 @@ pub use dtos::{
     WireAudioRole, WireBlendMode, WireCanvasAspect, WireChromaKey, WireClipParam, WireEasing,
     WireFilter, WireGenerator, WireLayerBackground, WireLayerGlow, WireLayerOutline,
     WireLayerShadow, WireLayerStyles, WireLookParam, WireMarkerColor, WireMask, WireMaskKind,
-    WireShape, WireShapeParam, WireStabilizeLevel, WireStyleParam, WireTextParam, WireTrackKind,
+    WireScale, WireShape, WireShapeParam, WireStabilizeLevel, WireStyleParam, WireTextParam,
+    WireTrackKind,
 };
 pub use tools::{ToolSpec, describe_project_spec, tool_specs};
 

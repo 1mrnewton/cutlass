@@ -420,7 +420,7 @@
       }
     },
     {
-      "description": "Change a clip's placement on the canvas: position, scale, rotation, opacity. Omitted fields keep their current value. Not valid on audio tracks.",
+      "description": "Change a clip's placement on the canvas: position, scale (number for uniform or [x, y] for per-axis), rotation, opacity. Omitted fields keep their current value. Not valid on audio tracks.",
       "name": "set_clip_transform",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -480,12 +480,32 @@
             ]
           },
           "scale": {
-            "description": "Uniform scale; 1.0 fits the content inside the canvas (100%).",
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
+            "anyOf": [
+              {
+                "anyOf": [
+                  {
+                    "description": "Uniform scale on both axes (1.0 = aspect-fit / CapCut 100%).",
+                    "format": "double",
+                    "type": "number"
+                  },
+                  {
+                    "description": "Per-axis scale `[x, y]`.",
+                    "items": {
+                      "format": "double",
+                      "type": "number"
+                    },
+                    "maxItems": 2,
+                    "minItems": 2,
+                    "type": "array"
+                  }
+                ],
+                "description": "Per-axis clip scale on the wire: a bare number (uniform, legacy agents)\nor `[x, y]` when split. Schema is `anyOf` number/array via untagged serde."
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Scale: a number for uniform (1.0 = fit inside the canvas) or `[x, y]`\nfor per-axis stretch."
           }
         },
         "required": [
@@ -787,7 +807,7 @@
       }
     },
     {
-      "description": "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), crop, volume, pan (−1 left … +1 right), speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, color-look `{look:{param}}`, and style `{style:{param}}` properties. Use `value` for scalars, `position` for position/anchor_point and vec2 params, `rgba` for colors, and `rect` as [x,y,w,h] for crop. Effect names and valid properties are visible in describe_project.",
+      "description": "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), crop, volume, pan (−1 left … +1 right), speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, color-look `{look:{param}}`, and style `{style:{param}}` properties. Use `value` for scalars (including uniform scale), `position` for position/anchor_point/per-axis scale and other vec2 params, `rgba` for colors, and `rect` as [x,y,w,h] for crop. Effect names and valid properties are visible in describe_project.",
       "name": "set_param_keyframe",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -871,7 +891,7 @@
               },
               {
                 "const": "scale",
-                "description": "Uniform scale (1.0 = fit inside the canvas).",
+                "description": "Scale (1.0 = fit inside the canvas). Use `value` for a uniform number\nor `position` as `[x, y]` for per-axis.",
                 "type": "string"
               },
               {
@@ -1169,7 +1189,7 @@
               },
               {
                 "const": "scale",
-                "description": "Uniform scale (1.0 = fit inside the canvas).",
+                "description": "Scale (1.0 = fit inside the canvas). Use `value` for a uniform number\nor `position` as `[x, y]` for per-axis.",
                 "type": "string"
               },
               {
@@ -1387,7 +1407,7 @@
       }
     },
     {
-      "description": "Set any animatable clip property to a fixed value and remove all its keyframes (stops its animation). Use the same `param` selector as set_param_keyframe, with `value` for scalars, `position` for position/anchor_point and vec2 params, `rgba` for colors, or `rect` as [x,y,w,h] for crop.",
+      "description": "Set any animatable clip property to a fixed value and remove all its keyframes (stops its animation). Use the same `param` selector as set_param_keyframe, with `value` for scalars (including uniform scale), `position` for position/anchor_point/per-axis scale and other vec2 params, `rgba` for colors, or `rect` as [x,y,w,h] for crop.",
       "name": "set_param_constant",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1413,7 +1433,7 @@
               },
               {
                 "const": "scale",
-                "description": "Uniform scale (1.0 = fit inside the canvas).",
+                "description": "Scale (1.0 = fit inside the canvas). Use `value` for a uniform number\nor `position` as `[x, y]` for per-axis.",
                 "type": "string"
               },
               {
@@ -3041,5 +3061,5 @@
       }
     }
   ],
-  "version": 35
+  "version": 36
 }

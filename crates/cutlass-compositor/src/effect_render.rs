@@ -886,15 +886,24 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
     })
 }
 
-/// Draw one layer to an offscreen target with a transparent clear.
+/// Draw one layer to an offscreen (or canvas) target.
+///
+/// `instances` is `Some((buffer, count))` for instanced glyph draws; `None`
+/// draws a single unit-quad like the rest of the layer pipelines.
 pub(crate) fn draw_layer_to_offscreen(
     pass: &mut wgpu::RenderPass<'_>,
     pipeline: &wgpu::RenderPipeline,
     bind_group: &wgpu::BindGroup,
+    instances: Option<(&wgpu::Buffer, u32)>,
 ) {
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, bind_group, &[]);
-    pass.draw(0..6, 0..1);
+    if let Some((buffer, count)) = instances {
+        pass.set_vertex_buffer(0, buffer.slice(..));
+        pass.draw(0..6, 0..count);
+    } else {
+        pass.draw(0..6, 0..1);
+    }
 }
 
 /// Returns `true` when the effect chain is empty or all passes are no-ops.

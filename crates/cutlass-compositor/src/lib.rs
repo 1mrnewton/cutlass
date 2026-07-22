@@ -38,15 +38,16 @@ mod lut;
 mod metal_import;
 mod passes;
 
-pub use compositor::{Compositor, FrameSink, ImageSink};
+pub use compositor::{Compositor, FrameSink, ImageSink, identity_instances};
 pub use cutlass_core::RgbaImage;
 pub use cutlass_shapes::{SdfParams, SdfShape, Stroke};
 pub use error::CompositorError;
 pub use gpu::GpuContext;
 pub use grade::ColorGrade;
 pub use layer::{
-    CompositeLayer, CompositorConfig, CompositorLayer, FULL_UV, LayerChromaKey, LayerContent,
-    LayerEffects, LayerLut, LayerMask, LayerPlacement, SdfLayer, mask_kind,
+    CompositeLayer, CompositorConfig, CompositorLayer, FULL_UV, GlyphInstance, GlyphsLayer,
+    LayerChromaKey, LayerContent, LayerEffects, LayerLut, LayerMask, LayerPlacement, SdfLayer,
+    mask_kind,
 };
 pub use lut::{CubeLut, LutError, MAX_CUBE_SIZE};
 pub use passes::{

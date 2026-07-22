@@ -31,6 +31,7 @@ impl Compositor {
             LayerContent::Frame(frame) => self.build_frame(gpu, config, layer, frame, grade),
             LayerContent::Rgba(image) => self.build_rgba(gpu, config, layer, image, grade),
             LayerContent::Sdf(shape) => self.build_sdf(gpu, config, layer, shape, grade),
+            LayerContent::Glyphs(glyphs) => self.build_glyphs(gpu, config, layer, glyphs, grade),
         }
     }
 
@@ -109,6 +110,7 @@ impl Compositor {
             _textures: Vec::new(),
             _uniform: buffer,
             _keep_alive: None,
+            instances: None,
         })
     }
 
@@ -155,6 +157,7 @@ impl Compositor {
             _textures: Vec::new(),
             _uniform: buffer,
             _keep_alive: None,
+            instances: None,
         })
     }
 
@@ -263,6 +266,7 @@ impl Compositor {
                 _textures: textures.into_iter().map(|(tex, _)| tex).collect(),
                 _uniform: buffer,
                 _keep_alive: keep_alive,
+                instances: None,
             });
         }
 
@@ -289,6 +293,7 @@ impl Compositor {
             _textures: textures.into_iter().map(|(tex, _)| tex).collect(),
             _uniform: placement_buffer,
             _keep_alive: Some(Box::new((fx_buffer, keep_alive))),
+            instances: None,
         })
     }
 
@@ -518,6 +523,7 @@ impl Compositor {
                 _textures: vec![texture],
                 _uniform: buffer,
                 _keep_alive: None,
+                instances: None,
             });
         }
 
@@ -566,6 +572,7 @@ impl Compositor {
             _textures: vec![texture],
             _uniform: placement_buffer,
             _keep_alive: Some(Box::new(fx_buffer)),
+            instances: None,
         })
     }
 }

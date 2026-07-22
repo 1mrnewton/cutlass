@@ -142,6 +142,41 @@ pub struct SdfLayer {
     pub stroke: Option<Stroke>,
 }
 
+/// One glyph placed from a [`GlyphsLayer`] atlas.
+///
+/// `glyph` indexes into [`GlyphsLayer::glyphs`]. Placement is absolute canvas
+/// pixels (the render crate folds clip transform + per-character animation
+/// into these fields before submit).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GlyphInstance {
+    /// Index into [`GlyphsLayer::glyphs`].
+    pub glyph: u32,
+    /// Content center in canvas pixels (+x right, +y down).
+    pub center: [f32; 2],
+    /// Pre-rotation content extent in canvas pixels.
+    pub size: [f32; 2],
+    /// Clockwise rotation about the center, in radians.
+    pub rotation: f32,
+    /// Instance opacity in `0.0..=1.0`; multiplied by the layer opacity.
+    pub opacity: f32,
+}
+
+/// Per-character text drawn as instanced quads from a shared glyph atlas.
+///
+/// `atlas_key` is a stable identity for the glyph set (e.g. a hash of text +
+/// style). Matching keys reuse the uploaded atlas; only the instance buffer
+/// is rewritten per frame.
+#[derive(Debug, Clone, Copy)]
+pub struct GlyphsLayer<'a> {
+    /// Cache identity for the packed atlas.
+    pub atlas_key: u64,
+    /// Straight-alpha cluster bitmaps (color already folded in). Zero-area
+    /// entries are whitespace placeholders and are not packed.
+    pub glyphs: &'a [RgbaImage],
+    /// Instance placements referencing `glyphs` by index.
+    pub instances: &'a [GlyphInstance],
+}
+
 /// The pixel source for a [`CompositeLayer`].
 ///
 /// Frames are borrowed: the engine pulls a [`VideoFrame`] from the decoder for
@@ -157,6 +192,8 @@ pub enum LayerContent<'a> {
     Solid([u8; 4]),
     /// A parametric vector shape evaluated in the fragment shader.
     Sdf(SdfLayer),
+    /// Per-character text as instanced atlas quads.
+    Glyphs(GlyphsLayer<'a>),
 }
 
 /// One layer in bottom-to-top stacking order: content plus placement.
@@ -248,6 +285,22 @@ impl<'a> CompositeLayer<'a> {
     pub fn sdf(shape: SdfLayer, placement: LayerPlacement) -> Self {
         Self {
             content: LayerContent::Sdf(shape),
+            placement,
+            uv: FULL_UV,
+            effects: &[],
+            fx: LayerEffects::IDENTITY,
+            color_grade: None,
+            lut: None,
+        }
+    }
+
+    /// Per-character text as instanced atlas quads.
+    ///
+    /// `placement` supplies the layer opacity multiplier (and is the grade/fx
+    /// anchor); each glyph's on-canvas transform lives on the instances.
+    pub fn glyphs(glyphs: GlyphsLayer<'a>, placement: LayerPlacement) -> Self {
+        Self {
+            content: LayerContent::Glyphs(glyphs),
             placement,
             uv: FULL_UV,
             effects: &[],

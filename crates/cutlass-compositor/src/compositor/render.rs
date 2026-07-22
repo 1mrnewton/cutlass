@@ -8,8 +8,8 @@ use crate::layer::{CompositeLayer, CompositorConfig, CompositorLayer, LayerLut};
 use crate::lut::CubeLut;
 
 use super::{
-    CANVAS_FORMAT, Compositor, FrameSink, ImageSink, LUT_CACHE_MAX, LayerPipeline, LutTexture,
-    TargetCache,
+    CANVAS_FORMAT, Compositor, FrameSink, ImageSink, LUT_CACHE_MAX, LayerGpu, LayerPipeline,
+    LutTexture, TargetCache,
 };
 use cutlass_core::RgbaImage;
 
@@ -263,9 +263,7 @@ impl Compositor {
                         occlusion_query_set: None,
                         multiview_mask: None,
                     });
-                    pass.set_pipeline(pipeline);
-                    pass.set_bind_group(0, &built.bind_group, &[]);
-                    pass.draw(0..6, 0..1);
+                    draw_built_layer(&mut pass, pipeline, &built);
                 }
                 CompositorLayer::Layer(layer) => {
                     let built = self.build_layer(gpu, config, layer)?;
@@ -287,7 +285,7 @@ impl Compositor {
                             occlusion_query_set: None,
                             multiview_mask: None,
                         });
-                        draw_layer_to_offscreen(&mut pass, pipeline, &built.bind_group);
+                        draw_built_layer(&mut pass, pipeline, &built);
                     }
                     let mut result = run_effect_chain(
                         device,
@@ -430,7 +428,7 @@ impl Compositor {
                             occlusion_query_set: None,
                             multiview_mask: None,
                         });
-                        draw_layer_to_offscreen(&mut pass, out_pipe, &out_built.bind_group);
+                        draw_built_layer(&mut pass, out_pipe, &out_built);
                     }
                     {
                         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -449,7 +447,7 @@ impl Compositor {
                             occlusion_query_set: None,
                             multiview_mask: None,
                         });
-                        draw_layer_to_offscreen(&mut pass, in_pipe, &in_built.bind_group);
+                        draw_built_layer(&mut pass, in_pipe, &in_built);
                     }
                     run_transition_pass(
                         device,
@@ -512,8 +510,15 @@ impl Compositor {
     }
 }
 
-/// Map the (already-submitted) readback buffer and copy it into a tight
-/// [`RgbaImage`], stripping the per-row copy padding.
+fn draw_built_layer(
+    pass: &mut wgpu::RenderPass<'_>,
+    pipeline: &wgpu::RenderPipeline,
+    built: &LayerGpu,
+) {
+    let instances = built.instances.as_ref().map(|i| (&i.buffer, i.count));
+    draw_layer_to_offscreen(pass, pipeline, &built.bind_group, instances);
+}
+
 fn pipeline_for<'a>(kind: &LayerPipeline, comp: &'a Compositor) -> &'a wgpu::RenderPipeline {
     match kind {
         LayerPipeline::Yuv => &comp.yuv_pipeline,
@@ -522,6 +527,7 @@ fn pipeline_for<'a>(kind: &LayerPipeline, comp: &'a Compositor) -> &'a wgpu::Ren
         LayerPipeline::RgbaFx => &comp.rgba_fx_pipeline,
         LayerPipeline::Solid => &comp.solid_pipeline,
         LayerPipeline::Sdf => &comp.sdf_pipeline,
+        LayerPipeline::Glyphs => &comp.glyphs_pipeline,
     }
 }
 

@@ -336,7 +336,8 @@ export component TextInspector inherits VerticalLayout {
     private property <int> selected-tab: 0;
     private property <float> anchor-x: live ? PreviewStore.gesture.anchor-x : sample.anchor-x;
     private property <float> anchor-y: live ? PreviewStore.gesture.anchor-y : sample.anchor-y;
-    private property <float> scale-v: live ? PreviewStore.gesture.scale : sample.scale;
+    private property <float> scale-x: live ? PreviewStore.gesture.scale : sample.scale;
+    private property <float> scale-y: live ? PreviewStore.gesture.scale-y : sample.scale-y;
     private property <float> rot-v: live ? PreviewStore.gesture.rotation : sample.rotation;
     private property <float> opacity-v: live ? PreviewStore.gesture.opacity : sample.opacity;
 
@@ -386,19 +387,24 @@ export component TextInspector inherits VerticalLayout {
             TimelineStore.playhead-tick,
             ax,
             ay,
-            root.scale-v,
+            root.scale-x,
+            root.scale-y,
             root.rot-v);
-        root.apply(c.position-x, c.position-y, ax, ay, root.scale-v, root.rot-v, root.opacity-v, commit);
+        root.apply(c.position-x, c.position-y, ax, ay, root.scale-x, root.scale-y, root.rot-v, root.opacity-v, commit);
     }
 
-    function apply(px: float, py: float, ax: float, ay: float, s: float, r: float, o: float, commit: bool) {
+    // Text sheet keeps a single Scale row (uniform); transform inspector owns
+    // per-axis. `sx`/`sy` still flow through so a live gizmo with split scale
+    // does not flatten Y when nudging position from here.
+    function apply(px: float, py: float, ax: float, ay: float, sx: float, sy: float, r: float, o: float, commit: bool) {
         if (commit) {
             // No-op against the playhead sample (what the rows display).
             if (px == sample.position-x
                 && py == sample.position-y
                 && ax == sample.anchor-x
                 && ay == sample.anchor-y
-                && s == sample.scale
+                && sx == sample.scale
+                && sy == sample.scale-y
                 && r == sample.rotation
                 && o == sample.opacity) {
                 if (PreviewStore.gesture-active && PreviewStore.gesture-clip == model.id) {
@@ -408,7 +414,7 @@ export component TextInspector inherits VerticalLayout {
                 PreviewStore.gesture-commit-pending = false;
             } else {
                 EditorStore.on-clip-transform-committed(
-                    model.id, px, py, ax, ay, s, r, o, TimelineStore.playhead-tick);
+                    model.id, px, py, ax, ay, sx, sy, r, o, TimelineStore.playhead-tick);
                 PreviewStore.gesture-commit-pending = true;
             }
         } else {
@@ -420,7 +426,8 @@ export component TextInspector inherits VerticalLayout {
                 position-y: py,
                 anchor-x: ax,
                 anchor-y: ay,
-                scale: s,
+                scale: sx,
+                scale-y: sy,
                 rotation: r,
                 opacity: o,
                 snap-h: false,
@@ -431,7 +438,7 @@ export component TextInspector inherits VerticalLayout {
             PreviewStore.gesture-commit-pending = false;
             PreviewStore.gesture-active = true;
             EditorStore.on-preview-transform-overridden(
-                model.id, px, py, ax, ay, s, r, o, TimelineStore.playhead-tick);
+                model.id, px, py, ax, ay, sx, sy, r, o, TimelineStore.playhead-tick);
         }
     }
 
@@ -624,7 +631,7 @@ export component TextInspector inherits VerticalLayout {
             SliderRow {
                 label: "Scale";
                 suffix: "%";
-                value: root.scale-v * 100;
+                value: root.scale-x * 100;
                 minimum: 1;
                 maximum: 400;
                 reset-value: 100;
@@ -632,16 +639,18 @@ export component TextInspector inherits VerticalLayout {
                 kf: root.sample.scale-row;
                 kf-can-toggle: root.playhead-inside;
                 preview(v) => {
-                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, max(v, 1) / 100, root.rot-v, root.opacity-v, false);
+                    let s = max(v, 1) / 100;
+                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, s, s, root.rot-v, root.opacity-v, false);
                 }
                 commit(v) => {
-                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, max(v, 1) / 100, root.rot-v, root.opacity-v, true);
+                    let s = max(v, 1) / 100;
+                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, s, s, root.rot-v, root.opacity-v, true);
                 }
                 kf-toggle => {
-                    root.toggle-kf("scale", root.sample.scale-row.on-keyframe, root.scale-v, 0);
+                    root.toggle-kf("scale", root.sample.scale-row.on-keyframe, root.scale-x, root.scale-y);
                 }
                 kf-set-easing(e) => {
-                    root.ease-kf("scale", e, root.scale-v, 0);
+                    root.ease-kf("scale", e, root.scale-x, root.scale-y);
                 }
             }
 
@@ -667,10 +676,10 @@ export component TextInspector inherits VerticalLayout {
                 kf: root.sample.position-row;
                 kf-can-toggle: root.playhead-inside;
                 commit-x(v) => {
-                    root.apply(v / root.canvas-w, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, root.rot-v, root.opacity-v, true);
+                    root.apply(v / root.canvas-w, root.pos-y, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, root.rot-v, root.opacity-v, true);
                 }
                 commit-y(v) => {
-                    root.apply(root.pos-x, v / root.canvas-h, root.anchor-x, root.anchor-y, root.scale-v, root.rot-v, root.opacity-v, true);
+                    root.apply(root.pos-x, v / root.canvas-h, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, root.rot-v, root.opacity-v, true);
                 }
                 kf-toggle => {
                     root.toggle-kf("position", root.sample.position-row.on-keyframe, root.pos-x, root.pos-y);
@@ -714,10 +723,10 @@ export component TextInspector inherits VerticalLayout {
                 kf: root.sample.rotation-row;
                 kf-can-toggle: root.playhead-inside;
                 preview(v) => {
-                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, v, root.opacity-v, false);
+                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, v, root.opacity-v, false);
                 }
                 commit(v) => {
-                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, v, root.opacity-v, true);
+                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, v, root.opacity-v, true);
                 }
                 kf-toggle => {
                     root.toggle-kf("rotation", root.sample.rotation-row.on-keyframe, root.rot-v, 0);
@@ -776,10 +785,10 @@ export component TextInspector inherits VerticalLayout {
                 kf: root.sample.opacity-row;
                 kf-can-toggle: root.playhead-inside;
                 preview(v) => {
-                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, root.rot-v, clamp(v, 0, 100) / 100, false);
+                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, root.rot-v, clamp(v, 0, 100) / 100, false);
                 }
                 commit(v) => {
-                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, root.rot-v, clamp(v, 0, 100) / 100, true);
+                    root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, root.rot-v, clamp(v, 0, 100) / 100, true);
                 }
                 kf-toggle => {
                     root.toggle-kf("opacity", root.sample.opacity-row.on-keyframe, root.opacity-v, 0);

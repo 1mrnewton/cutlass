@@ -41,9 +41,9 @@ pub(crate) fn wire_inspector(
         .on_sample_transform(|clip, playhead| inspector::sample_transform(&clip, playhead));
     app.global::<InspectorBackend>()
         .on_compensate_anchor_position(
-            |clip, sequence, playhead, anchor_x, anchor_y, scale, rotation| {
+            |clip, sequence, playhead, anchor_x, anchor_y, scale_x, scale_y, rotation| {
                 inspector::compensate_anchor_position(
-                    &clip, sequence, playhead, anchor_x, anchor_y, scale, rotation,
+                    &clip, sequence, playhead, anchor_x, anchor_y, scale_x, scale_y, rotation,
                 )
             },
         );

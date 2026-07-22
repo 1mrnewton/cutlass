@@ -7,6 +7,7 @@
 // override-then-commit pipeline as preview gestures — so the preview frame
 // and selection box follow the sliders.
 
+import { CheckBox } from "std-widgets.slint";
 import { CutlassText, SubtleButton } from "../../components/index.slint";
 import { AppStore, EditorStore, TimelineStore, PreviewStore } from "../../store/index.slint";
 import { Clip } from "../../models/index.slint";
@@ -44,9 +45,25 @@ export component TransformInspector inherits VerticalLayout {
     private property <float> pos-y: live ? PreviewStore.gesture.position-y : sample.position-y;
     private property <float> anchor-x: live ? PreviewStore.gesture.anchor-x : sample.anchor-x;
     private property <float> anchor-y: live ? PreviewStore.gesture.anchor-y : sample.anchor-y;
-    private property <float> scale-v: live ? PreviewStore.gesture.scale : sample.scale;
+    private property <float> scale-x: live ? PreviewStore.gesture.scale : sample.scale;
+    private property <float> scale-y: live ? PreviewStore.gesture.scale-y : sample.scale-y;
     private property <float> rot-v: live ? PreviewStore.gesture.rotation : sample.rotation;
     private property <float> opacity-v: live ? PreviewStore.gesture.opacity : sample.opacity;
+
+    // Link toggle: dragging either Scale row writes both axes when linked.
+    // Resets from the projected uniform flag when the selected clip changes
+    // (or after a commit updates the projection while idle).
+    private property <string> bound-clip-id: model.id;
+    private property <bool> scale-linked: true;
+    private property <bool> projected-linked: sample.scale-linked;
+    changed bound-clip-id => {
+        root.scale-linked = model.transform-scale-linked;
+    }
+    changed projected-linked => {
+        if (!root.live) {
+            root.scale-linked = root.projected-linked;
+        }
+    }
 
     // Transient "keyframe added" chip: the worker bumps the epoch when a
     // transform commit wrote keyframes (gesture on an animated clip — M2
@@ -75,9 +92,10 @@ export component TransformInspector inherits VerticalLayout {
             TimelineStore.playhead-tick,
             ax,
             ay,
-            root.scale-v,
+            root.scale-x,
+            root.scale-y,
             root.rot-v);
-        root.apply(c.position-x, c.position-y, ax, ay, root.scale-v, root.rot-v, root.opacity-v, commit);
+        root.apply(c.position-x, c.position-y, ax, ay, root.scale-x, root.scale-y, root.rot-v, root.opacity-v, commit);
     }
 
     // One funnel for every row, in normalized model units. Previews render
@@ -86,13 +104,14 @@ export component TransformInspector inherits VerticalLayout {
     // against the playhead sample (slider released without motion, Enter on
     // the same value, reset of an already-default property), which only
     // drops any active override.
-    function apply(px: float, py: float, ax: float, ay: float, s: float, r: float, o: float, commit: bool) {
+    function apply(px: float, py: float, ax: float, ay: float, sx: float, sy: float, r: float, o: float, commit: bool) {
         if (commit) {
             if (px == sample.position-x
                 && py == sample.position-y
                 && ax == sample.anchor-x
                 && ay == sample.anchor-y
-                && s == sample.scale
+                && sx == sample.scale
+                && sy == sample.scale-y
                 && r == sample.rotation
                 && o == sample.opacity) {
                 if (PreviewStore.gesture-active && PreviewStore.gesture-clip == model.id) {
@@ -102,7 +121,7 @@ export component TransformInspector inherits VerticalLayout {
                 PreviewStore.gesture-commit-pending = false;
             } else {
                 EditorStore.on-clip-transform-committed(
-                    model.id, px, py, ax, ay, s, r, o, TimelineStore.playhead-tick);
+                    model.id, px, py, ax, ay, sx, sy, r, o, TimelineStore.playhead-tick);
                 PreviewStore.gesture-commit-pending = true;
             }
         } else {
@@ -114,7 +133,8 @@ export component TransformInspector inherits VerticalLayout {
                 position-y: py,
                 anchor-x: ax,
                 anchor-y: ay,
-                scale: s,
+                scale: sx,
+                scale-y: sy,
                 rotation: r,
                 opacity: o,
                 snap-h: false,
@@ -125,7 +145,7 @@ export component TransformInspector inherits VerticalLayout {
             PreviewStore.gesture-commit-pending = false;
             PreviewStore.gesture-active = true;
             EditorStore.on-preview-transform-overridden(
-                model.id, px, py, ax, ay, s, r, o, TimelineStore.playhead-tick);
+                model.id, px, py, ax, ay, sx, sy, r, o, TimelineStore.playhead-tick);
         }
     }
 
@@ -146,6 +166,18 @@ export component TransformInspector inherits VerticalLayout {
     function ease-kf(param: string, easing: int, vx: float, vy: float) {
         InspectorBackend.set-param-keyframe(
             model.id, param, TimelineStore.playhead-tick, vx, vy, easing);
+    }
+
+    function apply-scale-x(v: float, commit: bool) {
+        let sx = max(v, 1) / 100;
+        let sy = root.scale-linked ? sx : root.scale-y;
+        root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, sx, sy, root.rot-v, root.opacity-v, commit);
+    }
+
+    function apply-scale-y(v: float, commit: bool) {
+        let sy = max(v, 1) / 100;
+        let sx = root.scale-linked ? sy : root.scale-x;
+        root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, sx, sy, root.rot-v, root.opacity-v, commit);
     }
 
     HorizontalLayout {
@@ -243,10 +275,10 @@ export component TransformInspector inherits VerticalLayout {
         kf: root.sample.position-row;
         kf-can-toggle: root.playhead-inside;
         preview(v) => {
-            root.apply(v / root.canvas-w, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, root.rot-v, root.opacity-v, false);
+            root.apply(v / root.canvas-w, root.pos-y, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, root.rot-v, root.opacity-v, false);
         }
         commit(v) => {
-            root.apply(v / root.canvas-w, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, root.rot-v, root.opacity-v, true);
+            root.apply(v / root.canvas-w, root.pos-y, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, root.rot-v, root.opacity-v, true);
         }
         // Position is one vec2 param: either axis row keyframes both.
         kf-toggle => {
@@ -268,10 +300,10 @@ export component TransformInspector inherits VerticalLayout {
         kf: root.sample.position-row;
         kf-can-toggle: root.playhead-inside;
         preview(v) => {
-            root.apply(root.pos-x, v / root.canvas-h, root.anchor-x, root.anchor-y, root.scale-v, root.rot-v, root.opacity-v, false);
+            root.apply(root.pos-x, v / root.canvas-h, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, root.rot-v, root.opacity-v, false);
         }
         commit(v) => {
-            root.apply(root.pos-x, v / root.canvas-h, root.anchor-x, root.anchor-y, root.scale-v, root.rot-v, root.opacity-v, true);
+            root.apply(root.pos-x, v / root.canvas-h, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, root.rot-v, root.opacity-v, true);
         }
         kf-toggle => {
             root.toggle-kf("position", root.sample.position-row.on-keyframe, root.pos-x, root.pos-y);
@@ -330,9 +362,9 @@ export component TransformInspector inherits VerticalLayout {
     }
 
     SliderRow {
-        label: "Scale";
+        label: "Scale X";
         suffix: "%";
-        value: root.scale-v * 100;
+        value: root.scale-x * 100;
         // Engine validation requires a positive scale; floor numeric entry
         // at 1% too.
         minimum: 1;
@@ -342,16 +374,57 @@ export component TransformInspector inherits VerticalLayout {
         kf: root.sample.scale-row;
         kf-can-toggle: root.playhead-inside;
         preview(v) => {
-            root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, max(v, 1) / 100, root.rot-v, root.opacity-v, false);
+            root.apply-scale-x(v, false);
         }
         commit(v) => {
-            root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, max(v, 1) / 100, root.rot-v, root.opacity-v, true);
+            root.apply-scale-x(v, true);
         }
+        // Scale is one param: either axis row keyframes both.
         kf-toggle => {
-            root.toggle-kf("scale", root.sample.scale-row.on-keyframe, root.scale-v, 0);
+            root.toggle-kf("scale", root.sample.scale-row.on-keyframe, root.scale-x, root.scale-y);
         }
         kf-set-easing(e) => {
-            root.ease-kf("scale", e, root.scale-v, 0);
+            root.ease-kf("scale", e, root.scale-x, root.scale-y);
+        }
+    }
+
+    SliderRow {
+        label: "Scale Y";
+        suffix: "%";
+        value: root.scale-y * 100;
+        minimum: 1;
+        maximum: 400;
+        reset-value: 100;
+        kf-visible: true;
+        kf: root.sample.scale-row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => {
+            root.apply-scale-y(v, false);
+        }
+        commit(v) => {
+            root.apply-scale-y(v, true);
+        }
+        kf-toggle => {
+            root.toggle-kf("scale", root.sample.scale-row.on-keyframe, root.scale-x, root.scale-y);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("scale", e, root.scale-x, root.scale-y);
+        }
+    }
+
+    // Plain CheckBox labelled "Link" — no chain icon yet (see docs/icons.md).
+    HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.sm;
+        height: 22px;
+        vertical-stretch: 0;
+
+        CheckBox {
+            text: "Link";
+            checked <=> root.scale-linked;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
         }
     }
 
@@ -366,10 +439,10 @@ export component TransformInspector inherits VerticalLayout {
         kf: root.sample.rotation-row;
         kf-can-toggle: root.playhead-inside;
         preview(v) => {
-            root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, v, root.opacity-v, false);
+            root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, v, root.opacity-v, false);
         }
         commit(v) => {
-            root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, v, root.opacity-v, true);
+            root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, v, root.opacity-v, true);
         }
         kf-toggle => {
             root.toggle-kf("rotation", root.sample.rotation-row.on-keyframe, root.rot-v, 0);
@@ -390,10 +463,10 @@ export component TransformInspector inherits VerticalLayout {
         kf: root.sample.opacity-row;
         kf-can-toggle: root.playhead-inside;
         preview(v) => {
-            root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, root.rot-v, clamp(v, 0, 100) / 100, false);
+            root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, root.rot-v, clamp(v, 0, 100) / 100, false);
         }
         commit(v) => {
-            root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-v, root.rot-v, clamp(v, 0, 100) / 100, true);
+            root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, root.rot-v, clamp(v, 0, 100) / 100, true);
         }
         kf-toggle => {
             root.toggle-kf("opacity", root.sample.opacity-row.on-keyframe, root.opacity-v, 0);

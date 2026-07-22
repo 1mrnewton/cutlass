@@ -847,3 +847,77 @@ fn projects_typed_effect_params_and_color_roundtrips() {
     assert!((offset.vec2_x - 0.0).abs() < f32::EPSILON);
     assert!((offset.vec2_y - 0.0).abs() < f32::EPSILON);
 }
+
+#[test]
+fn projects_per_axis_scale_and_linked_flag() {
+    use cutlass_models::{ClipTransform, MediaSource, RationalTime, Scale2, TimeRange, TrackKind};
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("scale2", EngineRational::FPS_24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/scale2.mp4",
+        1920,
+        1080,
+        EngineRational::FPS_24,
+        480,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            RationalTime::new(0, EngineRational::FPS_24),
+        )
+        .expect("clip");
+
+    // Uniform: linked.
+    project
+        .set_transform(
+            clip_id,
+            ClipTransform {
+                scale: Scale2::uniform(1.5),
+                ..ClipTransform::IDENTITY
+            },
+            None,
+        )
+        .expect("uniform");
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clip = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!((clip.transform_scale - 1.5).abs() < f32::EPSILON);
+    assert!((clip.transform_scale_y - 1.5).abs() < f32::EPSILON);
+    assert!(clip.transform_scale_linked);
+
+    // Split: not linked; X projects on transform_scale, Y on scale_y.
+    project
+        .set_transform(
+            clip_id,
+            ClipTransform {
+                scale: Scale2 { x: 2.0, y: 0.5 },
+                ..ClipTransform::IDENTITY
+            },
+            None,
+        )
+        .expect("split");
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clip = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!((clip.transform_scale - 2.0).abs() < f32::EPSILON);
+    assert!((clip.transform_scale_y - 0.5).abs() < f32::EPSILON);
+    assert!(!clip.transform_scale_linked);
+}

@@ -34,6 +34,8 @@ export struct TransformSample {
     anchor-x: float,
     anchor-y: float,
     scale: float,
+    scale-y: float,
+    scale-linked: bool,
     rotation: float,
     opacity: float,
     position-row: ParamRowState,
@@ -106,7 +108,8 @@ export global InspectorBackend {
         playhead-tick: int,
         anchor-x: float,
         anchor-y: float,
-        scale: float,
+        scale-x: float,
+        scale-y: float,
         rotation: float,
     ) -> CompensatedPosition;
 

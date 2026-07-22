@@ -76,7 +76,14 @@ pub(crate) fn clip_param_value(
     Some(match param {
         "position" => (ClipParam::Position, ParamValue::Vec2([value_x, value_y])),
         "anchor" => (ClipParam::AnchorPoint, ParamValue::Vec2([value_x, value_y])),
-        "scale" => (ClipParam::Scale, ParamValue::Scalar(value_x)),
+        "scale" => (
+            ClipParam::Scale,
+            if value_x == value_y {
+                ParamValue::Scalar(value_x)
+            } else {
+                ParamValue::Vec2([value_x, value_y])
+            },
+        ),
         "rotation" => (ClipParam::Rotation, ParamValue::Scalar(value_x)),
         "opacity" => (ClipParam::Opacity, ParamValue::Scalar(value_x)),
         "volume" => (ClipParam::Volume, ParamValue::Scalar(value_x)),

@@ -406,8 +406,8 @@ pub fn selection_box_in_viewport(
                 clip.transform_anchor_x = res.anchor_x;
                 clip.transform_anchor_y = res.anchor_y;
                 clip.transform_scale = res.scale;
-                clip.transform_scale_y = res.scale;
-                clip.transform_scale_linked = true;
+                clip.transform_scale_y = res.scale_y;
+                clip.transform_scale_linked = res.scale == res.scale_y;
                 clip.transform_rotation = res.rotation;
             }
             let p = clip_placement(&clip, &canvas);
@@ -462,8 +462,8 @@ fn apply_gesture_transform(clip: &mut Clip, gesture: &PreviewDragResolution) {
     clip.transform_anchor_y = gesture.anchor_y;
     // Corner-drag gizmo stays uniform.
     clip.transform_scale = gesture.scale;
-    clip.transform_scale_y = gesture.scale;
-    clip.transform_scale_linked = true;
+    clip.transform_scale_y = gesture.scale_y;
+    clip.transform_scale_linked = gesture.scale == gesture.scale_y;
     clip.transform_rotation = gesture.rotation;
 }
 

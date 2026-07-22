@@ -119,9 +119,9 @@ pub fn sample_transform(clip: &Clip, playhead: i32) -> TransformSample {
         position_y: t.position[1],
         anchor_x: t.anchor_point[0],
         anchor_y: t.anchor_point[1],
-        // Commit 1: inspector still exposes a single uniform scale (X);
-        // per-axis rows land in commit 2.
         scale: t.scale.x,
+        scale_y: t.scale.y,
+        scale_linked: t.scale.is_uniform(),
         rotation: t.rotation,
         opacity: t.opacity,
         position_row: row_state(&clip.kf_position, playhead),
@@ -218,23 +218,23 @@ pub fn sample_scalar_param(clip: &Clip, param: &str, playhead: i32) -> ScalarPar
 
 /// Position that keeps the composited frame fixed while the in-content
 /// anchor moves — mirrors the preview anchor-handle gesture.
+#[allow(clippy::too_many_arguments)] // Slint callback bridge: per-axis scale + rotation
 pub fn compensate_anchor_position(
     clip: &Clip,
     sequence: Sequence,
     playhead: i32,
     anchor_x: f32,
     anchor_y: f32,
-    scale: f32,
+    scale_x: f32,
+    scale_y: f32,
     rotation: f32,
 ) -> CompensatedPosition {
     let canvas = canvas_config(&sequence);
     let mut c = clip.clone();
     apply_sampled_transform(&mut c, playhead);
-    // Anchor compensation uses placement size; keep axes uniform while the
-    // inspector still drives a single scale slider.
-    c.transform_scale = scale;
-    c.transform_scale_y = scale;
-    c.transform_scale_linked = true;
+    c.transform_scale = scale_x;
+    c.transform_scale_y = scale_y;
+    c.transform_scale_linked = scale_x == scale_y;
     c.transform_rotation = rotation;
     let placement = clip_placement(&c, &canvas);
     let position = position_preserving_center(
@@ -380,7 +380,7 @@ mod tests {
         };
         let canvas = canvas_config(&sequence);
         let before = clip_placement(&clip, &canvas).center;
-        let c = compensate_anchor_position(&clip, sequence, 10, 0.2, 0.8, 1.0, 0.0);
+        let c = compensate_anchor_position(&clip, sequence, 10, 0.2, 0.8, 1.0, 1.0, 0.0);
         let mut after_clip = clip.clone();
         after_clip.transform_position_x = c.position_x;
         after_clip.transform_position_y = c.position_y;

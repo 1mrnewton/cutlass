@@ -567,6 +567,7 @@ fn sprite_placement_is_frame_aligned_at_identity_gesture() {
         anchor_x: 0.5,
         anchor_y: 0.5,
         scale: 1.0,
+        scale_y: 1.0,
         rotation: 0.0,
         opacity: 1.0,
         ..PreviewDragResolution::default()
@@ -596,6 +597,7 @@ fn sprite_placement_scales_with_gesture() {
         anchor_x: 0.5,
         anchor_y: 0.5,
         scale: 0.5,
+        scale_y: 0.5,
         rotation: 0.0,
         opacity: 1.0,
         ..PreviewDragResolution::default()
@@ -629,6 +631,7 @@ fn sprite_placement_falls_back_to_committed_transform() {
         anchor_x: 0.5,
         anchor_y: 0.5,
         scale: 0.6,
+        scale_y: 0.6,
         rotation: 30.0,
         opacity: 0.7,
         ..PreviewDragResolution::default()

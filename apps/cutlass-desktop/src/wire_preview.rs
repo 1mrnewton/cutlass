@@ -259,13 +259,25 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
 
     let override_handle = preview_worker.handle();
     editor.on_on_preview_transform_overridden(
-        move |clip_id, pos_x, pos_y, anchor_x, anchor_y, scale, rotation, opacity, tick| {
+        move |clip_id,
+              pos_x,
+              pos_y,
+              anchor_x,
+              anchor_y,
+              scale_x,
+              scale_y,
+              rotation,
+              opacity,
+              tick| {
             override_handle.transform_override(
                 clip_id.to_string(),
                 cutlass_models::ClipTransform {
                     position: [pos_x, pos_y],
                     anchor_point: [anchor_x, anchor_y],
-                    scale: cutlass_models::Scale2::uniform(scale),
+                    scale: cutlass_models::Scale2 {
+                        x: scale_x,
+                        y: scale_y,
+                    },
                     rotation,
                     opacity,
                 },
@@ -291,13 +303,25 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
 
     let transform_commit_handle = preview_worker.handle();
     editor.on_on_clip_transform_committed(
-        move |clip_id, pos_x, pos_y, anchor_x, anchor_y, scale, rotation, opacity, tick| {
+        move |clip_id,
+              pos_x,
+              pos_y,
+              anchor_x,
+              anchor_y,
+              scale_x,
+              scale_y,
+              rotation,
+              opacity,
+              tick| {
             transform_commit_handle.set_transform(
                 clip_id.to_string(),
                 cutlass_models::ClipTransform {
                     position: [pos_x, pos_y],
                     anchor_point: [anchor_x, anchor_y],
-                    scale: cutlass_models::Scale2::uniform(scale),
+                    scale: cutlass_models::Scale2 {
+                        x: scale_x,
+                        y: scale_y,
+                    },
                     rotation,
                     opacity,
                 },

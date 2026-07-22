@@ -70,7 +70,7 @@ pub use look::{
 };
 pub use media::{MediaKind, MediaSource, STILL_DEFAULT_DURATION_TICKS, STILL_TICK_RATE};
 pub use metadata::ProjectMetadata;
-pub use param::{Easing, Keyframe, Lerp, Param};
+pub use param::{EASING_PRESETS, Easing, EasingPreset, Keyframe, Lerp, Param, easing_preset};
 pub use persist::{PROJECT_FILE_EXTENSION, PROJECT_FILE_VERSION};
 pub use project::Project;
 pub use schema::{PROJECT_SCHEMA_KIND, PROJECT_SCHEMA_VERSION, ProjectSchema};

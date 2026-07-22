@@ -13,25 +13,36 @@ use slint::Model;
 use crate::{Clip, ParamKeyframe, ParamRowState};
 
 /// Encode an engine easing for the Slint `ParamKeyframe`:
-/// `(tag, [x1, y1, x2, y2])` — points are zero for the presets.
+/// `(tag, [x1, y1, x2, y2])` — points are zero for the built-in presets.
+///
+/// Tags: 0 linear, 1 ease-in, 2 ease-out, 3 ease-in-out, 4 custom bezier,
+/// 5 snappy, 6 overshoot, 7 anticipate ([`cutlass_models::EASING_PRESETS`]).
 pub(crate) fn easing_to_ui(easing: Easing) -> (i32, [f32; 4]) {
     match easing {
         Easing::Linear => (0, [0.0; 4]),
         Easing::EaseIn => (1, [0.0; 4]),
         Easing::EaseOut => (2, [0.0; 4]),
         Easing::EaseInOut => (3, [0.0; 4]),
-        Easing::Bezier { points } => (4, points),
+        Easing::Bezier { points } => match easing.preset_id() {
+            Some("snappy") => (5, points),
+            Some("overshoot") => (6, points),
+            Some("anticipate") => (7, points),
+            _ => (4, points),
+        },
     }
 }
 
 /// Decode the Slint easing encoding back to the engine enum. Unknown tags
-/// fall back to linear (defensive: the UI only emits 0..=3 today).
+/// fall back to linear.
 pub(crate) fn easing_from_ui(tag: i32, points: [f32; 4]) -> Easing {
     match tag {
         1 => Easing::EaseIn,
         2 => Easing::EaseOut,
         3 => Easing::EaseInOut,
         4 => Easing::Bezier { points },
+        5 => Easing::from_preset_id("snappy").unwrap_or(Easing::Linear),
+        6 => Easing::from_preset_id("overshoot").unwrap_or(Easing::Linear),
+        7 => Easing::from_preset_id("anticipate").unwrap_or(Easing::Linear),
         _ => Easing::Linear,
     }
 }
@@ -357,6 +368,9 @@ mod tests {
             Easing::EaseIn,
             Easing::EaseOut,
             Easing::EaseInOut,
+            Easing::from_preset_id("snappy").unwrap(),
+            Easing::from_preset_id("overshoot").unwrap(),
+            Easing::from_preset_id("anticipate").unwrap(),
             Easing::Bezier {
                 points: [0.42, 0.0, 0.58, 1.0],
             },

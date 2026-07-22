@@ -40,6 +40,66 @@ pub enum Easing {
     Bezier { points: [f32; 4] },
 }
 
+/// A named cubic-bezier easing preset (encoded as [`Easing::Bezier`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EasingPreset {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Control points `(x1, y1, x2, y2)`.
+    pub points: [f32; 4],
+}
+
+/// Named bezier easings offered in the inspector flyout / AI wire.
+/// Bounce-like multi-segment curves are deferred to a future graph editor.
+pub const EASING_PRESETS: &[EasingPreset] = &[
+    EasingPreset {
+        id: "snappy",
+        label: "Snappy",
+        // Material standard decelerate — quick start, crisp settle.
+        points: [0.0, 0.0, 0.2, 1.0],
+    },
+    EasingPreset {
+        id: "overshoot",
+        label: "Overshoot",
+        // Slight y > 1 for a soft landing past the target.
+        points: [0.34, 1.56, 0.64, 1.0],
+    },
+    EasingPreset {
+        id: "anticipate",
+        label: "Anticipate",
+        // Slight y < 0 wind-up before the motion.
+        points: [0.36, 0.0, 0.66, -0.56],
+    },
+];
+
+/// Look up a named easing preset by id.
+pub fn easing_preset(id: &str) -> Option<&'static EasingPreset> {
+    EASING_PRESETS.iter().find(|p| p.id == id)
+}
+
+impl Easing {
+    /// Build an [`Easing::Bezier`] from a catalog preset id, if known.
+    pub fn from_preset_id(id: &str) -> Option<Self> {
+        easing_preset(id).map(|p| Easing::Bezier { points: p.points })
+    }
+
+    /// When this is a bezier matching a named preset, return that id.
+    pub fn preset_id(self) -> Option<&'static str> {
+        let Easing::Bezier { points } = self else {
+            return None;
+        };
+        EASING_PRESETS
+            .iter()
+            .find(|p| {
+                p.points
+                    .iter()
+                    .zip(points.iter())
+                    .all(|(a, b)| (a - b).abs() < 1e-4)
+            })
+            .map(|p| p.id)
+    }
+}
+
 impl Easing {
     /// Map linear progress `t` in `0..=1` to eased progress.
     pub fn apply(self, t: f32) -> f32 {
@@ -705,6 +765,26 @@ mod tests {
         assert!(Easing::EaseOut.apply(0.25) > 0.25);
         let mid = Easing::EaseInOut.apply(0.5);
         assert!((mid - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn named_easing_presets_roundtrip_and_validate() {
+        assert_eq!(EASING_PRESETS.len(), 3);
+        for preset in EASING_PRESETS {
+            let easing = Easing::from_preset_id(preset.id).expect(preset.id);
+            assert_eq!(easing.preset_id(), Some(preset.id));
+            assert!(easing.validate().is_ok(), "{}", preset.id);
+            assert_eq!(easing.apply(0.0), 0.0);
+            assert!((easing.apply(1.0) - 1.0).abs() < 1e-4);
+        }
+        assert!(Easing::from_preset_id("bounce").is_none());
+        assert_eq!(
+            Easing::Bezier {
+                points: [0.42, 0.0, 0.58, 1.0],
+            }
+            .preset_id(),
+            None
+        );
     }
 
     #[test]

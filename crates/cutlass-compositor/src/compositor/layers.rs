@@ -617,19 +617,38 @@ fn rgba_upload_pixels(
     Ok((resized.into_raw(), width, height))
 }
 
+/// Floor for mask size axes so the shader can divide without a zero check.
+const MASK_SIZE_EPS: f32 = 1e-3;
+
 fn pack_fx_uniforms(effects: &LayerEffects, placement: &LayerPlacement) -> FxEffectsUniform {
-    let mask = effects
-        .mask
-        .map(|m| [m.kind as f32, m.feather, m.invert as f32, 1.0]);
+    let (mask, half_zw, mask_geo) = match effects.mask {
+        Some(m) => (
+            [m.kind as f32, m.feather, m.invert as f32, 1.0],
+            [m.rotation_rad, m.roundness],
+            [
+                m.center[0],
+                m.center[1],
+                m.size[0].max(MASK_SIZE_EPS),
+                m.size[1].max(MASK_SIZE_EPS),
+            ],
+        ),
+        None => ([0.0, 0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0, 1.0, 1.0]),
+    };
     let chroma = effects
         .chroma_key
         .map(|c| [c.rgb[0], c.rgb[1], c.rgb[2], 1.0]);
     let chroma_params = effects.chroma_key.map(|c| [c.strength, c.shadow, 0.0, 0.0]);
     FxEffectsUniform {
-        mask: mask.unwrap_or([0.0, 0.0, 0.0, 0.0]),
+        mask,
         chroma: chroma.unwrap_or([0.0, 0.0, 0.0, 0.0]),
         chroma_params: chroma_params.unwrap_or([0.0, 0.0, 0.0, 0.0]),
-        half: [placement.size[0] * 0.5, placement.size[1] * 0.5, 0.0, 0.0],
+        half: [
+            placement.size[0] * 0.5,
+            placement.size[1] * 0.5,
+            half_zw[0],
+            half_zw[1],
+        ],
+        mask_geo,
     }
 }
 

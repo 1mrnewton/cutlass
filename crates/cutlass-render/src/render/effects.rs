@@ -40,13 +40,18 @@ pub(super) fn pack_effects(resolved: &[ResolvedPass]) -> EffectChain {
     EffectChain { passes }
 }
 
+/// Floor for mask size axes (shader divides by size; avoid zeros).
+const MASK_SIZE_EPS: f32 = 1e-3;
+
 pub(super) fn layer_effects(layer: &crate::scene::SceneLayer) -> LayerEffects {
-    // Geometry consumed in a follow-up — SceneMask also carries
-    // center/size/rotation_rad/roundness; compositor LayerMask does not yet.
     let mask = layer.mask.map(|m| LayerMask {
         kind: mask_kind_id(m.kind),
         feather: m.feather,
         invert: u32::from(m.invert),
+        center: m.center,
+        size: [m.size[0].max(MASK_SIZE_EPS), m.size[1].max(MASK_SIZE_EPS)],
+        rotation_rad: m.rotation_rad,
+        roundness: m.roundness,
     });
     let chroma_key = layer.chroma_key.map(|c| LayerChromaKey {
         rgb: [

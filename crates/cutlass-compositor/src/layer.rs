@@ -75,11 +75,38 @@ pub mod mask_kind {
 }
 
 /// GPU-ready mask parameters (no `cutlass-models` dependency).
+///
+/// Geometry uses the same fraction-of-layer units as the model: `center` is an
+/// offset from the layer center, `size` scales the mask (`[1,1]` = full layer),
+/// `rotation_rad` is about the mask center, and `roundness` rounds rectangle
+/// corners only (`0`…`1`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerMask {
     pub kind: u32,
     pub feather: f32,
     pub invert: u32,
+    /// Offset from layer center, fraction of layer size per axis.
+    pub center: [f32; 2],
+    /// Mask size as a fraction of layer size (`[1, 1]` = legacy full-quad).
+    pub size: [f32; 2],
+    pub rotation_rad: f32,
+    /// Rectangle corner rounding, `0` … `1` (ignored for other kinds).
+    pub roundness: f32,
+}
+
+impl LayerMask {
+    /// Mask with identity geometry (centered, full size, no rotation/roundness).
+    pub const fn new(kind: u32) -> Self {
+        Self {
+            kind,
+            feather: 0.0,
+            invert: 0,
+            center: [0.0, 0.0],
+            size: [1.0, 1.0],
+            rotation_rad: 0.0,
+            roundness: 0.0,
+        }
+    }
 }
 
 /// GPU-ready chroma-key parameters.

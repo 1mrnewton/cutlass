@@ -13,12 +13,14 @@ struct Placement {
 struct Effects {
     // mask_kind, mask_feather, mask_invert (0/1), mask_enabled (0/1)
     mask: vec4<f32>,
-    // chroma_rgb (normalized), chroma_enabled (0/1), pad, pad
+    // chroma_rgb (normalized), chroma_enabled (0/1)
     chroma: vec4<f32>,
     // chroma_strength, chroma_shadow, pad, pad
     chroma_params: vec4<f32>,
-    // quad half-extents px (x, y), pad, pad
+    // quad half-extents px (x, y), mask rotation_rad (z), mask roundness (w)
     half: vec4<f32>,
+    // mask center xy (fraction of layer size), mask size xy (fraction)
+    mask_geo: vec4<f32>,
 }
 
 @group(0) @binding(0) var tex: texture_2d<f32>;
@@ -85,6 +87,10 @@ fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
             u32(fx.mask.x + 0.5),
             fx.mask.y,
             fx.mask.z,
+            fx.mask_geo.xy,
+            fx.mask_geo.zw,
+            fx.half.z,
+            fx.half.w,
         );
         premul = premul * malpha;
     }

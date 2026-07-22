@@ -5,9 +5,10 @@ use std::path::Path;
 
 use cutlass_compositor::{ColorGrade, GpuContext};
 use cutlass_models::{
-    BlendMode, ChromaKey, ClipTransform, ColorAdjustments, Filter, Generator, LayerBackground,
-    LayerShadow, LayerStyles, Mask, MaskKind, MediaSource, Param, Project, Rational, RationalTime,
-    Shape, ShapePath, ShapePathPoint, TextStyle, TimeRange, TrackKind,
+    BlendMode, CanvasAspect, CanvasSettings, ChromaKey, ClipTransform, ColorAdjustments, Filter,
+    Generator, LayerBackground, LayerShadow, LayerStyles, Mask, MaskKind, MediaSource, Param,
+    Project, Rational, RationalTime, Shape, ShapePath, ShapePathPoint, TextStyle, TimeRange,
+    TrackKind,
 };
 use cutlass_render::Renderer;
 
@@ -120,6 +121,43 @@ fn renders_still_with_circle_mask_and_chroma_key() {
     assert_near(frame.pixel(320, 180), [0, 0, 0, 255], 8, "center");
     // Corner is outside the circle → background.
     assert_near(frame.pixel(10, 10), [0, 0, 0, 255], 8, "corner");
+}
+
+#[test]
+fn renders_still_with_half_size_circle_mask() {
+    // Square canvas + square still fills the frame; fit_within keeps the
+    // resolve→realize→composite path cheap for CI.
+    let dir = tempfile::tempdir().unwrap();
+    let png_path = dir.path().join("red.png");
+    write_solid_png(&png_path, 200, 200, [255, 0, 0, 255]);
+
+    let mut project = Project::new("p", FPS_24);
+    project.timeline_mut().set_canvas(CanvasSettings {
+        aspect: CanvasAspect::Square1x1,
+        background: [0, 0, 0],
+    });
+    let media = project.add_media(MediaSource::image(&png_path, 200, 200));
+    let window = project.media(media).unwrap().full_range();
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, window, rt(0)).unwrap();
+    let mut mask = Mask::new(MaskKind::Circle);
+    mask.size = Param::Constant([0.5, 0.5]);
+    project.set_clip_mask(clip, Some(mask)).unwrap();
+
+    let Ok(mut renderer) = Renderer::new_headless() else {
+        eprintln!("skipping: no headless GPU available");
+        return;
+    };
+    let frame = renderer
+        .render_frame_fit(&project, rt(0), 200, 200)
+        .expect("render half-size mask");
+
+    // Center stays red; ~0.7×half-width falls outside size 0.5 → background.
+    let cx = frame.width / 2;
+    let cy = frame.height / 2;
+    let probe_x = cx + ((0.7 * (frame.width as f32 * 0.5)).round() as u32);
+    assert_near(frame.pixel(cx, cy), [255, 0, 0, 255], 8, "center");
+    assert_near(frame.pixel(probe_x, cy), [0, 0, 0, 255], 8, "mid-radius");
 }
 
 #[test]

@@ -109,8 +109,10 @@ pub(super) struct FxEffectsUniform {
     chroma: [f32; 4],
     /// chroma_strength, chroma_shadow, pad, pad.
     chroma_params: [f32; 4],
-    /// quad half-extents (x, y), pad, pad.
+    /// quad half-extents (x, y), mask rotation_rad (z), mask roundness (w).
     half: [f32; 4],
+    /// mask center xy (fraction of layer size), mask size xy (fraction).
+    mask_geo: [f32; 4],
 }
 
 #[repr(C)]

@@ -476,11 +476,7 @@ fn combined_mask_and_chroma_on_rgba_layer() {
     let bmp = rgba_uniform(64, 64, [0, 255, 0, 255]);
     let placement = LayerPlacement::full_canvas(&config);
     let effects = LayerEffects {
-        mask: Some(LayerMask {
-            kind: mask_kind::CIRCLE,
-            feather: 0.0,
-            invert: 0,
-        }),
+        mask: Some(LayerMask::new(mask_kind::CIRCLE)),
         chroma_key: Some(LayerChromaKey {
             rgb: [0.0, 1.0, 0.0],
             strength: 0.5,
@@ -504,11 +500,7 @@ fn circle_mask_cuts_rgba_corners() {
     let bmp = rgba_uniform(64, 64, [255, 0, 0, 255]);
     let placement = LayerPlacement::full_canvas(&config);
     let effects = LayerEffects {
-        mask: Some(LayerMask {
-            kind: mask_kind::CIRCLE,
-            feather: 0.0,
-            invert: 0,
-        }),
+        mask: Some(LayerMask::new(mask_kind::CIRCLE)),
         chroma_key: None,
     };
     let layer = CompositeLayer::rgba(&bmp, placement).with_fx(effects);

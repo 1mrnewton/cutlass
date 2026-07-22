@@ -15,7 +15,10 @@ struct Effects {
     mask: vec4<f32>,
     chroma: vec4<f32>,
     chroma_params: vec4<f32>,
+    // half.xy, mask rotation_rad (z), mask roundness (w)
     half: vec4<f32>,
+    // mask center xy, mask size xy
+    mask_geo: vec4<f32>,
 }
 
 @group(0) @binding(0) var y_tex: texture_2d<f32>;
@@ -107,6 +110,10 @@ fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
             u32(fx.mask.x + 0.5),
             fx.mask.y,
             fx.mask.z,
+            fx.mask_geo.xy,
+            fx.mask_geo.zw,
+            fx.half.z,
+            fx.half.w,
         );
         alpha = alpha * malpha;
     }

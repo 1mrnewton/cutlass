@@ -201,11 +201,7 @@ fn bench_compositor_only(
 ) {
     println!("compositor-only ({import}):");
     let fx_effects = LayerEffects {
-        mask: Some(LayerMask {
-            kind: mask_kind::CIRCLE,
-            feather: 0.0,
-            invert: 0,
-        }),
+        mask: Some(LayerMask::new(mask_kind::CIRCLE)),
         chroma_key: Some(LayerChromaKey {
             rgb: [0.0, 1.0, 0.0],
             strength: 0.5,

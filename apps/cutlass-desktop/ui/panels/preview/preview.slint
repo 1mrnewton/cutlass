@@ -174,7 +174,8 @@ export component PreviewPanel inherits PanelBase {
 
                     // Motion path for a selected clip with keyframed position.
                     // Same reactive inputs as sel-box (selection, projection
-                    // republish via sequence, zoom/pan, panel size).
+                    // republish via sequence, zoom/pan, panel size), plus the
+                    // live keyframe/tangent edit fields while dragging.
                     private property <MotionPath> motion-path: PreviewBackend.motion-path(
                         EditorStore.project.sequence,
                         TimelineStore.selected-clip-id,
@@ -183,7 +184,20 @@ export component PreviewPanel inherits PanelBase {
                         PreviewStore.viewport-zoom,
                         PreviewStore.viewport-pan-x / 1px,
                         PreviewStore.viewport-pan-y / 1px,
-                        PreviewStore.motion-path-selected-tick);
+                        PreviewStore.motion-path-selected-tick,
+                        PreviewStore.motion-path-edit-mode,
+                        PreviewStore.motion-path-edit-tick,
+                        PreviewStore.motion-path-edit-x,
+                        PreviewStore.motion-path-edit-y,
+                        PreviewStore.motion-path-mirror);
+
+                    // Clear motion-path selection when the timeline selection
+                    // changes — selection-only, never touches the project.
+                    private property <string> selected-clip-watch: TimelineStore.selected-clip-id;
+                    changed selected-clip-watch => {
+                        PreviewStore.motion-path-selected-tick = -1;
+                        PreviewStore.motion-path-edit-mode = 0;
+                    }
 
                     private property <bool> show-sprite-stack:
                         self.sprite-ready && self.sprite-hold;

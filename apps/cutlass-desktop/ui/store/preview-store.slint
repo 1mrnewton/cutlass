@@ -16,8 +16,22 @@ export global PreviewStore {
     callback viewport-changed(width: length, height: length);
 
     // Selected motion-path keyframe tick (absolute sequence tick), or -1
-    // when none. Drives diamond accent + (commit 2) tangent handles.
+    // when none. Drives diamond accent + tangent handles.
     in-out property <int> motion-path-selected-tick: -1;
+    // Live motion-path edit (0=idle, 1=move kf, 2=out tangent, 3=in tangent).
+    in-out property <int> motion-path-edit-mode: 0;
+    in-out property <int> motion-path-edit-tick: -1;
+    in-out property <float> motion-path-edit-x: 0;
+    in-out property <float> motion-path-edit-y: 0;
+    // Sibling tangent (canvas fractions) captured at press for non-mirror
+    // commits so dragging one handle doesn't wipe the other.
+    in-out property <float> motion-path-edit-out-x: 0;
+    in-out property <float> motion-path-edit-out-y: 0;
+    in-out property <float> motion-path-edit-in-x: 0;
+    in-out property <float> motion-path-edit-in-y: 0;
+    // Mirrored tangent handles (default on). Alt is already pan, so this is
+    // a toggle rather than a modifier.
+    in-out property <bool> motion-path-mirror: true;
 
     // Live transform gesture (preview roadmap Phases 3–5): the uncommitted
     // resolution of whatever gesture is in flight — a preview move/scale/

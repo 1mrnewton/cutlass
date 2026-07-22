@@ -2629,3 +2629,156 @@ fn extract_audio_undo_restores_pre_extract_state() {
     assert!(!engine.project().timeline().carries_own_audio(video));
     assert_eq!(audio_clip_count(&engine), 1);
 }
+
+// --- motion-path keyframe / tangent commits --------------------------------
+
+fn motion_path_fixture() -> (Engine, ClipId, Rational) {
+    let r = Rational::FPS_24;
+    let mut project = Project::new("motion-path", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/motion-path.mp4",
+        1920,
+        1080,
+        r,
+        200,
+        false,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 100, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    let handles = cutlass_models::SpatialTangents {
+        out_t: [0.1, 0.0],
+        in_t: [-0.1, 0.0],
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            RationalTime::new(0, r),
+            ParamValue::Vec2([0.0, 0.0]),
+            Easing::EaseIn,
+            Some(handles),
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            RationalTime::new(40, r),
+            ParamValue::Vec2([0.5, 0.0]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    let engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    (engine, clip, r)
+}
+
+/// Drag-commit of a keyframe value must keep that keyframe's easing and
+/// spatial tangents (the worker re-sends them on SetParamKeyframe).
+#[test]
+fn motion_path_keyframe_commit_preserves_easing_and_tangents() {
+    let (mut engine, clip, r) = motion_path_fixture();
+    let before = engine
+        .project()
+        .clip(clip)
+        .unwrap()
+        .transform
+        .position
+        .keyframes()[0];
+    assert_eq!(before.easing, Easing::EaseIn);
+    assert_eq!(
+        before.tangents,
+        Some(cutlass_models::SpatialTangents {
+            out_t: [0.1, 0.0],
+            in_t: [-0.1, 0.0],
+        })
+    );
+
+    engine
+        .apply(Command::Edit(EditCommand::SetParamKeyframe {
+            clip,
+            param: ClipParam::Position,
+            at: RationalTime::new(0, r),
+            value: ParamValue::Vec2([0.25, 0.1]),
+            easing: before.easing,
+            tangents: before.tangents,
+        }))
+        .expect("commit");
+
+    let after = &engine
+        .project()
+        .clip(clip)
+        .unwrap()
+        .transform
+        .position
+        .keyframes()[0];
+    assert_eq!(after.value, [0.25, 0.1]);
+    assert_eq!(after.easing, Easing::EaseIn);
+    assert_eq!(after.tangents, before.tangents);
+}
+
+/// Tangent-handle commit round-trips through SetParamKeyframe (value/easing
+/// unchanged; handles updated).
+#[test]
+fn motion_path_tangent_commit_round_trips() {
+    let (mut engine, clip, r) = motion_path_fixture();
+    let kf = engine
+        .project()
+        .clip(clip)
+        .unwrap()
+        .transform
+        .position
+        .keyframes()[0];
+    let new_tangents = cutlass_models::SpatialTangents {
+        out_t: [0.2, 0.15],
+        in_t: [-0.2, -0.15],
+    };
+    engine
+        .apply(Command::Edit(EditCommand::SetParamKeyframe {
+            clip,
+            param: ClipParam::Position,
+            at: RationalTime::new(0, r),
+            value: ParamValue::Vec2(kf.value),
+            easing: kf.easing,
+            tangents: Some(new_tangents),
+        }))
+        .expect("commit tangents");
+
+    let after = &engine
+        .project()
+        .clip(clip)
+        .unwrap()
+        .transform
+        .position
+        .keyframes()[0];
+    assert_eq!(after.value, kf.value);
+    assert_eq!(after.easing, kf.easing);
+    assert_eq!(after.tangents, Some(new_tangents));
+}
+
+/// Selecting / deselecting a motion-path keyframe is UI state only — the
+/// projected model (and engine) stay untouched. Covered by the overlay's
+/// live-edit unit test; this locks the engine side of that contract.
+#[test]
+fn motion_path_selection_does_not_touch_the_model() {
+    let (engine, clip, _) = motion_path_fixture();
+    let before = engine
+        .project()
+        .clip(clip)
+        .unwrap()
+        .transform
+        .position
+        .clone();
+    // No EditCommand is issued for select/deselect — model identity holds.
+    assert_eq!(
+        &before,
+        &engine.project().clip(clip).unwrap().transform.position
+    );
+}

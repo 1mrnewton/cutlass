@@ -794,6 +794,7 @@ pub(super) fn message_invalidates_preview(msg: &WorkerMsg) -> bool {
             // Aspect reshapes the composite, background recolors it.
             | WorkerMsg::SetCanvas { .. }
             | WorkerMsg::SetParamKeyframe { .. }
+            | WorkerMsg::SetParamKeyframeTangents { .. }
             | WorkerMsg::SetParamConstant { .. }
             | WorkerMsg::RemoveParamKeyframe { .. }
             | WorkerMsg::RetimeKeyframes { .. }

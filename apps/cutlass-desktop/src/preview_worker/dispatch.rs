@@ -358,6 +358,7 @@ pub(super) fn dispatch(
             tick,
             value,
             easing,
+            tangents,
         } => set_param_keyframe_and_publish(
             engine,
             &clip,
@@ -365,6 +366,18 @@ pub(super) fn dispatch(
             RationalTime::new(tick, tl_rate),
             value,
             easing,
+            tangents,
+            ui,
+        ),
+        WorkerMsg::SetParamKeyframeTangents {
+            clip,
+            tick,
+            tangents,
+        } => set_param_keyframe_tangents_and_publish(
+            engine,
+            &clip,
+            RationalTime::new(tick, tl_rate),
+            tangents,
             ui,
         ),
         WorkerMsg::SetParamConstant { clip, param, value } => {

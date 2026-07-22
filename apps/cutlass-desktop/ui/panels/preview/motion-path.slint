@@ -1,15 +1,104 @@
 import { AppStore } from "../../store/index.slint";
-import { MotionPath } from "../../lib/preview-backend.slint";
+import { EditorStore, PreviewStore, TimelineStore } from "../../store/index.slint";
+import { PreviewBackend, MotionPath, MotionPathDragResolution } from "../../lib/preview-backend.slint";
 
-// Motion-path overlay: sampled position polyline + keyframe diamonds for a
-// clip whose transform.position is keyframed. Geometry arrives pre-projected
-// into viewport-element px from Rust (src/preview_motion_path.rs).
+// Motion-path overlay (polyline + keyframe/tangent handles). Geometry from Rust.
 export component MotionPathOverlay inherits Rectangle {
     in property <MotionPath> path;
     in property <float> view-w;
     in property <float> view-h;
 
-    // Polyline through sampled position (SVG commands from Rust).
+    private property <MotionPathDragResolution> drag-res;
+    private property <bool> dragging: false;
+
+    function begin-edit(mode: int, tick: int, out-x: float, out-y: float, in-x: float, in-y: float) {
+        PreviewBackend.motion-path-select-keyframe(tick);
+        PreviewStore.motion-path-edit-out-x = out-x;
+        PreviewStore.motion-path-edit-out-y = out-y;
+        PreviewStore.motion-path-edit-in-x = in-x;
+        PreviewStore.motion-path-edit-in-y = in-y;
+        PreviewStore.motion-path-edit-mode = mode;
+        PreviewStore.motion-path-edit-tick = tick;
+        root.dragging = false;
+    }
+
+    function tip-offset(mode: int, tick: int, tip-x: float, tip-y: float) -> MotionPathDragResolution {
+        return PreviewBackend.resolve-motion-path-drag(
+            EditorStore.project.sequence, TimelineStore.selected-clip-id,
+            TimelineStore.playhead-tick, tip-x, tip-y, root.view-w, root.view-h,
+            PreviewStore.viewport-zoom, PreviewStore.viewport-pan-x / 1px,
+            PreviewStore.viewport-pan-y / 1px, mode, tick);
+    }
+
+    function move-edit(cx: float, cy: float) {
+        if (PreviewStore.motion-path-edit-mode == 0) {
+            return;
+        }
+        root.drag-res = root.tip-offset(
+            PreviewStore.motion-path-edit-mode, PreviewStore.motion-path-edit-tick, cx, cy);
+        if (!root.drag-res.valid) {
+            return;
+        }
+        root.dragging = true;
+        PreviewStore.motion-path-edit-x = root.drag-res.x;
+        PreviewStore.motion-path-edit-y = root.drag-res.y;
+        if (PreviewStore.motion-path-edit-mode == 1) {
+            PreviewStore.gesture-clip = TimelineStore.selected-clip-id;
+            PreviewStore.gesture = {
+                valid: true,
+                moved: true,
+                position-x: root.drag-res.x,
+                position-y: root.drag-res.y,
+                anchor-x: root.drag-res.anchor-x,
+                anchor-y: root.drag-res.anchor-y,
+                scale: root.drag-res.scale,
+                scale-y: root.drag-res.scale-y,
+                rotation: root.drag-res.rotation,
+                opacity: root.drag-res.opacity,
+                snap-h: false,
+                snap-v: false,
+                guide-x: 0,
+                guide-y: 0,
+            };
+            PreviewStore.gesture-commit-pending = false;
+            PreviewStore.gesture-active = true;
+            EditorStore.on-preview-transform-overridden(
+                TimelineStore.selected-clip-id,
+                root.drag-res.x, root.drag-res.y,
+                root.drag-res.anchor-x, root.drag-res.anchor-y,
+                root.drag-res.scale, root.drag-res.scale-y,
+                root.drag-res.rotation, root.drag-res.opacity,
+                TimelineStore.playhead-tick);
+        }
+    }
+
+    function end-edit(commit: bool) {
+        let mode = PreviewStore.motion-path-edit-mode;
+        let tick = PreviewStore.motion-path-edit-tick;
+        let x = PreviewStore.motion-path-edit-x;
+        let y = PreviewStore.motion-path-edit-y;
+        let mirror = PreviewStore.motion-path-mirror;
+        if (commit && root.dragging && mode == 1) {
+            PreviewBackend.motion-path-commit-keyframe(
+                TimelineStore.selected-clip-id, tick, x, y);
+            PreviewStore.gesture-commit-pending = true;
+        } else if (commit && root.dragging && (mode == 2 || mode == 3)) {
+            PreviewBackend.motion-path-commit-tangents(
+                TimelineStore.selected-clip-id,
+                tick,
+                mode == 2 ? x : (mirror ? -x : PreviewStore.motion-path-edit-out-x),
+                mode == 2 ? y : (mirror ? -y : PreviewStore.motion-path-edit-out-y),
+                mode == 3 ? x : (mirror ? -x : PreviewStore.motion-path-edit-in-x),
+                mode == 3 ? y : (mirror ? -y : PreviewStore.motion-path-edit-in-y));
+        } else if (root.dragging && mode == 1) {
+            EditorStore.on-preview-override-cleared(TimelineStore.playhead-tick);
+            PreviewStore.gesture-active = false;
+            PreviewStore.gesture-commit-pending = false;
+        }
+        PreviewStore.motion-path-edit-mode = 0;
+        PreviewStore.motion-path-edit-tick = -1;
+        root.dragging = false;
+    }
     if root.path.visible && root.path.path-commands != "": Path {
         width: 100%;
         height: 100%;
@@ -20,8 +109,24 @@ export component MotionPathOverlay inherits Rectangle {
         stroke-width: 1.5px;
         fill: transparent;
     }
-
-    // Keyframe diamonds — same corner-handle size language as the sel-box.
+    if root.path.visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        for kf in root.path.keyframes: Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: root.view-w;
+            viewbox-height: root.view-h;
+            stroke: AppStore.theme.accent.primary.with-alpha(0.7);
+            stroke-width: 1px;
+            fill: transparent;
+            visible: kf.has-handles;
+            commands: kf.has-handles
+                ? "M " + kf.in-x + " " + kf.in-y + " L " + kf.x + " " + kf.y
+                    + " L " + kf.out-x + " " + kf.out-y
+                : "";
+        }
+    }
     if root.path.visible: Rectangle {
         width: 100%;
         height: 100%;
@@ -34,9 +139,150 @@ export component MotionPathOverlay inherits Rectangle {
             background: kf.selected ? AppStore.theme.accent.primary : #FFFFFF;
             border-width: 1px;
             border-color: kf.selected ? #FFFFFF : #00000066;
-            // Rotate into a diamond so keyframes read distinct from scale handles.
             transform-rotation: 45deg;
             transform-origin: { x: 5px, y: 5px };
+
+            TouchArea {
+                width: 16px;
+                height: 16px;
+                x: -3px;
+                y: -3px;
+                mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                        let out = root.tip-offset(2, kf.tick, kf.out-x, kf.out-y);
+                        let inn = root.tip-offset(3, kf.tick, kf.in-x, kf.in-y);
+                        root.begin-edit(1, kf.tick,
+                            out.valid ? out.x : 0, out.valid ? out.y : 0,
+                            inn.valid ? inn.x : 0, inn.valid ? inn.y : 0);
+                    }
+                    if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
+                        root.end-edit(true);
+                    }
+                    if (ev.kind == PointerEventKind.cancel) {
+                        root.end-edit(false);
+                    }
+                }
+                moved => {
+                    root.move-edit(kf.x - 8 + self.mouse-x / 1px,
+                                   kf.y - 8 + self.mouse-y / 1px);
+                }
+            }
+        }
+    }
+    if root.path.visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        for kf in root.path.keyframes: Rectangle {
+            x: kf.out-x * 1px - 4px;
+            y: kf.out-y * 1px - 4px;
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: AppStore.theme.accent.primary;
+            border-width: 1px;
+            border-color: #FFFFFF;
+            visible: kf.has-handles;
+
+            TouchArea {
+                width: 14px;
+                height: 14px;
+                x: -3px;
+                y: -3px;
+                mouse-cursor: MouseCursor.crosshair;
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                        let out = root.tip-offset(2, kf.tick, kf.out-x, kf.out-y);
+                        let inn = root.tip-offset(3, kf.tick, kf.in-x, kf.in-y);
+                        root.begin-edit(2, kf.tick,
+                            out.valid ? out.x : 0, out.valid ? out.y : 0,
+                            inn.valid ? inn.x : 0, inn.valid ? inn.y : 0);
+                    }
+                    if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
+                        root.end-edit(true);
+                    }
+                    if (ev.kind == PointerEventKind.cancel) {
+                        root.end-edit(false);
+                    }
+                }
+                moved => {
+                    root.move-edit(kf.out-x - 7 + self.mouse-x / 1px,
+                                   kf.out-y - 7 + self.mouse-y / 1px);
+                }
+            }
+        }
+    }
+    if root.path.visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        for kf in root.path.keyframes: Rectangle {
+            x: kf.in-x * 1px - 4px;
+            y: kf.in-y * 1px - 4px;
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: AppStore.theme.accent.primary;
+            border-width: 1px;
+            border-color: #FFFFFF;
+            visible: kf.has-handles;
+
+            TouchArea {
+                width: 14px;
+                height: 14px;
+                x: -3px;
+                y: -3px;
+                mouse-cursor: MouseCursor.crosshair;
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                        let out = root.tip-offset(2, kf.tick, kf.out-x, kf.out-y);
+                        let inn = root.tip-offset(3, kf.tick, kf.in-x, kf.in-y);
+                        root.begin-edit(3, kf.tick,
+                            out.valid ? out.x : 0, out.valid ? out.y : 0,
+                            inn.valid ? inn.x : 0, inn.valid ? inn.y : 0);
+                    }
+                    if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
+                        root.end-edit(true);
+                    }
+                    if (ev.kind == PointerEventKind.cancel) {
+                        root.end-edit(false);
+                    }
+                }
+                moved => {
+                    root.move-edit(kf.in-x - 7 + self.mouse-x / 1px,
+                                   kf.in-y - 7 + self.mouse-y / 1px);
+                }
+            }
+        }
+    }
+
+    // Mirror toggle (Alt already pans the preview).
+    if root.path.visible && PreviewStore.motion-path-selected-tick >= 0: Rectangle {
+        x: parent.width - self.width - 8px;
+        y: 8px;
+        width: mirror-label.preferred-width + 14px;
+        height: 22px;
+        border-radius: 4px;
+        background: PreviewStore.motion-path-mirror ? AppStore.theme.accent.primary : #2A2A2A;
+        border-width: 1px;
+        border-color: #FFFFFF24;
+
+        mirror-label := Text {
+            width: parent.width;
+            height: parent.height;
+            text: "Mirror";
+            color: #FFFFFF;
+            font-size: 10px;
+            horizontal-alignment: TextHorizontalAlignment.center;
+            vertical-alignment: TextVerticalAlignment.center;
+        }
+
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                PreviewStore.motion-path-mirror = !PreviewStore.motion-path-mirror;
+            }
         }
     }
 }

@@ -216,6 +216,7 @@ pub(super) fn bump_keyframe_commit_epoch(ui: &UiSink) {
 /// diamond / easing picker). Engine-rejected positions (playhead outside the
 /// clip — the UI gates, but a stale projection can race) only log.
 /// Style-param commits clear a live styles override first.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn set_param_keyframe_and_publish(
     engine: &mut Engine,
     clip: &str,
@@ -223,6 +224,7 @@ pub(super) fn set_param_keyframe_and_publish(
     at: RationalTime,
     value: ParamValue,
     easing: Easing,
+    tangents: Option<cutlass_models::SpatialTangents>,
     ui: &UiSink,
 ) {
     if matches!(param, ClipParam::Style { .. }) {
@@ -238,13 +240,63 @@ pub(super) fn set_param_keyframe_and_publish(
         at,
         value,
         easing,
-        tangents: None,
+        tangents,
     })) {
         Ok(_) => {
             info!(%clip_id, ?param, tick = at.value, "set param keyframe");
             publish_projection(engine, ui);
         }
         Err(e) => error!(%clip_id, ?param, "set param keyframe failed: {e}"),
+    }
+}
+
+/// Set spatial tangents on a position keyframe at `at` without changing its
+/// value/easing — motion-path handle drag commit. Looks up the current
+/// keyframe and re-issues [`EditCommand::SetParamKeyframe`] so undo stays
+/// a full-clip restore (no separate tangents command on the wire).
+pub(super) fn set_param_keyframe_tangents_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    at: RationalTime,
+    tangents: Option<cutlass_models::SpatialTangents>,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(
+            clip,
+            "set-param-keyframe-tangents ignored: unparsable clip id"
+        );
+        return;
+    };
+    let Some(engine_clip) = engine.project().clip(clip_id) else {
+        error!(%clip_id, "set-param-keyframe-tangents ignored: unknown clip");
+        return;
+    };
+    let rel = at.value - engine_clip.timeline.start.value;
+    let Some(kf) = engine_clip
+        .transform
+        .position
+        .keyframes()
+        .iter()
+        .find(|k| k.tick == rel)
+        .cloned()
+    else {
+        error!(%clip_id, tick = at.value, "set-param-keyframe-tangents: no keyframe");
+        return;
+    };
+    match engine.apply(Command::Edit(EditCommand::SetParamKeyframe {
+        clip: clip_id,
+        param: ClipParam::Position,
+        at,
+        value: ParamValue::Vec2(kf.value),
+        easing: kf.easing,
+        tangents,
+    })) {
+        Ok(_) => {
+            info!(%clip_id, tick = at.value, "set param keyframe tangents");
+            publish_projection(engine, ui);
+        }
+        Err(e) => error!(%clip_id, "set param keyframe tangents failed: {e}"),
     }
 }
 

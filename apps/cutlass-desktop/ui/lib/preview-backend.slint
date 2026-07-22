@@ -92,12 +92,18 @@ export struct PreviewSpritePlacement {
 }
 
 // One keyframe diamond on the motion-path overlay (viewport-element px).
-// `selected` accents the diamond; commit 2 draws tangent handles from it.
+// When `selected`, `has-handles` lights the out/in tangent tips at
+// (out-x, out-y) / (in-x, in-y) — also viewport px.
 export struct MotionPathKeyframe {
     x: float,
     y: float,
     tick: int,
     selected: bool,
+    has-handles: bool,
+    out-x: float,
+    out-y: float,
+    in-x: float,
+    in-y: float,
 }
 
 // Motion-path overlay for a selected clip whose position is keyframed.
@@ -107,6 +113,22 @@ export struct MotionPath {
     visible: bool,
     path-commands: string,
     keyframes: [MotionPathKeyframe],
+}
+
+// Resolved motion-path drag: canvas-fraction position (mode 1) or tangent
+// offset (modes 2/3). `valid` is false when the keyframe/clip is unknown.
+// Anchor/scale/rotation/opacity pass the playhead sample through for the
+// live transform override during a keyframe drag.
+export struct MotionPathDragResolution {
+    valid: bool,
+    x: float,
+    y: float,
+    anchor-x: float,
+    anchor-y: float,
+    scale: float,
+    scale-y: float,
+    rotation: float,
+    opacity: float,
 }
 
 export global PreviewBackend {
@@ -136,9 +158,25 @@ export global PreviewBackend {
 
     // Motion-path overlay for a selected clip with keyframed position:
     // sampled polyline (SVG commands) + keyframe diamonds in viewport px.
-    // `selected-tick` marks one diamond (-1 ⇔ none). Recomputed with the
-    // same reactive inputs as selection-box (selection, projection, zoom/pan).
-    pure callback motion-path(Sequence /* sequence */, string /* clip-id */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, int    /* selected-tick */, ) -> MotionPath;
+    // `selected-tick` marks one diamond (-1 ⇔ none). `edit-mode` 0=none,
+    // 1=move keyframe, 2=out tangent, 3=in tangent — live path preview
+    // while dragging (`edit-x`/`edit-y` are canvas fractions / offsets).
+    pure callback motion-path(Sequence /* sequence */, string /* clip-id */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, int    /* selected-tick */, int    /* edit-mode */, int    /* edit-tick */, float  /* edit-x */, float  /* edit-y */, bool   /* mirror */, ) -> MotionPath;
+
+    // Cursor (viewport px) → canvas-fraction edit values for the active
+    // motion-path drag mode (see motion-path).
+    pure callback resolve-motion-path-drag(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, int    /* edit-mode */, int    /* edit-tick */, ) -> MotionPathDragResolution;
+
+    // Select a motion-path keyframe diamond (`tick` absolute, or -1 to clear).
+    // Selection-only — does not mutate the project.
+    callback motion-path-select-keyframe(tick: int);
+
+    // Commit a dragged keyframe's new canvas-fraction position at `tick`,
+    // preserving that keyframe's easing and spatial tangents.
+    callback motion-path-commit-keyframe(clip-id: string, tick: int, x: float, y: float);
+
+    // Commit spatial tangents on the position keyframe at `tick`.
+    callback motion-path-commit-tangents(clip-id: string, tick: int, out-x: float, out-y: float, in-x: float, in-y: float);
 
     // Move gesture (preview roadmap Phase 3): press point + current cursor
     // (viewport-element px) → new normalized position, center-guide magnet

@@ -503,6 +503,16 @@ pub(super) enum WorkerMsg {
         tick: i64,
         value: ParamValue,
         easing: Easing,
+        /// Spatial tangents for position motion paths. `None` clears / keeps
+        /// straight-line (engine always writes the slot on Position).
+        tangents: Option<cutlass_models::SpatialTangents>,
+    },
+    /// Set or clear spatial tangents on a position keyframe without changing
+    /// its value/easing (motion-path handle drag).
+    SetParamKeyframeTangents {
+        clip: String,
+        tick: i64,
+        tangents: Option<cutlass_models::SpatialTangents>,
     },
     /// Replace one animatable property with a constant, dropping its
     /// keyframes. One undoable edit.

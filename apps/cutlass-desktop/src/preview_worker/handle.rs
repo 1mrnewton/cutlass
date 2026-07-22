@@ -417,6 +417,7 @@ impl WorkerHandle {
         tick: i64,
         value: ParamValue,
         easing: Easing,
+        tangents: Option<cutlass_models::SpatialTangents>,
     ) {
         let _ = self.tx.send(WorkerMsg::SetParamKeyframe {
             clip,
@@ -424,6 +425,20 @@ impl WorkerHandle {
             tick,
             value,
             easing,
+            tangents,
+        });
+    }
+
+    pub fn set_param_keyframe_tangents(
+        &self,
+        clip: String,
+        tick: i64,
+        tangents: Option<cutlass_models::SpatialTangents>,
+    ) {
+        let _ = self.tx.send(WorkerMsg::SetParamKeyframeTangents {
+            clip,
+            tick,
+            tangents,
         });
     }
 

@@ -68,6 +68,7 @@ pub(crate) fn wire_inspector(
                 i64::from(tick),
                 value,
                 params::easing_from_ui(easing, [0.0; 4]),
+                None,
             );
         },
     );

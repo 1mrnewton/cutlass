@@ -2097,8 +2097,8 @@ fn look_commands_undo_redo_roundtrip() {
             clip: clip_id,
             chroma: Some(ChromaKey {
                 rgb: [0, 255, 0],
-                strength: 0.7,
-                shadow: 0.1,
+                strength: 0.7.into(),
+                shadow: 0.1.into(),
             }),
         }))
         .expect("chroma");
@@ -2118,18 +2118,18 @@ fn look_commands_undo_redo_roundtrip() {
         .apply(Command::Edit(EditCommand::SetClipAdjustments {
             clip: clip_id,
             adjust: ColorAdjustments {
-                exposure: 0.5,
+                exposure: 0.5.into(),
                 ..Default::default()
             },
         }))
         .expect("adjust");
 
     let styled = clip(&engine);
-    assert_eq!(styled.mask.unwrap().kind, MaskKind::Heart);
-    assert_eq!(styled.chroma_key.unwrap().rgb, [0, 255, 0]);
+    assert_eq!(styled.mask.as_ref().unwrap().kind, MaskKind::Heart);
+    assert_eq!(styled.chroma_key.as_ref().unwrap().rgb, [0, 255, 0]);
     assert_eq!(styled.stabilize, Some(StabilizeLevel::Recommended));
     assert_eq!(styled.filter.as_ref().unwrap().id, "noir");
-    assert_eq!(styled.adjust.exposure, 0.5);
+    assert_eq!(styled.adjust.exposure.sample(0), 0.5);
 
     // Undo peels them off one at a time (each is one history entry)…
     assert!(engine.undo());

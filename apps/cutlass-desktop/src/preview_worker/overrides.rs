@@ -331,6 +331,62 @@ pub(super) fn set_param_constant_and_publish(
     }
 }
 
+/// Move one property's keyframe to a new absolute tick (graph editor).
+/// `remove` + `set` inside one history group so a single undo restores it.
+pub(super) fn move_param_keyframe_and_publish(
+    engine: &mut Engine,
+    req: &MoveParamKeyframeRequest,
+    tl_rate: Rational,
+    ui: &UiSink,
+) {
+    let param = req.param;
+    if matches!(param, ClipParam::Style { .. }) {
+        engine.set_styles_override(None);
+    }
+    let Some(clip_id) = parse_raw_id(&req.clip).map(ClipId::from_raw) else {
+        error!(clip = %req.clip, "move-param-keyframe ignored: unparsable clip id");
+        return;
+    };
+    let from = RationalTime::new(req.from_tick, tl_rate);
+    let to = RationalTime::new(req.to_tick, tl_rate);
+    engine.begin_group();
+    let remove = engine.apply(Command::Edit(EditCommand::RemoveParamKeyframe {
+        clip: clip_id,
+        param,
+        at: from,
+    }));
+    if let Err(e) = remove {
+        error!(%clip_id, ?param, "move-param-keyframe remove failed: {e}");
+        engine.rollback_group();
+        return;
+    }
+    let set = engine.apply(Command::Edit(EditCommand::SetParamKeyframe {
+        clip: clip_id,
+        param,
+        at: to,
+        value: req.value,
+        easing: req.easing,
+        tangents: req.tangents,
+    }));
+    match set {
+        Ok(_) => {
+            engine.commit_group();
+            info!(
+                %clip_id,
+                ?param,
+                from = from.value,
+                to = to.value,
+                "moved param keyframe"
+            );
+            publish_projection(engine, ui);
+        }
+        Err(e) => {
+            error!(%clip_id, ?param, "move-param-keyframe set failed: {e}");
+            engine.rollback_group();
+        }
+    }
+}
+
 /// Remove the keyframe at exactly `at` on one property (inspector diamond
 /// toggled off). The engine rejects when nothing sits there.
 pub(super) fn remove_param_keyframe_and_publish(

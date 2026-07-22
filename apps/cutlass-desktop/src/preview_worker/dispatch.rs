@@ -390,6 +390,28 @@ pub(super) fn dispatch(
             RationalTime::new(tick, tl_rate),
             ui,
         ),
+        WorkerMsg::MoveParamKeyframe {
+            clip,
+            param,
+            from_tick,
+            to_tick,
+            value,
+            easing,
+            tangents,
+        } => move_param_keyframe_and_publish(
+            engine,
+            &MoveParamKeyframeRequest {
+                clip,
+                param,
+                from_tick,
+                to_tick,
+                value,
+                easing,
+                tangents,
+            },
+            tl_rate,
+            ui,
+        ),
         WorkerMsg::RetimeKeyframes {
             clip,
             from_tick,

@@ -97,5 +97,7 @@ pub(crate) use types::{
     ApplyTemplateRpcResult, ImportMediaRpcResult, NewProjectRpcResult, OpenProjectRpcResult,
     PreviewCacheStats, RelinkFolderRpcResult, RelinkMediaRpcResult, SaveProjectRpcResult,
 };
-pub use types::{ExportRequest, GroupMove, PreviewSession, TrackFlag, WorkerHandle};
+pub use types::{
+    ExportRequest, GroupMove, MoveParamKeyframeRequest, PreviewSession, TrackFlag, WorkerHandle,
+};
 pub use worker_loop::PreviewWorker;

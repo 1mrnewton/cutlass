@@ -55,7 +55,7 @@ export global GraphBackend {
     // Selected keyframe tick (absolute), or -1.
     in-out property <int> selected-tick: -1;
 
-    // Plot size last used for layout (for drag mapping later).
+    // Plot size last used for layout (for drag mapping).
     in-out property <float> plot-w: 0;
     in-out property <float> plot-h: 0;
 
@@ -65,4 +65,12 @@ export global GraphBackend {
     // Rebuild path/dots/channels from the projected sequence. Called when
     // selection, projection, playhead, channel, or plot size changes.
     callback refresh(sequence: Sequence, clip-id: string, playhead: int, width: float, height: float);
+
+    // Keyframe editing (commit 2).
+    callback select-dot(tick: int);
+    callback drag-begin(tick: int);
+    callback drag-move(x: float, y: float);
+    callback drag-end(commit: bool);
+    callback insert-at(x: float, y: float);
+    callback delete-dot(tick: int);
 }

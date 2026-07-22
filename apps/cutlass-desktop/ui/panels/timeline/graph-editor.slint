@@ -19,9 +19,10 @@ export component GraphEditor inherits Rectangle {
     private property <int> playhead: TimelineStore.playhead-tick;
     private property <string> sel-key: GraphBackend.selected-key;
     private property <int> sel-ch: GraphBackend.selected-channel;
+    private property <bool> dragging: false;
 
     function request-refresh() {
-        if (!GraphBackend.visible) {
+        if (!GraphBackend.visible || root.dragging) {
             return;
         }
         GraphBackend.refresh(
@@ -48,7 +49,6 @@ export component GraphEditor inherits Rectangle {
         padding: AppStore.theme.metrics.spacing.sm;
         spacing: AppStore.theme.metrics.spacing.xs;
 
-        // Channel picker row.
         HorizontalLayout {
             height: 24px;
             spacing: AppStore.theme.metrics.spacing.sm;
@@ -91,7 +91,6 @@ export component GraphEditor inherits Rectangle {
             border-radius: AppStore.theme.metrics.radius.sm;
             clip: true;
 
-            // Horizontal gridlines at min / mid / max.
             if GraphBackend.path-commands != "": Rectangle {
                 y: GraphBackend.grid-max-y * 1px;
                 width: 100%;
@@ -111,7 +110,6 @@ export component GraphEditor inherits Rectangle {
                 background: #ffffff18;
             }
 
-            // Y-axis value labels.
             if GraphBackend.path-commands != "": Text {
                 x: 4px;
                 y: GraphBackend.grid-max-y * 1px - 7px;
@@ -134,7 +132,6 @@ export component GraphEditor inherits Rectangle {
                 font-size: 9px;
             }
 
-            // Curve.
             if GraphBackend.path-commands != "": Path {
                 width: 100%;
                 height: 100%;
@@ -146,7 +143,6 @@ export component GraphEditor inherits Rectangle {
                 fill: transparent;
             }
 
-            // Playhead.
             if GraphBackend.playhead-visible: Rectangle {
                 x: GraphBackend.playhead-x * 1px - 0.5px;
                 width: 1px;
@@ -154,7 +150,15 @@ export component GraphEditor inherits Rectangle {
                 background: AppStore.theme.accent.primary.with-alpha(0.7);
             }
 
-            // Keyframe dots.
+            // Empty-area double-click inserts a keyframe at the curve sample.
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                double-clicked => {
+                    GraphBackend.insert-at(self.mouse-x / 1px, self.mouse-y / 1px);
+                }
+            }
+
             for d[i] in GraphBackend.dots: Rectangle {
                 x: d.px * 1px - 4px;
                 y: d.py * 1px - 4px;
@@ -166,6 +170,40 @@ export component GraphEditor inherits Rectangle {
                 border-color: d.selected ? #FFFFFF : #00000066;
                 transform-rotation: 45deg;
                 transform-origin: { x: 4px, y: 4px };
+                z: 2;
+
+                TouchArea {
+                    width: 16px;
+                    height: 16px;
+                    x: -4px;
+                    y: -4px;
+                    mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                            GraphBackend.select-dot(d.tick);
+                            GraphBackend.drag-begin(d.tick);
+                            root.dragging = true;
+                        }
+                        if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
+                            GraphBackend.drag-end(true);
+                            root.dragging = false;
+                        }
+                        if (ev.kind == PointerEventKind.cancel) {
+                            GraphBackend.drag-end(false);
+                            root.dragging = false;
+                        }
+                    }
+                    moved => {
+                        GraphBackend.drag-move(
+                            d.px - 8 + self.mouse-x / 1px,
+                            d.py - 8 + self.mouse-y / 1px);
+                    }
+                    double-clicked => {
+                        GraphBackend.delete-dot(d.tick);
+                        root.dragging = false;
+                    }
+                }
             }
         }
     }

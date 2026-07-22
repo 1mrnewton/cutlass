@@ -454,6 +454,19 @@ impl WorkerHandle {
             .send(WorkerMsg::RemoveParamKeyframe { clip, param, tick });
     }
 
+    /// Graph-editor tick move: remove+set in one undoable history group.
+    pub fn move_param_keyframe(&self, req: MoveParamKeyframeRequest) {
+        let _ = self.tx.send(WorkerMsg::MoveParamKeyframe {
+            clip: req.clip,
+            param: req.param,
+            from_tick: req.from_tick,
+            to_tick: req.to_tick,
+            value: req.value,
+            easing: req.easing,
+            tangents: req.tangents,
+        });
+    }
+
     pub fn retime_keyframes(&self, clip: String, from_tick: i64, to_tick: i64) {
         let _ = self.tx.send(WorkerMsg::RetimeKeyframes {
             clip,

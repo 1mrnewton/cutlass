@@ -529,6 +529,18 @@ pub(super) enum WorkerMsg {
         param: ClipParam,
         tick: i64,
     },
+    /// Move one property's keyframe from `from_tick` to `to_tick` (graph
+    /// editor horizontal drag). One history group: remove at the old tick
+    /// then set at the new tick with the given value/easing/tangents.
+    MoveParamKeyframe {
+        clip: String,
+        param: ClipParam,
+        from_tick: i64,
+        to_tick: i64,
+        value: ParamValue,
+        easing: Easing,
+        tangents: Option<cutlass_models::SpatialTangents>,
+    },
     /// Move every keyframe sitting at `from_tick` (across all animated
     /// properties of `clip`) to `to_tick` — the timeline diamond drag
     /// (keyframes roadmap Phase 2). One history group: a single undo puts
@@ -792,6 +804,17 @@ pub struct GroupMove {
     pub clip: String,
     pub track: String,
     pub start_tick: i64,
+}
+
+/// Graph-editor keyframe tick move (remove+set in one history group).
+pub struct MoveParamKeyframeRequest {
+    pub clip: String,
+    pub param: ClipParam,
+    pub from_tick: i64,
+    pub to_tick: i64,
+    pub value: ParamValue,
+    pub easing: Easing,
+    pub tangents: Option<cutlass_models::SpatialTangents>,
 }
 
 /// Which track header toggle a [`WorkerMsg::SetTrackFlag`] addresses.

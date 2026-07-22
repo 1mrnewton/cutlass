@@ -308,11 +308,74 @@ pub(crate) fn wire_timeline(
     });
 
     // --- keyframe graph editor drawer ------------------------------------
-    wire_graph_editor(app);
+    wire_graph_editor(app, preview_worker);
 }
 
-fn wire_graph_editor(app: &AppWindow) {
+#[derive(Clone)]
+struct GraphDragSession {
+    clip_id: String,
+    key: String,
+    channel: i32,
+    from_tick: i32,
+    tick: i32,
+    value: f32,
+    moved: bool,
+    mapping: crate::graph_editor::PlotMapping,
+    playhead: i32,
+}
+
+fn apply_graph_geometry(g: &GraphBackend, geo: crate::graph_editor::GraphGeometry) {
+    g.set_path_commands(geo.path_commands);
+    g.set_dots(ModelRc::from(Rc::new(VecModel::from(geo.dots))));
+    g.set_y_min_label(geo.y_min_label);
+    g.set_y_mid_label(geo.y_mid_label);
+    g.set_y_max_label(geo.y_max_label);
+    g.set_grid_min_y(geo.grid_min_y);
+    g.set_grid_mid_y(geo.grid_mid_y);
+    g.set_grid_max_y(geo.grid_max_y);
+    g.set_playhead_x(geo.playhead_x);
+    g.set_playhead_visible(geo.playhead_visible);
+    g.set_plot_w(geo.plot_w);
+    g.set_plot_h(geo.plot_h);
+}
+
+fn commit_graph_edit(
+    handle: &crate::preview_worker::WorkerHandle,
+    clip_id: &str,
+    commit: crate::graph_editor::GraphCommit,
+) {
+    // Value on the commit is authoritative; this lookup only resolves ClipParam.
+    let Some((param, _)) = clip_param_value(&commit.param_key, 0.0, 0.0) else {
+        tracing::error!(key = %commit.param_key, "graph commit: unknown param");
+        return;
+    };
+    if commit.tick_moved {
+        handle.move_param_keyframe(crate::preview_worker::MoveParamKeyframeRequest {
+            clip: clip_id.to_string(),
+            param,
+            from_tick: commit.from_tick,
+            to_tick: commit.to_tick,
+            value: commit.value,
+            easing: commit.easing,
+            tangents: commit.tangents,
+        });
+    } else {
+        handle.set_param_keyframe(
+            clip_id.to_string(),
+            param,
+            commit.to_tick,
+            commit.value,
+            commit.easing,
+            commit.tangents,
+        );
+    }
+}
+
+fn wire_graph_editor(app: &AppWindow, preview_worker: &crate::preview_worker::PreviewWorker) {
     let graph = app.global::<GraphBackend>();
+    let mapping = Rc::new(RefCell::new(None::<crate::graph_editor::PlotMapping>));
+    let drag = Rc::new(RefCell::new(None::<GraphDragSession>));
+
     let toggle_app = app.as_weak();
     graph.on_toggle_visible(move || {
         if let Some(app) = toggle_app.upgrade() {
@@ -331,10 +394,15 @@ fn wire_graph_editor(app: &AppWindow) {
     });
 
     let refresh_app = app.as_weak();
+    let refresh_mapping = mapping.clone();
+    let refresh_drag = drag.clone();
     graph.on_refresh(move |sequence, clip_id, playhead, width, height| {
         let Some(app) = refresh_app.upgrade() else {
             return;
         };
+        if refresh_drag.borrow().is_some() {
+            return;
+        }
         let g = app.global::<GraphBackend>();
         let selected_key = g.get_selected_key();
         let selected_channel = g.get_selected_channel();
@@ -354,18 +422,210 @@ fn wire_graph_editor(app: &AppWindow) {
         g.set_channel_index(result.channel_index);
         g.set_selected_key(result.selected_key);
         g.set_selected_channel(result.selected_channel);
-        let geo = result.geometry;
-        g.set_path_commands(geo.path_commands);
-        g.set_dots(ModelRc::from(Rc::new(VecModel::from(geo.dots))));
-        g.set_y_min_label(geo.y_min_label);
-        g.set_y_mid_label(geo.y_mid_label);
-        g.set_y_max_label(geo.y_max_label);
-        g.set_grid_min_y(geo.grid_min_y);
-        g.set_grid_mid_y(geo.grid_mid_y);
-        g.set_grid_max_y(geo.grid_max_y);
-        g.set_playhead_x(geo.playhead_x);
-        g.set_playhead_visible(geo.playhead_visible);
-        g.set_plot_w(geo.plot_w);
-        g.set_plot_h(geo.plot_h);
+        *refresh_mapping.borrow_mut() = result.geometry.mapping;
+        apply_graph_geometry(&g, result.geometry);
+    });
+
+    let select_app = app.as_weak();
+    graph.on_select_dot(move |tick| {
+        if let Some(app) = select_app.upgrade() {
+            app.global::<GraphBackend>().set_selected_tick(tick);
+        }
+    });
+
+    let begin_app = app.as_weak();
+    let begin_drag = drag.clone();
+    let begin_mapping = mapping.clone();
+    graph.on_drag_begin(move |tick| {
+        let Some(app) = begin_app.upgrade() else {
+            return;
+        };
+        let g = app.global::<GraphBackend>();
+        let Some(map) = *begin_mapping.borrow() else {
+            return;
+        };
+        let clip_id = app.global::<TimelineStore>().get_selected_clip_id();
+        let key = g.get_selected_key();
+        let channel = g.get_selected_channel();
+        let playhead = app.global::<TimelineStore>().get_playhead_tick();
+        let seq = app.global::<EditorStore>().get_project().sequence;
+        let Some(clip) = crate::preview_motion_path::find_projected_clip(&seq, clip_id.as_str())
+        else {
+            return;
+        };
+        let Some(param) = crate::graph_editor::channel_param(&clip, key.as_str(), channel) else {
+            return;
+        };
+        let value = param
+            .keyframes()
+            .iter()
+            .find(|kf| kf.tick == i64::from(tick))
+            .map(|kf| kf.value)
+            .unwrap_or(0.0);
+        g.set_selected_tick(tick);
+        *begin_drag.borrow_mut() = Some(GraphDragSession {
+            clip_id: clip_id.to_string(),
+            key: key.to_string(),
+            channel,
+            from_tick: tick,
+            tick,
+            value,
+            moved: false,
+            mapping: map,
+            playhead,
+        });
+    });
+
+    let move_app = app.as_weak();
+    let move_drag = drag.clone();
+    graph.on_drag_move(move |x, y| {
+        let Some(app) = move_app.upgrade() else {
+            return;
+        };
+        let mut slot = move_drag.borrow_mut();
+        let Some(session) = slot.as_mut() else {
+            return;
+        };
+        let seq = app.global::<EditorStore>().get_project().sequence;
+        let Some(clip) =
+            crate::preview_motion_path::find_projected_clip(&seq, session.clip_id.as_str())
+        else {
+            return;
+        };
+        let Some((tick, value)) = crate::graph_editor::resolve_drag(
+            &clip,
+            &session.key,
+            session.channel,
+            session.from_tick,
+            x,
+            y,
+            session.mapping,
+        ) else {
+            return;
+        };
+        if tick != session.tick || (value - session.value).abs() > 1e-6 {
+            session.moved = true;
+        }
+        session.tick = tick;
+        session.value = value;
+        let Some(param) = crate::graph_editor::live_param(
+            &clip,
+            &session.key,
+            session.channel,
+            session.from_tick,
+            tick,
+            value,
+        ) else {
+            return;
+        };
+        let geo = crate::graph_editor::build_geometry(
+            &param,
+            session.playhead,
+            session.mapping.width,
+            session.mapping.height,
+            tick,
+        );
+        apply_graph_geometry(&app.global::<GraphBackend>(), geo);
+    });
+
+    let end_handle = preview_worker.handle();
+    let end_app = app.as_weak();
+    let end_drag = drag.clone();
+    graph.on_drag_end(move |commit| {
+        let Some(app) = end_app.upgrade() else {
+            return;
+        };
+        let Some(session) = end_drag.borrow_mut().take() else {
+            return;
+        };
+        if !commit || !session.moved {
+            // Restore committed geometry.
+            let g = app.global::<GraphBackend>();
+            let seq = app.global::<EditorStore>().get_project().sequence;
+            let result =
+                crate::graph_editor::refresh_graph(crate::graph_editor::GraphRefreshInput {
+                    sequence: &seq,
+                    clip_id: session.clip_id.as_str(),
+                    playhead: session.playhead,
+                    width: session.mapping.width,
+                    height: session.mapping.height,
+                    selected_key: session.key.as_str(),
+                    selected_channel: session.channel,
+                    selected_tick: g.get_selected_tick(),
+                });
+            apply_graph_geometry(&g, result.geometry);
+            return;
+        }
+        let seq = app.global::<EditorStore>().get_project().sequence;
+        let Some(clip) =
+            crate::preview_motion_path::find_projected_clip(&seq, session.clip_id.as_str())
+        else {
+            return;
+        };
+        let Some(plan) = crate::graph_editor::plan_drag_commit(
+            &clip,
+            &session.key,
+            session.channel,
+            session.from_tick,
+            session.tick,
+            session.value,
+        ) else {
+            return;
+        };
+        commit_graph_edit(&end_handle, &session.clip_id, plan);
+        app.global::<GraphBackend>().set_selected_tick(session.tick);
+    });
+
+    let insert_handle = preview_worker.handle();
+    let insert_app = app.as_weak();
+    let insert_mapping = mapping.clone();
+    graph.on_insert_at(move |x, _y| {
+        let Some(app) = insert_app.upgrade() else {
+            return;
+        };
+        let Some(map) = *insert_mapping.borrow() else {
+            return;
+        };
+        let g = app.global::<GraphBackend>();
+        let clip_id = app.global::<TimelineStore>().get_selected_clip_id();
+        let key = g.get_selected_key();
+        let channel = g.get_selected_channel();
+        let seq = app.global::<EditorStore>().get_project().sequence;
+        let Some(clip) = crate::preview_motion_path::find_projected_clip(&seq, clip_id.as_str())
+        else {
+            return;
+        };
+        let Some((tick, value)) =
+            crate::graph_editor::plan_insert(&clip, key.as_str(), channel, x, map)
+        else {
+            return;
+        };
+        let Some(plan) =
+            crate::graph_editor::plan_insert_commit(&clip, key.as_str(), channel, tick, value)
+        else {
+            return;
+        };
+        commit_graph_edit(&insert_handle, clip_id.as_str(), plan);
+        g.set_selected_tick(tick as i32);
+    });
+
+    let delete_handle = preview_worker.handle();
+    let delete_app = app.as_weak();
+    let delete_drag = drag.clone();
+    graph.on_delete_dot(move |tick| {
+        let Some(app) = delete_app.upgrade() else {
+            return;
+        };
+        *delete_drag.borrow_mut() = None;
+        let g = app.global::<GraphBackend>();
+        let clip_id = app.global::<TimelineStore>().get_selected_clip_id();
+        let key = g.get_selected_key();
+        let Some((param, _)) = clip_param_value(key.as_str(), 0.0, 0.0) else {
+            return;
+        };
+        delete_handle.remove_param_keyframe(clip_id.to_string(), param, i64::from(tick));
+        if g.get_selected_tick() == tick {
+            g.set_selected_tick(-1);
+        }
     });
 }

@@ -6,11 +6,16 @@
 //! plus a model of keyframe dots in plot coordinates.
 
 mod channels;
+mod edit;
 
 #[cfg(test)]
 mod tests;
 
 pub use channels::{animated_channels, channel_param};
+pub use edit::{
+    GraphCommit, PlotMapping, live_param, plan_drag_commit, plan_insert, plan_insert_commit,
+    resolve_drag,
+};
 
 use cutlass_models::{Easing, Param};
 use slint::{ModelRc, SharedString, VecModel};
@@ -106,6 +111,7 @@ pub struct GraphGeometry {
     pub playhead_visible: bool,
     pub plot_w: f32,
     pub plot_h: f32,
+    pub mapping: Option<edit::PlotMapping>,
 }
 
 impl Default for GraphGeometry {
@@ -123,6 +129,7 @@ impl Default for GraphGeometry {
             playhead_visible: false,
             plot_w: 0.0,
             plot_h: 0.0,
+            mapping: None,
         }
     }
 }
@@ -194,6 +201,14 @@ pub fn build_geometry(
         playhead_visible,
         plot_w: width,
         plot_h: height,
+        mapping: Some(edit::PlotMapping {
+            t_min,
+            t_max,
+            y0,
+            y1,
+            width,
+            height,
+        }),
     }
 }
 

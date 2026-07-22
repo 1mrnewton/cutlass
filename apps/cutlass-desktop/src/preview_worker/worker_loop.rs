@@ -797,6 +797,7 @@ pub(super) fn message_invalidates_preview(msg: &WorkerMsg) -> bool {
             | WorkerMsg::SetParamKeyframeTangents { .. }
             | WorkerMsg::SetParamConstant { .. }
             | WorkerMsg::RemoveParamKeyframe { .. }
+            | WorkerMsg::MoveParamKeyframe { .. }
             | WorkerMsg::RetimeKeyframes { .. }
             | WorkerMsg::RemoveKeyframesAt { .. }
             | WorkerMsg::SplitClip { .. }

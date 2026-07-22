@@ -1,6 +1,6 @@
 use super::*;
 use crate::{Clip, ParamKeyframe, Rational, RationalTime, TimeRange};
-use cutlass_models::{Easing, Keyframe, Param};
+use cutlass_models::{Easing, Keyframe, Param, ParamValue, SpatialTangents};
 use slint::{ModelRc, SharedString, VecModel};
 use std::rc::Rc;
 
@@ -123,4 +123,91 @@ fn colors_are_not_enumerated_as_channels() {
     let channels = animated_channels(&clip);
     assert_eq!(channels.len(), 1);
     assert_eq!(channels[0].key.as_str(), "opacity");
+}
+
+#[test]
+fn drag_commit_same_tick_preserves_easing() {
+    let mut clip = media_clip("A");
+    let mut a = kf(0, 0.0, 0.0);
+    a.easing = 1; // EaseIn
+    clip.kf_opacity = kfs(vec![a, kf(40, 1.0, 0.0)]);
+    let plan = plan_drag_commit(&clip, "opacity", 0, 0, 0, 0.25).unwrap();
+    assert!(!plan.tick_moved);
+    assert_eq!(plan.to_tick, 0);
+    assert_eq!(plan.easing, Easing::EaseIn);
+    assert_eq!(plan.value, ParamValue::Scalar(0.25));
+}
+
+#[test]
+fn tick_move_commit_flags_remove_plus_set() {
+    let mut clip = media_clip("A");
+    clip.kf_opacity = kfs(vec![kf(0, 0.0, 0.0), kf(40, 1.0, 0.0)]);
+    let plan = plan_drag_commit(&clip, "opacity", 0, 0, 10, 0.1).unwrap();
+    assert!(plan.tick_moved);
+    assert_eq!((plan.from_tick, plan.to_tick), (0, 10));
+    // Clamp keeps the move off the neighbor at 40.
+    let param = channel_param(&clip, "opacity", 0).unwrap();
+    assert_eq!(edit::clamp_keyframe_tick(&param, &clip, 0, 40), 39);
+    assert_eq!(edit::clamp_keyframe_tick(&param, &clip, 0, -5), 0);
+}
+
+#[test]
+fn insert_uses_sampled_curve_value() {
+    let mut clip = media_clip("A");
+    clip.kf_opacity = kfs(vec![kf(0, 0.0, 0.0), kf(40, 1.0, 0.0)]);
+    let mapping = PlotMapping {
+        t_min: 0,
+        t_max: 40,
+        y0: -0.1,
+        y1: 1.1,
+        width: 400.0,
+        height: 180.0,
+    };
+    // Midpoint of the plot X → tick 20 → sample 0.5.
+    let mid_x = PAD_L + 0.5 * (400.0 - PAD_L - PAD_R);
+    let (tick, value) = plan_insert(&clip, "opacity", 0, mid_x, mapping).unwrap();
+    assert_eq!(tick, 20);
+    assert!((value - 0.5).abs() < 1e-5);
+    let plan = plan_insert_commit(&clip, "opacity", 0, tick, value).unwrap();
+    assert_eq!(plan.easing, Easing::Linear);
+    assert_eq!(plan.value, ParamValue::Scalar(0.5));
+}
+
+#[test]
+fn delete_last_keyframe_collapses_to_constant() {
+    // Mirrors remove_param_keyframe model semantics used by the graph delete.
+    let mut param = Param::Keyframed {
+        keyframes: vec![
+            Keyframe::new(0, 0.25, Easing::Linear),
+            Keyframe::new(40, 1.0, Easing::Linear),
+        ],
+    };
+    assert!(param.remove_keyframe(40));
+    assert!(param.remove_keyframe(0));
+    assert_eq!(param.constant(), Some(0.25));
+}
+
+#[test]
+fn vec2_channel_drag_preserves_other_axis_and_tangents() {
+    let mut clip = media_clip("A");
+    let mut a = kf(0, -0.25, 0.5);
+    a.has_tangents = true;
+    a.out_tx = 0.1;
+    a.out_ty = 0.2;
+    a.in_tx = -0.1;
+    a.in_ty = -0.2;
+    a.easing = 2; // EaseOut
+    clip.kf_position = kfs(vec![a, kf(40, 0.25, 0.9)]);
+    // Drag Position X only.
+    let plan = plan_drag_commit(&clip, "position", 0, 0, 0, 0.0).unwrap();
+    assert!(!plan.tick_moved);
+    assert_eq!(plan.easing, Easing::EaseOut);
+    assert_eq!(plan.value, ParamValue::Vec2([0.0, 0.5]));
+    assert_eq!(
+        plan.tangents,
+        Some(SpatialTangents {
+            out_t: [0.1, 0.2],
+            in_t: [-0.1, -0.2],
+        })
+    );
 }

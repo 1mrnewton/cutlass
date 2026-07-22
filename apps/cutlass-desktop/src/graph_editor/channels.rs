@@ -123,7 +123,7 @@ pub(super) fn kf_list<'a>(clip: &'a Clip, key: &str) -> Option<&'a slint::ModelR
     })
 }
 
-fn is_vec2_key(key: &str) -> bool {
+pub(super) fn is_vec2_key(key: &str) -> bool {
     matches!(
         key,
         "position"
@@ -133,6 +133,11 @@ fn is_vec2_key(key: &str) -> bool {
             | "look_mask_center"
             | "look_mask_size"
     )
+}
+
+/// Look up a projected keyframe on `key` at absolute `tick`.
+pub(super) fn keyframe_at(clip: &Clip, key: &str, tick: i32) -> Option<ParamKeyframe> {
+    kf_list(clip, key)?.iter().find(|kf| kf.tick == tick)
 }
 
 /// Animated scalar channels on `clip` (non-empty kf lists only; colors skipped).

@@ -342,6 +342,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 args.value,
                 args.position,
                 args.rgba,
+                args.rect,
             )?;
             EditCommand::SetParamKeyframe {
                 clip: clip.id,
@@ -383,6 +384,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 args.value,
                 args.position,
                 args.rgba,
+                args.rect,
             )?;
             EditCommand::SetParamConstant {
                 clip: clip.id,

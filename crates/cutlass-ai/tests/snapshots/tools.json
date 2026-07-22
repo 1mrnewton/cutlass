@@ -787,7 +787,7 @@
       }
     },
     {
-      "description": "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), volume, speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, and color-look `{look:{param}}` properties. Use `value` for scalars, `position` for position/anchor_point and vec2 effect params, and `rgba` for text, shape, style, or effect colors. Effect names and valid properties are visible in describe_project.",
+      "description": "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), crop, volume, speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, color-look `{look:{param}}`, and style `{style:{param}}` properties. Use `value` for scalars, `position` for position/anchor_point and vec2 params, `rgba` for colors, and `rect` as [x,y,w,h] for crop. Effect names and valid properties are visible in describe_project.",
       "name": "set_param_keyframe",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -882,6 +882,11 @@
               {
                 "const": "opacity",
                 "description": "Layer opacity 0.0–1.0.",
+                "type": "string"
+              },
+              {
+                "const": "crop",
+                "description": "Kept-region crop window as content fractions (rect: use the `rect`\nargument `[x, y, w, h]`, not `value`). Visual clips only.",
                 "type": "string"
               },
               {
@@ -1067,7 +1072,7 @@
             ]
           },
           "position": {
-            "description": "New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`,\nlook `mask_center` / `mask_size`, or vec2 effect params. Ignored for\nscalar and color params.",
+            "description": "New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`,\nlook `mask_center` / `mask_size`, or vec2 effect params. Ignored for\nscalar, color, and rect params.",
             "items": {
               "format": "double",
               "type": "number"
@@ -1079,8 +1084,21 @@
               "null"
             ]
           },
+          "rect": {
+            "description": "New `[x, y, w, h]` kept-region for `crop` (content fractions).\nIgnored for scalar, vec2, and color params.",
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "maxItems": 4,
+            "minItems": 4,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "rgba": {
-            "description": "New `[red, green, blue, alpha]` for shape, text, style, or effect\ncolor parameters. Ignored for scalar and vec2 params.",
+            "description": "New `[red, green, blue, alpha]` for shape, text, style, or effect\ncolor parameters. Ignored for scalar, vec2, and rect params.",
             "items": {
               "format": "uint8",
               "maximum": 255,
@@ -1095,7 +1113,7 @@
             ]
           },
           "value": {
-            "description": "New value for scalar parameters. Ignored for position/vec2 and color\nparameters.",
+            "description": "New value for scalar parameters. Ignored for position/vec2, color,\nand rect parameters.",
             "format": "double",
             "type": [
               "number",
@@ -1155,6 +1173,11 @@
               {
                 "const": "opacity",
                 "description": "Layer opacity 0.0–1.0.",
+                "type": "string"
+              },
+              {
+                "const": "crop",
+                "description": "Kept-region crop window as content fractions (rect: use the `rect`\nargument `[x, y, w, h]`, not `value`). Visual clips only.",
                 "type": "string"
               },
               {
@@ -1350,7 +1373,7 @@
       }
     },
     {
-      "description": "Set any animatable clip property to a fixed value and remove all its keyframes (stops its animation). Use the same `param` selector as set_param_keyframe, with `value` for scalars, `position` for position/anchor_point and vec2 effect params, or `rgba` for text, shape, style, or effect colors.",
+      "description": "Set any animatable clip property to a fixed value and remove all its keyframes (stops its animation). Use the same `param` selector as set_param_keyframe, with `value` for scalars, `position` for position/anchor_point and vec2 params, `rgba` for colors, or `rect` as [x,y,w,h] for crop.",
       "name": "set_param_constant",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1387,6 +1410,11 @@
               {
                 "const": "opacity",
                 "description": "Layer opacity 0.0–1.0.",
+                "type": "string"
+              },
+              {
+                "const": "crop",
+                "description": "Kept-region crop window as content fractions (rect: use the `rect`\nargument `[x, y, w, h]`, not `value`). Visual clips only.",
                 "type": "string"
               },
               {
@@ -1572,7 +1600,7 @@
             ]
           },
           "position": {
-            "description": "New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`,\nlook `mask_center` / `mask_size`, or vec2 effect params. Ignored for\nscalar and color params.",
+            "description": "New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`,\nlook `mask_center` / `mask_size`, or vec2 effect params. Ignored for\nscalar, color, and rect params.",
             "items": {
               "format": "double",
               "type": "number"
@@ -1584,8 +1612,21 @@
               "null"
             ]
           },
+          "rect": {
+            "description": "New `[x, y, w, h]` kept-region for `crop` (content fractions).\nIgnored for scalar, vec2, and color params.",
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "maxItems": 4,
+            "minItems": 4,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "rgba": {
-            "description": "New `[red, green, blue, alpha]` for shape, text, style, or effect\ncolor parameters. Ignored for scalar and vec2 params.",
+            "description": "New `[red, green, blue, alpha]` for shape, text, style, or effect\ncolor parameters. Ignored for scalar, vec2, and rect params.",
             "items": {
               "format": "uint8",
               "maximum": 255,
@@ -1600,7 +1641,7 @@
             ]
           },
           "value": {
-            "description": "New value for scalar parameters. Ignored for position/vec2 and color\nparameters.",
+            "description": "New value for scalar parameters. Ignored for position/vec2, color,\nand rect parameters.",
             "format": "double",
             "type": [
               "number",
@@ -2979,5 +3020,5 @@
       }
     }
   ],
-  "version": 32
+  "version": 33
 }

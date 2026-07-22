@@ -57,7 +57,9 @@ use serde::{Deserialize, Serialize};
 ///     on `set_clip_adjustments` and look keyframe params.
 /// 32: typed effect params — Color via `rgba`, Vec2 via `position` on
 ///     `set_effect_param` / `set_param_keyframe` / `set_param_constant`.
-pub const TOOL_SCHEMA_VERSION: u32 = 32;
+/// 33: animatable crop — `crop` on `WireClipParam` with `rect: [x,y,w,h]`
+///     on `set_param_keyframe` / `set_param_constant`.
+pub const TOOL_SCHEMA_VERSION: u32 = 33;
 
 mod dtos;
 mod tools;

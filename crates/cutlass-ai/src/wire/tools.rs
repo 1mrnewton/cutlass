@@ -137,11 +137,11 @@ tools! {
     "set_transition" => SetTransition(SetTransition),
         "Set the duration in seconds of the transition at a clip's right cut (centered on the cut).";
     "set_param_keyframe" => SetParamKeyframe(SetParamKeyframe),
-        "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), volume, speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, and color-look `{look:{param}}` properties. Use `value` for scalars, `position` for position/anchor_point and vec2 effect params, and `rgba` for text, shape, style, or effect colors. Effect names and valid properties are visible in describe_project.";
+        "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), crop, volume, speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, color-look `{look:{param}}`, and style `{style:{param}}` properties. Use `value` for scalars, `position` for position/anchor_point and vec2 params, `rgba` for colors, and `rect` as [x,y,w,h] for crop. Effect names and valid properties are visible in describe_project.";
     "remove_param_keyframe" => RemoveParamKeyframe(RemoveParamKeyframe),
         "Remove the keyframe at a timeline position (seconds) on any animatable clip property. Use the same `param` selector as set_param_keyframe. Removing the last keyframe freezes the property at that value.";
     "set_param_constant" => SetParamConstant(SetParamConstant),
-        "Set any animatable clip property to a fixed value and remove all its keyframes (stops its animation). Use the same `param` selector as set_param_keyframe, with `value` for scalars, `position` for position/anchor_point and vec2 effect params, or `rgba` for text, shape, style, or effect colors.";
+        "Set any animatable clip property to a fixed value and remove all its keyframes (stops its animation). Use the same `param` selector as set_param_keyframe, with `value` for scalars, `position` for position/anchor_point and vec2 params, `rgba` for colors, or `rect` as [x,y,w,h] for crop.";
     "set_clip_speed" => SetClipSpeed(SetClipSpeed),
         "Change a media clip's playback speed (2.0 = double speed, 0.5 = slow motion) and/or play it in reverse. The clip's timeline length re-derives from the speed; its audio time-stretches to match (pitch preserved by default). Not valid for generated clips.";
     "set_speed_curve" => SetSpeedCurve(SetSpeedCurve),

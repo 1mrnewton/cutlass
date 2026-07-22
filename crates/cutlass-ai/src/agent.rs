@@ -947,6 +947,7 @@ fn param_name(param: &wire::WireClipParam) -> String {
         wire::WireClipParam::Scale => "scale".into(),
         wire::WireClipParam::Rotation => "rotation".into(),
         wire::WireClipParam::Opacity => "opacity".into(),
+        wire::WireClipParam::Crop => "crop".into(),
         wire::WireClipParam::Volume => "volume".into(),
         wire::WireClipParam::Speed => "speed".into(),
         wire::WireClipParam::Effect { index, param } => format!("effect {index} {param}"),
@@ -965,10 +966,14 @@ fn param_value_phrase(
     value: Option<f64>,
     position: Option<[f64; 2]>,
     color: Option<[u8; 4]>,
+    rect: Option<[f64; 4]>,
 ) -> String {
     match param {
         wire::WireClipParam::Position | wire::WireClipParam::AnchorPoint => position
             .map(|p| format!("[{:.2}, {:.2}]", p[0], p[1]))
+            .unwrap_or_else(|| "?".into()),
+        wire::WireClipParam::Crop => rect
+            .map(|r| format!("[{:.2}, {:.2}, {:.2}, {:.2}]", r[0], r[1], r[2], r[3]))
             .unwrap_or_else(|| "?".into()),
         wire::WireClipParam::Scale | wire::WireClipParam::Opacity | wire::WireClipParam::Volume => {
             value
@@ -1125,7 +1130,7 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
             "keyframed clip {} {} = {} at {}",
             a.clip,
             param_name(&a.param),
-            param_value_phrase(&a.param, a.value, a.position, a.rgba),
+            param_value_phrase(&a.param, a.value, a.position, a.rgba, a.rect),
             secs(a.at),
         ),
         WireCommand::RemoveParamKeyframe(a) => format!(
@@ -1138,7 +1143,7 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
             "set clip {} {} to {} (animation cleared)",
             a.clip,
             param_name(&a.param),
-            param_value_phrase(&a.param, a.value, a.position, a.rgba),
+            param_value_phrase(&a.param, a.value, a.position, a.rgba, a.rect),
         ),
         WireCommand::SetClipSpeed(a) => {
             let mut parts = Vec::new();

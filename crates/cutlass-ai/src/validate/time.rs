@@ -50,8 +50,8 @@ pub(super) fn easing(easing: Option<WireEasing>) -> Result<Easing, Rejection> {
 }
 
 /// Build the typed parameter value from the wire's `value` / `position` /
-/// `rgba` fields, rejecting the wrong shape with a message naming the right
-/// one. Effect params look up the catalog kind on `clip`.
+/// `rgba` / `rect` fields, rejecting the wrong shape with a message naming
+/// the right one. Effect params look up the catalog kind on `clip`.
 pub(super) fn param_value(
     clip: &Clip,
     wire_clip: u64,
@@ -59,6 +59,7 @@ pub(super) fn param_value(
     value: Option<f64>,
     position: Option<[f64; 2]>,
     rgba: Option<[u8; 4]>,
+    rect: Option<[f64; 4]>,
 ) -> Result<ParamValue, Rejection> {
     match param {
         WireClipParam::Effect { index, param: name } => {
@@ -87,6 +88,19 @@ pub(super) fn param_value(
                     })
                 }
             }
+        }
+        WireClipParam::Crop => {
+            let r = rect.ok_or_else(|| {
+                Rejection::new("crop param needs the 'rect' argument as [x, y, w, h]")
+            })?;
+            let crop = CropRect {
+                x: r[0] as f32,
+                y: r[1] as f32,
+                w: r[2] as f32,
+                h: r[3] as f32,
+            };
+            crop.validate().map_err(|e| Rejection::new(e.to_string()))?;
+            Ok(ParamValue::Rect([crop.x, crop.y, crop.w, crop.h]))
         }
         WireClipParam::Position
         | WireClipParam::AnchorPoint

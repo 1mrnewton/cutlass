@@ -16,6 +16,7 @@ pub(super) fn clip_param(
         WireClipParam::Scale => ClipParam::Scale,
         WireClipParam::Rotation => ClipParam::Rotation,
         WireClipParam::Opacity => ClipParam::Opacity,
+        WireClipParam::Crop => ClipParam::Crop,
         WireClipParam::Volume => ClipParam::Volume,
         WireClipParam::Speed => ClipParam::Speed,
         WireClipParam::Effect { index, param } => {

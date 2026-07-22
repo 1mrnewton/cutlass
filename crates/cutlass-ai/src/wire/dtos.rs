@@ -303,6 +303,9 @@ pub enum WireClipParam {
     Rotation,
     /// Layer opacity 0.0–1.0.
     Opacity,
+    /// Kept-region crop window as content fractions (rect: use the `rect`
+    /// argument `[x, y, w, h]`, not `value`). Visual clips only.
+    Crop,
     /// Audio gain envelope (0.0 = mute, 1.0 = unchanged, up to 10.0 boost).
     /// Keyframing it draws volume automation; this is how you fade audio in
     /// or out over time or duck music under a voice. Media-backed clips only.
@@ -433,19 +436,23 @@ pub struct SetParamKeyframe {
     /// Timeline position of the keyframe, in seconds. Must fall inside the
     /// clip.
     pub at: f64,
-    /// New value for scalar parameters. Ignored for position/vec2 and color
-    /// parameters.
+    /// New value for scalar parameters. Ignored for position/vec2, color,
+    /// and rect parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
     /// New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`,
     /// look `mask_center` / `mask_size`, or vec2 effect params. Ignored for
-    /// scalar and color params.
+    /// scalar, color, and rect params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f64; 2]>,
     /// New `[red, green, blue, alpha]` for shape, text, style, or effect
-    /// color parameters. Ignored for scalar and vec2 params.
+    /// color parameters. Ignored for scalar, vec2, and rect params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rgba: Option<[u8; 4]>,
+    /// New `[x, y, w, h]` kept-region for `crop` (content fractions).
+    /// Ignored for scalar, vec2, and color params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rect: Option<[f64; 4]>,
     /// Interpolation toward the next keyframe. Defaults to linear.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub easing: Option<WireEasing>,
@@ -467,19 +474,23 @@ pub struct RemoveParamKeyframe {
 pub struct SetParamConstant {
     pub clip: u64,
     pub param: WireClipParam,
-    /// New value for scalar parameters. Ignored for position/vec2 and color
-    /// parameters.
+    /// New value for scalar parameters. Ignored for position/vec2, color,
+    /// and rect parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
     /// New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`,
     /// look `mask_center` / `mask_size`, or vec2 effect params. Ignored for
-    /// scalar and color params.
+    /// scalar, color, and rect params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f64; 2]>,
     /// New `[red, green, blue, alpha]` for shape, text, style, or effect
-    /// color parameters. Ignored for scalar and vec2 params.
+    /// color parameters. Ignored for scalar, vec2, and rect params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rgba: Option<[u8; 4]>,
+    /// New `[x, y, w, h]` kept-region for `crop` (content fractions).
+    /// Ignored for scalar, vec2, and color params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rect: Option<[f64; 4]>,
 }
 
 /// Change a media clip's constant playback speed and/or direction. The clip

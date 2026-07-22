@@ -157,6 +157,7 @@ fn extended_wire_clip_params_lower_to_model_params() {
                 value,
                 position,
                 rgba,
+                rect: None,
                 easing: Some(wire::WireEasing::EaseOut),
             }),
         );
@@ -211,6 +212,7 @@ fn named_and_bezier_easings_lower_on_set_param_keyframe() {
                 value: Some(0.5),
                 position: None,
                 rgba: None,
+                rect: None,
                 easing: Some(wire_easing),
             }),
         );
@@ -234,6 +236,7 @@ fn named_and_bezier_easings_lower_on_set_param_keyframe() {
             value: Some(0.5),
             position: None,
             rgba: None,
+            rect: None,
             easing: Some(wire::WireEasing::Bezier {
                 points: [1.5, 0.0, 0.5, 1.0],
             }),
@@ -284,6 +287,7 @@ fn extended_wire_params_work_for_constant_and_removal() {
                 value: None,
                 position: Some([0.25, 0.5]),
                 rgba: None,
+                rect: None,
             }),
         ),
         EditCommand::SetParamConstant {
@@ -753,6 +757,70 @@ fn clip_crop_merges_edges_and_rejects_empty_frames() {
 }
 
 #[test]
+fn crop_keyframe_uses_rect_on_wire() {
+    let (project, _, _, _, clip, _) = fixture();
+
+    let edit = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Crop,
+            at: 1.0,
+            value: None,
+            position: None,
+            rgba: None,
+            rect: Some([0.1, 0.2, 0.5, 0.5]),
+            easing: Some(wire::WireEasing::Linear),
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Crop,
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Rect([0.1, 0.2, 0.5, 0.5]),
+            easing: Easing::Linear,
+        }
+    );
+
+    // Degenerate width rejected by model validation after lowering path.
+    let msg = reject(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Crop,
+            at: 1.0,
+            value: None,
+            position: None,
+            rgba: None,
+            rect: Some([0.0, 0.0, 0.001, 1.0]),
+            easing: None,
+        }),
+    );
+    assert!(
+        msg.contains("crop") || msg.contains("0.01") || msg.contains("at least"),
+        "{msg}"
+    );
+
+    // Scalar value rejected for crop.
+    let msg = reject(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Crop,
+            at: 1.0,
+            value: Some(0.5),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: None,
+        }),
+    );
+    assert!(msg.contains("rect"), "{msg}");
+}
+
+#[test]
 fn clip_crop_rejects_audio_lane_clips() {
     let (mut project, media, _, _, _, _) = fixture();
     let lane = project.add_track(TrackKind::Audio, "A1");
@@ -1057,6 +1125,7 @@ fn style_param_keyframe_lowers_by_value_kind() {
             value: Some(12.0),
             position: None,
             rgba: None,
+            rect: None,
             easing: None,
         }),
     );
@@ -1084,6 +1153,7 @@ fn style_param_keyframe_lowers_by_value_kind() {
             value: Some(4.0),
             position: None,
             rgba: None,
+            rect: None,
             easing: None,
         }),
     );
@@ -1100,6 +1170,7 @@ fn style_param_keyframe_lowers_by_value_kind() {
             value: None,
             position: Some([4.0, -2.0]),
             rgba: None,
+            rect: None,
             easing: None,
         }),
     );
@@ -1127,6 +1198,7 @@ fn style_param_keyframe_lowers_by_value_kind() {
             value: Some(1.0),
             position: None,
             rgba: None,
+            rect: None,
             easing: None,
         }),
     );
@@ -1143,6 +1215,7 @@ fn style_param_keyframe_lowers_by_value_kind() {
             value: None,
             position: None,
             rgba: Some([255, 200, 0, 255]),
+            rect: None,
             easing: None,
         }),
     );
@@ -1370,6 +1443,7 @@ fn set_clip_adjustments_lowers_new_sliders_and_rejects_ranges() {
             value: Some(0.5),
             position: None,
             rgba: None,
+            rect: None,
             easing: None,
         }),
     );
@@ -1405,6 +1479,7 @@ fn mask_center_keyframe_uses_position_on_masked_clip() {
             value: Some(0.5),
             position: None,
             rgba: None,
+            rect: None,
             easing: None,
         }),
     );
@@ -1421,6 +1496,7 @@ fn mask_center_keyframe_uses_position_on_masked_clip() {
             value: None,
             position: Some([0.25, -0.1]),
             rgba: None,
+            rect: None,
             easing: None,
         }),
     );
@@ -2290,6 +2366,7 @@ fn typed_effect_params_accept_rgba_and_position_on_wire() {
             value: None,
             position: None,
             rgba: Some([20, 16, 60, 255]),
+            rect: None,
             easing: None,
         }),
     );
@@ -2319,6 +2396,7 @@ fn typed_effect_params_accept_rgba_and_position_on_wire() {
             value: Some(0.5),
             position: None,
             rgba: None,
+            rect: None,
             easing: None,
         }),
     );

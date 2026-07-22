@@ -901,6 +901,7 @@ fn set_clip_crop_undo_redo_roundtrip() {
             crop,
             flip_h: true,
             flip_v: false,
+            at: None,
         }))
         .expect("set crop");
     let clip = |engine: &cutlass_engine::Engine| engine.project().clip(clip_id).unwrap().clone();
@@ -972,6 +973,7 @@ fn set_clip_crop_rejects_invalid_rects_and_audio_lanes() {
                 crop: CropRect::FULL,
                 flip_h: true,
                 flip_v: false,
+                at: None,
             }))
             .is_err()
     );
@@ -991,6 +993,7 @@ fn set_clip_crop_rejects_invalid_rects_and_audio_lanes() {
                 },
                 flip_h: false,
                 flip_v: false,
+                at: None,
             }))
             .is_err()
     );

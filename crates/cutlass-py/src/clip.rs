@@ -544,7 +544,7 @@ impl Clip {
         self.with_project(py, |project| {
             project
                 .model_mut()
-                .set_clip_crop(self.id, CropRect { x, y, w, h }, flip_h, flip_v)
+                .set_clip_crop(self.id, CropRect { x, y, w, h }, flip_h, flip_v, None)
                 .map_err(model_err)
         })
     }

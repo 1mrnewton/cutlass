@@ -190,6 +190,7 @@ fn edit_samples() -> Vec<EditCommand> {
             },
             flip_h: true,
             flip_v: false,
+            at: None,
         },
         EditCommand::SetClipAudio {
             clip: clip(4),

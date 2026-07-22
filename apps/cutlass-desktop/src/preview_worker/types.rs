@@ -316,6 +316,8 @@ pub(super) enum WorkerMsg {
         crop: CropRect,
         flip_h: bool,
         flip_v: bool,
+        /// Absolute sequence tick (playhead) for M2 compose keyframing.
+        tick: i64,
     },
     /// Set a visual clip's blend mode (CapCut "Blend"). `mode` is a
     /// `BlendMode` id (e.g. `"multiply"`); unknown ids are ignored.

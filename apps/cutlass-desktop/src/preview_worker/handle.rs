@@ -254,12 +254,20 @@ impl WorkerHandle {
         });
     }
 
-    pub fn set_clip_crop(&self, clip: String, crop: CropRect, flip_h: bool, flip_v: bool) {
+    pub fn set_clip_crop(
+        &self,
+        clip: String,
+        crop: CropRect,
+        flip_h: bool,
+        flip_v: bool,
+        tick: i64,
+    ) {
         let _ = self.tx.send(WorkerMsg::SetClipCrop {
             clip,
             crop,
             flip_h,
             flip_v,
+            tick,
         });
     }
 

@@ -233,7 +233,9 @@ export global InspectorBackend {
     // normalized inset fractions measured in from each content edge
     // (0,0,0,0 ⇔ uncropped) plus flip flags. main.rs converts insets to the
     // model's kept-region rect; the engine validates (visual lanes only,
-    // non-degenerate window). One undoable edit.
+    // non-degenerate window). `playhead-tick` is the absolute sequence tick
+    // used to keyframe an already-animated crop (M2 compose). One undoable
+    // edit.
     callback set-clip-crop(
         clip-id: string,
         left: float,
@@ -242,6 +244,7 @@ export global InspectorBackend {
         bottom: float,
         flip-h: bool,
         flip-v: bool,
+        playhead-tick: int,
     );
 
     // Set a visual clip's blend mode (CapCut "Blend"). `mode` is a catalog

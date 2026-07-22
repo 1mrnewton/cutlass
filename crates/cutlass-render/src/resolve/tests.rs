@@ -314,6 +314,7 @@ fn crop_and_horizontal_flip_set_uv() {
             },
             true,
             false,
+            None,
         )
         .unwrap();
 
@@ -324,6 +325,63 @@ fn crop_and_horizontal_flip_set_uv() {
     approx(uv[1], 0.1);
     approx(uv[2], 0.25);
     approx(uv[3], 0.9);
+}
+
+#[test]
+fn keyframed_crop_samples_uv_per_tick() {
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    let a = CropRect {
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 1.0,
+    };
+    let b = CropRect {
+        x: 0.4,
+        y: 0.2,
+        w: 0.5,
+        h: 0.6,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Crop,
+            rt(0),
+            ParamValue::Rect([a.x, a.y, a.w, a.h]),
+            Easing::Linear,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Crop,
+            rt(10),
+            ParamValue::Rect([b.x, b.y, b.w, b.h]),
+            Easing::Linear,
+        )
+        .unwrap();
+
+    let uv0 = resolve(&project, rt(0)).unwrap().layers[0].uv;
+    approx(uv0[0], 0.0);
+    approx(uv0[1], 0.0);
+    approx(uv0[2], 1.0);
+    approx(uv0[3], 1.0);
+
+    let uv5 = resolve(&project, rt(5)).unwrap().layers[0].uv;
+    // Midpoint crop [0.2, 0.1, 0.75, 0.8] → UV [u0,v0,u1,v1].
+    approx(uv5[0], 0.2);
+    approx(uv5[1], 0.1);
+    approx(uv5[2], 0.95);
+    approx(uv5[3], 0.9);
+
+    let uv10 = resolve(&project, rt(10)).unwrap().layers[0].uv;
+    approx(uv10[0], 0.4);
+    approx(uv10[1], 0.2);
+    approx(uv10[2], 0.9);
+    approx(uv10[3], 0.8);
 }
 
 #[test]

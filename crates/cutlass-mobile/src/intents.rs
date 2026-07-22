@@ -1051,6 +1051,7 @@ fn duplicate(engine: &mut Engine, clip: ClipId) -> Result<serde_json::Value, Eng
                     crop,
                     flip_h: snapshot.flip_h,
                     flip_v: snapshot.flip_v,
+                    at: None,
                 }))?;
             }
             new

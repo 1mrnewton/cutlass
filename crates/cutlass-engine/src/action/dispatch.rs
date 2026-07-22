@@ -294,8 +294,9 @@ fn dispatch_edit(
             crop,
             flip_h,
             flip_v,
+            at,
         } => {
-            let inverse = edit::set_crop::set_crop(ctx, clip, crop, flip_h, flip_v)?;
+            let inverse = edit::set_crop::set_crop(ctx, clip, crop, flip_h, flip_v, at)?;
             Ok((
                 ApplyOutcome::Edited(EditOutcome::Updated(clip)),
                 Some(inverse),

@@ -309,9 +309,9 @@ export struct Clip {
     transform-opacity: float,
     // Framing (M1 crop): the normalized kept-region window into the
     // content (x/y top-left corner, w/h extent; 0,0,1,1 ⇔ uncropped) plus
-    // mirroring. Projected read-only — edits go through
-    // `EditCommand::SetClipCrop` on the worker. Constant per clip (not
-    // animatable), unlike the transform above.
+    // mirroring. Projected read-only (clip-start sample) — edits go through
+    // `EditCommand::SetClipCrop` on the worker. Animatable via ClipParam::Crop;
+    // inspector has no kf-crop diamond list yet (gizmo/constant-commit UI).
     crop-x: float,
     crop-y: float,
     crop-w: float,

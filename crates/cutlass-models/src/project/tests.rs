@@ -1829,7 +1829,9 @@ fn set_clip_crop_sets_framing() {
         w: 0.5,
         h: 1.0,
     };
-    project.set_clip_crop(clip, crop, true, false).unwrap();
+    project
+        .set_clip_crop(clip, crop, true, false, None)
+        .unwrap();
     let c = project.clip(clip).unwrap();
     assert_eq!(c.crop, Param::Constant(crop));
     assert!(c.flip_h && !c.flip_v);
@@ -1837,7 +1839,7 @@ fn set_clip_crop_sets_framing() {
 
     // Back to the full frame clears the custom-framing state.
     project
-        .set_clip_crop(clip, CropRect::FULL, false, false)
+        .set_clip_crop(clip, CropRect::FULL, false, false, None)
         .unwrap();
     assert!(!project.clip(clip).unwrap().has_custom_crop());
 }
@@ -1860,7 +1862,8 @@ fn set_clip_crop_rejects_invalid_targets() {
                 h: 1.0
             },
             false,
-            false
+            false,
+            None,
         ),
         Err(ModelError::InvalidParam(_))
     ));
@@ -1869,12 +1872,12 @@ fn set_clip_crop_rejects_invalid_targets() {
     let audio = project.add_track(TrackKind::Audio, "A1");
     let audio_clip = project.add_clip(audio, media_id, tr(0, 50), rt(0)).unwrap();
     assert!(matches!(
-        project.set_clip_crop(audio_clip, CropRect::FULL, true, false),
+        project.set_clip_crop(audio_clip, CropRect::FULL, true, false, None),
         Err(ModelError::IncompatibleTrackKind { .. })
     ));
 
     assert_eq!(
-        project.set_clip_crop(ClipId::from_raw(404), CropRect::FULL, false, false),
+        project.set_clip_crop(ClipId::from_raw(404), CropRect::FULL, false, false, None),
         Err(ModelError::UnknownClip(ClipId::from_raw(404)))
     );
 }
@@ -1891,7 +1894,7 @@ fn split_keeps_crop_and_flips_on_both_halves() {
         w: 0.8,
         h: 0.8,
     };
-    project.set_clip_crop(clip, crop, true, true).unwrap();
+    project.set_clip_crop(clip, crop, true, true, None).unwrap();
 
     let right = project.split_clip(clip, rt(60)).unwrap();
     for id in [clip, right] {

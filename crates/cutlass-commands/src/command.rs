@@ -239,11 +239,15 @@ pub enum EditCommand {
     /// `flip_h`/`flip_v` mirror the content. Rejected on audio-track clips
     /// and on degenerate/out-of-frame rects. The inverse restores the
     /// previous framing.
+    ///
+    /// `at: Some(playhead)` writes a crop keyframe when the property is
+    /// already animated (M2 compose); `None` flattens to a constant.
     SetClipCrop {
         clip: ClipId,
         crop: CropRect,
         flip_h: bool,
         flip_v: bool,
+        at: Option<RationalTime>,
     },
     /// Set a media clip's audio mix (CapCut volume + fades): `volume` is the
     /// flat gain (`0` mutes, `1` = unchanged, up to 10× boost) — `Some`

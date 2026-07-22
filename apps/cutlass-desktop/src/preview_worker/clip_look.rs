@@ -26,23 +26,33 @@ pub(super) fn set_canvas_and_publish(
 /// undoable history entry; the engine validates the rect and rejects
 /// audio-lane clips, so a failure here just logs (the inspector only shows
 /// crop controls for visual clips — a rejection is a stale-projection race).
+///
+/// When crop is already keyframed, `at` (the playhead) writes a keyframe
+/// instead of flattening — same compose semantics as
+/// [`super::overrides::set_transform_and_publish`].
 pub(super) fn set_clip_crop_and_publish(
     engine: &mut Engine,
     clip: &str,
     crop: CropRect,
     flip_h: bool,
     flip_v: bool,
+    at: RationalTime,
     ui: &UiSink,
 ) {
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-clip-crop ignored: unparsable clip id");
         return;
     };
+    let wrote_keyframe = engine
+        .project()
+        .clip(clip_id)
+        .is_some_and(|c| c.crop.is_animated());
     if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipCrop {
         clip: clip_id,
         crop,
         flip_h,
         flip_v,
+        at: Some(at),
     })) {
         error!(%clip_id, "set clip crop failed: {e}");
         return;
@@ -52,6 +62,9 @@ pub(super) fn set_clip_crop_and_publish(
         x = crop.x, y = crop.y, w = crop.w, h = crop.h, flip_h, flip_v,
         "set clip crop"
     );
+    if wrote_keyframe {
+        bump_keyframe_commit_epoch(ui);
+    }
     publish_projection(engine, ui);
 }
 

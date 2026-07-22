@@ -171,7 +171,7 @@ pub(crate) fn wire_inspector(
         });
     let set_crop_handle = preview_worker.handle();
     app.global::<InspectorBackend>().on_set_clip_crop(
-        move |clip_id, left, top, right, bottom, flip_h, flip_v| {
+        move |clip_id, left, top, right, bottom, flip_h, flip_v, playhead_tick| {
             // Insets (UI/agent shape) → kept-region rect (model shape). The
             // sliders cap each inset at 49%, so the window stays valid; the
             // floor only guards float dust against the engine's minimum.
@@ -181,7 +181,13 @@ pub(crate) fn wire_inspector(
                 w: (1.0 - left - right).max(cutlass_models::MIN_CROP_FRACTION),
                 h: (1.0 - top - bottom).max(cutlass_models::MIN_CROP_FRACTION),
             };
-            set_crop_handle.set_clip_crop(clip_id.to_string(), crop, flip_h, flip_v);
+            set_crop_handle.set_clip_crop(
+                clip_id.to_string(),
+                crop,
+                flip_h,
+                flip_v,
+                i64::from(playhead_tick),
+            );
         },
     );
 

@@ -175,6 +175,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 crop,
                 flip_h: args.flip_h.unwrap_or(clip.flip_h),
                 flip_v: args.flip_v.unwrap_or(clip.flip_v),
+                at: None,
             }
         }
         WireCommand::AddEffect(args) => {

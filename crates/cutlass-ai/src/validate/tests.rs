@@ -678,6 +678,7 @@ fn clip_crop_merges_edges_and_rejects_empty_frames() {
             },
             flip_h: true,
             flip_v: false,
+            at: None,
         }
     );
 
@@ -694,6 +695,7 @@ fn clip_crop_merges_edges_and_rejects_empty_frames() {
             },
             true,
             false,
+            None,
         )
         .unwrap();
     let edit = lower(

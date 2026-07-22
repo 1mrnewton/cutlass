@@ -1194,6 +1194,25 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
             Some(filter) => format!("set {} filter on clip {}", filter.id, a.clip),
             None => format!("cleared filter on clip {}", a.clip),
         },
+        WireCommand::SetClipBlendMode(a) => format!(
+            "set clip {} blend mode to {}",
+            a.clip,
+            match a.mode {
+                crate::wire::WireBlendMode::Normal => "normal",
+                crate::wire::WireBlendMode::Darken => "darken",
+                crate::wire::WireBlendMode::Multiply => "multiply",
+                crate::wire::WireBlendMode::ColorBurn => "color_burn",
+                crate::wire::WireBlendMode::Lighten => "lighten",
+                crate::wire::WireBlendMode::Screen => "screen",
+                crate::wire::WireBlendMode::ColorDodge => "color_dodge",
+                crate::wire::WireBlendMode::Add => "add",
+                crate::wire::WireBlendMode::Overlay => "overlay",
+                crate::wire::WireBlendMode::SoftLight => "soft_light",
+                crate::wire::WireBlendMode::HardLight => "hard_light",
+                crate::wire::WireBlendMode::Difference => "difference",
+                crate::wire::WireBlendMode::Exclusion => "exclusion",
+            }
+        ),
         WireCommand::SetClipAdjustments(a) => {
             let mut parts = Vec::new();
             if let Some(v) = a.brightness {

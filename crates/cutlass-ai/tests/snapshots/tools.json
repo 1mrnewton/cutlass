@@ -1809,6 +1809,48 @@
       }
     },
     {
+      "description": "Set how a visual clip composites over the layers below it (CapCut Blend). Modes: normal, darken, multiply, color_burn, lighten, screen, color_dodge, add, overlay, soft_light, hard_light, difference, exclusion. Visual clips only; normal resets to plain source-over.",
+      "name": "set_clip_blend_mode",
+      "parameters": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Set how a clip composites over the stack below (CapCut \"Blend\").",
+        "properties": {
+          "clip": {
+            "description": "Target clip id.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mode": {
+            "description": "Blend mode id: normal, darken, multiply, color_burn, lighten,\nscreen, color_dodge, add, overlay, soft_light, hard_light,\ndifference, exclusion.",
+            "enum": [
+              "normal",
+              "darken",
+              "multiply",
+              "color_burn",
+              "lighten",
+              "screen",
+              "color_dodge",
+              "add",
+              "overlay",
+              "soft_light",
+              "hard_light",
+              "difference",
+              "exclusion"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "clip",
+          "mode"
+        ],
+        "title": "SetClipBlendMode",
+        "type": "object"
+      }
+    },
+    {
       "description": "Set manual color adjustments (brightness, contrast, saturation, exposure, temperature) on any visual clip. Each slider is -1..1; omitted sliders keep their current value.",
       "name": "set_clip_adjustments",
       "parameters": {
@@ -2511,5 +2553,5 @@
       }
     }
   ],
-  "version": 27
+  "version": 28
 }

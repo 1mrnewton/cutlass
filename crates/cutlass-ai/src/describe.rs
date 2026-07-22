@@ -150,6 +150,9 @@ pub struct ClipSummary {
     /// Filter preset id (set_clip_filter); absent when none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter: Option<String>,
+    /// Blend mode id (set_clip_blend_mode); absent when normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<String>,
     /// Entrance animation id (set_clip_animation in slot); absent when none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation_in: Option<String>,
@@ -379,6 +382,7 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                         cutlass_models::MaskKind::Star => "star".to_string(),
                     }),
                     filter: clip.filter.as_ref().map(|f| f.id.clone()),
+                    blend: (!clip.blend_mode.is_normal()).then(|| clip.blend_mode.id().to_string()),
                     animation_in: clip.animation_in.as_ref().map(|a| a.id.clone()),
                     animation_out: clip.animation_out.as_ref().map(|a| a.id.clone()),
                     animation_combo: clip.animation_combo.as_ref().map(|a| a.id.clone()),

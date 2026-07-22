@@ -160,6 +160,8 @@ tools! {
         "Set or clear video stabilization on a media-backed video clip (not still images). Levels: recommended, smooth, max_smooth. Pass null for level to clear.";
     "set_clip_filter" => SetClipFilter(SetClipFilter),
         "Set or clear a color-grade filter preset on any visual clip. Filter ids include vivid, warm, cool, noir, sunset, and others from the catalog. Pass null for filter to clear.";
+    "set_clip_blend_mode" => SetClipBlendMode(SetClipBlendMode),
+        "Set how a visual clip composites over the layers below it (CapCut Blend). Modes: normal, darken, multiply, color_burn, lighten, screen, color_dodge, add, overlay, soft_light, hard_light, difference, exclusion. Visual clips only; normal resets to plain source-over.";
     "set_clip_adjustments" => SetClipAdjustments(SetClipAdjustments),
         "Set manual color adjustments (brightness, contrast, saturation, exposure, temperature) on any visual clip. Each slider is -1..1; omitted sliders keep their current value.";
     "set_clip_animation" => SetClipAnimation(SetClipAnimation),

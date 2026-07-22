@@ -213,6 +213,19 @@ fn remap_ids_rewrites_only_mapped_references() {
 
     // Marker references follow the marker map (sandbox add_marker ids
     // land on the live engine's ids during plan replay).
+    let mut blend = WireCommand::SetClipBlendMode(SetClipBlendMode {
+        clip: 10,
+        mode: WireBlendMode::Multiply,
+    });
+    blend.remap_ids(&clip_map, &track_map, &marker_map);
+    assert_eq!(
+        blend,
+        WireCommand::SetClipBlendMode(SetClipBlendMode {
+            clip: 99,
+            mode: WireBlendMode::Multiply,
+        })
+    );
+
     let mut set = WireCommand::SetMarker(SetMarker {
         marker: 4,
         at: Some(2.0),
@@ -234,7 +247,7 @@ fn remap_ids_rewrites_only_mapped_references() {
 #[test]
 fn tool_specs_cover_every_command_with_object_schemas() {
     let specs = tool_specs();
-    assert_eq!(specs.len(), 47);
+    assert_eq!(specs.len(), 48);
     for spec in &specs {
         assert!(
             !spec.description.is_empty(),

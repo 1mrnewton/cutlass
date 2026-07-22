@@ -21,16 +21,16 @@ use std::collections::HashSet;
 
 use cutlass_commands::{Command, EditCommand};
 use cutlass_models::{
-    AnimationRef, AnimationSlot, AudioRole, CanvasAspect, ChromaKey, Clip, ClipId, ClipParam,
-    ClipTransform, CropRect, Easing, Filter, Generator, Marker, MarkerColor, MarkerId, Mask,
-    MaskKind, MediaId, Param, ParamValue, Project, Rational, RationalTime, StabilizeLevel,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, Clip, ClipId,
+    ClipParam, ClipTransform, CropRect, Easing, Filter, Generator, Marker, MarkerColor, MarkerId,
+    Mask, MaskKind, MediaId, Param, ParamValue, Project, Rational, RationalTime, StabilizeLevel,
     TimeRange, TrackId, TrackKind, animation_spec, filter_catalog, filter_spec,
 };
 
 use crate::wire::{
-    MAX_MULTI_CLIP_REFS, WireAnimationSlot, WireAudioRole, WireCanvasAspect, WireChromaKey,
-    WireClipParam, WireCommand, WireEasing, WireGenerator, WireMarkerColor, WireMask, WireMaskKind,
-    WireShape, WireStabilizeLevel, WireTrackKind,
+    MAX_MULTI_CLIP_REFS, WireAnimationSlot, WireAudioRole, WireBlendMode, WireCanvasAspect,
+    WireChromaKey, WireClipParam, WireCommand, WireEasing, WireGenerator, WireMarkerColor,
+    WireMask, WireMaskKind, WireShape, WireStabilizeLevel, WireTrackKind,
 };
 
 use audio::*;

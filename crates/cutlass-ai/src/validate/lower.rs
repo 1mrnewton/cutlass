@@ -151,6 +151,24 @@ pub(super) fn lower_stabilize(level: WireStabilizeLevel) -> StabilizeLevel {
     }
 }
 
+pub(super) fn lower_blend_mode(mode: WireBlendMode) -> BlendMode {
+    match mode {
+        WireBlendMode::Normal => BlendMode::Normal,
+        WireBlendMode::Darken => BlendMode::Darken,
+        WireBlendMode::Multiply => BlendMode::Multiply,
+        WireBlendMode::ColorBurn => BlendMode::ColorBurn,
+        WireBlendMode::Lighten => BlendMode::Lighten,
+        WireBlendMode::Screen => BlendMode::Screen,
+        WireBlendMode::ColorDodge => BlendMode::ColorDodge,
+        WireBlendMode::Add => BlendMode::Add,
+        WireBlendMode::Overlay => BlendMode::Overlay,
+        WireBlendMode::SoftLight => BlendMode::SoftLight,
+        WireBlendMode::HardLight => BlendMode::HardLight,
+        WireBlendMode::Difference => BlendMode::Difference,
+        WireBlendMode::Exclusion => BlendMode::Exclusion,
+    }
+}
+
 pub(super) fn lower_filter(wire: &crate::wire::WireFilter) -> Result<Filter, Rejection> {
     let intensity = wire.intensity.unwrap_or(0.8);
     if !intensity.is_finite() || !(0.0..=1.0).contains(&intensity) {

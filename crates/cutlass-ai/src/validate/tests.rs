@@ -924,6 +924,55 @@ fn clip_pitch_lowers_and_rejects_generated() {
 }
 
 #[test]
+fn set_clip_blend_mode_lowers_and_guards() {
+    use cutlass_models::BlendMode;
+
+    let (mut project, media, _, _, clip, _) = fixture();
+    let edit = lower(
+        &project,
+        WireCommand::SetClipBlendMode(wire::SetClipBlendMode {
+            clip,
+            mode: wire::WireBlendMode::Multiply,
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetClipBlendMode {
+            clip: ClipId::from_raw(clip),
+            mode: BlendMode::Multiply,
+        }
+    );
+
+    let lane = project.add_track(TrackKind::Audio, "A1");
+    let audio_clip = project
+        .add_clip(
+            lane,
+            cutlass_models::MediaId::from_raw(media),
+            TimeRange::at_rate(0, 240, R24),
+            RationalTime::new(0, R24),
+        )
+        .unwrap();
+    let msg = reject(
+        &project,
+        WireCommand::SetClipBlendMode(wire::SetClipBlendMode {
+            clip: audio_clip.raw(),
+            mode: wire::WireBlendMode::Screen,
+        }),
+    );
+    assert!(msg.contains("visual frame"), "{msg}");
+
+    let err = WireCommand::from_tool_call(
+        "set_clip_blend_mode",
+        serde_json::json!({ "clip": clip, "mode": "nope" }),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("nope") || err.contains("unknown variant"),
+        "{err}"
+    );
+}
+
+#[test]
 fn look_commands_lower_and_guard() {
     let (project, _, _, _, clip, title) = fixture();
 

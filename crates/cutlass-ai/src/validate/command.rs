@@ -325,6 +325,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         WireCommand::SetClipChroma(args) => set_clip_chroma(project, args)?,
         WireCommand::SetClipStabilize(args) => set_clip_stabilize(project, args)?,
         WireCommand::SetClipFilter(args) => set_clip_filter(project, args)?,
+        WireCommand::SetClipBlendMode(args) => set_clip_blend_mode(project, args)?,
         WireCommand::SetClipAdjustments(args) => set_clip_adjustments(project, args)?,
         WireCommand::SetClipAnimation(args) => set_clip_animation(project, args)?,
         WireCommand::SetAudioRole(args) => set_audio_role(project, args)?,

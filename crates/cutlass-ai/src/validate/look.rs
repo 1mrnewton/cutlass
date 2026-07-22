@@ -4,8 +4,8 @@
 use super::*;
 
 use crate::wire::{
-    SetAudioRole, SetClipAdjustments, SetClipAnimation, SetClipChroma, SetClipFilter, SetClipMask,
-    SetClipStabilize,
+    SetAudioRole, SetClipAdjustments, SetClipAnimation, SetClipBlendMode, SetClipChroma,
+    SetClipFilter, SetClipMask, SetClipStabilize,
 };
 
 pub(super) fn set_clip_mask(
@@ -100,6 +100,18 @@ pub(super) fn set_clip_filter(
     Ok(EditCommand::SetClipFilter {
         clip: clip.id,
         filter,
+    })
+}
+
+pub(super) fn set_clip_blend_mode(
+    project: &Project,
+    args: &SetClipBlendMode,
+) -> Result<EditCommand, Rejection> {
+    let clip = clip_ref(project, args.clip)?;
+    reject_audio_lane(project, clip, "blend modes need a visual frame", args.clip)?;
+    Ok(EditCommand::SetClipBlendMode {
+        clip: clip.id,
+        mode: lower_blend_mode(args.mode),
     })
 }
 

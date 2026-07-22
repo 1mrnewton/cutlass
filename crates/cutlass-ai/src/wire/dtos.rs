@@ -614,6 +614,37 @@ pub struct SetClipFilter {
     pub filter: Option<WireFilter>,
 }
 
+/// How a visual clip composites over the stack below (CapCut "Blend").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WireBlendMode {
+    Normal,
+    Darken,
+    Multiply,
+    ColorBurn,
+    Lighten,
+    Screen,
+    ColorDodge,
+    Add,
+    Overlay,
+    SoftLight,
+    HardLight,
+    Difference,
+    Exclusion,
+}
+
+/// Set how a clip composites over the stack below (CapCut "Blend").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetClipBlendMode {
+    /// Target clip id.
+    pub clip: u64,
+    /// Blend mode id: normal, darken, multiply, color_burn, lighten,
+    /// screen, color_dodge, add, overlay, soft_light, hard_light,
+    /// difference, exclusion.
+    pub mode: WireBlendMode,
+}
+
 /// Set manual color adjustments (CapCut adjust) on any visual clip. Omitted
 /// sliders keep their current value; all-neutral clears the grade.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

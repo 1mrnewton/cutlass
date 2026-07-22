@@ -119,6 +119,12 @@ pub enum ClipParam {
     Shape {
         param: ShapeParam,
     },
+    /// An animatable property of a [`Generator::Text`] clip's visual style.
+    /// Scalar properties carry [`ParamValue::Scalar`]; color properties carry
+    /// [`ParamValue::Color`].
+    Text {
+        param: TextParam,
+    },
 }
 
 /// The animatable properties of a [`Generator::Shape`] (see
@@ -144,6 +150,22 @@ pub enum ShapeParam {
     /// Stroke width (reference px). Scalar; requires the shape to have a
     /// stroke.
     StrokeWidth,
+}
+
+/// The animatable visual treatment properties of a [`Generator::Text`] clip.
+/// Font selection and layout structure remain ordinary generator edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextParam {
+    Size,
+    Fill,
+    LetterSpacing,
+    LineSpacing,
+    StrokeWidth,
+    StrokeColor,
+    ShadowBlur,
+    ShadowDistance,
+    ShadowColor,
 }
 
 /// A value for a [`ClipParam`]: scalar properties take `Scalar`, `position`
@@ -352,7 +374,8 @@ impl AnimatedTransform {
             ClipParam::Effect { .. }
             | ClipParam::Speed
             | ClipParam::Volume
-            | ClipParam::Shape { .. } => {
+            | ClipParam::Shape { .. }
+            | ClipParam::Text { .. } => {
                 return Err(not_a_transform_param());
             }
         }
@@ -371,7 +394,8 @@ impl AnimatedTransform {
             ClipParam::Effect { .. }
             | ClipParam::Speed
             | ClipParam::Volume
-            | ClipParam::Shape { .. } => {
+            | ClipParam::Shape { .. }
+            | ClipParam::Text { .. } => {
                 return Err(not_a_transform_param());
             }
         };
@@ -419,7 +443,8 @@ impl AnimatedTransform {
             ClipParam::Effect { .. }
             | ClipParam::Speed
             | ClipParam::Volume
-            | ClipParam::Shape { .. } => {
+            | ClipParam::Shape { .. }
+            | ClipParam::Text { .. } => {
                 return Err(not_a_transform_param());
             }
         }

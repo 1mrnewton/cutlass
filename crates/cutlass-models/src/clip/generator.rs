@@ -6,7 +6,7 @@ use crate::param::{Easing, Param};
 use crate::time::TimeRange;
 
 use super::text::TextStyle;
-use super::transform::{ParamValue, ShapeParam};
+use super::transform::{ParamValue, ShapeParam, TextParam};
 
 /// What a clip draws. Either a trimmed range of imported media, or synthetic
 /// content rendered by the engine (text, shapes, solids, ...).
@@ -425,9 +425,9 @@ impl Generator {
         };
         let spec = crate::look::text_effect_spec(preset)
             .ok_or_else(|| ModelError::InvalidParam(format!("unknown text effect '{preset}'")))?;
-        style.stroke = spec.stroke;
-        style.shadow = spec.shadow;
-        style.background = spec.background;
+        style.stroke = spec.stroke.clone();
+        style.shadow = spec.shadow.clone();
+        style.background = spec.background.clone();
         Ok(())
     }
 
@@ -577,6 +577,66 @@ impl Generator {
         })
     }
 
+    /// Insert or replace a keyframe on one animatable text style property.
+    pub fn set_text_param_keyframe(
+        &mut self,
+        param: TextParam,
+        tick: i64,
+        value: ParamValue,
+        easing: Easing,
+    ) -> Result<(), ModelError> {
+        easing.validate()?;
+        self.with_text_param(param, |target, kind| match kind {
+            TextParamKind::Scalar { validate } => {
+                let v = value.scalar()?;
+                validate(v)?;
+                target.scalar()?.set_keyframe(tick, v, easing);
+                Ok(())
+            }
+            TextParamKind::Color => {
+                target.color()?.set_keyframe(tick, value.color()?, easing);
+                Ok(())
+            }
+        })
+    }
+
+    /// Remove the keyframe at exactly `tick` from a text style property.
+    pub fn remove_text_param_keyframe(
+        &mut self,
+        param: TextParam,
+        tick: i64,
+    ) -> Result<(), ModelError> {
+        self.with_text_param(param, |target, kind| {
+            let removed = match kind {
+                TextParamKind::Scalar { .. } => target.scalar()?.remove_keyframe(tick),
+                TextParamKind::Color => target.color()?.remove_keyframe(tick),
+            };
+            removed.then_some(()).ok_or_else(|| {
+                ModelError::InvalidParam(format!("no {param:?} keyframe at tick {tick}"))
+            })
+        })
+    }
+
+    /// Replace one text style property with a constant, dropping keyframes.
+    pub fn set_text_param_constant(
+        &mut self,
+        param: TextParam,
+        value: ParamValue,
+    ) -> Result<(), ModelError> {
+        self.with_text_param(param, |target, kind| match kind {
+            TextParamKind::Scalar { validate } => {
+                let v = value.scalar()?;
+                validate(v)?;
+                target.scalar()?.set_constant(v);
+                Ok(())
+            }
+            TextParamKind::Color => {
+                target.color()?.set_constant(value.color()?);
+                Ok(())
+            }
+        })
+    }
+
     /// Resolve `param` to the [`Param`] it names on this generator and run
     /// `f` on it — the single routing point for the three mutators above.
     fn with_shape_param<R>(
@@ -631,6 +691,102 @@ impl Generator {
         }
     }
 
+    fn with_text_param<R>(
+        &mut self,
+        param: TextParam,
+        f: impl FnOnce(TextParamTarget<'_>, TextParamKind) -> Result<R, ModelError>,
+    ) -> Result<R, ModelError> {
+        let Generator::Text { style, .. } = self else {
+            return Err(ModelError::InvalidParam(
+                "text parameters apply only to text generator clips".into(),
+            ));
+        };
+        let scalar =
+            |validate: fn(f32) -> Result<(), ModelError>| TextParamKind::Scalar { validate };
+        match param {
+            TextParam::Size => f(
+                TextParamTarget::Scalar(&mut style.size),
+                scalar(|v| {
+                    validate_text_range(
+                        v,
+                        f32::EPSILON,
+                        crate::clip::text::MAX_TEXT_SIZE,
+                        "text size",
+                    )
+                }),
+            ),
+            TextParam::Fill => f(
+                TextParamTarget::Color(&mut style.fill),
+                TextParamKind::Color,
+            ),
+            TextParam::LetterSpacing => f(
+                TextParamTarget::Scalar(&mut style.letter_spacing),
+                scalar(validate_text_letter_spacing),
+            ),
+            TextParam::LineSpacing => f(
+                TextParamTarget::Scalar(&mut style.line_spacing),
+                scalar(|v| {
+                    validate_text_range(
+                        v,
+                        f32::EPSILON,
+                        crate::clip::text::MAX_TEXT_LINE_SPACING,
+                        "text line spacing",
+                    )
+                }),
+            ),
+            TextParam::StrokeWidth | TextParam::StrokeColor => match &mut style.stroke {
+                Some(stroke) => match param {
+                    TextParam::StrokeWidth => f(
+                        TextParamTarget::Scalar(&mut stroke.width),
+                        scalar(|v| {
+                            validate_text_range(
+                                v,
+                                0.0,
+                                crate::clip::text::MAX_TEXT_STROKE_WIDTH,
+                                "text stroke width",
+                            )
+                        }),
+                    ),
+                    _ => f(
+                        TextParamTarget::Color(&mut stroke.rgba),
+                        TextParamKind::Color,
+                    ),
+                },
+                None => Err(ModelError::InvalidParam(
+                    "text has no stroke — set one via SetGenerator first".into(),
+                )),
+            },
+            TextParam::ShadowBlur | TextParam::ShadowDistance | TextParam::ShadowColor => {
+                match &mut style.shadow {
+                    Some(shadow) => match param {
+                        TextParam::ShadowBlur => f(
+                            TextParamTarget::Scalar(&mut shadow.blur),
+                            scalar(|v| validate_text_range(v, 0.0, 1.0, "text shadow blur")),
+                        ),
+                        TextParam::ShadowDistance => f(
+                            TextParamTarget::Scalar(&mut shadow.distance),
+                            scalar(|v| {
+                                validate_text_range(
+                                    v,
+                                    0.0,
+                                    crate::clip::text::MAX_TEXT_SHADOW_DISTANCE,
+                                    "text shadow distance",
+                                )
+                            }),
+                        ),
+                        _ => f(
+                            TextParamTarget::Color(&mut shadow.rgba),
+                            TextParamKind::Color,
+                        ),
+                    },
+                    None => Err(ModelError::InvalidParam(
+                        "text has no shadow — set one via SetGenerator first".into(),
+                    )),
+                }
+            }
+        }
+    }
+
     /// Rebase every clip-relative keyframe carried by generated content.
     ///
     /// Most generators are time-invariant data. Shape geometry is the one
@@ -638,6 +794,22 @@ impl Generator {
     /// [`Param`]s; the normalized speed ramp is deliberately handled
     /// separately by clip-splitting code.
     pub(super) fn shift_timeline_params(&mut self, delta: i64) -> Result<(), ModelError> {
+        if let Generator::Text { style, .. } = self {
+            style.size.shift_ticks(delta)?;
+            style.fill.shift_ticks(delta)?;
+            style.letter_spacing.shift_ticks(delta)?;
+            style.line_spacing.shift_ticks(delta)?;
+            if let Some(stroke) = &mut style.stroke {
+                stroke.rgba.shift_ticks(delta)?;
+                stroke.width.shift_ticks(delta)?;
+            }
+            if let Some(shadow) = &mut style.shadow {
+                shadow.rgba.shift_ticks(delta)?;
+                shadow.blur.shift_ticks(delta)?;
+                shadow.distance.shift_ticks(delta)?;
+            }
+            return Ok(());
+        }
         let Generator::Shape {
             shape,
             rgba,
@@ -671,6 +843,31 @@ enum ShapeParamTarget<'a> {
     Color(&'a mut Param<[u8; 4]>),
 }
 
+enum TextParamTarget<'a> {
+    Scalar(&'a mut Param<f32>),
+    Color(&'a mut Param<[u8; 4]>),
+}
+
+impl<'a> TextParamTarget<'a> {
+    fn scalar(self) -> Result<&'a mut Param<f32>, ModelError> {
+        match self {
+            Self::Scalar(p) => Ok(p),
+            Self::Color(_) => Err(ModelError::InvalidParam(
+                "expected a scalar value for this text parameter".into(),
+            )),
+        }
+    }
+
+    fn color(self) -> Result<&'a mut Param<[u8; 4]>, ModelError> {
+        match self {
+            Self::Color(p) => Ok(p),
+            Self::Scalar(_) => Err(ModelError::InvalidParam(
+                "expected a color value for this text parameter".into(),
+            )),
+        }
+    }
+}
+
 impl<'a> ShapeParamTarget<'a> {
     fn scalar(self) -> Result<&'a mut Param<f32>, ModelError> {
         match self {
@@ -693,6 +890,13 @@ impl<'a> ShapeParamTarget<'a> {
 
 /// Value kind (and range rule) of one [`ShapeParam`].
 enum ShapeParamKind {
+    Scalar {
+        validate: fn(f32) -> Result<(), ModelError>,
+    },
+    Color,
+}
+
+enum TextParamKind {
     Scalar {
         validate: fn(f32) -> Result<(), ModelError>,
     },
@@ -726,6 +930,26 @@ fn validate_shape_dim(v: f32) -> Result<(), ModelError> {
     if !v.is_finite() || v <= 0.0 || v > MAX_SHAPE_DIM {
         return Err(ModelError::InvalidParam(format!(
             "shape size must be positive and at most {MAX_SHAPE_DIM} reference px"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_text_range(v: f32, min: f32, max: f32, what: &str) -> Result<(), ModelError> {
+    if !v.is_finite() || !(min..=max).contains(&v) {
+        return Err(ModelError::InvalidParam(format!(
+            "{what} must be in {min}..={max}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_text_letter_spacing(v: f32) -> Result<(), ModelError> {
+    if !v.is_finite() || v.abs() > crate::clip::text::MAX_TEXT_LETTER_SPACING {
+        return Err(ModelError::InvalidParam(format!(
+            "text letter spacing must be finite and within -{}..={} reference px",
+            crate::clip::text::MAX_TEXT_LETTER_SPACING,
+            crate::clip::text::MAX_TEXT_LETTER_SPACING,
         )));
     }
     Ok(())

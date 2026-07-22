@@ -114,27 +114,27 @@ fn text_generator_maps_style_and_defers_size() {
     let mut project = Project::new("p", FPS_24);
     let track = project.add_track(TrackKind::Text, "T1");
     let style = ModelTextStyle {
-        size: 90.0,
+        size: 90.0.into(),
         bold: true,
         italic: true,
         underline: true,
-        fill: [255, 0, 0, 255],
-        letter_spacing: 12.0,
-        line_spacing: 1.5,
+        fill: [255, 0, 0, 255].into(),
+        letter_spacing: 12.0.into(),
+        line_spacing: 1.5.into(),
         align_h: cutlass_models::TextAlignH::Right,
         align_v: cutlass_models::TextAlignV::Bottom,
         stroke: Some(cutlass_models::TextStroke {
-            rgba: [0, 0, 0, 255],
-            width: 8.0,
+            rgba: [0, 0, 0, 255].into(),
+            width: 8.0.into(),
         }),
         background: Some(cutlass_models::TextBackground {
             rgba: [0, 0, 255, 200],
             radius: 0.5,
         }),
         shadow: Some(cutlass_models::TextShadow {
-            rgba: [0, 0, 0, 230],
-            blur: 0.15,
-            distance: 10.0,
+            rgba: [0, 0, 0, 230].into(),
+            blur: 0.15.into(),
+            distance: 10.0.into(),
         }),
         ..ModelTextStyle::default()
     };
@@ -197,7 +197,7 @@ fn text_wrap_toggle_removes_the_canvas_width_constraint() {
         wrap: false,
         ..ModelTextStyle::default()
     };
-    assert_eq!(map_text_style(&style, 1920.0, 1080.0).max_width, None);
+    assert_eq!(map_text_style(&style, 1920.0, 1080.0, 0).max_width, None);
 }
 
 #[test]

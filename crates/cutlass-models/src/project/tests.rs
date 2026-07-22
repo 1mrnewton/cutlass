@@ -2248,8 +2248,8 @@ fn text_effect_presets_bake_onto_the_style() {
     let manual = crate::TextStyle {
         effect_preset: None,
         stroke: Some(crate::TextStroke {
-            rgba: [1, 2, 3, 255],
-            width: 2.0,
+            rgba: [1, 2, 3, 255].into(),
+            width: 2.0.into(),
         }),
         ..Default::default()
     };

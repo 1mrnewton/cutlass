@@ -52,10 +52,11 @@ pub use clip::{
     MAX_CLIP_VOLUME, MAX_SHAPE_DIM, MAX_SPEED, MAX_STAR_POINTS, MAX_STROKE_WIDTH,
     MIN_CROP_FRACTION, MIN_SPEED, ParamValue, Replaceable, SHAPE_DROP_HEIGHT, SHAPE_DROP_WIDTH,
     SPEED_CURVE_SCALE, Shape, ShapeParam, ShapePath, ShapePathPoint, ShapeStroke, SlotMedia,
-    SpeedPresetSpec, TextAlignH, TextAlignV, TextBackground, TextCase, TextShadow, TextStroke,
-    TextStyle, audio_gain_at, look_animation_combo_period_ticks, look_animation_window_ticks,
-    speed_curve_integral, speed_curve_source_fraction, speed_preset, speed_preset_catalog,
-    speed_preset_id, validate_speed_curve, validate_volume, validate_volume_envelope,
+    SpeedPresetSpec, TextAlignH, TextAlignV, TextBackground, TextCase, TextParam, TextShadow,
+    TextStroke, TextStyle, audio_gain_at, look_animation_combo_period_ticks,
+    look_animation_window_ticks, speed_curve_integral, speed_curve_source_fraction, speed_preset,
+    speed_preset_catalog, speed_preset_id, validate_speed_curve, validate_volume,
+    validate_volume_envelope,
 };
 pub use effects::{EffectInstance, EffectParamSpec, EffectSpec, effect_catalog, effect_spec};
 pub use error::ModelError;

@@ -642,7 +642,7 @@ use crate::clip::{TextBackground, TextShadow, TextStroke};
 /// persists. Applying a preset bakes these fields onto the style (see
 /// [`crate::Generator::resolve_presets`]), so the file stays self-describing
 /// and renderers never need the catalog.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextEffectSpec {
     pub id: &'static str,
     pub label: &'static str,
@@ -656,13 +656,13 @@ const TEXT_EFFECTS: &[TextEffectSpec] = &[
         id: "neon",
         label: "Neon",
         stroke: Some(TextStroke {
-            rgba: [57, 255, 20, 255],
-            width: 4.0,
+            rgba: crate::Param::Constant([57, 255, 20, 255]),
+            width: crate::Param::Constant(4.0),
         }),
         shadow: Some(TextShadow {
-            rgba: [57, 255, 20, 200],
-            blur: 0.35,
-            distance: 0.0,
+            rgba: crate::Param::Constant([57, 255, 20, 200]),
+            blur: crate::Param::Constant(0.35),
+            distance: crate::Param::Constant(0.0),
         }),
         background: None,
     },
@@ -671,9 +671,9 @@ const TEXT_EFFECTS: &[TextEffectSpec] = &[
         label: "Shadow",
         stroke: None,
         shadow: Some(TextShadow {
-            rgba: [0, 0, 0, 230],
-            blur: 0.15,
-            distance: 8.0,
+            rgba: crate::Param::Constant([0, 0, 0, 230]),
+            blur: crate::Param::Constant(0.15),
+            distance: crate::Param::Constant(8.0),
         }),
         background: None,
     },
@@ -681,8 +681,8 @@ const TEXT_EFFECTS: &[TextEffectSpec] = &[
         id: "outline",
         label: "Outline",
         stroke: Some(TextStroke {
-            rgba: [0, 0, 0, 255],
-            width: 8.0,
+            rgba: crate::Param::Constant([0, 0, 0, 255]),
+            width: crate::Param::Constant(8.0),
         }),
         shadow: None,
         background: None,
@@ -692,9 +692,9 @@ const TEXT_EFFECTS: &[TextEffectSpec] = &[
         label: "Glow",
         stroke: None,
         shadow: Some(TextShadow {
-            rgba: [255, 255, 255, 220],
-            blur: 0.4,
-            distance: 0.0,
+            rgba: crate::Param::Constant([255, 255, 255, 220]),
+            blur: crate::Param::Constant(0.4),
+            distance: crate::Param::Constant(0.0),
         }),
         background: None,
     },
@@ -702,13 +702,13 @@ const TEXT_EFFECTS: &[TextEffectSpec] = &[
         id: "retro",
         label: "Retro",
         stroke: Some(TextStroke {
-            rgba: [255, 140, 60, 255],
-            width: 5.0,
+            rgba: crate::Param::Constant([255, 140, 60, 255]),
+            width: crate::Param::Constant(5.0),
         }),
         shadow: Some(TextShadow {
-            rgba: [120, 40, 160, 255],
-            blur: 0.05,
-            distance: 10.0,
+            rgba: crate::Param::Constant([120, 40, 160, 255]),
+            blur: crate::Param::Constant(0.05),
+            distance: crate::Param::Constant(10.0),
         }),
         background: None,
     },
@@ -716,13 +716,13 @@ const TEXT_EFFECTS: &[TextEffectSpec] = &[
         id: "chrome",
         label: "Chrome",
         stroke: Some(TextStroke {
-            rgba: [230, 230, 240, 255],
-            width: 3.0,
+            rgba: crate::Param::Constant([230, 230, 240, 255]),
+            width: crate::Param::Constant(3.0),
         }),
         shadow: Some(TextShadow {
-            rgba: [40, 60, 90, 200],
-            blur: 0.2,
-            distance: 6.0,
+            rgba: crate::Param::Constant([40, 60, 90, 200]),
+            blur: crate::Param::Constant(0.2),
+            distance: crate::Param::Constant(6.0),
         }),
         background: None,
     },

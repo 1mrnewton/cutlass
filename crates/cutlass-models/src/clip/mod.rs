@@ -35,7 +35,9 @@ pub use template::{Replaceable, SlotMedia};
 pub use text::{
     TextAlignH, TextAlignV, TextBackground, TextCase, TextShadow, TextStroke, TextStyle,
 };
-pub use transform::{AnimatedTransform, ClipParam, ClipTransform, ParamValue, ShapeParam};
+pub use transform::{
+    AnimatedTransform, ClipParam, ClipTransform, ParamValue, ShapeParam, TextParam,
+};
 
 /// A placement of some [`ClipSource`] on a track.
 ///

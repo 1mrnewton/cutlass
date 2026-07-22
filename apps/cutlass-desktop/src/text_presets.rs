@@ -243,8 +243,8 @@ pub fn generator_for(preset: &TextPreset) -> cutlass_models::Generator {
     };
     let style = cutlass_models::TextStyle {
         font: preset.font_family.clone(),
-        size: preset.font_size,
-        fill: preset.fill,
+        size: preset.font_size.into(),
+        fill: preset.fill.into(),
         ..Default::default()
     };
     cutlass_models::Generator::Text { content, style }

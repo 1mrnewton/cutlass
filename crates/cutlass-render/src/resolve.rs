@@ -557,7 +557,7 @@ pub(crate) fn resolve_generator(
                 clip: None,
                 source: LayerSource::Text {
                     content: text,
-                    style: map_text_style(style, cw, ch),
+                    style: map_text_style(style, cw, ch, tick),
                     animation: None,
                 },
                 center,
@@ -865,9 +865,9 @@ fn to_bezier(path: &ShapePath) -> BezierPath {
 /// Reference-pixel metrics are scaled against the 1080px authoring height.
 /// The raster remains ink-tight even when wrapping uses the canvas width;
 /// alignment is applied later to the finished bitmap's placement.
-fn map_text_style(style: &ModelTextStyle, cw: f32, ch: f32) -> TextStyle {
+fn map_text_style(style: &ModelTextStyle, cw: f32, ch: f32, tick: i64) -> TextStyle {
     let scale = ch / REFERENCE_HEIGHT;
-    let font_size = style.size * scale;
+    let font_size = style.size.sample(tick) * scale;
     let family = if style.font.is_empty() {
         FontFamily::SansSerif
     } else {
@@ -884,36 +884,36 @@ fn map_text_style(style: &ModelTextStyle, cw: f32, ch: f32) -> TextStyle {
         TextAlignV::Bottom => TextVerticalAlign::Bottom,
     };
     let mut mapped = TextStyle::new(font_size)
-        .with_color(style.fill)
+        .with_color(style.fill.sample(tick))
         .with_family(family)
         .with_bold(style.bold)
         .with_italic(style.italic)
         .with_underline(style.underline)
-        .with_letter_spacing(style.letter_spacing * scale)
+        .with_letter_spacing(style.letter_spacing.sample(tick) * scale)
         .with_align(align)
         .with_vertical_align(vertical_align)
-        .with_line_height(font_size * style.line_spacing);
+        .with_line_height(font_size * style.line_spacing.sample(tick));
     if style.wrap {
         mapped = mapped.with_max_width(cw.max(1.0));
     }
-    if let Some(stroke) = style.stroke {
+    if let Some(stroke) = &style.stroke {
         mapped = mapped.with_stroke(TextStroke {
-            rgba: stroke.rgba,
-            width: stroke.width * scale,
+            rgba: stroke.rgba.sample(tick),
+            width: stroke.width.sample(tick) * scale,
         });
     }
-    if let Some(background) = style.background {
+    if let Some(background) = &style.background {
         mapped = mapped.with_background(TextBackground {
             rgba: background.rgba,
             radius: background.radius,
         });
     }
-    if let Some(shadow) = style.shadow {
+    if let Some(shadow) = &style.shadow {
         mapped = mapped.with_shadow(TextShadow {
-            rgba: shadow.rgba,
+            rgba: shadow.rgba.sample(tick),
             // Fraction of font size — keep relative; rasterizer multiplies.
-            blur: shadow.blur,
-            distance: shadow.distance * scale,
+            blur: shadow.blur.sample(tick),
+            distance: shadow.distance.sample(tick) * scale,
         });
     }
     mapped

@@ -1374,6 +1374,24 @@ fn shape_param_routing_sets_and_samples() {
 }
 
 #[test]
+fn text_size_param_routing_sets_and_samples() {
+    let mut text = Generator::text("Animated");
+    text.set_text_param_keyframe(TextParam::Size, 0, ParamValue::Scalar(80.0), Easing::Linear)
+        .unwrap();
+    text.set_text_param_keyframe(
+        TextParam::Size,
+        10,
+        ParamValue::Scalar(120.0),
+        Easing::Linear,
+    )
+    .unwrap();
+    let Generator::Text { style, .. } = &text else {
+        panic!()
+    };
+    assert_eq!(style.size.sample(5), 100.0);
+}
+
+#[test]
 fn shape_param_routing_rejects_wrong_targets() {
     let mut rect = Generator::shape(Shape::Rectangle, [255, 255, 255, 255]);
     // Star-only param on a rectangle.
@@ -1412,29 +1430,29 @@ fn shape_param_routing_rejects_wrong_targets() {
 fn text_style_roundtrips_through_serde() {
     let style = TextStyle {
         font: "Helvetica".into(),
-        size: 120.0,
+        size: 120.0.into(),
         bold: true,
         italic: true,
         underline: true,
         case: TextCase::Upper,
-        fill: [10, 20, 30, 255],
-        letter_spacing: 3.0,
-        line_spacing: 1.5,
+        fill: [10, 20, 30, 255].into(),
+        letter_spacing: 3.0.into(),
+        line_spacing: 1.5.into(),
         align_h: TextAlignH::Right,
         align_v: TextAlignV::Bottom,
         wrap: false,
         stroke: Some(TextStroke {
-            rgba: [0, 0, 0, 255],
-            width: 8.0,
+            rgba: [0, 0, 0, 255].into(),
+            width: 8.0.into(),
         }),
         background: Some(TextBackground {
             rgba: [255, 255, 0, 200],
             radius: 0.5,
         }),
         shadow: Some(TextShadow {
-            rgba: [0, 0, 0, 230],
-            blur: 0.25,
-            distance: 12.0,
+            rgba: [0, 0, 0, 230].into(),
+            blur: 0.25.into(),
+            distance: 12.0.into(),
         }),
         effect_preset: None,
     };
@@ -1471,17 +1489,17 @@ fn text_generator_validation_rejects_unsafe_metrics() {
     };
 
     assert!(invalid(TextStyle {
-        size: f32::NAN,
+        size: f32::NAN.into(),
         ..Default::default()
     }));
     assert!(invalid(TextStyle {
-        line_spacing: 0.0,
+        line_spacing: 0.0.into(),
         ..Default::default()
     }));
     assert!(invalid(TextStyle {
         stroke: Some(TextStroke {
-            rgba: [0, 0, 0, 255],
-            width: 513.0,
+            rgba: [0, 0, 0, 255].into(),
+            width: 513.0.into(),
         }),
         ..Default::default()
     }));
@@ -1494,9 +1512,9 @@ fn text_generator_validation_rejects_unsafe_metrics() {
     }));
     assert!(invalid(TextStyle {
         shadow: Some(TextShadow {
-            rgba: [0, 0, 0, 255],
-            blur: 0.2,
-            distance: -1.0,
+            rgba: [0, 0, 0, 255].into(),
+            blur: 0.2.into(),
+            distance: (-1.0).into(),
         }),
         ..Default::default()
     }));
@@ -1505,17 +1523,17 @@ fn text_generator_validation_rejects_unsafe_metrics() {
         content: "Safe".into(),
         style: TextStyle {
             stroke: Some(TextStroke {
-                rgba: [0, 0, 0, 255],
-                width: 40.0,
+                rgba: [0, 0, 0, 255].into(),
+                width: 40.0.into(),
             }),
             background: Some(TextBackground {
                 rgba: [0, 0, 0, 200],
                 radius: 1.0,
             }),
             shadow: Some(TextShadow {
-                rgba: [0, 0, 0, 230],
-                blur: 1.0,
-                distance: 50.0,
+                rgba: [0, 0, 0, 230].into(),
+                blur: 1.0.into(),
+                distance: 50.0.into(),
             }),
             ..Default::default()
         },

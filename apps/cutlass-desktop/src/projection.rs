@@ -456,11 +456,13 @@ fn clip_animation(animation: Option<&cutlass_models::AnimationRef>) -> ClipAnima
         .map(|s| s.label)
         .unwrap_or(animation.id.as_str())
         .to_string();
-    let knobs = spec.map(|s| s.knobs).unwrap_or(cutlass_models::AnimationKnobs {
-        speed: false,
-        intensity: false,
-        stagger: false,
-    });
+    let knobs = spec
+        .map(|s| s.knobs)
+        .unwrap_or(cutlass_models::AnimationKnobs {
+            speed: false,
+            intensity: false,
+            stagger: false,
+        });
     ClipAnimationProj {
         id: animation.id.clone(),
         label,
@@ -860,34 +862,37 @@ fn clip_text_style(clip: &EngineClip) -> TextClipStyle {
 fn text_style_to_ui(style: &EngineTextStyle) -> TextClipStyle {
     let opaque = |rgba: [u8; 4]| Color::from_rgb_u8(rgba[0], rgba[1], rgba[2]);
     let alpha01 = |rgba: [u8; 4]| rgba[3] as f32 / 255.0;
-    let stroke = style.stroke.unwrap_or_default();
-    let background = style.background.unwrap_or_default();
-    let shadow = style.shadow.unwrap_or_default();
+    let stroke = style.stroke.clone().unwrap_or_default();
+    let background = style.background.clone().unwrap_or_default();
+    let shadow = style.shadow.clone().unwrap_or_default();
     TextClipStyle {
         font: style.font.clone().into(),
-        size: style.size,
+        size: style.size.sample(0),
         bold: style.bold,
         italic: style.italic,
         underline: style.underline,
         case: text_case_to_int(style.case),
-        fill: Color::from_argb_u8(style.fill[3], style.fill[0], style.fill[1], style.fill[2]),
-        letter_spacing: style.letter_spacing,
-        line_spacing: style.line_spacing,
+        fill: {
+            let fill = style.fill.sample(0);
+            Color::from_argb_u8(fill[3], fill[0], fill[1], fill[2])
+        },
+        letter_spacing: style.letter_spacing.sample(0),
+        line_spacing: style.line_spacing.sample(0),
         align_h: align_h_to_int(style.align_h),
         align_v: align_v_to_int(style.align_v),
         wrap: style.wrap,
         stroke_enabled: style.stroke.is_some(),
-        stroke_color: opaque(stroke.rgba),
-        stroke_width: stroke.width,
+        stroke_color: opaque(stroke.rgba.sample(0)),
+        stroke_width: stroke.width.sample(0),
         background_enabled: style.background.is_some(),
         background_color: opaque(background.rgba),
         background_opacity: alpha01(background.rgba),
         background_radius: background.radius,
         shadow_enabled: style.shadow.is_some(),
-        shadow_color: opaque(shadow.rgba),
-        shadow_opacity: alpha01(shadow.rgba),
-        shadow_blur: shadow.blur,
-        shadow_distance: shadow.distance,
+        shadow_color: opaque(shadow.rgba.sample(0)),
+        shadow_opacity: alpha01(shadow.rgba.sample(0)),
+        shadow_blur: shadow.blur.sample(0),
+        shadow_distance: shadow.distance.sample(0),
     }
 }
 

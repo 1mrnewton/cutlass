@@ -176,6 +176,8 @@ impl Project {
             }
             ClipParam::Shape { param } => super::helpers::generator_mut(clip)?
                 .set_shape_param_keyframe(param, tick, value, easing),
+            ClipParam::Text { param } => super::helpers::generator_mut(clip)?
+                .set_text_param_keyframe(param, tick, value, easing),
             _ => clip
                 .transform
                 .set_param_keyframe(param, tick, value, easing),
@@ -218,6 +220,9 @@ impl Project {
             ClipParam::Shape { param } => {
                 super::helpers::generator_mut(clip)?.remove_shape_param_keyframe(param, tick)
             }
+            ClipParam::Text { param } => {
+                super::helpers::generator_mut(clip)?.remove_text_param_keyframe(param, tick)
+            }
             _ => clip.transform.remove_param_keyframe(param, tick),
         }
     }
@@ -252,6 +257,9 @@ impl Project {
             }
             ClipParam::Shape { param } => {
                 super::helpers::generator_mut(clip)?.set_shape_param_constant(param, value)
+            }
+            ClipParam::Text { param } => {
+                super::helpers::generator_mut(clip)?.set_text_param_constant(param, value)
             }
             _ => clip.transform.set_param_constant(param, value),
         }

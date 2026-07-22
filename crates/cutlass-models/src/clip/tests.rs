@@ -1222,6 +1222,26 @@ fn param_kind_mismatch_rejected() {
 }
 
 #[test]
+fn transform_mutators_reject_style_params() {
+    let mut t = AnimatedTransform::identity();
+    let style = ClipParam::Style {
+        param: StyleParam::ShadowBlur,
+    };
+    assert!(matches!(
+        t.set_param_keyframe(style, 0, ParamValue::Scalar(4.0), Easing::Linear),
+        Err(ModelError::InvalidParam(_))
+    ));
+    assert!(matches!(
+        t.set_param_constant(style, ParamValue::Scalar(4.0)),
+        Err(ModelError::InvalidParam(_))
+    ));
+    assert!(matches!(
+        t.remove_param_keyframe(style, 0),
+        Err(ModelError::InvalidParam(_))
+    ));
+}
+
+#[test]
 fn param_values_validated_per_property() {
     let mut t = AnimatedTransform::identity();
     assert!(

@@ -131,6 +131,11 @@ pub enum ClipParam {
     Look {
         param: LookParam,
     },
+    /// An animatable property of the clip's layer styles. Enabling/removing a
+    /// style block remains a structural edit (`SetClipLayerStyles`).
+    Style {
+        param: StyleParam,
+    },
 }
 
 /// The animatable properties of a [`Generator::Shape`] (see
@@ -188,6 +193,37 @@ pub enum LookParam {
     MaskFeather,
     ChromaStrength,
     ChromaShadow,
+}
+
+/// An animatable property of the clip's [`crate::LayerStyles`].
+///
+/// `*Color` params carry [`ParamValue::Color`]; [`StyleParam::ShadowOffset`]
+/// carries [`ParamValue::Vec2`]; the rest carry [`ParamValue::Scalar`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StyleParam {
+    /// Shadow color. Color.
+    ShadowColor,
+    /// Shadow offset in reference pixels. Vec2.
+    ShadowOffset,
+    /// Shadow blur radius in reference pixels. Scalar.
+    ShadowBlur,
+    /// Glow color. Color.
+    GlowColor,
+    /// Glow radius in reference pixels. Scalar.
+    GlowRadius,
+    /// Glow intensity (`0` … `4`). Scalar.
+    GlowIntensity,
+    /// Outline color. Color.
+    OutlineColor,
+    /// Outline width in reference pixels. Scalar.
+    OutlineWidth,
+    /// Background plate color. Color.
+    BackgroundColor,
+    /// Background padding in reference pixels. Scalar.
+    BackgroundPadding,
+    /// Background corner radius in reference pixels. Scalar.
+    BackgroundRadius,
 }
 
 /// A value for a [`ClipParam`]: scalar properties take `Scalar`, `position`
@@ -398,7 +434,8 @@ impl AnimatedTransform {
             | ClipParam::Volume
             | ClipParam::Shape { .. }
             | ClipParam::Text { .. }
-            | ClipParam::Look { .. } => {
+            | ClipParam::Look { .. }
+            | ClipParam::Style { .. } => {
                 return Err(not_a_transform_param());
             }
         }
@@ -419,7 +456,8 @@ impl AnimatedTransform {
             | ClipParam::Volume
             | ClipParam::Shape { .. }
             | ClipParam::Text { .. }
-            | ClipParam::Look { .. } => {
+            | ClipParam::Look { .. }
+            | ClipParam::Style { .. } => {
                 return Err(not_a_transform_param());
             }
         };
@@ -469,7 +507,8 @@ impl AnimatedTransform {
             | ClipParam::Volume
             | ClipParam::Shape { .. }
             | ClipParam::Text { .. }
-            | ClipParam::Look { .. } => {
+            | ClipParam::Look { .. }
+            | ClipParam::Style { .. } => {
                 return Err(not_a_transform_param());
             }
         }

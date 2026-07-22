@@ -65,7 +65,7 @@ pub(crate) fn clip_param_value(
     value_x: f32,
     value_y: f32,
 ) -> Option<(cutlass_models::ClipParam, cutlass_models::ParamValue)> {
-    use cutlass_models::{ClipParam, LookParam, ParamValue, TextParam};
+    use cutlass_models::{ClipParam, LookParam, ParamValue, StyleParam, TextParam};
     // Color commands use two exact u16 lanes: RG and BA. Scalar rows always
     // leave `value_y` at zero, so this encoding cannot be confused with one.
     let color = || {
@@ -191,6 +191,72 @@ pub(crate) fn clip_param_value(
         "look_chroma_shadow" => (
             ClipParam::Look {
                 param: LookParam::ChromaShadow,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "style_shadow_color" => (
+            ClipParam::Style {
+                param: StyleParam::ShadowColor,
+            },
+            color(),
+        ),
+        "style_shadow_offset" => (
+            ClipParam::Style {
+                param: StyleParam::ShadowOffset,
+            },
+            ParamValue::Vec2([value_x, value_y]),
+        ),
+        "style_shadow_blur" => (
+            ClipParam::Style {
+                param: StyleParam::ShadowBlur,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "style_glow_color" => (
+            ClipParam::Style {
+                param: StyleParam::GlowColor,
+            },
+            color(),
+        ),
+        "style_glow_radius" => (
+            ClipParam::Style {
+                param: StyleParam::GlowRadius,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "style_glow_intensity" => (
+            ClipParam::Style {
+                param: StyleParam::GlowIntensity,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "style_outline_color" => (
+            ClipParam::Style {
+                param: StyleParam::OutlineColor,
+            },
+            color(),
+        ),
+        "style_outline_width" => (
+            ClipParam::Style {
+                param: StyleParam::OutlineWidth,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "style_background_color" => (
+            ClipParam::Style {
+                param: StyleParam::BackgroundColor,
+            },
+            color(),
+        ),
+        "style_background_padding" => (
+            ClipParam::Style {
+                param: StyleParam::BackgroundPadding,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "style_background_radius" => (
+            ClipParam::Style {
+                param: StyleParam::BackgroundRadius,
             },
             ParamValue::Scalar(value_x),
         ),

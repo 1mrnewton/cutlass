@@ -10,6 +10,9 @@ use crate::clip::{
 use crate::effects::EffectInstance;
 use crate::error::ModelError;
 use crate::ids::{ClipId, MediaId, ProjectId, TrackId};
+use crate::look::styles::{
+    remove_style_param_keyframe, set_style_param_constant, set_style_param_keyframe,
+};
 use crate::look::{
     AnimationRef, AnimationSlot, AudioRole, ChromaKey, ColorAdjustments, Filter, Lut, Mask,
     StabilizeLevel, animation_spec,
@@ -244,6 +247,9 @@ impl Project {
                 look_param_mut(clip, param)?.set_keyframe(tick, value, easing);
                 Ok(())
             }
+            ClipParam::Style { param } => {
+                set_style_param_keyframe(&mut clip.styles, param, tick, value, easing)
+            }
             _ => clip
                 .transform
                 .set_param_keyframe(param, tick, value, easing),
@@ -299,6 +305,9 @@ impl Project {
                     )))
                 }
             }
+            ClipParam::Style { param } => {
+                remove_style_param_keyframe(&mut clip.styles, param, tick)
+            }
             _ => clip.transform.remove_param_keyframe(param, tick),
         }
     }
@@ -343,6 +352,7 @@ impl Project {
                 look_param_mut(clip, param)?.set_constant(value);
                 Ok(())
             }
+            ClipParam::Style { param } => set_style_param_constant(&mut clip.styles, param, value),
             _ => clip.transform.set_param_constant(param, value),
         }
     }

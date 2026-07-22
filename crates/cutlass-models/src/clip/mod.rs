@@ -36,7 +36,8 @@ pub use text::{
     TextAlignH, TextAlignV, TextBackground, TextCase, TextShadow, TextStroke, TextStyle,
 };
 pub use transform::{
-    AnimatedTransform, ClipParam, ClipTransform, LookParam, ParamValue, ShapeParam, TextParam,
+    AnimatedTransform, ClipParam, ClipTransform, LookParam, ParamValue, ShapeParam, StyleParam,
+    TextParam,
 };
 
 /// A placement of some [`ClipSource`] on a track.

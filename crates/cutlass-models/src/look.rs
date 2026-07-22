@@ -24,7 +24,7 @@ mod blend;
 mod chroma;
 mod filter;
 mod mask;
-mod styles;
+pub(crate) mod styles;
 mod text_effect;
 
 pub use adjust::ColorAdjustments;

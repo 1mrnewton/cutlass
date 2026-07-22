@@ -29,7 +29,106 @@ fn project_with_media(duration: i64) -> (Project, MediaId, TrackId) {
     (project, media_id, track)
 }
 
-// --- shape params -------------------------------------------------------
+// --- shape / style params -----------------------------------------------
+
+#[test]
+fn style_params_keyframe_through_project_api() {
+    use crate::look::{LayerShadow, LayerStyles};
+
+    let mut project = Project::new("p", R24);
+    let track = project.add_track(TrackKind::Video, "V1");
+    let media = project.add_media(sample_media(R24, 500));
+    // Source window 48 ticks, placed at timeline 100.
+    let clip = project.add_clip(track, media, tr(0, 48), rt(100)).unwrap();
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow::default()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let blur = ClipParam::Style {
+        param: crate::StyleParam::ShadowBlur,
+    };
+    project
+        .set_param_keyframe(clip, blur, rt(100), ParamValue::Scalar(4.0), Easing::Linear)
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            blur,
+            rt(140),
+            ParamValue::Scalar(20.0),
+            Easing::Linear,
+        )
+        .unwrap();
+    assert_eq!(
+        project
+            .clip(clip)
+            .unwrap()
+            .styles
+            .shadow
+            .as_ref()
+            .unwrap()
+            .blur
+            .sample(20),
+        12.0
+    );
+
+    // Color / offset kind checks, constant + remove roundtrip.
+    let color = ClipParam::Style {
+        param: crate::StyleParam::ShadowColor,
+    };
+    assert!(
+        project
+            .set_param_keyframe(
+                clip,
+                color,
+                rt(100),
+                ParamValue::Scalar(1.0),
+                Easing::Linear
+            )
+            .is_err()
+    );
+    let offset = ClipParam::Style {
+        param: crate::StyleParam::ShadowOffset,
+    };
+    assert!(
+        project
+            .set_param_constant(clip, offset, ParamValue::Scalar(1.0))
+            .is_err()
+    );
+    project
+        .set_param_constant(clip, color, ParamValue::Color([10, 20, 30, 40]))
+        .unwrap();
+    assert_eq!(
+        project
+            .clip(clip)
+            .unwrap()
+            .styles
+            .shadow
+            .as_ref()
+            .unwrap()
+            .rgba
+            .constant(),
+        Some([10, 20, 30, 40])
+    );
+    project
+        .set_param_keyframe(clip, blur, rt(120), ParamValue::Scalar(8.0), Easing::Linear)
+        .unwrap();
+    project.remove_param_keyframe(clip, blur, rt(120)).unwrap();
+
+    // Without a shadow block the scalar param is rejected.
+    let bare = project.add_clip(track, media, tr(0, 48), rt(200)).unwrap();
+    assert!(
+        project
+            .set_param_keyframe(bare, blur, rt(200), ParamValue::Scalar(4.0), Easing::Linear)
+            .is_err()
+    );
+}
 
 #[test]
 fn shape_params_keyframe_through_project_api() {

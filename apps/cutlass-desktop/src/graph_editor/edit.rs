@@ -2,6 +2,19 @@
 //!
 //! Pure helpers over projected clips + scalar params. The wire layer commits
 //! via the preview worker (`set_param_keyframe` / grouped tick move).
+//!
+//! ## Bezier easing handles
+//!
+//! For the selected keyframe's *outgoing* segment (`kf → next`), CSS-style
+//! cubic-bezier handles sit at control points `(x1,y1)` / `(x2,y2)` in
+//! **segment space**:
+//! - `x ∈ [0,1]` maps to ticks `[kf.tick, next.tick]`
+//! - `y` maps to values `[kf.value, next.value]` via `lerp` (y may leave
+//!   `[0,1]` for overshoot — handles are allowed outside the segment box
+//!   vertically). Graph px use the same [`PlotMapping`] as dots/path.
+//!
+//! Named easings expose display control points via [`Easing::control_points`];
+//! [`Easing::Hold`] has no handles.
 
 use cutlass_models::{Easing, Param, ParamValue, SpatialTangents};
 
@@ -10,6 +23,224 @@ use super::{PAD_B, PAD_L, PAD_R, PAD_T};
 use crate::Clip;
 use crate::library_helpers::clip_param_value;
 use crate::params::easing_from_ui;
+
+/// Sanity clamp for bezier handle y (CSS allows overshoot; keep UI finite).
+const HANDLE_Y_MIN: f32 = -2.0;
+const HANDLE_Y_MAX: f32 = 3.0;
+
+/// Which outgoing-segment bezier handle is being dragged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandleId {
+    A,
+    B,
+}
+
+/// Plot-space bezier handles for the selected keyframe's outgoing segment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SegmentHandles {
+    pub a_px: f32,
+    pub a_py: f32,
+    pub b_px: f32,
+    pub b_py: f32,
+    pub start_px: f32,
+    pub start_py: f32,
+    pub end_px: f32,
+    pub end_py: f32,
+    /// Current control points `(x1,y1,x2,y2)` in segment space.
+    pub points: [f32; 4],
+    pub from_tick: i64,
+    pub from_value: f32,
+    pub to_tick: i64,
+    pub to_value: f32,
+}
+
+/// Map segment-space `(u, v)` into graph pixels for an outgoing segment.
+fn segment_to_plot(
+    mapping: PlotMapping,
+    from_tick: i64,
+    to_tick: i64,
+    from_value: f32,
+    to_value: f32,
+    u: f32,
+    v: f32,
+) -> (f32, f32) {
+    let tick = from_tick as f64 + f64::from(u) * (to_tick - from_tick) as f64;
+    let value = from_value + v * (to_value - from_value);
+    let plot_w = (mapping.width - PAD_L - PAD_R).max(1.0);
+    let plot_h = (mapping.height - PAD_T - PAD_B).max(1.0);
+    let t_span = (mapping.t_max - mapping.t_min).max(1) as f64;
+    let y_span = (mapping.y1 - mapping.y0).max(1e-6);
+    let px = PAD_L + ((tick - mapping.t_min as f64) / t_span) as f32 * plot_w;
+    let py = PAD_T + (1.0 - (value - mapping.y0) / y_span) * plot_h;
+    (px, py)
+}
+
+/// Inverse of [`segment_to_plot`] for handle drag: cursor → segment `(u,v)`.
+fn plot_to_segment(
+    mapping: PlotMapping,
+    from_tick: i64,
+    to_tick: i64,
+    from_value: f32,
+    to_value: f32,
+    x: f32,
+    y: f32,
+) -> (f32, f32) {
+    let plot_w = (mapping.width - PAD_L - PAD_R).max(1.0);
+    let plot_h = (mapping.height - PAD_T - PAD_B).max(1.0);
+    let t_span = (mapping.t_max - mapping.t_min).max(1) as f64;
+    let y_span = (mapping.y1 - mapping.y0).max(1e-6);
+    let tick = mapping.t_min as f64 + f64::from(((x - PAD_L) / plot_w).clamp(0.0, 1.0)) * t_span;
+    let value = mapping.y0 + (1.0 - ((y - PAD_T) / plot_h)) * y_span;
+    let seg_t = (to_tick - from_tick).max(1) as f64;
+    let u = ((tick - from_tick as f64) / seg_t) as f32;
+    let value_span = to_value - from_value;
+    let v = if value_span.abs() < 1e-6 {
+        0.0
+    } else {
+        (value - from_value) / value_span
+    };
+    (u, v)
+}
+
+/// Clamp bezier control points: x ∈ `[0,1]`, y ∈ `[−2, 3]`.
+pub fn clamp_bezier_points(points: [f32; 4]) -> [f32; 4] {
+    [
+        points[0].clamp(0.0, 1.0),
+        points[1].clamp(HANDLE_Y_MIN, HANDLE_Y_MAX),
+        points[2].clamp(0.0, 1.0),
+        points[3].clamp(HANDLE_Y_MIN, HANDLE_Y_MAX),
+    ]
+}
+
+/// Outgoing-segment handles for the keyframe at `selected_tick`, or `None`
+/// when there is no successor / the easing is [`Easing::Hold`].
+pub fn segment_handles(
+    param: &Param<f32>,
+    selected_tick: i64,
+    mapping: PlotMapping,
+) -> Option<SegmentHandles> {
+    let kfs = param.keyframes();
+    let idx = kfs.iter().position(|kf| kf.tick == selected_tick)?;
+    let next = kfs.get(idx + 1)?;
+    let kf = &kfs[idx];
+    let points = kf.easing.control_points()?;
+    let (start_px, start_py) =
+        segment_to_plot(mapping, kf.tick, next.tick, kf.value, next.value, 0.0, 0.0);
+    let (end_px, end_py) =
+        segment_to_plot(mapping, kf.tick, next.tick, kf.value, next.value, 1.0, 1.0);
+    let (a_px, a_py) = segment_to_plot(
+        mapping, kf.tick, next.tick, kf.value, next.value, points[0], points[1],
+    );
+    let (b_px, b_py) = segment_to_plot(
+        mapping, kf.tick, next.tick, kf.value, next.value, points[2], points[3],
+    );
+    Some(SegmentHandles {
+        a_px,
+        a_py,
+        b_px,
+        b_py,
+        start_px,
+        start_py,
+        end_px,
+        end_py,
+        points,
+        from_tick: kf.tick,
+        from_value: kf.value,
+        to_tick: next.tick,
+        to_value: next.value,
+    })
+}
+
+/// Cursor drag → updated clamped bezier points for one handle.
+pub fn resolve_handle_drag(
+    handles: &SegmentHandles,
+    which: HandleId,
+    cursor_x: f32,
+    cursor_y: f32,
+    mapping: PlotMapping,
+) -> [f32; 4] {
+    let (u, v) = plot_to_segment(
+        mapping,
+        handles.from_tick,
+        handles.to_tick,
+        handles.from_value,
+        handles.to_value,
+        cursor_x,
+        cursor_y,
+    );
+    let mut points = handles.points;
+    match which {
+        HandleId::A => {
+            points[0] = u;
+            points[1] = v;
+        }
+        HandleId::B => {
+            points[2] = u;
+            points[3] = v;
+        }
+    }
+    clamp_bezier_points(points)
+}
+
+/// Live-preview: clone `param` and set the outgoing easing at `from_tick`
+/// to `Easing::Bezier { points }`.
+pub fn live_handle_param(
+    param: &Param<f32>,
+    from_tick: i64,
+    points: [f32; 4],
+) -> Option<Param<f32>> {
+    let mut out = param.clone();
+    let value = out
+        .keyframes()
+        .iter()
+        .find(|kf| kf.tick == from_tick)
+        .map(|kf| kf.value)?;
+    out.set_keyframe(
+        from_tick,
+        value,
+        Easing::Bezier {
+            points: clamp_bezier_points(points),
+        },
+    );
+    Some(out)
+}
+
+/// Commit that writes a new [`Easing::Bezier`] at the selected keyframe
+/// (same tick/value; preserves the other vec2 axis / spatial tangents).
+pub fn plan_handle_commit(
+    clip: &Clip,
+    key: &str,
+    _channel: i32,
+    from_tick: i32,
+    points: [f32; 4],
+) -> Option<GraphCommit> {
+    let kf = keyframe_at(clip, key, from_tick)?;
+    let points = clamp_bezier_points(points);
+    let (value_x, value_y) = if is_vec2_key(key) {
+        (kf.value_x, kf.value_y)
+    } else {
+        (kf.value_x, 0.0)
+    };
+    let (_, param_value) = clip_param_value(key, value_x, value_y)?;
+    let tangents = if key == "position" && kf.has_tangents {
+        Some(SpatialTangents {
+            out_t: [kf.out_tx, kf.out_ty],
+            in_t: [kf.in_tx, kf.in_ty],
+        })
+    } else {
+        None
+    };
+    let tick = i64::from(from_tick);
+    Some(GraphCommit {
+        param_key: key.to_string(),
+        from_tick: tick,
+        to_tick: tick,
+        value: param_value,
+        easing: Easing::Bezier { points },
+        tangents,
+        tick_moved: false,
+    })
+}
 
 /// Plot ↔ data mapping captured with the last geometry build.
 #[derive(Clone, Copy, Debug)]

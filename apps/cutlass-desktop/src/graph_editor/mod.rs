@@ -13,8 +13,9 @@ mod tests;
 
 pub use channels::{animated_channels, channel_param};
 pub use edit::{
-    GraphCommit, PlotMapping, live_param, plan_drag_commit, plan_insert, plan_insert_commit,
-    resolve_drag,
+    GraphCommit, HandleId, PlotMapping, SegmentHandles, live_handle_param, live_param,
+    plan_drag_commit, plan_handle_commit, plan_insert, plan_insert_commit, resolve_drag,
+    resolve_handle_drag, segment_handles,
 };
 
 use cutlass_models::{Easing, Param};
@@ -112,6 +113,8 @@ pub struct GraphGeometry {
     pub plot_w: f32,
     pub plot_h: f32,
     pub mapping: Option<edit::PlotMapping>,
+    /// Outgoing-segment bezier handles for the selected keyframe (Hold → none).
+    pub handles: Option<edit::SegmentHandles>,
 }
 
 impl Default for GraphGeometry {
@@ -130,6 +133,7 @@ impl Default for GraphGeometry {
             plot_w: 0.0,
             plot_h: 0.0,
             mapping: None,
+            handles: None,
         }
     }
 }
@@ -188,6 +192,19 @@ pub fn build_geometry(
     let mid_v = (y0 + y1) * 0.5;
     let ph = i64::from(playhead);
     let playhead_visible = ph >= t_min && ph <= t_max;
+    let mapping = edit::PlotMapping {
+        t_min,
+        t_max,
+        y0,
+        y1,
+        width,
+        height,
+    };
+    let handles = if selected_tick >= 0 {
+        edit::segment_handles(param, i64::from(selected_tick), mapping)
+    } else {
+        None
+    };
     GraphGeometry {
         path_commands: svg_path_commands(&points),
         dots,
@@ -201,14 +218,8 @@ pub fn build_geometry(
         playhead_visible,
         plot_w: width,
         plot_h: height,
-        mapping: Some(edit::PlotMapping {
-            t_min,
-            t_max,
-            y0,
-            y1,
-            width,
-            height,
-        }),
+        mapping: Some(mapping),
+        handles,
     }
 }
 

@@ -1,3 +1,4 @@
+use super::edit::clamp_bezier_points;
 use super::*;
 use crate::{Clip, ParamKeyframe, Rational, RationalTime, TimeRange};
 use cutlass_models::{Easing, Keyframe, Param, ParamValue, SpatialTangents};
@@ -210,4 +211,139 @@ fn vec2_channel_drag_preserves_other_axis_and_tangents() {
             in_t: [-0.1, -0.2],
         })
     );
+}
+
+fn mapping_40() -> PlotMapping {
+    PlotMapping {
+        t_min: 0,
+        t_max: 40,
+        y0: -0.1,
+        y1: 1.1,
+        width: 400.0,
+        height: 180.0,
+    }
+}
+
+#[test]
+fn named_easing_display_control_points() {
+    assert_eq!(Easing::Linear.control_points(), Some([0.0, 0.0, 1.0, 1.0]));
+    assert_eq!(
+        Easing::EaseIn.control_points(),
+        Some([1.0 / 3.0, 0.0, 2.0 / 3.0, 1.0 / 3.0])
+    );
+    assert_eq!(
+        Easing::EaseOut.control_points(),
+        Some([1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 1.0])
+    );
+    assert_eq!(
+        Easing::EaseInOut.control_points(),
+        Some([1.0 / 3.0, 0.0, 2.0 / 3.0, 1.0])
+    );
+    assert_eq!(Easing::Hold.control_points(), None);
+    let bez = Easing::Bezier {
+        points: [0.42, 0.0, 0.58, 1.0],
+    };
+    assert_eq!(bez.control_points(), Some([0.42, 0.0, 0.58, 1.0]));
+}
+
+#[test]
+fn hold_segment_hides_handles() {
+    let param = Param::Keyframed {
+        keyframes: vec![
+            Keyframe::new(0, 0.0, Easing::Hold),
+            Keyframe::new(40, 1.0, Easing::Linear),
+        ],
+    };
+    assert!(segment_handles(&param, 0, mapping_40()).is_none());
+}
+
+#[test]
+fn bezier_round_trip_initializes_handles_from_segment() {
+    let points = [0.25, 0.1, 0.75, 0.9];
+    let param = Param::Keyframed {
+        keyframes: vec![
+            Keyframe::new(0, 0.0, Easing::Bezier { points }),
+            Keyframe::new(40, 1.0, Easing::Linear),
+        ],
+    };
+    let handles = segment_handles(&param, 0, mapping_40()).unwrap();
+    assert_eq!(handles.points, points);
+}
+
+#[test]
+fn handle_drag_commit_writes_expected_bezier() {
+    let mut clip = media_clip("A");
+    clip.kf_opacity = kfs(vec![kf(0, 0.0, 0.0), kf(40, 1.0, 0.0)]);
+    let points = [0.2, 0.5, 0.8, 0.5];
+    let plan = plan_handle_commit(&clip, "opacity", 0, 0, points).unwrap();
+    assert!(!plan.tick_moved);
+    assert_eq!(plan.to_tick, 0);
+    assert_eq!(plan.value, ParamValue::Scalar(0.0));
+    assert_eq!(plan.easing, Easing::Bezier { points });
+}
+
+#[test]
+fn handle_x_clamping_keeps_monotone_time() {
+    let clamped = clamp_bezier_points([-0.5, 0.0, 1.5, 1.0]);
+    assert_eq!(clamped[0], 0.0);
+    assert_eq!(clamped[2], 1.0);
+    let y_clamped = clamp_bezier_points([0.5, -10.0, 0.5, 10.0]);
+    assert_eq!(y_clamped[1], -2.0);
+    assert_eq!(y_clamped[3], 3.0);
+}
+
+#[test]
+fn ease_in_segment_samples_match_quadratic() {
+    // Segment curve sampling must use real easing (not just chord).
+    let param = Param::Keyframed {
+        keyframes: vec![
+            Keyframe::new(0, 0.0, Easing::EaseIn),
+            Keyframe::new(40, 1.0, Easing::Linear),
+        ],
+    };
+    let mid = param.sample_at(20.0);
+    // EaseIn = t² → at t=0.5, eased = 0.25.
+    assert!((mid - 0.25).abs() < 1e-5, "mid={mid}");
+    let geo = build_geometry(&param, 20, 400.0, 180.0, 0);
+    assert!(geo.handles.is_some());
+    // Midpoint of path should sit below the chord (ease-in starts slow).
+    let a = &geo.dots[0];
+    let b = &geo.dots[1];
+    let chord_mid_y = (a.py + b.py) * 0.5;
+    let samples = sample_curve(&param, 0, 40);
+    let mid_sample = &samples[samples.len() / 2];
+    let (y0, y1) = padded_y_range(0.0, 1.0);
+    let y_span = y1 - y0;
+    let py = PAD_T + (1.0 - (mid_sample.1 - y0) / y_span) * (180.0 - PAD_T - PAD_B);
+    // Larger py = lower on screen = smaller value for ease-in at midpoint.
+    assert!(py > chord_mid_y, "ease-in mid should sit below chord");
+}
+
+#[test]
+fn resolve_handle_drag_updates_control_point() {
+    let param = Param::Keyframed {
+        keyframes: vec![
+            Keyframe::new(0, 0.0, Easing::Linear),
+            Keyframe::new(40, 1.0, Easing::Linear),
+        ],
+    };
+    let map = mapping_40();
+    let handles = segment_handles(&param, 0, map).unwrap();
+    // Drag handle A to segment-space ~(0.25, 0.5).
+    let (ax, ay) = {
+        let plot_w = 400.0 - PAD_L - PAD_R;
+        let plot_h = 180.0 - PAD_T - PAD_B;
+        let tick = 0.25 * 40.0;
+        let value = 0.0 + 0.5 * 1.0;
+        let (y0, y1) = (map.y0, map.y1);
+        let px = PAD_L + (tick / 40.0) as f32 * plot_w;
+        let py = PAD_T + (1.0 - (value - y0) / (y1 - y0)) * plot_h;
+        (px, py)
+    };
+    let points = resolve_handle_drag(&handles, HandleId::A, ax, ay, map);
+    assert!((points[0] - 0.25).abs() < 0.02, "x1={}", points[0]);
+    assert!((points[1] - 0.5).abs() < 0.05, "y1={}", points[1]);
+    // Handle B unchanged from Linear display points (0,0)/(1,1).
+    assert!((points[2] - 1.0).abs() < 1e-5);
+    assert!((points[3] - 1.0).abs() < 1e-5);
 }

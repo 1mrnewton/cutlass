@@ -85,6 +85,25 @@ impl Easing {
 }
 
 impl Easing {
+    /// CSS-style cubic-bezier control points `(x1, y1, x2, y2)` for UI
+    /// display (graph-editor handles). [`Easing::Hold`] has no handles.
+    ///
+    /// Named polynomial easings use their exact cubic Bézier equivalents
+    /// (same polygons as [`Self::subsegment`]); [`Easing::Linear`] is the
+    /// identity `(0,0)/(1,1)`. Existing [`Easing::Bezier`] values round-trip
+    /// unchanged (including named presets like snappy/overshoot).
+    pub fn control_points(self) -> Option<[f32; 4]> {
+        match self {
+            Easing::Hold => None,
+            Easing::Linear => Some([0.0, 0.0, 1.0, 1.0]),
+            // Exact Bézier forms of t², 2t−t², and smoothstep (x(s)=s).
+            Easing::EaseIn => Some([1.0 / 3.0, 0.0, 2.0 / 3.0, 1.0 / 3.0]),
+            Easing::EaseOut => Some([1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 1.0]),
+            Easing::EaseInOut => Some([1.0 / 3.0, 0.0, 2.0 / 3.0, 1.0]),
+            Easing::Bezier { points } => Some(points),
+        }
+    }
+
     /// Map linear progress `t` in `0..=1` to eased progress.
     pub fn apply(self, t: f32) -> f32 {
         match self {
@@ -192,12 +211,9 @@ impl Easing {
         let [x1, y1, x2, y2] = match self {
             Easing::Linear => unreachable!("linear handled above"),
             Easing::Hold => unreachable!("hold handled above"),
-            // x(s) = s for control x values 1/3 and 2/3. The y controls
-            // below are the cubic Bézier forms of t², 2t-t², and smoothstep.
-            Easing::EaseIn => [1.0 / 3.0, 0.0, 2.0 / 3.0, 1.0 / 3.0],
-            Easing::EaseOut => [1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 1.0],
-            Easing::EaseInOut => [1.0 / 3.0, 0.0, 2.0 / 3.0, 1.0],
-            Easing::Bezier { points } => points,
+            other => other
+                .control_points()
+                .expect("named / bezier easings expose control points"),
         };
         let points = [
             BezierPoint { x: 0.0, y: 0.0 },

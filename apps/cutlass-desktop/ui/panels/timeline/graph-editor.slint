@@ -20,9 +20,10 @@ export component GraphEditor inherits Rectangle {
     private property <string> sel-key: GraphBackend.selected-key;
     private property <int> sel-ch: GraphBackend.selected-channel;
     private property <bool> dragging: false;
+    private property <bool> handle-dragging: false;
 
     function request-refresh() {
-        if (!GraphBackend.visible || root.dragging) {
+        if (!GraphBackend.visible || root.dragging || root.handle-dragging) {
             return;
         }
         GraphBackend.refresh(
@@ -143,6 +144,30 @@ export component GraphEditor inherits Rectangle {
                 fill: transparent;
             }
 
+            // Stem lines from segment endpoints to cubic-bezier handles.
+            if GraphBackend.handles-visible: Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: root.plot-w;
+                viewbox-height: root.plot-h;
+                commands: GraphBackend.handle-stem-a;
+                stroke: #ffffff55;
+                stroke-width: 1px;
+                fill: transparent;
+                z: 1;
+            }
+            if GraphBackend.handles-visible: Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: root.plot-w;
+                viewbox-height: root.plot-h;
+                commands: GraphBackend.handle-stem-b;
+                stroke: #ffffff55;
+                stroke-width: 1px;
+                fill: transparent;
+                z: 1;
+            }
+
             if GraphBackend.playhead-visible: Rectangle {
                 x: GraphBackend.playhead-x * 1px - 0.5px;
                 width: 1px;
@@ -202,6 +227,84 @@ export component GraphEditor inherits Rectangle {
                     double-clicked => {
                         GraphBackend.delete-dot(d.tick);
                         root.dragging = false;
+                    }
+                }
+            }
+
+            if GraphBackend.handles-visible: Rectangle {
+                x: GraphBackend.handle-a-x * 1px - 4px;
+                y: GraphBackend.handle-a-y * 1px - 4px;
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: AppStore.theme.accent.primary;
+                border-width: 1px;
+                border-color: #FFFFFF;
+                z: 3;
+
+                TouchArea {
+                    width: 16px;
+                    height: 16px;
+                    x: -4px;
+                    y: -4px;
+                    mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.crosshair;
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                            GraphBackend.handle-drag-begin(0);
+                            root.handle-dragging = true;
+                        }
+                        if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
+                            GraphBackend.handle-drag-end(true);
+                            root.handle-dragging = false;
+                        }
+                        if (ev.kind == PointerEventKind.cancel) {
+                            GraphBackend.handle-drag-end(false);
+                            root.handle-dragging = false;
+                        }
+                    }
+                    moved => {
+                        GraphBackend.handle-drag-move(
+                            GraphBackend.handle-a-x - 8 + self.mouse-x / 1px,
+                            GraphBackend.handle-a-y - 8 + self.mouse-y / 1px);
+                    }
+                }
+            }
+
+            if GraphBackend.handles-visible: Rectangle {
+                x: GraphBackend.handle-b-x * 1px - 4px;
+                y: GraphBackend.handle-b-y * 1px - 4px;
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: AppStore.theme.accent.primary;
+                border-width: 1px;
+                border-color: #FFFFFF;
+                z: 3;
+
+                TouchArea {
+                    width: 16px;
+                    height: 16px;
+                    x: -4px;
+                    y: -4px;
+                    mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.crosshair;
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                            GraphBackend.handle-drag-begin(1);
+                            root.handle-dragging = true;
+                        }
+                        if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
+                            GraphBackend.handle-drag-end(true);
+                            root.handle-dragging = false;
+                        }
+                        if (ev.kind == PointerEventKind.cancel) {
+                            GraphBackend.handle-drag-end(false);
+                            root.handle-dragging = false;
+                        }
+                    }
+                    moved => {
+                        GraphBackend.handle-drag-move(
+                            GraphBackend.handle-b-x - 8 + self.mouse-x / 1px,
+                            GraphBackend.handle-b-y - 8 + self.mouse-y / 1px);
                     }
                 }
             }

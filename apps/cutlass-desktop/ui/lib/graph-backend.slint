@@ -59,6 +59,17 @@ export global GraphBackend {
     in-out property <float> plot-w: 0;
     in-out property <float> plot-h: 0;
 
+    // Outgoing-segment cubic-bezier handles (selected keyframe → next).
+    // Hidden when no selection, no successor, or Hold easing.
+    in-out property <bool> handles-visible: false;
+    in-out property <float> handle-a-x: 0;
+    in-out property <float> handle-a-y: 0;
+    in-out property <float> handle-b-x: 0;
+    in-out property <float> handle-b-y: 0;
+    // Stem lines: start→A and end→B as SVG path commands.
+    in-out property <string> handle-stem-a: "";
+    in-out property <string> handle-stem-b: "";
+
     callback toggle-visible();
     callback set-channel(key: string, channel: int);
 
@@ -73,4 +84,9 @@ export global GraphBackend {
     callback drag-end(commit: bool);
     callback insert-at(x: float, y: float);
     callback delete-dot(tick: int);
+
+    // Bezier easing handle editing (commit 3). `which` is 0 = A, 1 = B.
+    callback handle-drag-begin(which: int);
+    callback handle-drag-move(x: float, y: float);
+    callback handle-drag-end(commit: bool);
 }

@@ -5,6 +5,7 @@
 
 import { CutlassText, HorizontalDivider } from "../../components/index.slint";
 import { AppStore, EditorStore, TimelineStore, TimelineActions } from "../../store/index.slint";
+import { GraphBackend } from "../../lib/graph-backend.slint";
 import { Slider } from "std-widgets.slint";
 
 // Compact toolbar control. Pass `icon` for a glyph button; otherwise
@@ -196,6 +197,17 @@ export component Toolbar inherits Rectangle {
             active: TimelineStore.preview-axis-enabled;
             clicked => {
                 TimelineActions.toggle-preview-axis();
+            }
+        }
+
+        // Keyframe graph drawer (curve display / edit) under the toolbar.
+        ToolButton {
+            label: "Graph";
+            show-icon: true;
+            icon: @image-url("../../../../../assets/icon/inspector/spline.svg");
+            active: GraphBackend.visible;
+            clicked => {
+                GraphBackend.toggle-visible();
             }
         }
 

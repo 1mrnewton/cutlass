@@ -100,6 +100,7 @@ lacks cleanly (`letter-spacing`, `line-height`): **[Tabler](https://tabler.io/ic
 - [x] `scan` — `assets/icon/timeline/scan.svg` — zoom to fit.
 - [x] `zoom-out` — `assets/icon/timeline/zoom-out.svg`.
 - [x] `zoom-in` — `assets/icon/timeline/zoom-in.svg`.
+- [x] `spline` (reuse inspector) — `assets/icon/inspector/spline.svg` — keyframe graph drawer toggle.
 
 ### Track headers — `panels/timeline/track-head.slint`
 
@@ -128,6 +129,7 @@ lacks cleanly (`letter-spacing`, `line-height`): **[Tabler](https://tabler.io/ic
 - [ ] `chevron-up` / `chevron-down` — placeholder `"^"` — section collapse caret (`inspector/inspector-widgets.slint`, `inspector/transform-inspector.slint`) — assets ready at `assets/icon/inspector/`.
 - [x] `spline` — `assets/icon/inspector/spline.svg` — keyframe easing.
 - [ ] `scan` + `expand` — placeholder `"Fit"` / `"Fill"` — transform fit/fill stays worded (`SubtleButton`); assets ready at `assets/icon/inspector/`.
+- [ ] `link-2` — placeholder CheckBox `"Link"` — `inspector/transform-inspector.slint` — link Scale X/Y axes (std-widgets CheckBox for now).
 - [ ] `trash-2` — placeholder `"Remove"` — remove effect stays worded; asset ready at `assets/icon/inspector/trash-2.svg`.
 - [x] `flip-horizontal` / `flip-vertical` — `assets/icon/inspector/`.
 

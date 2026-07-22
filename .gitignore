@@ -33,6 +33,8 @@ crates/cutlass-py/examples/trailer.mp4
 trailer.cutlass
 # Agent task scaffolding (local only; do not commit).
 AGENT_TASK.md
+AGENT-REPORT.md
 .cursor/plans/
 .cursor/skills/
 target/
+AGENT-PROVIDERS.md

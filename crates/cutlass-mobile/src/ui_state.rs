@@ -311,7 +311,7 @@ fn build_clip(project: &Project, track: &Track, clip: &Clip, rate: Rational) -> 
             // canvas dims; the shells use 0..1 with 0.5 at the center.
             pos_x: 0.5 + t.position[0],
             pos_y: 0.5 + t.position[1],
-            scale: t.scale,
+            scale: t.scale.x,
             rotation_degrees: t.rotation,
             opacity: t.opacity,
         }
@@ -347,11 +347,11 @@ fn build_clip(project: &Project, track: &Track, clip: &Clip, rate: Rational) -> 
         effects: clip.effects.iter().map(|e| e.effect_id.clone()).collect(),
         transition_after,
         link: clip.link.map(|l| l.raw()),
-        mask: clip.mask,
-        chroma_key: clip.chroma_key,
+        mask: clip.mask.clone(),
+        chroma_key: clip.chroma_key.clone(),
         stabilize: clip.stabilize,
         filter: clip.filter.clone(),
-        adjust: clip.adjust,
+        adjust: clip.adjust.clone(),
         animation_in: clip.animation_in.as_ref().map(|a| a.id.clone()),
         animation_out: clip.animation_out.as_ref().map(|a| a.id.clone()),
         animation_combo: clip.animation_combo.as_ref().map(|a| a.id.clone()),
@@ -629,6 +629,7 @@ mod tests {
                 RationalTime::new(30, FPS),
                 ParamValue::Scalar(2.0),
                 Easing::Linear,
+                None,
             )
             .unwrap();
         project
@@ -638,6 +639,7 @@ mod tests {
                 RationalTime::new(60, FPS),
                 ParamValue::Scalar(0.5),
                 Easing::Linear,
+                None,
             )
             .unwrap();
 
@@ -681,7 +683,7 @@ mod tests {
                 ClipTransform {
                     position: [0.25, -0.10],
                     anchor_point: [0.5, 0.5],
-                    scale: 0.5,
+                    scale: 0.5.into(),
                     rotation: 90.0,
                     opacity: 0.8,
                 },

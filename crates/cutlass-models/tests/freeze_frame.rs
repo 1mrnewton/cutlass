@@ -75,16 +75,19 @@ fn freeze_helper_bakes_visual_state_and_clears_dynamic_semantics() {
                 tick: 0,
                 value: 0.5,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: 1_000,
                 value: 1.5,
                 easing: Easing::Linear,
+                tangents: None,
             },
         ],
     };
     source.preserve_pitch = false;
     source.volume = Param::Constant(0.25);
+    source.pan = Param::Constant(-0.5);
     source.fade_in = 4;
     source.fade_out = 6;
     source.denoise = true;
@@ -95,24 +98,26 @@ fn freeze_helper_bakes_visual_state_and_clears_dynamic_semantics() {
         y: 0.2,
         w: 0.7,
         h: 0.6,
-    };
+    }
+    .into();
     source.flip_h = true;
     source.flip_v = true;
     source.mask = Some(Mask::new(MaskKind::Circle));
     source.chroma_key = Some(ChromaKey {
         rgb: [0, 255, 0],
-        strength: 0.7,
-        shadow: 0.2,
+        strength: 0.7.into(),
+        shadow: 0.2.into(),
     });
     source.stabilize = Some(StabilizeLevel::Smooth);
     source.filter = Some(Filter::new("vivid"));
     source.lut = Some(Lut::new("/tmp/look.cube"));
     source.adjust = ColorAdjustments {
-        brightness: 0.2,
-        contrast: -0.1,
-        saturation: 0.3,
-        exposure: 0.1,
-        temperature: -0.2,
+        brightness: 0.2.into(),
+        contrast: (-0.1).into(),
+        saturation: 0.3.into(),
+        exposure: 0.1.into(),
+        temperature: (-0.2).into(),
+        ..Default::default()
     };
     source.animation_in = Some(AnimationRef::new("fade_in"));
     source.animation_out = Some(AnimationRef::new("fade_out"));
@@ -155,13 +160,15 @@ fn freeze_helper_bakes_visual_state_and_clears_dynamic_semantics() {
     assert_eq!(frozen.speed_curve, Param::Constant(1.0));
     assert!(frozen.preserve_pitch);
     assert_eq!(frozen.volume, Param::Constant(1.0));
+    assert_eq!(frozen.pan, Param::Constant(0.0));
     assert_eq!((frozen.fade_in, frozen.fade_out), (0, 0));
     assert!(!frozen.denoise);
     assert!(frozen.beats.is_empty());
     assert_eq!(frozen.audio_role, None);
     assert!(frozen.is_silent());
 
-    assert_eq!(frozen.crop, source.crop);
+    assert_eq!(frozen.crop, Param::Constant(source.crop.sample(20)));
+    assert!(!frozen.crop.is_animated());
     assert_eq!((frozen.flip_h, frozen.flip_v), (true, true));
     assert_eq!(frozen.mask, source.mask);
     assert_eq!(frozen.chroma_key, source.chroma_key);
@@ -179,6 +186,52 @@ fn freeze_helper_bakes_visual_state_and_clears_dynamic_semantics() {
         assert_eq!(frozen.source_time_at(rt(tick)).unwrap(), Some(rt(140)));
     }
     assert_eq!(frozen.source_time_at(rt(80)).unwrap(), None);
+}
+
+#[test]
+fn frozen_frame_holds_keyframed_crop_at_freeze_tick() {
+    let (mut project, media) = video_project();
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    let a = CropRect {
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 1.0,
+    };
+    let b = CropRect {
+        x: 0.4,
+        y: 0.4,
+        w: 0.5,
+        h: 0.5,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            cutlass_models::ClipParam::Crop,
+            rt(0),
+            cutlass_models::ParamValue::Rect([a.x, a.y, a.w, a.h]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            cutlass_models::ClipParam::Crop,
+            rt(40),
+            cutlass_models::ParamValue::Rect([b.x, b.y, b.w, b.h]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    let source = project.clip(clip).unwrap().clone();
+    // Freeze at timeline tick 20 → clip-relative 20 → midpoint crop.
+    let frozen = source.frozen_frame(rt(20), tr(20, 30)).unwrap();
+    let expected = source.crop.sample(20);
+    assert_eq!(frozen.crop, Param::Constant(expected));
+    assert!((expected.x - 0.2).abs() < 1e-5);
+    assert!((expected.w - 0.75).abs() < 1e-5);
 }
 
 #[test]

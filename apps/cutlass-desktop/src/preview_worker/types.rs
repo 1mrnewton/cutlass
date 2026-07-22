@@ -316,6 +316,39 @@ pub(super) enum WorkerMsg {
         crop: CropRect,
         flip_h: bool,
         flip_v: bool,
+        /// Absolute sequence tick (playhead) for M2 compose keyframing.
+        tick: i64,
+    },
+    /// Set a visual clip's blend mode (CapCut "Blend"). `mode` is a
+    /// `BlendMode` id (e.g. `"multiply"`); unknown ids are ignored.
+    /// One undoable history entry.
+    SetBlendMode {
+        clip: String,
+        mode: String,
+    },
+    /// Set per-clip transform motion blur (export supersampling).
+    /// One undoable history entry.
+    SetMotionBlur {
+        clip: String,
+        motion_blur: MotionBlur,
+    },
+    /// Replace a visual clip's layer styles (shadow/glow/outline/background).
+    /// One undoable history entry.
+    SetLayerStyles {
+        clip: String,
+        styles: LayerStyles,
+    },
+    /// Set (or clear) a visual clip's shaped alpha mask. `None` clears.
+    /// One undoable history entry.
+    SetMask {
+        clip: String,
+        mask: Option<Mask>,
+    },
+    /// Set (or clear) chroma keying on a visual clip. `None` clears.
+    /// One undoable history entry.
+    SetChroma {
+        clip: String,
+        chroma: Option<ChromaKey>,
     },
     /// Set (or clear) a visual clip's filter preset. `filter_id == ""`
     /// clears; intensity is normalized 0..=1. One undoable history entry.
@@ -347,6 +380,9 @@ pub(super) enum WorkerMsg {
         clip: String,
         slot: String,
         animation_id: String,
+        speed: f32,
+        intensity: f32,
+        stagger: f32,
     },
     /// Live color-grading preview: replace one clip's filter + adjustments
     /// through the engine's session-only look override. Bursts coalesce to
@@ -356,6 +392,20 @@ pub(super) enum WorkerMsg {
         filter_id: String,
         intensity: f32,
         adjust: ColorAdjustments,
+        tick: i64,
+    },
+    /// Live layer-styles preview: replace one clip's styles through the
+    /// engine's session-only styles override. Bursts coalesce to the newest
+    /// like look/transform/generator overrides.
+    PreviewClipStyles {
+        clip: String,
+        styles: LayerStyles,
+        tick: i64,
+    },
+    /// Drop the styles override (control released with no net change) and
+    /// re-render `tick` from committed state. Look clears on commit only;
+    /// styles also clear on SetLayerStyles / style param commits.
+    ClearStylesOverride {
         tick: i64,
     },
     /// Append a catalog effect to a clip's chain (M4). One undoable entry.
@@ -369,11 +419,12 @@ pub(super) enum WorkerMsg {
         index: u32,
     },
     /// Set one effect parameter (by catalog name) to a constant (M4).
+    /// Scalars, colors, and vec2s share this message.
     SetEffectParam {
         clip: String,
         index: u32,
         param: String,
-        value: f32,
+        value: ParamValue,
     },
     /// Add a catalog transition at the junction after `clip` (M4).
     AddTransition {
@@ -458,6 +509,23 @@ pub(super) enum WorkerMsg {
         tick: i64,
         value: ParamValue,
         easing: Easing,
+        /// Spatial tangents for position motion paths. `None` clears / keeps
+        /// straight-line (engine always writes the slot on Position).
+        tangents: Option<cutlass_models::SpatialTangents>,
+    },
+    /// Set or clear spatial tangents on a position keyframe without changing
+    /// its value/easing (motion-path handle drag).
+    SetParamKeyframeTangents {
+        clip: String,
+        tick: i64,
+        tangents: Option<cutlass_models::SpatialTangents>,
+    },
+    /// Replace one animatable property with a constant, dropping its
+    /// keyframes. One undoable edit.
+    SetParamConstant {
+        clip: String,
+        param: ClipParam,
+        value: ParamValue,
     },
     /// Remove the keyframe sitting exactly at `tick` on one property of
     /// `clip`. Removing the last keyframe collapses the property to a
@@ -466,6 +534,26 @@ pub(super) enum WorkerMsg {
         clip: String,
         param: ClipParam,
         tick: i64,
+    },
+    /// Move one property's keyframe from `from_tick` to `to_tick` (graph
+    /// editor horizontal drag). One history group: remove at the old tick
+    /// then set at the new tick with the given value/easing/tangents.
+    MoveParamKeyframe {
+        clip: String,
+        param: ClipParam,
+        from_tick: i64,
+        to_tick: i64,
+        value: ParamValue,
+        easing: Easing,
+        tangents: Option<cutlass_models::SpatialTangents>,
+    },
+    /// Expand the outgoing segment at `tick` with a piecewise easing preset
+    /// (graph editor). One undoable engine edit (full-clip restore inverse).
+    ApplyEasingPreset {
+        clip: String,
+        param: ClipParam,
+        tick: i64,
+        preset: PiecewiseEasingPreset,
     },
     /// Move every keyframe sitting at `from_tick` (across all animated
     /// properties of `clip`) to `to_tick` — the timeline diamond drag
@@ -730,6 +818,17 @@ pub struct GroupMove {
     pub clip: String,
     pub track: String,
     pub start_tick: i64,
+}
+
+/// Graph-editor keyframe tick move (remove+set in one history group).
+pub struct MoveParamKeyframeRequest {
+    pub clip: String,
+    pub param: ClipParam,
+    pub from_tick: i64,
+    pub to_tick: i64,
+    pub value: ParamValue,
+    pub easing: Easing,
+    pub tangents: Option<cutlass_models::SpatialTangents>,
 }
 
 /// Which track header toggle a [`WorkerMsg::SetTrackFlag`] addresses.

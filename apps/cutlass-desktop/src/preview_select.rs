@@ -88,7 +88,10 @@ pub(crate) fn clip_transform(clip: &Clip) -> ClipTransform {
     ClipTransform {
         position: [clip.transform_position_x, clip.transform_position_y],
         anchor_point: [clip.transform_anchor_x, clip.transform_anchor_y],
-        scale: clip.transform_scale,
+        scale: cutlass_models::Scale2 {
+            x: clip.transform_scale,
+            y: clip.transform_scale_y,
+        },
         rotation: clip.transform_rotation,
         opacity: clip.transform_opacity,
     }
@@ -403,6 +406,8 @@ pub fn selection_box_in_viewport(
                 clip.transform_anchor_x = res.anchor_x;
                 clip.transform_anchor_y = res.anchor_y;
                 clip.transform_scale = res.scale;
+                clip.transform_scale_y = res.scale_y;
+                clip.transform_scale_linked = res.scale == res.scale_y;
                 clip.transform_rotation = res.rotation;
             }
             let p = clip_placement(&clip, &canvas);
@@ -445,6 +450,8 @@ fn apply_identity_transform(clip: &mut Clip) {
     clip.transform_anchor_x = 0.5;
     clip.transform_anchor_y = 0.5;
     clip.transform_scale = 1.0;
+    clip.transform_scale_y = 1.0;
+    clip.transform_scale_linked = true;
     clip.transform_rotation = 0.0;
 }
 
@@ -453,7 +460,10 @@ fn apply_gesture_transform(clip: &mut Clip, gesture: &PreviewDragResolution) {
     clip.transform_position_y = gesture.position_y;
     clip.transform_anchor_x = gesture.anchor_x;
     clip.transform_anchor_y = gesture.anchor_y;
+    // Corner-drag gizmo stays uniform.
     clip.transform_scale = gesture.scale;
+    clip.transform_scale_y = gesture.scale_y;
+    clip.transform_scale_linked = gesture.scale == gesture.scale_y;
     clip.transform_rotation = gesture.rotation;
 }
 

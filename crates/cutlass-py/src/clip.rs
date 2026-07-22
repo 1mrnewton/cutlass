@@ -265,7 +265,8 @@ impl Clip {
     #[getter]
     fn scale(&self, py: Python) -> PyResult<f32> {
         self.with_project(py, |project| {
-            Ok(Self::current_transform(project, self.id)?.scale)
+            // Uniform X (Python API stays a single float until per-axis lands).
+            Ok(Self::current_transform(project, self.id)?.scale.x)
         })
     }
 
@@ -273,7 +274,7 @@ impl Clip {
     fn set_scale(&self, py: Python, value: f32) -> PyResult<()> {
         self.with_project(py, |project| {
             let mut t = Self::current_transform(project, self.id)?;
-            t.scale = value;
+            t.scale = cutlass_models::Scale2::uniform(value);
             Self::set_transform_constant(project, self.id, t)
         })
     }
@@ -364,7 +365,7 @@ impl Clip {
             let xf = clip.transform.sample(tick);
             Ok((
                 (xf.position[0], xf.position[1]),
-                xf.scale,
+                xf.scale.x,
                 xf.rotation,
                 xf.opacity,
             ))
@@ -544,7 +545,7 @@ impl Clip {
         self.with_project(py, |project| {
             project
                 .model_mut()
-                .set_clip_crop(self.id, CropRect { x, y, w, h }, flip_h, flip_v)
+                .set_clip_crop(self.id, CropRect { x, y, w, h }, flip_h, flip_v, None)
                 .map_err(model_err)
         })
     }
@@ -818,7 +819,14 @@ fn sample_param_at_clip_start(
             let t = clip.transform.sample(0);
             Ok(ParamValue::Vec2(t.anchor_point))
         }
-        ClipParam::Scale => Ok(ParamValue::Scalar(clip.transform.sample(0).scale)),
+        ClipParam::Scale => {
+            let s = clip.transform.sample(0).scale;
+            Ok(if s.is_uniform() {
+                ParamValue::Scalar(s.x)
+            } else {
+                ParamValue::Vec2([s.x, s.y])
+            })
+        }
         ClipParam::Rotation => Ok(ParamValue::Scalar(clip.transform.sample(0).rotation)),
         ClipParam::Opacity => Ok(ParamValue::Scalar(clip.transform.sample(0).opacity)),
         ClipParam::Volume => Ok(ParamValue::Scalar(clip.volume.sample(0))),
@@ -882,7 +890,7 @@ fn apply_clip_animation(
             let abs = clip_key_time(clip_start, clip_dur, rel, rate);
             project
                 .model_mut()
-                .set_param_keyframe(clip_id, param, abs, val, easing)
+                .set_param_keyframe(clip_id, param, abs, val, easing, None)
                 .map_err(model_err)?;
         }
         return Ok(());
@@ -893,7 +901,7 @@ fn apply_clip_animation(
     let abs = clip_key_time(clip_start, clip_dur, at, rate);
     project
         .model_mut()
-        .set_param_keyframe(clip_id, param, abs, val, default_easing)
+        .set_param_keyframe(clip_id, param, abs, val, default_easing, None)
         .map_err(model_err)
 }
 

@@ -388,7 +388,7 @@ fn relocation_field_mapping_covers_every_disk_cache_and_preserves_other_settings
     original.appearance.theme = cutlass_settings::ThemeChoice::Ember;
     original.ai.base_url = "http://localhost:11434/v1".into();
     original.ai.model = "qwen-test".into();
-    original.account.base_url = "https://api.example.test".into();
+    original.cloud.base_url = "https://api.example.test".into();
     original.storage.root = Some(temporary.path().join("configured-root"));
     original.storage.download_quota_mib = 777;
     for id in disk_ids {
@@ -408,7 +408,7 @@ fn relocation_field_mapping_covers_every_disk_cache_and_preserves_other_settings
         assert_eq!(updated.appearance, original.appearance);
         assert_eq!(updated.ai, original.ai);
         assert_eq!(updated.providers, original.providers);
-        assert_eq!(updated.account, original.account);
+        assert_eq!(updated.cloud, original.cloud);
         assert_eq!(updated.storage.root, original.storage.root);
         assert_eq!(
             updated.storage.download_quota_mib,

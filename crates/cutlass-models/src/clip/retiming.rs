@@ -316,6 +316,7 @@ fn speed_curve_subsegment(
             tick,
             value: curve.sample_at(position),
             easing,
+            tangents: None,
         });
     }
 
@@ -454,6 +455,7 @@ pub fn speed_preset(name: &str) -> Option<Param<f32>> {
         tick: (frac * s as f64).round() as i64,
         value,
         easing,
+        tangents: None,
     };
     let keyframes = match name {
         // Accelerate from slow-mo into fast (CapCut "speed up").

@@ -1,12 +1,12 @@
 // Clip-level look animations (CapCut In / Out / Combo tabs). Values are
 // projected from the engine; picks route to undoable SetClipAnimation edits.
 
-import { CutlassScrollView, CutlassText } from "../../components/index.slint";
+import { CutlassScrollView, CutlassText, CutlassSlider } from "../../components/index.slint";
 import { AppState } from "../../state.slint";
 import { AppStore } from "../../store/index.slint";
 import { InspectorBackend } from "../../lib/inspector-backend.slint";
 import { Clip, CatalogEntry } from "../../models/index.slint";
-import { LabelCell, SectionHeader } from "inspector-widgets.slint";
+import { LabelCell, SectionHeader, SliderRow } from "inspector-widgets.slint";
 
 component AnimationPresetRow inherits Rectangle {
     in property <string> label;
@@ -145,6 +145,73 @@ component AnimationDropdown inherits Rectangle {
     }
 }
 
+// Speed / intensity / stagger knobs for one animation slot.
+component AnimationParamSliders inherits VerticalLayout {
+    in property <string> slot;
+    in property <string> anim-id;
+    in property <float> speed;
+    in property <float> intensity;
+    in property <float> stagger;
+    in property <bool> has-speed;
+    in property <bool> has-intensity;
+    in property <bool> has-stagger;
+    in property <string> clip-id;
+
+    spacing: AppStore.theme.metrics.spacing.sm;
+    alignment: LayoutAlignment.start;
+    visible: root.anim-id != "";
+
+    function commit(speed-v: float, intensity-v: float, stagger-v: float) {
+        InspectorBackend.set-clip-animation(
+            root.clip-id,
+            root.slot,
+            root.anim-id,
+            speed-v,
+            intensity-v,
+            stagger-v,
+        );
+    }
+
+    if root.has-speed: SliderRow {
+        label: "Speed";
+        suffix: "×";
+        value: root.speed;
+        minimum: 0.25;
+        maximum: 4;
+        reset-value: 1;
+        preview(v) => { }
+        commit(v) => {
+            root.commit(clamp(v, 0.25, 4), root.intensity, root.stagger);
+        }
+    }
+
+    if root.has-intensity: SliderRow {
+        label: "Intensity";
+        suffix: "";
+        value: root.intensity;
+        minimum: 0;
+        maximum: 2;
+        reset-value: 1;
+        preview(v) => { }
+        commit(v) => {
+            root.commit(root.speed, clamp(v, 0, 2), root.stagger);
+        }
+    }
+
+    if root.has-stagger: SliderRow {
+        label: "Stagger";
+        suffix: "";
+        value: root.stagger;
+        minimum: 0;
+        maximum: 2;
+        reset-value: 1;
+        preview(v) => { }
+        commit(v) => {
+            root.commit(root.speed, root.intensity, clamp(v, 0, 2));
+        }
+    }
+}
+
 export component AnimationInspector inherits VerticalLayout {
     in property <Clip> model;
     in property <bool> text-only-combos: false;
@@ -168,11 +235,25 @@ export component AnimationInspector inherits VerticalLayout {
         AnimationDropdown {
             current-id: root.model.animation-in-id;
             current-label: root.model.animation-in-label;
-            catalog: InspectorBackend.animation-in-catalog;
+            catalog: root.text-only-combos
+                ? InspectorBackend.animation-text-in-catalog
+                : InspectorBackend.animation-in-catalog;
             selected(id) => {
-                InspectorBackend.set-clip-animation(root.model.id, "in", id);
+                InspectorBackend.set-clip-animation(root.model.id, "in", id, 1, 1, 1);
             }
         }
+    }
+
+    AnimationParamSliders {
+        slot: "in";
+        clip-id: root.model.id;
+        anim-id: root.model.animation-in-id;
+        speed: root.model.animation-in-speed;
+        intensity: root.model.animation-in-intensity;
+        stagger: root.model.animation-in-stagger;
+        has-speed: root.model.animation-in-has-speed;
+        has-intensity: root.model.animation-in-has-intensity;
+        has-stagger: root.model.animation-in-has-stagger;
     }
 
     SectionHeader {
@@ -191,11 +272,25 @@ export component AnimationInspector inherits VerticalLayout {
         AnimationDropdown {
             current-id: root.model.animation-out-id;
             current-label: root.model.animation-out-label;
-            catalog: InspectorBackend.animation-out-catalog;
+            catalog: root.text-only-combos
+                ? InspectorBackend.animation-text-out-catalog
+                : InspectorBackend.animation-out-catalog;
             selected(id) => {
-                InspectorBackend.set-clip-animation(root.model.id, "out", id);
+                InspectorBackend.set-clip-animation(root.model.id, "out", id, 1, 1, 1);
             }
         }
+    }
+
+    AnimationParamSliders {
+        slot: "out";
+        clip-id: root.model.id;
+        anim-id: root.model.animation-out-id;
+        speed: root.model.animation-out-speed;
+        intensity: root.model.animation-out-intensity;
+        stagger: root.model.animation-out-stagger;
+        has-speed: root.model.animation-out-has-speed;
+        has-intensity: root.model.animation-out-has-intensity;
+        has-stagger: root.model.animation-out-has-stagger;
     }
 
     SectionHeader {
@@ -218,8 +313,20 @@ export component AnimationInspector inherits VerticalLayout {
                 ? InspectorBackend.animation-text-combo-catalog
                 : InspectorBackend.animation-combo-catalog;
             selected(id) => {
-                InspectorBackend.set-clip-animation(root.model.id, "combo", id);
+                InspectorBackend.set-clip-animation(root.model.id, "combo", id, 1, 1, 1);
             }
         }
+    }
+
+    AnimationParamSliders {
+        slot: "combo";
+        clip-id: root.model.id;
+        anim-id: root.model.animation-combo-id;
+        speed: root.model.animation-combo-speed;
+        intensity: root.model.animation-combo-intensity;
+        stagger: root.model.animation-combo-stagger;
+        has-speed: root.model.animation-combo-has-speed;
+        has-intensity: root.model.animation-combo-has-intensity;
+        has-stagger: root.model.animation-combo-has-stagger;
     }
 }

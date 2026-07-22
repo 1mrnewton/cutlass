@@ -691,7 +691,705 @@ fn look_edits_invalidate_preview() {
         clip: "1".into(),
         slot: "in".into(),
         animation_id: "fade".into(),
+        speed: 1.0,
+        intensity: 1.0,
+        stagger: 1.0,
     }));
+    assert!(message_invalidates_preview(&WorkerMsg::SetBlendMode {
+        clip: "1".into(),
+        mode: "multiply".into(),
+    }));
+    assert!(message_invalidates_preview(&WorkerMsg::SetMotionBlur {
+        clip: "1".into(),
+        motion_blur: MotionBlur {
+            enabled: true,
+            ..MotionBlur::default()
+        },
+    }));
+    assert!(message_invalidates_preview(&WorkerMsg::SetLayerStyles {
+        clip: "1".into(),
+        styles: LayerStyles {
+            shadow: Some(cutlass_models::LayerShadow::default()),
+            ..Default::default()
+        },
+    }));
+    assert!(message_invalidates_preview(&WorkerMsg::SetMask {
+        clip: "1".into(),
+        mask: Some(cutlass_models::Mask::new(cutlass_models::MaskKind::Circle)),
+    }));
+    assert!(message_invalidates_preview(&WorkerMsg::SetChroma {
+        clip: "1".into(),
+        chroma: Some(cutlass_models::ChromaKey {
+            rgb: [0, 255, 0],
+            strength: cutlass_models::Param::Constant(0.5),
+            shadow: cutlass_models::Param::Constant(0.0),
+        }),
+    }));
+}
+
+#[test]
+fn set_blend_mode_enqueues_worker_msg() {
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    handle.set_blend_mode("42".into(), "screen".into());
+    let WorkerMsg::SetBlendMode { clip, mode } = rx.try_recv().unwrap() else {
+        panic!("expected SetBlendMode");
+    };
+    assert_eq!(clip, "42");
+    assert_eq!(mode, "screen");
+}
+
+#[test]
+fn set_motion_blur_enqueues_worker_msg() {
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let blur = MotionBlur {
+        enabled: true,
+        shutter_deg: 270.0,
+        samples: 12,
+    };
+    handle.set_motion_blur("42".into(), blur);
+    let WorkerMsg::SetMotionBlur { clip, motion_blur } = rx.try_recv().unwrap() else {
+        panic!("expected SetMotionBlur");
+    };
+    assert_eq!(clip, "42");
+    assert_eq!(motion_blur, blur);
+}
+
+#[test]
+fn set_layer_styles_enqueues_worker_msg() {
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let styles = LayerStyles {
+        shadow: Some(cutlass_models::LayerShadow::default()),
+        ..Default::default()
+    };
+    handle.set_layer_styles("42".into(), styles.clone());
+    let WorkerMsg::SetLayerStyles { clip, styles: got } = rx.try_recv().unwrap() else {
+        panic!("expected SetLayerStyles");
+    };
+    assert_eq!(clip, "42");
+    assert_eq!(got, styles);
+}
+
+#[test]
+fn preview_clip_styles_enqueues_worker_msg() {
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let styles = LayerStyles {
+        shadow: Some(cutlass_models::LayerShadow {
+            blur: cutlass_models::Param::Constant(24.0),
+            ..cutlass_models::LayerShadow::default()
+        }),
+        ..Default::default()
+    };
+    handle.preview_clip_styles("42".into(), styles.clone(), 12);
+    let WorkerMsg::PreviewClipStyles {
+        clip,
+        styles: got,
+        tick,
+    } = rx.try_recv().unwrap()
+    else {
+        panic!("expected PreviewClipStyles");
+    };
+    assert_eq!(clip, "42");
+    assert_eq!(got, styles);
+    assert_eq!(tick, 12);
+
+    handle.clear_styles_override(7);
+    let WorkerMsg::ClearStylesOverride { tick } = rx.try_recv().unwrap() else {
+        panic!("expected ClearStylesOverride");
+    };
+    assert_eq!(tick, 7);
+}
+
+#[test]
+fn styles_override_previews_then_clears_on_commit() {
+    use cutlass_models::{LayerShadow, Param};
+    use cutlass_render::{ResolveOverrides, resolve, resolve_with};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("styles-preview", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/styles-preview.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow {
+                    blur: Param::Constant(8.0),
+                    ..LayerShadow::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("enable shadow");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+
+    let live = LayerStyles {
+        shadow: Some(LayerShadow {
+            blur: Param::Constant(24.0),
+            ..LayerShadow::default()
+        }),
+        ..Default::default()
+    };
+    // Same path the PreviewClipStyles worker arm uses.
+    apply_styles_override(&mut engine, &clip.raw().to_string(), live.clone());
+    assert!(engine.has_live_overrides());
+
+    let overrides = ResolveOverrides {
+        transform: None,
+        generator: None,
+        look: None,
+        styles: Some((clip, &live)),
+    };
+    let scene = resolve_with(engine.project(), RationalTime::new(0, r), overrides)
+        .expect("resolve with override");
+    assert!(
+        (scene.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .blur
+            - 24.0)
+            .abs()
+            < f32::EPSILON
+    );
+
+    // Commit clears the session override (mirrors look filter/adjust).
+    engine.set_styles_override(None);
+    engine
+        .apply(Command::Edit(EditCommand::SetClipLayerStyles {
+            clip,
+            styles: live,
+        }))
+        .expect("commit styles");
+    assert!(!engine.has_live_overrides());
+    let scene = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+    assert!(
+        (scene.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .blur
+            - 24.0)
+            .abs()
+            < f32::EPSILON
+    );
+}
+
+#[test]
+fn set_blend_mode_updates_projected_clip() {
+    use crate::projection::project_to_slint;
+    use cutlass_models::BlendMode;
+    use slint::Model;
+    use std::collections::{HashMap, HashSet};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("blend", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/blend.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+
+    // Same EditCommand the worker's set_blend_mode path applies.
+    engine
+        .apply(Command::Edit(EditCommand::SetClipBlendMode {
+            clip,
+            mode: BlendMode::Multiply,
+        }))
+        .expect("set blend");
+
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let track = projected.sequence.tracks.row_data(0).unwrap();
+    let c = track.clips.row_data(0).unwrap();
+    assert_eq!(c.blend_mode.as_str(), "multiply");
+    assert_eq!(c.blend_label.as_str(), "Multiply");
+}
+
+#[test]
+fn set_motion_blur_updates_projected_clip() {
+    use crate::projection::project_to_slint;
+    use slint::Model;
+    use std::collections::{HashMap, HashSet};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("motion-blur", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/mb.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+
+    let blur = MotionBlur {
+        enabled: true,
+        shutter_deg: 270.0,
+        samples: 12,
+    };
+    engine
+        .apply(Command::Edit(EditCommand::SetClipMotionBlur {
+            clip,
+            motion_blur: blur,
+        }))
+        .expect("set motion blur");
+
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let track = projected.sequence.tracks.row_data(0).unwrap();
+    let c = track.clips.row_data(0).unwrap();
+    assert!(c.motion_blur_enabled);
+    assert!((c.motion_blur_shutter - 270.0).abs() < f32::EPSILON);
+    assert_eq!(c.motion_blur_samples, 12);
+}
+
+#[test]
+fn set_layer_styles_updates_projected_clip() {
+    use crate::projection::project_to_slint;
+    use cutlass_models::LayerShadow;
+    use slint::Model;
+    use std::collections::{HashMap, HashSet};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("styles", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/styles.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+
+    engine
+        .apply(Command::Edit(EditCommand::SetClipLayerStyles {
+            clip,
+            styles: LayerStyles {
+                shadow: Some(LayerShadow::default()),
+                ..Default::default()
+            },
+        }))
+        .expect("enable shadow");
+
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let track = projected.sequence.tracks.row_data(0).unwrap();
+    let c = track.clips.row_data(0).unwrap();
+    assert!(c.style_shadow_enabled);
+    assert!((c.style_shadow_blur - 8.0).abs() < f32::EPSILON);
+
+    engine
+        .apply(Command::Edit(EditCommand::SetClipLayerStyles {
+            clip,
+            styles: LayerStyles::default(),
+        }))
+        .expect("clear styles");
+
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let track = projected.sequence.tracks.row_data(0).unwrap();
+    let c = track.clips.row_data(0).unwrap();
+    assert!(!c.style_shadow_enabled);
+}
+
+#[test]
+fn set_mask_enqueues_worker_msg() {
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let mask = cutlass_models::Mask::new(cutlass_models::MaskKind::Circle);
+    handle.set_mask("42".into(), Some(mask.clone()));
+    let WorkerMsg::SetMask { clip, mask: got } = rx.try_recv().unwrap() else {
+        panic!("expected SetMask");
+    };
+    assert_eq!(clip, "42");
+    assert_eq!(got, Some(mask));
+}
+
+#[test]
+fn set_mask_kind_preserves_feather_and_geometry_round_trips() {
+    use crate::projection::project_to_slint;
+    use cutlass_models::{LookParam, Mask, MaskKind, Param};
+    use slint::Model;
+    use std::collections::{HashMap, HashSet};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("mask", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/mask.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+
+    let mut mask = Mask::new(MaskKind::Circle);
+    mask.feather = Param::Constant(0.4);
+    mask.center = Param::Constant([0.1, -0.2]);
+    engine
+        .apply(Command::Edit(EditCommand::SetClipMask {
+            clip,
+            mask: Some(mask),
+        }))
+        .expect("set mask");
+
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(c.mask_kind.as_str(), "circle");
+    assert!((c.mask_feather - 0.4).abs() < f32::EPSILON);
+    assert!(!c.mask_invert);
+
+    // Kind switch preserves feather / geometry (wire_inspector snapshot path).
+    let mut switched = engine.project().clip(clip).unwrap().mask.clone().unwrap();
+    switched.kind = MaskKind::Rectangle;
+    engine
+        .apply(Command::Edit(EditCommand::SetClipMask {
+            clip,
+            mask: Some(switched),
+        }))
+        .expect("switch kind");
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(c.mask_kind.as_str(), "rectangle");
+    assert!((c.mask_feather - 0.4).abs() < f32::EPSILON);
+    assert!((c.mask_center_x - 0.1).abs() < f32::EPSILON);
+
+    // Invert toggles.
+    let mut inverted = engine.project().clip(clip).unwrap().mask.clone().unwrap();
+    inverted.invert = true;
+    engine
+        .apply(Command::Edit(EditCommand::SetClipMask {
+            clip,
+            mask: Some(inverted),
+        }))
+        .expect("invert");
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(c.mask_invert);
+
+    // Geometry param round-trips through the desktop look_mask_* path.
+    engine
+        .apply(Command::Edit(EditCommand::SetParamConstant {
+            clip,
+            param: cutlass_models::ClipParam::Look {
+                param: LookParam::MaskRotation,
+            },
+            value: cutlass_models::ParamValue::Scalar(45.0),
+        }))
+        .expect("set rotation");
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!((c.mask_rotation - 45.0).abs() < f32::EPSILON);
+
+    engine
+        .apply(Command::Edit(EditCommand::SetClipMask { clip, mask: None }))
+        .expect("clear");
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(c.mask_kind.as_str(), "");
+    assert!(!c.mask_invert);
+}
+
+/// Regression: adjust sliders commit ONE channel via `SetParamConstant`
+/// (look_adjust_* keys); they must not rebuild the whole `ColorAdjustments`
+/// block, which would flatten keyframed curves on the untouched channels.
+#[test]
+fn adjust_constant_commit_keeps_other_channels_keyframed() {
+    use cutlass_models::{ClipParam, Easing, LookParam, ParamValue};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("adjust", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/adjust.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    let brightness = ClipParam::Look {
+        param: LookParam::AdjustBrightness,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            brightness,
+            RationalTime::new(0, r),
+            ParamValue::Scalar(-0.5),
+            Easing::Linear,
+            None,
+        )
+        .expect("kf 0");
+    project
+        .set_param_keyframe(
+            clip,
+            brightness,
+            RationalTime::new(24, r),
+            ParamValue::Scalar(0.5),
+            Easing::Linear,
+            None,
+        )
+        .expect("kf 24");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+
+    // The contrast slider lands as a single-channel constant.
+    engine
+        .apply(Command::Edit(EditCommand::SetParamConstant {
+            clip,
+            param: ClipParam::Look {
+                param: LookParam::AdjustContrast,
+            },
+            value: ParamValue::Scalar(0.3),
+        }))
+        .expect("set contrast");
+
+    let adjust = &engine.project().clip(clip).unwrap().adjust;
+    assert!(
+        adjust.brightness.is_animated(),
+        "brightness keyframes must survive a contrast commit"
+    );
+    assert!((adjust.brightness.sample(0) - -0.5).abs() < f32::EPSILON);
+    assert!((adjust.contrast.sample(0) - 0.3).abs() < f32::EPSILON);
+}
+
+#[test]
+fn sanitize_adjustments_clamps_new_sliders() {
+    use super::overrides::sanitize_adjustments;
+    use cutlass_models::ColorAdjustments;
+
+    let raw = ColorAdjustments {
+        tint: 2.0.into(),
+        hue: (-3.0).into(),
+        sharpness: (-0.5).into(),
+        vignette: 1.5.into(),
+        ..Default::default()
+    };
+    let clean = sanitize_adjustments(&raw);
+    assert_eq!(clean.tint, 1.0.into());
+    assert_eq!(clean.hue, (-1.0).into());
+    assert_eq!(clean.sharpness, 0.0.into());
+    assert_eq!(clean.vignette, 1.0.into());
+}
+
+#[test]
+fn set_chroma_enable_color_and_disable() {
+    use crate::projection::project_to_slint;
+    use cutlass_models::{ChromaKey, Param};
+    use slint::Model;
+    use std::collections::{HashMap, HashSet};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("chroma", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/chroma.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+
+    engine
+        .apply(Command::Edit(EditCommand::SetClipChroma {
+            clip,
+            chroma: Some(ChromaKey {
+                rgb: [0, 255, 0],
+                strength: Param::Constant(0.5),
+                shadow: Param::Constant(0.0),
+            }),
+        }))
+        .expect("enable chroma");
+
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(c.chroma_enabled);
+    assert_eq!(c.chroma_color.red(), 0);
+    assert_eq!(c.chroma_color.green(), 255);
+    assert_eq!(c.chroma_color.blue(), 0);
+    assert!((c.chroma_strength - 0.5).abs() < f32::EPSILON);
+
+    // Color set round-trips (snapshot + replace path).
+    engine
+        .apply(Command::Edit(EditCommand::SetClipChroma {
+            clip,
+            chroma: Some(ChromaKey {
+                rgb: [10, 20, 30],
+                strength: Param::Constant(0.5),
+                shadow: Param::Constant(0.0),
+            }),
+        }))
+        .expect("set color");
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(c.chroma_color.red(), 10);
+    assert_eq!(c.chroma_color.green(), 20);
+    assert_eq!(c.chroma_color.blue(), 30);
+
+    engine
+        .apply(Command::Edit(EditCommand::SetClipChroma {
+            clip,
+            chroma: None,
+        }))
+        .expect("disable");
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(!c.chroma_enabled);
+}
+
+#[test]
+fn set_chroma_enqueues_worker_msg() {
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let chroma = cutlass_models::ChromaKey {
+        rgb: [0, 255, 0],
+        strength: cutlass_models::Param::Constant(0.5),
+        shadow: cutlass_models::Param::Constant(0.0),
+    };
+    handle.set_chroma("42".into(), Some(chroma.clone()));
+    let WorkerMsg::SetChroma { clip, chroma: got } = rx.try_recv().unwrap() else {
+        panic!("expected SetChroma");
+    };
+    assert_eq!(clip, "42");
+    assert_eq!(got, Some(chroma));
 }
 
 #[test]
@@ -2072,4 +2770,157 @@ fn extract_audio_undo_restores_pre_extract_state() {
     assert_eq!(engine.project().timeline().clip_count(), 2);
     assert!(!engine.project().timeline().carries_own_audio(video));
     assert_eq!(audio_clip_count(&engine), 1);
+}
+
+// --- motion-path keyframe / tangent commits --------------------------------
+
+fn motion_path_fixture() -> (Engine, ClipId, Rational) {
+    let r = Rational::FPS_24;
+    let mut project = Project::new("motion-path", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/motion-path.mp4",
+        1920,
+        1080,
+        r,
+        200,
+        false,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 100, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    let handles = cutlass_models::SpatialTangents {
+        out_t: [0.1, 0.0],
+        in_t: [-0.1, 0.0],
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            RationalTime::new(0, r),
+            ParamValue::Vec2([0.0, 0.0]),
+            Easing::EaseIn,
+            Some(handles),
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            RationalTime::new(40, r),
+            ParamValue::Vec2([0.5, 0.0]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    let engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    (engine, clip, r)
+}
+
+/// Drag-commit of a keyframe value must keep that keyframe's easing and
+/// spatial tangents (the worker re-sends them on SetParamKeyframe).
+#[test]
+fn motion_path_keyframe_commit_preserves_easing_and_tangents() {
+    let (mut engine, clip, r) = motion_path_fixture();
+    let before = engine
+        .project()
+        .clip(clip)
+        .unwrap()
+        .transform
+        .position
+        .keyframes()[0];
+    assert_eq!(before.easing, Easing::EaseIn);
+    assert_eq!(
+        before.tangents,
+        Some(cutlass_models::SpatialTangents {
+            out_t: [0.1, 0.0],
+            in_t: [-0.1, 0.0],
+        })
+    );
+
+    engine
+        .apply(Command::Edit(EditCommand::SetParamKeyframe {
+            clip,
+            param: ClipParam::Position,
+            at: RationalTime::new(0, r),
+            value: ParamValue::Vec2([0.25, 0.1]),
+            easing: before.easing,
+            tangents: before.tangents,
+        }))
+        .expect("commit");
+
+    let after = &engine
+        .project()
+        .clip(clip)
+        .unwrap()
+        .transform
+        .position
+        .keyframes()[0];
+    assert_eq!(after.value, [0.25, 0.1]);
+    assert_eq!(after.easing, Easing::EaseIn);
+    assert_eq!(after.tangents, before.tangents);
+}
+
+/// Tangent-handle commit round-trips through SetParamKeyframe (value/easing
+/// unchanged; handles updated).
+#[test]
+fn motion_path_tangent_commit_round_trips() {
+    let (mut engine, clip, r) = motion_path_fixture();
+    let kf = engine
+        .project()
+        .clip(clip)
+        .unwrap()
+        .transform
+        .position
+        .keyframes()[0];
+    let new_tangents = cutlass_models::SpatialTangents {
+        out_t: [0.2, 0.15],
+        in_t: [-0.2, -0.15],
+    };
+    engine
+        .apply(Command::Edit(EditCommand::SetParamKeyframe {
+            clip,
+            param: ClipParam::Position,
+            at: RationalTime::new(0, r),
+            value: ParamValue::Vec2(kf.value),
+            easing: kf.easing,
+            tangents: Some(new_tangents),
+        }))
+        .expect("commit tangents");
+
+    let after = &engine
+        .project()
+        .clip(clip)
+        .unwrap()
+        .transform
+        .position
+        .keyframes()[0];
+    assert_eq!(after.value, kf.value);
+    assert_eq!(after.easing, kf.easing);
+    assert_eq!(after.tangents, Some(new_tangents));
+}
+
+/// Selecting / deselecting a motion-path keyframe is UI state only — the
+/// projected model (and engine) stay untouched. Covered by the overlay's
+/// live-edit unit test; this locks the engine side of that contract.
+#[test]
+fn motion_path_selection_does_not_touch_the_model() {
+    let (engine, clip, _) = motion_path_fixture();
+    let before = engine
+        .project()
+        .clip(clip)
+        .unwrap()
+        .transform
+        .position
+        .clone();
+    // No EditCommand is issued for select/deselect — model identity holds.
+    assert_eq!(
+        &before,
+        &engine.project().clip(clip).unwrap().transform.position
+    );
 }

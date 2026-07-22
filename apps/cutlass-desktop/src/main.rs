@@ -1,4 +1,3 @@
-mod account;
 mod agent;
 mod agent_app_control;
 mod agent_jobs;
@@ -16,6 +15,7 @@ mod cloud;
 mod download_safety;
 mod drafts;
 mod external;
+mod graph_editor;
 mod inspector;
 mod interaction;
 mod lottie_stickers;
@@ -25,6 +25,7 @@ mod params;
 mod paths;
 mod placement;
 mod preview_gesture;
+mod preview_motion_path;
 mod preview_select;
 mod preview_view;
 mod preview_worker;
@@ -42,6 +43,7 @@ mod timecode;
 mod timeline;
 mod timeline_map;
 mod transport;
+mod updates;
 mod window;
 
 use slint::BackendSelector;

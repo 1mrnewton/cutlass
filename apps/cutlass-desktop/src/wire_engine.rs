@@ -39,7 +39,7 @@ pub(crate) struct EngineHandles {
     _cloud_worker: crate::cloud::CloudWorker,
     _templates_worker: crate::templates::TemplatesWorker,
     _ai_media_worker: crate::ai_media::AiMediaWorker,
-    _account_worker: crate::account::AccountWorker,
+    _updates_worker: crate::updates::UpdatesWorker,
     _text_presets_worker: crate::text_presets::TextPresetsWorker,
     _lottie_worker: crate::lottie_stickers::LottieWorker,
     _sfx_worker: crate::sfx::SfxWorker,
@@ -256,27 +256,15 @@ pub(crate) fn wire_engine(
         ai_backend.on_refresh_route(move || route_handle.refresh_route());
     }
 
-    // Cutlass account (Settings > Account + launch update nudge): device-
-    // flow sign-in, balance, the website hand-off for credits, and the
-    // update check on their own thread (src/account.rs); tokens live in
-    // the OS keychain.
-    let account_worker =
-        account::AccountWorker::spawn(app.as_weak()).map_err(slint::PlatformError::Other)?;
+    // Launch-screen update nudge: anonymous latest-version check on its
+    // own thread (src/updates.rs).
+    let updates_worker =
+        updates::UpdatesWorker::spawn(app.as_weak()).map_err(slint::PlatformError::Other)?;
     {
-        let account_backend = app.global::<AccountBackend>();
-        let sign_in_handle = account_worker.handle();
-        account_backend.on_sign_in(move || sign_in_handle.sign_in());
-        let sign_out_handle = account_worker.handle();
-        account_backend.on_sign_out(move || sign_out_handle.sign_out());
-        let balance_handle = account_worker.handle();
-        account_backend.on_refresh_balance(move || balance_handle.refresh_balance());
-        let buy_handle = account_worker.handle();
-        account_backend.on_buy_credits(move || buy_handle.buy_credits());
-        let update_handle = account_worker.handle();
-        account_backend.on_open_update(move || update_handle.open_update());
-        // Restore any keychain session and run the update check now, in the
-        // background — the launch screen renders regardless.
-        account_worker.handle().init();
+        let update_backend = app.global::<UpdateBackend>();
+        let open_handle = updates_worker.handle();
+        update_backend.on_open_update(move || open_handle.open_update());
+        updates_worker.handle().check();
     }
 
     // Animated text presets (Library > Text > Presets): catalog fetches on
@@ -435,6 +423,14 @@ pub(crate) fn wire_engine(
 
     let agent_cancel = agent_worker.handle();
     agent_store.on_cancel(move || agent_cancel.cancel());
+
+    agent_store.on_copy_text(move |text| {
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text.as_str()))
+        {
+            Ok(()) => {}
+            Err(err) => tracing::warn!(error = %err, "failed to copy agent message"),
+        }
+    });
 
     let agent_approve = agent_worker.handle();
     agent_store.on_approve_system_tool(move || agent_approve.approve_system_tool());
@@ -828,7 +824,7 @@ pub(crate) fn wire_engine(
         _cloud_worker: cloud_worker,
         _templates_worker: templates_worker,
         _ai_media_worker: ai_media_worker,
-        _account_worker: account_worker,
+        _updates_worker: updates_worker,
         _text_presets_worker: text_presets_worker,
         _lottie_worker: lottie_worker,
         _sfx_worker: sfx_worker,

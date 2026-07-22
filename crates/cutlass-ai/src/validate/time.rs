@@ -1,4 +1,5 @@
 use super::*;
+use crate::wire::{WireLookParam, WireShapeParam, WireStyleParam, WireTextParam};
 
 // --- seconds → ticks ---------------------------------------------------------
 
@@ -26,44 +27,210 @@ fn gcd(mut a: i32, mut b: i32) -> i32 {
     a.max(1)
 }
 
-pub(super) fn clip_param(param: WireClipParam) -> ClipParam {
-    match param {
-        WireClipParam::Position => ClipParam::Position,
-        WireClipParam::Scale => ClipParam::Scale,
-        WireClipParam::Rotation => ClipParam::Rotation,
-        WireClipParam::Opacity => ClipParam::Opacity,
-        WireClipParam::Volume => ClipParam::Volume,
+/// Lower optional wire spatial handles into model [`SpatialTangents`].
+/// Either handle alone is enough to mark a curved segment; omitted sides
+/// default to zero. Rejected on non-position params and out-of-range values.
+pub(super) fn spatial_tangents(
+    tangent_out: Option<[f64; 2]>,
+    tangent_in: Option<[f64; 2]>,
+    param: &WireClipParam,
+) -> Result<Option<cutlass_models::SpatialTangents>, Rejection> {
+    if tangent_out.is_none() && tangent_in.is_none() {
+        return Ok(None);
     }
+    if *param != WireClipParam::Position {
+        return Err(Rejection::new(
+            "spatial tangents are only supported on position",
+        ));
+    }
+    let to_comp = |v: f64, axis: &str| -> Result<f32, Rejection> {
+        if !v.is_finite() {
+            return Err(Rejection::new(format!(
+                "spatial tangent {axis} must be finite (got {v})"
+            )));
+        }
+        let f = v as f32;
+        if f.abs() > 4.0 {
+            return Err(Rejection::new(format!(
+                "spatial tangent {axis} = {f} is outside ±4.0 canvas fractions"
+            )));
+        }
+        Ok(f)
+    };
+    let out_t = match tangent_out {
+        Some([x, y]) => [to_comp(x, "out.x")?, to_comp(y, "out.y")?],
+        None => [0.0, 0.0],
+    };
+    let in_t = match tangent_in {
+        Some([x, y]) => [to_comp(x, "in.x")?, to_comp(y, "in.y")?],
+        None => [0.0, 0.0],
+    };
+    let tangents = cutlass_models::SpatialTangents { out_t, in_t };
+    tangents
+        .validate()
+        .map_err(|e| Rejection::new(format!("invalid spatial tangents: {e}")))?;
+    Ok(Some(tangents))
 }
 
-pub(super) fn easing(easing: Option<WireEasing>) -> Easing {
-    match easing {
+pub(super) fn easing(easing: Option<WireEasing>) -> Result<Easing, Rejection> {
+    let easing = match easing {
         None | Some(WireEasing::Linear) => Easing::Linear,
         Some(WireEasing::EaseIn) => Easing::EaseIn,
         Some(WireEasing::EaseOut) => Easing::EaseOut,
         Some(WireEasing::EaseInOut) => Easing::EaseInOut,
-    }
+        Some(WireEasing::Snappy) => Easing::from_preset_id("snappy").unwrap_or(Easing::Linear),
+        Some(WireEasing::Overshoot) => {
+            Easing::from_preset_id("overshoot").unwrap_or(Easing::Linear)
+        }
+        Some(WireEasing::Anticipate) => {
+            Easing::from_preset_id("anticipate").unwrap_or(Easing::Linear)
+        }
+        Some(WireEasing::Hold) => Easing::Hold,
+        Some(WireEasing::Bezier { points }) => Easing::Bezier { points },
+    };
+    easing
+        .validate()
+        .map_err(|e| Rejection::new(format!("invalid easing: {e}")))?;
+    Ok(easing)
 }
 
-/// Build the typed parameter value from the wire's `value` / `position`
-/// fields, rejecting the wrong shape with a message naming the right one.
+/// Build the typed parameter value from the wire's `value` / `position` /
+/// `rgba` / `rect` fields, rejecting the wrong shape with a message naming
+/// the right one. Effect params look up the catalog kind on `clip`.
 pub(super) fn param_value(
-    param: WireClipParam,
+    clip: &Clip,
+    wire_clip: u64,
+    param: &WireClipParam,
     value: Option<f64>,
     position: Option<[f64; 2]>,
+    rgba: Option<[u8; 4]>,
+    rect: Option<[f64; 4]>,
 ) -> Result<ParamValue, Rejection> {
     match param {
-        WireClipParam::Position => position
+        WireClipParam::Effect { index, param: name } => {
+            let (_, _, pspec) = effect_param_slot(clip, *index, name, wire_clip)?;
+            match pspec.kind {
+                cutlass_models::EffectParamKind::Scalar => {
+                    value.map(|v| ParamValue::Scalar(v as f32)).ok_or_else(|| {
+                        Rejection::new(format!(
+                            "effect param '{name}' is a scalar; pass 'value' (a number)"
+                        ))
+                    })
+                }
+                cutlass_models::EffectParamKind::Vec2 => position
+                    .map(|p| ParamValue::Vec2([p[0] as f32, p[1] as f32]))
+                    .ok_or_else(|| {
+                        Rejection::new(format!(
+                            "effect param '{name}' is a vec2; pass 'position' as [x, y]"
+                        ))
+                    }),
+                cutlass_models::EffectParamKind::Color => {
+                    rgba.map(ParamValue::Color).ok_or_else(|| {
+                        Rejection::new(format!(
+                            "effect param '{name}' is a color; pass 'rgba' as \
+                             [red, green, blue, alpha]"
+                        ))
+                    })
+                }
+            }
+        }
+        WireClipParam::Crop => {
+            let r = rect.ok_or_else(|| {
+                Rejection::new("crop param needs the 'rect' argument as [x, y, w, h]")
+            })?;
+            let crop = CropRect {
+                x: r[0] as f32,
+                y: r[1] as f32,
+                w: r[2] as f32,
+                h: r[3] as f32,
+            };
+            crop.validate().map_err(|e| Rejection::new(e.to_string()))?;
+            Ok(ParamValue::Rect([crop.x, crop.y, crop.w, crop.h]))
+        }
+        WireClipParam::Position
+        | WireClipParam::AnchorPoint
+        | WireClipParam::Style {
+            param: WireStyleParam::ShadowOffset,
+        }
+        | WireClipParam::Look {
+            param: WireLookParam::MaskCenter | WireLookParam::MaskSize,
+        } => position
             .map(|p| ParamValue::Vec2([p[0] as f32, p[1] as f32]))
             .ok_or_else(|| {
-                Rejection::new("param 'position' needs the 'position' argument as [x, y]")
+                Rejection::new(
+                    "position, anchor_point, style shadow_offset, and look \
+                     mask_center/mask_size params need the 'position' argument as [x, y]",
+                )
             }),
-        WireClipParam::Scale
-        | WireClipParam::Rotation
+        WireClipParam::Scale => {
+            // Uniform number via `value`, or per-axis via `position: [x, y]`.
+            if let Some(p) = position {
+                Ok(ParamValue::Vec2([p[0] as f32, p[1] as f32]))
+            } else if let Some(v) = value {
+                Ok(ParamValue::Scalar(v as f32))
+            } else {
+                Err(Rejection::new(
+                    "scale param needs 'value' (uniform number) or 'position' as [x, y]",
+                ))
+            }
+        }
+        WireClipParam::Rotation
         | WireClipParam::Opacity
-        | WireClipParam::Volume => value.map(|v| ParamValue::Scalar(v as f32)).ok_or_else(|| {
+        | WireClipParam::Volume
+        | WireClipParam::Pan
+        | WireClipParam::Speed
+        | WireClipParam::Shape {
+            param:
+                WireShapeParam::Width
+                | WireShapeParam::Height
+                | WireShapeParam::CornerRadius
+                | WireShapeParam::InnerRatio
+                | WireShapeParam::StrokeWidth,
+        }
+        | WireClipParam::Text {
+            param:
+                WireTextParam::Size
+                | WireTextParam::LetterSpacing
+                | WireTextParam::LineSpacing
+                | WireTextParam::StrokeWidth
+                | WireTextParam::ShadowBlur
+                | WireTextParam::ShadowDistance
+                | WireTextParam::BackgroundRadius,
+        }
+        | WireClipParam::Look { .. }
+        | WireClipParam::Style {
+            param:
+                WireStyleParam::ShadowBlur
+                | WireStyleParam::GlowRadius
+                | WireStyleParam::GlowIntensity
+                | WireStyleParam::OutlineWidth
+                | WireStyleParam::BackgroundPadding
+                | WireStyleParam::BackgroundRadius,
+        } => value.map(|v| ParamValue::Scalar(v as f32)).ok_or_else(|| {
             Rejection::new(
                 format!("param '{param:?}' needs the 'value' argument (a number)",).to_lowercase(),
+            )
+        }),
+        WireClipParam::Shape {
+            param: WireShapeParam::Fill | WireShapeParam::StrokeColor,
+        }
+        | WireClipParam::Text {
+            param:
+                WireTextParam::Fill
+                | WireTextParam::StrokeColor
+                | WireTextParam::ShadowColor
+                | WireTextParam::BackgroundColor,
+        }
+        | WireClipParam::Style {
+            param:
+                WireStyleParam::ShadowColor
+                | WireStyleParam::GlowColor
+                | WireStyleParam::OutlineColor
+                | WireStyleParam::BackgroundColor,
+        } => rgba.map(ParamValue::Color).ok_or_else(|| {
+            Rejection::new(
+                format!("param '{param:?}' needs the 'rgba' argument as [red, green, blue, alpha]",)
+                    .to_lowercase(),
             )
         }),
     }

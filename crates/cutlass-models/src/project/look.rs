@@ -10,8 +10,8 @@ use crate::effects::EffectInstance;
 use crate::error::ModelError;
 use crate::ids::{ClipId, MediaId, ProjectId, TrackId};
 use crate::look::{
-    AnimationRef, AnimationSlot, AudioRole, ChromaKey, ColorAdjustments, Filter, Lut, Mask,
-    StabilizeLevel, animation_spec,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, ChromaKey, ColorAdjustments, Filter,
+    LayerStyles, Lut, Mask, MotionBlur, StabilizeLevel, animation_spec,
 };
 use crate::media::MediaSource;
 use crate::metadata::ProjectMetadata;
@@ -84,6 +84,50 @@ impl Project {
             .clip_mut(clip_id)
             .expect("clip existence checked above")
             .mask = mask;
+        Ok(())
+    }
+
+    /// Set how the clip composites over the stack below (M-blend). Visual
+    /// clips only; audio has nothing to blend.
+    pub fn set_blend_mode(&mut self, clip_id: ClipId, mode: BlendMode) -> Result<(), ModelError> {
+        self.require_visual(clip_id, "a blend mode")?;
+        self.timeline
+            .clip_mut(clip_id)
+            .expect("clip existence checked above")
+            .blend_mode = mode;
+        Ok(())
+    }
+
+    /// Set per-clip motion blur (temporal supersampling of the animated
+    /// transform). Visual clips only; validated before store. Params are
+    /// plain values — not animatable.
+    pub fn set_motion_blur(
+        &mut self,
+        clip_id: ClipId,
+        motion_blur: MotionBlur,
+    ) -> Result<(), ModelError> {
+        self.require_visual(clip_id, "motion blur")?;
+        motion_blur.validate()?;
+        self.timeline
+            .clip_mut(clip_id)
+            .expect("clip existence checked above")
+            .motion_blur = motion_blur;
+        Ok(())
+    }
+
+    /// Set layer-quad styles (shadow/glow/outline/background) on a visual
+    /// clip. Empty styles clear every block; values are validated first.
+    pub fn set_layer_styles(
+        &mut self,
+        clip_id: ClipId,
+        styles: LayerStyles,
+    ) -> Result<(), ModelError> {
+        self.require_visual(clip_id, "layer styles")?;
+        styles.validate()?;
+        self.timeline
+            .clip_mut(clip_id)
+            .expect("clip existence checked above")
+            .styles = styles;
         Ok(())
     }
 
@@ -197,7 +241,7 @@ impl Project {
         animation: Option<AnimationRef>,
     ) -> Result<(), ModelError> {
         self.require_visual(clip_id, "animations")?;
-        if let Some(animation) = &animation {
+        let animation = if let Some(animation) = animation {
             let spec = animation_spec(&animation.id).ok_or_else(|| {
                 ModelError::InvalidParam(format!("unknown animation '{}'", animation.id))
             })?;
@@ -219,7 +263,10 @@ impl Project {
                     )));
                 }
             }
-        }
+            Some(animation.normalized_for(spec)?)
+        } else {
+            None
+        };
         let clip = self
             .timeline
             .clip_mut(clip_id)

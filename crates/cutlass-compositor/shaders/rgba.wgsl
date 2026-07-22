@@ -17,8 +17,10 @@ struct Placement {
     uv_rect: vec4<f32>,
     // Color grade: brightness, contrast, saturation, enabled (0 | 1).
     grade_adj0: vec4<f32>,
-    // Color grade: exposure, temperature, tint, pad.
+    // Color grade: exposure, temperature, tint, hue.
     grade_adj1: vec4<f32>,
+    // Color grade: highlights, shadows, sharpness, vignette.
+    grade_adj2: vec4<f32>,
 }
 
 @group(0) @binding(0) var tex: texture_2d<f32>;
@@ -28,6 +30,7 @@ struct Placement {
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    @location(1) quad_uv: vec2<f32>,
 }
 
 fn quad_corner(vertex_index: u32) -> vec2<f32> {
@@ -51,6 +54,7 @@ fn vs(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         1.0,
     );
     out.uv = mix(p.uv_rect.xy, p.uv_rect.zw, c + vec2(0.5, 0.5));
+    out.quad_uv = c + vec2(0.5, 0.5);
     return out;
 }
 
@@ -66,6 +70,8 @@ fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
     if premul.a > 0.0 {
         rgb = rgb / premul.a;
     }
-    rgb = apply_color_grade(rgb, p.grade_adj0, p.grade_adj1);
+    rgb = apply_color_grade(rgb, p.grade_adj0, p.grade_adj1, p.grade_adj2);
+    rgb = apply_grade_sharpness(rgb, in.uv, tex, samp, p.grade_adj2.z);
+    rgb = apply_grade_vignette(rgb, in.quad_uv, p.grade_adj2.w);
     return vec4(rgb * layer_a, layer_a);
 }

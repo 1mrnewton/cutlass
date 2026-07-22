@@ -166,7 +166,8 @@ fn bench_get_frame_solid(c: &mut Criterion) {
                     at: rt(tick),
                     value: ParamValue::Scalar(value),
                     easing: Easing::EaseInOut,
-                }))
+                tangents: None,
+            }))
                 .expect("keyframe");
         }
     }

@@ -131,7 +131,7 @@ impl Worker {
             preview_handle,
             cache,
             storage_layout,
-            base_url: crate::account::base_url(),
+            base_url: crate::cloud::base_url(),
             entries: Vec::new(),
         }
     }

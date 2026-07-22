@@ -158,6 +158,7 @@ pub fn resolve_drag_in_viewport(
         anchor_x: clip.transform_anchor_x,
         anchor_y: clip.transform_anchor_y,
         scale: clip.transform_scale,
+        scale_y: clip.transform_scale_y,
         rotation: clip.transform_rotation,
         opacity: clip.transform_opacity,
         snap_h,
@@ -257,6 +258,7 @@ pub fn resolve_scale_in_viewport(
         anchor_x: clip.transform_anchor_x,
         anchor_y: clip.transform_anchor_y,
         scale,
+        scale_y: scale,
         rotation: clip.transform_rotation,
         opacity: clip.transform_opacity,
         snap_h: false,
@@ -353,6 +355,7 @@ pub fn resolve_rotate_in_viewport(
         anchor_x: clip.transform_anchor_x,
         anchor_y: clip.transform_anchor_y,
         scale: clip.transform_scale,
+        scale_y: clip.transform_scale_y,
         rotation,
         opacity: clip.transform_opacity,
         snap_h: false,
@@ -387,6 +390,7 @@ pub fn nudge(
         anchor_x: clip.transform_anchor_x,
         anchor_y: clip.transform_anchor_y,
         scale: clip.transform_scale,
+        scale_y: clip.transform_scale_y,
         rotation: clip.transform_rotation,
         opacity: clip.transform_opacity,
         snap_h: false,
@@ -462,6 +466,7 @@ pub fn resolve_anchor_in_viewport(
         anchor_x: anchor_point[0],
         anchor_y: anchor_point[1],
         scale: clip.transform_scale,
+        scale_y: clip.transform_scale_y,
         rotation: clip.transform_rotation,
         opacity: clip.transform_opacity,
         snap_h: false,
@@ -499,6 +504,8 @@ mod tests {
             media_width: w,
             media_height: h,
             transform_scale: 1.0,
+            transform_scale_y: 1.0,
+            transform_scale_linked: true,
             transform_opacity: 1.0,
             transform_anchor_x: 0.5,
             transform_anchor_y: 0.5,
@@ -671,6 +678,8 @@ mod tests {
     fn scale_compounds_the_committed_scale() {
         let mut clip = media_clip("A", 1920, 1080);
         clip.transform_scale = 0.5;
+        clip.transform_scale_y = 0.5;
+        clip.transform_scale_linked = true;
         let seq = sequence(vec![track("1", vec![clip])]);
         // 200 → 300 px from center: ×1.5 on top of the committed 0.5.
         let r = resolve_scale(&seq, "A", 10, 680.0, 270.0, 780.0, 270.0, VW, VH);
@@ -793,6 +802,8 @@ mod tests {
 
         let mut scaled = base.clone();
         scaled.transform_scale = r.scale;
+        scaled.transform_scale_y = r.scale;
+        scaled.transform_scale_linked = true;
         let a1 =
             anchor_canvas_position(&clip_transform(&scaled), &clip_placement(&scaled, &canvas));
         assert!((a0[0] - a1[0]).abs() < 1e-2);
@@ -809,11 +820,13 @@ mod tests {
             ParamKeyframe {
                 tick: 0,
                 value_x: 1.0,
+                value_y: 1.0,
                 ..Default::default()
             },
             ParamKeyframe {
                 tick: 40,
                 value_x: 2.0,
+                value_y: 2.0,
                 ..Default::default()
             },
         ])));

@@ -104,7 +104,7 @@ impl Worker {
             backend_weak,
             registry,
             storage_layout,
-            base_url: crate::account::base_url(),
+            base_url: crate::cloud::base_url(),
         }
     }
 
@@ -243,8 +243,8 @@ pub fn generator_for(preset: &TextPreset) -> cutlass_models::Generator {
     };
     let style = cutlass_models::TextStyle {
         font: preset.font_family.clone(),
-        size: preset.font_size,
-        fill: preset.fill,
+        size: preset.font_size.into(),
+        fill: preset.fill.into(),
         ..Default::default()
     };
     cutlass_models::Generator::Text { content, style }
@@ -339,8 +339,8 @@ mod tests {
         match g {
             cutlass_models::Generator::Text { content, style } => {
                 assert_eq!(content, "NEON");
-                assert_eq!(style.size, 72.0);
-                assert_eq!(style.fill, [255, 64, 128, 255]);
+                assert_eq!(style.size.sample(0), 72.0);
+                assert_eq!(style.fill.sample(0), [255, 64, 128, 255]);
             }
             other => panic!("expected text generator, got {other:?}"),
         }

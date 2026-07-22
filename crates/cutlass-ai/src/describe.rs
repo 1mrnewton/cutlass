@@ -7,8 +7,10 @@
 //! editing. Output order is deterministic (stack order for tracks, start
 //! order for clips, id order for media) so eval tests can assert verbatim.
 
-use cutlass_models::{ClipSource, Generator, Project, Rational, Shape, Track};
+use cutlass_models::{ClipSource, Generator, Project, Rational, Scale2, Shape, Track};
 use serde::{Deserialize, Serialize};
+
+use crate::wire::WireScale;
 
 /// UI session state captured when the user hits send. This is how "the
 /// selected clip" and "at the playhead" resolve to ids and times.
@@ -119,6 +121,9 @@ pub struct ClipSummary {
     /// Audio gain multiplier (set_clip_audio); absent when 1.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<f64>,
+    /// Stereo pan (−1 left … +1 right); absent when centered (0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pan: Option<f64>,
     /// Fade-in seconds (set_clip_audio); absent when 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade_in: Option<f64>,
@@ -135,6 +140,10 @@ pub struct ClipSummary {
     /// Mirrored top-bottom (set_clip_crop); absent when not flipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flip_v: Option<bool>,
+    /// Placement scale (set_clip_transform): a bare number when uniform, or
+    /// `[x, y]` when split. Absent at the default identity (1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<WireScale>,
     /// Visual effects in chain order (add_effect); the index of each entry is
     /// what remove_effect / move_effect / set_effect_param address. Absent
     /// when empty.
@@ -144,12 +153,27 @@ pub struct ClipSummary {
     /// catalog id of the blend into the next clip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<String>,
-    /// Mask kind (set_clip_mask); absent when no mask.
+    /// Mask kind plus non-default geometry (set_clip_mask); absent when no mask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask: Option<String>,
     /// Filter preset id (set_clip_filter); absent when none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter: Option<String>,
+    /// Non-neutral manual adjust sliders (set_clip_adjustments), e.g.
+    /// "tint=0.25, sharpness=0.50"; absent when every slider is neutral.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjust: Option<String>,
+    /// Blend mode id (set_clip_blend_mode); absent when normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<String>,
+    /// Motion blur summary when enabled (set_motion_blur), e.g.
+    /// "shutter=180 samples=8"; absent when off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion_blur: Option<String>,
+    /// Active layer-style blocks (set_layer_styles), e.g. "shadow, outline";
+    /// absent when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub styles: Option<String>,
     /// Entrance animation id (set_clip_animation in slot); absent when none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation_in: Option<String>,
@@ -214,6 +238,34 @@ pub struct MediaSummary {
 
 fn seconds(ticks: i64, rate: Rational) -> f64 {
     ticks as f64 * rate.seconds_per_unit()
+}
+
+fn summarize_adjust(adjust: &cutlass_models::ColorAdjustments) -> Option<String> {
+    if adjust.is_neutral() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let push = |parts: &mut Vec<String>, name: &str, param: &cutlass_models::Param<f32>| {
+        if let Some(v) = param.constant()
+            && v != 0.0
+        {
+            parts.push(format!("{name}={v:.2}"));
+        } else if !matches!(param, cutlass_models::Param::Constant(_)) {
+            parts.push(format!("{name}=kf"));
+        }
+    };
+    push(&mut parts, "brightness", &adjust.brightness);
+    push(&mut parts, "contrast", &adjust.contrast);
+    push(&mut parts, "saturation", &adjust.saturation);
+    push(&mut parts, "exposure", &adjust.exposure);
+    push(&mut parts, "temperature", &adjust.temperature);
+    push(&mut parts, "tint", &adjust.tint);
+    push(&mut parts, "hue", &adjust.hue);
+    push(&mut parts, "highlights", &adjust.highlights);
+    push(&mut parts, "shadows", &adjust.shadows);
+    push(&mut parts, "sharpness", &adjust.sharpness);
+    push(&mut parts, "vignette", &adjust.vignette);
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 fn track_kind_name(track: &Track) -> &'static str {
@@ -335,19 +387,37 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                     speed_ramp: clip.has_speed_curve().then_some(true),
                     pitch_follows_speed: (!clip.preserve_pitch).then_some(true),
                     volume: clip.volume.constant().filter(|v| *v != 1.0).map(f64::from),
+                    pan: clip.pan.constant().filter(|v| *v != 0.0).map(f64::from),
                     fade_in: (clip.fade_in > 0).then(|| seconds(clip.fade_in, rate)),
                     fade_out: (clip.fade_out > 0).then(|| seconds(clip.fade_out, rate)),
-                    crop: (!clip.crop.is_full()).then(|| {
-                        let c = clip.crop;
-                        [
-                            f64::from(c.x),
-                            f64::from(c.y),
-                            f64::from(1.0 - c.x - c.w),
-                            f64::from(1.0 - c.y - c.h),
-                        ]
-                    }),
+                    crop: {
+                        // Constants: describe the stored framing. Keyframed:
+                        // sample at clip-relative 0 (playhead-aware describe
+                        // is a later pass).
+                        let c = clip.crop.sample(0);
+                        (!c.is_full() || clip.crop.is_animated()).then(|| {
+                            [
+                                f64::from(c.x),
+                                f64::from(c.y),
+                                f64::from(1.0 - c.x - c.w),
+                                f64::from(1.0 - c.y - c.h),
+                            ]
+                        })
+                    },
                     flip_h: clip.flip_h.then_some(true),
                     flip_v: clip.flip_v.then_some(true),
+                    scale: {
+                        let s = clip.transform.scale.sample(0);
+                        let interesting =
+                            s != Scale2::uniform(1.0) || clip.transform.scale.is_animated();
+                        interesting.then(|| {
+                            if s.is_uniform() {
+                                WireScale::Uniform(f64::from(s.x))
+                            } else {
+                                WireScale::Axes([f64::from(s.x), f64::from(s.y)])
+                            }
+                        })
+                    },
                     effects: clip
                         .effects
                         .iter()
@@ -370,15 +440,63 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                     transition: track
                         .transition_at(clip.id)
                         .map(|t| t.transition_id.clone()),
-                    mask: clip.mask.as_ref().map(|m| match m.kind {
-                        cutlass_models::MaskKind::Linear => "linear".to_string(),
-                        cutlass_models::MaskKind::Mirror => "mirror".to_string(),
-                        cutlass_models::MaskKind::Circle => "circle".to_string(),
-                        cutlass_models::MaskKind::Rectangle => "rectangle".to_string(),
-                        cutlass_models::MaskKind::Heart => "heart".to_string(),
-                        cutlass_models::MaskKind::Star => "star".to_string(),
+                    mask: clip.mask.as_ref().map(|m| {
+                        let kind = match m.kind {
+                            cutlass_models::MaskKind::Linear => "linear",
+                            cutlass_models::MaskKind::Mirror => "mirror",
+                            cutlass_models::MaskKind::Circle => "circle",
+                            cutlass_models::MaskKind::Rectangle => "rectangle",
+                            cutlass_models::MaskKind::Heart => "heart",
+                            cutlass_models::MaskKind::Star => "star",
+                        };
+                        let mut parts = vec![kind.to_string()];
+                        if let Some(c) = m.center.constant()
+                            && c != [0.0, 0.0]
+                        {
+                            parts.push(format!("center=[{:.2}, {:.2}]", c[0], c[1]));
+                        }
+                        if let Some(s) = m.size.constant()
+                            && s != [1.0, 1.0]
+                        {
+                            parts.push(format!("size=[{:.2}, {:.2}]", s[0], s[1]));
+                        }
+                        if let Some(r) = m.rotation.constant()
+                            && r != 0.0
+                        {
+                            parts.push(format!("rot={r:.0}"));
+                        }
+                        if let Some(r) = m.roundness.constant()
+                            && r != 0.0
+                        {
+                            parts.push(format!("round={r:.2}"));
+                        }
+                        parts.join(" ")
                     }),
                     filter: clip.filter.as_ref().map(|f| f.id.clone()),
+                    adjust: summarize_adjust(&clip.adjust),
+                    blend: (!clip.blend_mode.is_normal()).then(|| clip.blend_mode.id().to_string()),
+                    motion_blur: clip.motion_blur.enabled.then(|| {
+                        format!(
+                            "shutter={} samples={}",
+                            clip.motion_blur.shutter_deg, clip.motion_blur.samples
+                        )
+                    }),
+                    styles: {
+                        let mut blocks = Vec::new();
+                        if clip.styles.shadow.is_some() {
+                            blocks.push("shadow");
+                        }
+                        if clip.styles.glow.is_some() {
+                            blocks.push("glow");
+                        }
+                        if clip.styles.outline.is_some() {
+                            blocks.push("outline");
+                        }
+                        if clip.styles.background.is_some() {
+                            blocks.push("background");
+                        }
+                        (!blocks.is_empty()).then(|| blocks.join(", "))
+                    },
                     animation_in: clip.animation_in.as_ref().map(|a| a.id.clone()),
                     animation_out: clip.animation_out.as_ref().map(|a| a.id.clone()),
                     animation_combo: clip.animation_combo.as_ref().map(|a| a.id.clone()),

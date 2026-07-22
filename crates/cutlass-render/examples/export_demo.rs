@@ -48,8 +48,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // A centered title on its own text lane.
     let titles = project.add_track(TrackKind::Text, "Titles");
     let style = TextStyle {
-        size: 220.0,
-        fill: [240, 240, 255, 255],
+        size: 220.0.into(),
+        fill: [240, 240, 255, 255].into(),
         ..TextStyle::default()
     };
     project.add_generated(

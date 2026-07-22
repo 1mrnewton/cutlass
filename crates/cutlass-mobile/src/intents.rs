@@ -20,7 +20,8 @@ use cutlass_commands::{Command, EditCommand, EditOutcome, ProjectCommand};
 use cutlass_engine::{ApplyOutcome, Engine, EngineError};
 use cutlass_models::{
     AudioRole, Clip, ClipId, ClipParam, ClipSource, ClipTransform, Easing, Generator, MediaId,
-    ModelError, Param, ParamValue, Project, Rational, RationalTime, TimeRange, TrackId, TrackKind,
+    ModelError, Param, ParamValue, Project, Rational, RationalTime, Scale2, TimeRange, TrackId,
+    TrackKind,
 };
 
 /// Which clip edge a trim gesture drags.
@@ -703,7 +704,7 @@ fn add_pip(
         transform: ClipTransform {
             position: [0.0, -0.18],
             anchor_point: [0.5, 0.5],
-            scale: 0.5,
+            scale: 0.5.into(),
             rotation: 0.0,
             opacity: 1.0,
         },
@@ -1044,12 +1045,14 @@ fn duplicate(engine: &mut Engine, clip: ClipId) -> Result<serde_json::Value, Eng
                 fade_in: RationalTime::new(snapshot.fade_in, rate),
                 fade_out: RationalTime::new(snapshot.fade_out, rate),
             }))?;
-            if !snapshot.crop.is_full() || snapshot.flip_h || snapshot.flip_v {
+            let crop = snapshot.crop.sample(0);
+            if !crop.is_full() || snapshot.flip_h || snapshot.flip_v {
                 engine.apply(Command::Edit(EditCommand::SetClipCrop {
                     clip: new,
-                    crop: snapshot.crop,
+                    crop,
                     flip_h: snapshot.flip_h,
                     flip_v: snapshot.flip_v,
+                    at: None,
                 }))?;
             }
             new
@@ -1084,13 +1087,13 @@ fn copy_look(engine: &mut Engine, snapshot: &Clip, new: ClipId) -> Result<(), En
     if snapshot.mask.is_some() {
         engine.apply(Command::Edit(EditCommand::SetClipMask {
             clip: new,
-            mask: snapshot.mask,
+            mask: snapshot.mask.clone(),
         }))?;
     }
     if snapshot.chroma_key.is_some() {
         engine.apply(Command::Edit(EditCommand::SetClipChroma {
             clip: new,
-            chroma: snapshot.chroma_key,
+            chroma: snapshot.chroma_key.clone(),
         }))?;
     }
     if snapshot.stabilize.is_some() {
@@ -1108,7 +1111,7 @@ fn copy_look(engine: &mut Engine, snapshot: &Clip, new: ClipId) -> Result<(), En
     if !snapshot.adjust.is_neutral() {
         engine.apply(Command::Edit(EditCommand::SetClipAdjustments {
             clip: new,
-            adjust: snapshot.adjust,
+            adjust: snapshot.adjust.clone(),
         }))?;
     }
     for (slot, animation) in [
@@ -1400,7 +1403,7 @@ fn set_transform(
             // stores an offset from the center.
             position: [pos[0] - 0.5, pos[1] - 0.5],
             anchor_point: [0.5, 0.5],
-            scale,
+            scale: Scale2::uniform(scale),
             rotation: rotation_degrees,
             opacity,
         },
@@ -1432,12 +1435,13 @@ fn toggle_transform_keyframe(
 
     let has_kf = |param: &Param<f32>| param.keyframes().iter().any(|kf| kf.tick == rel);
     let has_kf2 = |param: &Param<[f32; 2]>| param.keyframes().iter().any(|kf| kf.tick == rel);
+    let has_kf_scale = |param: &Param<Scale2>| param.keyframes().iter().any(|kf| kf.tick == rel);
 
     let existing: Vec<ClipParam> = KEYFRAME_PARAMS
         .into_iter()
         .filter(|param| match param {
             ClipParam::Position => has_kf2(&snapshot.transform.position),
-            ClipParam::Scale => has_kf(&snapshot.transform.scale),
+            ClipParam::Scale => has_kf_scale(&snapshot.transform.scale),
             ClipParam::Rotation => has_kf(&snapshot.transform.rotation),
             ClipParam::Opacity => has_kf(&snapshot.transform.opacity),
             _ => false,
@@ -1448,9 +1452,14 @@ fn toggle_transform_keyframe(
     if existing.is_empty() {
         // Stamp the current pose across all four properties.
         let pose = snapshot.transform.sample(rel);
+        let scale_value = if pose.scale.is_uniform() {
+            ParamValue::Scalar(pose.scale.x)
+        } else {
+            ParamValue::Vec2([pose.scale.x, pose.scale.y])
+        };
         let stamps: [(ClipParam, ParamValue); 4] = [
             (ClipParam::Position, ParamValue::Vec2(pose.position)),
-            (ClipParam::Scale, ParamValue::Scalar(pose.scale)),
+            (ClipParam::Scale, scale_value),
             (ClipParam::Rotation, ParamValue::Scalar(pose.rotation)),
             (ClipParam::Opacity, ParamValue::Scalar(pose.opacity)),
         ];
@@ -1461,6 +1470,7 @@ fn toggle_transform_keyframe(
                 at: position,
                 value,
                 easing: Easing::Linear,
+                tangents: None,
             }))?;
         }
         Ok(serde_json::json!({ "clip": clip.raw(), "keyframed": true }))

@@ -940,13 +940,22 @@ fn rgba(c: [u8; 4]) -> String {
     format!("#{:02x}{:02x}{:02x}{:02x}", c[0], c[1], c[2], c[3])
 }
 
-fn param_name(param: wire::WireClipParam) -> &'static str {
+fn param_name(param: &wire::WireClipParam) -> String {
     match param {
-        wire::WireClipParam::Position => "position",
-        wire::WireClipParam::Scale => "scale",
-        wire::WireClipParam::Rotation => "rotation",
-        wire::WireClipParam::Opacity => "opacity",
-        wire::WireClipParam::Volume => "volume",
+        wire::WireClipParam::Position => "position".into(),
+        wire::WireClipParam::AnchorPoint => "anchor point".into(),
+        wire::WireClipParam::Scale => "scale".into(),
+        wire::WireClipParam::Rotation => "rotation".into(),
+        wire::WireClipParam::Opacity => "opacity".into(),
+        wire::WireClipParam::Crop => "crop".into(),
+        wire::WireClipParam::Volume => "volume".into(),
+        wire::WireClipParam::Pan => "pan".into(),
+        wire::WireClipParam::Speed => "speed".into(),
+        wire::WireClipParam::Effect { index, param } => format!("effect {index} {param}"),
+        wire::WireClipParam::Shape { param } => format!("shape {param:?}").to_lowercase(),
+        wire::WireClipParam::Text { param } => format!("text {param:?}").to_lowercase(),
+        wire::WireClipParam::Look { param } => format!("look {param:?}").to_lowercase(),
+        wire::WireClipParam::Style { param } => format!("style {param:?}").to_lowercase(),
     }
 }
 
@@ -954,22 +963,63 @@ fn param_name(param: wire::WireClipParam) -> &'static str {
 /// "[0.25, -0.10]". Falls back to "?" when the call omitted the value (the
 /// validation rejection carries the real message).
 fn param_value_phrase(
-    param: wire::WireClipParam,
+    param: &wire::WireClipParam,
     value: Option<f64>,
     position: Option<[f64; 2]>,
+    color: Option<[u8; 4]>,
+    rect: Option<[f64; 4]>,
 ) -> String {
     match param {
-        wire::WireClipParam::Position => position
+        wire::WireClipParam::Position | wire::WireClipParam::AnchorPoint => position
             .map(|p| format!("[{:.2}, {:.2}]", p[0], p[1]))
             .unwrap_or_else(|| "?".into()),
-        wire::WireClipParam::Scale | wire::WireClipParam::Opacity | wire::WireClipParam::Volume => {
-            value
-                .map(|v| format!("{:.0}%", v * 100.0))
-                .unwrap_or_else(|| "?".into())
+        wire::WireClipParam::Crop => rect
+            .map(|r| format!("[{:.2}, {:.2}, {:.2}, {:.2}]", r[0], r[1], r[2], r[3]))
+            .unwrap_or_else(|| "?".into()),
+        wire::WireClipParam::Scale => {
+            if let Some(p) = position {
+                format!("[{}, {}]", p[0], p[1])
+            } else if let Some(v) = value {
+                format!("{:.0}%", v * 100.0)
+            } else {
+                "?".into()
+            }
         }
+        wire::WireClipParam::Opacity | wire::WireClipParam::Volume => value
+            .map(|v| format!("{:.0}%", v * 100.0))
+            .unwrap_or_else(|| "?".into()),
+        wire::WireClipParam::Pan => value
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "?".into()),
         wire::WireClipParam::Rotation => value
             .map(|v| format!("{v:.0}°"))
             .unwrap_or_else(|| "?".into()),
+        wire::WireClipParam::Shape {
+            param: wire::WireShapeParam::Fill | wire::WireShapeParam::StrokeColor,
+        }
+        | wire::WireClipParam::Text {
+            param:
+                wire::WireTextParam::Fill
+                | wire::WireTextParam::StrokeColor
+                | wire::WireTextParam::ShadowColor
+                | wire::WireTextParam::BackgroundColor,
+        }
+        | wire::WireClipParam::Style {
+            param:
+                wire::WireStyleParam::ShadowColor
+                | wire::WireStyleParam::GlowColor
+                | wire::WireStyleParam::OutlineColor
+                | wire::WireStyleParam::BackgroundColor,
+        } => color.map(rgba).unwrap_or_else(|| "?".into()),
+        wire::WireClipParam::Style {
+            param: wire::WireStyleParam::ShadowOffset,
+        }
+        | wire::WireClipParam::Look {
+            param: wire::WireLookParam::MaskCenter | wire::WireLookParam::MaskSize,
+        } => position
+            .map(|p| format!("[{:.2}, {:.2}]", p[0], p[1]))
+            .unwrap_or_else(|| "?".into()),
+        _ => value.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
     }
 }
 
@@ -1039,7 +1089,10 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
                 parts.push("position".to_string());
             }
             if let Some(s) = a.scale {
-                parts.push(format!("scale {:.0}%", s * 100.0));
+                parts.push(match s {
+                    wire::WireScale::Uniform(u) => format!("scale {:.0}%", u * 100.0),
+                    wire::WireScale::Axes([x, y]) => format!("scale: [{x}, {y}]"),
+                });
             }
             if let Some(r) = a.rotation {
                 parts.push(format!("rotation {r:.0}°"));
@@ -1091,21 +1144,32 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
         WireCommand::SetParamKeyframe(a) => format!(
             "keyframed clip {} {} = {} at {}",
             a.clip,
-            param_name(a.param),
-            param_value_phrase(a.param, a.value, a.position),
+            param_name(&a.param),
+            param_value_phrase(&a.param, a.value, a.position, a.rgba, a.rect),
             secs(a.at),
         ),
         WireCommand::RemoveParamKeyframe(a) => format!(
             "removed clip {} {} keyframe at {}",
             a.clip,
-            param_name(a.param),
+            param_name(&a.param),
             secs(a.at),
         ),
         WireCommand::SetParamConstant(a) => format!(
             "set clip {} {} to {} (animation cleared)",
             a.clip,
-            param_name(a.param),
-            param_value_phrase(a.param, a.value, a.position),
+            param_name(&a.param),
+            param_value_phrase(&a.param, a.value, a.position, a.rgba, a.rect),
+        ),
+        WireCommand::ApplyEasingPreset(a) => format!(
+            "applied {} easing preset on clip {} {} from {}",
+            match a.preset {
+                crate::wire::WireEasingPreset::BounceOut => "bounce_out",
+                crate::wire::WireEasingPreset::ElasticOut => "elastic_out",
+                crate::wire::WireEasingPreset::BackOut => "back_out",
+            },
+            a.clip,
+            param_name(&a.param),
+            secs(a.from_tick),
         ),
         WireCommand::SetClipSpeed(a) => {
             let mut parts = Vec::new();
@@ -1177,6 +1241,63 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
             Some(filter) => format!("set {} filter on clip {}", filter.id, a.clip),
             None => format!("cleared filter on clip {}", a.clip),
         },
+        WireCommand::SetClipBlendMode(a) => format!(
+            "set clip {} blend mode to {}",
+            a.clip,
+            match a.mode {
+                crate::wire::WireBlendMode::Normal => "normal",
+                crate::wire::WireBlendMode::Darken => "darken",
+                crate::wire::WireBlendMode::Multiply => "multiply",
+                crate::wire::WireBlendMode::ColorBurn => "color_burn",
+                crate::wire::WireBlendMode::Lighten => "lighten",
+                crate::wire::WireBlendMode::Screen => "screen",
+                crate::wire::WireBlendMode::ColorDodge => "color_dodge",
+                crate::wire::WireBlendMode::Add => "add",
+                crate::wire::WireBlendMode::Overlay => "overlay",
+                crate::wire::WireBlendMode::SoftLight => "soft_light",
+                crate::wire::WireBlendMode::HardLight => "hard_light",
+                crate::wire::WireBlendMode::Difference => "difference",
+                crate::wire::WireBlendMode::Exclusion => "exclusion",
+            }
+        ),
+        WireCommand::SetMotionBlur(a) => {
+            if a.enabled {
+                let mut parts = vec![format!("enable motion blur on clip {}", a.clip)];
+                if let Some(s) = a.shutter_deg {
+                    parts.push(format!("shutter={s}"));
+                }
+                if let Some(n) = a.samples {
+                    parts.push(format!("samples={n}"));
+                }
+                parts.join(" ")
+            } else {
+                format!("disable motion blur on clip {}", a.clip)
+            }
+        }
+        WireCommand::SetClipLayerStyles(a) => {
+            let mut blocks = Vec::new();
+            if a.styles.shadow.is_some() {
+                blocks.push("shadow");
+            }
+            if a.styles.glow.is_some() {
+                blocks.push("glow");
+            }
+            if a.styles.outline.is_some() {
+                blocks.push("outline");
+            }
+            if a.styles.background.is_some() {
+                blocks.push("background");
+            }
+            if blocks.is_empty() {
+                format!("cleared layer styles on clip {}", a.clip)
+            } else {
+                format!(
+                    "set layer styles ({}) on clip {}",
+                    blocks.join(", "),
+                    a.clip
+                )
+            }
+        }
         WireCommand::SetClipAdjustments(a) => {
             let mut parts = Vec::new();
             if let Some(v) = a.brightness {
@@ -1193,6 +1314,24 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
             }
             if let Some(v) = a.temperature {
                 parts.push(format!("temperature {v:.2}"));
+            }
+            if let Some(v) = a.tint {
+                parts.push(format!("tint {v:.2}"));
+            }
+            if let Some(v) = a.hue {
+                parts.push(format!("hue {v:.2}"));
+            }
+            if let Some(v) = a.highlights {
+                parts.push(format!("highlights {v:.2}"));
+            }
+            if let Some(v) = a.shadows {
+                parts.push(format!("shadows {v:.2}"));
+            }
+            if let Some(v) = a.sharpness {
+                parts.push(format!("sharpness {v:.2}"));
+            }
+            if let Some(v) = a.vignette {
+                parts.push(format!("vignette {v:.2}"));
             }
             if parts.is_empty() {
                 parts.push("adjustments unchanged".into());
@@ -1252,9 +1391,16 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
             a.from_index, a.to_index, a.clip
         ),
         WireCommand::SetEffectParam(a) => {
+            let shown = if let Some(c) = a.rgba {
+                rgba(c)
+            } else if let Some(p) = a.position {
+                format!("[{:.2}, {:.2}]", p[0], p[1])
+            } else {
+                a.value.map(|v| v.to_string()).unwrap_or_else(|| "?".into())
+            };
             format!(
                 "set clip {} effect {} {} = {}",
-                a.clip, a.index, a.param, a.value
+                a.clip, a.index, a.param, shown
             )
         }
         WireCommand::AddTransition(a) => {

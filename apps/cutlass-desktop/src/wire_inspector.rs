@@ -41,15 +41,19 @@ pub(crate) fn wire_inspector(
         .on_sample_transform(|clip, playhead| inspector::sample_transform(&clip, playhead));
     app.global::<InspectorBackend>()
         .on_compensate_anchor_position(
-            |clip, sequence, playhead, anchor_x, anchor_y, scale, rotation| {
+            |clip, sequence, playhead, anchor_x, anchor_y, scale_x, scale_y, rotation| {
                 inspector::compensate_anchor_position(
-                    &clip, sequence, playhead, anchor_x, anchor_y, scale, rotation,
+                    &clip, sequence, playhead, anchor_x, anchor_y, scale_x, scale_y, rotation,
                 )
             },
         );
 
     app.global::<InspectorBackend>()
         .on_sample_audio(|clip, playhead| inspector::sample_audio(&clip, playhead));
+    app.global::<InspectorBackend>()
+        .on_sample_scalar_param(|clip, param, playhead| {
+            inspector::sample_scalar_param(&clip, param.as_str(), playhead)
+        });
 
     let kf_set_handle = preview_worker.handle();
     app.global::<InspectorBackend>().on_set_param_keyframe(
@@ -64,6 +68,7 @@ pub(crate) fn wire_inspector(
                 i64::from(tick),
                 value,
                 params::easing_from_ui(easing, [0.0; 4]),
+                None,
             );
         },
     );
@@ -80,6 +85,17 @@ pub(crate) fn wire_inspector(
             };
             kf_remove_handle.remove_param_keyframe(clip_id.to_string(), param, i64::from(tick));
         });
+
+    let param_constant_handle = preview_worker.handle();
+    app.global::<InspectorBackend>().on_set_param_constant(
+        move |clip_id, param, value_x, value_y| {
+            let Some((param, value)) = clip_param_value(param.as_str(), value_x, value_y) else {
+                tracing::error!(param = param.as_str(), "ignoring constant on unknown param");
+                return;
+            };
+            param_constant_handle.set_param_constant(clip_id.to_string(), param, value);
+        },
+    );
 
     // Timeline keyframe diamonds: merged tick model for the selected clip,
     // drag-retime, right-click delete.
@@ -156,7 +172,7 @@ pub(crate) fn wire_inspector(
         });
     let set_crop_handle = preview_worker.handle();
     app.global::<InspectorBackend>().on_set_clip_crop(
-        move |clip_id, left, top, right, bottom, flip_h, flip_v| {
+        move |clip_id, left, top, right, bottom, flip_h, flip_v, playhead_tick| {
             // Insets (UI/agent shape) → kept-region rect (model shape). The
             // sliders cap each inset at 49%, so the window stays valid; the
             // floor only guards float dust against the engine's minimum.
@@ -166,9 +182,272 @@ pub(crate) fn wire_inspector(
                 w: (1.0 - left - right).max(cutlass_models::MIN_CROP_FRACTION),
                 h: (1.0 - top - bottom).max(cutlass_models::MIN_CROP_FRACTION),
             };
-            set_crop_handle.set_clip_crop(clip_id.to_string(), crop, flip_h, flip_v);
+            set_crop_handle.set_clip_crop(
+                clip_id.to_string(),
+                crop,
+                flip_h,
+                flip_v,
+                i64::from(playhead_tick),
+            );
         },
     );
+
+    let set_blend_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_set_clip_blend_mode(move |clip_id, mode| {
+            set_blend_handle.set_blend_mode(clip_id.to_string(), mode.to_string());
+        });
+
+    let set_motion_blur_handle = preview_worker.handle();
+    app.global::<InspectorBackend>().on_set_clip_motion_blur(
+        move |clip_id, enabled, shutter, samples| {
+            let samples = u32::try_from(samples).unwrap_or(8).clamp(2, 32);
+            set_motion_blur_handle.set_motion_blur(
+                clip_id.to_string(),
+                cutlass_models::MotionBlur {
+                    enabled,
+                    shutter_deg: shutter,
+                    samples,
+                },
+            );
+        },
+    );
+
+    let set_mask_kind_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_set_clip_mask_kind(move |clip_id, kind| {
+            let Some(project) = set_mask_kind_handle.snapshot_project() else {
+                return;
+            };
+            let Some(raw) = clip_id.as_str().parse::<u64>().ok() else {
+                tracing::error!(clip = %clip_id, "set-clip-mask-kind ignored: unparsable clip id");
+                return;
+            };
+            let clip_key = cutlass_models::ClipId::from_raw(raw);
+            let Some(clip) = project.clip(clip_key) else {
+                tracing::error!(clip = %clip_id, "set-clip-mask-kind ignored: unknown clip");
+                return;
+            };
+            let mask = if kind.is_empty() {
+                None
+            } else {
+                let Some(spec) = cutlass_models::mask_catalog()
+                    .iter()
+                    .find(|s| s.kind.id() == kind.as_str())
+                else {
+                    tracing::error!(
+                        kind = kind.as_str(),
+                        "set-clip-mask-kind ignored: unknown kind"
+                    );
+                    return;
+                };
+                // Preserve feather / invert / geometry when switching kind;
+                // enable-from-none uses Mask::new defaults.
+                let mut mask = clip
+                    .mask
+                    .clone()
+                    .unwrap_or_else(|| cutlass_models::Mask::new(spec.kind));
+                mask.kind = spec.kind;
+                Some(mask)
+            };
+            set_mask_kind_handle.set_mask(clip_id.to_string(), mask);
+        });
+
+    let set_mask_invert_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_set_clip_mask_invert(move |clip_id, invert| {
+            let Some(project) = set_mask_invert_handle.snapshot_project() else {
+                return;
+            };
+            let Some(raw) = clip_id.as_str().parse::<u64>().ok() else {
+                tracing::error!(clip = %clip_id, "set-clip-mask-invert ignored: unparsable clip id");
+                return;
+            };
+            let clip_key = cutlass_models::ClipId::from_raw(raw);
+            let Some(clip) = project.clip(clip_key) else {
+                tracing::error!(clip = %clip_id, "set-clip-mask-invert ignored: unknown clip");
+                return;
+            };
+            let Some(mut mask) = clip.mask.clone() else {
+                tracing::error!(clip = %clip_id, "set-clip-mask-invert ignored: clip has no mask");
+                return;
+            };
+            mask.invert = invert;
+            set_mask_invert_handle.set_mask(clip_id.to_string(), Some(mask));
+        });
+
+    let toggle_chroma_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_toggle_clip_chroma(move |clip_id, enabled| {
+            let chroma = enabled.then_some(cutlass_models::ChromaKey {
+                rgb: [0, 255, 0],
+                strength: cutlass_models::Param::Constant(0.5),
+                shadow: cutlass_models::Param::Constant(0.0),
+            });
+            toggle_chroma_handle.set_chroma(clip_id.to_string(), chroma);
+        });
+
+    let set_chroma_color_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_set_clip_chroma_color(move |clip_id, r, g, b| {
+            let Some(project) = set_chroma_color_handle.snapshot_project() else {
+                return;
+            };
+            let Some(raw) = clip_id.as_str().parse::<u64>().ok() else {
+                tracing::error!(clip = %clip_id, "set-clip-chroma-color ignored: unparsable clip id");
+                return;
+            };
+            let clip_key = cutlass_models::ClipId::from_raw(raw);
+            let Some(clip) = project.clip(clip_key) else {
+                tracing::error!(clip = %clip_id, "set-clip-chroma-color ignored: unknown clip");
+                return;
+            };
+            let Some(mut chroma) = clip.chroma_key.clone() else {
+                tracing::error!(clip = %clip_id, "set-clip-chroma-color ignored: chroma off");
+                return;
+            };
+            chroma.rgb = [
+                r.clamp(0, 255) as u8,
+                g.clamp(0, 255) as u8,
+                b.clamp(0, 255) as u8,
+            ];
+            set_chroma_color_handle.set_chroma(clip_id.to_string(), Some(chroma));
+        });
+
+    let toggle_style_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_toggle_clip_style(move |clip_id, block, enabled| {
+            let Some(project) = toggle_style_handle.snapshot_project() else {
+                return;
+            };
+            let Some(raw) = clip_id.as_str().parse::<u64>().ok() else {
+                tracing::error!(clip = %clip_id, "toggle-clip-style ignored: unparsable clip id");
+                return;
+            };
+            let clip_key = cutlass_models::ClipId::from_raw(raw);
+            let Some(clip) = project.clip(clip_key) else {
+                tracing::error!(clip = %clip_id, "toggle-clip-style ignored: unknown clip");
+                return;
+            };
+            let mut styles = clip.styles.clone();
+            match block.as_str() {
+                "shadow" => {
+                    styles.shadow = enabled.then(cutlass_models::LayerShadow::default);
+                }
+                "glow" => {
+                    styles.glow = enabled.then(cutlass_models::LayerGlow::default);
+                }
+                "outline" => {
+                    styles.outline = enabled.then(cutlass_models::LayerOutline::default);
+                }
+                "background" => {
+                    styles.background = enabled.then(cutlass_models::LayerBackground::default);
+                }
+                other => {
+                    tracing::error!(block = other, "toggle-clip-style ignored: unknown block");
+                    return;
+                }
+            }
+            toggle_style_handle.set_layer_styles(clip_id.to_string(), styles);
+        });
+
+    let style_color_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_set_clip_style_color(move |clip_id, key, r, g, b, a| {
+            let r = r.clamp(0, 255) as u16;
+            let g = g.clamp(0, 255) as u16;
+            let b = b.clamp(0, 255) as u16;
+            let a = a.clamp(0, 255) as u16;
+            let value_x = ((r << 8) | g) as f32;
+            let value_y = ((b << 8) | a) as f32;
+            let Some((param, value)) = clip_param_value(key.as_str(), value_x, value_y) else {
+                tracing::error!(
+                    key = key.as_str(),
+                    "set-clip-style-color ignored: unknown key"
+                );
+                return;
+            };
+            style_color_handle.set_param_constant(clip_id.to_string(), param, value);
+        });
+
+    let preview_style_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_preview_clip_style(move |clip_id, key, value, tick| {
+            let Some(project) = preview_style_handle.snapshot_project() else {
+                return;
+            };
+            let Some(raw) = clip_id.as_str().parse::<u64>().ok() else {
+                tracing::error!(clip = %clip_id, "preview-clip-style ignored: unparsable clip id");
+                return;
+            };
+            let clip_key = cutlass_models::ClipId::from_raw(raw);
+            let Some(clip) = project.clip(clip_key) else {
+                tracing::error!(clip = %clip_id, "preview-clip-style ignored: unknown clip");
+                return;
+            };
+            let mut styles = clip.styles.clone();
+            let local_tick = clip.animation_tick(i64::from(tick));
+            if !apply_style_preview_constant(&mut styles, key.as_str(), value, 0.0, local_tick) {
+                tracing::error!(
+                    key = key.as_str(),
+                    "preview-clip-style ignored: unknown key"
+                );
+                return;
+            }
+            preview_style_handle.preview_clip_styles(clip_id.to_string(), styles, i64::from(tick));
+        });
+
+    let preview_style_color_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_preview_clip_style_color(move |clip_id, key, r, g, b, a, tick| {
+            let Some(project) = preview_style_color_handle.snapshot_project() else {
+                return;
+            };
+            let Some(raw) = clip_id.as_str().parse::<u64>().ok() else {
+                tracing::error!(
+                    clip = %clip_id,
+                    "preview-clip-style-color ignored: unparsable clip id"
+                );
+                return;
+            };
+            let clip_key = cutlass_models::ClipId::from_raw(raw);
+            let Some(clip) = project.clip(clip_key) else {
+                tracing::error!(clip = %clip_id, "preview-clip-style-color ignored: unknown clip");
+                return;
+            };
+            let r = r.clamp(0, 255) as u16;
+            let g = g.clamp(0, 255) as u16;
+            let b = b.clamp(0, 255) as u16;
+            let a = a.clamp(0, 255) as u16;
+            let value_x = ((r << 8) | g) as f32;
+            let value_y = ((b << 8) | a) as f32;
+            let mut styles = clip.styles.clone();
+            let local_tick = clip.animation_tick(i64::from(tick));
+            if !apply_style_preview_constant(
+                &mut styles,
+                key.as_str(),
+                value_x,
+                value_y,
+                local_tick,
+            ) {
+                tracing::error!(
+                    key = key.as_str(),
+                    "preview-clip-style-color ignored: unknown key"
+                );
+                return;
+            }
+            preview_style_color_handle.preview_clip_styles(
+                clip_id.to_string(),
+                styles,
+                i64::from(tick),
+            );
+        });
+
+    let clear_styles_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_clear_clip_styles(move |tick| {
+            clear_styles_handle.clear_styles_override(i64::from(tick));
+        });
 
     let set_filter_handle = preview_worker.handle();
     app.global::<InspectorBackend>()
@@ -181,53 +460,34 @@ pub(crate) fn wire_inspector(
         });
 
     let set_animation_handle = preview_worker.handle();
-    app.global::<InspectorBackend>()
-        .on_set_clip_animation(move |clip_id, slot, animation_id| {
+    app.global::<InspectorBackend>().on_set_clip_animation(
+        move |clip_id, slot, animation_id, speed, intensity, stagger| {
             set_animation_handle.set_clip_animation(
                 clip_id.to_string(),
                 slot.to_string(),
                 animation_id.to_string(),
-            );
-        });
-
-    let set_adjust_handle = preview_worker.handle();
-    app.global::<InspectorBackend>().on_set_clip_adjust(
-        move |clip_id, brightness, contrast, saturation, exposure, temperature| {
-            set_adjust_handle.set_clip_adjust(
-                clip_id.to_string(),
-                cutlass_models::ColorAdjustments {
-                    brightness,
-                    contrast,
-                    saturation,
-                    exposure,
-                    temperature,
-                },
+                speed,
+                intensity,
+                stagger,
             );
         },
     );
 
+    let set_adjust_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_set_clip_adjust(move |clip_id, adjust| {
+            set_adjust_handle
+                .set_clip_adjust(clip_id.to_string(), inspector::adjust_from_ui(&adjust));
+        });
+
     let preview_look_handle = preview_worker.handle();
     app.global::<InspectorBackend>().on_preview_clip_look(
-        move |clip_id,
-              filter_id,
-              intensity,
-              brightness,
-              contrast,
-              saturation,
-              exposure,
-              temperature,
-              tick| {
+        move |clip_id, filter_id, intensity, adjust, tick| {
             preview_look_handle.preview_clip_look(
                 clip_id.to_string(),
                 filter_id.to_string(),
                 intensity,
-                cutlass_models::ColorAdjustments {
-                    brightness,
-                    contrast,
-                    saturation,
-                    exposure,
-                    temperature,
-                },
+                inspector::adjust_from_ui(&adjust),
                 i64::from(tick),
             );
         },
@@ -314,56 +574,95 @@ pub(crate) fn wire_inspector(
             ModelRc::new(VecModel::from(filtered))
         });
 
-    // Filter, effect & transition catalogs are filled once from the model
-    // catalogs, then inspector/timeline edits route to undoable commands.
+    // Blend, filter, effect & transition catalogs are filled once from the
+    // model catalogs, then inspector/timeline edits route to undoable commands.
     {
         let inspector = app.global::<InspectorBackend>();
+        let blend_rows: Vec<CatalogEntry> = cutlass_models::BlendMode::ALL
+            .iter()
+            .map(|mode| CatalogEntry {
+                id: mode.id().into(),
+                label: mode.label().into(),
+                has_speed: false,
+                has_intensity: false,
+                has_stagger: false,
+            })
+            .collect();
+        inspector.set_blend_catalog(ModelRc::new(VecModel::from(blend_rows)));
+
+        let mask_rows: Vec<CatalogEntry> = cutlass_models::mask_catalog()
+            .iter()
+            .map(|s| CatalogEntry {
+                id: s.kind.id().into(),
+                label: s.label.into(),
+                has_speed: false,
+                has_intensity: false,
+                has_stagger: false,
+            })
+            .collect();
+        inspector.set_mask_catalog(ModelRc::new(VecModel::from(mask_rows)));
+
         let filter_rows: Vec<CatalogEntry> = cutlass_models::filter_catalog()
             .iter()
             .map(|s| CatalogEntry {
                 id: s.id.into(),
                 label: s.label.into(),
+                has_speed: false,
+                has_intensity: false,
+                has_stagger: false,
             })
             .collect();
         inspector.set_filter_catalog(ModelRc::new(VecModel::from(filter_rows)));
 
+        let entry = |s: &cutlass_models::AnimationSpec| CatalogEntry {
+            id: s.id.into(),
+            label: s.label.into(),
+            has_speed: s.knobs.speed,
+            has_intensity: s.knobs.intensity,
+            has_stagger: s.knobs.stagger,
+        };
+        // Media / general clips: whole-layer presets only.
         let animation_in: Vec<CatalogEntry> = cutlass_models::animation_catalog()
             .iter()
-            .filter(|s| s.slot == cutlass_models::AnimationSlot::In)
-            .map(|s| CatalogEntry {
-                id: s.id.into(),
-                label: s.label.into(),
-            })
+            .filter(|s| s.slot == cutlass_models::AnimationSlot::In && !s.text_only)
+            .map(entry)
             .collect();
         inspector.set_animation_in_catalog(ModelRc::new(VecModel::from(animation_in)));
 
         let animation_out: Vec<CatalogEntry> = cutlass_models::animation_catalog()
             .iter()
-            .filter(|s| s.slot == cutlass_models::AnimationSlot::Out)
-            .map(|s| CatalogEntry {
-                id: s.id.into(),
-                label: s.label.into(),
-            })
+            .filter(|s| s.slot == cutlass_models::AnimationSlot::Out && !s.text_only)
+            .map(entry)
             .collect();
         inspector.set_animation_out_catalog(ModelRc::new(VecModel::from(animation_out)));
 
         let animation_combo: Vec<CatalogEntry> = cutlass_models::animation_catalog()
             .iter()
             .filter(|s| s.slot == cutlass_models::AnimationSlot::Combo && !s.text_only)
-            .map(|s| CatalogEntry {
-                id: s.id.into(),
-                label: s.label.into(),
-            })
+            .map(entry)
             .collect();
         inspector.set_animation_combo_catalog(ModelRc::new(VecModel::from(animation_combo)));
 
+        // Text panel: whole-layer + per-character presets in every slot.
+        let animation_text_in: Vec<CatalogEntry> = cutlass_models::animation_catalog()
+            .iter()
+            .filter(|s| s.slot == cutlass_models::AnimationSlot::In)
+            .map(entry)
+            .collect();
+        inspector.set_animation_text_in_catalog(ModelRc::new(VecModel::from(animation_text_in)));
+
+        let animation_text_out: Vec<CatalogEntry> = cutlass_models::animation_catalog()
+            .iter()
+            .filter(|s| s.slot == cutlass_models::AnimationSlot::Out)
+            .map(entry)
+            .collect();
+        inspector.set_animation_text_out_catalog(ModelRc::new(VecModel::from(animation_text_out)));
+
+        // Text combo tab: per-character loops plus whole-layer presence presets.
         let animation_text_combo: Vec<CatalogEntry> = cutlass_models::animation_catalog()
             .iter()
             .filter(|s| s.slot == cutlass_models::AnimationSlot::Combo)
-            .map(|s| CatalogEntry {
-                id: s.id.into(),
-                label: s.label.into(),
-            })
+            .map(entry)
             .collect();
         inspector
             .set_animation_text_combo_catalog(ModelRc::new(VecModel::from(animation_text_combo)));
@@ -375,6 +674,9 @@ pub(crate) fn wire_inspector(
             .map(|s| CatalogEntry {
                 id: s.id.into(),
                 label: s.label.into(),
+                has_speed: false,
+                has_intensity: false,
+                has_stagger: false,
             })
             .collect();
         effects.set_effect_catalog(ModelRc::new(VecModel::from(effect_rows)));
@@ -383,6 +685,9 @@ pub(crate) fn wire_inspector(
             .map(|s| CatalogEntry {
                 id: s.id.into(),
                 label: s.label.into(),
+                has_speed: false,
+                has_intensity: false,
+                has_stagger: false,
             })
             .collect();
         effects.set_transition_catalog(ModelRc::new(VecModel::from(transition_rows)));
@@ -414,6 +719,33 @@ pub(crate) fn wire_inspector(
                 index.max(0) as u32,
                 param.to_string(),
                 value,
+            );
+        });
+    let set_effect_param_color_handle = preview_worker.handle();
+    app.global::<EffectsBackend>().on_set_effect_param_color(
+        move |clip_id, index, param, r, g, b, a| {
+            let rgba = [
+                r.clamp(0, 255) as u8,
+                g.clamp(0, 255) as u8,
+                b.clamp(0, 255) as u8,
+                a.clamp(0, 255) as u8,
+            ];
+            set_effect_param_color_handle.set_effect_param_value(
+                clip_id.to_string(),
+                index.max(0) as u32,
+                param.to_string(),
+                cutlass_models::ParamValue::Color(rgba),
+            );
+        },
+    );
+    let set_effect_param_vec2_handle = preview_worker.handle();
+    app.global::<EffectsBackend>()
+        .on_set_effect_param_vec2(move |clip_id, index, param, x, y| {
+            set_effect_param_vec2_handle.set_effect_param_value(
+                clip_id.to_string(),
+                index.max(0) as u32,
+                param.to_string(),
+                cutlass_models::ParamValue::Vec2([x, y]),
             );
         });
     let add_transition_handle = preview_worker.handle();

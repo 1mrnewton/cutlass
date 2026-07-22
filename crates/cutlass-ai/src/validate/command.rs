@@ -28,105 +28,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 start,
             }
         }
-        WireCommand::ExtractAudio(args) => {
-            let clip = clip_ref(project, args.clip)?;
-            let timeline = project.timeline();
-            let source_track_id = timeline.track_of(clip.id).ok_or_else(|| {
-                Rejection::new(format!("clip {} is not on the timeline", args.clip))
-            })?;
-            let source_track = timeline.track(source_track_id).ok_or_else(|| {
-                Rejection::new(format!(
-                    "clip {} refers to missing track {}",
-                    args.clip,
-                    source_track_id.raw()
-                ))
-            })?;
-            let cutlass_models::ClipSource::Media { media, .. } = &clip.content else {
-                return Err(Rejection::new(format!(
-                    "clip {} is generated; extract_audio requires a media-backed video clip",
-                    args.clip
-                )));
-            };
-            if source_track.kind != TrackKind::Video {
-                return Err(Rejection::new(format!(
-                    "clip {} is on a {} track; extract_audio requires a video-track clip",
-                    args.clip,
-                    kind_name(source_track.kind)
-                )));
-            }
-            if source_track.locked {
-                return Err(Rejection::new(format!(
-                    "video track {} is locked; unlock it before extracting clip {}'s audio",
-                    source_track_id.raw(),
-                    args.clip
-                )));
-            }
-            let media = media_ref(project, media.raw())?;
-            if media.kind() != cutlass_models::MediaKind::Video {
-                return Err(Rejection::new(format!(
-                    "clip {} does not reference video media; extract_audio requires a video file",
-                    args.clip
-                )));
-            }
-            if !media.has_audio {
-                return Err(Rejection::new(format!(
-                    "clip {} uses media {} with no audio stream to extract",
-                    args.clip,
-                    media.id.raw()
-                )));
-            }
-            if timeline.detached_to_audio_lane(clip.id) {
-                return Err(Rejection::new(format!(
-                    "clip {} already has extracted audio; use its linked audio-lane companion",
-                    args.clip
-                )));
-            }
-            if let Some(link) = clip.link {
-                let other_members: Vec<u64> = timeline
-                    .tracks_ordered()
-                    .flat_map(|track| track.clips())
-                    .filter(|candidate| candidate.id != clip.id && candidate.link == Some(link))
-                    .map(|candidate| candidate.id.raw())
-                    .collect();
-                if !other_members.is_empty() {
-                    return Err(Rejection::new(format!(
-                        "clip {} is already linked to clips {}; call unlink_clips first, then \
-                         retry extract_audio",
-                        args.clip,
-                        list_ids(other_members)
-                    )));
-                }
-            }
-
-            let target = track_ref(project, args.track)?;
-            if target.kind != TrackKind::Audio {
-                return Err(Rejection::new(format!(
-                    "track {} is a {} track; extract_audio needs an audio track",
-                    args.track,
-                    kind_name(target.kind)
-                )));
-            }
-            if target.locked {
-                return Err(Rejection::new(format!(
-                    "audio track {} is locked; unlock it or choose another audio track",
-                    args.track
-                )));
-            }
-            if target
-                .has_overlap(clip.timeline, None)
-                .map_err(|error| Rejection::new(error.to_string()))?
-            {
-                return Err(Rejection::new(format!(
-                    "audio track {} already has a clip overlapping clip {}'s exact timeline \
-                     range; choose or add a free audio track",
-                    args.track, args.clip
-                )));
-            }
-            EditCommand::ExtractAudio {
-                clip: clip.id,
-                to_track: Some(target.id),
-            }
-        }
+        WireCommand::ExtractAudio(args) => extract_audio(project, args)?,
         WireCommand::DuplicateClip(args) => {
             let clip = clip_ref(project, args.clip)?;
             let target = track_ref(project, args.to_track)?;
@@ -211,7 +113,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                     args.anchor_x.map_or(current.anchor_point[0], |v| v as f32),
                     args.anchor_y.map_or(current.anchor_point[1], |v| v as f32),
                 ],
-                scale: args.scale.map_or(current.scale, |v| v as f32),
+                scale: args.scale.map_or(current.scale, |v| v.to_scale2()),
                 rotation: args.rotation.map_or(current.rotation, |v| v as f32),
                 opacity: args.opacity.map_or(current.opacity, |v| v as f32),
             };
@@ -238,8 +140,9 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 )));
             }
             // Omitted edges keep the clip's current framing. Current insets
-            // derive from the stored kept-region rect.
-            let current = clip.crop;
+            // derive from the stored kept-region rect (sample at clip start
+            // when keyframed — set_clip_crop itself flattens to a constant).
+            let current = clip.crop.sample(0);
             let inset = |requested: Option<f64>, current: f32, what: &str| {
                 let Some(v) = requested else {
                     return Ok(current);
@@ -272,6 +175,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 crop,
                 flip_h: args.flip_h.unwrap_or(clip.flip_h),
                 flip_v: args.flip_v.unwrap_or(clip.flip_v),
+                at: None,
             }
         }
         WireCommand::AddEffect(args) => {
@@ -316,40 +220,74 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         }
         WireCommand::SetEffectParam(args) => {
             let clip = clip_ref(project, args.clip)?;
-            let index = effect_index(clip, args.index, args.clip)?;
-            let instance = &clip.effects[index];
-            let spec = cutlass_models::effect_spec(&instance.effect_id).ok_or_else(|| {
-                Rejection::new(format!(
-                    "effect '{}' on clip {} is not in the catalog",
-                    instance.effect_id, args.clip
-                ))
-            })?;
-            let slot = spec
-                .params
-                .iter()
-                .position(|p| p.name == args.param)
-                .ok_or_else(|| {
-                    let names: Vec<&str> = spec.params.iter().map(|p| p.name).collect();
-                    Rejection::new(format!(
-                        "effect '{}' has no parameter '{}'; parameters: {}",
-                        instance.effect_id,
-                        args.param,
-                        names.join(", ")
-                    ))
-                })?;
-            let p = &spec.params[slot];
-            let v = args.value;
-            if !v.is_finite() || v < f64::from(p.min) || v > f64::from(p.max) {
-                return Err(Rejection::new(format!(
-                    "{} must be between {} and {} (got {})",
-                    args.param, p.min, p.max, v
-                )));
-            }
-            EditCommand::SetEffectParam {
-                clip: clip.id,
-                index,
-                param: slot,
-                value: v as f32,
+            let (index, slot, p) = effect_param_slot(clip, args.index, &args.param, args.clip)?;
+            match p.kind {
+                cutlass_models::EffectParamKind::Scalar => {
+                    let v = args.value.ok_or_else(|| {
+                        Rejection::new(format!(
+                            "effect param '{}' is a scalar; pass 'value' (a number)",
+                            args.param
+                        ))
+                    })?;
+                    if !v.is_finite() || v < f64::from(p.min) || v > f64::from(p.max) {
+                        return Err(Rejection::new(format!(
+                            "{} must be between {} and {} (got {})",
+                            args.param, p.min, p.max, v
+                        )));
+                    }
+                    EditCommand::SetEffectParam {
+                        clip: clip.id,
+                        index,
+                        param: slot,
+                        value: v as f32,
+                    }
+                }
+                cutlass_models::EffectParamKind::Color => {
+                    let rgba = args.rgba.ok_or_else(|| {
+                        Rejection::new(format!(
+                            "effect param '{}' is a color; pass 'rgba' as \
+                             [red, green, blue, alpha]",
+                            args.param
+                        ))
+                    })?;
+                    EditCommand::SetParamConstant {
+                        clip: clip.id,
+                        param: ClipParam::Effect {
+                            effect: index as u32,
+                            param: slot as u32,
+                        },
+                        value: ParamValue::Color(rgba),
+                    }
+                }
+                cutlass_models::EffectParamKind::Vec2 => {
+                    let position = args.position.ok_or_else(|| {
+                        Rejection::new(format!(
+                            "effect param '{}' is a vec2; pass 'position' as [x, y]",
+                            args.param
+                        ))
+                    })?;
+                    let v = [position[0] as f32, position[1] as f32];
+                    if !v[0].is_finite()
+                        || !v[1].is_finite()
+                        || v[0] < p.min
+                        || v[0] > p.max
+                        || v[1] < p.min
+                        || v[1] > p.max
+                    {
+                        return Err(Rejection::new(format!(
+                            "{} components must be between {} and {} (got [{}, {}])",
+                            args.param, p.min, p.max, v[0], v[1]
+                        )));
+                    }
+                    EditCommand::SetParamConstant {
+                        clip: clip.id,
+                        param: ClipParam::Effect {
+                            effect: index as u32,
+                            param: slot as u32,
+                        },
+                        value: ParamValue::Vec2(v),
+                    }
+                }
             }
         }
         WireCommand::AddTransition(args) => {
@@ -397,13 +335,23 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         WireCommand::SetParamKeyframe(args) => {
             let clip = clip_ref(project, args.clip)?;
             let at = keyframe_position(project, clip, args.at)?;
-            let value = param_value(args.param, args.value, args.position)?;
+            let value = param_value(
+                clip,
+                args.clip,
+                &args.param,
+                args.value,
+                args.position,
+                args.rgba,
+                args.rect,
+            )?;
+            let tangents = spatial_tangents(args.tangent_out, args.tangent_in, &args.param)?;
             EditCommand::SetParamKeyframe {
                 clip: clip.id,
-                param: clip_param(args.param),
+                param: clip_param(&args.param, clip, args.clip)?,
                 at,
                 value,
-                easing: easing(args.easing),
+                easing: easing(args.easing)?,
+                tangents,
             }
         }
         WireCommand::RemoveParamKeyframe(args) => {
@@ -411,358 +359,80 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
             let at = keyframe_position(project, clip, args.at)?;
             EditCommand::RemoveParamKeyframe {
                 clip: clip.id,
-                param: clip_param(args.param),
+                param: clip_param(&args.param, clip, args.clip)?,
                 at,
             }
         }
-        WireCommand::SetClipSpeed(args) => {
-            let clip = clip_ref(project, args.clip)?;
-            if clip.is_generated() {
-                return Err(Rejection::new(format!(
-                    "clip {} is a generated clip; set_clip_speed only works on media \
-                     clips (footage with a source file)",
-                    args.clip
-                )));
-            }
-            // Omitted fields keep the clip's current retiming.
-            let speed = match args.speed {
-                Some(speed) => rational_speed(speed)?,
-                None => clip.speed,
-            };
-            EditCommand::SetClipSpeed {
-                clip: clip.id,
-                speed,
-                reversed: args.reversed.unwrap_or(clip.reversed),
-            }
-        }
-        WireCommand::SetSpeedCurve(args) => {
-            let clip = clip_ref(project, args.clip)?;
-            if clip.is_generated() {
-                return Err(Rejection::new(format!(
-                    "clip {} is a generated clip; set_speed_curve only works on media \
-                     clips (footage with a source file)",
-                    args.clip
-                )));
-            }
-            let curve = match &args.preset {
-                Some(name) => Some(cutlass_models::speed_preset(name).ok_or_else(|| {
-                    Rejection::new(format!(
-                        "unknown speed ramp preset '{name}'; choose one of: \
-                         ramp_up, ramp_down, montage, hero, bullet"
-                    ))
-                })?),
-                None => None,
-            };
-            EditCommand::SetSpeedCurve {
-                clip: clip.id,
-                curve,
-            }
-        }
-        WireCommand::SetClipPitch(args) => {
-            let clip = clip_ref(project, args.clip)?;
-            if clip.is_generated() {
-                return Err(Rejection::new(format!(
-                    "clip {} is a generated clip; set_clip_pitch only works on media \
-                     clips (footage with a source file)",
-                    args.clip
-                )));
-            }
-            EditCommand::SetClipPitch {
-                clip: clip.id,
-                preserve_pitch: args.preserve_pitch,
-            }
-        }
-        WireCommand::SetDenoise(args) => {
-            let clip = clip_ref(project, args.clip)?;
-            if clip.is_generated() {
-                return Err(Rejection::new(format!(
-                    "clip {} is a generated clip; set_denoise only works on media \
-                     clips (footage with a source file)",
-                    args.clip
-                )));
-            }
-            // CapCut keeps a video's sound on the clip itself, so denoise lands
-            // on the clip directly — unless its audio was detached to a linked
-            // audio lane, where the audible half now lives (same rule as
-            // set_clip_audio).
-            let timeline = project.timeline();
-            if !timeline.carries_own_audio(clip.id) {
-                let companion = clip.link.and_then(|link| {
-                    timeline
-                        .tracks_ordered()
-                        .filter(|t| t.kind == TrackKind::Audio)
-                        .flat_map(|t| t.clips())
-                        .find(|c| c.link == Some(link))
-                        .map(|c| c.id.raw())
-                });
-                return Err(Rejection::new(match companion {
-                    Some(id) => format!(
-                        "clip {} is not on an audio lane; its audio plays through \
-                         linked clip {id} — call set_denoise on clip {id} instead",
-                        args.clip
-                    ),
-                    None => format!(
-                        "clip {} is not on an audio lane and has no linked audio \
-                         companion; there is nothing audible to clean",
-                        args.clip
-                    ),
-                }));
-            }
-            EditCommand::SetClipDenoise {
-                clip: clip.id,
-                denoise: args.denoise,
-            }
-        }
-        WireCommand::SetClipMask(args) => {
-            let clip = clip_ref(project, args.clip)?;
-            reject_audio_lane(project, clip, "masks need a visual frame", args.clip)?;
-            if clip.is_generated() {
-                return Err(Rejection::new(format!(
-                    "clip {} is a generated clip; set_clip_mask only works on media \
-                     clips (footage with a source file)",
-                    args.clip
-                )));
-            }
-            let mask = match &args.mask {
-                None => None,
-                Some(wire) => Some(lower_mask(wire)?),
-            };
-            EditCommand::SetClipMask {
-                clip: clip.id,
-                mask,
-            }
-        }
-        WireCommand::SetClipChroma(args) => {
-            let clip = clip_ref(project, args.clip)?;
-            reject_audio_lane(project, clip, "chroma key needs a visual frame", args.clip)?;
-            if clip.is_generated() {
-                return Err(Rejection::new(format!(
-                    "clip {} is a generated clip; set_clip_chroma only works on media \
-                     clips (footage with a source file)",
-                    args.clip
-                )));
-            }
-            let chroma = match &args.chroma {
-                None => None,
-                Some(wire) => Some(lower_chroma(wire)?),
-            };
-            EditCommand::SetClipChroma {
-                clip: clip.id,
-                chroma,
-            }
-        }
-        WireCommand::SetClipStabilize(args) => {
-            let clip = clip_ref(project, args.clip)?;
-            reject_audio_lane(
-                project,
-                clip,
-                "stabilization needs a visual frame",
-                args.clip,
-            )?;
-            if clip.is_generated() {
-                return Err(Rejection::new(format!(
-                    "clip {} is a generated clip; set_clip_stabilize only works on media \
-                     clips (footage with a source file)",
-                    args.clip
-                )));
-            }
-            if let cutlass_models::ClipSource::Media { media, .. } = &clip.content
-                && project.media(*media).is_some_and(|m| m.is_image)
-            {
-                return Err(Rejection::new(format!(
-                    "clip {} is a still image; stabilization requires video",
-                    args.clip
-                )));
-            }
-            let stabilize = args.level.map(lower_stabilize);
-            EditCommand::SetClipStabilize {
-                clip: clip.id,
-                stabilize,
-            }
-        }
-        WireCommand::SetClipFilter(args) => {
-            let clip = clip_ref(project, args.clip)?;
-            reject_audio_lane(project, clip, "filters need a visual frame", args.clip)?;
-            let filter = match &args.filter {
-                None => None,
-                Some(wire) => Some(lower_filter(wire)?),
-            };
-            EditCommand::SetClipFilter {
-                clip: clip.id,
-                filter,
-            }
-        }
-        WireCommand::SetClipAdjustments(args) => {
-            let clip = clip_ref(project, args.clip)?;
-            reject_audio_lane(project, clip, "adjustments need a visual frame", args.clip)?;
-            let mut adjust = clip.adjust;
-            if let Some(v) = args.brightness {
-                adjust.brightness = unit_slider(v, "brightness")?;
-            }
-            if let Some(v) = args.contrast {
-                adjust.contrast = unit_slider(v, "contrast")?;
-            }
-            if let Some(v) = args.saturation {
-                adjust.saturation = unit_slider(v, "saturation")?;
-            }
-            if let Some(v) = args.exposure {
-                adjust.exposure = unit_slider(v, "exposure")?;
-            }
-            if let Some(v) = args.temperature {
-                adjust.temperature = unit_slider(v, "temperature")?;
-            }
-            adjust
-                .validate()
-                .map_err(|e| Rejection::new(e.to_string()))?;
-            EditCommand::SetClipAdjustments {
-                clip: clip.id,
-                adjust,
-            }
-        }
-        WireCommand::SetClipAnimation(args) => {
-            let clip = clip_ref(project, args.clip)?;
-            reject_audio_lane(project, clip, "animations need a visual frame", args.clip)?;
-            let slot = lower_animation_slot(args.slot);
-            let animation = match &args.animation {
-                None => None,
-                Some(id) => {
-                    let spec = animation_spec(id).ok_or_else(|| {
-                        Rejection::new(format!(
-                            "unknown animation '{id}'; available animations include fade_in, \
-                             fade_out, pulse, slide_up, zoom_in, and others from the catalog"
-                        ))
-                    })?;
-                    if spec.slot != slot {
-                        return Err(Rejection::new(format!(
-                            "animation '{id}' does not fit the {} slot",
-                            match args.slot {
-                                WireAnimationSlot::In => "in",
-                                WireAnimationSlot::Out => "out",
-                                WireAnimationSlot::Combo => "combo",
-                            }
-                        )));
-                    }
-                    if spec.text_only
-                        && !matches!(
-                            clip.content,
-                            cutlass_models::ClipSource::Generated(Generator::Text { .. })
-                        )
-                    {
-                        return Err(Rejection::new(format!(
-                            "animation '{id}' is a text-only preset"
-                        )));
-                    }
-                    Some(AnimationRef::new(id.clone()))
-                }
-            };
-            EditCommand::SetClipAnimation {
-                clip: clip.id,
-                slot,
-                animation,
-            }
-        }
-        WireCommand::SetAudioRole(args) => {
-            let clip = clip_ref(project, args.clip)?;
-            let timeline = project.timeline();
-            let on_audio = timeline
-                .track_of(clip.id)
-                .and_then(|id| timeline.track(id))
-                .is_some_and(|t| t.kind == TrackKind::Audio);
-            if !on_audio {
-                return Err(Rejection::new(format!(
-                    "clip {} is not on an audio lane; set_audio_role only works on audio clips",
-                    args.clip
-                )));
-            }
-            EditCommand::SetAudioRole {
-                clip: clip.id,
-                role: args.role.map(lower_audio_role),
-            }
-        }
-        WireCommand::SetClipAudio(args) => {
-            let clip = clip_ref(project, args.clip)?;
-            if clip.is_generated() {
-                return Err(Rejection::new(format!(
-                    "clip {} is a generated clip; set_clip_audio only works on media \
-                     clips (footage with a source file)",
-                    args.clip
-                )));
-            }
-            // CapCut keeps a video's sound on the clip itself, so volume/fades
-            // land on the clip directly — unless its audio was detached to a
-            // linked audio lane, where the audible half now lives.
-            let timeline = project.timeline();
-            if !timeline.carries_own_audio(clip.id) {
-                let companion = clip.link.and_then(|link| {
-                    timeline
-                        .tracks_ordered()
-                        .filter(|t| t.kind == TrackKind::Audio)
-                        .flat_map(|t| t.clips())
-                        .find(|c| c.link == Some(link))
-                        .map(|c| c.id.raw())
-                });
-                return Err(Rejection::new(match companion {
-                    Some(id) => format!(
-                        "clip {} is not on an audio lane; its audio plays through \
-                         linked clip {id} — call set_clip_audio on clip {id} instead",
-                        args.clip
-                    ),
-                    None => format!(
-                        "clip {} is not on an audio lane and has no linked audio \
-                         companion; there is nothing audible to adjust",
-                        args.clip
-                    ),
-                }));
-            }
-            // Omitted volume keeps the clip's gain untouched — a flat level
-            // stays flat and, crucially, an envelope is preserved (so "fade
-            // the music out" past a keyframed clip doesn't wipe the
-            // automation). A present volume sets a flat level (basic slider).
-            let volume = match args.volume {
-                Some(volume) => {
-                    if !volume.is_finite() || !(0.0..=10.0).contains(&volume) {
-                        return Err(Rejection::new(format!(
-                            "volume must be between 0 (mute) and 10 (got {volume})"
-                        )));
-                    }
-                    Some(volume as f32)
-                }
-                None => None,
-            };
-            let rate = timeline_rate(project);
-            let clip_ticks = clip.timeline.duration.value;
-            let fade = |current: i64,
-                        requested: Option<f64>,
-                        what: &str|
-             -> Result<RationalTime, Rejection> {
-                let Some(seconds) = requested else {
-                    return Ok(RationalTime::new(current, rate));
-                };
-                require_non_negative(seconds, what)?;
-                let time = timeline_time(project, seconds, what)?;
-                if time.value > clip_ticks {
-                    return Err(Rejection::new(format!(
-                        "{what} of {seconds}s is longer than clip {} ({:.3}s)",
-                        args.clip,
-                        ticks_to_seconds(clip_ticks, rate),
-                    )));
-                }
-                Ok(time)
-            };
-            EditCommand::SetClipAudio {
-                clip: clip.id,
-                volume,
-                fade_in: fade(clip.fade_in, args.fade_in, "fade_in")?,
-                fade_out: fade(clip.fade_out, args.fade_out, "fade_out")?,
-            }
-        }
+        WireCommand::SetClipSpeed(args) => set_clip_speed(project, args)?,
+        WireCommand::SetSpeedCurve(args) => set_speed_curve(project, args)?,
+        WireCommand::SetClipPitch(args) => set_clip_pitch(project, args)?,
+        WireCommand::SetDenoise(args) => set_denoise(project, args)?,
+        WireCommand::SetClipMask(args) => set_clip_mask(project, args)?,
+        WireCommand::SetClipChroma(args) => set_clip_chroma(project, args)?,
+        WireCommand::SetClipStabilize(args) => set_clip_stabilize(project, args)?,
+        WireCommand::SetClipFilter(args) => set_clip_filter(project, args)?,
+        WireCommand::SetClipBlendMode(args) => set_clip_blend_mode(project, args)?,
+        WireCommand::SetMotionBlur(args) => set_motion_blur(project, args)?,
+        WireCommand::SetClipLayerStyles(args) => set_clip_layer_styles(project, args)?,
+        WireCommand::SetClipAdjustments(args) => set_clip_adjustments(project, args)?,
+        WireCommand::SetClipAnimation(args) => set_clip_animation(project, args)?,
+        WireCommand::SetAudioRole(args) => set_audio_role(project, args)?,
+        WireCommand::SetClipAudio(args) => set_clip_audio(project, args)?,
         WireCommand::SetParamConstant(args) => {
             let clip = clip_ref(project, args.clip)?;
-            let value = param_value(args.param, args.value, args.position)?;
+            let value = param_value(
+                clip,
+                args.clip,
+                &args.param,
+                args.value,
+                args.position,
+                args.rgba,
+                args.rect,
+            )?;
             EditCommand::SetParamConstant {
                 clip: clip.id,
-                param: clip_param(args.param),
+                param: clip_param(&args.param, clip, args.clip)?,
                 value,
+            }
+        }
+        WireCommand::ApplyEasingPreset(args) => {
+            let clip = clip_ref(project, args.clip)?;
+            let at = keyframe_position(project, clip, args.from_tick)?;
+            let param = clip_param(&args.param, clip, args.clip)?;
+            // Fail closed early with a clear message for unsupported kinds.
+            if matches!(param, ClipParam::Crop | ClipParam::Speed)
+                || matches!(
+                    param,
+                    ClipParam::Effect { .. } | ClipParam::Shape { .. } | ClipParam::Text { .. }
+                )
+            {
+                return Err(Rejection::new(
+                    "apply_easing_preset supports scalar/vec2 transform, volume, pan, look, \
+                     and non-color style params only",
+                ));
+            }
+            if matches!(
+                param,
+                ClipParam::Style {
+                    param: StyleParam::ShadowColor
+                        | StyleParam::GlowColor
+                        | StyleParam::OutlineColor
+                        | StyleParam::BackgroundColor,
+                }
+            ) {
+                return Err(Rejection::new(
+                    "apply_easing_preset does not support color parameters",
+                ));
+            }
+            EditCommand::ApplyEasingPreset {
+                clip: clip.id,
+                param,
+                at,
+                preset: match args.preset {
+                    WireEasingPreset::BounceOut => PiecewiseEasingPreset::BounceOut,
+                    WireEasingPreset::ElasticOut => PiecewiseEasingPreset::ElasticOut,
+                    WireEasingPreset::BackOut => PiecewiseEasingPreset::BackOut,
+                },
             }
         }
         WireCommand::SplitClip(args) => {

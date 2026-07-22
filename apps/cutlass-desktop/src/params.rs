@@ -7,31 +7,56 @@
 //! preview selection geometry can be playhead-accurate without a projection
 //! republish per tick.
 
-use cutlass_models::{ClipTransform, Easing, Keyframe, Param};
+use cutlass_models::{ClipTransform, Easing, Keyframe, Param, Scale2, SpatialTangents};
 use slint::Model;
 
 use crate::{Clip, ParamKeyframe, ParamRowState};
 
+/// Spatial tangents carried on a projected keyframe, if any.
+fn tangents_of(kf: &ParamKeyframe) -> Option<SpatialTangents> {
+    if !kf.has_tangents {
+        return None;
+    }
+    Some(SpatialTangents {
+        out_t: [kf.out_tx, kf.out_ty],
+        in_t: [kf.in_tx, kf.in_ty],
+    })
+}
+
 /// Encode an engine easing for the Slint `ParamKeyframe`:
-/// `(tag, [x1, y1, x2, y2])` — points are zero for the presets.
+/// `(tag, [x1, y1, x2, y2])` — points are zero for the built-in presets.
+///
+/// Tags: 0 linear, 1 ease-in, 2 ease-out, 3 ease-in-out, 4 custom bezier,
+/// 5 snappy, 6 overshoot, 7 anticipate ([`cutlass_models::EASING_PRESETS`]),
+/// 8 hold.
 pub(crate) fn easing_to_ui(easing: Easing) -> (i32, [f32; 4]) {
     match easing {
         Easing::Linear => (0, [0.0; 4]),
         Easing::EaseIn => (1, [0.0; 4]),
         Easing::EaseOut => (2, [0.0; 4]),
         Easing::EaseInOut => (3, [0.0; 4]),
-        Easing::Bezier { points } => (4, points),
+        Easing::Hold => (8, [0.0; 4]),
+        Easing::Bezier { points } => match easing.preset_id() {
+            Some("snappy") => (5, points),
+            Some("overshoot") => (6, points),
+            Some("anticipate") => (7, points),
+            _ => (4, points),
+        },
     }
 }
 
 /// Decode the Slint easing encoding back to the engine enum. Unknown tags
-/// fall back to linear (defensive: the UI only emits 0..=3 today).
+/// fall back to linear.
 pub(crate) fn easing_from_ui(tag: i32, points: [f32; 4]) -> Easing {
     match tag {
         1 => Easing::EaseIn,
         2 => Easing::EaseOut,
         3 => Easing::EaseInOut,
         4 => Easing::Bezier { points },
+        5 => Easing::from_preset_id("snappy").unwrap_or(Easing::Linear),
+        6 => Easing::from_preset_id("overshoot").unwrap_or(Easing::Linear),
+        7 => Easing::from_preset_id("anticipate").unwrap_or(Easing::Linear),
+        8 => Easing::Hold,
         _ => Easing::Linear,
     }
 }
@@ -49,6 +74,7 @@ fn scalar_param(kfs: &slint::ModelRc<ParamKeyframe>, constant: f32) -> Param<f32
             tick: i64::from(kf.tick),
             value: kf.value_x,
             easing: easing_of(&kf),
+            tangents: None,
         })
         .collect();
     if keyframes.is_empty() {
@@ -65,6 +91,7 @@ fn vec2_param(kfs: &slint::ModelRc<ParamKeyframe>, constant: [f32; 2]) -> Param<
             tick: i64::from(kf.tick),
             value: [kf.value_x, kf.value_y],
             easing: easing_of(&kf),
+            tangents: tangents_of(&kf),
         })
         .collect();
     if keyframes.is_empty() {
@@ -72,6 +99,15 @@ fn vec2_param(kfs: &slint::ModelRc<ParamKeyframe>, constant: [f32; 2]) -> Param<
     } else {
         Param::Keyframed { keyframes }
     }
+}
+
+/// Rebuild the clip's position `Param` from the projected `kf-position` list
+/// (absolute ticks + optional spatial tangents). Empty ⇔ constant.
+pub(crate) fn position_param(clip: &Clip) -> Param<[f32; 2]> {
+    vec2_param(
+        &clip.kf_position,
+        [clip.transform_position_x, clip.transform_position_y],
+    )
 }
 
 /// Clamp the playhead into the clip's extent, mirroring the engine's
@@ -98,7 +134,14 @@ pub(crate) fn sampled_transform(clip: &Clip, playhead: i32) -> ClipTransform {
             [clip.transform_anchor_x, clip.transform_anchor_y],
         )
         .sample(tick),
-        scale: scalar_param(&clip.kf_scale, clip.transform_scale).sample(tick),
+        scale: {
+            let [x, y] = vec2_param(
+                &clip.kf_scale,
+                [clip.transform_scale, clip.transform_scale_y],
+            )
+            .sample(tick);
+            Scale2 { x, y }
+        },
         rotation: scalar_param(&clip.kf_rotation, clip.transform_rotation).sample(tick),
         opacity: scalar_param(&clip.kf_opacity, clip.transform_opacity).sample(tick),
     }
@@ -112,6 +155,98 @@ pub(crate) fn sampled_volume(clip: &Clip, playhead: i32) -> f32 {
     scalar_param(&clip.kf_volume, clip.volume).sample(tick)
 }
 
+/// The clip's stereo pan sampled at the (clamped) playhead — same `Param`
+/// math as [`sampled_volume`]. An empty `kf-pan` ⇔ the constant in `pan`.
+pub(crate) fn sampled_pan(clip: &Clip, playhead: i32) -> f32 {
+    let tick = clamped_tick(clip, playhead);
+    scalar_param(&clip.kf_pan, clip.pan).sample(tick)
+}
+
+/// Sample one scalar text-style or color-look property at the playhead. The
+/// string keys deliberately match the inspector command keys, keeping each
+/// property's display value and diamond state on the same projected curve.
+pub(crate) fn sampled_scalar_param(clip: &Clip, param: &str, playhead: i32) -> Option<f32> {
+    let tick = clamped_tick(clip, playhead);
+    let (keyframes, constant) = match param {
+        "text_size" => (&clip.kf_text_size, clip.text_style.size),
+        "text_letter_spacing" => (&clip.kf_text_letter_spacing, clip.text_style.letter_spacing),
+        "text_line_spacing" => (&clip.kf_text_line_spacing, clip.text_style.line_spacing),
+        "text_stroke_width" => (&clip.kf_text_stroke_width, clip.text_style.stroke_width),
+        "text_background_radius" => (
+            &clip.kf_text_background_radius,
+            clip.text_style.background_radius,
+        ),
+        "text_shadow_blur" => (&clip.kf_text_shadow_blur, clip.text_style.shadow_blur),
+        "text_shadow_distance" => (
+            &clip.kf_text_shadow_distance,
+            clip.text_style.shadow_distance,
+        ),
+        "look_filter_intensity" => (&clip.kf_look_filter_intensity, clip.filter_intensity),
+        "look_lut_intensity" => (&clip.kf_look_lut_intensity, clip.lut_intensity),
+        "look_adjust_brightness" => (&clip.kf_look_adjust_brightness, clip.adjust_brightness),
+        "look_adjust_contrast" => (&clip.kf_look_adjust_contrast, clip.adjust_contrast),
+        "look_adjust_saturation" => (&clip.kf_look_adjust_saturation, clip.adjust_saturation),
+        "look_adjust_exposure" => (&clip.kf_look_adjust_exposure, clip.adjust_exposure),
+        "look_adjust_temperature" => (&clip.kf_look_adjust_temperature, clip.adjust_temperature),
+        "look_adjust_tint" => (&clip.kf_look_adjust_tint, clip.adjust_tint),
+        "look_adjust_hue" => (&clip.kf_look_adjust_hue, clip.adjust_hue),
+        "look_adjust_highlights" => (&clip.kf_look_adjust_highlights, clip.adjust_highlights),
+        "look_adjust_shadows" => (&clip.kf_look_adjust_shadows, clip.adjust_shadows),
+        "look_adjust_sharpness" => (&clip.kf_look_adjust_sharpness, clip.adjust_sharpness),
+        "look_adjust_vignette" => (&clip.kf_look_adjust_vignette, clip.adjust_vignette),
+        "style_shadow_blur" => (&clip.kf_style_shadow_blur, clip.style_shadow_blur),
+        "style_glow_radius" => (&clip.kf_style_glow_radius, clip.style_glow_radius),
+        "style_glow_intensity" => (&clip.kf_style_glow_intensity, clip.style_glow_intensity),
+        "style_outline_width" => (&clip.kf_style_outline_width, clip.style_outline_width),
+        "style_background_padding" => (
+            &clip.kf_style_background_padding,
+            clip.style_background_padding,
+        ),
+        "style_background_radius" => (
+            &clip.kf_style_background_radius,
+            clip.style_background_radius,
+        ),
+        "look_mask_feather" => (&clip.kf_look_mask_feather, clip.mask_feather),
+        "look_mask_rotation" => (&clip.kf_look_mask_rotation, clip.mask_rotation),
+        "look_mask_roundness" => (&clip.kf_look_mask_roundness, clip.mask_roundness),
+        "look_chroma_strength" => (&clip.kf_look_chroma_strength, clip.chroma_strength),
+        "look_chroma_shadow" => (&clip.kf_look_chroma_shadow, clip.chroma_shadow),
+        _ => return None,
+    };
+    Some(scalar_param(keyframes, constant).sample(tick))
+}
+
+/// Sample a vec2 param (`position`, `anchor`, `style_shadow_offset`,
+/// `look_mask_center`, `look_mask_size`) at the playhead. Axis-display keys
+/// (`*_x` / `*_y`) are handled in [`crate::inspector::sample_scalar_param`].
+pub(crate) fn sampled_vec2_param(clip: &Clip, param: &str, playhead: i32) -> Option<[f32; 2]> {
+    let tick = clamped_tick(clip, playhead);
+    let (keyframes, constant) = match param {
+        "position" => (
+            &clip.kf_position,
+            [clip.transform_position_x, clip.transform_position_y],
+        ),
+        "anchor" => (
+            &clip.kf_anchor,
+            [clip.transform_anchor_x, clip.transform_anchor_y],
+        ),
+        "style_shadow_offset" => (
+            &clip.kf_style_shadow_offset,
+            [clip.style_shadow_offset_x, clip.style_shadow_offset_y],
+        ),
+        "look_mask_center" => (
+            &clip.kf_look_mask_center,
+            [clip.mask_center_x, clip.mask_center_y],
+        ),
+        "look_mask_size" => (
+            &clip.kf_look_mask_size,
+            [clip.mask_size_w, clip.mask_size_h],
+        ),
+        _ => return None,
+    };
+    Some(vec2_param(keyframes, constant).sample(tick))
+}
+
 /// Overwrite the clip's `transform-*` fields with the playhead sample, so
 /// geometry code that reads those fields (placement, hit-test, gestures)
 /// follows the rendered frame on animated clips.
@@ -121,7 +256,9 @@ pub(crate) fn apply_sampled_transform(clip: &mut Clip, playhead: i32) {
     clip.transform_position_y = t.position[1];
     clip.transform_anchor_x = t.anchor_point[0];
     clip.transform_anchor_y = t.anchor_point[1];
-    clip.transform_scale = t.scale;
+    clip.transform_scale = t.scale.x;
+    clip.transform_scale_y = t.scale.y;
+    clip.transform_scale_linked = t.scale.is_uniform();
     clip.transform_rotation = t.rotation;
     clip.transform_opacity = t.opacity;
 }
@@ -136,6 +273,44 @@ pub(crate) fn merged_keyframe_ticks(clip: &Clip) -> slint::ModelRc<i32> {
         &clip.kf_scale,
         &clip.kf_rotation,
         &clip.kf_opacity,
+        &clip.kf_text_size,
+        &clip.kf_text_fill,
+        &clip.kf_text_letter_spacing,
+        &clip.kf_text_line_spacing,
+        &clip.kf_text_stroke_width,
+        &clip.kf_text_stroke_color,
+        &clip.kf_text_background_color,
+        &clip.kf_text_background_radius,
+        &clip.kf_text_shadow_blur,
+        &clip.kf_text_shadow_distance,
+        &clip.kf_text_shadow_color,
+        &clip.kf_look_filter_intensity,
+        &clip.kf_look_lut_intensity,
+        &clip.kf_look_adjust_brightness,
+        &clip.kf_look_adjust_contrast,
+        &clip.kf_look_adjust_saturation,
+        &clip.kf_look_adjust_exposure,
+        &clip.kf_look_adjust_temperature,
+        &clip.kf_look_adjust_tint,
+        &clip.kf_look_adjust_hue,
+        &clip.kf_look_adjust_highlights,
+        &clip.kf_look_adjust_shadows,
+        &clip.kf_look_adjust_sharpness,
+        &clip.kf_look_adjust_vignette,
+        &clip.kf_style_shadow_offset,
+        &clip.kf_style_shadow_blur,
+        &clip.kf_style_glow_radius,
+        &clip.kf_style_glow_intensity,
+        &clip.kf_style_outline_width,
+        &clip.kf_style_background_padding,
+        &clip.kf_style_background_radius,
+        &clip.kf_look_mask_feather,
+        &clip.kf_look_mask_center,
+        &clip.kf_look_mask_size,
+        &clip.kf_look_mask_rotation,
+        &clip.kf_look_mask_roundness,
+        &clip.kf_look_chroma_strength,
+        &clip.kf_look_chroma_shadow,
     ]
     .iter()
     .flat_map(|kfs| kfs.iter().map(|kf| kf.tick))
@@ -181,12 +356,18 @@ mod tests {
         ParamKeyframe {
             tick,
             value_x: value,
-            value_y: 0.0,
+            // Scale keyframes project both axes; scalars ignore value_y.
+            value_y: value,
             easing: 0,
             bez_x1: 0.0,
             bez_y1: 0.0,
             bez_x2: 0.0,
             bez_y2: 0.0,
+            has_tangents: false,
+            out_tx: 0.0,
+            out_ty: 0.0,
+            in_tx: 0.0,
+            in_ty: 0.0,
         }
     }
 
@@ -210,6 +391,8 @@ mod tests {
                 duration: rt(dur),
             },
             transform_scale: 1.0,
+            transform_scale_y: 1.0,
+            transform_scale_linked: true,
             transform_opacity: 1.0,
             transform_anchor_x: 0.5,
             transform_anchor_y: 0.5,
@@ -225,18 +408,31 @@ mod tests {
         let t = sampled_transform(&c, 50);
         assert_eq!(t.position, [0.25, 0.0]);
         assert_eq!(t.rotation, 45.0);
-        assert_eq!(t.scale, 1.0);
+        assert_eq!(t.scale, Scale2::ONE);
+    }
+
+    #[test]
+    fn sampled_pan_tracks_constant_and_keyframed_curve() {
+        // Mirrors volume: constant field when kf-pan is empty; playhead
+        // sample on an envelope. Last keyframe sits inside [start, end).
+        let mut c = clip(0, 100);
+        c.pan = -0.25;
+        assert_eq!(sampled_pan(&c, 50), -0.25);
+        c.kf_pan = kfs(vec![kf(0, -1.0), kf(80, 1.0)]);
+        assert!((sampled_pan(&c, 40) - 0.0).abs() < 1e-6);
+        assert_eq!(sampled_pan(&c, 0), -1.0);
+        assert_eq!(sampled_pan(&c, 80), 1.0);
     }
 
     #[test]
     fn animated_scale_samples_at_playhead_and_clamps() {
         let mut c = clip(100, 50);
         c.kf_scale = kfs(vec![kf(100, 1.0), kf(140, 2.0)]);
-        assert_eq!(sampled_transform(&c, 120).scale, 1.5);
-        assert_eq!(sampled_transform(&c, 100).scale, 1.0);
+        assert_eq!(sampled_transform(&c, 120).scale, Scale2::uniform(1.5));
+        assert_eq!(sampled_transform(&c, 100).scale, Scale2::ONE);
         // Before the clip / after the last keyframe: first / last value holds.
-        assert_eq!(sampled_transform(&c, 0).scale, 1.0);
-        assert_eq!(sampled_transform(&c, 1000).scale, 2.0);
+        assert_eq!(sampled_transform(&c, 0).scale, Scale2::ONE);
+        assert_eq!(sampled_transform(&c, 1000).scale, Scale2::uniform(2.0));
     }
 
     #[test]
@@ -308,15 +504,38 @@ mod tests {
     }
 
     #[test]
+    fn style_shadow_blur_samples_projected_curve() {
+        let mut c = clip(0, 100);
+        c.style_shadow_blur = 8.0;
+        assert_eq!(sampled_scalar_param(&c, "style_shadow_blur", 50), Some(8.0));
+        c.kf_style_shadow_blur = kfs(vec![kf(0, 4.0), kf(40, 12.0)]);
+        assert_eq!(sampled_scalar_param(&c, "style_shadow_blur", 20), Some(8.0));
+        assert_eq!(
+            sampled_vec2_param(&c, "style_shadow_offset", 0),
+            Some([0.0, 0.0])
+        );
+        c.style_shadow_offset_x = 4.0;
+        c.style_shadow_offset_y = -2.0;
+        assert_eq!(
+            sampled_vec2_param(&c, "style_shadow_offset", 10),
+            Some([4.0, -2.0])
+        );
+    }
+
+    #[test]
     fn easing_roundtrips_through_ui_encoding() {
         for easing in [
             Easing::Linear,
             Easing::EaseIn,
             Easing::EaseOut,
             Easing::EaseInOut,
+            Easing::from_preset_id("snappy").unwrap(),
+            Easing::from_preset_id("overshoot").unwrap(),
+            Easing::from_preset_id("anticipate").unwrap(),
             Easing::Bezier {
                 points: [0.42, 0.0, 0.58, 1.0],
             },
+            Easing::Hold,
         ] {
             let (tag, points) = easing_to_ui(easing);
             assert_eq!(easing_from_ui(tag, points), easing);

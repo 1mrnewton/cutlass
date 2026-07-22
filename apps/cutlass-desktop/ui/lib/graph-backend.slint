@@ -1,0 +1,97 @@
+// Keyframe graph editor bridge (timeline drawer). Rust
+// (`src/graph_editor.rs`) enumerates animated scalar channels, samples the
+// selected channel into an SVG path + keyframe dots, and (later) commits
+// drag / insert / delete edits.
+
+import { Sequence } from "../models/index.slint";
+
+// One animatable scalar channel on the selected clip.
+// `channel` is 0 for scalars / X, 1 for Y on vec2 params.
+export struct GraphChannel {
+    key: string,
+    channel: int,
+    label: string,
+}
+
+// One keyframe diamond in graph plot coordinates (logical px).
+export struct GraphDot {
+    tick: int,
+    value: float,
+    px: float,
+    py: float,
+    selected: bool,
+    easing-tag: int,
+}
+
+export global GraphBackend {
+    // Drawer open/closed (toolbar "Graph" toggle).
+    in-out property <bool> visible: false;
+
+    // Animated scalar channels on the selected clip (empty ⇔ none / no clip).
+    in-out property <[GraphChannel]> channels: [];
+    // Labels for the channel ComboBox (index-aligned with `channels`).
+    in-out property <[string]> channel-labels: [];
+    in-out property <int> channel-index: 0;
+
+    in-out property <string> selected-key: "";
+    in-out property <int> selected-channel: 0;
+
+    // SVG path commands in plot coordinates ("M x y L x y …").
+    in-out property <string> path-commands: "";
+    in-out property <[GraphDot]> dots: [];
+
+    // Y-axis labels (min / mid / max of the padded range).
+    in-out property <string> y-min-label: "";
+    in-out property <string> y-mid-label: "";
+    in-out property <string> y-max-label: "";
+
+    // Horizontal gridline Y positions (plot px) and playhead X.
+    in-out property <float> grid-min-y: 0;
+    in-out property <float> grid-mid-y: 0;
+    in-out property <float> grid-max-y: 0;
+    in-out property <float> playhead-x: 0;
+    in-out property <bool> playhead-visible: false;
+
+    // Selected keyframe tick (absolute), or -1.
+    in-out property <int> selected-tick: -1;
+
+    // Plot size last used for layout (for drag mapping).
+    in-out property <float> plot-w: 0;
+    in-out property <float> plot-h: 0;
+
+    // Outgoing-segment cubic-bezier handles (selected keyframe → next).
+    // Hidden when no selection, no successor, or Hold easing.
+    in-out property <bool> handles-visible: false;
+    in-out property <float> handle-a-x: 0;
+    in-out property <float> handle-a-y: 0;
+    in-out property <float> handle-b-x: 0;
+    in-out property <float> handle-b-y: 0;
+    // Stem lines: start→A and end→B as SVG path commands.
+    in-out property <string> handle-stem-a: "";
+    in-out property <string> handle-stem-b: "";
+
+    callback toggle-visible();
+    callback set-channel(key: string, channel: int);
+
+    // Rebuild path/dots/channels from the projected sequence. Called when
+    // selection, projection, playhead, channel, or plot size changes.
+    callback refresh(sequence: Sequence, clip-id: string, playhead: int, width: float, height: float);
+
+    // Keyframe editing (commit 2).
+    callback select-dot(tick: int);
+    callback drag-begin(tick: int);
+    callback drag-move(x: float, y: float);
+    callback drag-end(commit: bool);
+    callback insert-at(x: float, y: float);
+    callback delete-dot(tick: int);
+
+    // Bezier easing handle editing (commit 3). `which` is 0 = A, 1 = B.
+    callback handle-drag-begin(which: int);
+    callback handle-drag-move(x: float, y: float);
+    callback handle-drag-end(commit: bool);
+
+    // Piecewise easing presets (commit 4). Enabled when the selected
+    // keyframe has a following segment. `preset` is 0=bounce, 1=elastic, 2=back.
+    in-out property <bool> preset-available: false;
+    callback apply-preset(preset: int);
+}

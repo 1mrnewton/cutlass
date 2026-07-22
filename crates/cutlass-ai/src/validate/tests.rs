@@ -57,6 +57,395 @@ fn reject(project: &Project, cmd: WireCommand) -> String {
 }
 
 #[test]
+fn extended_wire_clip_params_lower_to_model_params() {
+    let (mut project, _, _, _, clip, title) = fixture();
+    project
+        .add_effect(ClipId::from_raw(clip), "gaussian_blur")
+        .unwrap();
+    let sticker_track = project.add_track(TrackKind::Sticker, "Shapes");
+    let shape = project
+        .add_generated(
+            sticker_track,
+            Generator::shape(cutlass_models::Shape::Rectangle, [0, 0, 0, 255]),
+            TimeRange::at_rate(0, 72, R24),
+        )
+        .unwrap()
+        .raw();
+
+    let cases = [
+        (
+            clip,
+            wire::WireClipParam::AnchorPoint,
+            Some([0.25, -0.25]),
+            None,
+            None,
+            ClipParam::AnchorPoint,
+            ParamValue::Vec2([0.25, -0.25]),
+        ),
+        (
+            clip,
+            wire::WireClipParam::Speed,
+            None,
+            Some(1.5),
+            None,
+            ClipParam::Speed,
+            ParamValue::Scalar(1.5),
+        ),
+        (
+            clip,
+            wire::WireClipParam::Effect {
+                index: 0,
+                param: "radius".into(),
+            },
+            None,
+            Some(8.0),
+            None,
+            ClipParam::Effect {
+                effect: 0,
+                param: 0,
+            },
+            ParamValue::Scalar(8.0),
+        ),
+        (
+            shape,
+            wire::WireClipParam::Shape {
+                param: wire::WireShapeParam::Fill,
+            },
+            None,
+            None,
+            Some([12, 34, 56, 255]),
+            ClipParam::Shape {
+                param: cutlass_models::ShapeParam::Fill,
+            },
+            ParamValue::Color([12, 34, 56, 255]),
+        ),
+        (
+            title,
+            wire::WireClipParam::Text {
+                param: wire::WireTextParam::Size,
+            },
+            None,
+            Some(72.0),
+            None,
+            ClipParam::Text {
+                param: cutlass_models::TextParam::Size,
+            },
+            ParamValue::Scalar(72.0),
+        ),
+        (
+            title,
+            wire::WireClipParam::Text {
+                param: wire::WireTextParam::BackgroundRadius,
+            },
+            None,
+            Some(0.5),
+            None,
+            ClipParam::Text {
+                param: cutlass_models::TextParam::BackgroundRadius,
+            },
+            ParamValue::Scalar(0.5),
+        ),
+        (
+            title,
+            wire::WireClipParam::Text {
+                param: wire::WireTextParam::BackgroundColor,
+            },
+            None,
+            None,
+            Some([10, 20, 30, 200]),
+            ClipParam::Text {
+                param: cutlass_models::TextParam::BackgroundColor,
+            },
+            ParamValue::Color([10, 20, 30, 200]),
+        ),
+        (
+            clip,
+            wire::WireClipParam::Look {
+                param: wire::WireLookParam::AdjustContrast,
+            },
+            None,
+            Some(0.5),
+            None,
+            ClipParam::Look {
+                param: cutlass_models::LookParam::AdjustContrast,
+            },
+            ParamValue::Scalar(0.5),
+        ),
+    ];
+
+    for (target, param, position, value, rgba, expected_param, expected_value) in cases {
+        let edit = lower(
+            &project,
+            WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+                clip: target,
+                param,
+                at: 2.0,
+                value,
+                position,
+                rgba,
+                rect: None,
+                easing: Some(wire::WireEasing::EaseOut),
+
+                tangent_out: None,
+                tangent_in: None,
+            }),
+        );
+        assert_eq!(
+            edit,
+            EditCommand::SetParamKeyframe {
+                clip: ClipId::from_raw(target),
+                param: expected_param,
+                at: RationalTime::new(48, R24),
+                value: expected_value,
+                easing: Easing::EaseOut,
+                tangents: None,
+            }
+        );
+    }
+}
+
+#[test]
+fn named_and_bezier_easings_lower_on_set_param_keyframe() {
+    let (project, _, _, _, clip, _) = fixture();
+
+    let cases = [
+        (
+            wire::WireEasing::Snappy,
+            Easing::from_preset_id("snappy").unwrap(),
+        ),
+        (
+            wire::WireEasing::Overshoot,
+            Easing::from_preset_id("overshoot").unwrap(),
+        ),
+        (
+            wire::WireEasing::Anticipate,
+            Easing::from_preset_id("anticipate").unwrap(),
+        ),
+        (wire::WireEasing::Hold, Easing::Hold),
+        (
+            wire::WireEasing::Bezier {
+                points: [0.42, 0.0, 0.58, 1.0],
+            },
+            Easing::Bezier {
+                points: [0.42, 0.0, 0.58, 1.0],
+            },
+        ),
+    ];
+
+    for (wire_easing, expected) in cases {
+        let edit = lower(
+            &project,
+            WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+                clip,
+                param: wire::WireClipParam::Opacity,
+                at: 1.0,
+                value: Some(0.5),
+                position: None,
+                rgba: None,
+                rect: None,
+                easing: Some(wire_easing),
+
+                tangent_out: None,
+                tangent_in: None,
+            }),
+        );
+        assert_eq!(
+            edit,
+            EditCommand::SetParamKeyframe {
+                clip: ClipId::from_raw(clip),
+                param: ClipParam::Opacity,
+                at: RationalTime::new(24, R24),
+                value: ParamValue::Scalar(0.5),
+                easing: expected,
+                tangents: None,
+            }
+        );
+    }
+
+    let err = validate(
+        &WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Opacity,
+            at: 1.0,
+            value: Some(0.5),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: Some(wire::WireEasing::Bezier {
+                points: [1.5, 0.0, 0.5, 1.0],
+            }),
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+        &project,
+    )
+    .expect_err("x control point outside 0..=1 must reject");
+    assert!(
+        err.to_string().contains("invalid easing"),
+        "unexpected rejection: {err}"
+    );
+}
+
+#[test]
+fn hold_easing_lowers_from_wire_json() {
+    let (project, _, _, _, clip, _) = fixture();
+    let cmd: WireCommand = serde_json::from_value(serde_json::json!({
+        "command": "set_param_keyframe",
+        "clip": clip,
+        "param": "opacity",
+        "at": 1.0,
+        "value": 0.5,
+        "easing": "hold",
+    }))
+    .expect("\"hold\" is a valid wire easing tag");
+    assert_eq!(
+        lower(&project, cmd),
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Opacity,
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Scalar(0.5),
+            easing: Easing::Hold,
+            tangents: None,
+        }
+    );
+}
+
+#[test]
+fn position_tangents_lower_on_set_param_keyframe() {
+    let (project, _, _, _, clip, _) = fixture();
+    let edit = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Position,
+            at: 1.0,
+            value: None,
+            position: Some([0.25, -0.5]),
+            rgba: None,
+            rect: None,
+            easing: Some(wire::WireEasing::Linear),
+            tangent_out: Some([0.0, 0.5]),
+            tangent_in: Some([-0.25, 0.0]),
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Position,
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Vec2([0.25, -0.5]),
+            easing: Easing::Linear,
+            tangents: Some(cutlass_models::SpatialTangents {
+                out_t: [0.0, 0.5],
+                in_t: [-0.25, 0.0],
+            }),
+        }
+    );
+}
+
+#[test]
+fn position_tangents_on_opacity_are_rejected() {
+    let (project, _, _, _, clip, _) = fixture();
+    let err = validate(
+        &WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Opacity,
+            at: 1.0,
+            value: Some(0.5),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: None,
+            tangent_out: Some([0.1, 0.0]),
+            tangent_in: None,
+        }),
+        &project,
+    )
+    .expect_err("tangents on opacity must reject");
+    assert!(
+        err.to_string()
+            .contains("spatial tangents are only supported on position"),
+        "unexpected rejection: {err}"
+    );
+}
+
+#[test]
+fn position_tangents_roundtrip_through_wire_json() {
+    let (project, _, _, _, clip, _) = fixture();
+    let cmd: WireCommand = serde_json::from_value(serde_json::json!({
+        "command": "set_param_keyframe",
+        "clip": clip,
+        "param": "position",
+        "at": 1.0,
+        "position": [0.25, -0.5],
+        "tangent_out": [0.0, 0.5],
+        "tangent_in": [-0.25, 0.0],
+    }))
+    .expect("tangent fields deserialize");
+    let WireCommand::SetParamKeyframe(args) = &cmd else {
+        panic!("expected SetParamKeyframe");
+    };
+    assert_eq!(args.tangent_out, Some([0.0, 0.5]));
+    assert_eq!(args.tangent_in, Some([-0.25, 0.0]));
+    assert_eq!(
+        lower(&project, cmd),
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Position,
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Vec2([0.25, -0.5]),
+            easing: Easing::Linear,
+            tangents: Some(cutlass_models::SpatialTangents {
+                out_t: [0.0, 0.5],
+                in_t: [-0.25, 0.0],
+            }),
+        }
+    );
+}
+
+#[test]
+fn extended_wire_params_work_for_constant_and_removal() {
+    let (project, _, _, _, clip, _) = fixture();
+
+    assert_eq!(
+        lower(
+            &project,
+            WireCommand::SetParamConstant(wire::SetParamConstant {
+                clip,
+                param: wire::WireClipParam::AnchorPoint,
+                value: None,
+                position: Some([0.25, 0.5]),
+                rgba: None,
+                rect: None,
+            }),
+        ),
+        EditCommand::SetParamConstant {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::AnchorPoint,
+            value: ParamValue::Vec2([0.25, 0.5]),
+        }
+    );
+    assert_eq!(
+        lower(
+            &project,
+            WireCommand::RemoveParamKeyframe(wire::RemoveParamKeyframe {
+                clip,
+                param: wire::WireClipParam::Speed,
+                at: 1.0,
+            }),
+        ),
+        EditCommand::RemoveParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Speed,
+            at: RationalTime::new(24, R24),
+        }
+    );
+}
+
+#[test]
 fn add_transition_rejects_canvas_pass_lanes() {
     // Effect/filter/adjustment segments resolve to canvas-wide passes the
     // renderer can't nest inside a transition; the agent gets a rejection
@@ -291,7 +680,7 @@ fn set_generator_preserves_text_style_and_rejects_media_clips() {
     let styled = Generator::Text {
         content: "INTRO".into(),
         style: cutlass_models::TextStyle {
-            size: 120.0,
+            size: 120.0.into(),
             ..Default::default()
         },
     };
@@ -314,7 +703,11 @@ fn set_generator_preserves_text_style_and_rejects_media_clips() {
             ..
         } => {
             assert_eq!(content, "OUTRO");
-            assert_eq!(style.size, 120.0, "existing style must be preserved");
+            assert_eq!(
+                style.size.sample(0),
+                120.0,
+                "existing style must be preserved"
+            );
         }
         other => panic!("unexpected lowering: {other:?}"),
     }
@@ -339,7 +732,7 @@ fn transform_merges_with_current_values() {
             ClipId::from_raw(clip),
             ClipTransform {
                 position: [0.25, 0.0],
-                scale: 0.5,
+                scale: 0.5.into(),
                 rotation: 10.0,
                 opacity: 0.8,
                 ..ClipTransform::IDENTITY
@@ -367,7 +760,7 @@ fn transform_merges_with_current_values() {
             clip: ClipId::from_raw(clip),
             transform: ClipTransform {
                 position: [0.25, -0.1],
-                scale: 0.5,
+                scale: 0.5.into(),
                 rotation: 10.0,
                 opacity: 1.0,
                 ..ClipTransform::IDENTITY
@@ -384,12 +777,115 @@ fn transform_merges_with_current_values() {
             position_y: None,
             anchor_x: None,
             anchor_y: None,
-            scale: Some(0.0),
+            scale: Some(wire::WireScale::Uniform(0.0)),
             rotation: None,
             opacity: None,
         }),
     );
     assert!(msg.contains("invalid transform"), "{msg}");
+}
+
+#[test]
+fn transform_scale_accepts_legacy_number_and_axes_array() {
+    let (project, _, _, _, clip, _) = fixture();
+
+    // Old agent payloads: bare number → uniform Scale2.
+    let legacy = WireCommand::from_tool_call(
+        "set_clip_transform",
+        serde_json::json!({ "clip": clip, "scale": 1.5 }),
+    )
+    .unwrap();
+    let edit = lower(&project, legacy);
+    assert_eq!(
+        edit,
+        EditCommand::SetClipTransform {
+            clip: ClipId::from_raw(clip),
+            transform: ClipTransform {
+                scale: cutlass_models::Scale2::uniform(1.5),
+                ..ClipTransform::IDENTITY
+            },
+            at: None,
+        }
+    );
+
+    let split = WireCommand::from_tool_call(
+        "set_clip_transform",
+        serde_json::json!({ "clip": clip, "scale": [2.0, 1.0] }),
+    )
+    .unwrap();
+    let edit = lower(&project, split);
+    assert_eq!(
+        edit,
+        EditCommand::SetClipTransform {
+            clip: ClipId::from_raw(clip),
+            transform: ClipTransform {
+                scale: cutlass_models::Scale2 { x: 2.0, y: 1.0 },
+                ..ClipTransform::IDENTITY
+            },
+            at: None,
+        }
+    );
+}
+
+#[test]
+fn scale_keyframe_accepts_scalar_and_position_vec2() {
+    let (project, _, _, _, clip, _) = fixture();
+
+    let uniform = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Scale,
+            at: 1.0,
+            value: Some(2.0),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert_eq!(
+        uniform,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Scale,
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Scalar(2.0),
+            easing: Easing::Linear,
+            tangents: None,
+        }
+    );
+
+    let axes = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Scale,
+            at: 1.0,
+            value: None,
+            position: Some([2.0, 1.0]),
+            rgba: None,
+            rect: None,
+            easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert_eq!(
+        axes,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Scale,
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Vec2([2.0, 1.0]),
+            easing: Easing::Linear,
+            tangents: None,
+        }
+    );
 }
 
 #[test]
@@ -421,6 +917,7 @@ fn clip_crop_merges_edges_and_rejects_empty_frames() {
             },
             flip_h: true,
             flip_v: false,
+            at: None,
         }
     );
 
@@ -437,6 +934,7 @@ fn clip_crop_merges_edges_and_rejects_empty_frames() {
             },
             true,
             false,
+            None,
         )
         .unwrap();
     let edit = lower(
@@ -491,6 +989,155 @@ fn clip_crop_merges_edges_and_rejects_empty_frames() {
         }),
     );
     assert!(msg.contains("bottom must be a fraction"), "{msg}");
+}
+
+#[test]
+fn pan_keyframe_lowers_and_rejects_out_of_range() {
+    let (project, _, _, _, clip, title) = fixture();
+
+    let edit = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Pan,
+            at: 1.0,
+            value: Some(-0.5),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: Some(wire::WireEasing::Linear),
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Pan,
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Scalar(-0.5),
+            easing: Easing::Linear,
+            tangents: None,
+        }
+    );
+
+    let edit = lower(
+        &project,
+        WireCommand::SetParamConstant(wire::SetParamConstant {
+            clip,
+            param: wire::WireClipParam::Pan,
+            value: Some(0.25),
+            position: None,
+            rgba: None,
+            rect: None,
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetParamConstant {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Pan,
+            value: ParamValue::Scalar(0.25),
+        }
+    );
+
+    // Range + media-backed gating are enforced by the model when the edit
+    // lands (same as volume keyframes — wire lower accepts the scalar shape).
+    let mut project = project;
+    assert!(
+        project
+            .set_param_constant(
+                ClipId::from_raw(clip),
+                ClipParam::Pan,
+                ParamValue::Scalar(-1.01),
+            )
+            .is_err()
+    );
+    assert!(
+        project
+            .set_param_constant(
+                ClipId::from_raw(title),
+                ClipParam::Pan,
+                ParamValue::Scalar(0.5),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn crop_keyframe_uses_rect_on_wire() {
+    let (project, _, _, _, clip, _) = fixture();
+
+    let edit = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Crop,
+            at: 1.0,
+            value: None,
+            position: None,
+            rgba: None,
+            rect: Some([0.1, 0.2, 0.5, 0.5]),
+            easing: Some(wire::WireEasing::Linear),
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Crop,
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Rect([0.1, 0.2, 0.5, 0.5]),
+            easing: Easing::Linear,
+            tangents: None,
+        }
+    );
+
+    // Degenerate width rejected by model validation after lowering path.
+    let msg = reject(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Crop,
+            at: 1.0,
+            value: None,
+            position: None,
+            rgba: None,
+            rect: Some([0.0, 0.0, 0.001, 1.0]),
+            easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert!(
+        msg.contains("crop") || msg.contains("0.01") || msg.contains("at least"),
+        "{msg}"
+    );
+
+    // Scalar value rejected for crop.
+    let msg = reject(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Crop,
+            at: 1.0,
+            value: Some(0.5),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert!(msg.contains("rect"), "{msg}");
 }
 
 #[test]
@@ -667,6 +1314,399 @@ fn clip_pitch_lowers_and_rejects_generated() {
 }
 
 #[test]
+fn set_clip_blend_mode_lowers_and_guards() {
+    use cutlass_models::BlendMode;
+
+    let (mut project, media, _, _, clip, _) = fixture();
+    let edit = lower(
+        &project,
+        WireCommand::SetClipBlendMode(wire::SetClipBlendMode {
+            clip,
+            mode: wire::WireBlendMode::Multiply,
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetClipBlendMode {
+            clip: ClipId::from_raw(clip),
+            mode: BlendMode::Multiply,
+        }
+    );
+
+    let lane = project.add_track(TrackKind::Audio, "A1");
+    let audio_clip = project
+        .add_clip(
+            lane,
+            cutlass_models::MediaId::from_raw(media),
+            TimeRange::at_rate(0, 240, R24),
+            RationalTime::new(0, R24),
+        )
+        .unwrap();
+    let msg = reject(
+        &project,
+        WireCommand::SetClipBlendMode(wire::SetClipBlendMode {
+            clip: audio_clip.raw(),
+            mode: wire::WireBlendMode::Screen,
+        }),
+    );
+    assert!(msg.contains("visual frame"), "{msg}");
+
+    let err = WireCommand::from_tool_call(
+        "set_clip_blend_mode",
+        serde_json::json!({ "clip": clip, "mode": "nope" }),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("nope") || err.contains("unknown variant"),
+        "{err}"
+    );
+
+    let adj_lane = project.add_track(TrackKind::Adjustment, "ADJ");
+    let adj = project
+        .add_generated(
+            adj_lane,
+            Generator::Adjustment,
+            TimeRange::at_rate(0, 24, R24),
+        )
+        .unwrap();
+    let msg = reject(
+        &project,
+        WireCommand::SetClipBlendMode(wire::SetClipBlendMode {
+            clip: adj.raw(),
+            mode: wire::WireBlendMode::Multiply,
+        }),
+    );
+    assert!(msg.contains("adjustment/effect/filter"), "{msg}");
+}
+
+#[test]
+fn set_motion_blur_lowers_and_guards() {
+    use cutlass_models::MotionBlur;
+
+    let (mut project, media, _, _, clip, _) = fixture();
+    let edit = lower(
+        &project,
+        WireCommand::SetMotionBlur(wire::SetMotionBlur {
+            clip,
+            enabled: true,
+            shutter_deg: Some(270.0),
+            samples: Some(12),
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetClipMotionBlur {
+            clip: ClipId::from_raw(clip),
+            motion_blur: MotionBlur {
+                enabled: true,
+                shutter_deg: 270.0,
+                samples: 12,
+            },
+        }
+    );
+
+    let lane = project.add_track(TrackKind::Audio, "A1");
+    let audio_clip = project
+        .add_clip(
+            lane,
+            cutlass_models::MediaId::from_raw(media),
+            TimeRange::at_rate(0, 240, R24),
+            RationalTime::new(0, R24),
+        )
+        .unwrap();
+    let msg = reject(
+        &project,
+        WireCommand::SetMotionBlur(wire::SetMotionBlur {
+            clip: audio_clip.raw(),
+            enabled: true,
+            shutter_deg: None,
+            samples: None,
+        }),
+    );
+    assert!(msg.contains("visual frame"), "{msg}");
+
+    let msg = reject(
+        &project,
+        WireCommand::SetMotionBlur(wire::SetMotionBlur {
+            clip,
+            enabled: true,
+            shutter_deg: Some(900.0),
+            samples: None,
+        }),
+    );
+    assert!(msg.contains("shutter") || msg.contains("720"), "{msg}");
+
+    let fx_lane = project.add_track(TrackKind::Effect, "FX");
+    let fx = project
+        .add_generated(fx_lane, Generator::Effect, TimeRange::at_rate(0, 24, R24))
+        .unwrap();
+    let msg = reject(
+        &project,
+        WireCommand::SetMotionBlur(wire::SetMotionBlur {
+            clip: fx.raw(),
+            enabled: true,
+            shutter_deg: None,
+            samples: None,
+        }),
+    );
+    assert!(msg.contains("adjustment/effect/filter"), "{msg}");
+}
+
+#[test]
+fn set_layer_styles_lowers_and_guards() {
+    use cutlass_models::{LayerShadow, LayerStyles, Param};
+
+    let (mut project, media, _, _, clip, _) = fixture();
+    let edit = lower(
+        &project,
+        WireCommand::SetClipLayerStyles(wire::SetClipLayerStyles {
+            clip,
+            styles: wire::WireLayerStyles {
+                shadow: Some(wire::WireLayerShadow {
+                    rgba: [0, 0, 0, 128],
+                    offset: [4.0, 4.0],
+                    blur: 8.0,
+                }),
+                outline: Some(wire::WireLayerOutline {
+                    rgba: [255, 255, 255, 255],
+                    width: 2.0,
+                }),
+                ..Default::default()
+            },
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetClipLayerStyles {
+            clip: ClipId::from_raw(clip),
+            styles: LayerStyles {
+                shadow: Some(LayerShadow {
+                    rgba: Param::Constant([0, 0, 0, 128]),
+                    offset: Param::Constant([4.0, 4.0]),
+                    blur: Param::Constant(8.0),
+                }),
+                outline: Some(cutlass_models::LayerOutline {
+                    rgba: Param::Constant([255, 255, 255, 255]),
+                    width: Param::Constant(2.0),
+                }),
+                ..Default::default()
+            },
+        }
+    );
+
+    let lane = project.add_track(TrackKind::Audio, "A1");
+    let audio_clip = project
+        .add_clip(
+            lane,
+            cutlass_models::MediaId::from_raw(media),
+            TimeRange::at_rate(0, 240, R24),
+            RationalTime::new(0, R24),
+        )
+        .unwrap();
+    let msg = reject(
+        &project,
+        WireCommand::SetClipLayerStyles(wire::SetClipLayerStyles {
+            clip: audio_clip.raw(),
+            styles: wire::WireLayerStyles {
+                glow: Some(wire::WireLayerGlow {
+                    rgba: [255, 255, 255, 255],
+                    radius: 12.0,
+                    intensity: 1.0,
+                }),
+                ..Default::default()
+            },
+        }),
+    );
+    assert!(msg.contains("visual frame"), "{msg}");
+
+    let filter_lane = project.add_track(TrackKind::Filter, "FLT");
+    let filter_clip = project
+        .add_generated(
+            filter_lane,
+            Generator::Filter,
+            TimeRange::at_rate(0, 24, R24),
+        )
+        .unwrap();
+    let msg = reject(
+        &project,
+        WireCommand::SetClipLayerStyles(wire::SetClipLayerStyles {
+            clip: filter_clip.raw(),
+            styles: wire::WireLayerStyles {
+                shadow: Some(wire::WireLayerShadow {
+                    rgba: [0, 0, 0, 128],
+                    offset: [2.0, 2.0],
+                    blur: 4.0,
+                }),
+                ..Default::default()
+            },
+        }),
+    );
+    assert!(msg.contains("adjustment/effect/filter"), "{msg}");
+}
+
+#[test]
+fn style_param_keyframe_lowers_by_value_kind() {
+    let (project, _, _, _, clip, _) = fixture();
+
+    let edit = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Style {
+                param: wire::WireStyleParam::ShadowBlur,
+            },
+            at: 1.0,
+            value: Some(12.0),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Style {
+                param: cutlass_models::StyleParam::ShadowBlur,
+            },
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Scalar(12.0),
+            easing: Easing::Linear,
+            tangents: None,
+        }
+    );
+
+    let msg = reject(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Style {
+                param: wire::WireStyleParam::ShadowOffset,
+            },
+            at: 1.0,
+            value: Some(4.0),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert!(msg.contains("position"), "{msg}");
+
+    let offset = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Style {
+                param: wire::WireStyleParam::ShadowOffset,
+            },
+            at: 1.0,
+            value: None,
+            position: Some([4.0, -2.0]),
+            rgba: None,
+            rect: None,
+            easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert_eq!(
+        offset,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Style {
+                param: cutlass_models::StyleParam::ShadowOffset,
+            },
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Vec2([4.0, -2.0]),
+            easing: Easing::Linear,
+            tangents: None,
+        }
+    );
+
+    let msg = reject(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Style {
+                param: wire::WireStyleParam::GlowColor,
+            },
+            at: 1.0,
+            value: Some(1.0),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert!(msg.contains("rgba"), "{msg}");
+
+    let color = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Style {
+                param: wire::WireStyleParam::GlowColor,
+            },
+            at: 1.0,
+            value: None,
+            position: None,
+            rgba: Some([255, 200, 0, 255]),
+            rect: None,
+            easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert_eq!(
+        color,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Style {
+                param: cutlass_models::StyleParam::GlowColor,
+            },
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Color([255, 200, 0, 255]),
+            easing: Easing::Linear,
+            tangents: None,
+        }
+    );
+
+    // Tagged nesting on the wire: {"style":{"param":"shadow_blur"}}
+    let from_json = WireCommand::from_tool_call(
+        "set_param_keyframe",
+        serde_json::json!({
+            "clip": clip,
+            "param": { "style": { "param": "shadow_blur" } },
+            "at": 1.0,
+            "value": 8.0,
+        }),
+    )
+    .unwrap();
+    let WireCommand::SetParamKeyframe(args) = from_json else {
+        panic!("expected SetParamKeyframe");
+    };
+    assert_eq!(
+        args.param,
+        wire::WireClipParam::Style {
+            param: wire::WireStyleParam::ShadowBlur
+        }
+    );
+}
+
+#[test]
 fn look_commands_lower_and_guard() {
     let (project, _, _, _, clip, title) = fixture();
 
@@ -684,7 +1724,7 @@ fn look_commands_lower_and_guard() {
         EditCommand::SetClipFilter { filter, .. } => {
             let filter = filter.expect("filter set");
             assert_eq!(filter.id, "vivid");
-            assert!((filter.intensity - 0.9).abs() < 1e-6);
+            assert!((filter.intensity.sample_at(0.0) - 0.9).abs() < 1e-6);
         }
         other => panic!("expected SetClipFilter, got {other:?}"),
     }
@@ -695,6 +1735,9 @@ fn look_commands_lower_and_guard() {
             clip,
             slot: wire::WireAnimationSlot::In,
             animation: Some("fade_in".to_string()),
+            speed: None,
+            intensity: None,
+            stagger: None,
         }),
     );
     assert_eq!(
@@ -712,6 +1755,9 @@ fn look_commands_lower_and_guard() {
             clip,
             slot: wire::WireAnimationSlot::Out,
             animation: Some("fade_in".to_string()),
+            speed: None,
+            intensity: None,
+            stagger: None,
         }),
     );
     assert!(msg.contains("does not fit"), "{msg}");
@@ -724,10 +1770,233 @@ fn look_commands_lower_and_guard() {
                 kind: wire::WireMaskKind::Circle,
                 feather: None,
                 invert: None,
+                center: None,
+                size: None,
+                rotation: None,
+                roundness: None,
             }),
         }),
     );
     assert!(msg.contains("generated clip"), "{msg}");
+}
+
+#[test]
+fn mask_with_geometry_lowers_to_constants() {
+    let (project, _, _, _, clip, _) = fixture();
+
+    let edit = lower(
+        &project,
+        WireCommand::SetClipMask(wire::SetClipMask {
+            clip,
+            mask: Some(wire::WireMask {
+                kind: wire::WireMaskKind::Rectangle,
+                feather: Some(0.25),
+                invert: Some(true),
+                center: Some([0.1, -0.2]),
+                size: Some([0.8, 0.6]),
+                rotation: Some(15.0),
+                roundness: Some(0.3),
+            }),
+        }),
+    );
+    match edit {
+        EditCommand::SetClipMask {
+            mask: Some(mask), ..
+        } => {
+            assert_eq!(mask.kind, MaskKind::Rectangle);
+            assert_eq!(mask.feather, Param::Constant(0.25));
+            assert!(mask.invert);
+            assert_eq!(mask.center, Param::Constant([0.1, -0.2]));
+            assert_eq!(mask.size, Param::Constant([0.8, 0.6]));
+            assert_eq!(mask.rotation, Param::Constant(15.0));
+            assert_eq!(mask.roundness, Param::Constant(0.3));
+        }
+        other => panic!("expected SetClipMask with geometry, got {other:?}"),
+    }
+
+    let msg = reject(
+        &project,
+        WireCommand::SetClipMask(wire::SetClipMask {
+            clip,
+            mask: Some(wire::WireMask {
+                kind: wire::WireMaskKind::Circle,
+                feather: None,
+                invert: None,
+                center: None,
+                size: Some([0.0, 1.0]),
+                rotation: None,
+                roundness: None,
+            }),
+        }),
+    );
+    assert!(msg.contains("mask size"), "{msg}");
+}
+
+#[test]
+fn set_clip_adjustments_lowers_new_sliders_and_rejects_ranges() {
+    let (project, _, _, _, clip, _) = fixture();
+
+    let edit = lower(
+        &project,
+        WireCommand::SetClipAdjustments(wire::SetClipAdjustments {
+            clip,
+            brightness: None,
+            contrast: None,
+            saturation: None,
+            exposure: None,
+            temperature: None,
+            tint: Some(-0.5),
+            hue: Some(1.0),
+            highlights: Some(0.25),
+            shadows: Some(-0.25),
+            sharpness: Some(0.75),
+            vignette: Some(0.4),
+        }),
+    );
+    match edit {
+        EditCommand::SetClipAdjustments { adjust, .. } => {
+            assert_eq!(adjust.tint, (-0.5f32).into());
+            assert_eq!(adjust.hue, 1.0.into());
+            assert_eq!(adjust.highlights, 0.25.into());
+            assert_eq!(adjust.shadows, (-0.25f32).into());
+            assert_eq!(adjust.sharpness, 0.75.into());
+            assert_eq!(adjust.vignette, 0.4.into());
+        }
+        other => panic!("expected SetClipAdjustments, got {other:?}"),
+    }
+
+    let msg = reject(
+        &project,
+        WireCommand::SetClipAdjustments(wire::SetClipAdjustments {
+            clip,
+            brightness: None,
+            contrast: None,
+            saturation: None,
+            exposure: None,
+            temperature: None,
+            tint: None,
+            hue: None,
+            highlights: None,
+            shadows: None,
+            sharpness: Some(-0.5),
+            vignette: None,
+        }),
+    );
+    assert!(msg.contains("sharpness"), "{msg}");
+
+    let edit = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Look {
+                param: wire::WireLookParam::AdjustHue,
+            },
+            at: 0.0,
+            value: Some(0.5),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Look {
+                param: cutlass_models::LookParam::AdjustHue,
+            },
+            at: RationalTime::new(0, R24),
+            value: ParamValue::Scalar(0.5),
+            easing: Easing::Linear,
+            tangents: None,
+        }
+    );
+}
+
+#[test]
+fn mask_center_keyframe_uses_position_on_masked_clip() {
+    let (mut project, _, _, _, clip, _) = fixture();
+    project
+        .set_clip_mask(ClipId::from_raw(clip), Some(Mask::new(MaskKind::Circle)))
+        .unwrap();
+
+    let msg = reject(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Look {
+                param: wire::WireLookParam::MaskCenter,
+            },
+            at: 1.0,
+            value: Some(0.5),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert!(msg.contains("position"), "{msg}");
+
+    let edit = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Look {
+                param: wire::WireLookParam::MaskCenter,
+            },
+            at: 1.0,
+            value: None,
+            position: Some([0.25, -0.1]),
+            rgba: None,
+            rect: None,
+            easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Look {
+                param: cutlass_models::LookParam::MaskCenter,
+            },
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Vec2([0.25, -0.1]),
+            easing: Easing::Linear,
+            tangents: None,
+        }
+    );
+
+    // Tagged nesting on the wire: {"look":{"param":"mask_center"}}
+    let from_json = WireCommand::from_tool_call(
+        "set_param_keyframe",
+        serde_json::json!({
+            "clip": clip,
+            "param": { "look": { "param": "mask_center" } },
+            "at": 1.0,
+            "position": [0.25, -0.1],
+        }),
+    )
+    .unwrap();
+    let WireCommand::SetParamKeyframe(args) = from_json else {
+        panic!("expected SetParamKeyframe");
+    };
+    assert_eq!(
+        args.param,
+        wire::WireClipParam::Look {
+            param: wire::WireLookParam::MaskCenter
+        }
+    );
+    assert_eq!(args.position, Some([0.25, -0.1]));
 }
 
 #[test]
@@ -1536,4 +2805,184 @@ fn non_finite_and_negative_times_are_rejected() {
         }),
     );
     assert!(msg.contains("must not be negative"), "{msg}");
+}
+
+#[test]
+fn typed_effect_params_accept_rgba_and_position_on_wire() {
+    let (mut project, _, _, _, clip, _) = fixture();
+    project
+        .add_effect(ClipId::from_raw(clip), "duotone")
+        .unwrap();
+    project
+        .add_effect(ClipId::from_raw(clip), "color_overlay")
+        .unwrap();
+
+    let kf = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Effect {
+                index: 0,
+                param: "shadow_color".into(),
+            },
+            at: 1.0,
+            value: None,
+            position: None,
+            rgba: Some([20, 16, 60, 255]),
+            rect: None,
+            easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert_eq!(
+        kf,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Effect {
+                effect: 0,
+                param: 0,
+            },
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Color([20, 16, 60, 255]),
+            easing: Easing::Linear,
+            tangents: None,
+        }
+    );
+
+    let msg = reject(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Effect {
+                index: 0,
+                param: "shadow_color".into(),
+            },
+            at: 1.0,
+            value: Some(0.5),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
+        }),
+    );
+    assert!(msg.contains("color"), "{msg}");
+    assert!(msg.contains("rgba"), "{msg}");
+
+    let offset = lower(
+        &project,
+        WireCommand::SetEffectParam(wire::SetEffectParam {
+            clip,
+            index: 1,
+            param: "offset".into(),
+            value: None,
+            position: Some([0.25, -0.5]),
+            rgba: None,
+        }),
+    );
+    assert_eq!(
+        offset,
+        EditCommand::SetParamConstant {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Effect {
+                effect: 1,
+                param: 1,
+            },
+            value: ParamValue::Vec2([0.25, -0.5]),
+        }
+    );
+
+    let color_const = lower(
+        &project,
+        WireCommand::SetEffectParam(wire::SetEffectParam {
+            clip,
+            index: 0,
+            param: "highlight_color".into(),
+            value: None,
+            position: None,
+            rgba: Some([255, 220, 160, 255]),
+        }),
+    );
+    assert_eq!(
+        color_const,
+        EditCommand::SetParamConstant {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Effect {
+                effect: 0,
+                param: 1,
+            },
+            value: ParamValue::Color([255, 220, 160, 255]),
+        }
+    );
+
+    let msg = reject(
+        &project,
+        WireCommand::SetEffectParam(wire::SetEffectParam {
+            clip,
+            index: 0,
+            param: "shadow_color".into(),
+            value: Some(0.5),
+            position: None,
+            rgba: None,
+        }),
+    );
+    assert!(msg.contains("color"), "{msg}");
+    assert!(msg.contains("rgba"), "{msg}");
+}
+
+#[test]
+fn apply_easing_preset_lowers_to_engine_command() {
+    let (project, _, _, _, clip, _) = fixture();
+    let edit = lower(
+        &project,
+        WireCommand::ApplyEasingPreset(wire::ApplyEasingPreset {
+            clip,
+            param: wire::WireClipParam::Opacity,
+            from_tick: 0.0,
+            preset: wire::WireEasingPreset::BounceOut,
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::ApplyEasingPreset {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Opacity,
+            at: RationalTime::new(0, R24),
+            preset: cutlass_models::PiecewiseEasingPreset::BounceOut,
+        }
+    );
+}
+
+#[test]
+fn apply_easing_preset_rejects_crop_and_colors() {
+    let (project, _, _, _, clip, _) = fixture();
+    let crop_msg = reject(
+        &project,
+        WireCommand::ApplyEasingPreset(wire::ApplyEasingPreset {
+            clip,
+            param: wire::WireClipParam::Crop,
+            from_tick: 0.0,
+            preset: wire::WireEasingPreset::BackOut,
+        }),
+    );
+    assert!(
+        crop_msg.contains("scalar/vec2") || crop_msg.contains("not support"),
+        "{crop_msg}"
+    );
+    let color_msg = reject(
+        &project,
+        WireCommand::ApplyEasingPreset(wire::ApplyEasingPreset {
+            clip,
+            param: wire::WireClipParam::Style {
+                param: wire::WireStyleParam::ShadowColor,
+            },
+            from_tick: 0.0,
+            preset: wire::WireEasingPreset::ElasticOut,
+        }),
+    );
+    assert!(color_msg.contains("color"), "{color_msg}");
 }

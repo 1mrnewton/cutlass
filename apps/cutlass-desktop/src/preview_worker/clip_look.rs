@@ -26,23 +26,33 @@ pub(super) fn set_canvas_and_publish(
 /// undoable history entry; the engine validates the rect and rejects
 /// audio-lane clips, so a failure here just logs (the inspector only shows
 /// crop controls for visual clips — a rejection is a stale-projection race).
+///
+/// When crop is already keyframed, `at` (the playhead) writes a keyframe
+/// instead of flattening — same compose semantics as
+/// [`super::overrides::set_transform_and_publish`].
 pub(super) fn set_clip_crop_and_publish(
     engine: &mut Engine,
     clip: &str,
     crop: CropRect,
     flip_h: bool,
     flip_v: bool,
+    at: RationalTime,
     ui: &UiSink,
 ) {
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-clip-crop ignored: unparsable clip id");
         return;
     };
+    let wrote_keyframe = engine
+        .project()
+        .clip(clip_id)
+        .is_some_and(|c| c.crop.is_animated());
     if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipCrop {
         clip: clip_id,
         crop,
         flip_h,
         flip_v,
+        at: Some(at),
     })) {
         error!(%clip_id, "set clip crop failed: {e}");
         return;
@@ -52,6 +62,128 @@ pub(super) fn set_clip_crop_and_publish(
         x = crop.x, y = crop.y, w = crop.w, h = crop.h, flip_h, flip_v,
         "set clip crop"
     );
+    if wrote_keyframe {
+        bump_keyframe_commit_epoch(ui);
+    }
+    publish_projection(engine, ui);
+}
+
+/// Set a visual clip's blend mode (CapCut "Blend"). Unknown mode ids are
+/// ignored (the inspector only offers catalog entries).
+pub(super) fn set_blend_mode_and_publish(engine: &mut Engine, clip: &str, mode: &str, ui: &UiSink) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-blend-mode ignored: unparsable clip id");
+        return;
+    };
+    let Some(mode) = BlendMode::from_id(mode) else {
+        error!(clip, mode, "set-blend-mode ignored: unknown mode");
+        return;
+    };
+    if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipBlendMode {
+        clip: clip_id,
+        mode,
+    })) {
+        error!(%clip_id, ?mode, "set clip blend mode failed: {e}");
+        return;
+    }
+    info!(%clip_id, ?mode, "set clip blend mode");
+    publish_projection(engine, ui);
+}
+
+/// Set per-clip transform motion blur. Validation lives in the model
+/// setter; failures just log (stale-projection race).
+pub(super) fn set_motion_blur_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    motion_blur: MotionBlur,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-motion-blur ignored: unparsable clip id");
+        return;
+    };
+    let enabled = motion_blur.enabled;
+    let shutter = motion_blur.shutter_deg;
+    let samples = motion_blur.samples;
+    if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipMotionBlur {
+        clip: clip_id,
+        motion_blur,
+    })) {
+        error!(%clip_id, "set clip motion blur failed: {e}");
+        return;
+    }
+    info!(%clip_id, enabled, shutter, samples, "set clip motion blur");
+    publish_projection(engine, ui);
+}
+
+/// Replace a visual clip's layer styles (CapCut shadow/glow/outline/background).
+/// A live styles drag may have left an override in place; clear it first so
+/// the commit becomes authoritative (mirrors look filter/adjust commits).
+pub(super) fn set_layer_styles_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    styles: LayerStyles,
+    ui: &UiSink,
+) {
+    engine.set_styles_override(None);
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-layer-styles ignored: unparsable clip id");
+        return;
+    };
+    if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipLayerStyles {
+        clip: clip_id,
+        styles: styles.clone(),
+    })) {
+        error!(%clip_id, "set clip layer styles failed: {e}");
+        return;
+    }
+    info!(%clip_id, empty = styles.is_empty(), "set clip layer styles");
+    publish_projection(engine, ui);
+}
+
+/// Set or clear a visual clip's shaped alpha mask (CapCut mask panel).
+pub(super) fn set_mask_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    mask: Option<Mask>,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-mask ignored: unparsable clip id");
+        return;
+    };
+    let kind = mask.as_ref().map(|m| m.kind.id());
+    if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipMask {
+        clip: clip_id,
+        mask,
+    })) {
+        error!(%clip_id, "set clip mask failed: {e}");
+        return;
+    }
+    info!(%clip_id, ?kind, "set clip mask");
+    publish_projection(engine, ui);
+}
+
+/// Set or clear chroma keying (CapCut green screen).
+pub(super) fn set_chroma_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    chroma: Option<ChromaKey>,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-chroma ignored: unparsable clip id");
+        return;
+    };
+    let enabled = chroma.is_some();
+    if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipChroma {
+        clip: clip_id,
+        chroma,
+    })) {
+        error!(%clip_id, "set clip chroma failed: {e}");
+        return;
+    }
+    info!(%clip_id, enabled, "set clip chroma");
     publish_projection(engine, ui);
 }
 
@@ -96,7 +228,7 @@ pub(super) fn set_clip_lut_and_publish(
     };
     let lut = (!path.is_empty()).then(|| Lut {
         path: path.to_string(),
-        intensity: intensity.clamp(0.0, 1.0),
+        intensity: intensity.clamp(0.0, 1.0).into(),
     });
     if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipLut {
         clip: clip_id,
@@ -123,10 +255,10 @@ pub(super) fn set_clip_adjust_and_publish(
         error!(clip, "set-clip-adjust ignored: unparsable clip id");
         return;
     };
-    let adjust = sanitize_adjustments(adjust);
+    let adjust = sanitize_adjustments(&adjust);
     if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipAdjustments {
         clip: clip_id,
-        adjust,
+        adjust: adjust.clone(),
     })) {
         error!(%clip_id, ?adjust, "set clip adjustments failed: {e}");
         return;
@@ -139,7 +271,7 @@ pub(super) fn set_clip_animation_and_publish(
     engine: &mut Engine,
     clip: &str,
     slot: &str,
-    animation_id: &str,
+    animation: Option<cutlass_models::AnimationRef>,
     ui: &UiSink,
 ) {
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
@@ -150,20 +282,15 @@ pub(super) fn set_clip_animation_and_publish(
         error!(slot, "set-clip-animation ignored: unknown slot");
         return;
     };
-    let animation = if animation_id.is_empty() {
-        None
-    } else {
-        Some(cutlass_models::AnimationRef::new(animation_id))
-    };
     if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipAnimation {
         clip: clip_id,
         slot: animation_slot,
-        animation,
+        animation: animation.clone(),
     })) {
-        error!(%clip_id, slot, animation_id, "set clip animation failed: {e}");
+        error!(%clip_id, slot, ?animation, "set clip animation failed: {e}");
         return;
     }
-    info!(%clip_id, slot, animation_id, "set clip animation");
+    info!(%clip_id, slot, ?animation, "set clip animation");
     publish_projection(engine, ui);
 }
 

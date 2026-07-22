@@ -11,16 +11,24 @@
 //!   anti-aliased edges stay clean.
 //! - **solid fills** — a fast no-texture path; straight-alpha src-over.
 
+mod glyphs;
 mod layers;
 mod pipelines;
 mod render;
 mod upload;
+
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
 
 use cutlass_core::RgbaImage;
 
 use crate::effect_render::{OffscreenPool, PassRegistry};
+
+use glyphs::CachedAtlas;
+
+pub use glyphs::identity_instances;
 
 /// Canvas pixel format. Plain (non-sRGB) `Unorm`: the YUV shader already emits
 /// gamma-encoded R'G'B', so we store those bytes verbatim (display-ready SDR)
@@ -70,6 +78,7 @@ pub(super) struct YuvUniforms {
     coeffs: [f32; 4],
     grade_adj0: [f32; 4],
     grade_adj1: [f32; 4],
+    grade_adj2: [f32; 4],
 }
 
 #[repr(C)]
@@ -80,6 +89,7 @@ pub(super) struct SolidUniforms {
     trans_opacity: [f32; 4],
     grade_adj0: [f32; 4],
     grade_adj1: [f32; 4],
+    grade_adj2: [f32; 4],
 }
 
 #[repr(C)]
@@ -90,6 +100,7 @@ pub(super) struct RgbaUniforms {
     uv_rect: [f32; 4],
     grade_adj0: [f32; 4],
     grade_adj1: [f32; 4],
+    grade_adj2: [f32; 4],
 }
 
 #[repr(C)]
@@ -101,8 +112,10 @@ pub(super) struct FxEffectsUniform {
     chroma: [f32; 4],
     /// chroma_strength, chroma_shadow, pad, pad.
     chroma_params: [f32; 4],
-    /// quad half-extents (x, y), pad, pad.
+    /// quad half-extents (x, y), mask rotation_rad (z), mask roundness (w).
     half: [f32; 4],
+    /// mask center xy (fraction of layer size), mask size xy (fraction).
+    mask_geo: [f32; 4],
 }
 
 #[repr(C)]
@@ -119,6 +132,7 @@ pub(super) struct SdfUniforms {
     star: [f32; 4],
     grade_adj0: [f32; 4],
     grade_adj1: [f32; 4],
+    grade_adj2: [f32; 4],
 }
 
 /// Which pipeline draws a built layer.
@@ -130,6 +144,13 @@ pub(super) enum LayerPipeline {
     RgbaFx,
     Solid,
     Sdf,
+    Glyphs,
+}
+
+/// Instanced draw payload (glyph atlas quads).
+pub(super) struct InstanceDraw {
+    pub buffer: wgpu::Buffer,
+    pub count: u32,
 }
 
 /// GPU resources backing one layer for the duration of a render. The bind group
@@ -145,6 +166,8 @@ pub(super) struct LayerGpu {
     /// until the layer's GPU resources drop, i.e. after the pass is submitted
     /// and waited on. `None` for CPU-uploaded and generated layers.
     _keep_alive: Option<Box<dyn core::any::Any + Send>>,
+    /// Instanced draw (glyphs). `None` for single-quad layers.
+    instances: Option<InstanceDraw>,
 }
 
 /// Ceiling on cached LUT textures; crossing it clears the cache (a project
@@ -183,12 +206,14 @@ pub struct Compositor {
     rgba_fx_pipeline: wgpu::RenderPipeline,
     solid_pipeline: wgpu::RenderPipeline,
     sdf_pipeline: wgpu::RenderPipeline,
+    glyphs_pipeline: wgpu::RenderPipeline,
     yuv_layout: wgpu::BindGroupLayout,
     yuv_fx_layout: wgpu::BindGroupLayout,
     rgba_layout: wgpu::BindGroupLayout,
     rgba_fx_layout: wgpu::BindGroupLayout,
     solid_layout: wgpu::BindGroupLayout,
     sdf_layout: wgpu::BindGroupLayout,
+    glyphs_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     target: Option<TargetCache>,
     pass_registry: PassRegistry,
@@ -196,7 +221,11 @@ pub struct Compositor {
     /// Uploaded `.cube` 3D textures keyed by [`LayerLut::key`] (source path).
     /// LUTs are small (a 33³ RGBA8 table is ~140 KB), so the cache just
     /// resets past [`LUT_CACHE_MAX`] entries instead of tracking recency.
-    lut_cache: std::collections::HashMap<String, LutTexture>,
+    lut_cache: HashMap<String, LutTexture>,
+    /// Packed glyph atlases keyed by [`crate::layer::GlyphsLayer::atlas_key`].
+    /// `RefCell` so [`Self::build_layer`] can stay `&self` while the render
+    /// loop holds an immutable borrow of the canvas target.
+    glyph_atlases: RefCell<HashMap<u64, CachedAtlas>>,
     /// Maps Apple `CVPixelBuffer` GPU surfaces into `wgpu` textures with no CPU
     /// copy. `None` when the device isn't a Metal device (e.g. a software
     /// adapter) — GPU frames then fall back to [`CompositorError::UnsupportedFormat`]

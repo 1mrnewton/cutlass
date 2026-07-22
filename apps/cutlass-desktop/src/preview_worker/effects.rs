@@ -42,13 +42,15 @@ pub(super) fn remove_effect_and_publish(engine: &mut Engine, clip: &str, index: 
 
 /// Set one effect parameter to a constant (M4). The inspector addresses the
 /// parameter by its catalog name; resolve it to the uniform slot index the
-/// command expects from the clip's current effect.
+/// command expects from the clip's current effect. Scalars use
+/// [`EditCommand::SetEffectParam`]; colors and vec2s use
+/// [`EditCommand::SetParamConstant`] with [`ClipParam::Effect`].
 pub(super) fn set_effect_param_and_publish(
     engine: &mut Engine,
     clip: &str,
     index: u32,
     param: &str,
-    value: f32,
+    value: ParamValue,
     ui: &UiSink,
 ) {
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
@@ -65,16 +67,27 @@ pub(super) fn set_effect_param_and_publish(
         error!(%clip_id, index, param, "set-effect-param ignored: unknown param");
         return;
     };
-    if let Err(e) = engine.apply(Command::Edit(EditCommand::SetEffectParam {
-        clip: clip_id,
-        index: index as usize,
-        param: slot,
-        value,
-    })) {
-        error!(%clip_id, index, param, value, "set effect param failed: {e}");
+    let edit = match value {
+        ParamValue::Scalar(v) => EditCommand::SetEffectParam {
+            clip: clip_id,
+            index: index as usize,
+            param: slot,
+            value: v,
+        },
+        other => EditCommand::SetParamConstant {
+            clip: clip_id,
+            param: ClipParam::Effect {
+                effect: index,
+                param: slot as u32,
+            },
+            value: other,
+        },
+    };
+    if let Err(e) = engine.apply(Command::Edit(edit)) {
+        error!(%clip_id, index, param, ?value, "set effect param failed: {e}");
         return;
     }
-    info!(%clip_id, index, param, value, "set effect param");
+    info!(%clip_id, index, param, ?value, "set effect param");
     publish_projection(engine, ui);
 }
 

@@ -31,6 +31,7 @@ impl Compositor {
             LayerContent::Frame(frame) => self.build_frame(gpu, config, layer, frame, grade),
             LayerContent::Rgba(image) => self.build_rgba(gpu, config, layer, image, grade),
             LayerContent::Sdf(shape) => self.build_sdf(gpu, config, layer, shape, grade),
+            LayerContent::Glyphs(glyphs) => self.build_glyphs(gpu, config, layer, glyphs, grade),
         }
     }
 
@@ -72,7 +73,7 @@ impl Compositor {
                 f32::from(rgba[3]) / 255.0,
             ]
         };
-        let (grade_adj0, grade_adj1) = pack_grade(color_grade);
+        let (grade_adj0, grade_adj1, grade_adj2) = pack_grade(color_grade);
         let uniforms = SdfUniforms {
             fill: color(shape.fill),
             stroke_color: stroke.map_or([0.0; 4], |s| color(s.rgba)),
@@ -87,6 +88,7 @@ impl Compositor {
             ],
             grade_adj0,
             grade_adj1,
+            grade_adj2,
         };
         let buffer = gpu
             .device
@@ -109,6 +111,7 @@ impl Compositor {
             _textures: Vec::new(),
             _uniform: buffer,
             _keep_alive: None,
+            instances: None,
         })
     }
 
@@ -121,7 +124,7 @@ impl Compositor {
         color_grade: Option<ColorGrade>,
     ) -> Result<LayerGpu, CompositorError> {
         let (linear, trans) = placement_affine(config, &layer.placement, 0.0);
-        let (grade_adj0, grade_adj1) = pack_grade(color_grade);
+        let (grade_adj0, grade_adj1, grade_adj2) = pack_grade(color_grade);
         let uniforms = SolidUniforms {
             color: [
                 f32::from(rgba[0]) / 255.0,
@@ -133,6 +136,7 @@ impl Compositor {
             trans_opacity: trans,
             grade_adj0,
             grade_adj1,
+            grade_adj2,
         };
         let buffer = gpu
             .device
@@ -155,6 +159,7 @@ impl Compositor {
             _textures: Vec::new(),
             _uniform: buffer,
             _keep_alive: None,
+            instances: None,
         })
     }
 
@@ -200,7 +205,7 @@ impl Compositor {
         let (linear, trans) = placement_affine_rot(config, &layer.placement, rotation);
         let uv_rect = visible_uv_rect(frame, layer.uv);
 
-        let (grade_adj0, grade_adj1) = pack_grade(color_grade);
+        let (grade_adj0, grade_adj1, grade_adj2) = pack_grade(color_grade);
         let uniforms = YuvUniforms {
             linear,
             trans_opacity: trans,
@@ -208,6 +213,7 @@ impl Compositor {
             coeffs: [kr, kb, full, plane_mode],
             grade_adj0,
             grade_adj1,
+            grade_adj2,
         };
 
         let plane_entries = |layout: &wgpu::BindGroupLayout,
@@ -263,6 +269,7 @@ impl Compositor {
                 _textures: textures.into_iter().map(|(tex, _)| tex).collect(),
                 _uniform: buffer,
                 _keep_alive: keep_alive,
+                instances: None,
             });
         }
 
@@ -289,6 +296,7 @@ impl Compositor {
             _textures: textures.into_iter().map(|(tex, _)| tex).collect(),
             _uniform: placement_buffer,
             _keep_alive: Some(Box::new((fx_buffer, keep_alive))),
+            instances: None,
         })
     }
 
@@ -475,13 +483,14 @@ impl Compositor {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let (linear, trans) = placement_affine(config, &layer.placement, 0.0);
-        let (grade_adj0, grade_adj1) = pack_grade(color_grade);
+        let (grade_adj0, grade_adj1, grade_adj2) = pack_grade(color_grade);
         let placement_uniforms = RgbaUniforms {
             linear,
             trans_opacity: trans,
             uv_rect: layer.uv,
             grade_adj0,
             grade_adj1,
+            grade_adj2,
         };
 
         if layer.fx.is_identity() {
@@ -518,6 +527,7 @@ impl Compositor {
                 _textures: vec![texture],
                 _uniform: buffer,
                 _keep_alive: None,
+                instances: None,
             });
         }
 
@@ -566,6 +576,7 @@ impl Compositor {
             _textures: vec![texture],
             _uniform: placement_buffer,
             _keep_alive: Some(Box::new(fx_buffer)),
+            instances: None,
         })
     }
 }
@@ -610,19 +621,38 @@ fn rgba_upload_pixels(
     Ok((resized.into_raw(), width, height))
 }
 
+/// Floor for mask size axes so the shader can divide without a zero check.
+const MASK_SIZE_EPS: f32 = 1e-3;
+
 fn pack_fx_uniforms(effects: &LayerEffects, placement: &LayerPlacement) -> FxEffectsUniform {
-    let mask = effects
-        .mask
-        .map(|m| [m.kind as f32, m.feather, m.invert as f32, 1.0]);
+    let (mask, half_zw, mask_geo) = match effects.mask {
+        Some(m) => (
+            [m.kind as f32, m.feather, m.invert as f32, 1.0],
+            [m.rotation_rad, m.roundness],
+            [
+                m.center[0],
+                m.center[1],
+                m.size[0].max(MASK_SIZE_EPS),
+                m.size[1].max(MASK_SIZE_EPS),
+            ],
+        ),
+        None => ([0.0, 0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0, 1.0, 1.0]),
+    };
     let chroma = effects
         .chroma_key
         .map(|c| [c.rgb[0], c.rgb[1], c.rgb[2], 1.0]);
     let chroma_params = effects.chroma_key.map(|c| [c.strength, c.shadow, 0.0, 0.0]);
     FxEffectsUniform {
-        mask: mask.unwrap_or([0.0, 0.0, 0.0, 0.0]),
+        mask,
         chroma: chroma.unwrap_or([0.0, 0.0, 0.0, 0.0]),
         chroma_params: chroma_params.unwrap_or([0.0, 0.0, 0.0, 0.0]),
-        half: [placement.size[0] * 0.5, placement.size[1] * 0.5, 0.0, 0.0],
+        half: [
+            placement.size[0] * 0.5,
+            placement.size[1] * 0.5,
+            half_zw[0],
+            half_zw[1],
+        ],
+        mask_geo,
     }
 }
 

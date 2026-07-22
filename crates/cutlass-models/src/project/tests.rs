@@ -29,7 +29,291 @@ fn project_with_media(duration: i64) -> (Project, MediaId, TrackId) {
     (project, media_id, track)
 }
 
-// --- shape params -------------------------------------------------------
+// --- shape / style params -----------------------------------------------
+
+#[test]
+fn style_params_keyframe_through_project_api() {
+    use crate::look::{LayerShadow, LayerStyles};
+
+    let mut project = Project::new("p", R24);
+    let track = project.add_track(TrackKind::Video, "V1");
+    let media = project.add_media(sample_media(R24, 500));
+    // Source window 48 ticks, placed at timeline 100.
+    let clip = project.add_clip(track, media, tr(0, 48), rt(100)).unwrap();
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow::default()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let blur = ClipParam::Style {
+        param: crate::StyleParam::ShadowBlur,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            blur,
+            rt(100),
+            ParamValue::Scalar(4.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            blur,
+            rt(140),
+            ParamValue::Scalar(20.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        project
+            .clip(clip)
+            .unwrap()
+            .styles
+            .shadow
+            .as_ref()
+            .unwrap()
+            .blur
+            .sample(20),
+        12.0
+    );
+
+    // Color / offset kind checks, constant + remove roundtrip.
+    let color = ClipParam::Style {
+        param: crate::StyleParam::ShadowColor,
+    };
+    assert!(
+        project
+            .set_param_keyframe(
+                clip,
+                color,
+                rt(100),
+                ParamValue::Scalar(1.0),
+                Easing::Linear,
+                None
+            )
+            .is_err()
+    );
+    let offset = ClipParam::Style {
+        param: crate::StyleParam::ShadowOffset,
+    };
+    assert!(
+        project
+            .set_param_constant(clip, offset, ParamValue::Scalar(1.0))
+            .is_err()
+    );
+    project
+        .set_param_constant(clip, color, ParamValue::Color([10, 20, 30, 40]))
+        .unwrap();
+    assert_eq!(
+        project
+            .clip(clip)
+            .unwrap()
+            .styles
+            .shadow
+            .as_ref()
+            .unwrap()
+            .rgba
+            .constant(),
+        Some([10, 20, 30, 40])
+    );
+    project
+        .set_param_keyframe(
+            clip,
+            blur,
+            rt(120),
+            ParamValue::Scalar(8.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project.remove_param_keyframe(clip, blur, rt(120)).unwrap();
+
+    // Without a shadow block the scalar param is rejected.
+    let bare = project.add_clip(track, media, tr(0, 48), rt(200)).unwrap();
+    assert!(
+        project
+            .set_param_keyframe(
+                bare,
+                blur,
+                rt(200),
+                ParamValue::Scalar(4.0),
+                Easing::Linear,
+                None
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn spatial_tangents_routing_accepts_position_only() {
+    use crate::SpatialTangents;
+    use crate::look::{LayerShadow, LayerStyles};
+
+    let (mut project, media_id, track) = project_with_media(200);
+    let clip = project
+        .add_clip(track, media_id, tr(0, 48), rt(100))
+        .unwrap();
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow::default()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let handles = SpatialTangents {
+        out_t: [0.0, 0.4],
+        in_t: [0.0, 0.0],
+    };
+    // Position accepts tangents.
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            rt(100),
+            ParamValue::Vec2([0.0, 0.0]),
+            Easing::Linear,
+            Some(handles),
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            rt(140),
+            ParamValue::Vec2([0.5, 0.5]),
+            Easing::Linear,
+            Some(SpatialTangents {
+                out_t: [0.0, 0.0],
+                in_t: [-0.4, 0.0],
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        project.clip(clip).unwrap().transform.position.keyframes()[0].tangents,
+        Some(handles)
+    );
+
+    // Scalar opacity rejects.
+    let err = project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Opacity,
+            rt(100),
+            ParamValue::Scalar(0.5),
+            Easing::Linear,
+            Some(handles),
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("spatial tangents are only supported on position"),
+        "{err}"
+    );
+
+    // Vec2 shadow-offset also rejects (motion paths are position-only).
+    let offset = ClipParam::Style {
+        param: crate::StyleParam::ShadowOffset,
+    };
+    let err = project
+        .set_param_keyframe(
+            clip,
+            offset,
+            rt(100),
+            ParamValue::Vec2([4.0, 4.0]),
+            Easing::Linear,
+            Some(handles),
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("spatial tangents are only supported on position"),
+        "{err}"
+    );
+
+    // Parallel tangents-only API mirrors the gate.
+    let err = project
+        .set_param_keyframe_tangents(clip, offset, rt(100), Some(handles))
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("spatial tangents are only supported on position"),
+        "{err}"
+    );
+}
+
+#[test]
+fn effect_color_param_keyframes_through_project_api() {
+    let (mut project, media_id, track) = project_with_media(100);
+    let clip = project
+        .add_clip(track, media_id, tr(0, 48), rt(100))
+        .unwrap();
+    project.add_effect(clip, "color_overlay").unwrap();
+
+    let color = ClipParam::Effect {
+        effect: 0,
+        param: 0,
+    };
+    assert!(
+        project
+            .set_param_keyframe(
+                clip,
+                color,
+                rt(100),
+                ParamValue::Scalar(0.5),
+                Easing::Linear,
+                None
+            )
+            .is_err()
+    );
+    project
+        .set_param_keyframe(
+            clip,
+            color,
+            rt(100),
+            ParamValue::Color([0, 0, 0, 255]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            color,
+            rt(140),
+            ParamValue::Color([255, 0, 0, 255]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        project.clip(clip).unwrap().effects[0].sample_color_param("color", 20.0),
+        Some([128, 0, 0, 255])
+    );
+
+    let offset = ClipParam::Effect {
+        effect: 0,
+        param: 1,
+    };
+    project
+        .set_param_constant(clip, offset, ParamValue::Vec2([0.5, -0.25]))
+        .unwrap();
+    assert_eq!(
+        project.clip(clip).unwrap().effects[0].sample_vec2_param("offset", 0.0),
+        Some([0.5, -0.25])
+    );
+}
 
 #[test]
 fn shape_params_keyframe_through_project_api() {
@@ -54,6 +338,7 @@ fn shape_params_keyframe_through_project_api() {
             rt(100),
             ParamValue::Scalar(100.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -63,6 +348,7 @@ fn shape_params_keyframe_through_project_api() {
             rt(140),
             ParamValue::Scalar(500.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     let ClipSource::Generated(Generator::Shape { width: w, .. }) =
@@ -84,7 +370,8 @@ fn shape_params_keyframe_through_project_api() {
                 width,
                 rt(100),
                 ParamValue::Color([0; 4]),
-                Easing::Linear
+                Easing::Linear,
+                None
             )
             .is_err()
     );
@@ -103,6 +390,81 @@ fn shape_params_keyframe_through_project_api() {
             .set_param_constant(mclip, width, ParamValue::Scalar(10.0))
             .is_err()
     );
+}
+
+#[test]
+fn text_background_radius_keyframe_through_project_api() {
+    let mut project = Project::new("p", R24);
+    let track = project.add_track(TrackKind::Text, "T1");
+    let with_bg = project
+        .add_generated(
+            track,
+            Generator::Text {
+                content: "Card".into(),
+                style: crate::TextStyle {
+                    background: Some(crate::TextBackground::default()),
+                    ..Default::default()
+                },
+            },
+            tr(100, 48),
+        )
+        .unwrap();
+    let radius = ClipParam::Text {
+        param: crate::TextParam::BackgroundRadius,
+    };
+    project
+        .set_param_keyframe(
+            with_bg,
+            radius,
+            rt(100),
+            ParamValue::Scalar(0.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            with_bg,
+            radius,
+            rt(140),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    let ClipSource::Generated(Generator::Text { style, .. }) =
+        &project.clip(with_bg).unwrap().content
+    else {
+        panic!("expected text");
+    };
+    assert!((style.background.as_ref().unwrap().radius.sample(20) - 0.5).abs() < 1e-5);
+
+    assert!(matches!(
+        project.set_param_keyframe(
+            with_bg,
+            radius,
+            rt(120),
+            ParamValue::Scalar(1.5),
+            Easing::Linear,
+            None
+        ),
+        Err(ModelError::InvalidParam(_))
+    ));
+
+    let bare = project
+        .add_generated(track, Generator::text("Bare"), tr(200, 48))
+        .unwrap();
+    assert!(matches!(
+        project.set_param_keyframe(
+            bare,
+            radius,
+            rt(200),
+            ParamValue::Scalar(0.5),
+            Easing::Linear,
+            None
+        ),
+        Err(ModelError::InvalidParam(_))
+    ));
 }
 
 #[test]
@@ -497,10 +859,12 @@ fn duplicate_clip_preserves_full_property_snapshot() {
             .position
             .set_keyframe(60, [0.7, 0.4], Easing::EaseOut);
         clip.transform.anchor_point = Param::Constant([0.25, 0.75]);
-        clip.transform.scale.set_keyframe(0, 0.8, Easing::EaseIn);
         clip.transform
             .scale
-            .set_keyframe(60, 1.6, Easing::EaseInOut);
+            .set_keyframe(0, 0.8.into(), Easing::EaseIn);
+        clip.transform
+            .scale
+            .set_keyframe(60, 1.6.into(), Easing::EaseInOut);
         clip.transform.rotation = Param::Constant(27.5);
         clip.transform.opacity = Param::Constant(0.65);
 
@@ -522,7 +886,8 @@ fn duplicate_clip_preserves_full_property_snapshot() {
             y: 0.2,
             w: 0.7,
             h: 0.6,
-        };
+        }
+        .into();
         clip.flip_h = true;
         clip.flip_v = true;
 
@@ -538,29 +903,31 @@ fn duplicate_clip_preserves_full_property_snapshot() {
 
         clip.mask = Some(Mask {
             kind: MaskKind::Heart,
-            feather: 0.35,
+            feather: 0.35.into(),
             invert: true,
+            ..Mask::new(MaskKind::Heart)
         });
         clip.chroma_key = Some(ChromaKey {
             rgb: [3, 240, 17],
-            strength: 0.72,
-            shadow: 0.18,
+            strength: 0.72.into(),
+            shadow: 0.18.into(),
         });
         clip.stabilize = Some(StabilizeLevel::MaxSmooth);
         clip.filter = Some(Filter {
             id: "vivid".into(),
-            intensity: 0.63,
+            intensity: 0.63.into(),
         });
         clip.lut = Some(crate::look::Lut {
             path: "/tmp/cinematic.cube".into(),
-            intensity: 0.71,
+            intensity: 0.71.into(),
         });
         clip.adjust = ColorAdjustments {
-            brightness: 0.1,
-            contrast: -0.2,
-            saturation: 0.3,
-            exposure: -0.4,
-            temperature: 0.5,
+            brightness: 0.1.into(),
+            contrast: (-0.2).into(),
+            saturation: 0.3.into(),
+            exposure: (-0.4).into(),
+            temperature: 0.5.into(),
+            ..Default::default()
         };
         clip.animation_in = Some(AnimationRef::new("zoom_in"));
         clip.animation_out = Some(AnimationRef::new("drop"));
@@ -617,6 +984,7 @@ fn duplicate_clip_clones_generated_content_and_template_flag() {
             rt(5),
             ParamValue::Scalar(0.75),
             Easing::EaseInOut,
+            None,
         )
         .unwrap();
 
@@ -799,10 +1167,12 @@ fn split_clip_preserves_full_property_snapshot_and_rebases_tail_curves() {
             .position
             .set_keyframe(100, [0.7, 0.4], Easing::EaseOut);
         clip.transform.anchor_point = Param::Constant([0.25, 0.75]);
-        clip.transform.scale.set_keyframe(0, 0.8, Easing::EaseIn);
         clip.transform
             .scale
-            .set_keyframe(100, 1.6, Easing::EaseInOut);
+            .set_keyframe(0, 0.8.into(), Easing::EaseIn);
+        clip.transform
+            .scale
+            .set_keyframe(100, 1.6.into(), Easing::EaseInOut);
         clip.transform.rotation = Param::Constant(27.5);
         clip.transform.opacity = Param::Constant(0.65);
 
@@ -825,7 +1195,8 @@ fn split_clip_preserves_full_property_snapshot_and_rebases_tail_curves() {
             y: 0.2,
             w: 0.7,
             h: 0.6,
-        };
+        }
+        .into();
         clip.flip_h = true;
         clip.flip_v = true;
 
@@ -841,29 +1212,31 @@ fn split_clip_preserves_full_property_snapshot_and_rebases_tail_curves() {
 
         clip.mask = Some(Mask {
             kind: crate::look::MaskKind::Heart,
-            feather: 0.35,
+            feather: 0.35.into(),
             invert: true,
+            ..Mask::new(crate::look::MaskKind::Heart)
         });
         clip.chroma_key = Some(ChromaKey {
             rgb: [3, 240, 17],
-            strength: 0.72,
-            shadow: 0.18,
+            strength: 0.72.into(),
+            shadow: 0.18.into(),
         });
         clip.stabilize = Some(StabilizeLevel::MaxSmooth);
         clip.filter = Some(Filter {
             id: "vivid".into(),
-            intensity: 0.63,
+            intensity: 0.63.into(),
         });
         clip.lut = Some(Lut {
             path: "/tmp/cinematic.cube".into(),
-            intensity: 0.71,
+            intensity: 0.71.into(),
         });
         clip.adjust = ColorAdjustments {
-            brightness: 0.1,
-            contrast: -0.2,
-            saturation: 0.3,
-            exposure: -0.4,
-            temperature: 0.5,
+            brightness: 0.1.into(),
+            contrast: (-0.2).into(),
+            saturation: 0.3.into(),
+            exposure: (-0.4).into(),
+            temperature: 0.5.into(),
+            ..Default::default()
         };
         clip.animation_in = Some(AnimationRef::new("zoom_in"));
         clip.animation_out = Some(AnimationRef::new("drop"));
@@ -1374,11 +1747,13 @@ fn set_clip_speed_curve_rejects_bad_targets() {
                 tick: 0,
                 value: 0.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
             crate::param::Keyframe {
                 tick: 1000,
                 value: 1.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
         ],
     };
@@ -1568,6 +1943,7 @@ fn set_clip_audio_none_volume_preserves_envelope() {
             rt(0),
             ParamValue::Scalar(1.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -1577,6 +1953,7 @@ fn set_clip_audio_none_volume_preserves_envelope() {
             rt(50),
             ParamValue::Scalar(0.2),
             Easing::Linear,
+            None,
         )
         .unwrap();
     assert!(project.clip(clip).unwrap().has_volume_envelope());
@@ -1650,6 +2027,63 @@ fn split_keeps_volume_and_partitions_fades() {
     assert_eq!((right.fade_in, right.fade_out), (0, 20));
 }
 
+#[test]
+fn pan_param_keyframe_through_project_api() {
+    // Video-lane media clip (same target rule as volume — not audio-only).
+    let (mut project, media_id, track) = project_with_media(500);
+    let clip = project
+        .add_clip(track, media_id, tr(0, 100), rt(0))
+        .unwrap();
+
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Pan,
+            rt(0),
+            ParamValue::Scalar(-1.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Pan,
+            rt(50),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    let c = project.clip(clip).unwrap();
+    assert!(c.has_pan_envelope());
+    assert_eq!(c.pan.sample(0), -1.0);
+    assert_eq!(c.pan.sample(50), 1.0);
+    assert_eq!(c.pan.sample(25), 0.0);
+
+    project
+        .set_param_constant(clip, ClipParam::Pan, ParamValue::Scalar(0.25))
+        .unwrap();
+    assert_eq!(project.clip(clip).unwrap().pan.constant(), Some(0.25));
+
+    for bad in [-1.01_f32, 1.01, f32::NAN, f32::INFINITY] {
+        assert!(matches!(
+            project.set_param_constant(clip, ClipParam::Pan, ParamValue::Scalar(bad)),
+            Err(ModelError::InvalidParam(_))
+        ));
+    }
+
+    // Generated clips reject pan exactly like volume/set_clip_audio.
+    let fx = project.add_track(TrackKind::Adjustment, "FX");
+    let generated = project
+        .add_generated(fx, Generator::Adjustment, tr(0, 100))
+        .unwrap();
+    assert!(matches!(
+        project.set_param_constant(generated, ClipParam::Pan, ParamValue::Scalar(0.5)),
+        Err(ModelError::InvalidParam(_))
+    ));
+}
+
 // --- set_clip_crop (M1) ---------------------------------------------------
 
 #[test]
@@ -1665,15 +2099,17 @@ fn set_clip_crop_sets_framing() {
         w: 0.5,
         h: 1.0,
     };
-    project.set_clip_crop(clip, crop, true, false).unwrap();
+    project
+        .set_clip_crop(clip, crop, true, false, None)
+        .unwrap();
     let c = project.clip(clip).unwrap();
-    assert_eq!(c.crop, crop);
+    assert_eq!(c.crop, Param::Constant(crop));
     assert!(c.flip_h && !c.flip_v);
     assert!(c.has_custom_crop());
 
     // Back to the full frame clears the custom-framing state.
     project
-        .set_clip_crop(clip, CropRect::FULL, false, false)
+        .set_clip_crop(clip, CropRect::FULL, false, false, None)
         .unwrap();
     assert!(!project.clip(clip).unwrap().has_custom_crop());
 }
@@ -1696,7 +2132,8 @@ fn set_clip_crop_rejects_invalid_targets() {
                 h: 1.0
             },
             false,
-            false
+            false,
+            None,
         ),
         Err(ModelError::InvalidParam(_))
     ));
@@ -1705,12 +2142,12 @@ fn set_clip_crop_rejects_invalid_targets() {
     let audio = project.add_track(TrackKind::Audio, "A1");
     let audio_clip = project.add_clip(audio, media_id, tr(0, 50), rt(0)).unwrap();
     assert!(matches!(
-        project.set_clip_crop(audio_clip, CropRect::FULL, true, false),
+        project.set_clip_crop(audio_clip, CropRect::FULL, true, false, None),
         Err(ModelError::IncompatibleTrackKind { .. })
     ));
 
     assert_eq!(
-        project.set_clip_crop(ClipId::from_raw(404), CropRect::FULL, false, false),
+        project.set_clip_crop(ClipId::from_raw(404), CropRect::FULL, false, false, None),
         Err(ModelError::UnknownClip(ClipId::from_raw(404)))
     );
 }
@@ -1727,14 +2164,65 @@ fn split_keeps_crop_and_flips_on_both_halves() {
         w: 0.8,
         h: 0.8,
     };
-    project.set_clip_crop(clip, crop, true, true).unwrap();
+    project.set_clip_crop(clip, crop, true, true, None).unwrap();
 
     let right = project.split_clip(clip, rt(60)).unwrap();
     for id in [clip, right] {
         let c = project.clip(id).unwrap();
-        assert_eq!(c.crop, crop);
+        assert_eq!(c.crop, Param::Constant(crop));
         assert!(c.flip_h && c.flip_v);
     }
+}
+
+#[test]
+fn crop_param_keyframe_validates_each_value() {
+    let (mut project, media_id, track) = project_with_media(500);
+    let clip = project
+        .add_clip(track, media_id, tr(0, 100), rt(0))
+        .unwrap();
+    let ok = CropRect {
+        x: 0.1,
+        y: 0.1,
+        w: 0.5,
+        h: 0.5,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Crop,
+            rt(0),
+            ParamValue::Rect([ok.x, ok.y, ok.w, ok.h]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Crop,
+            rt(50),
+            ParamValue::Rect([0.2, 0.2, 0.4, 0.4]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    assert!(project.clip(clip).unwrap().crop.is_animated());
+    assert!(matches!(
+        project.set_param_keyframe(
+            clip,
+            ClipParam::Crop,
+            rt(25),
+            ParamValue::Rect([0.0, 0.0, 0.001, 1.0]),
+            Easing::Linear,
+            None
+        ),
+        Err(ModelError::InvalidParam(_))
+    ));
+    // Scalar value rejected for crop.
+    assert!(matches!(
+        project.set_param_constant(clip, ClipParam::Crop, ParamValue::Scalar(0.5)),
+        Err(ModelError::InvalidParam(_))
+    ));
 }
 
 #[test]
@@ -1979,8 +2467,8 @@ fn project_clone_is_independent_snapshot() {
 // --- Phase I look properties --------------------------------------------
 
 use crate::look::{
-    AnimationRef, AnimationSlot, AudioRole, ChromaKey, ColorAdjustments, Filter, Mask, MaskKind,
-    StabilizeLevel,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, ChromaKey, ColorAdjustments, Filter,
+    LayerShadow, LayerStyles, Mask, MaskKind, MotionBlur, StabilizeLevel,
 };
 
 #[test]
@@ -1996,8 +2484,8 @@ fn look_setters_persist_on_a_media_clip() {
             clip,
             Some(ChromaKey {
                 rgb: [0, 255, 0],
-                strength: 0.7,
-                shadow: 0.2,
+                strength: 0.7.into(),
+                shadow: 0.2.into(),
             }),
         )
         .unwrap();
@@ -2011,22 +2499,231 @@ fn look_setters_persist_on_a_media_clip() {
         .set_clip_adjustments(
             clip,
             ColorAdjustments {
-                brightness: 0.25,
+                brightness: 0.25.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    project.set_blend_mode(clip, BlendMode::Multiply).unwrap();
+    project
+        .set_motion_blur(
+            clip,
+            MotionBlur {
+                enabled: true,
+                shutter_deg: 180.0,
+                samples: 8,
+            },
+        )
+        .unwrap();
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow::default()),
                 ..Default::default()
             },
         )
         .unwrap();
 
     let c = project.clip(clip).unwrap();
-    assert_eq!(c.mask.unwrap().kind, MaskKind::Circle);
-    assert_eq!(c.chroma_key.unwrap().strength, 0.7);
+    assert_eq!(c.mask.as_ref().unwrap().kind, MaskKind::Circle);
+    assert_eq!(c.chroma_key.as_ref().unwrap().strength, 0.7.into());
     assert_eq!(c.stabilize, Some(StabilizeLevel::Smooth));
     assert_eq!(c.filter.as_ref().unwrap().id, "vivid");
-    assert_eq!(c.adjust.brightness, 0.25);
+    assert_eq!(c.adjust.brightness, 0.25.into());
+    assert_eq!(c.blend_mode, BlendMode::Multiply);
+    assert!(c.motion_blur.enabled);
+    assert!(c.styles.shadow.is_some());
 
     // Clearing works and the fields vanish from saves again.
     project.set_clip_mask(clip, None).unwrap();
     assert!(project.clip(clip).unwrap().mask.is_none());
+    project
+        .set_layer_styles(clip, LayerStyles::default())
+        .unwrap();
+    assert!(project.clip(clip).unwrap().styles.is_empty());
+    project
+        .set_motion_blur(clip, MotionBlur::default())
+        .unwrap();
+    assert!(project.clip(clip).unwrap().motion_blur.is_default());
+}
+
+#[test]
+fn filter_intensity_keyframes_sample_at_clip_local_ticks() {
+    let (mut project, media_id, track) = project_with_media(100);
+    let clip = project.add_clip(track, media_id, tr(0, 50), rt(0)).unwrap();
+    project
+        .set_clip_filter(clip, Some(Filter::new("vivid")))
+        .unwrap();
+    let param = ClipParam::Look {
+        param: crate::LookParam::FilterIntensity,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            param,
+            rt(0),
+            ParamValue::Scalar(0.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            param,
+            rt(10),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+
+    let intensity = project
+        .clip(clip)
+        .unwrap()
+        .filter
+        .as_ref()
+        .unwrap()
+        .intensity
+        .sample(5);
+    assert!((intensity - 0.5).abs() < f32::EPSILON);
+}
+
+#[test]
+fn adjust_hue_keyframes_through_project_api() {
+    let (mut project, media_id, track) = project_with_media(100);
+    let clip = project.add_clip(track, media_id, tr(0, 50), rt(0)).unwrap();
+    let param = ClipParam::Look {
+        param: crate::LookParam::AdjustHue,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            param,
+            rt(0),
+            ParamValue::Scalar(-1.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            param,
+            rt(10),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    let hue = project.clip(clip).unwrap().adjust.hue.sample(5);
+    assert!((hue - 0.0).abs() < f32::EPSILON);
+
+    assert!(
+        project
+            .set_param_keyframe(
+                clip,
+                ClipParam::Look {
+                    param: crate::LookParam::AdjustSharpness,
+                },
+                rt(0),
+                ParamValue::Scalar(-0.5),
+                Easing::Linear,
+                None
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn mask_geometry_keyframes_through_project_api() {
+    let (mut project, media_id, track) = project_with_media(100);
+    let clip = project
+        .add_clip(track, media_id, tr(0, 48), rt(100))
+        .unwrap();
+    project
+        .set_clip_mask(clip, Some(Mask::new(MaskKind::Rectangle)))
+        .unwrap();
+
+    let rotation = ClipParam::Look {
+        param: crate::LookParam::MaskRotation,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            rotation,
+            rt(100),
+            ParamValue::Scalar(0.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            rotation,
+            rt(140),
+            ParamValue::Scalar(90.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    assert!(
+        (project
+            .clip(clip)
+            .unwrap()
+            .mask
+            .as_ref()
+            .unwrap()
+            .rotation
+            .sample(20)
+            - 45.0)
+            .abs()
+            < f32::EPSILON
+    );
+
+    let center = ClipParam::Look {
+        param: crate::LookParam::MaskCenter,
+    };
+    assert!(
+        project
+            .set_param_keyframe(
+                clip,
+                center,
+                rt(100),
+                ParamValue::Scalar(0.5),
+                Easing::Linear,
+                None
+            )
+            .is_err()
+    );
+    project
+        .set_param_keyframe(
+            clip,
+            center,
+            rt(100),
+            ParamValue::Vec2([0.1, -0.2]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+
+    let bare = project
+        .add_clip(track, media_id, tr(0, 48), rt(200))
+        .unwrap();
+    assert!(
+        project
+            .set_param_keyframe(
+                bare,
+                rotation,
+                rt(200),
+                ParamValue::Scalar(15.0),
+                Easing::Linear,
+                None
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -2059,7 +2756,7 @@ fn look_setters_reject_wrong_content() {
             .set_clip_adjustments(
                 bar,
                 ColorAdjustments {
-                    contrast: -0.5,
+                    contrast: (-0.5).into(),
                     ..Default::default()
                 }
             )
@@ -2073,6 +2770,39 @@ fn look_setters_reject_wrong_content() {
         project
             .set_clip_filter(aclip, Some(Filter::new("warm")))
             .is_err()
+    );
+    assert!(
+        matches!(
+            project.set_blend_mode(aclip, BlendMode::Multiply),
+            Err(ModelError::IncompatibleTrackKind { .. })
+        ),
+        "blend modes need pixels"
+    );
+    assert!(
+        matches!(
+            project.set_motion_blur(
+                aclip,
+                MotionBlur {
+                    enabled: true,
+                    ..MotionBlur::default()
+                }
+            ),
+            Err(ModelError::IncompatibleTrackKind { .. })
+        ),
+        "motion blur needs pixels"
+    );
+    assert!(
+        matches!(
+            project.set_layer_styles(
+                aclip,
+                LayerStyles {
+                    shadow: Some(LayerShadow::default()),
+                    ..Default::default()
+                }
+            ),
+            Err(ModelError::IncompatibleTrackKind { .. })
+        ),
+        "layer styles need pixels"
     );
 
     // Stills have no motion to stabilize.
@@ -2103,7 +2833,7 @@ fn look_setters_reject_wrong_content() {
     let clip = p2.add_clip(t2, m2, tr(0, 50), rt(0)).unwrap();
     assert!(p2.set_clip_filter(clip, Some(Filter::new("nope"))).is_err());
     let mut hot = Filter::new("vivid");
-    hot.intensity = 1.5;
+    hot.intensity = 1.5.into();
     assert!(p2.set_clip_filter(clip, Some(hot)).is_err());
 }
 
@@ -2248,8 +2978,8 @@ fn text_effect_presets_bake_onto_the_style() {
     let manual = crate::TextStyle {
         effect_preset: None,
         stroke: Some(crate::TextStroke {
-            rgba: [1, 2, 3, 255],
-            width: 2.0,
+            rgba: [1, 2, 3, 255].into(),
+            width: 2.0.into(),
         }),
         ..Default::default()
     };

@@ -1280,6 +1280,67 @@ fn volume_envelope_with_keyframes() {
 }
 
 #[test]
+fn pan_envelope_with_keyframes() {
+    let mut project = Project::new("eval-pan", R24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/music.mp3",
+        0,
+        0,
+        R24,
+        120 * 24,
+        true,
+    ));
+    let music = project.add_track(TrackKind::Audio, "Music");
+    let clip = project
+        .add_clip(
+            music,
+            media,
+            TimeRange::at_rate(0, 240, R24),
+            RationalTime::new(0, R24),
+        )
+        .unwrap()
+        .raw();
+    let mut host = EngineHost::new(project);
+
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![
+            (
+                "call_1",
+                "set_param_keyframe",
+                serde_json::json!({ "clip": clip, "param": "pan", "at": 0.0, "value": -1.0 }),
+            ),
+            (
+                "call_2",
+                "set_param_keyframe",
+                serde_json::json!({ "clip": clip, "param": "pan", "at": 5.0, "value": 1.0 }),
+            ),
+        ]),
+        text_turn("Swept the music from left to right."),
+    ]);
+
+    let (outcome, _) = run(
+        &provider,
+        &mut host,
+        &EditorContext::default(),
+        "pan the music from left to right over five seconds",
+        &AgentConfig::default(),
+    );
+
+    assert_eq!(outcome.status, PromptStatus::Completed);
+    assert_eq!(outcome.actions.len(), 2);
+    assert_eq!(
+        outcome.actions[0].description,
+        format!("keyframed clip {clip} pan = -1.00 at 0.00s")
+    );
+
+    let clip_id = cutlass_models::ClipId::from_raw(clip);
+    let c = host.engine.project().clip(clip_id).unwrap();
+    assert!(c.has_pan_envelope());
+    assert_eq!(c.pan.sample(0), -1.0);
+    assert_eq!(c.pan.sample(120), 1.0);
+}
+
+#[test]
 fn fade_in_with_opacity_keyframes() {
     let (mut host, _, _, clip) = fixture();
     let provider = ScriptedProvider::new(vec![
@@ -1531,8 +1592,8 @@ fn crop_to_center_and_mirror_clip() {
         .project()
         .clip(cutlass_models::ClipId::from_raw(clip))
         .unwrap();
-    assert_eq!(placed.crop.x, 0.25);
-    assert_eq!(placed.crop.w, 0.5);
+    assert_eq!(placed.crop.sample(0).x, 0.25);
+    assert_eq!(placed.crop.sample(0).w, 0.5);
     assert!(placed.flip_h && !placed.flip_v);
     let summary = summarize(host.engine.project());
     let described = &summary.tracks[0].clips[0];

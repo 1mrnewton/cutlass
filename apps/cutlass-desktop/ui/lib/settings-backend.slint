@@ -23,19 +23,31 @@ export struct CacheUsageRow {
     relocatable: bool,
 }
 
+// One curated Local / OpenRouter model row for the Settings picker.
+export struct AiModelRow {
+    id: string,
+    display: string,
+    // Vendor group label for OpenRouter (empty for Local).
+    vendor: string,
+    // Local: false when GET /models did not find a matching install.
+    available: bool,
+    selected: bool,
+}
+
 export global SettingsBackend {
     // --- AI provider ([ai]) --------------------------------------------
+    // "local" | "openrouter" | "custom".
+    in-out property <string> ai-source: "local";
     in-out property <string> ai-base-url;
     in-out property <string> ai-model;
+    // Curated picker rows (Local / OpenRouter). Empty for Advanced.
+    in-out property <[AiModelRow]> ai-model-rows: [];
     // "chat_completions" | "responses".
     in-out property <string> ai-api-protocol: "chat_completions";
     // "auto" | "off"; only sent by the Responses protocol.
     in-out property <string> ai-reasoning-summary: "auto";
     in-out property <string> ai-api-key;
     in-out property <string> ai-api-key-env;
-    // Route the assistant through the Cutlass account (managed proxy,
-    // credits-metered) instead of the endpoint fields above.
-    in-out property <bool> ai-use-account;
 
     // --- Storage & cache ([storage]) -----------------------------------
     // Displayed root and editable download-cache quota. Choosing a new root
@@ -71,6 +83,8 @@ export global SettingsBackend {
     // Probe the endpoint with the *current, unsaved* AI fields and report
     // back through `ai-test-status` / `ai-test-ok`.
     callback test-connection();
+    // Local: GET /models and refresh `ai-model-rows` availability.
+    callback refresh-local-models();
     // Cache inventory and exact-cache actions. There is intentionally no
     // aggregate clear callback.
     callback refresh-caches();

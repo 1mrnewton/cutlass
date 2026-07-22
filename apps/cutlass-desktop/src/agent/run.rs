@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crossbeam_channel::{Receiver, unbounded};
-use cutlass_ai::providers::{OpenAiProtocol, OpenAiProvider, ReasoningSummary};
 use cutlass_ai::{
     AgentConfig, AgentEvent, AgentExtensions, EditorContext, Message, PromptStatus, compose_rules,
     expand_slash_command, load_agent_dir, merge_skills, run_prompt_with_host,
@@ -426,66 +425,25 @@ pub(crate) fn run_one_prompt(
             return;
         }
     };
-    if !section.is_configured() {
-        with_store(store, |s| s.set_configured(false));
-        push_entry(
-            store,
-            "error",
-            format!(
-                "No AI provider configured. Add an endpoint and model in \
-                 Settings (or an [ai] table in {}), then send again.",
-                config_path.display()
-            ),
-        );
-        return;
-    }
-    // The third provider mode: "Cutlass account" routes through the
-    // backend's OpenAI-compatible managed proxy with the keychain session
-    // as the bearer (model pinned server-side; credits metered there).
-    let provider = if section.use_account {
-        let token = match crate::account::managed_access_token() {
-            Ok(token) => token,
-            Err(e) => {
-                push_entry(store, "error", e);
-                return;
-            }
-        };
-        with_store(store, |s| s.set_configured(true));
-        OpenAiProvider::new(
-            &format!("{}/v1/generate", crate::account::base_url()),
-            "cutlass-managed",
-            Some(token),
-            OpenAiProtocol::ChatCompletions,
-            ReasoningSummary::Off,
-        )
-    } else {
-        let api_key = match cutlass_ai::config::resolve_api_key(
-            section.api_key.as_deref(),
-            section.api_key_env.as_deref(),
-        ) {
-            Ok(key) => key,
-            Err(e) => {
-                push_entry(store, "error", e);
-                return;
-            }
-        };
-        with_store(store, |s| s.set_configured(true));
-        let protocol = match section.api_protocol {
-            cutlass_settings::AiApiProtocol::ChatCompletions => OpenAiProtocol::ChatCompletions,
-            cutlass_settings::AiApiProtocol::Responses => OpenAiProtocol::Responses,
-        };
-        let reasoning_summary = match section.reasoning_summary {
-            cutlass_settings::ReasoningSummary::Auto => ReasoningSummary::Auto,
-            cutlass_settings::ReasoningSummary::Off => ReasoningSummary::Off,
-        };
-        OpenAiProvider::new(
-            &section.base_url,
-            &section.model,
-            api_key,
-            protocol,
-            reasoning_summary,
-        )
+    let provider = match cutlass_ai::config::provider_from_ai(&section) {
+        Ok(provider) => provider,
+        Err(e) => {
+            // The settings may look structurally complete, but no provider can
+            // be built from them — every prompt would error, so surface the
+            // unconfigured state instead of a chat box that can't work.
+            with_store(store, |s| s.set_configured(false));
+            push_entry(
+                store,
+                "error",
+                format!(
+                    "{e} Configure AI in Settings (or edit {}).",
+                    config_path.display()
+                ),
+            );
+            return;
+        }
     };
+    with_store(store, |s| s.set_configured(true));
 
     let sandbox_existed = sandbox.is_some();
     let engine = match sandbox {

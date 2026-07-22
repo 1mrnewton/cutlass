@@ -240,8 +240,10 @@ fn dispatch_edit(
             at,
             value,
             easing,
+            tangents,
         } => {
-            let inverse = edit::set_param::set_keyframe(ctx, clip, param, at, value, easing)?;
+            let inverse =
+                edit::set_param::set_keyframe(ctx, clip, param, at, value, easing, tangents)?;
             Ok((
                 ApplyOutcome::Edited(EditOutcome::Updated(clip)),
                 Some(inverse),
@@ -256,6 +258,18 @@ fn dispatch_edit(
         }
         EditCommand::SetParamConstant { clip, param, value } => {
             let inverse = edit::set_param::set_constant(ctx, clip, param, value)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(clip)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::ApplyEasingPreset {
+            clip,
+            param,
+            at,
+            preset,
+        } => {
+            let inverse = edit::set_param::apply_easing_preset(ctx, clip, param, at, preset)?;
             Ok((
                 ApplyOutcome::Edited(EditOutcome::Updated(clip)),
                 Some(inverse),
@@ -294,8 +308,9 @@ fn dispatch_edit(
             crop,
             flip_h,
             flip_v,
+            at,
         } => {
-            let inverse = edit::set_crop::set_crop(ctx, clip, crop, flip_h, flip_v)?;
+            let inverse = edit::set_crop::set_crop(ctx, clip, crop, flip_h, flip_v, at)?;
             Ok((
                 ApplyOutcome::Edited(EditOutcome::Updated(clip)),
                 Some(inverse),
@@ -322,6 +337,27 @@ fn dispatch_edit(
         }
         EditCommand::SetClipMask { clip, mask } => {
             let inverse = edit::set_look::set_mask(ctx, clip, mask)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(clip)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::SetClipBlendMode { clip, mode } => {
+            let inverse = edit::set_look::set_blend_mode(ctx, clip, mode)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(clip)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::SetClipMotionBlur { clip, motion_blur } => {
+            let inverse = edit::set_look::set_motion_blur(ctx, clip, motion_blur)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(clip)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::SetClipLayerStyles { clip, styles } => {
+            let inverse = edit::set_look::set_layer_styles(ctx, clip, styles)?;
             Ok((
                 ApplyOutcome::Edited(EditOutcome::Updated(clip)),
                 Some(inverse),

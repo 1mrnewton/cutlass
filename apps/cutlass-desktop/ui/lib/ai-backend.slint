@@ -2,11 +2,9 @@
 // Audio > AI generated), implemented in Rust (src/ai_media.rs owns a
 // worker thread).
 //
-// The BYOK-first routing rule made visible: `route-label` names who pays
-// wherever a generate button lives — "Your fal.ai key" (direct, backend
-// uninvolved) or "Cutlass credits" (managed path). With neither a key
-// nor a session, generation is unavailable and the UI says how to enable
-// it.
+// Generation requires a fal.ai key (`[providers.fal]`). `route-label`
+// names who pays next to every generate button. Without a key,
+// generation is unavailable and the UI says how to enable it.
 
 // One generated (or in-flight) result.
 export struct AiItemTile {
@@ -24,7 +22,7 @@ export struct AiItemTile {
 export global AiBackend {
     // Who pays, shown next to every generate button.
     in-out property <string> route-label: "";
-    // False when neither a fal key nor a session exists.
+    // False when no fal key is configured.
     in-out property <bool> available: false;
     in-out property <string> error: "";
     // True while any job is in flight (generate buttons disable).
@@ -45,6 +43,6 @@ export global AiBackend {
     // Import a finished result into the media pool. `kind` picks the list
     // ("tts" = tts-items, anything else = media-items).
     callback import(kind: string, index: int);
-    // Recompute route-label/available (settings or session changed).
+    // Recompute route-label/available (settings changed).
     callback refresh-route();
 }

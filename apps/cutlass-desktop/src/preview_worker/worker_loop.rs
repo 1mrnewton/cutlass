@@ -546,7 +546,7 @@ fn worker_loop(
                         }
                         other => {
                             if std::mem::take(&mut pending) {
-                                apply_look_override(engine, &clip, &filter_id, intensity, adjust);
+                                apply_look_override(engine, &clip, &filter_id, intensity, &adjust);
                             }
                             dispatch(
                                 engine,
@@ -567,7 +567,64 @@ fn worker_loop(
                 }
                 last_tick = tick;
                 if pending {
-                    apply_look_override(engine, &clip, &filter_id, intensity, adjust);
+                    apply_look_override(engine, &clip, &filter_id, intensity, &adjust);
+                }
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+            }
+            // Layer-style slider drags carry the whole styles block so preview
+            // frames never mix a new blur with a stale color. Coalesce to the
+            // newest value like look/transform/generator overrides.
+            WorkerMsg::PreviewClipStyles {
+                mut clip,
+                mut styles,
+                mut tick,
+            } => {
+                let mut pending = true;
+                while let Ok(next) = req_rx.try_recv() {
+                    match next {
+                        WorkerMsg::Frame(latest) => tick = latest,
+                        WorkerMsg::PreviewClipStyles {
+                            clip: c,
+                            styles: s,
+                            tick: at,
+                        } => {
+                            clip = c;
+                            styles = s;
+                            tick = at;
+                            pending = true;
+                        }
+                        other => {
+                            if std::mem::take(&mut pending) {
+                                apply_styles_override(engine, &clip, styles.clone());
+                            }
+                            dispatch(
+                                engine,
+                                &mut clipboard,
+                                &mut main_magnet,
+                                &mut linkage,
+                                other,
+                                tl_rate,
+                                &preview_weak,
+                                &fit,
+                                &cache,
+                                &sprite_mode,
+                                &export_state,
+                                &ui,
+                            )
+                        }
+                    }
+                }
+                last_tick = tick;
+                if pending {
+                    apply_styles_override(engine, &clip, styles);
                 }
                 render_frame(
                     engine,
@@ -719,6 +776,11 @@ pub(super) fn message_invalidates_preview(msg: &WorkerMsg) -> bool {
             | WorkerMsg::SetSpeedCurve { .. }
             | WorkerMsg::SetSpeedCurvePoint { .. }
             | WorkerMsg::SetClipCrop { .. }
+            | WorkerMsg::SetBlendMode { .. }
+            | WorkerMsg::SetMotionBlur { .. }
+            | WorkerMsg::SetLayerStyles { .. }
+            | WorkerMsg::SetMask { .. }
+            | WorkerMsg::SetChroma { .. }
             | WorkerMsg::SetClipFilter { .. }
             | WorkerMsg::SetClipAdjust { .. }
             | WorkerMsg::SetClipLut { .. }
@@ -733,7 +795,11 @@ pub(super) fn message_invalidates_preview(msg: &WorkerMsg) -> bool {
             // Aspect reshapes the composite, background recolors it.
             | WorkerMsg::SetCanvas { .. }
             | WorkerMsg::SetParamKeyframe { .. }
+            | WorkerMsg::SetParamKeyframeTangents { .. }
+            | WorkerMsg::SetParamConstant { .. }
             | WorkerMsg::RemoveParamKeyframe { .. }
+            | WorkerMsg::MoveParamKeyframe { .. }
+            | WorkerMsg::ApplyEasingPreset { .. }
             | WorkerMsg::RetimeKeyframes { .. }
             | WorkerMsg::RemoveKeyframesAt { .. }
             | WorkerMsg::SplitClip { .. }

@@ -213,6 +213,63 @@ fn remap_ids_rewrites_only_mapped_references() {
 
     // Marker references follow the marker map (sandbox add_marker ids
     // land on the live engine's ids during plan replay).
+    let mut blend = WireCommand::SetClipBlendMode(SetClipBlendMode {
+        clip: 10,
+        mode: WireBlendMode::Multiply,
+    });
+    blend.remap_ids(&clip_map, &track_map, &marker_map);
+    assert_eq!(
+        blend,
+        WireCommand::SetClipBlendMode(SetClipBlendMode {
+            clip: 99,
+            mode: WireBlendMode::Multiply,
+        })
+    );
+
+    let mut motion_blur = WireCommand::SetMotionBlur(SetMotionBlur {
+        clip: 10,
+        enabled: true,
+        shutter_deg: Some(180.0),
+        samples: Some(8),
+    });
+    motion_blur.remap_ids(&clip_map, &track_map, &marker_map);
+    assert_eq!(
+        motion_blur,
+        WireCommand::SetMotionBlur(SetMotionBlur {
+            clip: 99,
+            enabled: true,
+            shutter_deg: Some(180.0),
+            samples: Some(8),
+        })
+    );
+
+    let mut styles = WireCommand::SetClipLayerStyles(SetClipLayerStyles {
+        clip: 10,
+        styles: WireLayerStyles {
+            shadow: Some(WireLayerShadow {
+                rgba: [0, 0, 0, 128],
+                offset: [4.0, 4.0],
+                blur: 8.0,
+            }),
+            ..Default::default()
+        },
+    });
+    styles.remap_ids(&clip_map, &track_map, &marker_map);
+    assert_eq!(
+        styles,
+        WireCommand::SetClipLayerStyles(SetClipLayerStyles {
+            clip: 99,
+            styles: WireLayerStyles {
+                shadow: Some(WireLayerShadow {
+                    rgba: [0, 0, 0, 128],
+                    offset: [4.0, 4.0],
+                    blur: 8.0,
+                }),
+                ..Default::default()
+            },
+        })
+    );
+
     let mut set = WireCommand::SetMarker(SetMarker {
         marker: 4,
         at: Some(2.0),
@@ -234,7 +291,7 @@ fn remap_ids_rewrites_only_mapped_references() {
 #[test]
 fn tool_specs_cover_every_command_with_object_schemas() {
     let specs = tool_specs();
-    assert_eq!(specs.len(), 47);
+    assert_eq!(specs.len(), 51);
     for spec in &specs {
         assert!(
             !spec.description.is_empty(),

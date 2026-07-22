@@ -34,11 +34,29 @@ fn extracted_audio_companion_copies_only_audio_and_retime_state() {
                 tick: 0,
                 value: 0.25,
                 easing: Easing::EaseIn,
+                tangents: None,
             },
             Keyframe {
                 tick: 79,
                 value: 0.8,
                 easing: Easing::Linear,
+                tangents: None,
+            },
+        ],
+    };
+    source.pan = Param::Keyframed {
+        keyframes: vec![
+            Keyframe {
+                tick: 0,
+                value: -0.5,
+                easing: Easing::Linear,
+                tangents: None,
+            },
+            Keyframe {
+                tick: 79,
+                value: 0.5,
+                easing: Easing::EaseOut,
+                tangents: None,
             },
         ],
     };
@@ -52,7 +70,7 @@ fn extracted_audio_companion_copies_only_audio_and_retime_state() {
     source.transform = ClipTransform {
         position: [0.2, -0.3],
         anchor_point: [0.1, 0.9],
-        scale: 1.5,
+        scale: 1.5.into(),
         rotation: 20.0,
         opacity: 0.6,
     }
@@ -62,11 +80,12 @@ fn extracted_audio_companion_copies_only_audio_and_retime_state() {
         y: 0.2,
         w: 0.7,
         h: 0.6,
-    };
+    }
+    .into();
     source.flip_h = true;
     source.filter = Some(crate::look::Filter {
         id: "vivid".into(),
-        intensity: 0.4,
+        intensity: 0.4.into(),
     });
     source.animation_in = Some(crate::look::AnimationRef::new("fade_in"));
     source.replaceable = Some(Replaceable::new(3));
@@ -80,6 +99,7 @@ fn extracted_audio_companion_copies_only_audio_and_retime_state() {
     expected.speed_curve = source.speed_curve.clone();
     expected.preserve_pitch = source.preserve_pitch;
     expected.volume = source.volume.clone();
+    expected.pan = source.pan.clone();
     expected.fade_in = source.fade_in;
     expected.fade_out = source.fade_out;
     expected.denoise = source.denoise;
@@ -524,11 +544,13 @@ fn linear_ramp(v0: f32, v1: f32) -> Param<f32> {
                 tick: 0,
                 value: v0,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: SPEED_CURVE_SCALE,
                 value: v1,
                 easing: Easing::Linear,
+                tangents: None,
             },
         ],
     }
@@ -599,6 +621,7 @@ fn curve_integral_holds_flat_outside_keyframes() {
             tick: SPEED_CURVE_SCALE / 2,
             value: 2.0,
             easing: Easing::Linear,
+            tangents: None,
         }],
     };
     assert!((clip.speed_curve_integral(0.25) - 0.5).abs() < 1e-6);
@@ -616,16 +639,19 @@ fn source_time_at_curve_sweeps_full_window_symmetrically() {
                 tick: 0,
                 value: 0.5,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: SPEED_CURVE_SCALE / 2,
                 value: 2.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: SPEED_CURVE_SCALE,
                 value: 0.5,
                 easing: Easing::Linear,
+                tangents: None,
             },
         ],
     };
@@ -661,6 +687,7 @@ fn validate_speed_curve_rejects_out_of_range_values_and_ticks() {
             tick: SPEED_CURVE_SCALE + 1,
             value: 1.0,
             easing: Easing::Linear,
+            tangents: None,
         }],
     };
     assert!(validate_speed_curve(&bad_tick).is_err());
@@ -697,12 +724,14 @@ fn default_audio_serializes_without_fields() {
     let value = serde_json::to_value(&clip).expect("serialize");
     let map = value.as_object().expect("clip serializes to a map");
     assert!(!map.contains_key("volume"), "unit volume must stay absent");
+    assert!(!map.contains_key("pan"), "center pan must stay absent");
     assert!(!map.contains_key("fade_in"), "zero fade must stay absent");
     assert!(!map.contains_key("fade_out"), "zero fade must stay absent");
 
-    // And a pre-volume save loads with the defaults.
+    // And a pre-volume / pre-pan save loads with the defaults.
     let loaded: Clip = serde_json::from_value(value).expect("deserialize");
     assert_eq!(loaded.volume, Param::Constant(1.0));
+    assert_eq!(loaded.pan, Param::Constant(0.0));
     assert_eq!((loaded.fade_in, loaded.fade_out), (0, 0));
 }
 
@@ -710,12 +739,14 @@ fn default_audio_serializes_without_fields() {
 fn custom_audio_roundtrips_through_serde() {
     let mut clip = media_clip(MediaId::from_raw(1), tr(0, 48, R24), tr(0, 48, R24));
     clip.volume = Param::Constant(0.5);
+    clip.pan = Param::Constant(-0.25);
     clip.fade_in = 12;
     clip.fade_out = 24;
     assert!(clip.has_custom_audio());
     let json = serde_json::to_string(&clip).expect("serialize");
     let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(loaded.volume, Param::Constant(0.5));
+    assert_eq!(loaded.pan, Param::Constant(-0.25));
     assert_eq!((loaded.fade_in, loaded.fade_out), (12, 24));
 }
 
@@ -734,6 +765,22 @@ fn constant_volume_serializes_as_a_bare_value() {
 }
 
 #[test]
+fn constant_pan_serializes_as_a_bare_value() {
+    let mut clip = media_clip(MediaId::from_raw(1), tr(0, 48, R24), tr(0, 48, R24));
+    clip.pan = Param::Constant(0.5);
+    let value = serde_json::to_value(&clip).expect("serialize");
+    assert_eq!(value.get("pan"), Some(&serde_json::json!(0.5)));
+    // A legacy save without pan loads centered.
+    let mut legacy = value.as_object().cloned().expect("map");
+    legacy.remove("pan");
+    let loaded: Clip = serde_json::from_value(serde_json::Value::Object(legacy)).expect("load");
+    assert_eq!(loaded.pan, Param::Constant(0.0));
+    // Bare constant round-trips without a `{"kf":..}` wrapper.
+    let roundtrip: Clip = serde_json::from_value(value).expect("deserialize");
+    assert_eq!(roundtrip.pan, Param::Constant(0.5));
+}
+
+#[test]
 fn volume_envelope_roundtrips_and_validates() {
     let mut clip = media_clip(MediaId::from_raw(1), tr(0, 48, R24), tr(0, 48, R24));
     clip.volume = Param::Keyframed {
@@ -742,11 +789,13 @@ fn volume_envelope_roundtrips_and_validates() {
                 tick: 0,
                 value: 0.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: 24,
                 value: 1.0,
                 easing: Easing::EaseOut,
+                tangents: None,
             },
         ],
     };
@@ -763,9 +812,55 @@ fn volume_envelope_roundtrips_and_validates() {
             tick: 0,
             value: MAX_CLIP_VOLUME + 1.0,
             easing: Easing::Linear,
+            tangents: None,
         }],
     };
     assert!(validate_volume_envelope(&hot).is_err());
+}
+
+#[test]
+fn pan_envelope_roundtrips_and_validates() {
+    let mut clip = media_clip(MediaId::from_raw(1), tr(0, 48, R24), tr(0, 48, R24));
+    clip.pan = Param::Keyframed {
+        keyframes: vec![
+            Keyframe {
+                tick: 0,
+                value: -1.0,
+                easing: Easing::Linear,
+                tangents: None,
+            },
+            Keyframe {
+                tick: 24,
+                value: 1.0,
+                easing: Easing::EaseOut,
+                tangents: None,
+            },
+        ],
+    };
+    assert!(clip.has_pan_envelope());
+    assert!(clip.has_custom_audio());
+    validate_pan_envelope(&clip.pan).expect("in-range envelope");
+    let json = serde_json::to_string(&clip).expect("serialize");
+    let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(loaded.pan, clip.pan);
+
+    for bad in [
+        MAX_CLIP_PAN + 0.01,
+        MIN_CLIP_PAN - 0.01,
+        f32::NAN,
+        f32::INFINITY,
+    ] {
+        assert!(validate_pan(bad).is_err());
+    }
+    let hot = Param::Keyframed {
+        keyframes: vec![Keyframe {
+            tick: 0,
+            value: MAX_CLIP_PAN + 1.0,
+            easing: Easing::Linear,
+            tangents: None,
+        }],
+    };
+    assert!(validate_pan_envelope(&hot).is_err());
 }
 
 #[test]
@@ -803,11 +898,13 @@ fn audio_gain_follows_a_keyframed_envelope() {
                 tick: 0,
                 value: 0.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: 100,
                 value: 1.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
         ],
     };
@@ -833,7 +930,7 @@ fn default_crop_serializes_without_fields() {
 
     // And a pre-crop save loads with the defaults.
     let loaded: Clip = serde_json::from_value(value).expect("deserialize");
-    assert_eq!(loaded.crop, CropRect::FULL);
+    assert_eq!(loaded.crop, Param::Constant(CropRect::FULL));
     assert!(!loaded.flip_h && !loaded.flip_v);
 }
 
@@ -845,13 +942,71 @@ fn custom_crop_roundtrips_through_serde() {
         y: 0.2,
         w: 0.5,
         h: 0.25,
-    };
+    }
+    .into();
     clip.flip_h = true;
     assert!(clip.has_custom_crop());
     let json = serde_json::to_string(&clip).expect("serialize");
     let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(loaded.crop, clip.crop);
     assert!(loaded.flip_h && !loaded.flip_v);
+}
+
+#[test]
+fn legacy_bare_crop_rect_json_loads_as_constant() {
+    // Pre-Param saves wrote the bare rect; Constant serializes identically.
+    let json = r#"{"x":0.1,"y":0.2,"w":0.5,"h":0.5}"#;
+    let crop: Param<CropRect> = serde_json::from_str(json).expect("legacy crop");
+    assert_eq!(
+        crop,
+        Param::Constant(CropRect {
+            x: 0.1,
+            y: 0.2,
+            w: 0.5,
+            h: 0.5,
+        })
+    );
+}
+
+#[test]
+fn keyframed_crop_roundtrips_and_lerps() {
+    let a = CropRect {
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 1.0,
+    };
+    let b = CropRect {
+        x: 0.2,
+        y: 0.2,
+        w: 0.6,
+        h: 0.6,
+    };
+    let mut clip = media_clip(MediaId::from_raw(1), tr(0, 100, R24), tr(0, 100, R24));
+    clip.crop = Param::Keyframed {
+        keyframes: vec![
+            Keyframe {
+                tick: 0,
+                value: a,
+                easing: Easing::Linear,
+                tangents: None,
+            },
+            Keyframe {
+                tick: 10,
+                value: b,
+                easing: Easing::Linear,
+                tangents: None,
+            },
+        ],
+    };
+    let json = serde_json::to_string(&clip).expect("serialize");
+    let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(loaded.crop, clip.crop);
+    let mid = loaded.crop.sample(5);
+    assert!((mid.x - 0.1).abs() < 1e-5);
+    assert!((mid.y - 0.1).abs() < 1e-5);
+    assert!((mid.w - 0.8).abs() < 1e-5);
+    assert!((mid.h - 0.8).abs() < 1e-5);
 }
 
 #[test]
@@ -952,11 +1107,159 @@ fn clip_without_transform_field_deserializes_to_identity() {
 }
 
 #[test]
+fn normal_blend_mode_is_elided_from_serde() {
+    let clip = Clip::generated(Generator::text("blend"), tr(0, 10, R24));
+    assert_eq!(clip.blend_mode, crate::look::BlendMode::Normal);
+    let json = serde_json::to_string(&clip).expect("serialize");
+    assert!(
+        !json.contains("blend_mode"),
+        "Normal blend must be absent from saves: {json}"
+    );
+}
+
+#[test]
+fn multiply_blend_mode_roundtrips_through_serde() {
+    let mut clip = Clip::generated(Generator::text("blend"), tr(0, 10, R24));
+    clip.blend_mode = crate::look::BlendMode::Multiply;
+    let json = serde_json::to_string(&clip).expect("serialize");
+    assert!(json.contains("\"blend_mode\":\"multiply\""));
+    let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(loaded.blend_mode, crate::look::BlendMode::Multiply);
+}
+
+#[test]
+fn clip_without_blend_mode_field_deserializes_to_normal() {
+    let clip = Clip::generated(Generator::text("old"), tr(0, 10, R24));
+    let mut value = serde_json::to_value(&clip).expect("serialize");
+    // Normal is already skipped; ensure a legacy map without the key loads.
+    value
+        .as_object_mut()
+        .expect("clip serializes to a map")
+        .remove("blend_mode");
+
+    let loaded: Clip = serde_json::from_value(value).expect("deserialize legacy clip");
+    assert_eq!(loaded.blend_mode, crate::look::BlendMode::Normal);
+    assert_eq!(loaded.content, clip.content);
+}
+
+#[test]
+fn default_motion_blur_is_elided_from_serde() {
+    let clip = Clip::generated(Generator::text("blur"), tr(0, 10, R24));
+    assert!(clip.motion_blur.is_default());
+    let json = serde_json::to_string(&clip).expect("serialize");
+    assert!(
+        !json.contains("motion_blur"),
+        "default motion blur must be absent from saves: {json}"
+    );
+}
+
+#[test]
+fn enabled_motion_blur_roundtrips_through_serde() {
+    let mut clip = Clip::generated(Generator::text("blur"), tr(0, 10, R24));
+    clip.motion_blur = crate::look::MotionBlur {
+        enabled: true,
+        shutter_deg: 270.0,
+        samples: 12,
+    };
+    let json = serde_json::to_string(&clip).expect("serialize");
+    assert!(json.contains("\"motion_blur\""));
+    let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
+    assert!(loaded.motion_blur.enabled);
+    assert_eq!(loaded.motion_blur.shutter_deg, 270.0);
+    assert_eq!(loaded.motion_blur.samples, 12);
+}
+
+#[test]
+fn clip_without_motion_blur_field_deserializes_to_default() {
+    let clip = Clip::generated(Generator::text("old"), tr(0, 10, R24));
+    let mut value = serde_json::to_value(&clip).expect("serialize");
+    value
+        .as_object_mut()
+        .expect("clip serializes to a map")
+        .remove("motion_blur");
+
+    let loaded: Clip = serde_json::from_value(value).expect("deserialize legacy clip");
+    assert!(loaded.motion_blur.is_default());
+    assert_eq!(loaded.content, clip.content);
+}
+
+#[test]
+fn empty_layer_styles_are_elided_from_serde() {
+    let clip = Clip::generated(Generator::text("plain"), tr(0, 10, R24));
+    assert!(clip.styles.is_empty());
+    let json = serde_json::to_string(&clip).expect("serialize");
+    assert!(
+        !json.contains("\"styles\""),
+        "empty styles must be absent from saves: {json}"
+    );
+}
+
+#[test]
+fn clip_without_styles_field_deserializes_empty() {
+    let clip = Clip::generated(Generator::text("old"), tr(0, 10, R24));
+    let mut value = serde_json::to_value(&clip).expect("serialize");
+    value
+        .as_object_mut()
+        .expect("clip serializes to a map")
+        .remove("styles");
+
+    let loaded: Clip = serde_json::from_value(value).expect("deserialize legacy clip");
+    assert!(loaded.styles.is_empty());
+    assert_eq!(loaded.content, clip.content);
+}
+
+#[test]
+fn layer_shadow_roundtrips_through_serde() {
+    let mut clip = Clip::generated(Generator::text("styles"), tr(0, 10, R24));
+    clip.styles.shadow = Some(crate::look::LayerShadow::default());
+    let json = serde_json::to_string(&clip).expect("serialize");
+    assert!(json.contains("\"styles\""));
+    assert!(json.contains("\"shadow\""));
+    let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(
+        loaded.styles.shadow.as_ref().unwrap().blur,
+        Param::Constant(8.0)
+    );
+}
+
+#[test]
+fn keyframed_layer_shadow_blur_roundtrips_through_serde() {
+    let mut clip = Clip::generated(Generator::text("styles"), tr(0, 10, R24));
+    let shadow = crate::look::LayerShadow {
+        blur: Param::Keyframed {
+            keyframes: vec![
+                Keyframe {
+                    tick: 0,
+                    value: 4.0,
+                    easing: Easing::Linear,
+                    tangents: None,
+                },
+                Keyframe {
+                    tick: 10,
+                    value: 16.0,
+                    easing: Easing::EaseIn,
+                    tangents: None,
+                },
+            ],
+        },
+        ..Default::default()
+    };
+    clip.styles.shadow = Some(shadow);
+    let json = serde_json::to_string(&clip).expect("serialize");
+    assert!(json.contains("\"kf\""));
+    let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(
+        loaded.styles.shadow.as_ref().unwrap().blur,
+        clip.styles.shadow.as_ref().unwrap().blur
+    );
+}
+
+#[test]
 fn transform_roundtrips_through_serde() {
     let mut clip = Clip::generated(Generator::Adjustment, tr(0, 10, R24));
     clip.transform = ClipTransform {
         position: [-0.25, 0.5],
-        scale: 1.5,
+        scale: 1.5.into(),
         rotation: 90.0,
         opacity: 0.25,
         ..ClipTransform::IDENTITY
@@ -984,7 +1287,7 @@ fn legacy_plain_transform_json_deserializes_as_constants() {
         clip.transform.sample(0),
         ClipTransform {
             position: [0.25, -0.1],
-            scale: 2.0,
+            scale: 2.0.into(),
             rotation: 45.0,
             opacity: 0.5,
             ..ClipTransform::IDENTITY
@@ -997,7 +1300,7 @@ fn constant_transform_serializes_in_pre_m2_shape() {
     let mut clip = Clip::generated(Generator::Adjustment, tr(0, 10, R24));
     clip.transform = ClipTransform {
         position: [0.25, 0.5],
-        scale: 1.5,
+        scale: 1.5.into(),
         rotation: 0.0,
         opacity: 1.0,
         ..ClipTransform::IDENTITY
@@ -1050,7 +1353,7 @@ fn animated_transform_samples_per_property() {
     .unwrap();
     // Scale animates; everything else stays constant.
     let mid = t.sample(5);
-    assert_eq!(mid.scale, 1.5);
+    assert_eq!(mid.scale, 1.5.into());
     assert_eq!(mid.position, [0.0, 0.0]);
     assert_eq!(mid.opacity, 1.0);
 }
@@ -1070,7 +1373,7 @@ fn compose_at_writes_keyframe_only_on_animated_properties() {
 
     let edit = ClipTransform {
         position: [0.3, 0.0],
-        scale: 2.0,
+        scale: 2.0.into(),
         rotation: 0.0,
         opacity: 1.0,
         ..ClipTransform::IDENTITY
@@ -1079,9 +1382,9 @@ fn compose_at_writes_keyframe_only_on_animated_properties() {
 
     // Scale gained a keyframe at tick 10; the curve still animates.
     assert_eq!(t.scale.keyframes().len(), 3);
-    assert_eq!(t.sample(10).scale, 2.0);
-    assert_eq!(t.sample(0).scale, 1.0);
-    assert_eq!(t.sample(20).scale, 3.0);
+    assert_eq!(t.sample(10).scale, 2.0.into());
+    assert_eq!(t.sample(0).scale, 1.0.into());
+    assert_eq!(t.sample(20).scale, 3.0.into());
     // Position was constant and stays constant.
     assert!(!t.position.is_animated());
     assert_eq!(t.sample(0).position, [0.3, 0.0]);
@@ -1095,23 +1398,44 @@ fn remove_param_keyframe_errors_when_absent() {
         .unwrap();
     assert!(t.remove_param_keyframe(ClipParam::Scale, 5).is_ok());
     assert!(!t.scale.is_animated());
-    assert_eq!(t.scale.constant(), Some(2.0));
+    assert_eq!(t.scale.constant(), Some(2.0.into()));
 }
 
 #[test]
 fn param_kind_mismatch_rejected() {
     let mut t = AnimatedTransform::identity();
+    // Scale accepts Scalar (uniform) and Vec2 (per-axis); Color still rejects.
     assert!(matches!(
         t.set_param_keyframe(
             ClipParam::Scale,
             0,
-            ParamValue::Vec2([1.0, 1.0]),
+            ParamValue::Color([255, 0, 0, 255]),
             Easing::Linear
         ),
         Err(ModelError::InvalidParam(_))
     ));
     assert!(matches!(
         t.set_param_constant(ClipParam::Position, ParamValue::Scalar(1.0)),
+        Err(ModelError::InvalidParam(_))
+    ));
+}
+
+#[test]
+fn transform_mutators_reject_style_params() {
+    let mut t = AnimatedTransform::identity();
+    let style = ClipParam::Style {
+        param: StyleParam::ShadowBlur,
+    };
+    assert!(matches!(
+        t.set_param_keyframe(style, 0, ParamValue::Scalar(4.0), Easing::Linear),
+        Err(ModelError::InvalidParam(_))
+    ));
+    assert!(matches!(
+        t.set_param_constant(style, ParamValue::Scalar(4.0)),
+        Err(ModelError::InvalidParam(_))
+    ));
+    assert!(matches!(
+        t.remove_param_keyframe(style, 0),
         Err(ModelError::InvalidParam(_))
     ));
 }
@@ -1374,6 +1698,24 @@ fn shape_param_routing_sets_and_samples() {
 }
 
 #[test]
+fn text_size_param_routing_sets_and_samples() {
+    let mut text = Generator::text("Animated");
+    text.set_text_param_keyframe(TextParam::Size, 0, ParamValue::Scalar(80.0), Easing::Linear)
+        .unwrap();
+    text.set_text_param_keyframe(
+        TextParam::Size,
+        10,
+        ParamValue::Scalar(120.0),
+        Easing::Linear,
+    )
+    .unwrap();
+    let Generator::Text { style, .. } = &text else {
+        panic!()
+    };
+    assert_eq!(style.size.sample(5), 100.0);
+}
+
+#[test]
 fn shape_param_routing_rejects_wrong_targets() {
     let mut rect = Generator::shape(Shape::Rectangle, [255, 255, 255, 255]);
     // Star-only param on a rectangle.
@@ -1412,29 +1754,29 @@ fn shape_param_routing_rejects_wrong_targets() {
 fn text_style_roundtrips_through_serde() {
     let style = TextStyle {
         font: "Helvetica".into(),
-        size: 120.0,
+        size: 120.0.into(),
         bold: true,
         italic: true,
         underline: true,
         case: TextCase::Upper,
-        fill: [10, 20, 30, 255],
-        letter_spacing: 3.0,
-        line_spacing: 1.5,
+        fill: [10, 20, 30, 255].into(),
+        letter_spacing: 3.0.into(),
+        line_spacing: 1.5.into(),
         align_h: TextAlignH::Right,
         align_v: TextAlignV::Bottom,
         wrap: false,
         stroke: Some(TextStroke {
-            rgba: [0, 0, 0, 255],
-            width: 8.0,
+            rgba: [0, 0, 0, 255].into(),
+            width: 8.0.into(),
         }),
         background: Some(TextBackground {
-            rgba: [255, 255, 0, 200],
-            radius: 0.5,
+            rgba: [255, 255, 0, 200].into(),
+            radius: 0.5.into(),
         }),
         shadow: Some(TextShadow {
-            rgba: [0, 0, 0, 230],
-            blur: 0.25,
-            distance: 12.0,
+            rgba: [0, 0, 0, 230].into(),
+            blur: 0.25.into(),
+            distance: 12.0.into(),
         }),
         effect_preset: None,
     };
@@ -1460,6 +1802,47 @@ fn text_style_roundtrips_through_serde() {
 }
 
 #[test]
+fn legacy_bare_text_background_json_loads_as_constants() {
+    // Pre-Param saves wrote bare rgba/radius; Constant serializes identically.
+    let json = r#"{"rgba":[0,0,0,255],"radius":0.5}"#;
+    let background: TextBackground = serde_json::from_str(json).expect("legacy background");
+    assert_eq!(
+        background,
+        TextBackground {
+            rgba: Param::Constant([0, 0, 0, 255]),
+            radius: Param::Constant(0.5),
+        }
+    );
+}
+
+#[test]
+fn keyframed_text_background_rgba_roundtrips() {
+    let background = TextBackground {
+        rgba: Param::Keyframed {
+            keyframes: vec![
+                Keyframe {
+                    tick: 0,
+                    value: [0, 0, 0, 255],
+                    easing: Easing::Linear,
+                    tangents: None,
+                },
+                Keyframe {
+                    tick: 10,
+                    value: [255, 0, 0, 255],
+                    easing: Easing::Linear,
+                    tangents: None,
+                },
+            ],
+        },
+        radius: Param::Constant(0.25),
+    };
+    let json = serde_json::to_string(&background).expect("serialize");
+    let loaded: TextBackground = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(loaded, background);
+    assert_eq!(loaded.rgba.sample(5), [128, 0, 0, 255]);
+}
+
+#[test]
 fn text_generator_validation_rejects_unsafe_metrics() {
     let invalid = |style| {
         Generator::Text {
@@ -1471,32 +1854,32 @@ fn text_generator_validation_rejects_unsafe_metrics() {
     };
 
     assert!(invalid(TextStyle {
-        size: f32::NAN,
+        size: f32::NAN.into(),
         ..Default::default()
     }));
     assert!(invalid(TextStyle {
-        line_spacing: 0.0,
+        line_spacing: 0.0.into(),
         ..Default::default()
     }));
     assert!(invalid(TextStyle {
         stroke: Some(TextStroke {
-            rgba: [0, 0, 0, 255],
-            width: 513.0,
+            rgba: [0, 0, 0, 255].into(),
+            width: 513.0.into(),
         }),
         ..Default::default()
     }));
     assert!(invalid(TextStyle {
         background: Some(TextBackground {
-            rgba: [0, 0, 0, 255],
-            radius: 1.01,
+            rgba: [0, 0, 0, 255].into(),
+            radius: 1.01.into(),
         }),
         ..Default::default()
     }));
     assert!(invalid(TextStyle {
         shadow: Some(TextShadow {
-            rgba: [0, 0, 0, 255],
-            blur: 0.2,
-            distance: -1.0,
+            rgba: [0, 0, 0, 255].into(),
+            blur: 0.2.into(),
+            distance: (-1.0).into(),
         }),
         ..Default::default()
     }));
@@ -1505,17 +1888,17 @@ fn text_generator_validation_rejects_unsafe_metrics() {
         content: "Safe".into(),
         style: TextStyle {
             stroke: Some(TextStroke {
-                rgba: [0, 0, 0, 255],
-                width: 40.0,
+                rgba: [0, 0, 0, 255].into(),
+                width: 40.0.into(),
             }),
             background: Some(TextBackground {
-                rgba: [0, 0, 0, 200],
-                radius: 1.0,
+                rgba: [0, 0, 0, 200].into(),
+                radius: 1.0.into(),
             }),
             shadow: Some(TextShadow {
-                rgba: [0, 0, 0, 230],
-                blur: 1.0,
-                distance: 50.0,
+                rgba: [0, 0, 0, 230].into(),
+                blur: 1.0.into(),
+                distance: 50.0.into(),
             }),
             ..Default::default()
         },
@@ -1539,7 +1922,7 @@ fn transform_validation() {
     assert!(
         ClipTransform {
             position: [0.4, -0.4],
-            scale: 3.0,
+            scale: 3.0.into(),
             rotation: -720.0,
             opacity: 0.0,
             ..ClipTransform::IDENTITY
@@ -1549,11 +1932,20 @@ fn transform_validation() {
     );
 
     let bad_scale = ClipTransform {
-        scale: -0.5,
+        scale: Scale2::uniform(-0.5),
         ..ClipTransform::IDENTITY
     };
     assert!(matches!(
         bad_scale.validate(),
+        Err(ModelError::InvalidTransform(_))
+    ));
+
+    let bad_axis = ClipTransform {
+        scale: Scale2 { x: 1.0, y: 0.0 },
+        ..ClipTransform::IDENTITY
+    };
+    assert!(matches!(
+        bad_axis.validate(),
         Err(ModelError::InvalidTransform(_))
     ));
 
@@ -1574,6 +1966,62 @@ fn transform_validation() {
         bad_position.validate(),
         Err(ModelError::InvalidTransform(_))
     ));
+}
+
+#[test]
+fn scale2_uniform_serializes_as_bare_float() {
+    let s = Scale2::uniform(1.5);
+    let json = serde_json::to_string(&s).unwrap();
+    assert_eq!(json, "1.5");
+    let loaded: Scale2 = serde_json::from_str(&json).unwrap();
+    assert_eq!(loaded, s);
+}
+
+#[test]
+fn scale2_split_serializes_as_array_and_roundtrips() {
+    let s = Scale2 { x: 2.0, y: 1.0 };
+    let json = serde_json::to_string(&s).unwrap();
+    assert_eq!(json, "[2.0,1.0]");
+    let loaded: Scale2 = serde_json::from_str(&json).unwrap();
+    assert_eq!(loaded, s);
+}
+
+#[test]
+fn legacy_keyframed_f32_scale_loads_as_uniform() {
+    // Pre-Scale2 keyframed saves wrote bare f32 values in each keyframe.
+    let json = r#"{"kf":[{"t":0,"v":1.0},{"t":10,"v":2.0}]}"#;
+    let p: Param<Scale2> = serde_json::from_str(json).unwrap();
+    assert_eq!(p.sample(0), Scale2::ONE);
+    assert_eq!(p.sample(5), Scale2::uniform(1.5));
+    assert_eq!(p.sample(10), Scale2::uniform(2.0));
+}
+
+#[test]
+fn scale_param_accepts_scalar_and_vec2_keyframes() {
+    let mut t = AnimatedTransform::identity();
+    t.set_param_keyframe(ClipParam::Scale, 0, ParamValue::Scalar(1.0), Easing::Linear)
+        .unwrap();
+    t.set_param_keyframe(
+        ClipParam::Scale,
+        10,
+        ParamValue::Vec2([2.0, 1.0]),
+        Easing::Linear,
+    )
+    .unwrap();
+    assert_eq!(t.sample(0).scale, Scale2::ONE);
+    assert_eq!(t.sample(5).scale, Scale2 { x: 1.5, y: 1.0 });
+    assert_eq!(t.sample(10).scale, Scale2 { x: 2.0, y: 1.0 });
+}
+
+#[test]
+fn scale2_lerp_and_isotropic() {
+    use crate::param::Lerp;
+    let a = Scale2 { x: 1.0, y: 1.0 };
+    let b = Scale2 { x: 3.0, y: 5.0 };
+    assert_eq!(Scale2::lerp(a, b, 0.5), Scale2 { x: 2.0, y: 3.0 });
+    // Geometric mean: sqrt(4*1) = 2.
+    assert!((Scale2 { x: 4.0, y: 1.0 }.isotropic() - 2.0).abs() < 1e-6);
+    assert!((Scale2::uniform(2.0).isotropic() - 2.0).abs() < 1e-6);
 }
 
 // --- source_time_at: errors -------------------------------------------

@@ -1,7 +1,119 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::ModelError;
-use crate::param::{Easing, Param};
+use crate::param::{Easing, Lerp, Param, SegmentSample};
+
+/// Per-axis scale. Serializes as a bare number when uniform (so old builds
+/// and old saves stay interchangeable) and as `[x, y]` when split.
+/// Deserializes from either form.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Scale2 {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Scale2 {
+    pub const ONE: Self = Self { x: 1.0, y: 1.0 };
+
+    #[inline]
+    pub const fn uniform(s: f32) -> Self {
+        Self { x: s, y: s }
+    }
+
+    /// Exact equality — values come from the same slider unless the user
+    /// (or a vec2 keyframe) has split the axes.
+    #[inline]
+    pub fn is_uniform(self) -> bool {
+        self.x == self.y
+    }
+
+    /// Geometric mean of the absolute axes. Keeps stroke / blur / style
+    /// reference-px widths stable under uniform scale and splits the
+    /// difference under stretch (so a `[4, 1]` scale still doubles widths).
+    #[inline]
+    pub fn isotropic(self) -> f32 {
+        (self.x.abs() * self.y.abs()).sqrt()
+    }
+}
+
+impl Default for Scale2 {
+    fn default() -> Self {
+        Self::ONE
+    }
+}
+
+impl From<f32> for Scale2 {
+    fn from(s: f32) -> Self {
+        Self::uniform(s)
+    }
+}
+
+impl From<[f32; 2]> for Scale2 {
+    fn from([x, y]: [f32; 2]) -> Self {
+        Self { x, y }
+    }
+}
+
+impl From<Scale2> for [f32; 2] {
+    fn from(s: Scale2) -> Self {
+        [s.x, s.y]
+    }
+}
+
+impl std::ops::Mul<f32> for Scale2 {
+    type Output = Self;
+    fn mul(self, rhs: f32) -> Self {
+        Self {
+            x: self.x * rhs,
+            y: self.y * rhs,
+        }
+    }
+}
+
+impl std::ops::MulAssign<f32> for Scale2 {
+    fn mul_assign(&mut self, rhs: f32) {
+        self.x *= rhs;
+        self.y *= rhs;
+    }
+}
+
+impl Lerp for Scale2 {
+    fn lerp(a: Self, b: Self, t: f32) -> Self {
+        Self {
+            x: f32::lerp(a.x, b.x, t),
+            y: f32::lerp(a.y, b.y, t),
+        }
+    }
+}
+
+impl crate::param::Extrapolate for Scale2 {}
+
+impl SegmentSample for Scale2 {}
+
+impl Serialize for Scale2 {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.is_uniform() {
+            serializer.serialize_f32(self.x)
+        } else {
+            [self.x, self.y].serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Scale2 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Uniform(f32),
+            Axes([f32; 2]),
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Uniform(s) => Self::uniform(s),
+            Wire::Axes([x, y]) => Self { x, y },
+        })
+    }
+}
 
 /// Spatial placement of a clip's content on the canvas (CapCut "Basic"
 /// transform: position, anchor, scale, rotation, opacity).
@@ -11,9 +123,10 @@ use crate::param::{Easing, Param};
 /// center as a fraction of canvas width/height (+x right, +y down — screen
 /// convention). With the default center anchor this matches the legacy
 /// content-center semantics. `anchor_point` is the pivot within the content
-/// bounds (0,0 = top-left, 0.5,0.5 = center). `scale` is uniform with 1.0 =
-/// aspect-fit inside the canvas (CapCut's 100%). `rotation` is degrees
-/// clockwise about the anchor.
+/// bounds (0,0 = top-left, 0.5,0.5 = center). `scale` is per-axis with 1.0 =
+/// aspect-fit inside the canvas (CapCut's 100%); uniform scales serialize as
+/// a bare float for save/compat. `rotation` is degrees clockwise about the
+/// anchor.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ClipTransform {
     /// Anchor offset from canvas center, normalized to canvas dimensions.
@@ -24,8 +137,9 @@ pub struct ClipTransform {
     /// (+x right, +y down). `[0.5, 0.5]` = content center (default).
     #[serde(default = "default_anchor_point")]
     pub anchor_point: [f32; 2],
-    /// Uniform scale; 1.0 aspect-fits the content inside the canvas.
-    pub scale: f32,
+    /// Per-axis scale; `[1, 1]` aspect-fits the content inside the canvas.
+    /// Uniform values serialize as a bare float.
+    pub scale: Scale2,
     /// Clockwise rotation in degrees about the anchor.
     pub rotation: f32,
     /// Layer opacity, 0.0 (transparent) ..= 1.0 (opaque).
@@ -40,7 +154,7 @@ impl ClipTransform {
     pub const IDENTITY: Self = Self {
         position: [0.0, 0.0],
         anchor_point: [0.5, 0.5],
-        scale: 1.0,
+        scale: Scale2::ONE,
         rotation: 0.0,
         opacity: 1.0,
     };
@@ -49,23 +163,20 @@ impl ClipTransform {
         *self == Self::IDENTITY
     }
 
-    /// `Ok` iff every component is finite, scale is positive, and opacity is
-    /// within `0..=1` — the invariant [`crate::Project::set_transform`]
-    /// enforces before storing.
+    /// `Ok` iff every component is finite, both scale axes are positive, and
+    /// opacity is within `0..=1` — the invariant
+    /// [`crate::Project::set_transform`] enforces before storing.
     pub fn validate(&self) -> Result<(), ModelError> {
         let finite = self.position.iter().all(|v| v.is_finite())
             && self.anchor_point.iter().all(|v| v.is_finite())
-            && self.scale.is_finite()
+            && self.scale.x.is_finite()
+            && self.scale.y.is_finite()
             && self.rotation.is_finite()
             && self.opacity.is_finite();
         if !finite {
             return Err(ModelError::InvalidTransform("non-finite component".into()));
         }
-        if self.scale <= 0.0 {
-            return Err(ModelError::InvalidTransform(
-                "scale must be positive".into(),
-            ));
-        }
+        validate_scale(self.scale)?;
         if !(0.0..=1.0).contains(&self.opacity) {
             return Err(ModelError::InvalidTransform(
                 "opacity must be in 0..=1".into(),
@@ -91,6 +202,10 @@ pub enum ClipParam {
     Scale,
     Rotation,
     Opacity,
+    /// The clip's crop window (kept-region rect in content fractions).
+    /// Routed to [`Clip::crop`] instead of the transform. Always carries a
+    /// [`ParamValue::Rect`] `[x, y, w, h]`.
+    Crop,
     /// The clip's playback-rate ramp (M2 speed curves). Animates the
     /// instantaneous speed *multiplier* over the clip's normalized span
     /// (`speed_curve`), not the clip transform — its keyframe ticks live in
@@ -103,10 +218,16 @@ pub enum ClipParam {
     /// volume keyframes. Media-backed clips only. Always carries a
     /// [`ParamValue::Scalar`] in `0..=`[`MAX_CLIP_VOLUME`].
     Volume,
-    /// A scalar parameter of one of the clip's effects (M4): `effect` is the
-    /// index into [`Clip::effects`], `param` the catalog slot. Routed to the
-    /// effect's `Param<f32>` instead of the transform, so the same keyframe
-    /// commands drive effect curves. Always carries a [`ParamValue::Scalar`].
+    /// The clip's stereo pan envelope. Routed to the clip's `pan: Param<f32>`
+    /// instead of the transform. Media-backed clips only (same target rule as
+    /// [`ClipParam::Volume`] — video clips with sound can pan too). Always
+    /// carries a [`ParamValue::Scalar`] in `−1..=1`.
+    Pan,
+    /// A parameter of one of the clip's effects (M4): `effect` is the index
+    /// into [`Clip::effects`], `param` the catalog slot. Routed to the
+    /// effect's typed param maps instead of the transform. Carries
+    /// [`ParamValue::Scalar`], [`ParamValue::Color`], or [`ParamValue::Vec2`]
+    /// matching the catalog slot's [`crate::EffectParamKind`].
     Effect {
         effect: u32,
         param: u32,
@@ -118,6 +239,23 @@ pub enum ClipParam {
     /// [`ParamValue::Color`].
     Shape {
         param: ShapeParam,
+    },
+    /// An animatable property of a [`Generator::Text`] clip's visual style.
+    /// Scalar properties carry [`ParamValue::Scalar`]; color properties carry
+    /// [`ParamValue::Color`].
+    Text {
+        param: TextParam,
+    },
+    /// An animatable property of the clip's color look. Structural look
+    /// selections (filter id, LUT path, mask shape, chroma color) remain
+    /// ordinary clip edits.
+    Look {
+        param: LookParam,
+    },
+    /// An animatable property of the clip's layer styles. Enabling/removing a
+    /// style block remains a structural edit (`SetClipLayerStyles`).
+    Style {
+        param: StyleParam,
     },
 }
 
@@ -146,15 +284,105 @@ pub enum ShapeParam {
     StrokeWidth,
 }
 
+/// The animatable visual treatment properties of a [`Generator::Text`] clip.
+/// Font selection and layout structure remain ordinary generator edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextParam {
+    Size,
+    Fill,
+    LetterSpacing,
+    LineSpacing,
+    StrokeWidth,
+    StrokeColor,
+    ShadowBlur,
+    ShadowDistance,
+    ShadowColor,
+    /// Background card color. Color; requires a background block.
+    BackgroundColor,
+    /// Background card corner rounding (`0` … `1`). Scalar; requires a
+    /// background block.
+    BackgroundRadius,
+}
+
+/// The animatable properties in a clip's color look / mask.
+///
+/// [`LookParam::MaskCenter`] / [`LookParam::MaskSize`] carry [`ParamValue::Vec2`];
+/// the rest carry [`ParamValue::Scalar`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LookParam {
+    FilterIntensity,
+    LutIntensity,
+    AdjustBrightness,
+    AdjustContrast,
+    AdjustSaturation,
+    AdjustExposure,
+    AdjustTemperature,
+    AdjustTint,
+    AdjustHue,
+    AdjustHighlights,
+    AdjustShadows,
+    AdjustSharpness,
+    AdjustVignette,
+    /// Mask edge softness (`0` … `1`). Scalar.
+    MaskFeather,
+    /// Mask center offset as a fraction of layer size. Vec2.
+    MaskCenter,
+    /// Mask size as a fraction of layer size. Vec2.
+    MaskSize,
+    /// Mask rotation in degrees (clockwise). Scalar.
+    MaskRotation,
+    /// Rectangle corner rounding (`0` … `1`). Scalar.
+    MaskRoundness,
+    ChromaStrength,
+    ChromaShadow,
+}
+
+/// An animatable property of the clip's [`crate::LayerStyles`].
+///
+/// `*Color` params carry [`ParamValue::Color`]; [`StyleParam::ShadowOffset`]
+/// carries [`ParamValue::Vec2`]; the rest carry [`ParamValue::Scalar`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StyleParam {
+    /// Shadow color. Color.
+    ShadowColor,
+    /// Shadow offset in reference pixels. Vec2.
+    ShadowOffset,
+    /// Shadow blur radius in reference pixels. Scalar.
+    ShadowBlur,
+    /// Glow color. Color.
+    GlowColor,
+    /// Glow radius in reference pixels. Scalar.
+    GlowRadius,
+    /// Glow intensity (`0` … `4`). Scalar.
+    GlowIntensity,
+    /// Outline color. Color.
+    OutlineColor,
+    /// Outline width in reference pixels. Scalar.
+    OutlineWidth,
+    /// Background plate color. Color.
+    BackgroundColor,
+    /// Background padding in reference pixels. Scalar.
+    BackgroundPadding,
+    /// Background corner radius in reference pixels. Scalar.
+    BackgroundRadius,
+}
+
 /// A value for a [`ClipParam`]: scalar properties take `Scalar`, `position`
-/// takes `Vec2`, color properties (shape fill/stroke) take `Color`. Commands
-/// carry this so one command shape serves every param kind.
+/// / per-axis `scale` take `Vec2` (scale also accepts `Scalar` → uniform),
+/// color properties (shape fill/stroke) take `Color`, and crop (and any
+/// future 4-float rect) take `Rect` as `[x, y, w, h]`. Commands carry this
+/// so one command shape serves every param kind.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParamValue {
     Scalar(f32),
     Vec2([f32; 2]),
     Color([u8; 4]),
+    /// Axis-aligned rect as `[x, y, w, h]` (e.g. [`ClipParam::Crop`]).
+    Rect([f32; 4]),
 }
 
 impl ParamValue {
@@ -178,6 +406,13 @@ impl ParamValue {
             _ => Err(ModelError::InvalidParam("expected a color value".into())),
         }
     }
+
+    pub(crate) fn rect(self) -> Result<[f32; 4], ModelError> {
+        match self {
+            ParamValue::Rect(v) => Ok(v),
+            _ => Err(ModelError::InvalidParam("expected a rect value".into())),
+        }
+    }
 }
 
 /// The animatable spatial placement stored on a clip: each [`ClipTransform`]
@@ -198,9 +433,10 @@ pub struct AnimatedTransform {
         skip_serializing_if = "is_default_anchor_param"
     )]
     pub anchor_point: Param<[f32; 2]>,
-    /// Uniform scale (see [`ClipTransform::scale`]).
+    /// Per-axis scale (see [`ClipTransform::scale`]). Uniform constants
+    /// serialize as a bare float for pre-M2 / pre-Scale2 save compat.
     #[serde(default = "default_scale_param")]
-    pub scale: Param<f32>,
+    pub scale: Param<Scale2>,
     /// Clockwise rotation in degrees (see [`ClipTransform::rotation`]).
     #[serde(default = "default_rotation_param")]
     pub rotation: Param<f32>,
@@ -218,8 +454,8 @@ fn default_anchor_point_param() -> Param<[f32; 2]> {
 fn is_default_anchor_param(p: &Param<[f32; 2]>) -> bool {
     p.constant() == Some([0.5, 0.5])
 }
-fn default_scale_param() -> Param<f32> {
-    Param::Constant(1.0)
+fn default_scale_param() -> Param<Scale2> {
+    Param::Constant(Scale2::ONE)
 }
 fn default_rotation_param() -> Param<f32> {
     Param::Constant(0.0)
@@ -335,7 +571,7 @@ impl AnimatedTransform {
                 self.anchor_point.set_keyframe(tick, v, easing);
             }
             ClipParam::Scale => {
-                let v = value.scalar()?;
+                let v = scale_value(value)?;
                 validate_scale(v)?;
                 self.scale.set_keyframe(tick, v, easing);
             }
@@ -350,9 +586,14 @@ impl AnimatedTransform {
                 self.opacity.set_keyframe(tick, v, easing);
             }
             ClipParam::Effect { .. }
+            | ClipParam::Crop
             | ClipParam::Speed
             | ClipParam::Volume
-            | ClipParam::Shape { .. } => {
+            | ClipParam::Pan
+            | ClipParam::Shape { .. }
+            | ClipParam::Text { .. }
+            | ClipParam::Look { .. }
+            | ClipParam::Style { .. } => {
                 return Err(not_a_transform_param());
             }
         }
@@ -369,9 +610,14 @@ impl AnimatedTransform {
             ClipParam::Rotation => self.rotation.remove_keyframe(tick),
             ClipParam::Opacity => self.opacity.remove_keyframe(tick),
             ClipParam::Effect { .. }
+            | ClipParam::Crop
             | ClipParam::Speed
             | ClipParam::Volume
-            | ClipParam::Shape { .. } => {
+            | ClipParam::Pan
+            | ClipParam::Shape { .. }
+            | ClipParam::Text { .. }
+            | ClipParam::Look { .. }
+            | ClipParam::Style { .. } => {
                 return Err(not_a_transform_param());
             }
         };
@@ -402,7 +648,7 @@ impl AnimatedTransform {
                 self.anchor_point.set_constant(v);
             }
             ClipParam::Scale => {
-                let v = value.scalar()?;
+                let v = scale_value(value)?;
                 validate_scale(v)?;
                 self.scale.set_constant(v);
             }
@@ -417,9 +663,14 @@ impl AnimatedTransform {
                 self.opacity.set_constant(v);
             }
             ClipParam::Effect { .. }
+            | ClipParam::Crop
             | ClipParam::Speed
             | ClipParam::Volume
-            | ClipParam::Shape { .. } => {
+            | ClipParam::Pan
+            | ClipParam::Shape { .. }
+            | ClipParam::Text { .. }
+            | ClipParam::Look { .. }
+            | ClipParam::Style { .. } => {
                 return Err(not_a_transform_param());
             }
         }
@@ -462,6 +713,17 @@ fn not_a_transform_param() -> ModelError {
     ModelError::InvalidParam("parameter is not a clip transform property".into())
 }
 
+/// Accept scalar (uniform) or vec2 (per-axis) for [`ClipParam::Scale`].
+fn scale_value(value: ParamValue) -> Result<Scale2, ModelError> {
+    match value {
+        ParamValue::Scalar(v) => Ok(Scale2::uniform(v)),
+        ParamValue::Vec2(v) => Ok(Scale2::from(v)),
+        _ => Err(ModelError::InvalidParam(
+            "expected a scalar or vec2 scale value".into(),
+        )),
+    }
+}
+
 fn validate_position(v: &[f32; 2]) -> Result<(), ModelError> {
     if v.iter().all(|c| c.is_finite()) {
         Ok(())
@@ -478,11 +740,11 @@ fn validate_anchor_point(v: &[f32; 2]) -> Result<(), ModelError> {
     }
 }
 
-fn validate_scale(v: f32) -> Result<(), ModelError> {
-    if !v.is_finite() {
+fn validate_scale(v: Scale2) -> Result<(), ModelError> {
+    if !v.x.is_finite() || !v.y.is_finite() {
         return Err(ModelError::InvalidTransform("non-finite component".into()));
     }
-    if v <= 0.0 {
+    if v.x <= 0.0 || v.y <= 0.0 {
         return Err(ModelError::InvalidTransform(
             "scale must be positive".into(),
         ));

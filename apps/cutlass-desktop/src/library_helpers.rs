@@ -65,16 +65,391 @@ pub(crate) fn clip_param_value(
     value_x: f32,
     value_y: f32,
 ) -> Option<(cutlass_models::ClipParam, cutlass_models::ParamValue)> {
-    use cutlass_models::{ClipParam, ParamValue};
+    use cutlass_models::{ClipParam, LookParam, ParamValue, StyleParam, TextParam};
+    // Color commands use two exact u16 lanes: RG and BA. Scalar rows always
+    // leave `value_y` at zero, so this encoding cannot be confused with one.
+    let color = || {
+        let rg = value_x.round().clamp(0.0, u16::MAX as f32) as u16;
+        let ba = value_y.round().clamp(0.0, u16::MAX as f32) as u16;
+        ParamValue::Color([(rg >> 8) as u8, rg as u8, (ba >> 8) as u8, ba as u8])
+    };
     Some(match param {
         "position" => (ClipParam::Position, ParamValue::Vec2([value_x, value_y])),
         "anchor" => (ClipParam::AnchorPoint, ParamValue::Vec2([value_x, value_y])),
-        "scale" => (ClipParam::Scale, ParamValue::Scalar(value_x)),
+        "scale" => (
+            ClipParam::Scale,
+            if value_x == value_y {
+                ParamValue::Scalar(value_x)
+            } else {
+                ParamValue::Vec2([value_x, value_y])
+            },
+        ),
         "rotation" => (ClipParam::Rotation, ParamValue::Scalar(value_x)),
         "opacity" => (ClipParam::Opacity, ParamValue::Scalar(value_x)),
         "volume" => (ClipParam::Volume, ParamValue::Scalar(value_x)),
+        "pan" => (ClipParam::Pan, ParamValue::Scalar(value_x)),
+        // Crop keyframes carry `[x,y,w,h]` via `ParamValue::Rect`. The Slint
+        // two-float channel cannot express a full rect — this arm resolves the
+        // param for remove/diamond tooling; commits that need a real rect use
+        // `ParamValue::Rect` directly (crop tool / AI wire).
+        "crop" => (
+            ClipParam::Crop,
+            ParamValue::Rect([value_x, value_y, 1.0, 1.0]),
+        ),
+        "text_size" => (
+            ClipParam::Text {
+                param: TextParam::Size,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "text_fill" => (
+            ClipParam::Text {
+                param: TextParam::Fill,
+            },
+            color(),
+        ),
+        "text_letter_spacing" => (
+            ClipParam::Text {
+                param: TextParam::LetterSpacing,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "text_line_spacing" => (
+            ClipParam::Text {
+                param: TextParam::LineSpacing,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "text_stroke_width" => (
+            ClipParam::Text {
+                param: TextParam::StrokeWidth,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "text_stroke_color" => (
+            ClipParam::Text {
+                param: TextParam::StrokeColor,
+            },
+            color(),
+        ),
+        "text_shadow_blur" => (
+            ClipParam::Text {
+                param: TextParam::ShadowBlur,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "text_shadow_distance" => (
+            ClipParam::Text {
+                param: TextParam::ShadowDistance,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "text_shadow_color" => (
+            ClipParam::Text {
+                param: TextParam::ShadowColor,
+            },
+            color(),
+        ),
+        "text_background_color" => (
+            ClipParam::Text {
+                param: TextParam::BackgroundColor,
+            },
+            color(),
+        ),
+        "text_background_radius" => (
+            ClipParam::Text {
+                param: TextParam::BackgroundRadius,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_filter_intensity" => (
+            ClipParam::Look {
+                param: LookParam::FilterIntensity,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_lut_intensity" => (
+            ClipParam::Look {
+                param: LookParam::LutIntensity,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_brightness" => (
+            ClipParam::Look {
+                param: LookParam::AdjustBrightness,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_contrast" => (
+            ClipParam::Look {
+                param: LookParam::AdjustContrast,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_saturation" => (
+            ClipParam::Look {
+                param: LookParam::AdjustSaturation,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_exposure" => (
+            ClipParam::Look {
+                param: LookParam::AdjustExposure,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_temperature" => (
+            ClipParam::Look {
+                param: LookParam::AdjustTemperature,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_tint" => (
+            ClipParam::Look {
+                param: LookParam::AdjustTint,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_hue" => (
+            ClipParam::Look {
+                param: LookParam::AdjustHue,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_highlights" => (
+            ClipParam::Look {
+                param: LookParam::AdjustHighlights,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_shadows" => (
+            ClipParam::Look {
+                param: LookParam::AdjustShadows,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_sharpness" => (
+            ClipParam::Look {
+                param: LookParam::AdjustSharpness,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_vignette" => (
+            ClipParam::Look {
+                param: LookParam::AdjustVignette,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_mask_feather" => (
+            ClipParam::Look {
+                param: LookParam::MaskFeather,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_mask_center" => (
+            ClipParam::Look {
+                param: LookParam::MaskCenter,
+            },
+            ParamValue::Vec2([value_x, value_y]),
+        ),
+        "look_mask_size" => (
+            ClipParam::Look {
+                param: LookParam::MaskSize,
+            },
+            ParamValue::Vec2([value_x, value_y]),
+        ),
+        "look_mask_rotation" => (
+            ClipParam::Look {
+                param: LookParam::MaskRotation,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_mask_roundness" => (
+            ClipParam::Look {
+                param: LookParam::MaskRoundness,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_chroma_strength" => (
+            ClipParam::Look {
+                param: LookParam::ChromaStrength,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_chroma_shadow" => (
+            ClipParam::Look {
+                param: LookParam::ChromaShadow,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "style_shadow_color" => (
+            ClipParam::Style {
+                param: StyleParam::ShadowColor,
+            },
+            color(),
+        ),
+        "style_shadow_offset" => (
+            ClipParam::Style {
+                param: StyleParam::ShadowOffset,
+            },
+            ParamValue::Vec2([value_x, value_y]),
+        ),
+        "style_shadow_blur" => (
+            ClipParam::Style {
+                param: StyleParam::ShadowBlur,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "style_glow_color" => (
+            ClipParam::Style {
+                param: StyleParam::GlowColor,
+            },
+            color(),
+        ),
+        "style_glow_radius" => (
+            ClipParam::Style {
+                param: StyleParam::GlowRadius,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "style_glow_intensity" => (
+            ClipParam::Style {
+                param: StyleParam::GlowIntensity,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "style_outline_color" => (
+            ClipParam::Style {
+                param: StyleParam::OutlineColor,
+            },
+            color(),
+        ),
+        "style_outline_width" => (
+            ClipParam::Style {
+                param: StyleParam::OutlineWidth,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "style_background_color" => (
+            ClipParam::Style {
+                param: StyleParam::BackgroundColor,
+            },
+            color(),
+        ),
+        "style_background_padding" => (
+            ClipParam::Style {
+                param: StyleParam::BackgroundPadding,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "style_background_radius" => (
+            ClipParam::Style {
+                param: StyleParam::BackgroundRadius,
+            },
+            ParamValue::Scalar(value_x),
+        ),
         _ => return None,
     })
+}
+
+/// Apply one layer-style field as a [`Param::Constant`] onto a cloned
+/// [`LayerStyles`] for live preview. Ensures the owning block exists (model
+/// default) then overwrites the named field. Supports axis keys
+/// `style_shadow_offset_x` / `_y` (keeps the other axis from the offset
+/// sampled at the clip-relative `tick`, so a keyframed offset previews the
+/// playhead's composite value). Returns `false` for unknown keys.
+pub(crate) fn apply_style_preview_constant(
+    styles: &mut cutlass_models::LayerStyles,
+    key: &str,
+    value_x: f32,
+    value_y: f32,
+    tick: i64,
+) -> bool {
+    use cutlass_models::{
+        ClipParam, LayerBackground, LayerGlow, LayerOutline, LayerShadow, Param, ParamValue,
+        StyleParam,
+    };
+
+    let (key, value_x, value_y) = match key {
+        "style_shadow_offset_x" => {
+            let y = styles
+                .shadow
+                .as_ref()
+                .map(|s| s.offset.sample(tick)[1])
+                .unwrap_or(4.0);
+            ("style_shadow_offset", value_x, y)
+        }
+        "style_shadow_offset_y" => {
+            let x = styles
+                .shadow
+                .as_ref()
+                .map(|s| s.offset.sample(tick)[0])
+                .unwrap_or(4.0);
+            ("style_shadow_offset", x, value_x)
+        }
+        other => (other, value_x, value_y),
+    };
+
+    let Some((ClipParam::Style { param }, value)) = clip_param_value(key, value_x, value_y) else {
+        return false;
+    };
+
+    match param {
+        StyleParam::ShadowColor | StyleParam::ShadowOffset | StyleParam::ShadowBlur => {
+            styles.shadow.get_or_insert_with(LayerShadow::default);
+        }
+        StyleParam::GlowColor | StyleParam::GlowRadius | StyleParam::GlowIntensity => {
+            styles.glow.get_or_insert_with(LayerGlow::default);
+        }
+        StyleParam::OutlineColor | StyleParam::OutlineWidth => {
+            styles.outline.get_or_insert_with(LayerOutline::default);
+        }
+        StyleParam::BackgroundColor
+        | StyleParam::BackgroundPadding
+        | StyleParam::BackgroundRadius => {
+            styles
+                .background
+                .get_or_insert_with(LayerBackground::default);
+        }
+    }
+
+    match (param, value) {
+        (StyleParam::ShadowBlur, ParamValue::Scalar(v)) => {
+            styles.shadow.as_mut().unwrap().blur = Param::Constant(v);
+        }
+        (StyleParam::ShadowOffset, ParamValue::Vec2(v)) => {
+            styles.shadow.as_mut().unwrap().offset = Param::Constant(v);
+        }
+        (StyleParam::ShadowColor, ParamValue::Color(v)) => {
+            styles.shadow.as_mut().unwrap().rgba = Param::Constant(v);
+        }
+        (StyleParam::GlowRadius, ParamValue::Scalar(v)) => {
+            styles.glow.as_mut().unwrap().radius = Param::Constant(v);
+        }
+        (StyleParam::GlowIntensity, ParamValue::Scalar(v)) => {
+            styles.glow.as_mut().unwrap().intensity = Param::Constant(v);
+        }
+        (StyleParam::GlowColor, ParamValue::Color(v)) => {
+            styles.glow.as_mut().unwrap().rgba = Param::Constant(v);
+        }
+        (StyleParam::OutlineWidth, ParamValue::Scalar(v)) => {
+            styles.outline.as_mut().unwrap().width = Param::Constant(v);
+        }
+        (StyleParam::OutlineColor, ParamValue::Color(v)) => {
+            styles.outline.as_mut().unwrap().rgba = Param::Constant(v);
+        }
+        (StyleParam::BackgroundPadding, ParamValue::Scalar(v)) => {
+            styles.background.as_mut().unwrap().padding = Param::Constant(v);
+        }
+        (StyleParam::BackgroundRadius, ParamValue::Scalar(v)) => {
+            styles.background.as_mut().unwrap().radius = Param::Constant(v);
+        }
+        (StyleParam::BackgroundColor, ParamValue::Color(v)) => {
+            styles.background.as_mut().unwrap().rgba = Param::Constant(v);
+        }
+        _ => return false,
+    }
+    true
 }
 
 /// Run `f` on the next event-loop turn, outside whatever callback is
@@ -215,4 +590,44 @@ pub(crate) async fn pick_relink_folder() -> Option<std::path::PathBuf> {
         .pick_folder()
         .await
         .map(|file| file.path().to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cutlass_models::{ClipParam, ParamValue, StyleParam};
+
+    #[test]
+    fn style_param_keys_round_trip_through_clip_param_value() {
+        let (param, value) = clip_param_value("style_shadow_blur", 12.5, 0.0).expect("blur");
+        assert_eq!(
+            param,
+            ClipParam::Style {
+                param: StyleParam::ShadowBlur
+            }
+        );
+        assert_eq!(value, ParamValue::Scalar(12.5));
+
+        let (param, value) = clip_param_value("style_shadow_offset", 4.0, -2.0).expect("offset");
+        assert_eq!(
+            param,
+            ClipParam::Style {
+                param: StyleParam::ShadowOffset
+            }
+        );
+        assert_eq!(value, ParamValue::Vec2([4.0, -2.0]));
+
+        // Color packing: RG and BA as u16 lanes (same as text color keys).
+        let rg = ((10u16) << 8) | 20;
+        let ba = ((30u16) << 8) | 40;
+        let (param, value) =
+            clip_param_value("style_glow_color", rg as f32, ba as f32).expect("color");
+        assert_eq!(
+            param,
+            ClipParam::Style {
+                param: StyleParam::GlowColor
+            }
+        );
+        assert_eq!(value, ParamValue::Color([10, 20, 30, 40]));
+    }
 }

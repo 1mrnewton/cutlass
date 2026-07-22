@@ -476,11 +476,7 @@ fn combined_mask_and_chroma_on_rgba_layer() {
     let bmp = rgba_uniform(64, 64, [0, 255, 0, 255]);
     let placement = LayerPlacement::full_canvas(&config);
     let effects = LayerEffects {
-        mask: Some(LayerMask {
-            kind: mask_kind::CIRCLE,
-            feather: 0.0,
-            invert: 0,
-        }),
+        mask: Some(LayerMask::new(mask_kind::CIRCLE)),
         chroma_key: Some(LayerChromaKey {
             rgb: [0.0, 1.0, 0.0],
             strength: 0.5,
@@ -504,11 +500,7 @@ fn circle_mask_cuts_rgba_corners() {
     let bmp = rgba_uniform(64, 64, [255, 0, 0, 255]);
     let placement = LayerPlacement::full_canvas(&config);
     let effects = LayerEffects {
-        mask: Some(LayerMask {
-            kind: mask_kind::CIRCLE,
-            feather: 0.0,
-            invert: 0,
-        }),
+        mask: Some(LayerMask::new(mask_kind::CIRCLE)),
         chroma_key: None,
     };
     let layer = CompositeLayer::rgba(&bmp, placement).with_fx(effects);
@@ -762,6 +754,40 @@ fn vignette_darkens_corners_vs_center() {
     assert!(
         corner[0] < center[0] - 20,
         "corner should darken: {corner:?} vs {center:?}"
+    );
+}
+
+#[test]
+fn gaussian_blur_radius_softens_a_hard_edge() {
+    let gpu = gpu_or_skip!();
+    let mut comp = Compositor::new(&gpu);
+    let config = CompositorConfig::new(64, 64).with_background([0, 0, 0, 255]);
+    // Half white / half black vertical split — blur should mix across the seam.
+    let mut pixels = Vec::with_capacity(64 * 64 * 4);
+    for _y in 0..64 {
+        for x in 0..64 {
+            let v = if x < 32 { 255 } else { 0 };
+            pixels.extend_from_slice(&[v, v, v, 255]);
+        }
+    }
+    let bmp = RgbaImage::new(64, 64, pixels);
+    let sharp = CompositeLayer::rgba(&bmp, LayerPlacement::full_canvas(&config));
+    let sharp_img = comp.render(&gpu, &config, &[sharp]).expect("sharp");
+
+    let blur = PassInstance {
+        id: "gaussian_blur",
+        params: &[8.0],
+    };
+    let effects = [blur];
+    let soft =
+        CompositeLayer::rgba(&bmp, LayerPlacement::full_canvas(&config)).with_effects(&effects);
+    let soft_img = comp.render(&gpu, &config, &[soft]).expect("blur");
+
+    let sharp_seam = sharp_img.pixel(31, 32)[0] as i16;
+    let soft_seam = soft_img.pixel(31, 32)[0] as i16;
+    assert!(
+        (soft_seam - sharp_seam).abs() > 10,
+        "blur should pull dark ink across the seam: sharp={sharp_seam} soft={soft_seam}"
     );
 }
 

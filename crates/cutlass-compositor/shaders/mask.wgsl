@@ -1,7 +1,8 @@
 // mask.wgsl — shared mask alpha helpers for rgba_fx / yuv_fx pipelines.
 //
 // Evaluated in quad-local pixels (origin at center, +y down). `half` is the
-// layer's half-extents (`placement.size * 0.5`).
+// layer's half-extents (`placement.size * 0.5`). Geometry (center / size /
+// rotation / roundness) is applied in that same space before the SDF.
 
 const BASE_AA: f32 = 1.0;
 const PI: f32 = 3.14159265358979;
@@ -99,37 +100,59 @@ const MASK_RECTANGLE: u32 = 3u;
 const MASK_HEART: u32 = 4u;
 const MASK_STAR: u32 = 5u;
 
+// Map layer-local px → mask space. Identity geometry (center 0, size 1, rot 0)
+// is an exact no-op: subtract 0, rotate by 0, divide by 1.
+fn mask_space(
+    local: vec2<f32>,
+    half: vec2<f32>,
+    center: vec2<f32>,
+    size: vec2<f32>,
+    rotation: f32,
+) -> vec2<f32> {
+    var p = local - center * (half * 2.0);
+    let c = cos(-rotation);
+    let s = sin(-rotation);
+    p = vec2(c * p.x - s * p.y, s * p.x + c * p.y);
+    return p / size;
+}
+
 fn mask_alpha(
     local: vec2<f32>,
     half: vec2<f32>,
     kind: u32,
     feather: f32,
     invert: f32,
+    center: vec2<f32>,
+    size: vec2<f32>,
+    rotation: f32,
+    roundness: f32,
 ) -> f32 {
+    let p = mask_space(local, half, center, size, rotation);
     let aa = BASE_AA + feather * min(half.x, half.y);
     var alpha = 1.0;
 
     switch kind {
         case MASK_LINEAR: {
             // Soft ramp across the vertical center line (x = 0): right half visible.
-            alpha = coverage(-local.x, aa);
+            alpha = coverage(-p.x, aa);
         }
         case MASK_MIRROR: {
             // Keep the left half visible (x <= 0).
-            alpha = coverage(local.x, aa);
+            alpha = coverage(p.x, aa);
         }
         case MASK_CIRCLE: {
-            alpha = coverage(sd_ellipse(local, half), aa);
+            alpha = coverage(sd_ellipse(p, half), aa);
         }
         case MASK_RECTANGLE: {
-            alpha = coverage(sd_round_box(local, half, 0.0), aa);
+            let r = roundness * 0.5 * min(half.x, half.y);
+            alpha = coverage(sd_round_box(p, half, r), aa);
         }
         case MASK_HEART: {
-            alpha = coverage(sd_heart(local, half), aa);
+            alpha = coverage(sd_heart(p, half), aa);
         }
         default: {
             // Star (5 points, inner 0.5).
-            alpha = coverage(sd_star(local, half, 5.0, 0.5), aa);
+            alpha = coverage(sd_star(p, half, 5.0, 0.5), aa);
         }
     }
 

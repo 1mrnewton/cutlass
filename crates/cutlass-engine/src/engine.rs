@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use cutlass_commands::{Command, ProjectCommand};
 use cutlass_models::{
-    ClipId, ClipTransform, ColorAdjustments, Filter, Generator, MediaId, Project, Rational,
-    RationalTime, TrackKind,
+    ClipId, ClipTransform, ColorAdjustments, Filter, Generator, LayerStyles, MediaId, Project,
+    Rational, RationalTime, TrackKind,
 };
 use cutlass_render::{
     FrameSink, Renderer, ResolveOverrides, RgbaImage, SeekPolicy, export_to_file,
@@ -55,6 +55,9 @@ pub struct Engine {
     /// Live filter/adjustment look for one clip (inspector slider preview),
     /// same session-only semantics as `transform_override`.
     look_override: Option<(ClipId, Option<Filter>, ColorAdjustments)>,
+    /// Live layer styles for one clip (inspector slider preview), same
+    /// session-only semantics as `transform_override`.
+    styles_override: Option<(ClipId, LayerStyles)>,
 }
 
 impl Engine {
@@ -78,6 +81,7 @@ impl Engine {
             transform_override: None,
             generator_override: None,
             look_override: None,
+            styles_override: None,
         })
     }
 
@@ -178,6 +182,7 @@ impl Engine {
         self.transform_override = None;
         self.generator_override = None;
         self.look_override = None;
+        self.styles_override = None;
         // Media ids are project-local: the same id can name a different
         // file in the incoming project, so all id-keyed render state is
         // stale (open decoders and still bitmaps, not only proxies).
@@ -270,12 +275,20 @@ impl Engine {
         self.look_override = value;
     }
 
+    /// Set (or clear with `None`) the live layer styles for one clip — the
+    /// shadow/glow/outline/background analogue of
+    /// [`set_transform_override`](Self::set_transform_override).
+    pub fn set_styles_override(&mut self, value: Option<(ClipId, LayerStyles)>) {
+        self.styles_override = value;
+    }
+
     /// True while a live preview override is set: frames rendered now show
     /// session-only state that no project revision describes.
     pub fn has_live_overrides(&self) -> bool {
         self.transform_override.is_some()
             || self.generator_override.is_some()
             || self.look_override.is_some()
+            || self.styles_override.is_some()
     }
 
     /// Stage timings of the most recent successful preview/export render.
@@ -323,6 +336,7 @@ impl Engine {
                 .look_override
                 .as_ref()
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
+            styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
         };
         Ok(self
             .renderer
@@ -346,6 +360,7 @@ impl Engine {
                 .look_override
                 .as_ref()
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
+            styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
         };
         Ok(self.renderer.render_frame_fit_with(
             &self.project,
@@ -388,6 +403,7 @@ impl Engine {
                 .look_override
                 .as_ref()
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
+            styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
         };
         Ok(self
             .renderer
@@ -410,6 +426,7 @@ impl Engine {
                 .look_override
                 .as_ref()
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
+            styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
         };
         Ok(self.renderer.render_frame_fit_into_with(
             &self.project,

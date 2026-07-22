@@ -133,12 +133,20 @@ pub(super) fn retimed_duration(
     (src_dur_tl as f64 / effective).round().max(1.0) as i64
 }
 
-/// Unwrap a scalar [`ParamValue`] (effect params are always scalar).
+/// Unwrap a scalar [`ParamValue`].
 pub(super) fn scalar_param(value: ParamValue) -> Result<f32, ModelError> {
     match value {
         ParamValue::Scalar(v) => Ok(v),
-        ParamValue::Vec2(_) | ParamValue::Color(_) => Err(ModelError::InvalidParam(
-            "effect parameters take a scalar value".into(),
-        )),
+        ParamValue::Vec2(_) | ParamValue::Color(_) | ParamValue::Rect(_) => {
+            Err(ModelError::InvalidParam("expected a scalar value".into()))
+        }
     }
+}
+
+/// Unwrap a rect [`ParamValue`] as a validated [`CropRect`].
+pub(super) fn crop_rect_param(value: ParamValue) -> Result<CropRect, ModelError> {
+    let [x, y, w, h] = value.rect()?;
+    let crop = CropRect { x, y, w, h };
+    crop.validate()?;
+    Ok(crop)
 }

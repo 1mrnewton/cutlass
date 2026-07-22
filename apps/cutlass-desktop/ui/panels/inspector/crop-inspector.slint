@@ -4,12 +4,13 @@
 // worker. The compositor re-renders from the projection republish, and the
 // preview selection box hugs the cropped quad (`src/preview_select.rs`).
 //
-// Crop is constant per clip (not animatable), so the rows carry no keyframe
-// cluster and no live-preview override — sliders commit on release and the
-// projection republish refreshes the frame.
+// Crop can be keyframed via the AI wire / param path; inspector sliders
+// still commit on release (no diamond cluster yet). When the property is
+// already animated, the commit keyframes at the playhead instead of
+// flattening — same compose semantics as the transform gizmo.
 
 import { CutlassText } from "../../components/index.slint";
-import { AppStore } from "../../store/index.slint";
+import { AppStore, TimelineStore } from "../../store/index.slint";
 import { Clip } from "../../models/index.slint";
 import { InspectorBackend } from "../../lib/inspector-backend.slint";
 import { SectionHeader, SliderRow } from "inspector-widgets.slint";
@@ -74,7 +75,8 @@ export component CropInspector inherits VerticalLayout {
             && fv == root.model.flip-v) {
             return;
         }
-        InspectorBackend.set-clip-crop(root.model.id, l, t, r, b, fh, fv);
+        InspectorBackend.set-clip-crop(
+            root.model.id, l, t, r, b, fh, fv, TimelineStore.playhead-tick);
     }
 
     SectionHeader {

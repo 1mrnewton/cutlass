@@ -61,6 +61,22 @@ export struct TextClipStyle {
     shadow-distance: float,
 }
 
+/// Manual color-adjust panel values (normalized). Signed sliders use
+/// `-1..=1`; sharpness / vignette use `0..=1`.
+export struct ClipAdjust {
+    brightness: float,
+    contrast: float,
+    saturation: float,
+    exposure: float,
+    temperature: float,
+    tint: float,
+    hue: float,
+    highlights: float,
+    shadows: float,
+    sharpness: float,
+    vignette: float,
+}
+
 // One keyframe of an animatable clip property, projected for the inspector
 // and timeline keyframe UI (M2). `tick` is the ABSOLUTE sequence tick (clip
 // start + clip-relative offset) so playhead math needs no conversions.
@@ -79,18 +95,31 @@ export struct ParamKeyframe {
     bez-y1: float,
     bez-x2: float,
     bez-y2: float,
+    // Spatial bezier handles for position motion paths (canvas-fraction
+    // offsets from the keyframe value). `has-tangents` false ⇔ straight
+    // segment (legacy / non-position params). Ignored by scalar samplers.
+    has-tangents: bool,
+    out-tx: float,
+    out-ty: float,
+    in-tx: float,
+    in-ty: float,
 }
 
-// One scalar parameter of a clip effect (M4), projected for the inspector
-// Effects section. `value` is the current (clip-start) sample; `min`/`max`
-// bound the slider per the catalog.
+// One parameter of a clip effect, projected for the inspector Effects
+// section. `kind` is "scalar" | "vec2" | "color". Scalars use `value` +
+// `min`/`max`; colors use `color`; vec2s use `vec2-x` / `vec2-y` (also
+// bounded by `min`/`max` per component).
 @rust-attr(derive(serde::Serialize, serde::Deserialize))
 export struct EffectParamView {
     name: string,
     label: string,
+    kind: string,
     value: float,
     min: float,
     max: float,
+    color: color,
+    vec2-x: float,
+    vec2-y: float,
 }
 
 // One effect on a clip's chain (M4). The chain index is the position in the
@@ -120,6 +149,11 @@ export struct TransitionView {
 export struct CatalogEntry {
     id: string,
     label: string,
+    // Animation catalog only — which tunable knobs the preset exposes.
+    // Ignored (left false) for effect / filter / LUT / font catalogs.
+    has-speed: bool,
+    has-intensity: bool,
+    has-stagger: bool,
 }
 
 // A bundled sticker for the Library's Stickers tab: catalog id, display
@@ -217,6 +251,10 @@ export struct Clip {
     // the clip edges. Meaningful on audio-lane clips; defaults elsewhere.
     // Edits go through `InspectorBackend.set-clip-audio` on the worker.
     volume: float,
+    // Stereo pan (−1 full left … +1 full right). Clip-start sample; the
+    // inspector samples `kf-pan` at the playhead. Edits ride
+    // `set-param-constant` / `set-param-keyframe` with param "pan".
+    pan: float,
     fade-in-s: float,
     fade-out-s: float,
     // Noise reduction (CapCut "Reduce noise", M8 Phase 5): true ⇒ the mixers
@@ -279,19 +317,72 @@ export struct Clip {
     transform-anchor-x: float,
     transform-anchor-y: float,
     transform-scale: float,
+    // Per-axis Y; `transform-scale` is X. Linked when x == y (uniform).
+    transform-scale-y: float,
+    transform-scale-linked: bool,
     transform-rotation: float,
     transform-opacity: float,
     // Framing (M1 crop): the normalized kept-region window into the
     // content (x/y top-left corner, w/h extent; 0,0,1,1 ⇔ uncropped) plus
-    // mirroring. Projected read-only — edits go through
-    // `EditCommand::SetClipCrop` on the worker. Constant per clip (not
-    // animatable), unlike the transform above.
+    // mirroring. Projected read-only (clip-start sample) — edits go through
+    // `EditCommand::SetClipCrop` on the worker. Animatable via ClipParam::Crop;
+    // inspector has no kf-crop diamond list yet (gizmo/constant-commit UI).
     crop-x: float,
     crop-y: float,
     crop-w: float,
     crop-h: float,
     flip-h: bool,
     flip-v: bool,
+    // CapCut "Blend": how the clip composites over layers below. Projected
+    // read-only as the model id (e.g. "multiply"); edits go through
+    // `InspectorBackend.set-clip-blend-mode`.
+    blend-mode: string,
+    blend-label: string,
+    // Transform motion blur (temporal supersampling). Plain values — not
+    // animatable. Edits go through `InspectorBackend.set-clip-motion-blur`.
+    motion-blur-enabled: bool,
+    motion-blur-shutter: float,
+    motion-blur-samples: int,
+    // CapCut mask: kind id (empty ⇔ none) + invert + geometry samples.
+    // Kind / invert go through `set-clip-mask-*`; geometry rides look_mask_*
+    // generic param callbacks.
+    mask-kind: string,
+    mask-label: string,
+    mask-invert: bool,
+    mask-feather: float,
+    mask-center-x: float,
+    mask-center-y: float,
+    mask-size-w: float,
+    mask-size-h: float,
+    mask-rotation: float,
+    mask-roundness: float,
+    // CapCut chroma key. Enable / color go through `toggle-clip-chroma` /
+    // `set-clip-chroma-color`; strength / shadow ride look_chroma_* params.
+    chroma-enabled: bool,
+    chroma-color: color,
+    chroma-strength: float,
+    chroma-shadow: float,
+    // Layer-quad styles (CapCut shadow/glow/outline/background). Structural
+    // enable/disable goes through `InspectorBackend.toggle-clip-style`; field
+    // edits ride the generic param callbacks (or `set-clip-style-color`).
+    // Color params project the clip-start sample only — no `kf-*` lists
+    // (color keyframes stay AI-only for now).
+    style-shadow-enabled: bool,
+    style-shadow-color: color,
+    style-shadow-offset-x: float,
+    style-shadow-offset-y: float,
+    style-shadow-blur: float,
+    style-glow-enabled: bool,
+    style-glow-color: color,
+    style-glow-radius: float,
+    style-glow-intensity: float,
+    style-outline-enabled: bool,
+    style-outline-color: color,
+    style-outline-width: float,
+    style-background-enabled: bool,
+    style-background-color: color,
+    style-background-padding: float,
+    style-background-radius: float,
     // Clip-level color grading (filters + manual adjust), projected read-only.
     // Edits go through `InspectorBackend.set-clip-filter` /
     // `set-clip-adjust`; slider drags use a session-only look override.
@@ -303,6 +394,12 @@ export struct Clip {
     adjust-saturation: float,
     adjust-exposure: float,
     adjust-temperature: float,
+    adjust-tint: float,
+    adjust-hue: float,
+    adjust-highlights: float,
+    adjust-shadows: float,
+    adjust-sharpness: float,
+    adjust-vignette: float,
     // Optional `.cube` LUT, projected read-only. `lut-id` is the catalog id
     // (the file's stem); `lut-path` is the absolute `.cube` path used to
     // re-apply intensity for catalog and user-picked files. Edits go through
@@ -315,10 +412,28 @@ export struct Clip {
     // read-only — edits go through `InspectorBackend.set-clip-animation`.
     animation-in-id: string,
     animation-in-label: string,
+    animation-in-speed: float,
+    animation-in-intensity: float,
+    animation-in-stagger: float,
+    animation-in-has-speed: bool,
+    animation-in-has-intensity: bool,
+    animation-in-has-stagger: bool,
     animation-out-id: string,
     animation-out-label: string,
+    animation-out-speed: float,
+    animation-out-intensity: float,
+    animation-out-stagger: float,
+    animation-out-has-speed: bool,
+    animation-out-has-intensity: bool,
+    animation-out-has-stagger: bool,
     animation-combo-id: string,
     animation-combo-label: string,
+    animation-combo-speed: float,
+    animation-combo-intensity: float,
+    animation-combo-stagger: float,
+    animation-combo-has-speed: bool,
+    animation-combo-has-intensity: bool,
+    animation-combo-has-stagger: bool,
     // Keyframe curves per animatable property (M2), in tick order with
     // ABSOLUTE sequence ticks. Empty ⇔ the property is a constant (read it
     // from `transform-*` above). Edits go through
@@ -328,6 +443,50 @@ export struct Clip {
     kf-scale: [ParamKeyframe],
     kf-rotation: [ParamKeyframe],
     kf-opacity: [ParamKeyframe],
+    // Text visual-style curves. Color curves are published too so their
+    // ticks participate in the clip's merged timeline diamonds.
+    kf-text-size: [ParamKeyframe],
+    kf-text-fill: [ParamKeyframe],
+    kf-text-letter-spacing: [ParamKeyframe],
+    kf-text-line-spacing: [ParamKeyframe],
+    kf-text-stroke-width: [ParamKeyframe],
+    kf-text-stroke-color: [ParamKeyframe],
+    kf-text-background-color: [ParamKeyframe],
+    kf-text-background-radius: [ParamKeyframe],
+    kf-text-shadow-blur: [ParamKeyframe],
+    kf-text-shadow-distance: [ParamKeyframe],
+    kf-text-shadow-color: [ParamKeyframe],
+    // Clip color-look curves.
+    kf-look-filter-intensity: [ParamKeyframe],
+    kf-look-lut-intensity: [ParamKeyframe],
+    kf-look-adjust-brightness: [ParamKeyframe],
+    kf-look-adjust-contrast: [ParamKeyframe],
+    kf-look-adjust-saturation: [ParamKeyframe],
+    kf-look-adjust-exposure: [ParamKeyframe],
+    kf-look-adjust-temperature: [ParamKeyframe],
+    kf-look-adjust-tint: [ParamKeyframe],
+    kf-look-adjust-hue: [ParamKeyframe],
+    kf-look-adjust-highlights: [ParamKeyframe],
+    kf-look-adjust-shadows: [ParamKeyframe],
+    kf-look-adjust-sharpness: [ParamKeyframe],
+    kf-look-adjust-vignette: [ParamKeyframe],
+    // Layer-style scalar / vec2 curves (absolute ticks). Color style params
+    // intentionally omit kf lists (AI-only for now).
+    kf-style-shadow-offset: [ParamKeyframe],
+    kf-style-shadow-blur: [ParamKeyframe],
+    kf-style-glow-radius: [ParamKeyframe],
+    kf-style-glow-intensity: [ParamKeyframe],
+    kf-style-outline-width: [ParamKeyframe],
+    kf-style-background-padding: [ParamKeyframe],
+    kf-style-background-radius: [ParamKeyframe],
+    // Mask geometry curves (absolute ticks). Empty when the clip has no mask.
+    kf-look-mask-feather: [ParamKeyframe],
+    kf-look-mask-center: [ParamKeyframe],
+    kf-look-mask-size: [ParamKeyframe],
+    kf-look-mask-rotation: [ParamKeyframe],
+    kf-look-mask-roundness: [ParamKeyframe],
+    kf-look-chroma-strength: [ParamKeyframe],
+    kf-look-chroma-shadow: [ParamKeyframe],
     // Playback-rate ramp (M2 speed curves): the speed-multiplier curve over
     // the clip's NORMALIZED span — `tick` is 0..=1000 (0 = clip start, 1000 =
     // clip end), `value-x` the multiplier. Empty ⇔ a flat constant-speed
@@ -352,6 +511,11 @@ export struct Clip {
     // True ⇔ the clip's gain is a non-constant envelope — drives the
     // inspector's diamond state and the on-clip automation line + badge.
     has-volume-envelope: bool,
+    // Pan automation: absolute-tick keyframes (transform / volume pattern).
+    // Empty ⇔ a constant pan (read it from `pan`). Edits ride param "pan".
+    kf-pan: [ParamKeyframe],
+    // True ⇔ the clip's pan is a non-constant envelope.
+    has-pan-envelope: bool,
     // The volume envelope as an SVG path-commands string in a normalized
     // 1000×1000 viewbox (x = clip start→end, y = gain 0..200% top-down,
     // densely sampled so easing curvature shows). "" ⇔ a flat clip, so no

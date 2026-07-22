@@ -17,24 +17,29 @@
 //!   layers.
 //! - **Lane passes**: effect, filter, and adjustment generator bars resolve to
 //!   canvas-wide passes over everything below their track.
-//! - **Deferred**: stickers are skipped (they produce no layer) rather than
-//!   rendered wrong.
+//! - **Stickers & Lottie**: bundled stickers and Lottie compositions resolve
+//!   to placed layers, sized by their intrinsic reference-pixel dimensions.
 
-use cutlass_compositor::ColorGrade;
 use cutlass_core::{RationalTime, resample};
 use cutlass_models::{
-    ClipId, ClipSource, ClipTransform, ColorAdjustments, EffectInstance, Filter, Generator,
-    MediaKind, Param, Project, Shape, ShapePath, ShapeStroke, TextAlignH, TextAlignV,
-    TextStyle as ModelTextStyle,
-};
-use cutlass_shapes::{BezierPath, PathPoint, SDF_AA, SdfParams, Stroke};
-use cutlass_text::{
-    FontFamily, TextAlign, TextBackground, TextShadow, TextStroke, TextStyle, TextVerticalAlign,
+    AnimationSlot, ClipId, ClipSource, ClipTransform, ColorAdjustments, Easing, EffectInstance,
+    Filter, Generator, LayerStyles, MediaKind, Project, look_animation_combo_period_ticks,
+    look_animation_window_ticks,
 };
 
-use crate::animation::apply_look_animations;
-use crate::grade::resolve_color_grade;
-use crate::scene::{LayerSource, ResolvedPass, Scene, SceneLayer, SceneLut, SizeSpec};
+use crate::animation::{apply_look_animations, is_per_character, scaled_ticks, text_knobs};
+use crate::grade::resolve_color_grade_at;
+use crate::scene::{
+    LayerSource, ResolvedPass, Scene, SceneBackground, SceneChromaKey, SceneGlow, SceneLayer,
+    SceneLut, SceneMask, SceneOutline, SceneShadow, SceneStyles, SizeSpec, TextAnimation,
+};
+
+mod generator;
+mod shape;
+
+#[cfg(test)]
+use generator::map_text_style;
+pub(crate) use generator::resolve_generator;
 
 /// Vertical reference height that a generator's reference-pixel sizes (text
 /// `size`, shape `width`/`height`) are authored against. Matches the model's
@@ -55,6 +60,7 @@ pub struct ResolveOverrides<'a> {
     pub transform: Option<(ClipId, ClipTransform)>,
     pub generator: Option<(ClipId, &'a Generator)>,
     pub look: Option<(ClipId, Option<&'a Filter>, &'a ColorAdjustments)>,
+    pub styles: Option<(ClipId, &'a LayerStyles)>,
 }
 
 /// Identity transform used when rasterizing the gesture sprite: the clip's
@@ -62,7 +68,7 @@ pub struct ResolveOverrides<'a> {
 pub const GESTURE_IDENTITY_TRANSFORM: ClipTransform = ClipTransform {
     position: [0.0, 0.0],
     anchor_point: [0.5, 0.5],
-    scale: 1.0,
+    scale: cutlass_models::Scale2::ONE,
     rotation: 0.0,
     opacity: 1.0,
 };
@@ -92,6 +98,7 @@ pub fn resolve_gesture_partitions(
         transform: Some((clip_id, GESTURE_IDENTITY_TRANSFORM)),
         generator: None,
         look: None,
+        styles: None,
     };
     let scene = resolve_with(project, t, overrides)?;
     let index = scene
@@ -119,18 +126,21 @@ pub fn resolve_gesture_partitions(
             width: scene.width,
             height: scene.height,
             background: scene.background,
+            tick: scene.tick,
             layers: scene.layers[..index].to_vec(),
         },
         sprite: Scene {
             width: scene.width,
             height: scene.height,
             background: [0, 0, 0, 0],
+            tick: scene.tick,
             layers: vec![scene.layers[index].clone()],
         },
         above: Scene {
             width: scene.width,
             height: scene.height,
             background: [0, 0, 0, 0],
+            tick: scene.tick,
             layers: scene.layers[index + 1..].to_vec(),
         },
     }))
@@ -157,6 +167,7 @@ pub fn resolve_with(
     let (width, height) = canvas_size(project);
     let bg = timeline.canvas().background;
     let mut scene = Scene::empty(width, height, [bg[0], bg[1], bg[2], 255]);
+    scene.tick = t;
 
     let cw = width as f32;
     let ch = height as f32;
@@ -252,6 +263,9 @@ fn resolve_track_at(
                 chroma_key: None,
                 color_grade: None,
                 lut: None,
+                blend_mode: cutlass_models::BlendMode::Normal,
+                styles: None,
+                blur_passes: Vec::new(),
             }));
         }
     }
@@ -342,23 +356,49 @@ fn resolve_clip(
     let anchor_point = xf.anchor_point;
     let rotation = xf.rotation.to_radians();
     let opacity = xf.opacity.clamp(0.0, 1.0);
-    let uv = crop_flip_uv(clip);
+    let uv = crop_flip_uv(clip, local_tick);
     let effects = resolve_effects(clip, local_tick);
     let (filter, adjust) = match overrides.look {
         Some((id, filter, adjust)) if id == clip.id => (filter, adjust),
         _ => (clip.filter.as_ref(), &clip.adjust),
     };
-    let color_grade = resolve_color_grade(filter, adjust);
+    let color_grade = resolve_color_grade_at(filter, adjust, local_tick);
     // File-backed `.cube` LUT (applied after the grade). Zero intensity is
     // identity — drop it here so downstream stages keep their fast paths.
     let lut = clip
         .lut
         .as_ref()
-        .filter(|l| l.intensity > 0.0)
+        .filter(|l| l.intensity.sample(local_tick) > 0.0)
         .map(|l| SceneLut {
             path: l.path.clone(),
-            intensity: l.intensity,
+            intensity: l.intensity.sample(local_tick),
         });
+    let mask = clip.mask.as_ref().map(|mask| {
+        let rotation_deg = mask.rotation.sample(local_tick);
+        SceneMask {
+            kind: mask.kind,
+            feather: mask.feather.sample(local_tick),
+            center: mask.center.sample(local_tick),
+            size: mask.size.sample(local_tick),
+            rotation_rad: rotation_deg.to_radians(),
+            roundness: mask.roundness.sample(local_tick),
+            invert: mask.invert,
+        }
+    });
+    let chroma_key = clip.chroma_key.as_ref().map(|chroma| SceneChromaKey {
+        rgb: chroma.rgb,
+        strength: chroma.strength.sample(local_tick),
+        shadow: chroma.shadow.sample(local_tick),
+    });
+    // Isotropic: stroke / blur / style ref-px → canvas px. Geometric mean
+    // keeps widths stable under uniform scale and splits the difference
+    // under stretch.
+    let px = (ch / REFERENCE_HEIGHT) * xf.scale.isotropic();
+    let styles_src = match overrides.styles {
+        Some((id, s)) if id == clip.id => s,
+        _ => &clip.styles,
+    };
+    let styles = resolve_styles(styles_src, local_tick, px);
 
     match &clip.content {
         ClipSource::Media { media, .. } => {
@@ -383,9 +423,10 @@ fn resolve_clip(
                 MediaKind::Audio => return Ok(None),
             };
             let fit = fit_scale(src.width as f32, src.height as f32, cw, ch);
+            // Per-axis placement: width × x, height × y.
             let size = SizeSpec::Fixed([
-                src.width as f32 * fit * xf.scale,
-                src.height as f32 * fit * xf.scale,
+                src.width as f32 * fit * xf.scale.x,
+                src.height as f32 * fit * xf.scale.y,
             ]);
             Ok(Some(SceneLayer {
                 clip: Some(clip.id),
@@ -397,10 +438,13 @@ fn resolve_clip(
                 opacity,
                 uv,
                 effects,
-                mask: clip.mask,
-                chroma_key: clip.chroma_key,
+                mask,
+                chroma_key,
                 color_grade,
                 lut,
+                blend_mode: clip.blend_mode,
+                styles,
+                blur_passes: Vec::new(),
             }))
         }
         ClipSource::Generated(generator) => {
@@ -427,10 +471,124 @@ fn resolve_clip(
             )
             .map(|mut layer| {
                 layer.clip = Some(clip.id);
+                // Canvas passes grade/effect the whole stack — blend modes
+                // and layer styles only apply to layer quads.
+                if !matches!(layer.source, LayerSource::CanvasPass) {
+                    layer.blend_mode = clip.blend_mode;
+                    layer.styles = styles;
+                }
+                if let LayerSource::Text { animation, .. } = &mut layer.source {
+                    *animation = sample_text_animation(clip, local_tick, local_tick_f, t.rate);
+                }
                 layer
             }))
         }
     }
+}
+
+/// Sample [`LayerStyles`] at a clip-local tick into canvas-pixel scene values.
+///
+/// Lengths (offset, blur, radius, width, padding) scale by `px` (reference →
+/// canvas); colors and glow intensity pass through. `None` overall when the
+/// clip has no style blocks.
+fn resolve_styles(styles: &LayerStyles, local_tick: i64, px: f32) -> Option<SceneStyles> {
+    if styles.is_empty() {
+        return None;
+    }
+    Some(SceneStyles {
+        shadow: styles.shadow.as_ref().map(|shadow| {
+            let offset = shadow.offset.sample(local_tick);
+            SceneShadow {
+                rgba: shadow.rgba.sample(local_tick),
+                offset: [offset[0] * px, offset[1] * px],
+                blur: shadow.blur.sample(local_tick) * px,
+            }
+        }),
+        glow: styles.glow.as_ref().map(|glow| SceneGlow {
+            rgba: glow.rgba.sample(local_tick),
+            radius: glow.radius.sample(local_tick) * px,
+            intensity: glow.intensity.sample(local_tick),
+        }),
+        outline: styles.outline.as_ref().map(|outline| SceneOutline {
+            rgba: outline.rgba.sample(local_tick),
+            width: outline.width.sample(local_tick) * px,
+        }),
+        background: styles
+            .background
+            .as_ref()
+            .map(|background| SceneBackground {
+                rgba: background.rgba.sample(local_tick),
+                padding: background.padding.sample(local_tick) * px,
+                radius: background.radius.sample(local_tick) * px,
+            }),
+    })
+}
+
+/// Sample an active per-character look preset into resolve-time data.
+fn sample_text_animation(
+    clip: &cutlass_models::Clip,
+    local_tick: i64,
+    local_tick_f: f64,
+    rate: cutlass_core::Rational,
+) -> Option<TextAnimation> {
+    let duration = clip.timeline.duration.value.max(1);
+    let base_window = look_animation_window_ticks(duration, rate);
+
+    if let Some(combo) = &clip.animation_combo {
+        if is_per_character(&combo.id) {
+            let period = scaled_ticks(look_animation_combo_period_ticks(rate), combo.speed);
+            let phase = ((local_tick_f % period as f64) / period as f64).clamp(0.0, 1.0) as f32;
+            let (intensity, stagger) = text_knobs(combo);
+            return Some(TextAnimation {
+                id: combo.id.clone(),
+                slot: AnimationSlot::Combo,
+                t: phase,
+                intensity,
+                stagger,
+            });
+        }
+        return None;
+    }
+
+    if let Some(anim) = &clip.animation_in
+        && is_per_character(&anim.id)
+    {
+        let window = scaled_ticks(base_window, anim.speed).min(duration);
+        if local_tick < window {
+            let raw = (local_tick_f / window as f64).clamp(0.0, 1.0) as f32;
+            let eased = Easing::EaseOut.apply(raw);
+            let (intensity, stagger) = text_knobs(anim);
+            return Some(TextAnimation {
+                id: anim.id.clone(),
+                slot: AnimationSlot::In,
+                t: eased,
+                intensity,
+                stagger,
+            });
+        }
+    }
+
+    if let Some(anim) = &clip.animation_out
+        && is_per_character(&anim.id)
+    {
+        let window = scaled_ticks(base_window, anim.speed).min(duration);
+        let out_start = duration - window;
+        if local_tick >= out_start {
+            let raw = ((local_tick_f - out_start as f64) / (window - 1).max(1) as f64)
+                .clamp(0.0, 1.0) as f32;
+            let eased = Easing::EaseIn.apply(raw);
+            let (intensity, stagger) = text_knobs(anim);
+            return Some(TextAnimation {
+                id: anim.id.clone(),
+                slot: AnimationSlot::Out,
+                t: eased,
+                intensity,
+                stagger,
+            });
+        }
+    }
+
+    None
 }
 
 /// Sample `clip.effects` at clip-local `tick` into compositor-ready passes.
@@ -443,11 +601,33 @@ fn resolve_effects(clip: &cutlass_models::Clip, tick: i64) -> Vec<ResolvedPass> 
 }
 
 fn pack_effect(fx: &EffectInstance, tick: f64) -> Result<ResolvedPass, cutlass_models::ModelError> {
+    use cutlass_models::EffectParamKind;
+
     let spec = fx.spec()?;
-    let mut params = Vec::with_capacity(spec.params.len());
+    let mut params = Vec::with_capacity(spec.params.len() * 4);
     for pspec in spec.params {
-        let value = fx.sample_param(pspec.name, tick).unwrap_or(pspec.default);
-        params.push(value);
+        match pspec.kind {
+            EffectParamKind::Scalar => {
+                let value = fx.sample_param(pspec.name, tick).unwrap_or(pspec.default);
+                params.push(value);
+            }
+            EffectParamKind::Vec2 => {
+                let value = fx
+                    .sample_vec2_param(pspec.name, tick)
+                    .unwrap_or(pspec.default_vec2);
+                params.push(value[0]);
+                params.push(value[1]);
+            }
+            EffectParamKind::Color => {
+                let value = fx
+                    .sample_color_param(pspec.name, tick)
+                    .unwrap_or(pspec.default_color);
+                params.push(f32::from(value[0]) / 255.0);
+                params.push(f32::from(value[1]) / 255.0);
+                params.push(f32::from(value[2]) / 255.0);
+                params.push(f32::from(value[3]) / 255.0);
+            }
+        }
     }
     Ok(ResolvedPass {
         id: fx.effect_id.clone(),
@@ -455,399 +635,10 @@ fn pack_effect(fx: &EffectInstance, tick: f64) -> Result<ResolvedPass, cutlass_m
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn resolve_generator(
-    generator: &Generator,
-    center: [f32; 2],
-    anchor_point: [f32; 2],
-    rotation: f32,
-    opacity: f32,
-    uv: [f32; 4],
-    color_grade: Option<ColorGrade>,
-    lut: Option<SceneLut>,
-    cw: f32,
-    ch: f32,
-    scale: f32,
-    tick: i64,
-    local_seconds: f64,
-    effects: Vec<ResolvedPass>,
-) -> Option<SceneLayer> {
-    let ref_scale = ch / REFERENCE_HEIGHT;
-    let has_lut = lut.is_some();
-    let mut layer = match generator {
-        Generator::Text { content, style } => {
-            let text = style.case.apply(content);
-            if text.trim().is_empty() {
-                return None;
-            }
-            Some(SceneLayer {
-                clip: None,
-                source: LayerSource::Text {
-                    content: text,
-                    style: map_text_style(style, cw, ch),
-                },
-                center,
-                anchor_point,
-                size: SizeSpec::BitmapScaled(scale),
-                rotation,
-                opacity,
-                uv,
-                effects,
-                mask: None,
-                chroma_key: None,
-                color_grade,
-                lut: None,
-            })
-        }
-        Generator::SolidColor { rgba } => Some(SceneLayer {
-            clip: None,
-            source: LayerSource::Solid(*rgba),
-            center,
-            anchor_point,
-            size: SizeSpec::Fixed([cw * scale, ch * scale]),
-            rotation,
-            opacity,
-            uv,
-            effects,
-            mask: None,
-            chroma_key: None,
-            color_grade,
-            lut: None,
-        }),
-        Generator::Shape {
-            shape,
-            rgba,
-            width,
-            height,
-            corner_radius,
-            stroke,
-        } => resolve_shape(
-            shape,
-            rgba,
-            width,
-            height,
-            corner_radius,
-            stroke.as_ref(),
-            tick,
-            ref_scale * scale,
-            center,
-            anchor_point,
-            rotation,
-            opacity,
-            uv,
-            color_grade,
-            scale,
-            effects,
-        ),
-        Generator::Effect => canvas_pass(effects, None, has_lut, cw, ch),
-        Generator::Filter | Generator::Adjustment => {
-            canvas_pass(Vec::new(), color_grade, has_lut, cw, ch)
-        }
-        Generator::Lottie {
-            path,
-            width,
-            height,
-        } => {
-            // Same placement convention as stickers: intrinsic pixels are
-            // reference pixels. The stored size drives placement so this
-            // stays pure — the renderer probes the file itself.
-            let px = ref_scale * scale;
-            Some(SceneLayer {
-                clip: None,
-                source: LayerSource::Lottie {
-                    path: path.clone(),
-                    local_time: local_seconds,
-                },
-                center,
-                anchor_point,
-                size: SizeSpec::Fixed([*width as f32 * px, *height as f32 * px]),
-                rotation,
-                opacity,
-                uv,
-                effects,
-                mask: None,
-                chroma_key: None,
-                color_grade,
-                lut: None,
-            })
-        }
-        Generator::Sticker { asset } => {
-            // Unknown/empty ids place nothing — the legacy payload-less
-            // sticker behavior, never an error.
-            let spec = cutlass_models::sticker_spec(asset)?;
-            // Intrinsic pixels are *reference pixels* (1080p canvas), the
-            // same convention as shapes: a 256 px sticker lands at a
-            // CapCut-like overlay size and samples ~1:1 instead of being
-            // blown up to canvas height like aspect-fit media.
-            let px = ref_scale * scale;
-            Some(SceneLayer {
-                clip: None,
-                source: LayerSource::Sticker {
-                    asset: asset.clone(),
-                    local_time: local_seconds,
-                },
-                center,
-                anchor_point,
-                size: SizeSpec::Fixed([spec.width as f32 * px, spec.height as f32 * px]),
-                rotation,
-                opacity,
-                uv,
-                effects,
-                mask: None,
-                chroma_key: None,
-                color_grade,
-                lut: None,
-            })
-        }
-    }?;
-    layer.lut = lut;
-    Some(layer)
-}
-
-fn canvas_pass(
-    effects: Vec<ResolvedPass>,
-    color_grade: Option<ColorGrade>,
-    has_lut: bool,
-    cw: f32,
-    ch: f32,
-) -> Option<SceneLayer> {
-    (!effects.is_empty() || color_grade.is_some() || has_lut).then_some(SceneLayer {
-        clip: None,
-        source: LayerSource::CanvasPass,
-        center: [cw * 0.5, ch * 0.5],
-        anchor_point: [0.5, 0.5],
-        size: SizeSpec::Fixed([cw, ch]),
-        rotation: 0.0,
-        opacity: 1.0,
-        uv: [0.0, 0.0, 1.0, 1.0],
-        effects,
-        mask: None,
-        chroma_key: None,
-        color_grade,
-        lut: None,
-    })
-}
-
-/// Resolve one shape generator at `tick` into a placed layer.
-///
-/// All `Param` curves are sampled here (the resolver is the "animation →
-/// values" boundary), and every length is converted to canvas pixels with
-/// `px_scale` (reference scale × the clip's animated transform scale), so
-/// downstream stages see plain numbers. Parametric shapes become SDF layers
-/// whose quad is padded for stroke overhang + anti-aliasing; pen paths become
-/// CPU-raster layers that scale like text bitmaps.
-#[allow(clippy::too_many_arguments)]
-fn resolve_shape(
-    shape: &Shape,
-    rgba: &Param<[u8; 4]>,
-    width: &Param<f32>,
-    height: &Param<f32>,
-    corner_radius: &Param<f32>,
-    stroke: Option<&ShapeStroke>,
-    tick: i64,
-    px_scale: f32,
-    center: [f32; 2],
-    anchor_point: [f32; 2],
-    rotation: f32,
-    opacity: f32,
-    uv: [f32; 4],
-    color_grade: Option<ColorGrade>,
-    transform_scale: f32,
-    effects: Vec<ResolvedPass>,
-) -> Option<SceneLayer> {
-    let fill = rgba.sample(tick);
-    let stroke_px = stroke.map(|s| Stroke {
-        rgba: s.rgba.sample(tick),
-        width: (s.width.sample(tick) * px_scale).max(0.0),
-    });
-
-    // Pen paths: rasterized on the CPU at the *reference* scale so the memo
-    // stays warm under transform-scale animation (the quad magnifies the
-    // bitmap, like text). `px_scale / transform_scale` recovers ref_scale.
-    if let Shape::Path(path) = shape {
-        let bezier = to_bezier(path);
-        if !bezier.is_drawable() {
-            return None;
-        }
-        let raster_scale = if transform_scale > 0.0 {
-            px_scale / transform_scale
-        } else {
-            px_scale
-        };
-        return Some(SceneLayer {
-            clip: None,
-            source: LayerSource::PathShape {
-                path: bezier,
-                fill,
-                // Raster-space stroke: `PathRaster` folds `raster_scale` into
-                // the width itself, so hand it the unscaled model value.
-                stroke: stroke.map(|s| Stroke {
-                    rgba: s.rgba.sample(tick),
-                    width: s.width.sample(tick).max(0.0),
-                }),
-                raster_scale,
-            },
-            center,
-            anchor_point,
-            size: SizeSpec::BitmapScaled(transform_scale),
-            rotation,
-            opacity,
-            uv,
-            effects,
-            mask: None,
-            chroma_key: None,
-            color_grade,
-            lut: None,
-        });
-    }
-
-    let w = width.sample(tick) * px_scale;
-    let h = height.sample(tick) * px_scale;
-    if w <= 0.0 || h <= 0.0 {
-        return None;
-    }
-    let radius = (corner_radius.sample(tick) * px_scale).max(0.0);
-
-    // Plain rectangles keep the no-texture solid fast path.
-    if matches!(shape, Shape::Rectangle) && radius == 0.0 && stroke_px.is_none() {
-        return Some(SceneLayer {
-            clip: None,
-            source: LayerSource::Solid(fill),
-            center,
-            anchor_point,
-            size: SizeSpec::Fixed([w, h]),
-            rotation,
-            opacity,
-            uv,
-            effects,
-            mask: None,
-            chroma_key: None,
-            color_grade,
-            lut: None,
-        });
-    }
-
-    let params = match shape {
-        Shape::Rectangle => SdfParams::RoundedRect { radius },
-        Shape::Ellipse => SdfParams::Ellipse,
-        Shape::Polygon { sides } => SdfParams::polygon(*sides, radius),
-        Shape::Star {
-            points,
-            inner_ratio,
-        } => SdfParams::Star {
-            points: *points,
-            inner: inner_ratio.sample(tick).clamp(0.0, 1.0),
-            round: radius,
-        },
-        Shape::Line => SdfParams::Line,
-        Shape::Arrow => SdfParams::Arrow,
-        Shape::Heart => SdfParams::Heart,
-        Shape::Path(_) => unreachable!("handled above"),
-    };
-
-    // The quad must cover the stroke's outward half plus the AA ramp, or the
-    // shader's ink clips at the quad edge (same margin as the CPU raster).
-    let pad = stroke_px.map_or(0.0, |s| s.width * 0.5) + 2.0 * SDF_AA;
-    Some(SceneLayer {
-        clip: None,
-        source: LayerSource::Shape {
-            params,
-            fill,
-            stroke: stroke_px,
-            pad,
-        },
-        center,
-        anchor_point,
-        size: SizeSpec::Fixed([w + 2.0 * pad, h + 2.0 * pad]),
-        rotation,
-        opacity,
-        uv,
-        effects,
-        mask: None,
-        chroma_key: None,
-        color_grade,
-        lut: None,
-    })
-}
-
-/// Convert the model's serialized path into the shapes crate's bezier form.
-fn to_bezier(path: &ShapePath) -> BezierPath {
-    BezierPath {
-        points: path
-            .points
-            .iter()
-            .map(|p| PathPoint {
-                anchor: p.anchor,
-                handle_in: p.handle_in,
-                handle_out: p.handle_out,
-            })
-            .collect(),
-        closed: path.closed,
-    }
-}
-
-/// Map a model [`ModelTextStyle`] onto a [`cutlass_text`] render style.
-///
-/// Reference-pixel metrics are scaled against the 1080px authoring height.
-/// The raster remains ink-tight even when wrapping uses the canvas width;
-/// alignment is applied later to the finished bitmap's placement.
-fn map_text_style(style: &ModelTextStyle, cw: f32, ch: f32) -> TextStyle {
-    let scale = ch / REFERENCE_HEIGHT;
-    let font_size = style.size * scale;
-    let family = if style.font.is_empty() {
-        FontFamily::SansSerif
-    } else {
-        FontFamily::Named(style.font.clone())
-    };
-    let align = match style.align_h {
-        TextAlignH::Left => TextAlign::Left,
-        TextAlignH::Center => TextAlign::Center,
-        TextAlignH::Right => TextAlign::Right,
-    };
-    let vertical_align = match style.align_v {
-        TextAlignV::Top => TextVerticalAlign::Top,
-        TextAlignV::Middle => TextVerticalAlign::Middle,
-        TextAlignV::Bottom => TextVerticalAlign::Bottom,
-    };
-    let mut mapped = TextStyle::new(font_size)
-        .with_color(style.fill)
-        .with_family(family)
-        .with_bold(style.bold)
-        .with_italic(style.italic)
-        .with_underline(style.underline)
-        .with_letter_spacing(style.letter_spacing * scale)
-        .with_align(align)
-        .with_vertical_align(vertical_align)
-        .with_line_height(font_size * style.line_spacing);
-    if style.wrap {
-        mapped = mapped.with_max_width(cw.max(1.0));
-    }
-    if let Some(stroke) = style.stroke {
-        mapped = mapped.with_stroke(TextStroke {
-            rgba: stroke.rgba,
-            width: stroke.width * scale,
-        });
-    }
-    if let Some(background) = style.background {
-        mapped = mapped.with_background(TextBackground {
-            rgba: background.rgba,
-            radius: background.radius,
-        });
-    }
-    if let Some(shadow) = style.shadow {
-        mapped = mapped.with_shadow(TextShadow {
-            rgba: shadow.rgba,
-            // Fraction of font size — keep relative; rasterizer multiplies.
-            blur: shadow.blur,
-            distance: shadow.distance * scale,
-        });
-    }
-    mapped
-}
-
-/// UV rect from a clip's crop, with axes reversed for mirror flags.
-fn crop_flip_uv(clip: &cutlass_models::Clip) -> [f32; 4] {
-    let c = clip.crop;
+/// UV rect from a clip's crop sampled at a clip-relative tick, with axes
+/// reversed for mirror flags.
+fn crop_flip_uv(clip: &cutlass_models::Clip, tick: i64) -> [f32; 4] {
+    let c = clip.crop.sample(tick);
     let (mut u0, mut u1) = (c.x, c.x + c.w);
     let (mut v0, mut v1) = (c.y, c.y + c.h);
     if clip.flip_h {
@@ -867,5 +658,7 @@ fn fit_scale(nw: f32, nh: f32, cw: f32, ch: f32) -> f32 {
     (cw / nw).min(ch / nh)
 }
 
+#[cfg(test)]
+mod per_char_tests;
 #[cfg(test)]
 mod tests;

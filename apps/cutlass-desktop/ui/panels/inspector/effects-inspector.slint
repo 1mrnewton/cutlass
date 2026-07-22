@@ -1,19 +1,19 @@
 // The clip's effect chain (M4), one block per effect: a header with the
-// catalog label and a remove button, then a slider per scalar parameter. The
-// chain index drives `remove-effect` / `set-effect-param`, so the order here
-// matches the engine's apply order.
+// catalog label and a remove button, then a row per parameter (scalar
+// slider, color swatch, or paired X/Y vec2 sliders). The chain index drives
+// `remove-effect` / `set-effect-param*`, so the order here matches the
+// engine's apply order.
 //
 // Param values come from the clip-start projection and re-sync on every
 // republish, so a committed edit lands back through the projection rather
-// than being held UI-side. Release / Enter commit one undoable
-// `SetEffectParam`; animated edits go through the keyframe path (a
-// deliberate follow-up).
+// than being held UI-side. Release / Enter commit one undoable edit.
+// Effect rows have no keyframe UI today (a deliberate follow-up).
 
-import { CutlassText, SubtleButton } from "../../components/index.slint";
+import { CutlassText, SubtleButton, CutlassColorSwatch } from "../../components/index.slint";
 import { AppStore } from "../../store/index.slint";
-import { Clip, EffectView, EffectParamView } from "../../models/index.slint";
+import { Clip } from "../../models/index.slint";
 import { EffectsBackend } from "../../lib/index.slint";
-import { SectionHeader, SliderRow } from "inspector-widgets.slint";
+import { SectionHeader, SliderRow, LabelCell } from "inspector-widgets.slint";
 
 export component EffectsInspector inherits VerticalLayout {
     // Named `model` — `clip` is a built-in boolean on Slint elements.
@@ -58,18 +58,76 @@ export component EffectsInspector inherits VerticalLayout {
             }
         }
 
-        for p in fx.params: SliderRow {
-            label: p.label;
-            value: p.value;
-            minimum: p.min;
-            maximum: p.max;
-            step: max(0.001, (p.max - p.min) / 200);
-            decimals: 2;
-            // Double-click reset: zero when the range allows it (the neutral
-            // value for blur/intensity-style params), otherwise the minimum.
-            reset-value: clamp(0, p.min, p.max);
-            commit(v) => {
-                EffectsBackend.set-effect-param(root.model.id, i, p.name, clamp(v, p.min, p.max));
+        for p in fx.params: VerticalLayout {
+            spacing: AppStore.theme.metrics.spacing.sm;
+
+            if p.kind == "scalar": SliderRow {
+                label: p.label;
+                value: p.value;
+                minimum: p.min;
+                maximum: p.max;
+                step: max(0.001, (p.max - p.min) / 200);
+                decimals: 2;
+                // Double-click reset: zero when the range allows it (the neutral
+                // value for blur/intensity-style params), otherwise the minimum.
+                reset-value: clamp(0, p.min, p.max);
+                commit(v) => {
+                    EffectsBackend.set-effect-param(root.model.id, i, p.name, clamp(v, p.min, p.max));
+                }
+            }
+
+            if p.kind == "color": HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+                height: 28px;
+                vertical-stretch: 0;
+
+                LabelCell {
+                    label: p.label;
+                }
+
+                CutlassColorSwatch {
+                    value: p.color;
+                    changed(c) => {
+                        EffectsBackend.set-effect-param-color(
+                            root.model.id, i, p.name, c.red, c.green, c.blue, c.alpha);
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            if p.kind == "vec2": VerticalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                SliderRow {
+                    label: p.label + " X";
+                    value: p.vec2-x;
+                    minimum: p.min;
+                    maximum: p.max;
+                    step: max(0.001, (p.max - p.min) / 200);
+                    decimals: 2;
+                    reset-value: 0;
+                    commit(v) => {
+                        EffectsBackend.set-effect-param-vec2(
+                            root.model.id, i, p.name, clamp(v, p.min, p.max), p.vec2-y);
+                    }
+                }
+
+                SliderRow {
+                    label: p.label + " Y";
+                    value: p.vec2-y;
+                    minimum: p.min;
+                    maximum: p.max;
+                    step: max(0.001, (p.max - p.min) / 200);
+                    decimals: 2;
+                    reset-value: 0;
+                    commit(v) => {
+                        EffectsBackend.set-effect-param-vec2(
+                            root.model.id, i, p.name, p.vec2-x, clamp(v, p.min, p.max));
+                    }
+                }
             }
         }
     }

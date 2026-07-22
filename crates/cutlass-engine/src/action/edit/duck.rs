@@ -168,7 +168,8 @@ pub(crate) fn plan_ducking(
                     tick,
                     value,
                     easing: Easing::Linear,
-                }),
+                tangents: None,
+            }),
             }
         }
         let volume = match keyframes.len() {

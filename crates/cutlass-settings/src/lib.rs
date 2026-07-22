@@ -3,7 +3,7 @@
 //! This crate is the **single owner** of the user config file. Everything the
 //! app persists between runs that isn't project data or the recents/autosave
 //! sidecars (those live in the OS data dir, see `cutlass-desktop::paths`)
-//! lives here: AI providers, the theme, account endpoints, and storage
+//! lives here: AI providers, the theme, cloud API endpoint, and storage
 //! locations/quotas. Keys never live in project files — the `[ai]` table is
 //! the historical home for the API key and stays here.
 //!
@@ -21,11 +21,12 @@
 //!
 //! ```toml
 //! [ai]
-//! base_url = "http://localhost:11434/v1"   # Ollama
-//! model = "qwen3:14b"
-//! # api_key = "sk-..."             # literal key, or:
-//! # api_key_env = "OPENAI_API_KEY"  # read from the environment
-//! # api_protocol = "responses"      # default: "chat_completions"
+//! source = "local"                 # "local" | "openrouter" | "custom"
+//! base_url = "http://localhost:11434/v1"   # Local / Advanced
+//! model = "qwen3:14b"              # curated id, OR slug, or freeform
+//! # api_key = "sk-..."             # OpenRouter / Advanced, or:
+//! # api_key_env = "OPENROUTER_API_KEY"
+//! # api_protocol = "responses"      # Advanced only; default chat_completions
 //! # reasoning_summary = "off"       # default: "auto" in Responses mode
 //! # autonomy = "full"              # skip destructive-tool confirmations
 //!
@@ -55,11 +56,9 @@
 //! [providers.elevenlabs]
 //! api_key = "sk-..."
 //!
-//! # Cutlass account plumbing. The session token itself is NEVER here —
-//! # it lives in the OS keychain (see cutlass-cloud's token store).
-//! [account]
+//! # Anonymous cloud API host (stock, catalogs, update check).
+//! [cloud]
 //! base_url = "https://api.cutlass.sh"     # API override; empty = default
-//! auth_base_url = "https://cutlass.sh"    # website/auth override; empty = default
 //! ```
 
 use std::collections::BTreeMap;
@@ -222,6 +221,37 @@ impl ReasoningSummary {
     }
 }
 
+/// Which AI path Settings / the agent should use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AiSource {
+    /// Local OpenAI-compatible server (Ollama, LM Studio). Base URL + curated model.
+    #[default]
+    Local,
+    /// OpenRouter cloud gateway. One key + curated OR slug.
+    OpenRouter,
+    /// Freeform OpenAI-compatible endpoint (escape hatch).
+    Custom,
+}
+
+impl AiSource {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::OpenRouter => "openrouter",
+            Self::Custom => "custom",
+        }
+    }
+
+    pub fn from_key(value: &str) -> Option<Self> {
+        match value {
+            "local" => Some(Self::Local),
+            "openrouter" | "or" => Some(Self::OpenRouter),
+            "custom" | "advanced" | "endpoint" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+}
+
 /// The `[ai]` table: how the agent reaches an OpenAI-compatible endpoint.
 /// Plain data — key *resolution* (the `api_key_env` indirection) is an
 /// AI-domain concern and lives in `cutlass_ai::config`. The default (empty
@@ -229,23 +259,23 @@ impl ReasoningSummary {
 /// [`is_configured`](Self::is_configured) reports.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AiSettings {
-    /// OpenAI-compatible endpoint root, e.g. `http://localhost:11434/v1`.
+    /// Local / OpenRouter / freeform Advanced.
+    pub source: AiSource,
+    /// OpenAI-compatible endpoint root. Used by Local and Custom; ignored for
+    /// OpenRouter (fixed gateway URL in `cutlass-ai`).
     pub base_url: String,
-    /// Model name as the endpoint knows it, e.g. `qwen3:14b` or `gpt-4o`.
+    /// Model id: curated local / OR slug / freeform for Custom.
     pub model: String,
-    /// HTTP API shape. Existing configurations remain on Chat Completions.
+    /// HTTP API shape. Local and OpenRouter always use Chat Completions;
+    /// Custom may select Responses.
     pub api_protocol: AiApiProtocol,
     /// Provider-generated summary visibility for Responses reasoning models.
     pub reasoning_summary: ReasoningSummary,
-    /// Literal API key. Local servers usually need none.
+    /// Literal API key. Local servers usually need none; OpenRouter requires one.
     pub api_key: Option<String>,
     /// Name of an environment variable holding the key (preferred over a
     /// literal for cloud providers).
     pub api_key_env: Option<String>,
-    /// Route the assistant through the Cutlass account (managed chat
-    /// proxy, credits-metered) instead of the endpoint above. The three
-    /// provider modes: local/BYOK endpoint (fields above), or this.
-    pub use_account: bool,
     /// Confirmation policy for destructive agent tools. Orthogonal to
     /// [`is_configured`](Self::is_configured) — it gates tool *execution*,
     /// not provider reachability.
@@ -253,11 +283,27 @@ pub struct AiSettings {
 }
 
 impl AiSettings {
-    /// Whether enough is set to attempt a prompt. An endpoint and a model are
-    /// the floor; the key is optional (local servers need none). The agent
-    /// panel keys its "connect a provider" state off this.
+    /// Whether enough is set to attempt a prompt for the active [`AiSource`].
+    /// Allowlist membership is enforced by the desktop / `cutlass-ai` catalog
+    /// at save and prompt time; this only checks structural readiness.
     pub fn is_configured(&self) -> bool {
-        self.use_account || (!self.base_url.trim().is_empty() && !self.model.trim().is_empty())
+        let model = !self.model.trim().is_empty();
+        match self.source {
+            AiSource::Local => !self.base_url.trim().is_empty() && model,
+            AiSource::OpenRouter => model && self.has_api_key(),
+            AiSource::Custom => !self.base_url.trim().is_empty() && model,
+        }
+    }
+
+    /// Literal or env-named key present (not resolved).
+    pub fn has_api_key(&self) -> bool {
+        self.api_key
+            .as_deref()
+            .is_some_and(|k| !k.trim().is_empty())
+            || self
+                .api_key_env
+                .as_deref()
+                .is_some_and(|k| !k.trim().is_empty())
     }
 }
 
@@ -306,17 +352,12 @@ impl ProviderSettings {
     }
 }
 
-/// The `[account]` table. Deliberately tiny: the base-URL overrides are
-/// the only account state that belongs in a plain file — the session
-/// token lives in the OS keychain, never here.
+/// The `[cloud]` table: anonymous API host override for stock, catalogs,
+/// and the update check. Empty `base_url` means the shipped default.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AccountSettings {
+pub struct CloudSettings {
     /// Backend (API) base URL override; empty = the shipped default.
     pub base_url: String,
-    /// Auth base URL override — the website hosting better-auth
-    /// (`/api/auth/*`, `/device`, `/account`); empty = the shipped
-    /// default.
-    pub auth_base_url: String,
 }
 
 /// Default quota for downloaded, re-fetchable assets: 2048 MiB (2 GiB).
@@ -418,8 +459,8 @@ pub struct Settings {
     /// `[providers.<name>]` — BYOK keys by provider name ("pexels",
     /// "pixabay", "elevenlabs", …). Sorted map so saves are deterministic.
     pub providers: BTreeMap<String, ProviderSettings>,
-    /// `[account]`.
-    pub account: AccountSettings,
+    /// `[cloud]`.
+    pub cloud: CloudSettings,
     /// `[storage]`.
     pub storage: StorageSettings,
 }
@@ -815,15 +856,22 @@ impl Settings {
             }
             s.ai.api_key = string_at(t, "api_key");
             s.ai.api_key_env = string_at(t, "api_key_env");
-            s.ai.use_account = t
-                .get("use_account")
-                .and_then(Item::as_bool)
-                .unwrap_or(false);
+            // Legacy `use_account` is ignored (Cutlass account removed).
             if let Some(autonomy) = string_at(t, "autonomy")
                 .as_deref()
                 .and_then(Autonomy::from_key)
             {
                 s.ai.autonomy = autonomy;
+            }
+            // Explicit `source` wins. Otherwise migrate: a pre-source config
+            // with URL+model was freeform Advanced; empty stays Local default.
+            if let Some(source) = string_at(t, "source")
+                .as_deref()
+                .and_then(AiSource::from_key)
+            {
+                s.ai.source = source;
+            } else if !s.ai.base_url.trim().is_empty() && !s.ai.model.trim().is_empty() {
+                s.ai.source = AiSource::Custom;
             }
         }
 
@@ -872,13 +920,15 @@ impl Settings {
             }
         }
 
-        if let Some(t) = section(doc, "account") {
+        // Prefer `[cloud]`; fall back to legacy `[account].base_url`.
+        if let Some(t) = section(doc, "cloud") {
             if let Some(v) = string_at(t, "base_url") {
-                s.account.base_url = v;
+                s.cloud.base_url = v;
             }
-            if let Some(v) = string_at(t, "auth_base_url") {
-                s.account.auth_base_url = v;
-            }
+        } else if let Some(t) = section(doc, "account")
+            && let Some(v) = string_at(t, "base_url")
+        {
+            s.cloud.base_url = v;
         }
 
         s
@@ -929,6 +979,11 @@ impl Settings {
 
         {
             let t = ensure_table(doc, "ai");
+            if self.ai.source == AiSource::default() {
+                t.remove("source");
+            } else {
+                set_str(t, "source", self.ai.source.key());
+            }
             set_str(t, "base_url", &self.ai.base_url);
             set_str(t, "model", &self.ai.model);
             if self.ai.api_protocol == AiApiProtocol::default() {
@@ -943,13 +998,9 @@ impl Settings {
             }
             set_optional(t, "api_key", self.ai.api_key.as_deref());
             set_optional(t, "api_key_env", self.ai.api_key_env.as_deref());
-            if self.ai.use_account {
-                t.insert("use_account", toml_edit::value(true));
-            } else {
-                t.remove("use_account");
-            }
-            // Same convention as `use_account`: the default is absence, so a
-            // fresh config stays minimal.
+            // Drop legacy managed-account key if present.
+            t.remove("use_account");
+            // Default autonomy is absence, so a fresh config stays minimal.
             if self.ai.autonomy == Autonomy::default() {
                 t.remove("autonomy");
             } else {
@@ -1040,25 +1091,21 @@ impl Settings {
             }
         }
         {
-            // Empty overrides remove their keys (and a now-empty table),
-            // so a fresh config stays minimal.
-            for (key, value) in [
-                ("base_url", &self.account.base_url),
-                ("auth_base_url", &self.account.auth_base_url),
-            ] {
-                if value.is_empty() {
-                    if let Some(t) = doc.get_mut("account").and_then(Item::as_table_mut) {
-                        t.remove(key);
-                    }
-                } else {
-                    let t = ensure_table(doc, "account");
-                    set_str(t, key, value);
+            // Empty override removes the key (and a now-empty table).
+            // Migrate off legacy `[account]` when writing.
+            doc.remove("account");
+            if self.cloud.base_url.is_empty() {
+                if let Some(t) = doc.get_mut("cloud").and_then(Item::as_table_mut) {
+                    t.remove("base_url");
                 }
+            } else {
+                let t = ensure_table(doc, "cloud");
+                set_str(t, "base_url", &self.cloud.base_url);
             }
-            if let Some(t) = doc.get_mut("account").and_then(Item::as_table_mut)
+            if let Some(t) = doc.get_mut("cloud").and_then(Item::as_table_mut)
                 && t.is_empty()
             {
-                doc.remove("account");
+                doc.remove("cloud");
             }
         }
         Ok(())

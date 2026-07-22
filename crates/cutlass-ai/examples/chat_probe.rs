@@ -8,9 +8,8 @@
 
 use std::sync::atomic::AtomicBool;
 
-use cutlass_ai::config::resolve_api_key;
+use cutlass_ai::config::provider_from_ai;
 use cutlass_ai::provider::{ChatProvider, ChatRequest, Message, ProviderStreamEvent};
-use cutlass_ai::providers::{OpenAiProtocol, OpenAiProvider, ReasoningSummary};
 
 fn main() {
     let prompt = std::env::args()
@@ -25,35 +24,17 @@ fn main() {
             std::process::exit(1);
         }
     };
-    if !ai.is_configured() {
-        eprintln!(
-            "no [ai] section in {}; see cutlass-settings",
-            path.display()
-        );
-        std::process::exit(1);
-    }
-    println!("endpoint: {}  model: {}\n", ai.base_url, ai.model);
-
-    let api_key =
-        resolve_api_key(ai.api_key.as_deref(), ai.api_key_env.as_deref()).unwrap_or_else(|e| {
-            eprintln!("{e}");
-            std::process::exit(1);
-        });
-    let protocol = match ai.api_protocol {
-        cutlass_settings::AiApiProtocol::ChatCompletions => OpenAiProtocol::ChatCompletions,
-        cutlass_settings::AiApiProtocol::Responses => OpenAiProtocol::Responses,
-    };
-    let reasoning_summary = match ai.reasoning_summary {
-        cutlass_settings::ReasoningSummary::Auto => ReasoningSummary::Auto,
-        cutlass_settings::ReasoningSummary::Off => ReasoningSummary::Off,
-    };
-    let provider = OpenAiProvider::new(
-        &ai.base_url,
-        &ai.model,
-        api_key,
-        protocol,
-        reasoning_summary,
+    println!(
+        "source: {}  endpoint: {}  model: {}\n",
+        ai.source.key(),
+        ai.base_url,
+        ai.model
     );
+
+    let provider = provider_from_ai(&ai).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
 
     let messages = vec![
         Message::system(

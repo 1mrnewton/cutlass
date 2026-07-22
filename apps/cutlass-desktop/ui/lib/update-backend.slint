@@ -1,0 +1,10 @@
+// Launch-screen update nudge. Rust (`src/updates.rs`) checks
+// `GET /v1/app/latest-version` on a worker thread; the chip never blocks.
+
+export global UpdateBackend {
+    in-out property <bool> update-available: false;
+    in-out property <string> update-version: "";
+
+    // Open the download page for an available update.
+    callback open-update();
+}

@@ -420,6 +420,8 @@ theme = "ember"
     assert_eq!(s.ai.base_url, "http://localhost:11434/v1");
     assert_eq!(s.ai.model, "qwen3:14b");
     assert_eq!(s.ai.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+    // Pre-source configs with URL+model migrate to freeform Advanced.
+    assert_eq!(s.ai.source, AiSource::Custom);
     assert!(s.ai.is_configured());
     assert_eq!(s.appearance.theme, ThemeChoice::Ember);
 }
@@ -656,7 +658,7 @@ fn fallback_backup_cleanup_failure_does_not_uncommit_installation() {
 }
 
 #[test]
-fn providers_and_account_round_trip() {
+fn providers_and_cloud_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
 
@@ -675,7 +677,7 @@ fn providers_and_account_round_trip() {
             api_key_env: None,
         },
     );
-    s.account.base_url = "https://staging.api.cutlass.sh".into();
+    s.cloud.base_url = "https://staging.api.cutlass.sh".into();
     save(&path, &s).unwrap();
 
     let loaded = load(&path).unwrap();
@@ -689,18 +691,40 @@ fn providers_and_account_round_trip() {
         Some("sk-11")
     );
     assert!(!loaded.provider("nonexistent").is_configured());
-    assert_eq!(loaded.account.base_url, "https://staging.api.cutlass.sh");
+    assert_eq!(loaded.cloud.base_url, "https://staging.api.cutlass.sh");
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("[cloud]"), "{raw}");
 
-    // Dropping a provider removes its table; clearing the account
+    // Dropping a provider removes its table; clearing the cloud
     // override removes the key.
     let mut s = loaded;
     s.providers.remove("elevenlabs");
-    s.account.base_url.clear();
+    s.cloud.base_url.clear();
     save(&path, &s).unwrap();
     let raw = std::fs::read_to_string(&path).unwrap();
     assert!(!raw.contains("elevenlabs"), "{raw}");
     assert!(!raw.contains("base_url = \"https://staging"), "{raw}");
     assert!(raw.contains("[providers.pexels]"), "{raw}");
+}
+
+#[test]
+fn legacy_account_base_url_loads_into_cloud() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[account]\nbase_url = \"https://legacy.api.cutlass.sh\"\nauth_base_url = \"https://cutlass.sh\"\n",
+    )
+    .unwrap();
+    let loaded = load(&path).unwrap();
+    assert_eq!(loaded.cloud.base_url, "https://legacy.api.cutlass.sh");
+
+    // Saving migrates to `[cloud]` and drops `[account]`.
+    save(&path, &loaded).unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("[cloud]"), "{raw}");
+    assert!(!raw.contains("[account]"), "{raw}");
+    assert!(!raw.contains("auth_base_url"), "{raw}");
 }
 
 #[test]
@@ -769,7 +793,7 @@ fn autonomy_round_trips_and_preserves_unrelated_keys() {
     assert!(raw.contains("# local"), "inline comment kept");
     assert_eq!(load(&path).unwrap().ai.autonomy, Autonomy::Full);
 
-    // Back to the default removes the key (the `use_account` convention).
+    // Back to the default removes the key (absence = default).
     let mut s = load(&path).unwrap();
     s.ai.autonomy = Autonomy::Ask;
     save(&path, &s).unwrap();
@@ -850,4 +874,52 @@ fn corrupt_non_table_section_is_replaced_on_save() {
     s.ai.model = "m".into();
     save(&path, &s).unwrap();
     assert!(load(&path).unwrap().ai.is_configured());
+}
+
+#[test]
+fn ai_source_parses_migrates_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+
+    // Missing source + empty AI → Local default, not configured.
+    std::fs::write(&path, "[ai]\n").unwrap();
+    let loaded = load(&path).unwrap();
+    assert_eq!(loaded.ai.source, AiSource::Local);
+    assert!(!loaded.ai.is_configured());
+
+    // Explicit openrouter needs a key to be configured.
+    std::fs::write(
+        &path,
+        "[ai]\nsource = \"openrouter\"\nmodel = \"openai/gpt-5.6-sol\"\napi_key = \"sk-or\"\n",
+    )
+    .unwrap();
+    let loaded = load(&path).unwrap();
+    assert_eq!(loaded.ai.source, AiSource::OpenRouter);
+    assert!(loaded.ai.is_configured());
+
+    std::fs::write(
+        &path,
+        "[ai]\nsource = \"openrouter\"\nmodel = \"openai/gpt-5.6-sol\"\n",
+    )
+    .unwrap();
+    assert!(!load(&path).unwrap().ai.is_configured());
+
+    // Round-trip non-default source.
+    let mut settings = Settings::default();
+    settings.ai.source = AiSource::OpenRouter;
+    settings.ai.model = "openai/gpt-5.6-sol".into();
+    settings.ai.api_key = Some("sk-or".into());
+    save(&path, &settings).unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("source = \"openrouter\""), "{raw}");
+    assert_eq!(load(&path).unwrap().ai.source, AiSource::OpenRouter);
+
+    // Default Local omits the key.
+    settings.ai.source = AiSource::Local;
+    settings.ai.base_url = "http://localhost:11434/v1".into();
+    settings.ai.model = "qwen3:14b".into();
+    settings.ai.api_key = None;
+    save(&path, &settings).unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(!raw.contains("source"), "{raw}");
 }

@@ -133,7 +133,7 @@ fn get_frame_places_transformed_solid() {
             clip: clip_id,
             transform: ClipTransform {
                 position: [-0.25, -0.25],
-                scale: 0.5,
+                scale: 0.5.into(),
                 ..ClipTransform::IDENTITY
             },
             at: None,
@@ -186,7 +186,7 @@ fn transform_override_previews_without_touching_state() {
         clip_id,
         ClipTransform {
             position: [-0.25, -0.25],
-            scale: 0.5,
+            scale: 0.5.into(),
             ..ClipTransform::IDENTITY
         },
     )));
@@ -290,7 +290,7 @@ fn new_session_clears_overrides() {
     engine.set_transform_override(Some((
         clip_id,
         ClipTransform {
-            scale: 0.5,
+            scale: 0.5.into(),
             ..ClipTransform::IDENTITY
         },
     )));

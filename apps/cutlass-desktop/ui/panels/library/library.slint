@@ -679,7 +679,7 @@ export component LibraryPanel inherits PanelBase {
                         title: "AI media";
                         message: AiBackend.available
                             ? "Generate images and video clips from a prompt; click a result to add it to the library."
-                            : "Sign in (Settings > Account) or add a fal.ai key under [providers.fal] to enable generation.";
+                            : "Add a fal.ai key under [providers.fal] to enable generation.";
                     }
 
                     if AiBackend.media-items.length > 0: ai-media-grid := CutlassGridView {
@@ -884,7 +884,7 @@ export component LibraryPanel inherits PanelBase {
                         title: "AI voice-over";
                         message: AiBackend.available
                             ? "Type a line and generate a voice-over; click a result to add it as audio media."
-                            : "Sign in (Settings > Account) or add a fal.ai key under [providers.fal] to enable generation.";
+                            : "Add a fal.ai key under [providers.fal] to enable generation.";
                     }
 
                     if AiBackend.tts-items.length > 0: ai-tts-grid := CutlassGridView {

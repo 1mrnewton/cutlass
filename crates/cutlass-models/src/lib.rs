@@ -48,27 +48,35 @@ pub type Map<K, V> = rustc_hash::FxHashMap<K, V>;
 
 pub use capabilities::{ClipAction, ClipCapabilities};
 pub use clip::{
-    AnimatedTransform, Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator,
-    MAX_CLIP_VOLUME, MAX_SHAPE_DIM, MAX_SPEED, MAX_STAR_POINTS, MAX_STROKE_WIDTH,
-    MIN_CROP_FRACTION, MIN_SPEED, ParamValue, Replaceable, SHAPE_DROP_HEIGHT, SHAPE_DROP_WIDTH,
-    SPEED_CURVE_SCALE, Shape, ShapeParam, ShapePath, ShapePathPoint, ShapeStroke, SlotMedia,
-    SpeedPresetSpec, TextAlignH, TextAlignV, TextBackground, TextCase, TextShadow, TextStroke,
-    TextStyle, audio_gain_at, look_animation_combo_period_ticks, look_animation_window_ticks,
-    speed_curve_integral, speed_curve_source_fraction, speed_preset, speed_preset_catalog,
-    speed_preset_id, validate_speed_curve, validate_volume, validate_volume_envelope,
+    AnimatedTransform, Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator, LookParam,
+    MAX_CLIP_PAN, MAX_CLIP_VOLUME, MAX_SHAPE_DIM, MAX_SPEED, MAX_STAR_POINTS, MAX_STROKE_WIDTH,
+    MIN_CLIP_PAN, MIN_CROP_FRACTION, MIN_SPEED, ParamValue, Replaceable, SHAPE_DROP_HEIGHT,
+    SHAPE_DROP_WIDTH, SPEED_CURVE_SCALE, Scale2, Shape, ShapeParam, ShapePath, ShapePathPoint,
+    ShapeStroke, SlotMedia, SpeedPresetSpec, StyleParam, TextAlignH, TextAlignV, TextBackground,
+    TextCase, TextParam, TextShadow, TextStroke, TextStyle, audio_gain_at,
+    look_animation_combo_period_ticks, look_animation_window_ticks, speed_curve_integral,
+    speed_curve_source_fraction, speed_preset, speed_preset_catalog, speed_preset_id, validate_pan,
+    validate_pan_envelope, validate_speed_curve, validate_volume, validate_volume_envelope,
 };
-pub use effects::{EffectInstance, EffectParamSpec, EffectSpec, effect_catalog, effect_spec};
+pub use effects::{
+    EffectInstance, EffectParamKind, EffectParamSpec, EffectSpec, effect_catalog, effect_spec,
+};
 pub use error::ModelError;
 pub use ids::{ClipId, LinkId, MarkerId, MediaId, ProjectId, TemplateId, TrackId};
 pub use look::{
-    AnimationRef, AnimationSlot, AnimationSpec, AudioRole, ChromaKey, ColorAdjustments, Filter,
-    FilterSpec, Lut, Mask, MaskKind, MaskSpec, StabilizeLevel, TextEffectSpec, animation_catalog,
-    animation_spec, filter_catalog, filter_spec, mask_catalog, text_effect_catalog,
-    text_effect_spec,
+    ANIMATION_INTENSITY_RANGE, ANIMATION_PARAM_DEFAULT, ANIMATION_SPEED_RANGE,
+    ANIMATION_STAGGER_RANGE, AnimationKnobs, AnimationRef, AnimationSlot, AnimationSpec, AudioRole,
+    BlendMode, ChromaKey, ColorAdjustments, Filter, FilterSpec, LayerBackground, LayerGlow,
+    LayerOutline, LayerShadow, LayerStyles, Lut, Mask, MaskKind, MaskSpec, MotionBlur,
+    StabilizeLevel, TextEffectSpec, animation_catalog, animation_spec, filter_catalog, filter_spec,
+    mask_catalog, text_effect_catalog, text_effect_spec,
 };
 pub use media::{MediaKind, MediaSource, STILL_DEFAULT_DURATION_TICKS, STILL_TICK_RATE};
 pub use metadata::ProjectMetadata;
-pub use param::{Easing, Keyframe, Lerp, Param};
+pub use param::{
+    EASING_PRESETS, Easing, EasingPreset, Extrapolate, Keyframe, Lerp, MIN_PRESET_SEGMENT_TICKS,
+    Param, PiecewiseEasingPreset, SegmentSample, SpatialTangents, easing_preset, expand_preset,
+};
 pub use persist::{PROJECT_FILE_EXTENSION, PROJECT_FILE_VERSION};
 pub use project::Project;
 pub use schema::{PROJECT_SCHEMA_KIND, PROJECT_SCHEMA_VERSION, ProjectSchema};

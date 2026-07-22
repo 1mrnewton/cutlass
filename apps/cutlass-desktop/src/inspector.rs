@@ -1,18 +1,38 @@
 //! Inspector helpers: resolve the selected clip for the property sheet, and
 //! sample its animated transform at the playhead for the keyframe UI.
 
-use crate::params::{apply_sampled_transform, row_state, sampled_transform, sampled_volume};
+use crate::params::{
+    apply_sampled_transform, row_state, sampled_pan, sampled_scalar_param, sampled_transform,
+    sampled_vec2_param, sampled_volume,
+};
 use crate::placement::position_preserving_center;
 use crate::preview_select::{canvas_config, clip_placement};
 use crate::{
-    AudioSample, Clip, CompensatedPosition, SelectedClipInfo, Sequence, TextClipStyle, TrackKind,
-    TransformSample,
+    AudioSample, Clip, ClipAdjust, CompensatedPosition, ScalarParamSample, SelectedClipInfo,
+    Sequence, TextClipStyle, TrackKind, TransformSample,
 };
 use cutlass_models::{
     TextAlignH, TextAlignV, TextBackground, TextCase, TextShadow, TextStroke,
     TextStyle as ModelTextStyle,
 };
 use slint::Model;
+
+/// Convert the inspector's Slint [`ClipAdjust`] into the engine model.
+pub fn adjust_from_ui(adjust: &ClipAdjust) -> cutlass_models::ColorAdjustments {
+    cutlass_models::ColorAdjustments {
+        brightness: adjust.brightness.into(),
+        contrast: adjust.contrast.into(),
+        saturation: adjust.saturation.into(),
+        exposure: adjust.exposure.into(),
+        temperature: adjust.temperature.into(),
+        tint: adjust.tint.into(),
+        hue: adjust.hue.into(),
+        highlights: adjust.highlights.into(),
+        shadows: adjust.shadows.into(),
+        sharpness: adjust.sharpness.into(),
+        vignette: adjust.vignette.into(),
+    }
+}
 
 /// Convert the inspector's Slint `TextClipStyle` into the engine model.
 ///
@@ -32,29 +52,29 @@ pub fn text_style_from_ui(style: &TextClipStyle) -> ModelTextStyle {
     };
     ModelTextStyle {
         font: style.font.to_string(),
-        size: style.size,
+        size: style.size.into(),
         bold: style.bold,
         italic: style.italic,
         underline: style.underline,
         case: text_case_from_int(style.case),
-        fill: rgba(style.fill),
-        letter_spacing: style.letter_spacing,
-        line_spacing: style.line_spacing,
+        fill: rgba(style.fill).into(),
+        letter_spacing: style.letter_spacing.into(),
+        line_spacing: style.line_spacing.into(),
         align_h: align_h_from_int(style.align_h),
         align_v: align_v_from_int(style.align_v),
         wrap: style.wrap,
         stroke: style.stroke_enabled.then(|| TextStroke {
-            rgba: rgba(style.stroke_color),
-            width: style.stroke_width,
+            rgba: rgba(style.stroke_color).into(),
+            width: style.stroke_width.into(),
         }),
         background: style.background_enabled.then(|| TextBackground {
-            rgba: rgb_alpha(style.background_color, style.background_opacity),
-            radius: style.background_radius,
+            rgba: rgb_alpha(style.background_color, style.background_opacity).into(),
+            radius: style.background_radius.into(),
         }),
         shadow: style.shadow_enabled.then(|| TextShadow {
-            rgba: rgb_alpha(style.shadow_color, style.shadow_opacity),
-            blur: style.shadow_blur,
-            distance: style.shadow_distance,
+            rgba: rgb_alpha(style.shadow_color, style.shadow_opacity).into(),
+            blur: style.shadow_blur.into(),
+            distance: style.shadow_distance.into(),
         }),
         // The vendored inspector has no preset chips yet; a manual commit
         // carries the baked treatments above and drops the preset tag.
@@ -99,7 +119,9 @@ pub fn sample_transform(clip: &Clip, playhead: i32) -> TransformSample {
         position_y: t.position[1],
         anchor_x: t.anchor_point[0],
         anchor_y: t.anchor_point[1],
-        scale: t.scale,
+        scale: t.scale.x,
+        scale_y: t.scale.y,
+        scale_linked: t.scale.is_uniform(),
         rotation: t.rotation,
         opacity: t.opacity,
         position_row: row_state(&clip.kf_position, playhead),
@@ -110,21 +132,109 @@ pub fn sample_transform(clip: &Clip, playhead: i32) -> TransformSample {
     }
 }
 
+/// Sample a scalar text-style or look curve at the playhead for inspector
+/// rows. Unknown ids are defensive no-ops; the UI only supplies known keys.
+pub fn sample_scalar_param(clip: &Clip, param: &str, playhead: i32) -> ScalarParamSample {
+    // Axis display keys for shared vec2 params — same row-state precedent as
+    // transform `position` X/Y.
+    if param == "style_shadow_offset_x" || param == "style_shadow_offset_y" {
+        let offset =
+            sampled_vec2_param(clip, "style_shadow_offset", playhead).unwrap_or([0.0, 0.0]);
+        return ScalarParamSample {
+            value: if param.ends_with("_x") {
+                offset[0]
+            } else {
+                offset[1]
+            },
+            row: row_state(&clip.kf_style_shadow_offset, playhead),
+        };
+    }
+    if param == "look_mask_center_x" || param == "look_mask_center_y" {
+        let center = sampled_vec2_param(clip, "look_mask_center", playhead).unwrap_or([0.0, 0.0]);
+        return ScalarParamSample {
+            value: if param.ends_with("_x") {
+                center[0]
+            } else {
+                center[1]
+            },
+            row: row_state(&clip.kf_look_mask_center, playhead),
+        };
+    }
+    if param == "look_mask_size_x" || param == "look_mask_size_y" {
+        let size = sampled_vec2_param(clip, "look_mask_size", playhead).unwrap_or([1.0, 1.0]);
+        return ScalarParamSample {
+            value: if param.ends_with("_x") {
+                size[0]
+            } else {
+                size[1]
+            },
+            row: row_state(&clip.kf_look_mask_size, playhead),
+        };
+    }
+    let keyframes = match param {
+        "text_size" => &clip.kf_text_size,
+        "text_letter_spacing" => &clip.kf_text_letter_spacing,
+        "text_line_spacing" => &clip.kf_text_line_spacing,
+        "text_stroke_width" => &clip.kf_text_stroke_width,
+        "text_background_radius" => &clip.kf_text_background_radius,
+        "text_shadow_blur" => &clip.kf_text_shadow_blur,
+        "text_shadow_distance" => &clip.kf_text_shadow_distance,
+        "look_filter_intensity" => &clip.kf_look_filter_intensity,
+        "look_lut_intensity" => &clip.kf_look_lut_intensity,
+        "look_adjust_brightness" => &clip.kf_look_adjust_brightness,
+        "look_adjust_contrast" => &clip.kf_look_adjust_contrast,
+        "look_adjust_saturation" => &clip.kf_look_adjust_saturation,
+        "look_adjust_exposure" => &clip.kf_look_adjust_exposure,
+        "look_adjust_temperature" => &clip.kf_look_adjust_temperature,
+        "look_adjust_tint" => &clip.kf_look_adjust_tint,
+        "look_adjust_hue" => &clip.kf_look_adjust_hue,
+        "look_adjust_highlights" => &clip.kf_look_adjust_highlights,
+        "look_adjust_shadows" => &clip.kf_look_adjust_shadows,
+        "look_adjust_sharpness" => &clip.kf_look_adjust_sharpness,
+        "look_adjust_vignette" => &clip.kf_look_adjust_vignette,
+        "style_shadow_blur" => &clip.kf_style_shadow_blur,
+        "style_glow_radius" => &clip.kf_style_glow_radius,
+        "style_glow_intensity" => &clip.kf_style_glow_intensity,
+        "style_outline_width" => &clip.kf_style_outline_width,
+        "style_background_padding" => &clip.kf_style_background_padding,
+        "style_background_radius" => &clip.kf_style_background_radius,
+        "look_mask_feather" => &clip.kf_look_mask_feather,
+        "look_mask_rotation" => &clip.kf_look_mask_rotation,
+        "look_mask_roundness" => &clip.kf_look_mask_roundness,
+        "look_chroma_strength" => &clip.kf_look_chroma_strength,
+        "look_chroma_shadow" => &clip.kf_look_chroma_shadow,
+        _ => {
+            return ScalarParamSample {
+                value: 0.0,
+                row: Default::default(),
+            };
+        }
+    };
+    ScalarParamSample {
+        value: sampled_scalar_param(clip, param, playhead).unwrap_or_default(),
+        row: row_state(keyframes, playhead),
+    }
+}
+
 /// Position that keeps the composited frame fixed while the in-content
 /// anchor moves — mirrors the preview anchor-handle gesture.
+#[allow(clippy::too_many_arguments)] // Slint callback bridge: per-axis scale + rotation
 pub fn compensate_anchor_position(
     clip: &Clip,
     sequence: Sequence,
     playhead: i32,
     anchor_x: f32,
     anchor_y: f32,
-    scale: f32,
+    scale_x: f32,
+    scale_y: f32,
     rotation: f32,
 ) -> CompensatedPosition {
     let canvas = canvas_config(&sequence);
     let mut c = clip.clone();
     apply_sampled_transform(&mut c, playhead);
-    c.transform_scale = scale;
+    c.transform_scale = scale_x;
+    c.transform_scale_y = scale_y;
+    c.transform_scale_linked = scale_x == scale_y;
     c.transform_rotation = rotation;
     let placement = clip_placement(&c, &canvas);
     let position = position_preserving_center(
@@ -140,13 +250,15 @@ pub fn compensate_anchor_position(
     }
 }
 
-/// The inspector's per-playhead view of a clip's audio gain: the envelope
-/// sampled at the (clamped) playhead plus the keyframe row state driving the
-/// volume row's diamond. The audio analogue of [`sample_transform`].
+/// The inspector's per-playhead view of a clip's audio mix: volume + pan
+/// envelopes sampled at the (clamped) playhead plus each keyframe row state
+/// driving the diamonds. The audio analogue of [`sample_transform`].
 pub fn sample_audio(clip: &Clip, playhead: i32) -> AudioSample {
     AudioSample {
         volume: sampled_volume(clip, playhead),
         volume_row: row_state(&clip.kf_volume, playhead),
+        pan: sampled_pan(clip, playhead),
+        pan_row: row_state(&clip.kf_pan, playhead),
     }
 }
 
@@ -240,6 +352,8 @@ mod tests {
             media_width: 1920,
             media_height: 1080,
             transform_scale: 1.0,
+            transform_scale_y: 1.0,
+            transform_scale_linked: true,
             transform_opacity: 1.0,
             transform_anchor_x: 0.5,
             transform_anchor_y: 0.5,
@@ -266,7 +380,7 @@ mod tests {
         };
         let canvas = canvas_config(&sequence);
         let before = clip_placement(&clip, &canvas).center;
-        let c = compensate_anchor_position(&clip, sequence, 10, 0.2, 0.8, 1.0, 0.0);
+        let c = compensate_anchor_position(&clip, sequence, 10, 0.2, 0.8, 1.0, 1.0, 0.0);
         let mut after_clip = clip.clone();
         after_clip.transform_position_x = c.position_x;
         after_clip.transform_position_y = c.position_y;

@@ -9,13 +9,37 @@
 //! while [`Renderer`](crate::Renderer) does the decode + rasterize + composite.
 
 use cutlass_compositor::ColorGrade;
-use cutlass_models::{ChromaKey, ClipId, Mask, MediaId};
+use cutlass_core::Rational;
+use cutlass_models::{AnimationSlot, BlendMode, ClipId, MaskKind, MediaId};
 use cutlass_shapes::{BezierPath, SdfParams, Stroke};
 use cutlass_text::{TextAlign, TextStyle, TextVerticalAlign};
+
+/// Sampled per-character text animation attached to a [`LayerSource::Text`].
+///
+/// Pure resolve-time data: the preset id, which slot it came from, a
+/// normalized progress / phase in `0…1`, and the clip's tunable knobs.
+/// Realize expands this into per-cluster placement deltas — the Scene stays
+/// GPU-free and unit-testable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextAnimation {
+    pub id: String,
+    pub slot: AnimationSlot,
+    /// Eased entrance/exit progress, or combo phase (both in `0…1`).
+    pub t: f32,
+    /// Magnitude multiplier (`1` = catalog feel).
+    pub intensity: f32,
+    /// Per-character stagger stretch (`1` = catalog feel).
+    pub stagger: f32,
+}
 
 pub use cutlass_core::RationalTime;
 
 /// One sampled GPU effect pass attached to a clip at resolve time.
+///
+/// `params` is the catalog-ordered flattened value list for the GPU uniform
+/// upload: each scalar contributes 1 float, each vec2 contributes 2, and each
+/// color contributes 4 floats in `0…1` (encoded 8-bit ÷ 255). Slot order
+/// matches [`cutlass_models::EffectSpec::params`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedPass {
     pub id: String,
@@ -32,6 +56,10 @@ pub struct Scene {
     /// Canvas clear color before layers composite. Alpha 0 is supported for
     /// gesture sprite/foreground passes that stack over an opaque backdrop.
     pub background: [u8; 4],
+    /// Timeline instant this scene was resolved at (timeline rate). Used by
+    /// motion-blur supersampling to re-place animated transforms at sub-ticks
+    /// without re-resolving content.
+    pub tick: RationalTime,
     /// Layers in bottom-to-top stacking order (index 0 draws first).
     pub layers: Vec<SceneLayer>,
 }
@@ -43,6 +71,7 @@ impl Scene {
             width,
             height,
             background,
+            tick: RationalTime::new(0, Rational::FPS_30),
             layers: Vec::new(),
         }
     }
@@ -66,8 +95,14 @@ impl Scene {
                 SizeSpec::Fixed([w, h]) => SizeSpec::Fixed([w * factor, h * factor]),
                 // Text / path bitmaps rasterize at their reference resolution
                 // and ride the quad; scaling the multiplier scales the quad.
-                SizeSpec::BitmapScaled(s) => SizeSpec::BitmapScaled(s * factor),
+                SizeSpec::BitmapScaled([sx, sy]) => {
+                    SizeSpec::BitmapScaled([sx * factor, sy * factor])
+                }
             };
+            for pass in &mut layer.blur_passes {
+                pass.center = [pass.center[0] * factor, pass.center[1] * factor];
+                pass.size = [pass.size[0] * factor, pass.size[1] * factor];
+            }
             match &mut layer.source {
                 // SDF stroke width and AA pad are in canvas pixels.
                 LayerSource::Shape { stroke, pad, .. } => {
@@ -121,10 +156,25 @@ impl Scene {
         let dy = (height as f32 - ch * factor) * 0.5;
         for layer in &mut self.layers {
             layer.center = [layer.center[0] + dx, layer.center[1] + dy];
+            for pass in &mut layer.blur_passes {
+                pass.center = [pass.center[0] + dx, pass.center[1] + dy];
+            }
         }
         self.width = width;
         self.height = height;
     }
+}
+
+/// One transform sample for motion-blur supersampling (scene space).
+///
+/// `center` is the **anchor** position (same convention as [`SceneLayer::center`]);
+/// the renderer derives the quad center from `size` + the layer's anchor point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneBlurPass {
+    pub center: [f32; 2],
+    pub size: [f32; 2],
+    pub rotation: f32,
+    pub opacity: f32,
 }
 
 /// A scaled canvas dimension: rounded, never collapsing to zero.
@@ -162,9 +212,9 @@ pub struct SceneLayer {
     /// GPU effect chain sampled at clip-local tick (empty when none).
     pub effects: Vec<ResolvedPass>,
     /// Shaped alpha mask (media clips only).
-    pub mask: Option<Mask>,
+    pub mask: Option<SceneMask>,
     /// Green-screen keying (media clips only).
-    pub chroma_key: Option<ChromaKey>,
+    pub chroma_key: Option<SceneChromaKey>,
     /// Resolved color grade (filter preset + manual adjustments); `None` when
     /// the clip's look is identity.
     pub color_grade: Option<ColorGrade>,
@@ -172,6 +222,47 @@ pub struct SceneLayer {
     /// File-backed: the renderer parses and uploads the table on first use
     /// and skips missing/unparseable files gracefully.
     pub lut: Option<SceneLut>,
+    /// How this layer composites over the stack below (`Normal` = source-over).
+    /// Canvas-wide passes and transition wrappers stay `Normal`.
+    pub blend_mode: BlendMode,
+    /// Layer-quad styles (shadow/glow/outline/background) sampled at the
+    /// clip-local tick into canvas pixels. `None` when the clip has no style
+    /// blocks — the compositor fast path. Canvas-wide passes and transition
+    /// wrappers stay `None`.
+    pub styles: Option<SceneStyles>,
+    /// Alternate transform samples for motion-blur supersampling. Empty when
+    /// unused. Content (texture / source time) stays at the primary tick —
+    /// transform-only blur. Filled by [`crate::motion_blur::attach_motion_blur_passes`]
+    /// before fit/scale; ignored by interactive preview when motion blur is off.
+    pub blur_passes: Vec<SceneBlurPass>,
+}
+
+/// Mask values sampled at a clip-local tick.
+///
+/// Geometry (`center`, `size`, `rotation_rad`, `roundness`) stays in the same
+/// fraction-of-layer units as the model — the compositor consumes those
+/// fractions directly; no canvas-pixel conversion happens here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneMask {
+    pub kind: MaskKind,
+    pub feather: f32,
+    /// Mask center offset from the layer center, as a fraction of layer size.
+    pub center: [f32; 2],
+    /// Mask size as a fraction of layer size (`[1,1]` = cover the layer).
+    pub size: [f32; 2],
+    /// Mask rotation in radians (converted from model degrees at resolve).
+    pub rotation_rad: f32,
+    /// Rectangle corner rounding, `0` … `1`.
+    pub roundness: f32,
+    pub invert: bool,
+}
+
+/// Chroma-key values sampled at a clip-local tick.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneChromaKey {
+    pub rgb: [u8; 3],
+    pub strength: f32,
+    pub shadow: f32,
 }
 
 /// A file-backed `.cube` LUT reference on a [`SceneLayer`].
@@ -181,6 +272,56 @@ pub struct SceneLut {
     pub path: String,
     /// Blend of the looked-up result over the original, `0` … `1`.
     pub intensity: f32,
+}
+
+/// Drop shadow drawn from the layer's alpha (offset + blur), in canvas pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneShadow {
+    pub rgba: [u8; 4],
+    pub offset: [f32; 2],
+    pub blur: f32,
+}
+
+/// Soft glow bloom drawn from the layer's alpha, in canvas pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneGlow {
+    pub rgba: [u8; 4],
+    pub radius: f32,
+    pub intensity: f32,
+}
+
+/// Hard outline / stroke around the layer's alpha silhouette, in canvas pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneOutline {
+    pub rgba: [u8; 4],
+    pub width: f32,
+}
+
+/// Solid plate behind the layer (padded AABB of the alpha bounds), in canvas pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneBackground {
+    pub rgba: [u8; 4],
+    pub padding: f32,
+    pub radius: f32,
+}
+
+/// Layer-quad styles sampled at a clip-local tick into canvas pixels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneStyles {
+    pub shadow: Option<SceneShadow>,
+    pub glow: Option<SceneGlow>,
+    pub outline: Option<SceneOutline>,
+    pub background: Option<SceneBackground>,
+}
+
+impl SceneStyles {
+    /// True iff no style block is present.
+    pub fn is_empty(&self) -> bool {
+        self.shadow.is_none()
+            && self.glow.is_none()
+            && self.outline.is_none()
+            && self.background.is_none()
+    }
 }
 
 impl SceneLayer {
@@ -234,8 +375,9 @@ impl SceneLayer {
 pub enum SizeSpec {
     /// A known on-canvas size in pixels (scale already folded in).
     Fixed([f32; 2]),
-    /// Multiply the rasterized content's pixel size by this factor (text).
-    BitmapScaled(f32),
+    /// Multiply the rasterized content's pixel size by these per-axis factors
+    /// (text / path shapes). Uniform scales use equal components.
+    BitmapScaled([f32; 2]),
 }
 
 /// The pixel source for a [`SceneLayer`].
@@ -267,8 +409,13 @@ pub enum LayerSource {
         /// Seconds since the clip's timeline start.
         local_time: f64,
     },
-    /// A rasterized text run.
-    Text { content: String, style: TextStyle },
+    /// A text run. When `animation` is `Some`, realize draws per-character
+    /// instanced glyphs; otherwise the whole run is rasterized as one bitmap.
+    Text {
+        content: String,
+        style: TextStyle,
+        animation: Option<TextAnimation>,
+    },
     /// A solid RGBA fill across the placed quad.
     Solid([u8; 4]),
     /// Apply this layer's effect chain and color grade to the current canvas.
@@ -337,6 +484,9 @@ mod tests {
             chroma_key: None,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
+            styles: None,
+            blur_passes: Vec::new(),
         }
     }
 
@@ -363,6 +513,9 @@ mod tests {
             chroma_key: None,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
+            styles: None,
+            blur_passes: Vec::new(),
         }
     }
 
@@ -372,10 +525,11 @@ mod tests {
             source: LayerSource::Text {
                 content: "hi".into(),
                 style: TextStyle::new(48.0),
+                animation: None,
             },
             center: [50.0, 25.0],
             anchor_point: [0.5, 0.5],
-            size: SizeSpec::BitmapScaled(2.0),
+            size: SizeSpec::BitmapScaled([2.0, 2.0]),
             rotation: 0.0,
             opacity: 1.0,
             uv: [0.0, 0.0, 1.0, 1.0],
@@ -384,6 +538,9 @@ mod tests {
             chroma_key: None,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
+            styles: None,
+            blur_passes: Vec::new(),
         }
     }
 
@@ -438,7 +595,7 @@ mod tests {
         assert_eq!(scene.layers[0].uv, [0.1, 0.2, 0.9, 0.8]);
 
         // Text scales through its bitmap multiplier.
-        assert_eq!(scene.layers[1].size, SizeSpec::BitmapScaled(1.0));
+        assert_eq!(scene.layers[1].size, SizeSpec::BitmapScaled([1.0, 1.0]));
 
         // SDF stroke width and pad are canvas-pixel quantities.
         let LayerSource::Shape { stroke, pad, .. } = &scene.layers[2].source else {

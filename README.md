@@ -14,28 +14,32 @@ project format that hasn't settled yet.
 
 - Import video, audio, and images onto a multi-lane timeline.
 - Cut, trim, split, move, duplicate, link/unlink, ripple-delete, multi-select.
-- Speed changes (flat or ramped), reverse, crop, flip, move/scale/rotate,
-  opacity.
+- Speed changes (flat or ramped), reverse, crop, flip, move/scale/rotate
+  (per-axis scale), opacity.
 - Styled text, solid colors, shapes, and bundled stickers, static and animated.
 - Entrance/exit/combo animations from a catalog.
-- Keyframes on transforms and effect settings.
+- Keyframes on transforms and effect settings, with a graph editor and easing
+  presets; motion paths support bezier tangents.
+- Blend modes, layer styles (shadow / glow / outline / background), animatable
+  crop, and per-clip transform motion blur.
 - Canvas presets (16:9, 9:16, 1:1, 4:5, 21:9) and a background color.
 
 **Effects and color**
 
-- GPU effect passes: gaussian blur, vignette, pixelate. The rest of the
-  catalog (sharpen, glitch, grain, glow, and so on) is selectable but renders
-  as a no-op until its shader lands.
-- Per-clip masks (linear, mirror, circle, rectangle, heart, star) and chroma
-  key.
-- Filter presets and color adjustments per clip, plus lane-wide adjustment
-  layers that grade everything beneath them.
+- GPU effect passes: gaussian blur, vignette, pixelate, plus typed params
+  (including duotone). The rest of the catalog (sharpen, glitch, grain, glow,
+  and so on) is selectable but renders as a no-op until its shader lands.
+- Per-clip mask geometry (linear, mirror, circle, rectangle, heart, star) and
+  chroma key.
+- Filter presets and expanded color adjust (11 sliders) per clip, plus
+  lane-wide adjustment / effect / filter passes that grade everything beneath
+  them.
 - Transitions: crossfade and wipe-left are implemented; the other catalog
   entries currently play as a crossfade.
 
 **Audio**
 
-- Volume envelopes and draggable fade handles.
+- Volume envelopes, stereo pan, and draggable fade handles.
 - Speed changes resample the audio, ramps included. Pitch follows the rate
   for now; pitch-preserving stretch is planned but not built.
 - Noise reduction per clip (RNNoise).
@@ -68,17 +72,23 @@ Download a build from the [releases page](https://github.com/1Mr-Newton/cutlass/
 
 ## Setting up the AI assistant
 
-Cutlass doesn't ship a model. Point it at any OpenAI-compatible endpoint:
-a local one like [Ollama](https://ollama.com), or a cloud provider.
-
-Create `~/.cutlass/config.toml`:
+Cutlass doesn't ship a model. Use **Local** (Ollama / LM Studio), **OpenRouter**
+for cloud, or **Advanced** for any OpenAI-compatible endpoint. The Settings
+dialog is the usual path; or create `~/.cutlass/config.toml`:
 
 ```toml
+# Local (Ollama / LM Studio) — curated models only
 [ai]
-base_url = "http://localhost:11434/v1"   # e.g. Ollama
+source = "local"
+base_url = "http://localhost:11434/v1"
 model = "qwen3:14b"
-# api_key = "sk-..."                      # for cloud endpoints, or:
-# api_key_env = "OPENAI_API_KEY"          # read the key from an env var
+
+# Or OpenRouter cloud — one key, curated slugs
+# [ai]
+# source = "openrouter"
+# model = "openai/gpt-5.6-sol"
+# api_key = "sk-or-…"
+# # api_key_env = "OPENROUTER_API_KEY"
 ```
 
 The key stays in that file or your environment; it's never written into

@@ -1,242 +1,25 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+mod layers;
+mod text;
+
+use layers::{Realized, composite_from_realized, fixed_size};
+
 use cutlass_compositor::{
-    ColorGrade, CompositeLayer, CompositorConfig, CompositorLayer, FrameSink, LayerEffects,
-    LayerPlacement, PassInstance, RgbaImage, SdfLayer,
+    ColorGrade, CompositeLayer, CompositorConfig, CompositorLayer, FrameSink, LayerPlacement,
+    PassInstance, SdfLayer,
 };
-use cutlass_core::VideoFrame;
 use cutlass_models::{MediaId, Project};
 use cutlass_shapes::ShapeStyle;
 
 use crate::error::RenderError;
-use crate::scene::{LayerSource, ResolvedPass, Scene, SceneLut, SizeSpec};
+use crate::motion_blur::{blur_passes_for_placement, layer_placements_from_blur_passes};
+use crate::scene::{LayerSource, Scene, SceneLut, SizeSpec};
 
-use super::effects::{EffectChain, layer_effects, pack_effects};
-use super::media_cache::{CubeLutState, LottieState, StickerSequence, layer_lut};
+use super::effects::{EffectChain, blend_mode, layer_effects, layer_styles, pack_effects};
+use super::media_cache::layer_lut;
 use super::{FrameStats, Renderer, SLOW_FRAME_LOG_MS, SeekPolicy};
-
-fn composite_from_realized<'a>(
-    r: &'a Realized,
-    stills: &'a HashMap<MediaId, RgbaImage>,
-    stickers: &'a HashMap<String, StickerSequence>,
-    lottie: &'a HashMap<String, LottieState>,
-    luts: &'a HashMap<String, CubeLutState>,
-    effects: &'a [PassInstance<'a>],
-) -> CompositeLayer<'a> {
-    match r {
-        Realized::Solid {
-            rgba,
-            placement,
-            fx,
-            color_grade,
-            lut,
-            ..
-        } => CompositeLayer::solid(*rgba, *placement)
-            .with_fx(*fx)
-            .with_effects(effects)
-            .with_color_grade(*color_grade)
-            .with_lut(layer_lut(lut, luts)),
-        Realized::Bitmap {
-            image,
-            placement,
-            uv,
-            fx,
-            color_grade,
-            lut,
-            ..
-        } => CompositeLayer::rgba(image, *placement)
-            .with_uv(*uv)
-            .with_fx(*fx)
-            .with_effects(effects)
-            .with_color_grade(*color_grade)
-            .with_lut(layer_lut(lut, luts)),
-        Realized::Frame {
-            frame,
-            placement,
-            uv,
-            fx,
-            color_grade,
-            lut,
-            ..
-        } => CompositeLayer::frame(frame, *placement)
-            .with_uv(*uv)
-            .with_fx(*fx)
-            .with_effects(effects)
-            .with_color_grade(*color_grade)
-            .with_lut(layer_lut(lut, luts)),
-        Realized::Still {
-            media,
-            placement,
-            uv,
-            fx,
-            color_grade,
-            lut,
-            ..
-        } => CompositeLayer::rgba(&stills[media], *placement)
-            .with_uv(*uv)
-            .with_fx(*fx)
-            .with_effects(effects)
-            .with_color_grade(*color_grade)
-            .with_lut(layer_lut(lut, luts)),
-        Realized::Sticker {
-            asset,
-            frame_index,
-            placement,
-            uv,
-            fx,
-            color_grade,
-            lut,
-            ..
-        } => CompositeLayer::rgba(&stickers[asset].frames[*frame_index], *placement)
-            .with_uv(*uv)
-            .with_fx(*fx)
-            .with_effects(effects)
-            .with_color_grade(*color_grade)
-            .with_lut(layer_lut(lut, luts)),
-        Realized::Lottie {
-            path,
-            frame_index,
-            placement,
-            uv,
-            fx,
-            color_grade,
-            lut,
-            ..
-        } => {
-            // Realize only emits `Realized::Lottie` after `ensure_lottie_frame`
-            // cached this exact frame, and the LRU never evicts frames stamped
-            // by the scene being composed.
-            let LottieState::Loaded(player) = &lottie[path] else {
-                unreachable!("realized lottie layer without a loaded player")
-            };
-            CompositeLayer::rgba(&player.frames[frame_index].0, *placement)
-                .with_uv(*uv)
-                .with_fx(*fx)
-                .with_effects(effects)
-                .with_color_grade(*color_grade)
-                .with_lut(layer_lut(lut, luts))
-        }
-        Realized::Sdf {
-            shape,
-            placement,
-            fx,
-            color_grade,
-            lut,
-            ..
-        } => CompositeLayer::sdf(*shape, *placement)
-            .with_fx(*fx)
-            .with_effects(effects)
-            .with_color_grade(*color_grade)
-            .with_lut(layer_lut(lut, luts)),
-        Realized::Transition { .. } | Realized::CanvasPass { .. } => {
-            unreachable!("non-layer realized items handled separately")
-        }
-    }
-}
-
-/// An owned, decoded/rasterized layer kept alive while the compositor borrows it.
-enum Realized {
-    Transition {
-        outgoing: Box<Realized>,
-        incoming: Box<Realized>,
-        transition_id: String,
-        progress: f32,
-    },
-    CanvasPass {
-        effects: Vec<ResolvedPass>,
-        grade: Option<ColorGrade>,
-        lut: Option<SceneLut>,
-    },
-    Frame {
-        frame: VideoFrame,
-        placement: LayerPlacement,
-        uv: [f32; 4],
-        effects: Vec<ResolvedPass>,
-        fx: LayerEffects,
-        color_grade: Option<ColorGrade>,
-        lut: Option<SceneLut>,
-    },
-    Still {
-        media: MediaId,
-        placement: LayerPlacement,
-        uv: [f32; 4],
-        effects: Vec<ResolvedPass>,
-        fx: LayerEffects,
-        color_grade: Option<ColorGrade>,
-        lut: Option<SceneLut>,
-    },
-    Sticker {
-        asset: String,
-        frame_index: usize,
-        placement: LayerPlacement,
-        uv: [f32; 4],
-        effects: Vec<ResolvedPass>,
-        fx: LayerEffects,
-        color_grade: Option<ColorGrade>,
-        lut: Option<SceneLut>,
-    },
-    Lottie {
-        path: String,
-        frame_index: usize,
-        placement: LayerPlacement,
-        uv: [f32; 4],
-        effects: Vec<ResolvedPass>,
-        fx: LayerEffects,
-        color_grade: Option<ColorGrade>,
-        lut: Option<SceneLut>,
-    },
-    Bitmap {
-        image: RgbaImage,
-        placement: LayerPlacement,
-        uv: [f32; 4],
-        effects: Vec<ResolvedPass>,
-        fx: LayerEffects,
-        color_grade: Option<ColorGrade>,
-        lut: Option<SceneLut>,
-    },
-    Solid {
-        rgba: [u8; 4],
-        placement: LayerPlacement,
-        effects: Vec<ResolvedPass>,
-        fx: LayerEffects,
-        color_grade: Option<ColorGrade>,
-        lut: Option<SceneLut>,
-    },
-    Sdf {
-        shape: SdfLayer,
-        placement: LayerPlacement,
-        effects: Vec<ResolvedPass>,
-        fx: LayerEffects,
-        color_grade: Option<ColorGrade>,
-        lut: Option<SceneLut>,
-    },
-}
-
-impl Realized {
-    fn effects(&self) -> Option<&[ResolvedPass]> {
-        match self {
-            Realized::Transition { .. } => None,
-            Realized::CanvasPass { effects, .. } => Some(effects),
-            Realized::Frame { effects, .. }
-            | Realized::Still { effects, .. }
-            | Realized::Sticker { effects, .. }
-            | Realized::Lottie { effects, .. }
-            | Realized::Bitmap { effects, .. }
-            | Realized::Solid { effects, .. }
-            | Realized::Sdf { effects, .. } => Some(effects),
-        }
-    }
-}
-
-/// The on-canvas size for a non-text layer, falling back to the canvas if a
-/// bitmap-scaled spec ever reaches here (it shouldn't for media/solid).
-fn fixed_size(size: SizeSpec, canvas: [f32; 2]) -> [f32; 2] {
-    match size {
-        SizeSpec::Fixed(s) => s,
-        SizeSpec::BitmapScaled(_) => canvas,
-    }
-}
 
 impl Renderer {
     pub(super) fn render_scene_once(
@@ -257,11 +40,20 @@ impl Renderer {
         // placement. Held in `realized` so the borrowed `CompositeLayer`s built
         // below stay valid through the composite call.
         let mut realized: Vec<Realized> = Vec::with_capacity(scene.layers.len());
+        // Parallel to `realized`: compositor blur placements (may be empty).
+        let mut blur_for_realized: Vec<Vec<LayerPlacement>> =
+            Vec::with_capacity(scene.layers.len());
         let mut effect_store: Vec<EffectChain> = Vec::new();
         let mut occurrence: HashMap<MediaId, u32> = HashMap::new();
         for layer in &scene.layers {
+            blur_for_realized.push(layer_placements_from_blur_passes(
+                &layer.blur_passes,
+                layer.anchor_point,
+            ));
             let fx = layer_effects(layer);
             let color_grade = layer.color_grade;
+            let mode = blend_mode(layer.blend_mode);
+            let styles = layer_styles(layer.styles.as_ref());
             // Load (or recall) the layer's .cube table; unreadable files
             // resolve to None and grade nothing.
             let scene_lut = self.resolve_scene_lut(&layer.lut);
@@ -305,37 +97,32 @@ impl Renderer {
                         fx,
                         color_grade,
                         lut: scene_lut,
+                        blend_mode: mode,
+                        styles,
                     });
                 }
-                LayerSource::Text { content, style } => {
-                    let image = self.text.rasterize(content, style);
-                    if image.width == 0 || image.height == 0 {
-                        continue; // nothing rasterized (no fonts / empty run)
-                    }
-                    let scale = match layer.size {
-                        SizeSpec::BitmapScaled(s) => s,
-                        SizeSpec::Fixed(_) => 1.0,
-                    };
-                    let size = [image.width as f32 * scale, image.height as f32 * scale];
-                    let placement = LayerPlacement {
-                        center: layer.text_quad_center(
-                            style,
-                            size,
-                            [scene.width as f32, scene.height as f32],
-                        ),
-                        size,
-                        rotation: layer.rotation,
-                        opacity: layer.opacity,
-                    };
-                    realized.push(Realized::Bitmap {
-                        image,
-                        placement,
-                        uv: layer.uv,
-                        effects: layer.effects.clone(),
+                LayerSource::Text {
+                    content,
+                    style,
+                    animation,
+                } => {
+                    let Some(layer_realized) = text::realize_text_layer(
+                        &mut self.text,
+                        layer,
+                        content,
+                        style,
+                        animation,
+                        [scene.width as f32, scene.height as f32],
+                        layer.effects.clone(),
                         fx,
                         color_grade,
-                        lut: scene_lut,
-                    });
+                        scene_lut,
+                        mode,
+                        styles,
+                    ) else {
+                        continue;
+                    };
+                    realized.push(layer_realized);
                 }
                 LayerSource::Media { media, source_time } => {
                     let slot = occurrence.entry(*media).or_insert(0);
@@ -352,6 +139,8 @@ impl Renderer {
                         fx,
                         color_grade,
                         lut: scene_lut,
+                        blend_mode: mode,
+                        styles,
                     });
                 }
                 LayerSource::Still { media } => {
@@ -365,6 +154,8 @@ impl Renderer {
                         fx,
                         color_grade,
                         lut: scene_lut,
+                        blend_mode: mode,
+                        styles,
                     });
                 }
                 LayerSource::Lottie { path, local_time } => {
@@ -383,6 +174,8 @@ impl Renderer {
                         fx,
                         color_grade,
                         lut: scene_lut,
+                        blend_mode: mode,
+                        styles,
                     });
                 }
                 LayerSource::Sticker { asset, local_time } => {
@@ -403,6 +196,8 @@ impl Renderer {
                         fx,
                         color_grade,
                         lut: scene_lut,
+                        blend_mode: mode,
+                        styles,
                     });
                 }
                 LayerSource::Shape {
@@ -429,6 +224,8 @@ impl Renderer {
                         fx,
                         color_grade,
                         lut: scene_lut,
+                        blend_mode: mode,
+                        styles,
                     });
                 }
                 LayerSource::PathShape {
@@ -447,9 +244,12 @@ impl Renderer {
                     }
                     let scale = match layer.size {
                         SizeSpec::BitmapScaled(s) => s,
-                        SizeSpec::Fixed(_) => 1.0,
+                        SizeSpec::Fixed(_) => [1.0, 1.0],
                     };
-                    let size = [image.width as f32 * scale, image.height as f32 * scale];
+                    let size = [
+                        image.width as f32 * scale[0],
+                        image.height as f32 * scale[1],
+                    ];
                     realized.push(Realized::Bitmap {
                         image,
                         placement: place(size),
@@ -458,6 +258,8 @@ impl Renderer {
                         fx,
                         color_grade,
                         lut: scene_lut,
+                        blend_mode: mode,
+                        styles,
                     });
                 }
             }
@@ -508,7 +310,7 @@ impl Renderer {
         }
         let mut jobs: Vec<LayerJob<'_>> = Vec::new();
 
-        for r in &realized {
+        for (layer_idx, r) in realized.iter().enumerate() {
             match r {
                 Realized::CanvasPass {
                     effects,
@@ -577,6 +379,50 @@ impl Renderer {
                         progress: *progress,
                     });
                 }
+                Realized::Glyphs {
+                    background: Some((bg_image, bg_placement)),
+                    effects,
+                    fx,
+                    color_grade,
+                    lut,
+                    blend_mode,
+                    ..
+                } => {
+                    // Whole-run background card sits behind the glyphs.
+                    let bg_effects = if effects.is_empty() {
+                        &[]
+                    } else {
+                        let chain = &instance_store[effect_idx];
+                        effect_idx += 1;
+                        chain.as_slice()
+                    };
+                    layer_storage.push(
+                        CompositeLayer::rgba(bg_image, *bg_placement)
+                            .with_fx(*fx)
+                            .with_effects(bg_effects)
+                            .with_color_grade(*color_grade)
+                            .with_lut(layer_lut(lut, &self.luts))
+                            .with_blend_mode(*blend_mode),
+                    );
+                    jobs.push(LayerJob::Plain {
+                        storage_idx: layer_storage.len() - 1,
+                    });
+                    // Glyphs share the same effect chain reference when present.
+                    // Per-glyph instances own placement; transform motion blur
+                    // is not applied to glyph runs (bitmap text still blurs).
+                    let glyph_effects = if effects.is_empty() { &[] } else { bg_effects };
+                    layer_storage.push(composite_from_realized(
+                        r,
+                        &self.stills,
+                        &self.stickers,
+                        &self.lottie,
+                        &self.luts,
+                        glyph_effects,
+                    ));
+                    jobs.push(LayerJob::Plain {
+                        storage_idx: layer_storage.len() - 1,
+                    });
+                }
                 other => {
                     let effects = other
                         .effects()
@@ -587,14 +433,33 @@ impl Renderer {
                             chain.as_slice()
                         })
                         .unwrap_or(&[]);
-                    layer_storage.push(composite_from_realized(
+                    let mut cl = composite_from_realized(
                         other,
                         &self.stills,
                         &self.stickers,
                         &self.lottie,
                         &self.luts,
                         effects,
-                    ));
+                    );
+                    let mut blur = blur_for_realized[layer_idx].clone();
+                    // BitmapScaled layers skip attach-time sampling; fill now.
+                    if blur.is_empty()
+                        && self.apply_motion_blur
+                        && !matches!(other, Realized::Glyphs { .. })
+                        && let Some(clip_id) = scene.layers[layer_idx].clip
+                    {
+                        blur = blur_passes_for_placement(
+                            project,
+                            scene,
+                            clip_id,
+                            cl.placement,
+                            scene.layers[layer_idx].anchor_point,
+                        );
+                    }
+                    if !blur.is_empty() {
+                        cl = cl.with_blur_passes(blur);
+                    }
+                    layer_storage.push(cl);
                     jobs.push(LayerJob::Plain {
                         storage_idx: layer_storage.len() - 1,
                     });
@@ -675,193 +540,5 @@ impl Renderer {
             );
         }
         Ok(())
-    }
-
-    fn realize_subscene_layer(
-        &mut self,
-        project: &Project,
-        scene: &Scene,
-        layer: &crate::scene::SceneLayer,
-        policy: SeekPolicy,
-    ) -> Result<Box<Realized>, RenderError> {
-        let place = |size: [f32; 2]| LayerPlacement {
-            center: layer.quad_center(size),
-            size,
-            rotation: layer.rotation,
-            opacity: layer.opacity,
-        };
-        let fx = layer_effects(layer);
-        let color_grade = layer.color_grade;
-        let realized = match &layer.source {
-            LayerSource::Solid(rgba) => {
-                let size = fixed_size(layer.size, [scene.width as f32, scene.height as f32]);
-                Realized::Solid {
-                    rgba: *rgba,
-                    placement: place(size),
-                    effects: layer.effects.clone(),
-                    fx,
-                    color_grade,
-                    lut: None,
-                }
-            }
-            LayerSource::Text { content, style } => {
-                let image = self.text.rasterize(content, style);
-                if image.width == 0 || image.height == 0 {
-                    return Err(RenderError::unsupported("empty text layer"));
-                }
-                let scale = match layer.size {
-                    SizeSpec::BitmapScaled(s) => s,
-                    SizeSpec::Fixed(_) => 1.0,
-                };
-                let size = [image.width as f32 * scale, image.height as f32 * scale];
-                let placement = LayerPlacement {
-                    center: layer.text_quad_center(
-                        style,
-                        size,
-                        [scene.width as f32, scene.height as f32],
-                    ),
-                    size,
-                    rotation: layer.rotation,
-                    opacity: layer.opacity,
-                };
-                Realized::Bitmap {
-                    image,
-                    placement,
-                    uv: layer.uv,
-                    effects: layer.effects.clone(),
-                    fx,
-                    color_grade,
-                    lut: None,
-                }
-            }
-            LayerSource::Media { media, source_time } => {
-                let frame = self.decode(project, *media, 0, *source_time, policy)?;
-                let size = fixed_size(layer.size, [scene.width as f32, scene.height as f32]);
-                Realized::Frame {
-                    frame,
-                    placement: place(size),
-                    uv: layer.uv,
-                    effects: layer.effects.clone(),
-                    fx,
-                    color_grade,
-                    lut: None,
-                }
-            }
-            LayerSource::Still { media } => {
-                self.ensure_still(project, *media)?;
-                let size = fixed_size(layer.size, [scene.width as f32, scene.height as f32]);
-                Realized::Still {
-                    media: *media,
-                    placement: place(size),
-                    uv: layer.uv,
-                    effects: layer.effects.clone(),
-                    fx,
-                    color_grade,
-                    lut: None,
-                }
-            }
-            LayerSource::Lottie { path, local_time } => {
-                let size = fixed_size(layer.size, [scene.width as f32, scene.height as f32]);
-                match self.ensure_lottie_frame(path, *local_time) {
-                    Some(frame_index) => Realized::Lottie {
-                        path: path.clone(),
-                        frame_index,
-                        placement: place(size),
-                        uv: layer.uv,
-                        effects: layer.effects.clone(),
-                        fx,
-                        color_grade,
-                        lut: None,
-                    },
-                    // Missing file inside a transition: a transparent side,
-                    // matching the draw-nothing policy of the main path.
-                    None => Realized::Solid {
-                        rgba: [0, 0, 0, 0],
-                        placement: place(size),
-                        effects: layer.effects.clone(),
-                        fx,
-                        color_grade,
-                        lut: None,
-                    },
-                }
-            }
-            LayerSource::Sticker { asset, local_time } => {
-                let spec = cutlass_models::sticker_spec(asset)
-                    .ok_or_else(|| RenderError::unsupported("unknown sticker asset"))?;
-                self.ensure_sticker(spec)?;
-                let frame_index = self.stickers[spec.id].frame_at(*local_time);
-                let size = fixed_size(layer.size, [scene.width as f32, scene.height as f32]);
-                Realized::Sticker {
-                    asset: asset.clone(),
-                    frame_index,
-                    placement: place(size),
-                    uv: layer.uv,
-                    effects: layer.effects.clone(),
-                    fx,
-                    color_grade,
-                    lut: None,
-                }
-            }
-            LayerSource::Shape {
-                params,
-                fill,
-                stroke,
-                pad,
-            } => {
-                let size = fixed_size(layer.size, [scene.width as f32, scene.height as f32]);
-                let half = [
-                    (size[0] * 0.5 - pad).max(0.0),
-                    (size[1] * 0.5 - pad).max(0.0),
-                ];
-                Realized::Sdf {
-                    shape: SdfLayer {
-                        shape: params.with_half(half),
-                        fill: *fill,
-                        stroke: *stroke,
-                    },
-                    placement: place(size),
-                    effects: layer.effects.clone(),
-                    fx,
-                    color_grade,
-                    lut: None,
-                }
-            }
-            LayerSource::PathShape {
-                path,
-                fill,
-                stroke,
-                raster_scale,
-            } => {
-                let style = ShapeStyle {
-                    fill: Some(*fill).filter(|c| c[3] > 0),
-                    stroke: *stroke,
-                };
-                let image = self.paths.rasterize(path, &style, *raster_scale);
-                if image.width == 0 || image.height == 0 {
-                    return Err(RenderError::unsupported("degenerate path layer"));
-                }
-                let scale = match layer.size {
-                    SizeSpec::BitmapScaled(s) => s,
-                    SizeSpec::Fixed(_) => 1.0,
-                };
-                let size = [image.width as f32 * scale, image.height as f32 * scale];
-                Realized::Bitmap {
-                    image,
-                    placement: place(size),
-                    uv: layer.uv,
-                    effects: layer.effects.clone(),
-                    fx,
-                    color_grade,
-                    lut: None,
-                }
-            }
-            LayerSource::Transition { .. } => {
-                return Err(RenderError::unsupported("nested transitions"));
-            }
-            LayerSource::CanvasPass => {
-                return Err(RenderError::unsupported("nested canvas pass"));
-            }
-        };
-        Ok(Box::new(realized))
     }
 }

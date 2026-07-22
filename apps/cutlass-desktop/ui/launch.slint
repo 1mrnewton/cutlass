@@ -20,7 +20,7 @@ import { AppStore, EditorStore } from "store/index.slint";
 import { AppState } from "state.slint";
 import { WindowBackend } from "lib/window-backend.slint";
 import { TemplatesBackend, TemplateTile } from "lib/templates-backend.slint";
-import { AccountBackend } from "lib/account-backend.slint";
+import { UpdateBackend } from "lib/update-backend.slint";
 
 export component LaunchScreen inherits Rectangle {
     background: AppStore.theme.surface.app-background;
@@ -177,7 +177,7 @@ export component LaunchScreen inherits Rectangle {
                     // Update nudge: a quiet chip at the bottom of the rail when
                     // the backend reports a newer release. Click opens the
                     // download page in the browser; never blocks anything.
-                    if AccountBackend.update-available: Rectangle {
+                    if UpdateBackend.update-available: Rectangle {
                         height: 30px;
                         border-radius: AppStore.theme.metrics.radius.sm;
                         background: update-ta.has-hover
@@ -189,7 +189,7 @@ export component LaunchScreen inherits Rectangle {
                             width: parent.width - 2 * AppStore.theme.metrics.spacing.md;
                             height: parent.height;
                             vertical-alignment: center;
-                            text: "Update available — " + AccountBackend.update-version;
+                            text: "Update available — " + UpdateBackend.update-version;
                             style: AppStore.theme.typography.caption;
                             foreground: AppStore.theme.accent.primary;
                             overflow: elide;
@@ -198,7 +198,7 @@ export component LaunchScreen inherits Rectangle {
                         update-ta := TouchArea {
                             mouse-cursor: pointer;
                             clicked => {
-                                AccountBackend.open-update();
+                                UpdateBackend.open-update();
                             }
                         }
                     }

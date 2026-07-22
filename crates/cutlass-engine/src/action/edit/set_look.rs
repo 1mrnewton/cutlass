@@ -7,8 +7,8 @@
 //! (persisted + surfaced in `ui_state`, drawn later).
 
 use cutlass_models::{
-    AnimationRef, AnimationSlot, AudioRole, ChromaKey, Clip, ClipId, ColorAdjustments, Filter, Lut,
-    Mask, ModelError, Project, StabilizeLevel,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, ChromaKey, Clip, ClipId, ColorAdjustments,
+    Filter, LayerStyles, Lut, Mask, ModelError, MotionBlur, Project, StabilizeLevel,
 };
 
 use crate::action::edit::restore_clip::RestoreClipAction;
@@ -37,6 +37,30 @@ pub fn set_mask(
     mask: Option<Mask>,
 ) -> Result<Box<dyn EditAction>, EngineError> {
     with_restore(ctx, clip, |p| p.set_clip_mask(clip, mask))
+}
+
+pub fn set_blend_mode(
+    ctx: &mut ApplyContext<'_>,
+    clip: ClipId,
+    mode: BlendMode,
+) -> Result<Box<dyn EditAction>, EngineError> {
+    with_restore(ctx, clip, |p| p.set_blend_mode(clip, mode))
+}
+
+pub fn set_motion_blur(
+    ctx: &mut ApplyContext<'_>,
+    clip: ClipId,
+    motion_blur: MotionBlur,
+) -> Result<Box<dyn EditAction>, EngineError> {
+    with_restore(ctx, clip, |p| p.set_motion_blur(clip, motion_blur))
+}
+
+pub fn set_layer_styles(
+    ctx: &mut ApplyContext<'_>,
+    clip: ClipId,
+    styles: LayerStyles,
+) -> Result<Box<dyn EditAction>, EngineError> {
+    with_restore(ctx, clip, |p| p.set_layer_styles(clip, styles))
 }
 
 pub fn set_chroma(

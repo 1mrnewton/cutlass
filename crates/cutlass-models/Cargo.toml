@@ -18,4 +18,9 @@ tar = "0.4"
 thiserror.workspace = true
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
+
+[[bench]]
+name = "param_sample"
+harness = false

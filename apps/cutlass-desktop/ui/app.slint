@@ -75,6 +75,7 @@ export {
 }from "lib/preview-backend.slint";
 export { InspectorBackend, SelectedClipInfo }from "lib/inspector-backend.slint";
 export { KeyframeBackend }from "lib/keyframe-backend.slint";
+export { GraphBackend, GraphChannel, GraphDot }from "lib/graph-backend.slint";
 export { StripBackend, StripTile }from "lib/strip-backend.slint";
 export { TransportBackend }from "lib/transport-backend.slint";
 export { WindowBackend }from "lib/window-backend.slint";
@@ -87,7 +88,7 @@ export { TemplatesBackend, TemplateTile }from "lib/templates-backend.slint";
 export { TextPresetsBackend, TextPresetTile }from "lib/text-presets-backend.slint";
 export { LottieBackend, LottieTile }from "lib/lottie-backend.slint";
 export { SfxBackend, SfxTile }from "lib/sfx-backend.slint";
-export { AccountBackend }from "lib/account-backend.slint";
+export { UpdateBackend }from "lib/update-backend.slint";
 export { AiBackend, AiItemTile }from "lib/ai-backend.slint";
 
 export component AppWindow inherits Window {
@@ -450,6 +451,7 @@ export component AppWindow inherits Window {
             self.nudge-res.anchor-x,
             self.nudge-res.anchor-y,
             self.nudge-res.scale,
+            self.nudge-res.scale-y,
             self.nudge-res.rotation,
             self.nudge-res.opacity,
             TimelineStore.playhead-tick);

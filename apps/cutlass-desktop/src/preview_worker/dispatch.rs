@@ -171,7 +171,22 @@ pub(super) fn dispatch(
             crop,
             flip_h,
             flip_v,
-        } => set_clip_crop_and_publish(engine, &clip, crop, flip_h, flip_v, ui),
+            tick,
+        } => {
+            let at = RationalTime::new(tick, tl_rate);
+            set_clip_crop_and_publish(engine, &clip, crop, flip_h, flip_v, at, ui);
+        }
+        WorkerMsg::SetBlendMode { clip, mode } => {
+            set_blend_mode_and_publish(engine, &clip, &mode, ui)
+        }
+        WorkerMsg::SetMotionBlur { clip, motion_blur } => {
+            set_motion_blur_and_publish(engine, &clip, motion_blur, ui)
+        }
+        WorkerMsg::SetLayerStyles { clip, styles } => {
+            set_layer_styles_and_publish(engine, &clip, styles, ui)
+        }
+        WorkerMsg::SetMask { clip, mask } => set_mask_and_publish(engine, &clip, mask, ui),
+        WorkerMsg::SetChroma { clip, chroma } => set_chroma_and_publish(engine, &clip, chroma, ui),
         WorkerMsg::SetClipFilter {
             clip,
             filter_id,
@@ -193,7 +208,19 @@ pub(super) fn dispatch(
             clip,
             slot,
             animation_id,
-        } => set_clip_animation_and_publish(engine, &clip, &slot, &animation_id, ui),
+            speed,
+            intensity,
+            stagger,
+        } => {
+            // Empty id ⇔ clear the slot.
+            let animation = (!animation_id.is_empty()).then_some(cutlass_models::AnimationRef {
+                id: animation_id,
+                speed,
+                intensity,
+                stagger,
+            });
+            set_clip_animation_and_publish(engine, &clip, &slot, animation, ui)
+        }
         // Only reached when a look-preview burst interleaves with another
         // coalesced gesture's drain. The dedicated loop arm coalesces the
         // common case.
@@ -204,7 +231,32 @@ pub(super) fn dispatch(
             adjust,
             tick,
         } => {
-            apply_look_override(engine, &clip, &filter_id, intensity, adjust);
+            apply_look_override(engine, &clip, &filter_id, intensity, &adjust);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        // Same interleave fallback for styles preview bursts.
+        WorkerMsg::PreviewClipStyles { clip, styles, tick } => {
+            apply_styles_override(engine, &clip, styles);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        WorkerMsg::ClearStylesOverride { tick } => {
+            engine.set_styles_override(None);
             render_frame(
                 engine,
                 tl_rate,
@@ -309,6 +361,7 @@ pub(super) fn dispatch(
             tick,
             value,
             easing,
+            tangents,
         } => set_param_keyframe_and_publish(
             engine,
             &clip,
@@ -316,13 +369,63 @@ pub(super) fn dispatch(
             RationalTime::new(tick, tl_rate),
             value,
             easing,
+            tangents,
             ui,
         ),
+        WorkerMsg::SetParamKeyframeTangents {
+            clip,
+            tick,
+            tangents,
+        } => set_param_keyframe_tangents_and_publish(
+            engine,
+            &clip,
+            RationalTime::new(tick, tl_rate),
+            tangents,
+            ui,
+        ),
+        WorkerMsg::SetParamConstant { clip, param, value } => {
+            set_param_constant_and_publish(engine, &clip, param, value, ui)
+        }
         WorkerMsg::RemoveParamKeyframe { clip, param, tick } => remove_param_keyframe_and_publish(
             engine,
             &clip,
             param,
             RationalTime::new(tick, tl_rate),
+            ui,
+        ),
+        WorkerMsg::MoveParamKeyframe {
+            clip,
+            param,
+            from_tick,
+            to_tick,
+            value,
+            easing,
+            tangents,
+        } => move_param_keyframe_and_publish(
+            engine,
+            &MoveParamKeyframeRequest {
+                clip,
+                param,
+                from_tick,
+                to_tick,
+                value,
+                easing,
+                tangents,
+            },
+            tl_rate,
+            ui,
+        ),
+        WorkerMsg::ApplyEasingPreset {
+            clip,
+            param,
+            tick,
+            preset,
+        } => apply_easing_preset_and_publish(
+            engine,
+            &clip,
+            param,
+            RationalTime::new(tick, tl_rate),
+            preset,
             ui,
         ),
         WorkerMsg::RetimeKeyframes {

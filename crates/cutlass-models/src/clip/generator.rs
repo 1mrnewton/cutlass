@@ -2,14 +2,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ModelError;
 use crate::ids::MediaId;
-use crate::param::{Easing, Param};
+use crate::param::Param;
 use crate::time::TimeRange;
 
 use super::text::TextStyle;
-use super::transform::{ParamValue, ShapeParam};
+
+mod params;
 
 /// What a clip draws. Either a trimmed range of imported media, or synthetic
 /// content rendered by the engine (text, shapes, solids, ...).
+///
+/// `Generated` dwarfs `Media` because [`Generator`] carries the full text
+/// style / shape params inline. That's deliberate: projects hold at most a
+/// few hundred clips and the resolver walks them every frame, so inline
+/// storage beats boxing (one less pointer chase on the hot path).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClipSource {
     /// A trimmed portion of a [`MediaSource`](crate::MediaSource).
@@ -425,9 +432,9 @@ impl Generator {
         };
         let spec = crate::look::text_effect_spec(preset)
             .ok_or_else(|| ModelError::InvalidParam(format!("unknown text effect '{preset}'")))?;
-        style.stroke = spec.stroke;
-        style.shadow = spec.shadow;
-        style.background = spec.background;
+        style.stroke = spec.stroke.clone();
+        style.shadow = spec.shadow.clone();
+        style.background = spec.background.clone();
         Ok(())
     }
 
@@ -508,129 +515,6 @@ impl Generator {
         Ok(())
     }
 
-    /// Insert or replace a keyframe on one animatable shape property.
-    /// Errors when the generator is not a shape, the property does not
-    /// apply to its kind (e.g. `InnerRatio` on a rectangle, stroke params
-    /// with no stroke set), or the value is out of range.
-    pub fn set_shape_param_keyframe(
-        &mut self,
-        param: ShapeParam,
-        tick: i64,
-        value: ParamValue,
-        easing: Easing,
-    ) -> Result<(), ModelError> {
-        easing.validate()?;
-        self.with_shape_param(param, |target, kind| match kind {
-            ShapeParamKind::Scalar { validate } => {
-                let v = value.scalar()?;
-                validate(v)?;
-                target.scalar()?.set_keyframe(tick, v, easing);
-                Ok(())
-            }
-            ShapeParamKind::Color => {
-                let v = value.color()?;
-                target.color()?.set_keyframe(tick, v, easing);
-                Ok(())
-            }
-        })
-    }
-
-    /// Remove the keyframe at exactly `tick` on one shape property. Errors
-    /// when no keyframe sits there.
-    pub fn remove_shape_param_keyframe(
-        &mut self,
-        param: ShapeParam,
-        tick: i64,
-    ) -> Result<(), ModelError> {
-        self.with_shape_param(param, |target, kind| {
-            let removed = match kind {
-                ShapeParamKind::Scalar { .. } => target.scalar()?.remove_keyframe(tick),
-                ShapeParamKind::Color => target.color()?.remove_keyframe(tick),
-            };
-            if removed {
-                Ok(())
-            } else {
-                Err(ModelError::InvalidParam(format!(
-                    "no {param:?} keyframe at tick {tick}"
-                )))
-            }
-        })
-    }
-
-    /// Replace one shape property with a constant, dropping its keyframes.
-    pub fn set_shape_param_constant(
-        &mut self,
-        param: ShapeParam,
-        value: ParamValue,
-    ) -> Result<(), ModelError> {
-        self.with_shape_param(param, |target, kind| match kind {
-            ShapeParamKind::Scalar { validate } => {
-                let v = value.scalar()?;
-                validate(v)?;
-                target.scalar()?.set_constant(v);
-                Ok(())
-            }
-            ShapeParamKind::Color => {
-                target.color()?.set_constant(value.color()?);
-                Ok(())
-            }
-        })
-    }
-
-    /// Resolve `param` to the [`Param`] it names on this generator and run
-    /// `f` on it — the single routing point for the three mutators above.
-    fn with_shape_param<R>(
-        &mut self,
-        param: ShapeParam,
-        f: impl FnOnce(ShapeParamTarget<'_>, ShapeParamKind) -> Result<R, ModelError>,
-    ) -> Result<R, ModelError> {
-        let Generator::Shape {
-            shape,
-            rgba,
-            width,
-            height,
-            corner_radius,
-            stroke,
-        } = self
-        else {
-            return Err(ModelError::InvalidParam(
-                "shape parameters apply only to shape generator clips".into(),
-            ));
-        };
-        let scalar =
-            |validate: fn(f32) -> Result<(), ModelError>| ShapeParamKind::Scalar { validate };
-        match param {
-            ShapeParam::Width => f(ShapeParamTarget::Scalar(width), scalar(validate_shape_dim)),
-            ShapeParam::Height => f(ShapeParamTarget::Scalar(height), scalar(validate_shape_dim)),
-            ShapeParam::CornerRadius => f(
-                ShapeParamTarget::Scalar(corner_radius),
-                scalar(validate_corner_radius),
-            ),
-            ShapeParam::Fill => f(ShapeParamTarget::Color(rgba), ShapeParamKind::Color),
-            ShapeParam::InnerRatio => match shape {
-                Shape::Star { inner_ratio, .. } => f(
-                    ShapeParamTarget::Scalar(inner_ratio),
-                    scalar(|v| validate_unit_fraction(v, "star inner_ratio")),
-                ),
-                _ => Err(ModelError::InvalidParam(
-                    "inner_ratio applies only to star shapes".into(),
-                )),
-            },
-            ShapeParam::StrokeWidth | ShapeParam::StrokeColor => match stroke {
-                Some(s) => match param {
-                    ShapeParam::StrokeWidth => f(
-                        ShapeParamTarget::Scalar(&mut s.width),
-                        scalar(validate_stroke_width),
-                    ),
-                    _ => f(ShapeParamTarget::Color(&mut s.rgba), ShapeParamKind::Color),
-                },
-                None => Err(ModelError::InvalidParam(
-                    "shape has no stroke — set one via SetGenerator first".into(),
-                )),
-            },
-        }
-    }
-
     /// Rebase every clip-relative keyframe carried by generated content.
     ///
     /// Most generators are time-invariant data. Shape geometry is the one
@@ -638,6 +522,22 @@ impl Generator {
     /// [`Param`]s; the normalized speed ramp is deliberately handled
     /// separately by clip-splitting code.
     pub(super) fn shift_timeline_params(&mut self, delta: i64) -> Result<(), ModelError> {
+        if let Generator::Text { style, .. } = self {
+            style.size.shift_ticks(delta)?;
+            style.fill.shift_ticks(delta)?;
+            style.letter_spacing.shift_ticks(delta)?;
+            style.line_spacing.shift_ticks(delta)?;
+            if let Some(stroke) = &mut style.stroke {
+                stroke.rgba.shift_ticks(delta)?;
+                stroke.width.shift_ticks(delta)?;
+            }
+            if let Some(shadow) = &mut style.shadow {
+                shadow.rgba.shift_ticks(delta)?;
+                shadow.blur.shift_ticks(delta)?;
+                shadow.distance.shift_ticks(delta)?;
+            }
+            return Ok(());
+        }
         let Generator::Shape {
             shape,
             rgba,
@@ -663,40 +563,6 @@ impl Generator {
         }
         Ok(())
     }
-}
-
-/// A mutable reference to one animatable shape property, typed by value kind.
-enum ShapeParamTarget<'a> {
-    Scalar(&'a mut Param<f32>),
-    Color(&'a mut Param<[u8; 4]>),
-}
-
-impl<'a> ShapeParamTarget<'a> {
-    fn scalar(self) -> Result<&'a mut Param<f32>, ModelError> {
-        match self {
-            ShapeParamTarget::Scalar(p) => Ok(p),
-            ShapeParamTarget::Color(_) => Err(ModelError::InvalidParam(
-                "expected a color value for this shape parameter".into(),
-            )),
-        }
-    }
-
-    fn color(self) -> Result<&'a mut Param<[u8; 4]>, ModelError> {
-        match self {
-            ShapeParamTarget::Color(p) => Ok(p),
-            ShapeParamTarget::Scalar(_) => Err(ModelError::InvalidParam(
-                "expected a scalar value for this shape parameter".into(),
-            )),
-        }
-    }
-}
-
-/// Value kind (and range rule) of one [`ShapeParam`].
-enum ShapeParamKind {
-    Scalar {
-        validate: fn(f32) -> Result<(), ModelError>,
-    },
-    Color,
 }
 
 impl ShapePath {

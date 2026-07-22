@@ -16,289 +16,35 @@
 //! - **Sampling is hot-path.** `sample` is pure and allocation-free: a
 //!   binary search over the keyframe slice plus an eased lerp. It runs
 //!   per-layer-per-frame in `resolve_layers`.
+//! - **Spatial tangents** (`Keyframe::tangents`) are a serde slot on every
+//!   keyframe type for schema simplicity, but only `[f32; 2]` sampling reads
+//!   them (cubic bezier motion paths). The project routing layer rejects
+//!   tangents on non-position params.
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::ModelError;
 
-/// Interpolation curve for the segment *leaving* a keyframe (toward the next
-/// one). The last keyframe's easing is unused until a keyframe follows it.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Easing {
-    /// Constant-velocity interpolation.
-    #[default]
-    Linear,
-    /// Accelerate from rest (quadratic).
-    EaseIn,
-    /// Decelerate to rest (quadratic).
-    EaseOut,
-    /// Accelerate then decelerate (smoothstep).
-    EaseInOut,
-    /// CSS-style cubic bezier: control points `(x1, y1)`, `(x2, y2)` with
-    /// `x1`/`x2` in `0..=1`. `y` outside `0..=1` overshoots, like CSS.
-    Bezier { points: [f32; 4] },
-}
+mod easing;
+mod presets;
 
-impl Easing {
-    /// Map linear progress `t` in `0..=1` to eased progress.
-    pub fn apply(self, t: f32) -> f32 {
-        match self {
-            Easing::Linear => t,
-            Easing::EaseIn => t * t,
-            Easing::EaseOut => t * (2.0 - t),
-            Easing::EaseInOut => t * t * (3.0 - 2.0 * t),
-            Easing::Bezier {
-                points: [x1, y1, x2, y2],
-            } => cubic_bezier(t, x1, y1, x2, y2),
-        }
-    }
-
-    /// Definite integral `∫₀ᵗ apply(τ) dτ` for `t` in `0..=1`.
-    ///
-    /// Speed is a *rate*, so the source position swept by a keyframed speed
-    /// segment is the integral of the eased curve, not the eased value
-    /// itself (M2 speed ramps). The preset easings integrate in closed form;
-    /// bezier falls back to Simpson's rule (smooth and monotonic over the
-    /// unit interval, so a fixed step count is accurate and allocation-free).
-    pub fn integral_to(self, t: f32) -> f32 {
-        let t = t.clamp(0.0, 1.0);
-        match self {
-            // ∫ τ        = t²/2
-            Easing::Linear => 0.5 * t * t,
-            // ∫ τ²       = t³/3
-            Easing::EaseIn => t * t * t / 3.0,
-            // ∫ (2τ−τ²)  = t² − t³/3
-            Easing::EaseOut => t * t - t * t * t / 3.0,
-            // ∫ (3τ²−2τ³)= t³ − t⁴/2
-            Easing::EaseInOut => {
-                let t3 = t * t * t;
-                t3 - 0.5 * t3 * t
-            }
-            Easing::Bezier {
-                points: [x1, y1, x2, y2],
-            } => {
-                // Simpson's rule over [0, t] with an even step count.
-                const STEPS: usize = 32;
-                let h = t / STEPS as f32;
-                if h == 0.0 {
-                    return 0.0;
-                }
-                let f = |s: f32| cubic_bezier(s, x1, y1, x2, y2);
-                let mut sum = f(0.0) + f(t);
-                for i in 1..STEPS {
-                    let s = h * i as f32;
-                    sum += if i % 2 == 0 { 2.0 } else { 4.0 } * f(s);
-                }
-                sum * h / 3.0
-            }
-        }
-    }
-
-    /// Reparameterize the portion `from..=to` of this easing back onto
-    /// `0..=1`. The returned easing satisfies
-    ///
-    /// `slice(u) = (self(from + (to-from)u) - self(from)) /
-    ///             (self(to) - self(from))`.
-    ///
-    /// Structural edits use this when a normalized speed-ramp segment is cut
-    /// at an arbitrary point. Polynomial presets are first represented as
-    /// equivalent cubic Béziers; de Casteljau subdivision then preserves the
-    /// exact curve shape. A subrange whose endpoint progress is identical but
-    /// whose interior is not flat cannot be represented by one `Easing`, so it
-    /// fails closed.
-    pub(crate) fn subsegment(self, from: f32, to: f32) -> Result<Self, ModelError> {
-        if !from.is_finite()
-            || !to.is_finite()
-            || !(0.0..1.0).contains(&from)
-            || !(0.0..=1.0).contains(&to)
-            || from >= to
-        {
-            return Err(ModelError::InvalidParam(
-                "easing subsegment must satisfy 0 <= from < to <= 1".into(),
-            ));
-        }
-        if from == 0.0 && to == 1.0 {
-            return Ok(self);
-        }
-        if self == Easing::Linear {
-            return Ok(Easing::Linear);
-        }
-
-        let [x1, y1, x2, y2] = match self {
-            Easing::Linear => unreachable!("linear handled above"),
-            // x(s) = s for control x values 1/3 and 2/3. The y controls
-            // below are the cubic Bézier forms of t², 2t-t², and smoothstep.
-            Easing::EaseIn => [1.0 / 3.0, 0.0, 2.0 / 3.0, 1.0 / 3.0],
-            Easing::EaseOut => [1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 1.0],
-            Easing::EaseInOut => [1.0 / 3.0, 0.0, 2.0 / 3.0, 1.0],
-            Easing::Bezier { points } => points,
-        };
-        let points = [
-            BezierPoint { x: 0.0, y: 0.0 },
-            BezierPoint { x: x1, y: y1 },
-            BezierPoint { x: x2, y: y2 },
-            BezierPoint { x: 1.0, y: 1.0 },
-        ];
-        let start_parameter = cubic_parameter_for_x(from, x1, x2);
-        let end_parameter = cubic_parameter_for_x(to, x1, x2);
-        let segment = cubic_subsegment(points, start_parameter, end_parameter);
-        let dx = segment[3].x - segment[0].x;
-        let dy = segment[3].y - segment[0].y;
-        if dx <= f32::EPSILON {
-            return Err(ModelError::InvalidParam(
-                "easing subsegment has no time span".into(),
-            ));
-        }
-        if dy.abs() <= f32::EPSILON {
-            let midpoint = self.apply(0.5 * (from + to));
-            if (midpoint - segment[0].y).abs() <= f32::EPSILON {
-                return Ok(Easing::Linear);
-            }
-            return Err(ModelError::InvalidParam(
-                "easing subsegment with equal endpoints is not representable".into(),
-            ));
-        }
-
-        let normalize_x = |x: f32| ((x - segment[0].x) / dx).clamp(0.0, 1.0);
-        let normalize_y = |y: f32| (y - segment[0].y) / dy;
-        Ok(Easing::Bezier {
-            points: [
-                normalize_x(segment[1].x),
-                normalize_y(segment[1].y),
-                normalize_x(segment[2].x),
-                normalize_y(segment[2].y),
-            ],
-        })
-    }
-
-    /// `Ok` iff a bezier's x control points are within `0..=1` and every
-    /// component is finite (an x outside the unit range makes the curve
-    /// non-monotonic in time — not a function of t).
-    pub fn validate(self) -> Result<(), ModelError> {
-        if let Easing::Bezier { points } = self {
-            if points.iter().any(|v| !v.is_finite()) {
-                return Err(ModelError::InvalidParam(
-                    "bezier easing has non-finite control point".into(),
-                ));
-            }
-            let [x1, _, x2, _] = points;
-            if !(0.0..=1.0).contains(&x1) || !(0.0..=1.0).contains(&x2) {
-                return Err(ModelError::InvalidParam(
-                    "bezier easing x control points must be in 0..=1".into(),
-                ));
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Evaluate a CSS-style cubic bezier easing at progress `t`: solve the curve
-/// parameter `s` where `x(s) = t` (Newton with bisection fallback), then
-/// return `y(s)`. Endpoints are fixed at (0,0) and (1,1).
-fn cubic_bezier(t: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
-    if t <= 0.0 {
-        return 0.0;
-    }
-    if t >= 1.0 {
-        return 1.0;
-    }
-    let s = cubic_parameter_for_x(t, x1, x2);
-    let (cy, by, ay) = poly_coefficients(y1, y2);
-    ((ay * s + by) * s + cy) * s
-}
-
-/// Parameter `s` where a unit cubic Bézier with x controls `x1`/`x2`
-/// intersects normalized time `x`. Newton converges quickly for ordinary
-/// curves; bounded bisection handles flat derivatives deterministically.
-fn cubic_parameter_for_x(x: f32, x1: f32, x2: f32) -> f32 {
-    if x <= 0.0 {
-        return 0.0;
-    }
-    if x >= 1.0 {
-        return 1.0;
-    }
-    let (cx, bx, ax) = poly_coefficients(x1, x2);
-    let eval = |s: f32| ((ax * s + bx) * s + cx) * s;
-    let mut s = x;
-    for _ in 0..8 {
-        let error = eval(s) - x;
-        if error.abs() < 1e-7 && (0.0..=1.0).contains(&s) {
-            return s;
-        }
-        let dx = (3.0 * ax * s + 2.0 * bx) * s + cx;
-        if dx.abs() < 1e-6 {
-            break;
-        }
-        s -= error / dx;
-        if !(0.0..=1.0).contains(&s) {
-            break;
-        }
-    }
-
-    let (mut lo, mut hi) = (0.0f32, 1.0f32);
-    for _ in 0..32 {
-        s = 0.5 * (lo + hi);
-        let value = eval(s);
-        if (value - x).abs() < 1e-7 {
-            return s;
-        }
-        if value < x {
-            lo = s;
-        } else {
-            hi = s;
-        }
-    }
-    0.5 * (lo + hi)
-}
-
-/// Coefficients `(c, b, a)` of `B(s) = a·s³ + b·s² + c·s` for a unit bezier
-/// with inner control values `p1`, `p2`.
-fn poly_coefficients(p1: f32, p2: f32) -> (f32, f32, f32) {
-    let c = 3.0 * p1;
-    let b = 3.0 * (p2 - p1) - c;
-    let a = 1.0 - c - b;
-    (c, b, a)
-}
-
-#[derive(Clone, Copy)]
-struct BezierPoint {
-    x: f32,
-    y: f32,
-}
-
-impl BezierPoint {
-    fn lerp(self, other: Self, t: f32) -> Self {
-        Self {
-            x: self.x + (other.x - self.x) * t,
-            y: self.y + (other.y - self.y) * t,
-        }
-    }
-}
-
-/// The exact cubic control polygon over parameter interval `from..=to`.
-fn cubic_subsegment(points: [BezierPoint; 4], from: f32, to: f32) -> [BezierPoint; 4] {
-    let (_, after_start) = split_cubic(points, from);
-    let relative_end = ((to - from) / (1.0 - from)).clamp(0.0, 1.0);
-    let (segment, _) = split_cubic(after_start, relative_end);
-    segment
-}
-
-/// De Casteljau subdivision at parameter `t`.
-fn split_cubic(points: [BezierPoint; 4], t: f32) -> ([BezierPoint; 4], [BezierPoint; 4]) {
-    let p01 = points[0].lerp(points[1], t);
-    let p12 = points[1].lerp(points[2], t);
-    let p23 = points[2].lerp(points[3], t);
-    let p012 = p01.lerp(p12, t);
-    let p123 = p12.lerp(p23, t);
-    let p = p012.lerp(p123, t);
-    ([points[0], p01, p012, p], [p, p123, p23, points[3]])
-}
+pub use easing::{EASING_PRESETS, Easing, EasingPreset, easing_preset};
+pub use presets::{MIN_PRESET_SEGMENT_TICKS, PiecewiseEasingPreset, expand_preset};
 
 /// Values a [`Param`] can animate: lerp-able, plain-old-data.
 pub trait Lerp: Copy {
     fn lerp(a: Self, b: Self, t: f32) -> Self;
 }
+
+/// Marker for [`Lerp`] types whose `lerp(a, b, t)` is safe for `t` outside
+/// `[0, 1]` (overshoot for elastic / back presets). Implemented for scalars,
+/// vec2, and [`crate::Scale2`]. Not implemented for colors (`[u8; 4]`) or
+/// [`crate::CropRect`] — those clamp / wrap and must not receive piecewise
+/// overshoot presets.
+pub trait Extrapolate: Lerp {}
+
+impl Extrapolate for f32 {}
+impl Extrapolate for [f32; 2] {}
 
 impl Lerp for f32 {
     fn lerp(a: Self, b: Self, t: f32) -> Self {
@@ -327,8 +73,138 @@ impl Lerp for [u8; 4] {
     }
 }
 
+/// Segment interpolation with access to the bounding keyframes; the default
+/// forwards to plain [`Lerp`]. `[f32; 2]` overrides it to follow cubic bezier
+/// motion paths when spatial tangents are present.
+///
+/// Temporal easing controls SPEED along the path; spatial tangents control
+/// SHAPE (After Effects semantics). Both tangents zero/`None` → exact legacy
+/// straight-line lerp (early-return, bit-identical).
+///
+/// Public because it bounds [`Param::sample`]; outside this crate, implement
+/// the default (`impl SegmentSample for T {}`) for any custom [`Lerp`] type.
+pub trait SegmentSample: Lerp {
+    fn segment_sample(a: &Keyframe<Self>, b: &Keyframe<Self>, eased_t: f32) -> Self {
+        Lerp::lerp(a.value, b.value, eased_t)
+    }
+}
+
+impl SegmentSample for f32 {}
+impl SegmentSample for [u8; 4] {}
+
+impl SegmentSample for [f32; 2] {
+    fn segment_sample(a: &Keyframe<Self>, b: &Keyframe<Self>, eased_t: f32) -> Self {
+        let out_t = a.tangents.map(|t| t.out_t).unwrap_or([0.0, 0.0]);
+        let in_t = b.tangents.map(|t| t.in_t).unwrap_or([0.0, 0.0]);
+        if is_zero_vec2(&out_t) && is_zero_vec2(&in_t) {
+            return Lerp::lerp(a.value, b.value, eased_t);
+        }
+        let p0 = a.value;
+        let p1 = [p0[0] + out_t[0], p0[1] + out_t[1]];
+        let p3 = b.value;
+        let p2 = [p3[0] + in_t[0], p3[1] + in_t[1]];
+        let u = arc_length_parameter(p0, p1, p2, p3, eased_t.clamp(0.0, 1.0));
+        eval_cubic_bezier2(p0, p1, p2, p3, u)
+    }
+}
+
+/// Spatial bezier handles for 2-d position segments (motion paths). Offsets
+/// are relative to the keyframe's value, in the same units as the value.
+/// `out_t` shapes the segment LEAVING this keyframe, `in_t` the segment
+/// ARRIVING at it. `None` ⇔ straight-line (legacy) motion.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SpatialTangents {
+    #[serde(rename = "o", default, skip_serializing_if = "is_zero_vec2")]
+    pub out_t: [f32; 2],
+    #[serde(rename = "i", default, skip_serializing_if = "is_zero_vec2")]
+    pub in_t: [f32; 2],
+}
+
+impl SpatialTangents {
+    /// Both handles at the origin — equivalent to a missing `tangents` slot
+    /// for sampling, but distinct in serde when explicitly stored.
+    pub const ZERO: Self = Self {
+        out_t: [0.0, 0.0],
+        in_t: [0.0, 0.0],
+    };
+
+    /// `Ok` when every component is finite and within ±4 canvas fractions
+    /// (generous for motion-path handles).
+    pub fn validate(self) -> Result<(), ModelError> {
+        for c in [self.out_t[0], self.out_t[1], self.in_t[0], self.in_t[1]] {
+            if !c.is_finite() || c.abs() > 4.0 {
+                return Err(ModelError::InvalidParam(format!(
+                    "spatial tangent component {c} must be finite and within ±4.0"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn is_zero_vec2(v: &[f32; 2]) -> bool {
+    v[0] == 0.0 && v[1] == 0.0
+}
+
+/// Evaluate a 2-d cubic bezier at parameter `u`.
+fn eval_cubic_bezier2(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], u: f32) -> [f32; 2] {
+    let u2 = u * u;
+    let u3 = u2 * u;
+    let mu = 1.0 - u;
+    let mu2 = mu * mu;
+    let mu3 = mu2 * mu;
+    [
+        mu3 * p0[0] + 3.0 * mu2 * u * p1[0] + 3.0 * mu * u2 * p2[0] + u3 * p3[0],
+        mu3 * p0[1] + 3.0 * mu2 * u * p1[1] + 3.0 * mu * u2 * p2[1] + u3 * p3[1],
+    ]
+}
+
+/// Map eased progress `t` in `0..=1` to a cubic parameter `u` so that equal
+/// `t` steps travel roughly equal arc length along the curve.
+///
+/// Builds a 17-point cumulative chord-length table (16 segments, stack array,
+/// no alloc). Acceptable cost: 17 bezier evals per curved segment per sample
+/// call — motion paths are rare relative to straight segments.
+fn arc_length_parameter(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], t: f32) -> f32 {
+    const LUT_SIZE: usize = 17;
+    let mut cumlen = [0.0f32; LUT_SIZE];
+    let mut prev = p0;
+    for i in 1..LUT_SIZE {
+        let u = i as f32 / (LUT_SIZE - 1) as f32;
+        let pt = eval_cubic_bezier2(p0, p1, p2, p3, u);
+        let dx = pt[0] - prev[0];
+        let dy = pt[1] - prev[1];
+        cumlen[i] = cumlen[i - 1] + (dx * dx + dy * dy).sqrt();
+        prev = pt;
+    }
+    let total = cumlen[LUT_SIZE - 1];
+    if total <= f32::EPSILON {
+        return t;
+    }
+    let target = t * total;
+    // First index with cumlen[i] >= target (linear scan; 17 entries).
+    let mut hi = 1;
+    while hi < LUT_SIZE - 1 && cumlen[hi] < target {
+        hi += 1;
+    }
+    let lo = hi - 1;
+    let span = cumlen[hi] - cumlen[lo];
+    let local = if span > 0.0 {
+        (target - cumlen[lo]) / span
+    } else {
+        0.0
+    };
+    let u0 = lo as f32 / (LUT_SIZE - 1) as f32;
+    let u1 = hi as f32 / (LUT_SIZE - 1) as f32;
+    u0 + (u1 - u0) * local
+}
+
 /// One point on a keyframed curve. `tick` is clip-relative (offset from the
 /// clip's timeline start) at the timeline rate.
+///
+/// `tangents` is present on every keyframe type for serde simplicity, but
+/// only `[f32; 2]` [`SegmentSample`] reads it. Routing rejects tangents on
+/// non-position params.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Keyframe<T> {
     /// Offset from the clip's timeline start, in timeline-rate ticks.
@@ -340,6 +216,22 @@ pub struct Keyframe<T> {
     /// Curve of the segment leaving this keyframe.
     #[serde(rename = "e", default, skip_serializing_if = "is_linear")]
     pub easing: Easing,
+    /// Spatial bezier handles (motion paths). Only meaningful for
+    /// `[f32; 2]` position params; ignored by other samplers.
+    #[serde(rename = "s", default, skip_serializing_if = "Option::is_none")]
+    pub tangents: Option<SpatialTangents>,
+}
+
+impl<T> Keyframe<T> {
+    /// Build a keyframe with no spatial tangents (straight-line segments).
+    pub fn new(tick: i64, value: T, easing: Easing) -> Self {
+        Self {
+            tick,
+            value,
+            easing,
+            tangents: None,
+        }
+    }
 }
 
 fn is_linear(easing: &Easing) -> bool {
@@ -366,7 +258,7 @@ pub enum Param<T> {
     Constant(T),
 }
 
-impl<T: Lerp> Param<T> {
+impl<T: SegmentSample> Param<T> {
     /// Value at a clip-relative `tick`. Before the first keyframe the first
     /// value holds; after the last, the last (CapCut behavior). Between two
     /// keyframes the segment's easing shapes the lerp.
@@ -404,7 +296,8 @@ impl<T: Lerp> Param<T> {
                 let k1 = &keyframes[idx];
                 let span = (k1.tick - k0.tick) as f64;
                 let t = ((tick - k0.tick as f64) / span) as f32;
-                T::lerp(k0.value, k1.value, k0.easing.apply(t))
+                let eased_t = k0.easing.apply(t);
+                T::segment_sample(k0, k1, eased_t)
             }
         }
     }
@@ -420,38 +313,54 @@ impl<T: Copy> Param<T> {
     }
 
     /// Insert or replace the keyframe at `tick`. A constant param becomes a
-    /// single-keyframe curve.
+    /// single-keyframe curve. Replacing an existing keyframe preserves its
+    /// spatial tangents (use [`Self::set_keyframe_tangents`] to change them).
     pub fn set_keyframe(&mut self, tick: i64, value: T, easing: Easing) {
         match self {
             Param::Constant(_) => {
                 *self = Param::Keyframed {
-                    keyframes: vec![Keyframe {
-                        tick,
-                        value,
-                        easing,
-                    }],
+                    keyframes: vec![Keyframe::new(tick, value, easing)],
                 };
             }
             Param::Keyframed { keyframes } => {
                 match keyframes.binary_search_by_key(&tick, |kf| kf.tick) {
                     Ok(i) => {
+                        let tangents = keyframes[i].tangents;
                         keyframes[i] = Keyframe {
                             tick,
                             value,
                             easing,
-                        }
+                            tangents,
+                        };
                     }
-                    Err(i) => keyframes.insert(
-                        i,
-                        Keyframe {
-                            tick,
-                            value,
-                            easing,
-                        },
-                    ),
+                    Err(i) => keyframes.insert(i, Keyframe::new(tick, value, easing)),
                 }
             }
         }
+    }
+
+    /// Set or clear spatial tangents on the keyframe at `tick`. Errors when
+    /// no keyframe sits there (including on a constant param).
+    pub fn set_keyframe_tangents(
+        &mut self,
+        tick: i64,
+        tangents: Option<SpatialTangents>,
+    ) -> Result<(), ModelError> {
+        let Param::Keyframed { keyframes } = self else {
+            return Err(ModelError::InvalidParam(format!(
+                "no keyframe at {tick} to set tangents"
+            )));
+        };
+        let Ok(i) = keyframes.binary_search_by_key(&tick, |kf| kf.tick) else {
+            return Err(ModelError::InvalidParam(format!(
+                "no keyframe at {tick} to set tangents"
+            )));
+        };
+        if let Some(t) = tangents {
+            t.validate()?;
+        }
+        keyframes[i].tangents = tangents;
+        Ok(())
     }
 
     /// Remove the keyframe at exactly `tick`. Removing the last keyframe
@@ -478,6 +387,54 @@ impl<T: Copy> Param<T> {
     }
 }
 
+impl<T: Lerp + Extrapolate> Param<T> {
+    /// Expand the outgoing segment at `from_tick` with a piecewise easing
+    /// preset. Requires a successor keyframe. Removes any intermediates
+    /// strictly between `from` and `to`, then writes the expanded sequence.
+    /// Short segments (< [`MIN_PRESET_SEGMENT_TICKS`]) leave the pair unchanged
+    /// (still `Ok`).
+    pub fn apply_easing_preset(
+        &mut self,
+        from_tick: i64,
+        preset: PiecewiseEasingPreset,
+    ) -> Result<(), ModelError> {
+        let Param::Keyframed { keyframes } = self else {
+            return Err(ModelError::InvalidParam(
+                "easing preset requires a keyframed parameter".into(),
+            ));
+        };
+        let idx = keyframes
+            .iter()
+            .position(|kf| kf.tick == from_tick)
+            .ok_or_else(|| {
+                ModelError::InvalidParam(format!(
+                    "no keyframe at tick {from_tick} for easing preset"
+                ))
+            })?;
+        let Some(to) = keyframes.get(idx + 1).copied() else {
+            return Err(ModelError::InvalidParam(
+                "easing preset requires a following keyframe on the segment".into(),
+            ));
+        };
+        let from = keyframes[idx];
+        let expanded = expand_preset(preset, &from, &to);
+        let remove: Vec<i64> = keyframes
+            .iter()
+            .filter(|kf| kf.tick > from.tick && kf.tick < to.tick)
+            .map(|kf| kf.tick)
+            .collect();
+        for tick in remove {
+            self.remove_keyframe(tick);
+        }
+        for kf in expanded {
+            // `set_keyframe` preserves existing spatial tangents on replace;
+            // new intermediate ticks start with `None`.
+            self.set_keyframe(kf.tick, kf.value, kf.easing);
+        }
+        Ok(())
+    }
+}
+
 impl<T: Clone> Param<T> {
     /// A copy with every keyframe tick remapped by `f` (constants pass through
     /// unchanged). Used to rebase a clip-relative envelope from timeline ticks
@@ -494,6 +451,7 @@ impl<T: Clone> Param<T> {
                         tick: f(kf.tick),
                         value: kf.value.clone(),
                         easing: kf.easing,
+                        tangents: kf.tangents,
                     })
                     .collect(),
             },
@@ -506,6 +464,9 @@ impl<T: Clone> Param<T> {
     ///
     /// Clip splitting uses this to preserve an absolute animation curve on
     /// the tail while rebasing its clip-relative origin to the split point.
+    /// Spatial tangents travel with their keyframes unchanged — the full
+    /// segment (including bezier handles) stays intact on both halves, so
+    /// mid-segment splits need no de Casteljau subdivision.
     pub fn shift_ticks(&mut self, delta: i64) -> Result<(), ModelError> {
         let Param::Keyframed { keyframes } = self else {
             return Ok(());
@@ -517,6 +478,7 @@ impl<T: Clone> Param<T> {
                     tick: kf.tick.checked_add(delta).ok_or(ModelError::TimeOverflow)?,
                     value: kf.value.clone(),
                     easing: kf.easing,
+                    tangents: kf.tangents,
                 })
             })
             .collect::<Result<Vec<_>, ModelError>>()?;
@@ -558,6 +520,9 @@ impl<T> Param<T> {
         }
         for kf in keyframes {
             kf.easing.validate()?;
+            if let Some(t) = kf.tangents {
+                t.validate()?;
+            }
         }
         Ok(())
     }
@@ -584,391 +549,4 @@ impl<T> From<T> for Param<T> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn kf(tick: i64, value: f32) -> Keyframe<f32> {
-        Keyframe {
-            tick,
-            value,
-            easing: Easing::Linear,
-        }
-    }
-
-    // --- sampling -----------------------------------------------------------
-
-    #[test]
-    fn constant_samples_everywhere() {
-        let p = Param::Constant(2.5f32);
-        assert_eq!(p.sample(-100), 2.5);
-        assert_eq!(p.sample(0), 2.5);
-        assert_eq!(p.sample(i64::MAX), 2.5);
-    }
-
-    #[test]
-    fn keyframed_clamps_outside_range() {
-        let p = Param::Keyframed {
-            keyframes: vec![kf(10, 1.0), kf(20, 3.0)],
-        };
-        assert_eq!(p.sample(0), 1.0);
-        assert_eq!(p.sample(10), 1.0);
-        assert_eq!(p.sample(20), 3.0);
-        assert_eq!(p.sample(1000), 3.0);
-    }
-
-    #[test]
-    fn linear_interpolation_between_keyframes() {
-        let p = Param::Keyframed {
-            keyframes: vec![kf(0, 0.0), kf(10, 10.0)],
-        };
-        assert_eq!(p.sample(5), 5.0);
-        assert_eq!(p.sample(1), 1.0);
-        assert_eq!(p.sample(9), 9.0);
-    }
-
-    #[test]
-    fn single_keyframe_acts_constant() {
-        let p = Param::Keyframed {
-            keyframes: vec![kf(50, 7.0)],
-        };
-        assert_eq!(p.sample(0), 7.0);
-        assert_eq!(p.sample(50), 7.0);
-        assert_eq!(p.sample(100), 7.0);
-    }
-
-    #[test]
-    fn multi_segment_picks_correct_pair() {
-        let p = Param::Keyframed {
-            keyframes: vec![kf(0, 0.0), kf(10, 100.0), kf(30, 0.0)],
-        };
-        assert_eq!(p.sample(5), 50.0);
-        assert_eq!(p.sample(10), 100.0);
-        assert_eq!(p.sample(20), 50.0);
-    }
-
-    #[test]
-    fn fractional_sampling_interpolates_between_ticks() {
-        let p = Param::Keyframed {
-            keyframes: vec![kf(0, 0.0), kf(10, 10.0)],
-        };
-        // Whole ticks agree with the integer path.
-        assert_eq!(p.sample_at(5.0), p.sample(5));
-        // Sub-tick positions land between frame values.
-        assert_eq!(p.sample_at(5.5), 5.5);
-        assert_eq!(p.sample_at(0.25), 0.25);
-        // Clamping matches the integer path on both sides.
-        assert_eq!(p.sample_at(-3.7), 0.0);
-        assert_eq!(p.sample_at(10.4), 10.0);
-        assert_eq!(Param::Constant(2.5f32).sample_at(1.5), 2.5);
-    }
-
-    #[test]
-    fn vec2_lerp() {
-        let p = Param::Keyframed {
-            keyframes: vec![
-                Keyframe {
-                    tick: 0,
-                    value: [0.0, 0.0],
-                    easing: Easing::Linear,
-                },
-                Keyframe {
-                    tick: 10,
-                    value: [1.0, -1.0],
-                    easing: Easing::Linear,
-                },
-            ],
-        };
-        assert_eq!(p.sample(5), [0.5, -0.5]);
-    }
-
-    // --- easing ---------------------------------------------------------------
-
-    #[test]
-    fn easing_endpoints_are_exact() {
-        for easing in [
-            Easing::Linear,
-            Easing::EaseIn,
-            Easing::EaseOut,
-            Easing::EaseInOut,
-            Easing::Bezier {
-                points: [0.42, 0.0, 0.58, 1.0],
-            },
-        ] {
-            assert_eq!(easing.apply(0.0), 0.0, "{easing:?} at 0");
-            assert!((easing.apply(1.0) - 1.0).abs() < 1e-4, "{easing:?} at 1");
-        }
-    }
-
-    #[test]
-    fn ease_in_starts_slow_ease_out_starts_fast() {
-        assert!(Easing::EaseIn.apply(0.25) < 0.25);
-        assert!(Easing::EaseOut.apply(0.25) > 0.25);
-        let mid = Easing::EaseInOut.apply(0.5);
-        assert!((mid - 0.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn bezier_matches_css_ease_in_out_shape() {
-        // cubic-bezier(0.42, 0, 0.58, 1) — CSS "ease-in-out".
-        let e = Easing::Bezier {
-            points: [0.42, 0.0, 0.58, 1.0],
-        };
-        assert!(e.apply(0.1) < 0.1);
-        assert!(e.apply(0.9) > 0.9);
-        assert!((e.apply(0.5) - 0.5).abs() < 1e-3);
-        // Monotonic over a sweep.
-        let mut prev = 0.0;
-        for i in 0..=100 {
-            let v = e.apply(i as f32 / 100.0);
-            assert!(v >= prev - 1e-4, "non-monotonic at {i}");
-            prev = v;
-        }
-    }
-
-    #[test]
-    fn easing_subsegments_preserve_original_progress() {
-        const FROM: f32 = 0.2;
-        const TO: f32 = 0.8;
-        for easing in [
-            Easing::Linear,
-            Easing::EaseIn,
-            Easing::EaseOut,
-            Easing::EaseInOut,
-            Easing::Bezier {
-                points: [0.42, 0.0, 0.58, 1.0],
-            },
-        ] {
-            let sliced = easing.subsegment(FROM, TO).unwrap();
-            let start = easing.apply(FROM);
-            let span = easing.apply(TO) - start;
-            for step in 0..=20 {
-                let u = step as f32 / 20.0;
-                let original = easing.apply(FROM + (TO - FROM) * u);
-                let expected = (original - start) / span;
-                assert!(
-                    (sliced.apply(u) - expected).abs() < 2e-4,
-                    "{easing:?} slice diverged at {u}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn easing_integrals_match_closed_form_endpoints() {
-        // ∫₀¹ of each easing over the unit interval.
-        assert!((Easing::Linear.integral_to(1.0) - 0.5).abs() < 1e-6);
-        assert!((Easing::EaseIn.integral_to(1.0) - 1.0 / 3.0).abs() < 1e-6);
-        assert!((Easing::EaseOut.integral_to(1.0) - 2.0 / 3.0).abs() < 1e-6);
-        assert!((Easing::EaseInOut.integral_to(1.0) - 0.5).abs() < 1e-6);
-        // The symmetric CSS ease-in-out bezier integrates to ½ by symmetry.
-        let e = Easing::Bezier {
-            points: [0.42, 0.0, 0.58, 1.0],
-        };
-        assert!((e.integral_to(1.0) - 0.5).abs() < 1e-3);
-        // Integral is 0 at t=0 and monotonic increasing.
-        for easing in [
-            Easing::Linear,
-            Easing::EaseIn,
-            Easing::EaseOut,
-            Easing::EaseInOut,
-        ] {
-            assert_eq!(easing.integral_to(0.0), 0.0);
-            let mut prev = 0.0;
-            for i in 0..=20 {
-                let v = easing.integral_to(i as f32 / 20.0);
-                assert!(v >= prev - 1e-6, "{easing:?} non-monotonic integral");
-                prev = v;
-            }
-        }
-    }
-
-    #[test]
-    fn bezier_validation_rejects_bad_x() {
-        assert!(
-            Easing::Bezier {
-                points: [1.5, 0.0, 0.5, 1.0]
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            Easing::Bezier {
-                points: [0.5, 0.0, -0.1, 1.0]
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            Easing::Bezier {
-                points: [0.5, f32::NAN, 0.5, 1.0]
-            }
-            .validate()
-            .is_err()
-        );
-        // Overshooting y is allowed (CSS semantics).
-        assert!(
-            Easing::Bezier {
-                points: [0.3, -0.5, 0.7, 1.5]
-            }
-            .validate()
-            .is_ok()
-        );
-    }
-
-    // --- mutation ---------------------------------------------------------------
-
-    #[test]
-    fn set_keyframe_on_constant_becomes_curve() {
-        let mut p = Param::Constant(1.0f32);
-        p.set_keyframe(10, 2.0, Easing::Linear);
-        assert!(p.is_animated());
-        assert_eq!(p.keyframes().len(), 1);
-        assert_eq!(p.sample(10), 2.0);
-    }
-
-    #[test]
-    fn set_keyframe_inserts_sorted_and_replaces() {
-        let mut p = Param::Constant(0.0f32);
-        p.set_keyframe(20, 2.0, Easing::Linear);
-        p.set_keyframe(0, 0.0, Easing::Linear);
-        p.set_keyframe(10, 1.0, Easing::Linear);
-        let ticks: Vec<i64> = p.keyframes().iter().map(|k| k.tick).collect();
-        assert_eq!(ticks, vec![0, 10, 20]);
-
-        p.set_keyframe(10, 5.0, Easing::EaseIn);
-        assert_eq!(p.keyframes().len(), 3);
-        assert_eq!(p.sample(10), 5.0);
-    }
-
-    #[test]
-    fn remove_keyframe_collapses_last_to_constant() {
-        let mut p = Param::Constant(0.0f32);
-        p.set_keyframe(10, 7.0, Easing::Linear);
-        assert!(!p.remove_keyframe(5), "no keyframe at 5");
-        assert!(p.remove_keyframe(10));
-        assert!(!p.is_animated());
-        assert_eq!(p.constant(), Some(7.0));
-    }
-
-    #[test]
-    fn set_constant_wipes_keyframes() {
-        let mut p = Param::Constant(0.0f32);
-        p.set_keyframe(10, 1.0, Easing::Linear);
-        p.set_keyframe(20, 2.0, Easing::Linear);
-        p.set_constant(9.0);
-        assert_eq!(p.constant(), Some(9.0));
-        assert!(p.keyframes().is_empty());
-    }
-
-    // --- serde -----------------------------------------------------------------
-
-    #[test]
-    fn constant_serializes_as_bare_value() {
-        let p = Param::Constant(1.5f32);
-        assert_eq!(serde_json::to_string(&p).unwrap(), "1.5");
-        let v: Param<[f32; 2]> = Param::Constant([0.0, 0.25]);
-        assert_eq!(serde_json::to_string(&v).unwrap(), "[0.0,0.25]");
-    }
-
-    #[test]
-    fn bare_value_deserializes_as_constant() {
-        let p: Param<f32> = serde_json::from_str("2.0").unwrap();
-        assert_eq!(p, Param::Constant(2.0));
-        let v: Param<[f32; 2]> = serde_json::from_str("[0.1,0.2]").unwrap();
-        assert_eq!(v, Param::Constant([0.1, 0.2]));
-    }
-
-    #[test]
-    fn keyframed_roundtrips_compactly() {
-        let p = Param::Keyframed {
-            keyframes: vec![
-                Keyframe {
-                    tick: 0,
-                    value: 1.0f32,
-                    easing: Easing::Linear,
-                },
-                Keyframe {
-                    tick: 24,
-                    value: 2.0,
-                    easing: Easing::EaseInOut,
-                },
-            ],
-        };
-        let json = serde_json::to_string(&p).unwrap();
-        // Linear easing is elided; non-linear spelled out.
-        assert_eq!(
-            json,
-            r#"{"kf":[{"t":0,"v":1.0},{"t":24,"v":2.0,"e":"ease_in_out"}]}"#
-        );
-        let back: Param<f32> = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, p);
-    }
-
-    #[test]
-    fn bezier_easing_roundtrips() {
-        let p = Param::Keyframed {
-            keyframes: vec![
-                Keyframe {
-                    tick: 0,
-                    value: 0.0f32,
-                    easing: Easing::Bezier {
-                        points: [0.42, 0.0, 0.58, 1.0],
-                    },
-                },
-                Keyframe {
-                    tick: 10,
-                    value: 1.0,
-                    easing: Easing::Linear,
-                },
-            ],
-        };
-        let json = serde_json::to_string(&p).unwrap();
-        let back: Param<f32> = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, p);
-    }
-
-    #[test]
-    fn vec2_keyframed_roundtrips() {
-        let p = Param::Keyframed {
-            keyframes: vec![
-                Keyframe {
-                    tick: 0,
-                    value: [0.0f32, 0.0],
-                    easing: Easing::Linear,
-                },
-                Keyframe {
-                    tick: 48,
-                    value: [0.5, -0.5],
-                    easing: Easing::EaseOut,
-                },
-            ],
-        };
-        let json = serde_json::to_string(&p).unwrap();
-        let back: Param<[f32; 2]> = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, p);
-    }
-
-    // --- validation -------------------------------------------------------------
-
-    #[test]
-    fn validate_shape_rejects_unsorted_and_empty() {
-        let unsorted: Param<f32> = Param::Keyframed {
-            keyframes: vec![kf(10, 1.0), kf(5, 2.0)],
-        };
-        assert!(unsorted.validate_shape().is_err());
-
-        let dup: Param<f32> = Param::Keyframed {
-            keyframes: vec![kf(10, 1.0), kf(10, 2.0)],
-        };
-        assert!(dup.validate_shape().is_err());
-
-        let empty: Param<f32> = Param::Keyframed { keyframes: vec![] };
-        assert!(empty.validate_shape().is_err());
-
-        let ok: Param<f32> = Param::Keyframed {
-            keyframes: vec![kf(0, 1.0), kf(10, 2.0)],
-        };
-        assert!(ok.validate_shape().is_ok());
-        assert!(Param::Constant(1.0f32).validate_shape().is_ok());
-    }
-}
+mod tests;

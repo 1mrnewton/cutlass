@@ -1,7 +1,10 @@
-use cutlass_compositor::{LayerChromaKey, LayerEffects, LayerMask, PassInstance, mask_kind};
+use cutlass_compositor::{
+    BlendMode, LayerBackground, LayerChromaKey, LayerEffects, LayerGlow, LayerMask, LayerOutline,
+    LayerShadow, LayerStyles, PassInstance, mask_kind,
+};
 use cutlass_models::MaskKind;
 
-use crate::scene::ResolvedPass;
+use crate::scene::{ResolvedPass, SceneStyles};
 
 /// Packed effect chain: catalog-static ids plus owned parameter values.
 ///
@@ -37,11 +40,18 @@ pub(super) fn pack_effects(resolved: &[ResolvedPass]) -> EffectChain {
     EffectChain { passes }
 }
 
+/// Floor for mask size axes (shader divides by size; avoid zeros).
+const MASK_SIZE_EPS: f32 = 1e-3;
+
 pub(super) fn layer_effects(layer: &crate::scene::SceneLayer) -> LayerEffects {
     let mask = layer.mask.map(|m| LayerMask {
         kind: mask_kind_id(m.kind),
         feather: m.feather,
         invert: u32::from(m.invert),
+        center: m.center,
+        size: [m.size[0].max(MASK_SIZE_EPS), m.size[1].max(MASK_SIZE_EPS)],
+        rotation_rad: m.rotation_rad,
+        roundness: m.roundness,
     });
     let chroma_key = layer.chroma_key.map(|c| LayerChromaKey {
         rgb: [
@@ -63,5 +73,54 @@ fn mask_kind_id(kind: MaskKind) -> u32 {
         MaskKind::Rectangle => mask_kind::RECTANGLE,
         MaskKind::Heart => mask_kind::HEART,
         MaskKind::Star => mask_kind::STAR,
+    }
+}
+
+/// Map a model blend mode onto the compositor's GPU blend id.
+pub(super) fn blend_mode(mode: cutlass_models::BlendMode) -> BlendMode {
+    match mode {
+        cutlass_models::BlendMode::Normal => BlendMode::Normal,
+        cutlass_models::BlendMode::Darken => BlendMode::Darken,
+        cutlass_models::BlendMode::Multiply => BlendMode::Multiply,
+        cutlass_models::BlendMode::ColorBurn => BlendMode::ColorBurn,
+        cutlass_models::BlendMode::Lighten => BlendMode::Lighten,
+        cutlass_models::BlendMode::Screen => BlendMode::Screen,
+        cutlass_models::BlendMode::ColorDodge => BlendMode::ColorDodge,
+        cutlass_models::BlendMode::Add => BlendMode::Add,
+        cutlass_models::BlendMode::Overlay => BlendMode::Overlay,
+        cutlass_models::BlendMode::SoftLight => BlendMode::SoftLight,
+        cutlass_models::BlendMode::HardLight => BlendMode::HardLight,
+        cutlass_models::BlendMode::Difference => BlendMode::Difference,
+        cutlass_models::BlendMode::Exclusion => BlendMode::Exclusion,
+    }
+}
+
+/// Map resolved scene styles onto the compositor's layer-style uniforms.
+///
+/// `None` (or an empty styles block) keeps the compositor fast path.
+pub(super) fn layer_styles(styles: Option<&SceneStyles>) -> LayerStyles {
+    let Some(styles) = styles else {
+        return LayerStyles::default();
+    };
+    LayerStyles {
+        shadow: styles.shadow.map(|shadow| LayerShadow {
+            rgba: shadow.rgba,
+            offset: shadow.offset,
+            blur: shadow.blur,
+        }),
+        glow: styles.glow.map(|glow| LayerGlow {
+            rgba: glow.rgba,
+            radius: glow.radius,
+            intensity: glow.intensity,
+        }),
+        outline: styles.outline.map(|outline| LayerOutline {
+            rgba: outline.rgba,
+            width: outline.width,
+        }),
+        background: styles.background.map(|background| LayerBackground {
+            rgba: background.rgba,
+            padding: background.padding,
+            radius: background.radius,
+        }),
     }
 }

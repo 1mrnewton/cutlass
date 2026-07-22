@@ -6,7 +6,7 @@ use common::{image_asset, import_asset, rt, small_video_asset, temp_engine, tr};
 use cutlass_commands::{Command, EditCommand, EditOutcome};
 use cutlass_engine::ApplyOutcome;
 use cutlass_models::{
-    CanvasAspect, ClipParam, ClipTransform, CropRect, Easing, Generator, ParamValue, Shape,
+    CanvasAspect, ClipParam, ClipTransform, CropRect, Easing, Generator, Param, ParamValue, Shape,
     ShapeParam, TrackKind,
 };
 
@@ -449,11 +449,11 @@ fn undo_redo_set_generator_oscillates_style() {
 
     let styled = cutlass_models::TextStyle {
         bold: true,
-        size: 120.0,
-        fill: [10, 20, 30, 255],
+        size: 120.0.into(),
+        fill: [10, 20, 30, 255].into(),
         stroke: Some(cutlass_models::TextStroke {
-            rgba: [0, 0, 0, 255],
-            width: 8.0,
+            rgba: [0, 0, 0, 255].into(),
+            width: 8.0.into(),
         }),
         ..Default::default()
     };
@@ -530,7 +530,7 @@ fn undo_redo_set_clip_transform_oscillates() {
 
     let moved = ClipTransform {
         position: [0.25, -0.1],
-        scale: 0.5,
+        scale: 0.5.into(),
         rotation: 45.0,
         opacity: 0.8,
         ..ClipTransform::IDENTITY
@@ -575,7 +575,7 @@ fn invalid_transform_rejected_and_state_unchanged() {
             .apply(Command::Edit(EditCommand::SetClipTransform {
                 clip: clip_id,
                 transform: ClipTransform {
-                    scale: 0.0,
+                    scale: 0.0.into(),
                     ..ClipTransform::IDENTITY
                 },
                 at: None,
@@ -618,6 +618,7 @@ fn set_param_keyframe_undo_redo_roundtrip() {
             at: rt(0),
             value: ParamValue::Scalar(0.0),
             easing: Easing::Linear,
+            tangents: None,
         }))
         .expect("first keyframe");
     engine
@@ -627,6 +628,7 @@ fn set_param_keyframe_undo_redo_roundtrip() {
             at: rt(24),
             value: ParamValue::Scalar(1.0),
             easing: Easing::EaseInOut,
+            tangents: None,
         }))
         .expect("second keyframe");
 
@@ -901,10 +903,11 @@ fn set_clip_crop_undo_redo_roundtrip() {
             crop,
             flip_h: true,
             flip_v: false,
+            at: None,
         }))
         .expect("set crop");
     let clip = |engine: &cutlass_engine::Engine| engine.project().clip(clip_id).unwrap().clone();
-    assert_eq!(clip(&engine).crop, crop);
+    assert_eq!(clip(&engine).crop, Param::Constant(crop));
     assert!(clip(&engine).flip_h && !clip(&engine).flip_v);
 
     // One undo restores the full frame and both flips.
@@ -913,7 +916,7 @@ fn set_clip_crop_undo_redo_roundtrip() {
     assert!(!restored.has_custom_crop());
 
     assert!(engine.redo());
-    assert_eq!(clip(&engine).crop, crop);
+    assert_eq!(clip(&engine).crop, Param::Constant(crop));
     assert!(clip(&engine).flip_h);
 }
 
@@ -972,6 +975,7 @@ fn set_clip_crop_rejects_invalid_rects_and_audio_lanes() {
                 crop: CropRect::FULL,
                 flip_h: true,
                 flip_v: false,
+                at: None,
             }))
             .is_err()
     );
@@ -991,6 +995,7 @@ fn set_clip_crop_rejects_invalid_rects_and_audio_lanes() {
                 },
                 flip_h: false,
                 flip_v: false,
+                at: None,
             }))
             .is_err()
     );
@@ -1029,6 +1034,7 @@ fn remove_param_keyframe_undo_restores_curve() {
                 at: rt(tick),
                 value: ParamValue::Scalar(value + 1.0),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .expect("keyframe");
     }
@@ -1080,6 +1086,7 @@ fn set_param_constant_undo_restores_keyframes() {
                 at: rt(tick),
                 value: ParamValue::Scalar(tick as f32),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .expect("keyframe");
     }
@@ -1121,6 +1128,7 @@ fn param_keyframe_outside_clip_rejected() {
                 at: rt(48), // exclusive end — outside
                 value: ParamValue::Scalar(0.5),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .is_err()
     );
@@ -1148,6 +1156,7 @@ fn transform_gesture_at_playhead_keyframes_animated_property() {
                 at: rt(tick),
                 value: ParamValue::Scalar(value),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .expect("keyframe");
     }
@@ -1157,7 +1166,7 @@ fn transform_gesture_at_playhead_keyframes_animated_property() {
         .apply(Command::Edit(EditCommand::SetClipTransform {
             clip: clip_id,
             transform: ClipTransform {
-                scale: 2.5,
+                scale: 2.5.into(),
                 ..ClipTransform::IDENTITY
             },
             at: Some(rt(20)),
@@ -1167,9 +1176,9 @@ fn transform_gesture_at_playhead_keyframes_animated_property() {
     let transform = engine.project().clip(clip_id).unwrap().transform.clone();
     // Scale gained a keyframe; the endpoints survive.
     assert_eq!(transform.scale.keyframes().len(), 3);
-    assert_eq!(transform.sample(20).scale, 2.5);
-    assert_eq!(transform.sample(0).scale, 1.0);
-    assert_eq!(transform.sample(40).scale, 3.0);
+    assert_eq!(transform.sample(20).scale, 2.5.into());
+    assert_eq!(transform.sample(0).scale, 1.0.into());
+    assert_eq!(transform.sample(40).scale, 3.0.into());
     // Un-animated properties stay constant.
     assert!(!transform.position.is_animated());
 }
@@ -1748,6 +1757,7 @@ fn move_effect_undo_redo_restores_exact_instances() {
                 at: rt(tick),
                 value: ParamValue::Scalar(value),
                 easing,
+                tangents: None,
             }))
             .expect("set animated effect param");
     }
@@ -1791,6 +1801,7 @@ fn effect_param_keyframe_through_clip_param() {
             at: rt(0),
             value: ParamValue::Scalar(0.0),
             easing: Easing::Linear,
+            tangents: None,
         }))
         .expect("kf0");
     engine
@@ -1800,6 +1811,7 @@ fn effect_param_keyframe_through_clip_param() {
             at: rt(24),
             value: ParamValue::Scalar(8.0),
             easing: Easing::Linear,
+            tangents: None,
         }))
         .expect("kf24");
 
@@ -1856,6 +1868,7 @@ fn shape_param_keyframe_undo_redo_roundtrip() {
                 at: rt(tick),
                 value: ParamValue::Scalar(value),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .expect("keyframe");
     }
@@ -1894,6 +1907,7 @@ fn shape_fill_color_keyframes_animate_and_flatten() {
                 at: rt(tick),
                 value: ParamValue::Color(rgba),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .expect("keyframe");
     }
@@ -1937,6 +1951,7 @@ fn shape_param_commands_reject_bad_targets_without_history() {
                 at: rt(0),
                 value: ParamValue::Scalar(4.0),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .is_err()
     );
@@ -1951,6 +1966,7 @@ fn shape_param_commands_reject_bad_targets_without_history() {
                 at: rt(0),
                 value: ParamValue::Scalar(0.5),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .is_err()
     );
@@ -1966,6 +1982,7 @@ fn shape_param_commands_reject_bad_targets_without_history() {
                 at: rt(0),
                 value: ParamValue::Scalar(100.0),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .is_err()
     );
@@ -2061,6 +2078,140 @@ fn effect_commands_reject_unknown_ids_without_history() {
 // --- Phase I look commands ---------------------------------------------------
 
 #[test]
+fn set_clip_blend_mode_undo_redo_roundtrip() {
+    use cutlass_models::BlendMode;
+
+    let Some(path) = small_video_asset() else {
+        return;
+    };
+    let (_dir, mut engine) = temp_engine();
+    let media_id = import_asset(&mut engine, &path);
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
+    let clip_id = created(
+        engine
+            .apply(Command::Edit(EditCommand::AddClip {
+                track,
+                media: media_id,
+                source: tr(0, 48),
+                start: rt(0),
+            }))
+            .expect("add"),
+    );
+    let before = engine.project().clip(clip_id).unwrap().clone();
+    assert_eq!(before.blend_mode, BlendMode::Normal);
+
+    engine
+        .apply(Command::Edit(EditCommand::SetClipBlendMode {
+            clip: clip_id,
+            mode: BlendMode::Multiply,
+        }))
+        .expect("blend");
+    assert_eq!(
+        engine.project().clip(clip_id).unwrap().blend_mode,
+        BlendMode::Multiply
+    );
+
+    // Inverse (undo) restores the pre-edit clip snapshot.
+    assert!(engine.undo());
+    assert_eq!(engine.project().clip(clip_id).unwrap(), &before);
+    assert!(engine.redo());
+    assert_eq!(
+        engine.project().clip(clip_id).unwrap().blend_mode,
+        BlendMode::Multiply
+    );
+}
+
+#[test]
+fn set_clip_motion_blur_undo_redo_roundtrip() {
+    use cutlass_models::MotionBlur;
+
+    let Some(path) = small_video_asset() else {
+        return;
+    };
+    let (_dir, mut engine) = temp_engine();
+    let media_id = import_asset(&mut engine, &path);
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
+    let clip_id = created(
+        engine
+            .apply(Command::Edit(EditCommand::AddClip {
+                track,
+                media: media_id,
+                source: tr(0, 48),
+                start: rt(0),
+            }))
+            .expect("add"),
+    );
+    let before = engine.project().clip(clip_id).unwrap().clone();
+    assert!(before.motion_blur.is_default());
+
+    let blur = MotionBlur {
+        enabled: true,
+        shutter_deg: 270.0,
+        samples: 12,
+    };
+    engine
+        .apply(Command::Edit(EditCommand::SetClipMotionBlur {
+            clip: clip_id,
+            motion_blur: blur,
+        }))
+        .expect("motion blur");
+    assert_eq!(engine.project().clip(clip_id).unwrap().motion_blur, blur);
+
+    // Inverse (undo) restores the pre-edit clip snapshot.
+    assert!(engine.undo());
+    assert_eq!(engine.project().clip(clip_id).unwrap(), &before);
+    assert!(engine.redo());
+    assert_eq!(engine.project().clip(clip_id).unwrap().motion_blur, blur);
+}
+
+#[test]
+fn set_clip_layer_styles_undo_redo_roundtrip() {
+    use cutlass_models::{LayerShadow, LayerStyles, Param};
+
+    let Some(path) = small_video_asset() else {
+        return;
+    };
+    let (_dir, mut engine) = temp_engine();
+    let media_id = import_asset(&mut engine, &path);
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
+    let clip_id = created(
+        engine
+            .apply(Command::Edit(EditCommand::AddClip {
+                track,
+                media: media_id,
+                source: tr(0, 48),
+                start: rt(0),
+            }))
+            .expect("add"),
+    );
+    let before = engine.project().clip(clip_id).unwrap().clone();
+    assert!(before.styles.is_empty());
+
+    let styles = LayerStyles {
+        shadow: Some(LayerShadow {
+            rgba: Param::Constant([0, 0, 0, 128]),
+            offset: Param::Constant([4.0, 4.0]),
+            blur: Param::Constant(8.0),
+        }),
+        ..Default::default()
+    };
+    engine
+        .apply(Command::Edit(EditCommand::SetClipLayerStyles {
+            clip: clip_id,
+            styles: styles.clone(),
+        }))
+        .expect("styles");
+    assert_eq!(engine.project().clip(clip_id).unwrap().styles, styles);
+
+    // Inverse (undo) restores the pre-edit clip snapshot (styles cleared).
+    assert!(engine.undo());
+    assert_eq!(engine.project().clip(clip_id).unwrap(), &before);
+    assert!(engine.project().clip(clip_id).unwrap().styles.is_empty());
+    assert!(engine.redo());
+    assert_eq!(engine.project().clip(clip_id).unwrap().styles, styles);
+}
+
+#[test]
 fn look_commands_undo_redo_roundtrip() {
     use cutlass_models::{
         AnimationRef, AnimationSlot, ChromaKey, ColorAdjustments, Filter, Mask, MaskKind,
@@ -2097,8 +2248,8 @@ fn look_commands_undo_redo_roundtrip() {
             clip: clip_id,
             chroma: Some(ChromaKey {
                 rgb: [0, 255, 0],
-                strength: 0.7,
-                shadow: 0.1,
+                strength: 0.7.into(),
+                shadow: 0.1.into(),
             }),
         }))
         .expect("chroma");
@@ -2118,18 +2269,18 @@ fn look_commands_undo_redo_roundtrip() {
         .apply(Command::Edit(EditCommand::SetClipAdjustments {
             clip: clip_id,
             adjust: ColorAdjustments {
-                exposure: 0.5,
+                exposure: 0.5.into(),
                 ..Default::default()
             },
         }))
         .expect("adjust");
 
     let styled = clip(&engine);
-    assert_eq!(styled.mask.unwrap().kind, MaskKind::Heart);
-    assert_eq!(styled.chroma_key.unwrap().rgb, [0, 255, 0]);
+    assert_eq!(styled.mask.as_ref().unwrap().kind, MaskKind::Heart);
+    assert_eq!(styled.chroma_key.as_ref().unwrap().rgb, [0, 255, 0]);
     assert_eq!(styled.stabilize, Some(StabilizeLevel::Recommended));
     assert_eq!(styled.filter.as_ref().unwrap().id, "noir");
-    assert_eq!(styled.adjust.exposure, 0.5);
+    assert_eq!(styled.adjust.exposure.sample(0), 0.5);
 
     // Undo peels them off one at a time (each is one history entry)…
     assert!(engine.undo());

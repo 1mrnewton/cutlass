@@ -46,17 +46,16 @@ pub(super) fn fit_clip_transform(
         // Generators raster at canvas size: fit and fill are both 1.0.
         None => (canvas_w, canvas_h),
     };
-    let (w, h) = (
-        content_w as f32 * clip.crop.w,
-        content_h as f32 * clip.crop.h,
-    );
+    let crop = clip.crop.sample(clip.animation_tick(tick));
+    let (w, h) = (content_w as f32 * crop.w, content_h as f32 * crop.h);
     if w <= 0.0 || h <= 0.0 || canvas_w == 0 || canvas_h == 0 {
         return None;
     }
     let (cw, ch) = (canvas_w as f32, canvas_h as f32);
     let fit = (cw / w).min(ch / h);
     let cover = (cw / w).max(ch / h);
-    let scale = if fill { cover / fit } else { 1.0 };
+    // Fit/fill writes a uniform scale (both axes).
+    let scale = cutlass_models::Scale2::uniform(if fill { cover / fit } else { 1.0 });
     let sampled = clip.transform.sample_at(clip.animation_tick_f(tick as f64));
     Some(ClipTransform {
         position: [0.0, 0.0],
@@ -134,7 +133,7 @@ pub(super) fn apply_look_override(
     clip: &str,
     filter_id: &str,
     intensity: f32,
-    adjust: ColorAdjustments,
+    adjust: &ColorAdjustments,
 ) {
     match parse_raw_id(clip).map(ClipId::from_raw) {
         Some(id) => engine.set_look_override(Some((
@@ -146,6 +145,16 @@ pub(super) fn apply_look_override(
     }
 }
 
+/// Point the engine's styles override at `clip` (raw id) for the next renders —
+/// the live preview of an uncommitted layer-style edit. Unparsable ids are
+/// dropped (stale projection race), same as the other overrides.
+pub(super) fn apply_styles_override(engine: &mut Engine, clip: &str, styles: LayerStyles) {
+    match parse_raw_id(clip).map(ClipId::from_raw) {
+        Some(id) => engine.set_styles_override(Some((id, styles))),
+        None => error!(clip, "styles override ignored: unparsable clip id"),
+    }
+}
+
 pub(super) fn filter_from_ui(filter_id: &str, intensity: f32) -> Option<Filter> {
     let id = filter_id.trim();
     if id.is_empty() {
@@ -153,17 +162,23 @@ pub(super) fn filter_from_ui(filter_id: &str, intensity: f32) -> Option<Filter> 
     }
     Some(Filter {
         id: id.to_string(),
-        intensity: clamp_unit(intensity),
+        intensity: clamp_unit(intensity).into(),
     })
 }
 
-pub(super) fn sanitize_adjustments(adjust: ColorAdjustments) -> ColorAdjustments {
+pub(super) fn sanitize_adjustments(adjust: &ColorAdjustments) -> ColorAdjustments {
     ColorAdjustments {
-        brightness: clamp_signed_unit(adjust.brightness),
-        contrast: clamp_signed_unit(adjust.contrast),
-        saturation: clamp_signed_unit(adjust.saturation),
-        exposure: clamp_signed_unit(adjust.exposure),
-        temperature: clamp_signed_unit(adjust.temperature),
+        brightness: clamp_signed_unit(adjust.brightness.sample(0)).into(),
+        contrast: clamp_signed_unit(adjust.contrast.sample(0)).into(),
+        saturation: clamp_signed_unit(adjust.saturation.sample(0)).into(),
+        exposure: clamp_signed_unit(adjust.exposure.sample(0)).into(),
+        temperature: clamp_signed_unit(adjust.temperature.sample(0)).into(),
+        tint: clamp_signed_unit(adjust.tint.sample(0)).into(),
+        hue: clamp_signed_unit(adjust.hue.sample(0)).into(),
+        highlights: clamp_signed_unit(adjust.highlights.sample(0)).into(),
+        shadows: clamp_signed_unit(adjust.shadows.sample(0)).into(),
+        sharpness: clamp_unit(adjust.sharpness.sample(0)).into(),
+        vignette: clamp_unit(adjust.vignette.sample(0)).into(),
     }
 }
 
@@ -200,6 +215,8 @@ pub(super) fn bump_keyframe_commit_epoch(ui: &UiSink) {
 /// position) as one undoable edit (keyframes roadmap Phase 1: the inspector
 /// diamond / easing picker). Engine-rejected positions (playhead outside the
 /// clip — the UI gates, but a stale projection can race) only log.
+/// Style-param commits clear a live styles override first.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn set_param_keyframe_and_publish(
     engine: &mut Engine,
     clip: &str,
@@ -207,8 +224,12 @@ pub(super) fn set_param_keyframe_and_publish(
     at: RationalTime,
     value: ParamValue,
     easing: Easing,
+    tangents: Option<cutlass_models::SpatialTangents>,
     ui: &UiSink,
 ) {
+    if matches!(param, ClipParam::Style { .. }) {
+        engine.set_styles_override(None);
+    }
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-param-keyframe ignored: unparsable clip id");
         return;
@@ -219,12 +240,181 @@ pub(super) fn set_param_keyframe_and_publish(
         at,
         value,
         easing,
+        tangents,
     })) {
         Ok(_) => {
             info!(%clip_id, ?param, tick = at.value, "set param keyframe");
             publish_projection(engine, ui);
         }
         Err(e) => error!(%clip_id, ?param, "set param keyframe failed: {e}"),
+    }
+}
+
+/// Set spatial tangents on a position keyframe at `at` without changing its
+/// value/easing — motion-path handle drag commit. Looks up the current
+/// keyframe and re-issues [`EditCommand::SetParamKeyframe`] so undo stays
+/// a full-clip restore (no separate tangents command on the wire).
+pub(super) fn set_param_keyframe_tangents_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    at: RationalTime,
+    tangents: Option<cutlass_models::SpatialTangents>,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(
+            clip,
+            "set-param-keyframe-tangents ignored: unparsable clip id"
+        );
+        return;
+    };
+    let Some(engine_clip) = engine.project().clip(clip_id) else {
+        error!(%clip_id, "set-param-keyframe-tangents ignored: unknown clip");
+        return;
+    };
+    let rel = at.value - engine_clip.timeline.start.value;
+    let Some(kf) = engine_clip
+        .transform
+        .position
+        .keyframes()
+        .iter()
+        .find(|k| k.tick == rel)
+        .cloned()
+    else {
+        error!(%clip_id, tick = at.value, "set-param-keyframe-tangents: no keyframe");
+        return;
+    };
+    match engine.apply(Command::Edit(EditCommand::SetParamKeyframe {
+        clip: clip_id,
+        param: ClipParam::Position,
+        at,
+        value: ParamValue::Vec2(kf.value),
+        easing: kf.easing,
+        tangents,
+    })) {
+        Ok(_) => {
+            info!(%clip_id, tick = at.value, "set param keyframe tangents");
+            publish_projection(engine, ui);
+        }
+        Err(e) => error!(%clip_id, "set param keyframe tangents failed: {e}"),
+    }
+}
+
+/// Replace one animatable property with a constant (inspector slider commit
+/// on a non-animated row). Drops any existing keyframes on that property.
+/// Style-param commits clear a live styles override first (look clears on
+/// filter/adjust commit the same way).
+pub(super) fn set_param_constant_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    param: ClipParam,
+    value: ParamValue,
+    ui: &UiSink,
+) {
+    if matches!(param, ClipParam::Style { .. }) {
+        engine.set_styles_override(None);
+    }
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-param-constant ignored: unparsable clip id");
+        return;
+    };
+    match engine.apply(Command::Edit(EditCommand::SetParamConstant {
+        clip: clip_id,
+        param,
+        value,
+    })) {
+        Ok(_) => {
+            info!(%clip_id, ?param, "set param constant");
+            publish_projection(engine, ui);
+        }
+        Err(e) => error!(%clip_id, ?param, "set param constant failed: {e}"),
+    }
+}
+
+/// Move one property's keyframe to a new absolute tick (graph editor).
+/// `remove` + `set` inside one history group so a single undo restores it.
+pub(super) fn move_param_keyframe_and_publish(
+    engine: &mut Engine,
+    req: &MoveParamKeyframeRequest,
+    tl_rate: Rational,
+    ui: &UiSink,
+) {
+    let param = req.param;
+    if matches!(param, ClipParam::Style { .. }) {
+        engine.set_styles_override(None);
+    }
+    let Some(clip_id) = parse_raw_id(&req.clip).map(ClipId::from_raw) else {
+        error!(clip = %req.clip, "move-param-keyframe ignored: unparsable clip id");
+        return;
+    };
+    let from = RationalTime::new(req.from_tick, tl_rate);
+    let to = RationalTime::new(req.to_tick, tl_rate);
+    engine.begin_group();
+    let remove = engine.apply(Command::Edit(EditCommand::RemoveParamKeyframe {
+        clip: clip_id,
+        param,
+        at: from,
+    }));
+    if let Err(e) = remove {
+        error!(%clip_id, ?param, "move-param-keyframe remove failed: {e}");
+        engine.rollback_group();
+        return;
+    }
+    let set = engine.apply(Command::Edit(EditCommand::SetParamKeyframe {
+        clip: clip_id,
+        param,
+        at: to,
+        value: req.value,
+        easing: req.easing,
+        tangents: req.tangents,
+    }));
+    match set {
+        Ok(_) => {
+            engine.commit_group();
+            info!(
+                %clip_id,
+                ?param,
+                from = from.value,
+                to = to.value,
+                "moved param keyframe"
+            );
+            publish_projection(engine, ui);
+        }
+        Err(e) => {
+            error!(%clip_id, ?param, "move-param-keyframe set failed: {e}");
+            engine.rollback_group();
+        }
+    }
+}
+
+/// Expand a keyframe segment with a piecewise easing preset (graph editor).
+/// One undoable edit via full-clip restore inverse.
+pub(super) fn apply_easing_preset_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    param: ClipParam,
+    at: RationalTime,
+    preset: PiecewiseEasingPreset,
+    ui: &UiSink,
+) {
+    if matches!(param, ClipParam::Style { .. }) {
+        engine.set_styles_override(None);
+    }
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "apply-easing-preset ignored: unparsable clip id");
+        return;
+    };
+    match engine.apply(Command::Edit(EditCommand::ApplyEasingPreset {
+        clip: clip_id,
+        param,
+        at,
+        preset,
+    })) {
+        Ok(_) => {
+            info!(%clip_id, ?param, tick = at.value, ?preset, "applied easing preset");
+            publish_projection(engine, ui);
+        }
+        Err(e) => error!(%clip_id, ?param, "apply easing preset failed: {e}"),
     }
 }
 
@@ -271,8 +461,22 @@ pub(super) fn keyframes_at(
     {
         hits.push((ClipParam::Position, ParamValue::Vec2(kf.value), kf.easing));
     }
+    if let Some(kf) = transform
+        .scale
+        .keyframes()
+        .iter()
+        .find(|k| k.tick == rel_tick)
+    {
+        // Prefer Scalar when uniform so diamond retimes stay byte-compat with
+        // older agent/UI paths; Vec2 when axes are split.
+        let value = if kf.value.is_uniform() {
+            ParamValue::Scalar(kf.value.x)
+        } else {
+            ParamValue::Vec2([kf.value.x, kf.value.y])
+        };
+        hits.push((ClipParam::Scale, value, kf.easing));
+    }
     let scalars = [
-        (ClipParam::Scale, &transform.scale),
         (ClipParam::Rotation, &transform.rotation),
         (ClipParam::Opacity, &transform.opacity),
     ];
@@ -332,6 +536,7 @@ pub(super) fn retime_keyframes_and_publish(
             at: RationalTime::new(to_tick, tl_rate),
             value,
             easing,
+            tangents: None,
         })) {
             error!(%clip_id, ?param, "retime keyframes failed setting: {e}");
             engine.rollback_group();

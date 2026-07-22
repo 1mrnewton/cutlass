@@ -5,8 +5,10 @@ use std::path::Path;
 
 use cutlass_compositor::{ColorGrade, GpuContext};
 use cutlass_models::{
-    ChromaKey, ColorAdjustments, Filter, Generator, Mask, MaskKind, MediaSource, Project, Rational,
-    RationalTime, Shape, ShapePath, ShapePathPoint, TextStyle, TimeRange, TrackKind,
+    BlendMode, CanvasAspect, CanvasSettings, ChromaKey, ClipParam, ClipTransform, ColorAdjustments,
+    Easing, Filter, Generator, LayerBackground, LayerShadow, LayerStyles, Mask, MaskKind,
+    MediaSource, MotionBlur, Param, ParamValue, Project, Rational, RationalTime, Shape, ShapePath,
+    ShapePathPoint, TextStyle, TimeRange, TrackKind,
 };
 use cutlass_render::Renderer;
 
@@ -40,30 +42,13 @@ fn assert_near(actual: [u8; 4], expected: [u8; 4], tolerance: u8, what: &str) {
     }
 }
 
-/// CPU mirror of `grade.wgsl`'s `apply_grade`, for tolerance comparisons.
+/// CPU mirror of `grade.wgsl`'s `apply_color_grade`, for tolerance comparisons.
 fn grade_ref_u8(rgba: [u8; 4], grade: ColorGrade) -> [u8; 4] {
-    let mut c = [
+    let c = grade.apply([
         f32::from(rgba[0]) / 255.0,
         f32::from(rgba[1]) / 255.0,
         f32::from(rgba[2]) / 255.0,
-    ];
-    c[0] *= 2f32.powf(2.0 * grade.exposure);
-    c[1] *= 2f32.powf(2.0 * grade.exposure);
-    c[2] *= 2f32.powf(2.0 * grade.exposure);
-    c[0] += 0.25 * grade.temperature;
-    c[2] -= 0.25 * grade.temperature;
-    c[1] += 0.25 * grade.tint;
-    for ch in &mut c {
-        *ch += 0.25 * grade.brightness;
-    }
-    for ch in &mut c {
-        *ch = (*ch - 0.5) * (1.0 + grade.contrast) + 0.5;
-    }
-    let luma = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-    let sat = 1.0 + grade.saturation;
-    c[0] = luma + (c[0] - luma) * sat;
-    c[1] = luma + (c[1] - luma) * sat;
-    c[2] = luma + (c[2] - luma) * sat;
+    ]);
     let quant = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
     [quant(c[0]), quant(c[1]), quant(c[2]), rgba[3]]
 }
@@ -101,8 +86,8 @@ fn renders_still_with_circle_mask_and_chroma_key() {
             clip,
             Some(ChromaKey {
                 rgb: [0, 255, 0],
-                strength: 0.5,
-                shadow: 0.0,
+                strength: 0.5.into(),
+                shadow: 0.0.into(),
             }),
         )
         .unwrap();
@@ -119,6 +104,43 @@ fn renders_still_with_circle_mask_and_chroma_key() {
     assert_near(frame.pixel(320, 180), [0, 0, 0, 255], 8, "center");
     // Corner is outside the circle → background.
     assert_near(frame.pixel(10, 10), [0, 0, 0, 255], 8, "corner");
+}
+
+#[test]
+fn renders_still_with_half_size_circle_mask() {
+    // Square canvas + square still fills the frame; fit_within keeps the
+    // resolve→realize→composite path cheap for CI.
+    let dir = tempfile::tempdir().unwrap();
+    let png_path = dir.path().join("red.png");
+    write_solid_png(&png_path, 200, 200, [255, 0, 0, 255]);
+
+    let mut project = Project::new("p", FPS_24);
+    project.timeline_mut().set_canvas(CanvasSettings {
+        aspect: CanvasAspect::Square1x1,
+        background: [0, 0, 0],
+    });
+    let media = project.add_media(MediaSource::image(&png_path, 200, 200));
+    let window = project.media(media).unwrap().full_range();
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, window, rt(0)).unwrap();
+    let mut mask = Mask::new(MaskKind::Circle);
+    mask.size = Param::Constant([0.5, 0.5]);
+    project.set_clip_mask(clip, Some(mask)).unwrap();
+
+    let Ok(mut renderer) = Renderer::new_headless() else {
+        eprintln!("skipping: no headless GPU available");
+        return;
+    };
+    let frame = renderer
+        .render_frame_fit(&project, rt(0), 200, 200)
+        .expect("render half-size mask");
+
+    // Center stays red; ~0.7×half-width falls outside size 0.5 → background.
+    let cx = frame.width / 2;
+    let cy = frame.height / 2;
+    let probe_x = cx + ((0.7 * (frame.width as f32 * 0.5)).round() as u32);
+    assert_near(frame.pixel(cx, cy), [255, 0, 0, 255], 8, "center");
+    assert_near(frame.pixel(probe_x, cy), [0, 0, 0, 255], 8, "mid-radius");
 }
 
 #[test]
@@ -148,7 +170,7 @@ fn renders_adjustment_lane_over_still_media() {
         .set_clip_adjustments(
             bar,
             ColorAdjustments {
-                saturation: -1.0,
+                saturation: (-1.0).into(),
                 ..ColorAdjustments::default()
             },
         )
@@ -227,8 +249,8 @@ fn gesture_sprite_contains_unwrapped_text_pixels() {
                 content: "hello worldhello worldhello worldhello world".into(),
                 style: TextStyle {
                     font: "Micro 5".into(),
-                    size: 56.0,
-                    letter_spacing: 30.0,
+                    size: 56.0.into(),
+                    letter_spacing: 30.0.into(),
                     wrap: false,
                     ..TextStyle::default()
                 },
@@ -414,7 +436,7 @@ fn saturation_minus_one_desaturates_red_solid() {
         .set_clip_adjustments(
             clip,
             ColorAdjustments {
-                saturation: -1.0,
+                saturation: (-1.0).into(),
                 ..ColorAdjustments::default()
             },
         )
@@ -489,7 +511,7 @@ fn mono_filter_at_zero_intensity_matches_no_filter() {
             clip,
             Some(Filter {
                 id: "mono".into(),
-                intensity: 0.0,
+                intensity: 0.0.into(),
             }),
         )
         .unwrap();
@@ -507,4 +529,227 @@ fn mono_filter_at_zero_intensity_matches_no_filter() {
     let top_left = graded.pixel(0, 0);
     let baseline_px = baseline.pixel(0, 0);
     assert_px_close(top_left, baseline_px, tol, "mono filter intensity 0");
+}
+
+#[test]
+fn multiply_red_solid_over_green_solid_is_black() {
+    let mut project = Project::new("p", FPS_24);
+    let bottom = project.add_track(TrackKind::Sticker, "S1");
+    project
+        .add_generated(
+            bottom,
+            Generator::SolidColor {
+                rgba: [0, 255, 0, 255],
+            },
+            TimeRange::at_rate(0, 100, FPS_24),
+        )
+        .unwrap();
+    let top = project.add_track(TrackKind::Sticker, "S2");
+    let red = project
+        .add_generated(
+            top,
+            Generator::SolidColor {
+                rgba: [255, 0, 0, 255],
+            },
+            TimeRange::at_rate(0, 100, FPS_24),
+        )
+        .unwrap();
+    project.set_blend_mode(red, BlendMode::Multiply).unwrap();
+
+    let Ok(mut renderer) = Renderer::new_headless() else {
+        eprintln!("skipping: no headless GPU available");
+        return;
+    };
+    let image = renderer.render_frame(&project, rt(0)).expect("render");
+    let center = image.pixel(960, 540);
+    assert!(
+        center[0] < 16 && center[1] < 16 && center[2] < 16 && center[3] > 240,
+        "multiply red over green should be ~black, got {center:?}"
+    );
+}
+
+#[test]
+fn red_solid_with_white_background_plate_shows_padding() {
+    // Default solids fill the canvas; scale down so the padded plate has a
+    // probeable band outside the content on a black canvas.
+    let mut project = Project::new("p", FPS_24);
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::SolidColor {
+                rgba: [255, 0, 0, 255],
+            },
+            TimeRange::at_rate(0, 100, FPS_24),
+        )
+        .unwrap();
+    project
+        .set_transform(
+            clip,
+            ClipTransform {
+                scale: 0.5.into(),
+                ..ClipTransform::IDENTITY
+            },
+            None,
+        )
+        .unwrap();
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                background: Some(LayerBackground {
+                    rgba: Param::Constant([255, 255, 255, 255]),
+                    padding: Param::Constant(20.0),
+                    radius: Param::Constant(0.0),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let Ok(mut renderer) = Renderer::new_headless() else {
+        eprintln!("skipping: no headless GPU available");
+        return;
+    };
+    let image = renderer.render_frame(&project, rt(0)).expect("render");
+
+    // Content is 960×540 centered; canvas padding = 20 × 0.5 = 10px.
+    // x=1445 sits ~5px into the plate past the content's right edge.
+    let plate = image.pixel(1445, 540);
+    assert_near(plate, [255, 255, 255, 255], 3, "background plate padding");
+    let center = image.pixel(960, 540);
+    assert_near(center, [255, 0, 0, 255], 3, "solid content center");
+    let corner = image.pixel(10, 10);
+    assert_near(corner, [0, 0, 0, 255], 3, "canvas outside plate");
+}
+
+#[test]
+fn text_clip_with_layer_shadow_composites() {
+    let mut project = Project::new("p", FPS_24);
+    let track = project.add_track(TrackKind::Text, "T1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::Text {
+                content: "styles".into(),
+                style: TextStyle {
+                    font: "Micro 5".into(),
+                    size: 72.0.into(),
+                    ..TextStyle::default()
+                },
+            },
+            TimeRange::at_rate(0, 100, FPS_24),
+        )
+        .unwrap();
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow {
+                    rgba: Param::Constant([0, 0, 0, 180]),
+                    offset: Param::Constant([8.0, 8.0]),
+                    blur: Param::Constant(4.0),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let Ok(mut renderer) = Renderer::new_headless() else {
+        eprintln!("skipping: no headless GPU available");
+        return;
+    };
+    renderer.load_font(include_bytes!("../../cutlass-text/assets/Micro5-Regular.ttf").to_vec());
+    let image = renderer
+        .render_frame(&project, rt(0))
+        .expect("text + layer shadow should composite");
+    assert_eq!((image.width, image.height), (1920, 1080));
+}
+
+#[test]
+fn motion_blur_export_smears_animated_solid() {
+    // Small solid sweeping left→right over 2 ticks; with blur at the midpoint,
+    // intermediate x positions light up that blur-off leaves dark.
+    let mut project = Project::new("p", FPS_24);
+    project.timeline_mut().set_canvas(CanvasSettings {
+        aspect: CanvasAspect::Square1x1,
+        background: [0, 0, 0],
+    });
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::SolidColor {
+                rgba: [255, 255, 255, 255],
+            },
+            TimeRange::at_rate(0, 24, FPS_24),
+        )
+        .unwrap();
+    // Shrink so the solid is a bar, not full-canvas (1080×1080 → ~108px).
+    project
+        .set_transform(
+            clip,
+            ClipTransform {
+                scale: 0.1.into(),
+                ..ClipTransform::IDENTITY
+            },
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            rt(0),
+            ParamValue::Vec2([-0.35, 0.0]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            rt(2),
+            ParamValue::Vec2([0.35, 0.0]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_motion_blur(
+            clip,
+            MotionBlur {
+                enabled: true,
+                shutter_deg: 360.0,
+                samples: 8,
+            },
+        )
+        .unwrap();
+
+    let Ok(mut renderer) = Renderer::new_headless() else {
+        eprintln!("skipping: no headless GPU available");
+        return;
+    };
+
+    // Preview path (default): no blur.
+    let off = renderer.render_frame(&project, rt(1)).expect("preview");
+
+    renderer.set_apply_motion_blur(true);
+    let on = renderer.render_frame(&project, rt(1)).expect("export blur");
+
+    assert_ne!(
+        off.pixel(400, 540),
+        on.pixel(400, 540),
+        "blur-on export frame must differ from blur-off preview at smear probe"
+    );
+
+    // At tick 1 the sharp bar sits near canvas center (x≈540). With a full-
+    // frame shutter the smear covers toward the left keyframe — probe there.
+    let left = on.pixel(400, 540);
+    let left_off = off.pixel(400, 540);
+    assert!(
+        left[0] > left_off[0],
+        "blur should leave coverage left of the sharp mid position: on={left:?} off={left_off:?}"
+    );
 }

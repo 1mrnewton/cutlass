@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::ModelError;
+use crate::param::Param;
 
 /// Sanity ceilings for persisted text metrics in 1080-reference pixels.
 /// These are deliberately broader than the desktop inspector ranges so API
@@ -74,58 +75,58 @@ pub enum TextAlignV {
 }
 
 /// Outline drawn around glyphs.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextStroke {
     /// Stroke color (RGBA, 0-255).
-    pub rgba: [u8; 4],
+    pub rgba: Param<[u8; 4]>,
     /// Stroke width in reference pixels (see [`TextStyle::size`]).
-    pub width: f32,
+    pub width: Param<f32>,
 }
 
 impl Default for TextStroke {
     fn default() -> Self {
         Self {
-            rgba: [0, 0, 0, 255],
-            width: 6.0,
+            rgba: Param::Constant([0, 0, 0, 255]),
+            width: Param::Constant(6.0),
         }
     }
 }
 
 /// A filled card drawn behind the title block.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextBackground {
     /// Card color (RGBA, 0-255); the alpha doubles as the opacity slider.
-    pub rgba: [u8; 4],
+    pub rgba: Param<[u8; 4]>,
     /// Corner rounding, `0.0` (square) ..= `1.0` (pill).
-    pub radius: f32,
+    pub radius: Param<f32>,
 }
 
 impl Default for TextBackground {
     fn default() -> Self {
         Self {
-            rgba: [0, 0, 0, 255],
-            radius: 0.0,
+            rgba: Param::Constant([0, 0, 0, 255]),
+            radius: Param::Constant(0.0),
         }
     }
 }
 
 /// A soft drop shadow behind the title, offset down-right at 45°.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextShadow {
     /// Shadow color (RGBA, 0-255); the alpha doubles as the opacity slider.
-    pub rgba: [u8; 4],
+    pub rgba: Param<[u8; 4]>,
     /// Blur radius as a fraction of the effective font size, `0.0`..=`1.0`.
-    pub blur: f32,
+    pub blur: Param<f32>,
     /// Offset distance in reference pixels (see [`TextStyle::size`]).
-    pub distance: f32,
+    pub distance: Param<f32>,
 }
 
 impl Default for TextShadow {
     fn default() -> Self {
         Self {
-            rgba: [0, 0, 0, 230],
-            blur: 0.15,
-            distance: 5.0,
+            rgba: Param::Constant([0, 0, 0, 230]),
+            blur: Param::Constant(0.15),
+            distance: Param::Constant(5.0),
         }
     }
 }
@@ -144,7 +145,7 @@ pub struct TextStyle {
     pub font: String,
     /// Font size in reference pixels (1080px-tall canvas).
     #[serde(default = "default_font_size")]
-    pub size: f32,
+    pub size: Param<f32>,
     #[serde(default)]
     pub bold: bool,
     #[serde(default)]
@@ -155,13 +156,13 @@ pub struct TextStyle {
     pub case: TextCase,
     /// Fill color (RGBA, 0-255).
     #[serde(default = "default_text_fill")]
-    pub fill: [u8; 4],
+    pub fill: Param<[u8; 4]>,
     /// Extra space between glyphs, in reference pixels (can be negative).
-    #[serde(default)]
-    pub letter_spacing: f32,
+    #[serde(default = "default_letter_spacing")]
+    pub letter_spacing: Param<f32>,
     /// Line-height multiplier (`1.2` ⇒ 120% of the font size).
     #[serde(default = "default_line_spacing")]
-    pub line_spacing: f32,
+    pub line_spacing: Param<f32>,
     #[serde(default)]
     pub align_h: TextAlignH,
     #[serde(default)]
@@ -193,18 +194,22 @@ pub struct TextStyle {
 
 /// Default font size in reference pixels — matches the legacy `height / 12`
 /// look at a 1080px canvas.
-fn default_font_size() -> f32 {
-    90.0
+fn default_font_size() -> Param<f32> {
+    Param::Constant(90.0)
 }
 
 /// Default fill color for a title (opaque white), matching the legacy raster.
-fn default_text_fill() -> [u8; 4] {
-    [255, 255, 255, 255]
+fn default_text_fill() -> Param<[u8; 4]> {
+    Param::Constant([255, 255, 255, 255])
 }
 
 /// Default line-height multiplier (matches the legacy `font_size * 1.2`).
-fn default_line_spacing() -> f32 {
-    1.2
+fn default_line_spacing() -> Param<f32> {
+    Param::Constant(1.2)
+}
+
+fn default_letter_spacing() -> Param<f32> {
+    Param::Constant(0.0)
 }
 
 /// Default wrap behavior (on) — matches the legacy always-wrap raster so older
@@ -219,37 +224,47 @@ impl TextStyle {
     /// project mutations; the renderer still sanitizes defensively for direct
     /// `cutlass-text` callers and legacy files.
     pub fn validate(&self) -> Result<(), ModelError> {
-        validate_range(self.size, f32::EPSILON, MAX_TEXT_SIZE, "text size")?;
-        if !self.letter_spacing.is_finite() || self.letter_spacing.abs() > MAX_TEXT_LETTER_SPACING {
-            return Err(ModelError::InvalidParam(format!(
-                "text letter spacing must be finite and within -{MAX_TEXT_LETTER_SPACING}..={MAX_TEXT_LETTER_SPACING} reference px"
-            )));
+        self.size.validate_shape()?;
+        self.fill.validate_shape()?;
+        self.letter_spacing.validate_shape()?;
+        self.line_spacing.validate_shape()?;
+        self.size
+            .for_each_value(|v| validate_range(*v, f32::EPSILON, MAX_TEXT_SIZE, "text size"))?;
+        self.letter_spacing.for_each_value(|v| {
+            if !v.is_finite() || v.abs() > MAX_TEXT_LETTER_SPACING {
+                return Err(ModelError::InvalidParam(format!(
+                    "text letter spacing must be finite and within -{MAX_TEXT_LETTER_SPACING}..={MAX_TEXT_LETTER_SPACING} reference px"
+                )));
+            }
+            Ok(())
+        })?;
+        self.line_spacing.for_each_value(|v| {
+            validate_range(*v, f32::EPSILON, MAX_TEXT_LINE_SPACING, "text line spacing")
+        })?;
+        if let Some(stroke) = &self.stroke {
+            stroke.rgba.validate_shape()?;
+            stroke.width.validate_shape()?;
+            stroke.width.for_each_value(|v| {
+                validate_range(*v, 0.0, MAX_TEXT_STROKE_WIDTH, "text stroke width")
+            })?;
         }
-        validate_range(
-            self.line_spacing,
-            f32::EPSILON,
-            MAX_TEXT_LINE_SPACING,
-            "text line spacing",
-        )?;
-        if let Some(stroke) = self.stroke {
-            validate_range(
-                stroke.width,
-                0.0,
-                MAX_TEXT_STROKE_WIDTH,
-                "text stroke width",
-            )?;
+        if let Some(background) = &self.background {
+            background.rgba.validate_shape()?;
+            background.radius.validate_shape()?;
+            background
+                .radius
+                .for_each_value(|v| validate_range(*v, 0.0, 1.0, "text background radius"))?;
         }
-        if let Some(background) = self.background {
-            validate_range(background.radius, 0.0, 1.0, "text background radius")?;
-        }
-        if let Some(shadow) = self.shadow {
-            validate_range(shadow.blur, 0.0, 1.0, "text shadow blur")?;
-            validate_range(
-                shadow.distance,
-                0.0,
-                MAX_TEXT_SHADOW_DISTANCE,
-                "text shadow distance",
-            )?;
+        if let Some(shadow) = &self.shadow {
+            shadow.rgba.validate_shape()?;
+            shadow.blur.validate_shape()?;
+            shadow.distance.validate_shape()?;
+            shadow
+                .blur
+                .for_each_value(|v| validate_range(*v, 0.0, 1.0, "text shadow blur"))?;
+            shadow.distance.for_each_value(|v| {
+                validate_range(*v, 0.0, MAX_TEXT_SHADOW_DISTANCE, "text shadow distance")
+            })?;
         }
         Ok(())
     }
@@ -274,7 +289,7 @@ impl Default for TextStyle {
             underline: false,
             case: TextCase::Normal,
             fill: default_text_fill(),
-            letter_spacing: 0.0,
+            letter_spacing: default_letter_spacing(),
             line_spacing: default_line_spacing(),
             align_h: TextAlignH::Center,
             align_v: TextAlignV::Middle,

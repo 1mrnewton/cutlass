@@ -61,23 +61,25 @@ fn clear_beats_undo_redo_only_swaps_the_normalized_grid() {
             y: 0.2,
             w: 0.8,
             h: 0.7,
-        };
+        }
+        .into();
         clip.flip_h = true;
         clip.effects.push(EffectInstance::new("gaussian_blur"));
         clip.mask = Some(Mask {
             kind: MaskKind::Circle,
-            feather: 0.2,
+            feather: 0.2.into(),
             invert: true,
+            ..Mask::new(MaskKind::Circle)
         });
         clip.chroma_key = Some(ChromaKey {
             rgb: [0, 255, 0],
-            strength: 0.6,
-            shadow: 0.1,
+            strength: 0.6.into(),
+            shadow: 0.1.into(),
         });
         clip.stabilize = Some(StabilizeLevel::Smooth);
         clip.filter = Some(Filter::new("mono"));
         clip.lut = Some(Lut::new("/tmp/look.cube"));
-        clip.adjust.exposure = 0.25;
+        clip.adjust.exposure = 0.25.into();
         clip.animation_in = Some(AnimationRef::new("zoom_in"));
         clip.animation_out = Some(AnimationRef::new("fade_out"));
         clip.replaceable = Some(Replaceable::new(7).with_label("Hero"));

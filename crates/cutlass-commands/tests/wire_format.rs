@@ -10,11 +10,11 @@
 use std::path::PathBuf;
 
 use cutlass_commands::{
-    AnimationRef, AnimationSlot, AudioRole, CanvasAspect, ChromaKey, ClipId, ClipParam,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
     ClipTransform, ColorAdjustments, Command, CropRect, Easing, EditCommand, EditOutcome, Filter,
-    Generator, Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId, Param, ParamValue,
-    ProjectCommand, Rational, RationalTime, Replaceable, StabilizeLevel, TemplateMeta,
-    TemplatePick, TimeRange, TrackId, TrackKind,
+    Generator, LayerShadow, LayerStyles, Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId,
+    MotionBlur, Param, ParamValue, ProjectCommand, Rational, RationalTime, Replaceable,
+    SpatialTangents, StabilizeLevel, TemplateMeta, TemplatePick, TimeRange, TrackId, TrackKind,
 };
 use serde_json::{Value, json};
 
@@ -144,7 +144,7 @@ fn edit_samples() -> Vec<EditCommand> {
             transform: ClipTransform {
                 position: [0.25, -0.5],
                 anchor_point: [0.5, 0.5],
-                scale: 2.0,
+                scale: 2.0.into(),
                 rotation: 90.0,
                 opacity: 0.75,
             },
@@ -156,6 +156,18 @@ fn edit_samples() -> Vec<EditCommand> {
             at: t(45),
             value: ParamValue::Scalar(1.5),
             easing: Easing::EaseInOut,
+            tangents: None,
+        },
+        EditCommand::SetParamKeyframe {
+            clip: clip(4),
+            param: ClipParam::Position,
+            at: t(45),
+            value: ParamValue::Vec2([0.25, -0.5]),
+            easing: Easing::Linear,
+            tangents: Some(SpatialTangents {
+                out_t: [0.0, 0.5],
+                in_t: [-0.25, 0.0],
+            }),
         },
         EditCommand::RemoveParamKeyframe {
             clip: clip(4),
@@ -190,6 +202,7 @@ fn edit_samples() -> Vec<EditCommand> {
             },
             flip_h: true,
             flip_v: false,
+            at: None,
         },
         EditCommand::SetClipAudio {
             clip: clip(4),
@@ -205,16 +218,40 @@ fn edit_samples() -> Vec<EditCommand> {
             clip: clip(4),
             mask: Some(Mask {
                 kind: MaskKind::Circle,
-                feather: 0.5,
+                feather: 0.5.into(),
                 invert: true,
+                ..Mask::new(MaskKind::Circle)
             }),
+        },
+        EditCommand::SetClipBlendMode {
+            clip: clip(4),
+            mode: BlendMode::Multiply,
+        },
+        EditCommand::SetClipMotionBlur {
+            clip: clip(4),
+            motion_blur: MotionBlur {
+                enabled: true,
+                shutter_deg: 180.0,
+                samples: 8,
+            },
+        },
+        EditCommand::SetClipLayerStyles {
+            clip: clip(4),
+            styles: LayerStyles {
+                shadow: Some(LayerShadow {
+                    rgba: Param::Constant([0, 0, 0, 128]),
+                    offset: Param::Constant([4.0, 4.0]),
+                    blur: Param::Constant(8.0),
+                }),
+                ..Default::default()
+            },
         },
         EditCommand::SetClipChroma {
             clip: clip(4),
             chroma: Some(ChromaKey {
                 rgb: [0, 255, 0],
-                strength: 0.7,
-                shadow: 0.2,
+                strength: 0.7.into(),
+                shadow: 0.2.into(),
             }),
         },
         EditCommand::SetClipStabilize {
@@ -225,24 +262,25 @@ fn edit_samples() -> Vec<EditCommand> {
             clip: clip(4),
             filter: Some(Filter {
                 id: "vivid".into(),
-                intensity: 0.6,
+                intensity: 0.6.into(),
             }),
         },
         EditCommand::SetClipLut {
             clip: clip(4),
             lut: Some(Lut {
                 path: "/luts/teal-orange.cube".into(),
-                intensity: 0.7,
+                intensity: 0.7.into(),
             }),
         },
         EditCommand::SetClipAdjustments {
             clip: clip(4),
             adjust: ColorAdjustments {
-                brightness: 0.1,
-                contrast: -0.2,
-                saturation: 0.3,
-                exposure: 0.0,
-                temperature: -0.4,
+                brightness: 0.1.into(),
+                contrast: (-0.2).into(),
+                saturation: 0.3.into(),
+                exposure: 0.0.into(),
+                temperature: (-0.4).into(),
+                ..Default::default()
             },
         },
         EditCommand::SetClipAnimation {
@@ -405,6 +443,7 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
         EditCommand::SetParamKeyframe { .. } => "SetParamKeyframe",
         EditCommand::RemoveParamKeyframe { .. } => "RemoveParamKeyframe",
         EditCommand::SetParamConstant { .. } => "SetParamConstant",
+        EditCommand::ApplyEasingPreset { .. } => "ApplyEasingPreset",
         EditCommand::SetClipSpeed { .. } => "SetClipSpeed",
         EditCommand::SetSpeedCurve { .. } => "SetSpeedCurve",
         EditCommand::SetClipPitch { .. } => "SetClipPitch",
@@ -412,6 +451,9 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
         EditCommand::SetClipAudio { .. } => "SetClipAudio",
         EditCommand::SetClipDenoise { .. } => "SetClipDenoise",
         EditCommand::SetClipMask { .. } => "SetClipMask",
+        EditCommand::SetClipBlendMode { .. } => "SetClipBlendMode",
+        EditCommand::SetClipMotionBlur { .. } => "SetClipMotionBlur",
+        EditCommand::SetClipLayerStyles { .. } => "SetClipLayerStyles",
         EditCommand::SetClipChroma { .. } => "SetClipChroma",
         EditCommand::SetClipStabilize { .. } => "SetClipStabilize",
         EditCommand::SetClipFilter { .. } => "SetClipFilter",
@@ -458,7 +500,7 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
 #[test]
 fn command_variant_counts_are_locked() {
     assert_eq!(project_samples().len(), 9);
-    assert_eq!(edit_samples().len(), 59);
+    assert_eq!(edit_samples().len(), 63);
 }
 
 #[test]
@@ -637,6 +679,7 @@ fn golden_set_param_keyframe() {
         at: t(45),
         value: ParamValue::Scalar(1.5),
         easing: Easing::EaseInOut,
+        tangents: None,
     });
     assert_eq!(
         serde_json::to_value(&cmd).unwrap(),
@@ -647,6 +690,33 @@ fn golden_set_param_keyframe() {
             "at": {"value": 45, "rate": {"num": 30, "den": 1}},
             "value": {"scalar": 1.5},
             "easing": "ease_in_out",
+        })
+    );
+}
+
+#[test]
+fn golden_set_param_keyframe_with_spatial_tangents() {
+    let cmd = Command::Edit(EditCommand::SetParamKeyframe {
+        clip: clip(4),
+        param: ClipParam::Position,
+        at: t(45),
+        value: ParamValue::Vec2([0.25, -0.5]),
+        easing: Easing::Linear,
+        tangents: Some(SpatialTangents {
+            out_t: [0.0, 0.5],
+            in_t: [-0.25, 0.0],
+        }),
+    });
+    assert_eq!(
+        serde_json::to_value(&cmd).unwrap(),
+        json!({
+            "type": "SetParamKeyframe",
+            "clip": 4,
+            "param": "position",
+            "at": {"value": 45, "rate": {"num": 30, "den": 1}},
+            "value": {"vec2": [0.25, -0.5]},
+            "easing": "linear",
+            "tangents": {"o": [0.0, 0.5], "i": [-0.25, 0.0]},
         })
     );
 }
@@ -739,12 +809,68 @@ fn golden_look_commands() {
         json!({"type": "SetClipMask", "clip": 4, "mask": {"kind": "circle"}})
     );
 
+    let blend = Command::Edit(EditCommand::SetClipBlendMode {
+        clip: clip(4),
+        mode: BlendMode::Multiply,
+    });
+    assert_eq!(
+        serde_json::to_value(&blend).unwrap(),
+        json!({"type": "SetClipBlendMode", "clip": 4, "mode": "multiply"})
+    );
+
+    let motion_blur = Command::Edit(EditCommand::SetClipMotionBlur {
+        clip: clip(4),
+        motion_blur: MotionBlur {
+            enabled: true,
+            shutter_deg: 180.0,
+            samples: 8,
+        },
+    });
+    assert_eq!(
+        serde_json::to_value(&motion_blur).unwrap(),
+        json!({
+            "type": "SetClipMotionBlur",
+            "clip": 4,
+            "motion_blur": {
+                "enabled": true,
+                "shutter_deg": 180.0,
+                "samples": 8
+            }
+        })
+    );
+
+    let styles = Command::Edit(EditCommand::SetClipLayerStyles {
+        clip: clip(4),
+        styles: LayerStyles {
+            shadow: Some(LayerShadow {
+                rgba: Param::Constant([0, 0, 0, 128]),
+                offset: Param::Constant([4.0, 4.0]),
+                blur: Param::Constant(8.0),
+            }),
+            ..Default::default()
+        },
+    });
+    assert_eq!(
+        serde_json::to_value(&styles).unwrap(),
+        json!({
+            "type": "SetClipLayerStyles",
+            "clip": 4,
+            "styles": {
+                "shadow": {
+                    "rgba": [0, 0, 0, 128],
+                    "offset": [4.0, 4.0],
+                    "blur": 8.0
+                }
+            }
+        })
+    );
+
     let chroma = Command::Edit(EditCommand::SetClipChroma {
         clip: clip(4),
         chroma: Some(ChromaKey {
             rgb: [0, 255, 0],
-            strength: 0.5,
-            shadow: 0.0,
+            strength: 0.5.into(),
+            shadow: 0.0.into(),
         }),
     });
     assert_eq!(
@@ -769,7 +895,7 @@ fn golden_look_commands() {
         clip: clip(4),
         filter: Some(Filter {
             id: "vivid".into(),
-            intensity: 0.75,
+            intensity: 0.75.into(),
         }),
     });
     assert_eq!(
@@ -784,7 +910,7 @@ fn golden_look_commands() {
     let adjust = Command::Edit(EditCommand::SetClipAdjustments {
         clip: clip(4),
         adjust: ColorAdjustments {
-            brightness: 0.25,
+            brightness: 0.25.into(),
             ..Default::default()
         },
     });

@@ -1,22 +1,15 @@
 //! AI generation (image / video / TTS) — the client half.
 //!
-//! One trait, two routes, per the BYOK-first rule:
+//! [`FalGenerationProvider`]: the user's own fal.ai key talking to the
+//! fal queue API directly — backend fully out of the loop. The job id
+//! is the fal request id, namespaced per model.
 //!
-//! - [`ManagedGenerationProvider`]: signed-in path through the backend
-//!   (`POST /v1/generate/*`, poll `GET /v1/jobs/:id`). Credits are
-//!   debited server-side; 402 surfaces as [`CloudError::Status`] with
-//!   `status == 402` for the out-of-credits UI.
-//! - [`FalGenerationProvider`]: the user's own fal.ai key talking to the
-//!   fal queue API directly — backend fully out of the loop. The job id
-//!   is the fal request id, namespaced per model.
-//!
-//! Both yield provider-CDN result URLs; the caller downloads via
+//! Yields provider-CDN result URLs; the caller downloads via
 //! [`crate::download`] and runs the normal import path. Blocking, worker
 //! threads only — like the rest of the crate.
 
 use std::time::Duration;
 
-use crate::auth::AuthedClient;
 use crate::dto::{GenerateRequest, Job, JobStatus};
 use crate::error::CloudError;
 
@@ -45,36 +38,10 @@ pub trait GenerationProvider: Send {
 }
 
 // ---------------------------------------------------------------------------
-// Managed (backend) path
-// ---------------------------------------------------------------------------
-
-/// Backend-routed generation for signed-in users.
-pub struct ManagedGenerationProvider {
-    client: AuthedClient,
-}
-
-impl ManagedGenerationProvider {
-    pub fn new(client: AuthedClient) -> Self {
-        Self { client }
-    }
-}
-
-impl GenerationProvider for ManagedGenerationProvider {
-    fn start(&self, kind: GenerationKind, request: &GenerateRequest) -> Result<Job, CloudError> {
-        self.client.generate(kind.as_str(), request)
-    }
-
-    fn poll(&self, job_id: &str) -> Result<Job, CloudError> {
-        self.client.job(job_id)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // BYOK (direct fal.ai) path
 // ---------------------------------------------------------------------------
 
-/// Direct fal.ai queue access with the user's own key. Mirrors the
-/// backend's provider so managed and BYOK produce identical results.
+/// Direct fal.ai queue access with the user's own key.
 pub struct FalGenerationProvider {
     api_key: String,
     queue_base: String,

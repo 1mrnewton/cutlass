@@ -1,4 +1,7 @@
-use cutlass_models::{ClipId, ClipParam, Easing, ModelError, ParamValue, RationalTime};
+use cutlass_models::{
+    ClipId, ClipParam, Easing, ModelError, ParamValue, PiecewiseEasingPreset, RationalTime,
+    SpatialTangents,
+};
 
 use crate::action::edit::restore_clip::RestoreClipAction;
 use crate::action::{ApplyContext, EditAction};
@@ -15,10 +18,11 @@ pub fn set_keyframe(
     at: RationalTime,
     value: ParamValue,
     easing: Easing,
+    tangents: Option<SpatialTangents>,
 ) -> Result<Box<dyn EditAction>, EngineError> {
     let before = snapshot(ctx, clip)?;
     ctx.project
-        .set_param_keyframe(clip, param, at, value, easing)?;
+        .set_param_keyframe(clip, param, at, value, easing, tangents)?;
     Ok(Box::new(RestoreClipAction { clip: before }))
 }
 
@@ -41,6 +45,18 @@ pub fn set_constant(
 ) -> Result<Box<dyn EditAction>, EngineError> {
     let before = snapshot(ctx, clip)?;
     ctx.project.set_param_constant(clip, param, value)?;
+    Ok(Box::new(RestoreClipAction { clip: before }))
+}
+
+pub fn apply_easing_preset(
+    ctx: &mut ApplyContext<'_>,
+    clip: ClipId,
+    param: ClipParam,
+    at: RationalTime,
+    preset: PiecewiseEasingPreset,
+) -> Result<Box<dyn EditAction>, EngineError> {
+    let before = snapshot(ctx, clip)?;
+    ctx.project.apply_easing_preset(clip, param, at, preset)?;
     Ok(Box::new(RestoreClipAction { clip: before }))
 }
 

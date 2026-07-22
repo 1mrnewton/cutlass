@@ -257,82 +257,20 @@ pub struct TextPreset {
 }
 
 // ---------------------------------------------------------------------------
-// Auth + credits (the account half; used from Workstream 6 on)
+// Generation jobs (BYOK fal path; shared shape with the backend contract)
 // ---------------------------------------------------------------------------
 
-/// The client-side token bundle. `access_token` is a short-lived EdDSA
-/// JWT minted by the website (better-auth), verified by the backend via
-/// JWKS; `refresh_token` holds the long-lived better-auth **session
-/// token** from the device flow, used to fetch fresh JWTs from
-/// `/api/auth/token`. The app keeps both in the OS keychain, never in
-/// files. (Not a backend DTO — assembled client-side in [`crate::auth`].)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenPair {
-    pub access_token: String,
-    pub refresh_token: String,
-    /// Access-token lifetime in seconds.
-    pub expires_in: u64,
-}
-
-/// `GET /v1/me` response — the signed-in identity shown in the account UI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Me {
-    /// Stable user id (opaque).
-    pub id: String,
-    #[serde(default)]
-    pub email: String,
-    #[serde(default)]
-    pub display_name: String,
-    /// OAuth provider the account was created with (`github`, `google`).
-    #[serde(default)]
-    pub provider: String,
-}
-
-/// `GET /v1/credits/balance` response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Balance {
-    /// Whole credits remaining.
-    pub credits: i64,
-}
-
-/// `GET /v1/credits/history` response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LedgerPage {
-    pub entries: Vec<LedgerEntry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
-}
-
-/// One append-only ledger row, as shown in the account UI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LedgerEntry {
-    pub id: String,
-    /// Signed credits (+grant/top-up/refund, −usage).
-    pub amount: i64,
-    /// `top_up`, `generation`, `refund`, `grant`.
-    pub kind: String,
-    /// Human description ("Image generation · flux-pro").
-    #[serde(default)]
-    pub description: String,
-    /// RFC 3339.
-    pub created_at: String,
-}
-
-// ---------------------------------------------------------------------------
-// Generation jobs (managed path; used from Workstream 7 on)
-// ---------------------------------------------------------------------------
-
-/// `POST /v1/generate/image|video|tts` request.
+/// Generation request payload (prompt + optional model / duration).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerateRequest {
     pub prompt: String,
-    /// Provider-recognizable model id; empty = server default.
+    /// Provider-recognizable model id; empty = client default.
     #[serde(default)]
     pub model: String,
-    /// Seconds, for video/TTS where it prices the job.
+    /// Seconds, for video/TTS where the provider accepts it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<f64>,
-    /// Client idempotency key: retries never double-charge.
+    /// Client idempotency key.
     pub idempotency_key: String,
 }
 
@@ -348,7 +286,7 @@ pub enum JobStatus {
     Other,
 }
 
-/// `POST /v1/generate/*` and `GET /v1/jobs/:id` response.
+/// Generation job status / result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,
@@ -357,7 +295,8 @@ pub struct Job {
     /// directly (no bytes through the backend) and imports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_url: Option<String>,
-    /// Credits charged for this job (refunded on failure).
+    /// Reserved for contract compatibility with the backend DTO; BYOK
+    /// always reports `0`.
     #[serde(default)]
     pub credits_charged: i64,
     /// Failure detail when `status == Failed`.

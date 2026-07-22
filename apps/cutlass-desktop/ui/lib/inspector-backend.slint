@@ -1,4 +1,4 @@
-import { CatalogEntry, Clip, Sequence, TrackKind, TextClipStyle } from "../models/index.slint";
+import { CatalogEntry, Clip, ClipAdjust, Sequence, TrackKind, TextClipStyle } from "../models/index.slint";
 
 export struct SelectedClipInfo {
     found: bool,
@@ -23,12 +23,19 @@ export struct ParamRowState {
     easing: int,
 }
 
+export struct ScalarParamSample {
+    value: float,
+    row: ParamRowState,
+}
+
 export struct TransformSample {
     position-x: float,
     position-y: float,
     anchor-x: float,
     anchor-y: float,
     scale: float,
+    scale-y: float,
+    scale-linked: bool,
     rotation: float,
     opacity: float,
     position-row: ParamRowState,
@@ -44,18 +51,26 @@ export struct CompensatedPosition {
     position-y: float,
 }
 
-// The clip's audio gain sampled at the playhead, plus the volume envelope's
+// The clip's audio gain + pan sampled at the playhead, plus each envelope's
 // keyframe row state — the audio analogue of `TransformSample`, feeding the
-// inspector's volume diamond (M8 volume envelopes).
+// inspector's volume/pan diamonds.
 export struct AudioSample {
     volume: float,
     volume-row: ParamRowState,
+    pan: float,
+    pan-row: ParamRowState,
 }
 
 // Selection lookup and clip-property writes for the inspector panel.
 // Implemented in Rust (`src/inspector.rs`) so nested model traversal
 // stays out of Slint.
 export global InspectorBackend {
+    // Clip blend-mode catalog (CapCut "Blend"), populated once at startup
+    // from `BlendMode::ALL`.
+    in-out property <[CatalogEntry]> blend-catalog: [];
+    // Mask shape catalog (CapCut mask panel), populated once at startup
+    // from `mask_catalog()`.
+    in-out property <[CatalogEntry]> mask-catalog: [];
     // Clip-level filter preset catalog, populated once at startup.
     in-out property <[CatalogEntry]> filter-catalog: [];
     // Cloud LUT catalog (downloaded `.cube` starter pack). Populated by the
@@ -68,6 +83,9 @@ export global InspectorBackend {
     in-out property <[CatalogEntry]> animation-in-catalog: [];
     in-out property <[CatalogEntry]> animation-out-catalog: [];
     in-out property <[CatalogEntry]> animation-combo-catalog: [];
+    // Text panel: includes per-character presets (text_only) in every slot.
+    in-out property <[CatalogEntry]> animation-text-in-catalog: [];
+    in-out property <[CatalogEntry]> animation-text-out-catalog: [];
     in-out property <[CatalogEntry]> animation-text-combo-catalog: [];
 
     pure callback resolve-selection(
@@ -90,19 +108,28 @@ export global InspectorBackend {
         playhead-tick: int,
         anchor-x: float,
         anchor-y: float,
-        scale: float,
+        scale-x: float,
+        scale-y: float,
         rotation: float,
     ) -> CompensatedPosition;
 
-    // Sample the clip's volume envelope at the playhead and report its
-    // keyframe row state, mirroring `sample-transform` for the audio sheet
-    // (M8 volume envelopes). Implemented in Rust over the projected
-    // `kf-volume` curve with the engine's `Param` math, so the readout always
-    // matches the mixed gain.
+    // Sample the clip's volume + pan envelopes at the playhead and report
+    // their keyframe row state, mirroring `sample-transform` for the audio
+    // sheet. Implemented in Rust over the projected `kf-volume` / `kf-pan`
+    // curves with the engine's `Param` math, so the readout always matches
+    // the mixed gain and balance.
     pure callback sample-audio(clip: Clip, playhead-tick: int) -> AudioSample;
 
+    // Sample a scalar text-style or look parameter by its inspector command
+    // id. This is the same projected curve used for the row's keyframe state.
+    pure callback sample-scalar-param(
+        clip: Clip,
+        param: string,
+        playhead-tick: int,
+    ) -> ScalarParamSample;
+
     // Insert or replace a keyframe on `param` ("position" | "anchor" | "scale" |
-    // "rotation" | "opacity" | "volume") at the absolute sequence tick.
+    // "rotation" | "opacity" | "volume" | "pan") at the absolute sequence tick.
     // Scalars ride `value-x`; position uses both axes. `easing`: 0 linear,
     // 1 ease-in, 2 ease-out, 3 ease-in-out. One undoable engine edit.
     callback set-param-keyframe(
@@ -118,6 +145,17 @@ export global InspectorBackend {
     // the last keyframe collapses the property to a constant (engine
     // semantics). One undoable engine edit.
     callback remove-param-keyframe(clip-id: string, param: string, tick: int);
+
+    // Replace one animatable property with a constant, dropping its
+    // keyframes. Scalars ride `value-x`; vec2 params use both axes; color
+    // params pack RG into `value-x` and BA into `value-y` (u16 lanes).
+    // One undoable engine edit.
+    callback set-param-constant(
+        clip-id: string,
+        param: string,
+        value-x: float,
+        value-y: float,
+    );
 
     // Retime a media clip (CapCut speed, M1): positive rational `num/den`
     // playback rate (2/1 = double speed) plus the reverse flag. The engine
@@ -200,7 +238,9 @@ export global InspectorBackend {
     // normalized inset fractions measured in from each content edge
     // (0,0,0,0 ⇔ uncropped) plus flip flags. main.rs converts insets to the
     // model's kept-region rect; the engine validates (visual lanes only,
-    // non-degenerate window). One undoable edit.
+    // non-degenerate window). `playhead-tick` is the absolute sequence tick
+    // used to keyframe an already-animated crop (M2 compose). One undoable
+    // edit.
     callback set-clip-crop(
         clip-id: string,
         left: float,
@@ -209,7 +249,71 @@ export global InspectorBackend {
         bottom: float,
         flip-h: bool,
         flip-v: bool,
+        playhead-tick: int,
     );
+
+    // Set a visual clip's blend mode (CapCut "Blend"). `mode` is a catalog
+    // id from `blend-catalog` (e.g. "multiply"); `"normal"` is the default.
+    // One undoable edit.
+    callback set-clip-blend-mode(clip-id: string, mode: string);
+
+    // Set per-clip transform motion blur. `shutter` is degrees (0..=720);
+    // `samples` is quality (2..=16 in the UI). One undoable edit.
+    callback set-clip-motion-blur(clip-id: string, enabled: bool, shutter: float, samples: int);
+
+    // Set (or clear with an empty id) a visual clip's mask kind. Switching
+    // kind preserves feather / invert / geometry; enabling from none uses
+    // `Mask::new`. One undoable edit.
+    callback set-clip-mask-kind(clip-id: string, kind: string);
+
+    // Toggle mask invert on a clip that already has a mask. One undoable edit.
+    callback set-clip-mask-invert(clip-id: string, invert: bool);
+
+    // Enable or clear chroma keying. Enabling installs green `[0,255,0]` with
+    // strength `0.5` / shadow `0`. One undoable edit.
+    callback toggle-clip-chroma(clip-id: string, enabled: bool);
+
+    // Set the chroma key color (RGB 0..=255) on a keyed clip. One undoable edit.
+    callback set-clip-chroma-color(clip-id: string, r: int, g: int, b: int);
+
+    // Enable or clear one layer-style block on a visual clip. `block` is
+    // "shadow" | "glow" | "outline" | "background". Enabling installs the
+    // model default for that block; disabling clears it. One undoable edit.
+    callback toggle-clip-style(clip-id: string, block: string, enabled: bool);
+
+    // Set a layer-style color param (`style_shadow_color`, …) as a constant
+    // via the generic param path. Channels are 0..=255. One undoable edit.
+    callback set-clip-style-color(
+        clip-id: string,
+        key: string,
+        r: int,
+        g: int,
+        b: int,
+        a: int,
+    );
+
+    // Live preview of one layer-style scalar (or shadow offset axis) during
+    // a slider drag. `key` is a style_* param id; for offset use
+    // `style_shadow_offset_x` / `_y`. Session-only — release commits via
+    // set-param-constant / set-param-keyframe.
+    callback preview-clip-style(clip-id: string, key: string, value: float, tick: int);
+
+    // Live preview of one layer-style color during a swatch edit. Channels
+    // are 0..=255. Session-only; the matching set-clip-style-color commits.
+    callback preview-clip-style-color(
+        clip-id: string,
+        key: string,
+        r: int,
+        g: int,
+        b: int,
+        a: int,
+        tick: int,
+    );
+
+    // Drop a lingering styles preview override and repaint `tick` from
+    // committed state (release with no net change). Style slider commits
+    // also clear via set-param-constant / set-layer-styles.
+    callback clear-clip-styles(tick: int);
 
     // Set (or clear with an empty id) a visual clip's filter preset. Intensity
     // is normalized 0..=1; the inspector displays it as 0..=100%.
@@ -231,19 +335,20 @@ export global InspectorBackend {
     callback pick-clip-lut(clip-id: string);
 
     // Set (or clear with an empty id) one look-animation slot: "in", "out",
-    // or "combo". One undoable edit; combo exclusivity is enforced by the model.
-    callback set-clip-animation(clip-id: string, slot: string, animation-id: string);
-
-    // Set all five manual color adjustment sliders in one undoable edit.
-    // Values are normalized -1..=1.
-    callback set-clip-adjust(
+    // or "combo". Knobs are speed / intensity / stagger (defaults 1.0).
+    // One undoable edit; combo exclusivity is enforced by the model.
+    callback set-clip-animation(
         clip-id: string,
-        brightness: float,
-        contrast: float,
-        saturation: float,
-        exposure: float,
-        temperature: float,
+        slot: string,
+        animation-id: string,
+        speed: float,
+        intensity: float,
+        stagger: float,
     );
+
+    // Set all manual color adjustment sliders in one undoable edit.
+    // Signed values are normalized -1..=1; sharpness/vignette are 0..=1.
+    callback set-clip-adjust(clip-id: string, adjust: ClipAdjust);
 
     // Atomic live preview of the whole look: filter plus all adjustments.
     // The worker coalesces bursts and clears this session-only override on
@@ -252,11 +357,7 @@ export global InspectorBackend {
         clip-id: string,
         filter-id: string,
         intensity: float,
-        brightness: float,
-        contrast: float,
-        saturation: float,
-        exposure: float,
-        temperature: float,
+        adjust: ClipAdjust,
         tick: int,
     );
 

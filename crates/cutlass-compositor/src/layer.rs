@@ -75,11 +75,38 @@ pub mod mask_kind {
 }
 
 /// GPU-ready mask parameters (no `cutlass-models` dependency).
+///
+/// Geometry uses the same fraction-of-layer units as the model: `center` is an
+/// offset from the layer center, `size` scales the mask (`[1,1]` = full layer),
+/// `rotation_rad` is about the mask center, and `roundness` rounds rectangle
+/// corners only (`0`…`1`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerMask {
     pub kind: u32,
     pub feather: f32,
     pub invert: u32,
+    /// Offset from layer center, fraction of layer size per axis.
+    pub center: [f32; 2],
+    /// Mask size as a fraction of layer size (`[1, 1]` = legacy full-quad).
+    pub size: [f32; 2],
+    pub rotation_rad: f32,
+    /// Rectangle corner rounding, `0` … `1` (ignored for other kinds).
+    pub roundness: f32,
+}
+
+impl LayerMask {
+    /// Mask with identity geometry (centered, full size, no rotation/roundness).
+    pub const fn new(kind: u32) -> Self {
+        Self {
+            kind,
+            feather: 0.0,
+            invert: 0,
+            center: [0.0, 0.0],
+            size: [1.0, 1.0],
+            rotation_rad: 0.0,
+            roundness: 0.0,
+        }
+    }
 }
 
 /// GPU-ready chroma-key parameters.
@@ -88,6 +115,107 @@ pub struct LayerChromaKey {
     pub rgb: [f32; 3],
     pub strength: f32,
     pub shadow: f32,
+}
+
+/// Drop shadow drawn from the layer's alpha (offset + blur), in canvas pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LayerShadow {
+    pub rgba: [u8; 4],
+    pub offset: [f32; 2],
+    pub blur: f32,
+}
+
+/// Soft glow bloom drawn from the layer's alpha, in canvas pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LayerGlow {
+    pub rgba: [u8; 4],
+    pub radius: f32,
+    /// Multiplier on silhouette alpha before blur; typical range `0..=4`.
+    pub intensity: f32,
+}
+
+/// Hard outline / stroke around the layer's alpha silhouette, in canvas pixels.
+///
+/// Drawn as silhouette → box blur (`width`) → harden threshold, composited
+/// after the layer content (outside stroke). Width or alpha 0 skips the pass.
+/// Blur+threshold approximates morphological dilation; the effective width is
+/// capped by the style blur iteration limit (see `run_style_blur`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LayerOutline {
+    pub rgba: [u8; 4],
+    pub width: f32,
+}
+
+/// Solid rounded-rect plate behind the layer, in canvas pixels.
+///
+/// Sized as the content placement plus `2 * padding` per axis (same center and
+/// rotation), with SDF AA pad on the quad. Alpha 0 skips the pass.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LayerBackground {
+    pub rgba: [u8; 4],
+    pub padding: f32,
+    pub radius: f32,
+}
+
+/// Resolved layer styles in canvas pixels, rendered from the layer's alpha.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LayerStyles {
+    pub shadow: Option<LayerShadow>,
+    pub glow: Option<LayerGlow>,
+    pub outline: Option<LayerOutline>,
+    pub background: Option<LayerBackground>,
+}
+
+impl LayerStyles {
+    /// True iff no style block is present.
+    pub fn is_empty(&self) -> bool {
+        self.shadow.is_none()
+            && self.glow.is_none()
+            && self.outline.is_none()
+            && self.background.is_none()
+    }
+}
+
+/// How a layer's pixels combine with the accumulated canvas below it.
+/// `Normal` is plain source-over (the fast path); every other mode runs
+/// the dst-sampling blend pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Darken,
+    Multiply,
+    ColorBurn,
+    Lighten,
+    Screen,
+    ColorDodge,
+    Add,
+    Overlay,
+    SoftLight,
+    HardLight,
+    Difference,
+    Exclusion,
+}
+
+impl BlendMode {
+    /// WGSL `mode` uniform id (`Normal` = 0, then 1..=12 in declaration order).
+    pub(crate) fn shader_id(self) -> u32 {
+        match self {
+            BlendMode::Normal => 0,
+            BlendMode::Darken => 1,
+            BlendMode::Multiply => 2,
+            BlendMode::ColorBurn => 3,
+            BlendMode::Lighten => 4,
+            BlendMode::Screen => 5,
+            BlendMode::ColorDodge => 6,
+            BlendMode::Add => 7,
+            BlendMode::Overlay => 8,
+            BlendMode::SoftLight => 9,
+            BlendMode::HardLight => 10,
+            BlendMode::Difference => 11,
+            BlendMode::Exclusion => 12,
+        }
+    }
 }
 
 /// Per-layer mask and chroma-key state for the fx pipelines.
@@ -142,6 +270,41 @@ pub struct SdfLayer {
     pub stroke: Option<Stroke>,
 }
 
+/// One glyph placed from a [`GlyphsLayer`] atlas.
+///
+/// `glyph` indexes into [`GlyphsLayer::glyphs`]. Placement is absolute canvas
+/// pixels (the render crate folds clip transform + per-character animation
+/// into these fields before submit).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GlyphInstance {
+    /// Index into [`GlyphsLayer::glyphs`].
+    pub glyph: u32,
+    /// Content center in canvas pixels (+x right, +y down).
+    pub center: [f32; 2],
+    /// Pre-rotation content extent in canvas pixels.
+    pub size: [f32; 2],
+    /// Clockwise rotation about the center, in radians.
+    pub rotation: f32,
+    /// Instance opacity in `0.0..=1.0`; multiplied by the layer opacity.
+    pub opacity: f32,
+}
+
+/// Per-character text drawn as instanced quads from a shared glyph atlas.
+///
+/// `atlas_key` is a stable identity for the glyph set (e.g. a hash of text +
+/// style). Matching keys reuse the uploaded atlas; only the instance buffer
+/// is rewritten per frame.
+#[derive(Debug, Clone, Copy)]
+pub struct GlyphsLayer<'a> {
+    /// Cache identity for the packed atlas.
+    pub atlas_key: u64,
+    /// Straight-alpha cluster bitmaps (color already folded in). Zero-area
+    /// entries are whitespace placeholders and are not packed.
+    pub glyphs: &'a [RgbaImage],
+    /// Instance placements referencing `glyphs` by index.
+    pub instances: &'a [GlyphInstance],
+}
+
 /// The pixel source for a [`CompositeLayer`].
 ///
 /// Frames are borrowed: the engine pulls a [`VideoFrame`] from the decoder for
@@ -157,6 +320,8 @@ pub enum LayerContent<'a> {
     Solid([u8; 4]),
     /// A parametric vector shape evaluated in the fragment shader.
     Sdf(SdfLayer),
+    /// Per-character text as instanced atlas quads.
+    Glyphs(GlyphsLayer<'a>),
 }
 
 /// One layer in bottom-to-top stacking order: content plus placement.
@@ -177,6 +342,18 @@ pub struct CompositeLayer<'a> {
     /// Skipped while the layer is a transition side (matching effect chains,
     /// which also pause during the blend).
     pub lut: Option<LayerLut<'a>>,
+    /// How this layer composites over the accumulated canvas. `Normal` keeps
+    /// the direct src-over fast path; other modes force the offscreen blend pass.
+    pub blend_mode: BlendMode,
+    /// Shadow/glow/outline/background styles. Order on canvas: background →
+    /// shadow → glow → content → outline. Non-empty styles force the offscreen path.
+    pub styles: LayerStyles,
+    /// When non-empty, the compositor draws the layer content once per
+    /// placement into a cleared offscreen at weight `1/N` (additive), then
+    /// composites that average like a normal premultiplied layer. Texture
+    /// content stays shared across passes (transform-only motion blur).
+    /// Styles / blend modes apply to the accumulated result.
+    pub blur_passes: Vec<LayerPlacement>,
 }
 
 /// A layer, a canvas-wide pass, or a dual-source transition submitted to the compositor.
@@ -215,6 +392,9 @@ impl<'a> CompositeLayer<'a> {
             fx: LayerEffects::IDENTITY,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
+            styles: LayerStyles::default(),
+            blur_passes: Vec::new(),
         }
     }
 
@@ -228,6 +408,9 @@ impl<'a> CompositeLayer<'a> {
             fx: LayerEffects::IDENTITY,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
+            styles: LayerStyles::default(),
+            blur_passes: Vec::new(),
         }
     }
 
@@ -241,6 +424,9 @@ impl<'a> CompositeLayer<'a> {
             fx: LayerEffects::IDENTITY,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
+            styles: LayerStyles::default(),
+            blur_passes: Vec::new(),
         }
     }
 
@@ -254,6 +440,28 @@ impl<'a> CompositeLayer<'a> {
             fx: LayerEffects::IDENTITY,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
+            styles: LayerStyles::default(),
+            blur_passes: Vec::new(),
+        }
+    }
+
+    /// Per-character text as instanced atlas quads.
+    ///
+    /// `placement` supplies the layer opacity multiplier (and is the grade/fx
+    /// anchor); each glyph's on-canvas transform lives on the instances.
+    pub fn glyphs(glyphs: GlyphsLayer<'a>, placement: LayerPlacement) -> Self {
+        Self {
+            content: LayerContent::Glyphs(glyphs),
+            placement,
+            uv: FULL_UV,
+            effects: &[],
+            fx: LayerEffects::IDENTITY,
+            color_grade: None,
+            lut: None,
+            blend_mode: BlendMode::Normal,
+            styles: LayerStyles::default(),
+            blur_passes: Vec::new(),
         }
     }
 
@@ -291,6 +499,26 @@ impl<'a> CompositeLayer<'a> {
     /// identity fast path and drops the pass entirely.
     pub fn with_lut(mut self, lut: Option<LayerLut<'a>>) -> Self {
         self.lut = lut.filter(|l| l.intensity > 0.0);
+        self
+    }
+
+    /// Set the per-layer blend mode (`Normal` keeps the direct fast path).
+    pub fn with_blend_mode(mut self, blend_mode: BlendMode) -> Self {
+        self.blend_mode = blend_mode;
+        self
+    }
+
+    /// Attach resolved shadow/glow/outline/background styles (empty keeps the
+    /// direct fast path when blend/effects/LUT also allow it).
+    pub fn with_styles(mut self, styles: LayerStyles) -> Self {
+        self.styles = styles;
+        self
+    }
+
+    /// Attach motion-blur supersample placements (empty keeps the single-draw
+    /// path). Forces the offscreen accumulate path when non-empty.
+    pub fn with_blur_passes(mut self, blur_passes: Vec<LayerPlacement>) -> Self {
+        self.blur_passes = blur_passes;
         self
     }
 }

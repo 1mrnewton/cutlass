@@ -15,10 +15,11 @@
 use std::path::PathBuf;
 
 use cutlass_models::{
-    AnimationRef, AnimationSlot, AudioRole, CanvasAspect, ChromaKey, ClipId, ClipParam,
-    ClipTransform, ColorAdjustments, CropRect, Easing, Filter, Generator, Lut, MarkerColor,
-    MarkerId, Mask, MediaId, Param, ParamValue, Rational, RationalTime, Replaceable,
-    StabilizeLevel, TemplateMeta, TimeRange, TrackId, TrackKind,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
+    ClipTransform, ColorAdjustments, CropRect, Easing, Filter, Generator, LayerStyles, Lut,
+    MarkerColor, MarkerId, Mask, MediaId, MotionBlur, Param, ParamValue, PiecewiseEasingPreset,
+    Rational, RationalTime, Replaceable, StabilizeLevel, TemplateMeta, TimeRange, TrackId,
+    TrackKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -180,14 +181,19 @@ pub enum EditCommand {
     },
     /// Insert or replace a keyframe on one animatable clip property at an
     /// absolute timeline position (must fall inside the clip). A constant
-    /// property becomes a single-keyframe curve. The inverse restores the
-    /// previous parameter state.
+    /// property becomes a single-keyframe curve. Optional spatial `tangents`
+    /// shape a position motion path (rejected on non-position params). The
+    /// inverse restores the previous parameter state (full-clip snapshot).
     SetParamKeyframe {
         clip: ClipId,
         param: ClipParam,
         at: RationalTime,
         value: ParamValue,
         easing: Easing,
+        /// Spatial bezier handles for position motion paths. `None` is
+        /// straight-line (legacy). Only valid when `param` is [`ClipParam::Position`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tangents: Option<cutlass_models::SpatialTangents>,
     },
     /// Remove the keyframe at exactly `at` on one property. Removing the
     /// last keyframe collapses the property to a constant of that
@@ -203,6 +209,15 @@ pub enum EditCommand {
         clip: ClipId,
         param: ClipParam,
         value: ParamValue,
+    },
+    /// Expand the outgoing keyframe segment at `at` into a multi-keyframe
+    /// bounce / elastic / back approximation. Scalar and vec2 params only;
+    /// inverse is a full-clip restore.
+    ApplyEasingPreset {
+        clip: ClipId,
+        param: ClipParam,
+        at: RationalTime,
+        preset: PiecewiseEasingPreset,
     },
     /// Retime a media clip (CapCut speed, M1): `speed` is the positive
     /// playback-rate multiplier (2/1 = double speed), `reversed` plays the
@@ -239,11 +254,15 @@ pub enum EditCommand {
     /// `flip_h`/`flip_v` mirror the content. Rejected on audio-track clips
     /// and on degenerate/out-of-frame rects. The inverse restores the
     /// previous framing.
+    ///
+    /// `at: Some(playhead)` writes a crop keyframe when the property is
+    /// already animated (M2 compose); `None` flattens to a constant.
     SetClipCrop {
         clip: ClipId,
         crop: CropRect,
         flip_h: bool,
         flip_v: bool,
+        at: Option<RationalTime>,
     },
     /// Set a media clip's audio mix (CapCut volume + fades): `volume` is the
     /// flat gain (`0` mutes, `1` = unchanged, up to 10× boost) — `Some`
@@ -269,6 +288,19 @@ pub enum EditCommand {
     /// gap, like stickers). Media-backed visual clips only. The inverse
     /// restores the previous clip state.
     SetClipMask { clip: ClipId, mask: Option<Mask> },
+    /// Set how a clip composites over the stack below (visual clips only).
+    SetClipBlendMode { clip: ClipId, mode: BlendMode },
+    /// Set per-clip motion blur (temporal supersampling of the animated
+    /// transform). Visual clips only. Params are plain values — not
+    /// animatable. The inverse restores the previous clip state.
+    SetClipMotionBlur {
+        clip: ClipId,
+        motion_blur: MotionBlur,
+    },
+    /// Set layer-quad styles (shadow/glow/outline/background) on a visual
+    /// clip. Empty styles clear every block. The inverse restores the
+    /// previous clip state.
+    SetClipLayerStyles { clip: ClipId, styles: LayerStyles },
     /// Set (or clear) chroma keying (CapCut chroma key, Phase I;
     /// render-neutral). Media-backed visual clips only. The inverse restores
     /// the previous clip state.
@@ -470,6 +502,12 @@ pub enum EditCommand {
 /// Untagged on the wire: the flat `{"type": …}` object of the inner enums is
 /// the whole format (variant names are disjoint across the two sets), so
 /// callers never spell the project/edit split in JSON.
+///
+/// `Edit` outweighs `Project` because some edits (layer styles, masks)
+/// carry whole param blocks inline. Commands are transient — built once per
+/// user action, applied, dropped — so boxing buys nothing and would churn
+/// every construction site.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Command {

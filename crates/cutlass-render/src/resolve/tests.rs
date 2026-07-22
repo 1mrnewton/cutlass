@@ -1,10 +1,11 @@
 use super::*;
 use crate::grade::effective_grade;
-use crate::scene::{LayerSource, SizeSpec};
+use crate::scene::{LayerSource, SceneShadow, SizeSpec};
 use cutlass_models::{
-    AnimationRef, AnimationSlot, CanvasAspect, CanvasSettings, ClipTransform, ColorAdjustments,
-    CropRect, Filter, Generator, MediaSource, Project, Rational, RationalTime, Shape,
-    TextStyle as ModelTextStyle, TimeRange, TrackKind,
+    AnimationRef, AnimationSlot, BlendMode, CanvasAspect, CanvasSettings, ClipParam, ClipTransform,
+    ColorAdjustments, CropRect, Easing, Filter, Generator, LayerGlow, LayerOutline, LayerShadow,
+    LayerStyles, MediaSource, Param, ParamValue, Project, Rational, RationalTime, Scale2, Shape,
+    SpatialTangents, StyleParam, TextStyle as ModelTextStyle, TimeRange, TrackKind,
 };
 
 const FPS_24: Rational = Rational::FPS_24;
@@ -114,27 +115,27 @@ fn text_generator_maps_style_and_defers_size() {
     let mut project = Project::new("p", FPS_24);
     let track = project.add_track(TrackKind::Text, "T1");
     let style = ModelTextStyle {
-        size: 90.0,
+        size: 90.0.into(),
         bold: true,
         italic: true,
         underline: true,
-        fill: [255, 0, 0, 255],
-        letter_spacing: 12.0,
-        line_spacing: 1.5,
+        fill: [255, 0, 0, 255].into(),
+        letter_spacing: 12.0.into(),
+        line_spacing: 1.5.into(),
         align_h: cutlass_models::TextAlignH::Right,
         align_v: cutlass_models::TextAlignV::Bottom,
         stroke: Some(cutlass_models::TextStroke {
-            rgba: [0, 0, 0, 255],
-            width: 8.0,
+            rgba: [0, 0, 0, 255].into(),
+            width: 8.0.into(),
         }),
         background: Some(cutlass_models::TextBackground {
-            rgba: [0, 0, 255, 200],
-            radius: 0.5,
+            rgba: [0, 0, 255, 200].into(),
+            radius: 0.5.into(),
         }),
         shadow: Some(cutlass_models::TextShadow {
-            rgba: [0, 0, 0, 230],
-            blur: 0.15,
-            distance: 10.0,
+            rgba: [0, 0, 0, 230].into(),
+            blur: 0.15.into(),
+            distance: 10.0.into(),
         }),
         ..ModelTextStyle::default()
     };
@@ -154,9 +155,14 @@ fn text_generator_maps_style_and_defers_size() {
     assert_eq!(scene.layers.len(), 1);
     let layer = &scene.layers[0];
     approx2(layer.center, [960.0, 540.0]);
-    assert_eq!(layer.size, SizeSpec::BitmapScaled(1.0));
+    assert_eq!(layer.size, SizeSpec::BitmapScaled([1.0, 1.0]));
     match &layer.source {
-        LayerSource::Text { content, style } => {
+        LayerSource::Text {
+            content,
+            style,
+            animation,
+        } => {
+            assert!(animation.is_none());
             assert_eq!(content, "Hi");
             approx(style.font_size, 90.0);
             assert_eq!(style.color, [255, 0, 0, 255]);
@@ -192,7 +198,84 @@ fn text_wrap_toggle_removes_the_canvas_width_constraint() {
         wrap: false,
         ..ModelTextStyle::default()
     };
-    assert_eq!(map_text_style(&style, 1920.0, 1080.0).max_width, None);
+    assert_eq!(map_text_style(&style, 1920.0, 1080.0, 0).max_width, None);
+}
+
+#[test]
+fn keyframed_text_background_samples_card_per_tick() {
+    use cutlass_models::{ClipParam, Easing, ParamValue, TextParam};
+
+    let mut project = Project::new("p", FPS_24);
+    let track = project.add_track(TrackKind::Text, "T1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::Text {
+                content: "Card".into(),
+                style: ModelTextStyle {
+                    background: Some(cutlass_models::TextBackground::default()),
+                    ..ModelTextStyle::default()
+                },
+            },
+            tr(0, 100),
+        )
+        .unwrap();
+    let color = ClipParam::Text {
+        param: TextParam::BackgroundColor,
+    };
+    let radius = ClipParam::Text {
+        param: TextParam::BackgroundRadius,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            color,
+            rt(0),
+            ParamValue::Color([0, 0, 0, 255]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            color,
+            rt(50),
+            ParamValue::Color([200, 100, 0, 255]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            radius,
+            rt(0),
+            ParamValue::Scalar(0.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            radius,
+            rt(50),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+
+    let scene = resolve(&project, rt(25)).unwrap();
+    match &scene.layers[0].source {
+        LayerSource::Text { style, .. } => {
+            let bg = style.background.expect("background");
+            assert_eq!(bg.rgba, [100, 50, 0, 255], "card color lerps per channel");
+            approx(bg.radius, 0.5);
+        }
+        other => panic!("expected text source, got {other:?}"),
+    }
 }
 
 #[test]
@@ -283,7 +366,7 @@ fn empty_or_unknown_sticker_asset_places_nothing() {
         None,
         1920.0,
         1080.0,
-        1.0,
+        Scale2::ONE,
         0,
         0.0,
         Vec::new(),
@@ -308,6 +391,7 @@ fn crop_and_horizontal_flip_set_uv() {
             },
             true,
             false,
+            None,
         )
         .unwrap();
 
@@ -318,6 +402,65 @@ fn crop_and_horizontal_flip_set_uv() {
     approx(uv[1], 0.1);
     approx(uv[2], 0.25);
     approx(uv[3], 0.9);
+}
+
+#[test]
+fn keyframed_crop_samples_uv_per_tick() {
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    let a = CropRect {
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 1.0,
+    };
+    let b = CropRect {
+        x: 0.4,
+        y: 0.2,
+        w: 0.5,
+        h: 0.6,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Crop,
+            rt(0),
+            ParamValue::Rect([a.x, a.y, a.w, a.h]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Crop,
+            rt(10),
+            ParamValue::Rect([b.x, b.y, b.w, b.h]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+
+    let uv0 = resolve(&project, rt(0)).unwrap().layers[0].uv;
+    approx(uv0[0], 0.0);
+    approx(uv0[1], 0.0);
+    approx(uv0[2], 1.0);
+    approx(uv0[3], 1.0);
+
+    let uv5 = resolve(&project, rt(5)).unwrap().layers[0].uv;
+    // Midpoint crop [0.2, 0.1, 0.75, 0.8] → UV [u0,v0,u1,v1].
+    approx(uv5[0], 0.2);
+    approx(uv5[1], 0.1);
+    approx(uv5[2], 0.95);
+    approx(uv5[3], 0.9);
+
+    let uv10 = resolve(&project, rt(10)).unwrap().layers[0].uv;
+    approx(uv10[0], 0.4);
+    approx(uv10[1], 0.2);
+    approx(uv10[2], 0.9);
+    approx(uv10[3], 0.8);
 }
 
 #[test]
@@ -353,7 +496,7 @@ fn transform_offsets_center_and_scales_size() {
             clip,
             ClipTransform {
                 position: [0.25, -0.1],
-                scale: 2.0,
+                scale: 2.0.into(),
                 opacity: 0.5,
                 ..ClipTransform::IDENTITY
             },
@@ -369,6 +512,143 @@ fn transform_offsets_center_and_scales_size() {
         other => panic!("expected fixed size, got {other:?}"),
     }
     approx(layer.opacity, 0.5);
+}
+
+#[test]
+fn keyframed_position_with_tangents_resolves_off_the_line() {
+    // Motion-path sampling flows through Param::sample → resolve automatically.
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            rt(0),
+            ParamValue::Vec2([0.0, 0.0]),
+            Easing::Linear,
+            Some(SpatialTangents {
+                out_t: [0.0, 0.55],
+                in_t: [0.0, 0.0],
+            }),
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            rt(10),
+            ParamValue::Vec2([1.0, 1.0]),
+            Easing::Linear,
+            Some(SpatialTangents {
+                out_t: [0.0, 0.0],
+                in_t: [-0.55, 0.0],
+            }),
+        )
+        .unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    let center = scene.layers[0].center;
+    // Straight mid position is [0.5, 0.5] → canvas center [cw, ch].
+    let straight = [1920.0, 1080.0];
+    assert!(
+        (center[1] - straight[1]).abs() > 10.0 || (center[0] - straight[0]).abs() > 10.0,
+        "expected curved mid off the straight line, got {center:?}"
+    );
+    // Quarter-ish bulge: y above the diagonal in position space → center_y > ch
+    // relative to center_x's progress.
+    let pos_x = center[0] / 1920.0 - 0.5;
+    let pos_y = center[1] / 1080.0 - 0.5;
+    assert!(
+        pos_y > pos_x + 0.05,
+        "expected position above diagonal, got ({pos_x}, {pos_y}) from center {center:?}"
+    );
+}
+
+#[test]
+fn per_axis_scale_stretches_media_width_only() {
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_transform(
+            clip,
+            ClipTransform {
+                scale: Scale2 { x: 2.0, y: 1.0 },
+                ..ClipTransform::IDENTITY
+            },
+            None,
+        )
+        .unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    match scene.layers[0].size {
+        // Width doubled, height unchanged.
+        SizeSpec::Fixed(size) => approx2(size, [3840.0, 1080.0]),
+        other => panic!("expected fixed size, got {other:?}"),
+    }
+}
+
+#[test]
+fn shape_stroke_uses_isotropic_scale() {
+    let mut project = Project::new("p", FPS_24);
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let generator = Generator::Shape {
+        shape: Shape::Rectangle,
+        rgba: Param::Constant([255, 0, 0, 255]),
+        width: Param::Constant(100.0),
+        height: Param::Constant(50.0),
+        corner_radius: Param::Constant(0.0),
+        stroke: Some(cutlass_models::ShapeStroke::new([0, 0, 0, 255], 6.0)),
+    };
+    let clip = project.add_generated(track, generator, tr(0, 100)).unwrap();
+
+    // Uniform [2,2]: stroke doubles (ref_scale = 1 on 1080p canvas).
+    project
+        .set_transform(
+            clip,
+            ClipTransform {
+                scale: Scale2::uniform(2.0),
+                ..ClipTransform::IDENTITY
+            },
+            None,
+        )
+        .unwrap();
+    let scene = resolve(&project, rt(5)).unwrap();
+    match &scene.layers[0].source {
+        LayerSource::Shape { stroke, .. } => {
+            approx(stroke.expect("stroke").width, 12.0);
+        }
+        other => panic!("expected shape, got {other:?}"),
+    }
+
+    // Split [4,1]: geometric mean is still 2 → stroke still doubles.
+    project
+        .set_transform(
+            clip,
+            ClipTransform {
+                scale: Scale2 { x: 4.0, y: 1.0 },
+                ..ClipTransform::IDENTITY
+            },
+            None,
+        )
+        .unwrap();
+    let scene = resolve(&project, rt(5)).unwrap();
+    match &scene.layers[0].source {
+        LayerSource::Shape { stroke, .. } => {
+            approx(stroke.expect("stroke").width, 12.0);
+        }
+        other => panic!("expected shape, got {other:?}"),
+    }
+    // Placement still stretches per-axis (width ×4, height ×1) plus pad.
+    match scene.layers[0].size {
+        SizeSpec::Fixed(size) => {
+            assert!(size[0] > size[1] * 3.0, "width should dominate under [4,1]");
+        }
+        other => panic!("expected fixed size, got {other:?}"),
+    }
 }
 
 #[test]
@@ -515,6 +795,9 @@ fn quad_center_rotates_about_the_anchor() {
         chroma_key: None,
         color_grade: None,
         lut: None,
+        blend_mode: BlendMode::Normal,
+        styles: None,
+        blur_passes: Vec::new(),
     };
     // to_center (960, 540) rotated 90° cw (+y down) → (-540, 960).
     approx2(layer.quad_center([1920.0, 1080.0]), [420.0, 1500.0]);
@@ -539,7 +822,7 @@ fn resolve_with_substitutes_transform_and_generator_for_one_clip() {
             clip,
             ClipTransform {
                 position: [0.25, 0.0],
-                scale: 0.5,
+                scale: 0.5.into(),
                 ..ClipTransform::IDENTITY
             },
         )),
@@ -553,10 +836,11 @@ fn resolve_with_substitutes_transform_and_generator_for_one_clip() {
             clip,
             None,
             &ColorAdjustments {
-                brightness: 0.25,
+                brightness: 0.25.into(),
                 ..ColorAdjustments::default()
             },
         )),
+        styles: None,
     };
     let scene = resolve_with(&project, rt(5), overrides).unwrap();
     let layer = &scene.layers[0];
@@ -566,7 +850,7 @@ fn resolve_with_substitutes_transform_and_generator_for_one_clip() {
         Some(effective_grade(
             None,
             &ColorAdjustments {
-                brightness: 0.25,
+                brightness: 0.25.into(),
                 ..ColorAdjustments::default()
             }
         ))
@@ -774,7 +1058,7 @@ fn animated_shape_params_sample_at_the_clip_tick() {
         (fill, 50, ParamValue::Color([200, 100, 0, 255])),
     ] {
         project
-            .set_param_keyframe(clip, param, rt(at), value, Easing::Linear)
+            .set_param_keyframe(clip, param, rt(at), value, Easing::Linear, None)
             .unwrap();
     }
 
@@ -838,7 +1122,7 @@ fn pen_path_resolves_to_a_bitmap_scaled_path_layer() {
         other => panic!("expected path source, got {other:?}"),
     }
     // Transform scale rides the quad, not the raster.
-    assert_eq!(layer.size, SizeSpec::BitmapScaled(1.0));
+    assert_eq!(layer.size, SizeSpec::BitmapScaled([1.0, 1.0]));
 }
 
 #[test]
@@ -876,7 +1160,7 @@ fn clip_adjust_and_filter_flow_into_scene_layer_grade() {
         .set_clip_adjustments(
             adjust_clip,
             ColorAdjustments {
-                saturation: -1.0,
+                saturation: (-1.0).into(),
                 ..ColorAdjustments::default()
             },
         )
@@ -886,7 +1170,7 @@ fn clip_adjust_and_filter_flow_into_scene_layer_grade() {
     let expected = effective_grade(
         None,
         &ColorAdjustments {
-            saturation: -1.0,
+            saturation: (-1.0).into(),
             ..ColorAdjustments::default()
         },
     );
@@ -905,7 +1189,7 @@ fn clip_adjust_and_filter_flow_into_scene_layer_grade() {
         .unwrap();
     let filter = Filter {
         id: "mono".into(),
-        intensity: 0.8,
+        intensity: 0.8.into(),
     };
     project
         .set_clip_filter(filter_clip, Some(filter.clone()))
@@ -941,8 +1225,8 @@ fn mask_and_chroma_key_reach_media_layer() {
             clip,
             Some(ChromaKey {
                 rgb: [0, 255, 0],
-                strength: 0.5,
-                shadow: 0.0,
+                strength: 0.5.into(),
+                shadow: 0.0.into(),
             }),
         )
         .unwrap();
@@ -950,9 +1234,85 @@ fn mask_and_chroma_key_reach_media_layer() {
     let scene = resolve(&project, rt(5)).unwrap();
     assert_eq!(scene.layers.len(), 1);
     let layer = &scene.layers[0];
-    assert_eq!(layer.mask.unwrap().kind, MaskKind::Circle);
+    let mask = layer.mask.unwrap();
+    assert_eq!(mask.kind, MaskKind::Circle);
+    approx2(mask.center, [0.0, 0.0]);
+    approx2(mask.size, [1.0, 1.0]);
+    approx(mask.rotation_rad, 0.0);
+    approx(mask.roundness, 0.0);
     assert_eq!(layer.chroma_key.unwrap().rgb, [0, 255, 0]);
     assert!((layer.chroma_key.unwrap().strength - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn keyframed_mask_center_samples_per_tick() {
+    use cutlass_models::{LookParam, Mask, MaskKind};
+
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_clip_mask(clip, Some(Mask::new(MaskKind::Circle)))
+        .unwrap();
+    let center = ClipParam::Look {
+        param: LookParam::MaskCenter,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            center,
+            rt(0),
+            ParamValue::Vec2([0.0, 0.0]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            center,
+            rt(40),
+            ParamValue::Vec2([0.5, -0.25]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+
+    let start = resolve(&project, rt(0)).unwrap();
+    approx2(start.layers[0].mask.unwrap().center, [0.0, 0.0]);
+    let mid = resolve(&project, rt(20)).unwrap();
+    approx2(mid.layers[0].mask.unwrap().center, [0.25, -0.125]);
+    let end = resolve(&project, rt(40)).unwrap();
+    approx2(end.layers[0].mask.unwrap().center, [0.5, -0.25]);
+}
+
+#[test]
+fn mask_rotation_degrees_resolve_to_radians() {
+    use cutlass_models::{LookParam, Mask, MaskKind};
+
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_clip_mask(clip, Some(Mask::new(MaskKind::Rectangle)))
+        .unwrap();
+    project
+        .set_param_constant(
+            clip,
+            ClipParam::Look {
+                param: LookParam::MaskRotation,
+            },
+            ParamValue::Scalar(90.0),
+        )
+        .unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    approx(
+        scene.layers[0].mask.unwrap().rotation_rad,
+        std::f32::consts::FRAC_PI_2,
+    );
 }
 
 #[test]
@@ -1026,6 +1386,55 @@ fn clip_with_gaussian_blur_carries_sampled_radius() {
 }
 
 #[test]
+fn color_overlay_flattens_typed_params_in_catalog_order() {
+    let mut project = Project::new("p", FPS_24);
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::SolidColor {
+                rgba: [255, 0, 0, 255],
+            },
+            tr(0, 100),
+        )
+        .unwrap();
+    project.add_effect(clip, "color_overlay").unwrap();
+    project
+        .set_param_constant(
+            clip,
+            ClipParam::Effect {
+                effect: 0,
+                param: 0,
+            },
+            ParamValue::Color([51, 102, 153, 204]),
+        )
+        .unwrap();
+    project
+        .set_param_constant(
+            clip,
+            ClipParam::Effect {
+                effect: 0,
+                param: 1,
+            },
+            ParamValue::Vec2([0.25, -0.5]),
+        )
+        .unwrap();
+    project.set_effect_param(clip, 0, 2, 0.75).unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    let params = &scene.layers[0].effects[0].params;
+    // color (4) + offset (2) + amount (1)
+    assert_eq!(params.len(), 7);
+    approx(params[0], 51.0 / 255.0);
+    approx(params[1], 102.0 / 255.0);
+    approx(params[2], 153.0 / 255.0);
+    approx(params[3], 204.0 / 255.0);
+    approx(params[4], 0.25);
+    approx(params[5], -0.5);
+    approx(params[6], 0.75);
+}
+
+#[test]
 fn adjustment_lane_resolves_to_canvas_pass_above_lower_layers() {
     let mut project = Project::new("p", FPS_24);
     let base = project.add_track(TrackKind::Sticker, "S1");
@@ -1046,7 +1455,7 @@ fn adjustment_lane_resolves_to_canvas_pass_above_lower_layers() {
         .set_clip_adjustments(
             bar,
             ColorAdjustments {
-                saturation: -1.0,
+                saturation: (-1.0).into(),
                 ..ColorAdjustments::default()
             },
         )
@@ -1063,7 +1472,7 @@ fn adjustment_lane_resolves_to_canvas_pass_above_lower_layers() {
         Some(effective_grade(
             None,
             &ColorAdjustments {
-                saturation: -1.0,
+                saturation: (-1.0).into(),
                 ..ColorAdjustments::default()
             },
         ))
@@ -1089,7 +1498,7 @@ fn filter_lane_resolves_to_canvas_pass_grade() {
         .unwrap();
     let filter = Filter {
         id: "mono".into(),
-        intensity: 1.0,
+        intensity: 1.0.into(),
     };
     project.set_clip_filter(bar, Some(filter.clone())).unwrap();
 
@@ -1159,7 +1568,7 @@ fn identity_or_inactive_lane_passes_are_elided() {
         .set_clip_adjustments(
             bar,
             ColorAdjustments {
-                exposure: 1.0,
+                exposure: 1.0.into(),
                 ..ColorAdjustments::default()
             },
         )
@@ -1200,7 +1609,7 @@ fn gesture_partitions_fall_back_when_canvas_pass_sits_above_clip() {
         .set_clip_adjustments(
             bar,
             ColorAdjustments {
-                exposure: 1.0,
+                exposure: 1.0.into(),
                 ..ColorAdjustments::default()
             },
         )
@@ -1270,7 +1679,7 @@ fn transition_between_canvas_passes_falls_back_to_plain_clip() {
             .set_clip_adjustments(
                 clip,
                 ColorAdjustments {
-                    exposure: 1.0,
+                    exposure: 1.0.into(),
                     ..ColorAdjustments::default()
                 },
             )
@@ -1388,4 +1797,336 @@ fn gesture_partitions_return_none_inside_transition_window() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn video_clip_blend_mode_reaches_scene_layer() {
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project.set_blend_mode(clip, BlendMode::Multiply).unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    assert_eq!(scene.layers.len(), 1);
+    assert_eq!(scene.layers[0].blend_mode, BlendMode::Multiply);
+}
+
+#[test]
+fn text_generator_blend_mode_reaches_scene_layer() {
+    let mut project = Project::new("p", FPS_24);
+    let track = project.add_track(TrackKind::Text, "T1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::Text {
+                content: "Hi".into(),
+                style: ModelTextStyle::default(),
+            },
+            tr(0, 100),
+        )
+        .unwrap();
+    project.set_blend_mode(clip, BlendMode::Screen).unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    assert_eq!(scene.layers.len(), 1);
+    assert!(matches!(scene.layers[0].source, LayerSource::Text { .. }));
+    assert_eq!(scene.layers[0].blend_mode, BlendMode::Screen);
+}
+
+#[test]
+fn adjustment_lane_blend_mode_stays_normal_on_canvas_pass() {
+    let mut project = Project::new("p", FPS_24);
+    let base = project.add_track(TrackKind::Sticker, "S1");
+    project
+        .add_generated(
+            base,
+            Generator::SolidColor {
+                rgba: [255, 0, 0, 255],
+            },
+            tr(0, 100),
+        )
+        .unwrap();
+    let adjustment = project.add_track(TrackKind::Adjustment, "A1");
+    let bar = project
+        .add_generated(adjustment, Generator::Adjustment, tr(0, 100))
+        .unwrap();
+    project
+        .set_clip_adjustments(
+            bar,
+            ColorAdjustments {
+                saturation: (-1.0).into(),
+                ..ColorAdjustments::default()
+            },
+        )
+        .unwrap();
+    // Even if the bar carries a blend mode, canvas passes must stay Normal.
+    project.set_blend_mode(bar, BlendMode::Multiply).unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    assert_eq!(scene.layers.len(), 2);
+    assert_eq!(scene.layers[1].source, LayerSource::CanvasPass);
+    assert_eq!(scene.layers[1].blend_mode, BlendMode::Normal);
+}
+
+#[test]
+fn shadow_blur_scales_to_canvas_pixels_on_tall_canvas() {
+    // Auto canvas follows the 3840×2160 media → ch=2160 → px = 2× at scale 1.
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(3840, 2160));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow {
+                    rgba: Param::Constant([0, 0, 0, 128]),
+                    offset: Param::Constant([4.0, 4.0]),
+                    blur: Param::Constant(8.0),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    assert_eq!((scene.width, scene.height), (3840, 2160));
+    assert_eq!(scene.layers.len(), 1);
+    let styles = scene.layers[0].styles.as_ref().expect("styles");
+    assert_eq!(
+        styles.shadow,
+        Some(SceneShadow {
+            rgba: [0, 0, 0, 128],
+            offset: [8.0, 8.0],
+            blur: 16.0,
+        })
+    );
+}
+
+#[test]
+fn keyframed_glow_radius_samples_per_tick() {
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                glow: Some(LayerGlow {
+                    rgba: Param::Constant([255, 255, 255, 255]),
+                    radius: Param::Constant(0.0),
+                    intensity: Param::Constant(1.0),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let radius = ClipParam::Style {
+        param: StyleParam::GlowRadius,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            radius,
+            rt(0),
+            ParamValue::Scalar(4.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            radius,
+            rt(40),
+            ParamValue::Scalar(20.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+
+    // Midpoint of the segment (local tick 20) → radius 12 ref px → 12 canvas px.
+    let mid = resolve(&project, rt(20)).unwrap();
+    approx(
+        mid.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .glow
+            .as_ref()
+            .unwrap()
+            .radius,
+        12.0,
+    );
+    let end = resolve(&project, rt(40)).unwrap();
+    approx(
+        end.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .glow
+            .as_ref()
+            .unwrap()
+            .radius,
+        20.0,
+    );
+}
+
+#[test]
+fn transform_scale_doubles_outline_width() {
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                outline: Some(LayerOutline {
+                    rgba: Param::Constant([255, 255, 255, 255]),
+                    width: Param::Constant(4.0),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    project
+        .set_transform(
+            clip,
+            ClipTransform {
+                scale: 2.0.into(),
+                ..ClipTransform::IDENTITY
+            },
+            None,
+        )
+        .unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    approx(
+        scene.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .outline
+            .as_ref()
+            .unwrap()
+            .width,
+        8.0,
+    );
+}
+
+#[test]
+fn clip_without_styles_resolves_styles_none() {
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    assert_eq!(scene.layers.len(), 1);
+    assert!(scene.layers[0].styles.is_none());
+}
+
+#[test]
+fn resolve_with_substitutes_styles_for_one_clip() {
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow {
+                    blur: Param::Constant(8.0),
+                    ..LayerShadow::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let live = LayerStyles {
+        shadow: Some(LayerShadow {
+            blur: Param::Constant(24.0),
+            ..LayerShadow::default()
+        }),
+        ..Default::default()
+    };
+    let overrides = ResolveOverrides {
+        transform: None,
+        generator: None,
+        look: None,
+        styles: Some((clip, &live)),
+    };
+    let scene = resolve_with(&project, rt(5), overrides).unwrap();
+    approx(
+        scene.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .blur,
+        24.0,
+    );
+
+    // Plain resolve still sees only committed state.
+    let scene = resolve(&project, rt(5)).unwrap();
+    approx(
+        scene.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .blur,
+        8.0,
+    );
+}
+
+#[test]
+fn adjustment_lane_styles_stay_none_on_canvas_pass() {
+    let mut project = Project::new("p", FPS_24);
+    let base = project.add_track(TrackKind::Sticker, "S1");
+    project
+        .add_generated(
+            base,
+            Generator::SolidColor {
+                rgba: [255, 0, 0, 255],
+            },
+            tr(0, 100),
+        )
+        .unwrap();
+    let adjustment = project.add_track(TrackKind::Adjustment, "A1");
+    let bar = project
+        .add_generated(adjustment, Generator::Adjustment, tr(0, 100))
+        .unwrap();
+    project
+        .set_clip_adjustments(
+            bar,
+            ColorAdjustments {
+                saturation: (-1.0).into(),
+                ..ColorAdjustments::default()
+            },
+        )
+        .unwrap();
+    project
+        .set_layer_styles(
+            bar,
+            LayerStyles {
+                shadow: Some(LayerShadow::default()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    assert_eq!(scene.layers.len(), 2);
+    assert_eq!(scene.layers[1].source, LayerSource::CanvasPass);
+    assert!(scene.layers[1].styles.is_none());
 }

@@ -7,7 +7,7 @@
 //!
 //! | Effect id | Renders |
 //! |-----------|---------|
-//! | `gaussian_blur`, `vignette`, `pixelate` | Yes |
+//! | `gaussian_blur`, `vignette`, `pixelate`, `color_overlay`, `duotone` | Yes |
 //! | `sharpen`, `glitch`, `chromatic_aberration`, `grain`, `glow`, `zoom_blur`, `mirror` | Passthrough (no visual change) |
 //!
 //! ## Transition coverage
@@ -82,6 +82,14 @@ const EFFECT_DESCRIPTORS: &[PassDescriptor] = &[
         id: "mirror",
         params: &["mode"],
     },
+    PassDescriptor {
+        id: "color_overlay",
+        params: &["color", "offset", "amount"],
+    },
+    PassDescriptor {
+        id: "duotone",
+        params: &["shadow_color", "highlight_color", "intensity"],
+    },
 ];
 
 const TRANSITION_IDS: &[&str] = &[
@@ -108,7 +116,9 @@ pub fn transition_ids() -> &'static [&'static str] {
 /// Implementation status for an effect catalog id.
 pub fn effect_coverage(id: &str) -> PassCoverage {
     match id {
-        "gaussian_blur" | "vignette" | "pixelate" => PassCoverage::Implemented,
+        "gaussian_blur" | "vignette" | "pixelate" | "color_overlay" | "duotone" => {
+            PassCoverage::Implemented
+        }
         "sharpen"
         | "glitch"
         | "chromatic_aberration"
@@ -149,6 +159,10 @@ pub fn effect_is_noop(id: &str, params: &[f32]) -> bool {
         "gaussian_blur" => params.first().is_none_or(|&r| r <= 0.0),
         "vignette" => params.first().is_none_or(|&a| a <= 0.0),
         "pixelate" => params.first().is_none_or(|&s| s <= 1.0),
+        // Flatten: color(4) + offset(2) + amount(1) → amount at index 6.
+        "color_overlay" => params.get(6).is_none_or(|&a| a <= 0.0),
+        // Flatten: shadow(4) + highlight(4) + intensity(1) → intensity at index 8.
+        "duotone" => params.get(8).is_none_or(|&i| i <= 0.0),
         _ => effect_coverage(id) == PassCoverage::Passthrough,
     }
 }

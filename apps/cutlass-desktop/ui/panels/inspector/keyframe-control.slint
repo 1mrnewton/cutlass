@@ -60,11 +60,24 @@ export component KeyframeControl inherits HorizontalLayout {
     callback toggle();
     // Move the playhead to a neighboring keyframe's tick.
     callback jump(tick: int);
-    // Re-ease the keyframe under the playhead (0 linear … 3 ease-in-out).
+    // Re-ease the keyframe under the playhead (0 linear … 3 ease-in-out,
+    // 5 snappy, 6 overshoot, 7 anticipate, 8 hold — tag 4 is custom bezier,
+    // unused in the flyout).
     callback set-easing(easing: int);
 
     private property <color> accent: AppStore.theme.accent.primary;
-    private property <[string]> easing-names: ["Linear", "Ease in", "Ease out", "Ease in & out"];
+    private property <[string]> easing-names: [
+        "Linear",
+        "Ease in",
+        "Ease out",
+        "Ease in & out",
+        "Snappy",
+        "Overshoot",
+        "Anticipate",
+        "Hold",
+    ];
+    // Map flyout row index → engine easing tag (skip custom-bezier tag 4).
+    private property <[int]> easing-tags: [0, 1, 2, 3, 5, 6, 7, 8];
 
     spacing: AppStore.theme.metrics.spacing.none;
     alignment: LayoutAlignment.center;
@@ -168,9 +181,10 @@ export component KeyframeControl inherits HorizontalLayout {
                     spacing: 0;
 
                     for name[idx] in root.easing-names: Rectangle {
+                        property <int> tag: root.easing-tags[idx];
                         height: 26px;
                         border-radius: AppStore.theme.metrics.radius.sm;
-                        background: idx == root.state.easing
+                        background: tag == root.state.easing
                             ? AppStore.theme.accent.primary.with-alpha(0.12)
                             : (row-ta.has-hover ? #ffffff10 : transparent);
 
@@ -181,14 +195,14 @@ export component KeyframeControl inherits HorizontalLayout {
                             vertical-alignment: center;
                             text: name;
                             style: AppStore.theme.typography.body;
-                            foreground: idx == root.state.easing
+                            foreground: tag == root.state.easing
                                 ? root.accent
                                 : AppStore.theme.text.primary;
                         }
 
                         row-ta := TouchArea {
                             clicked => {
-                                root.set-easing(idx);
+                                root.set-easing(tag);
                                 easing-popup.close();
                                 AppState.refocus-shortcuts();
                             }

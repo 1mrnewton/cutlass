@@ -1,0 +1,324 @@
+// Collapsible keyframe graph drawer inside the timeline panel.
+// Geometry (SVG path + dots) comes from GraphBackend / src/graph_editor.rs.
+
+import { CutlassText } from "../../components/index.slint";
+import { AppStore, EditorStore, TimelineStore } from "../../store/index.slint";
+import { GraphBackend } from "../../lib/graph-backend.slint";
+import { ComboBox } from "std-widgets.slint";
+
+export component GraphEditor inherits Rectangle {
+    height: GraphBackend.visible ? 180px : 0px;
+    clip: true;
+    background: AppStore.theme.panel.background;
+    visible: GraphBackend.visible;
+
+    private property <float> plot-w: plot.width / 1px;
+    private property <float> plot-h: plot.height / 1px;
+    private property <int> rev: EditorStore.projection-revision;
+    private property <string> clip-id: TimelineStore.selected-clip-id;
+    private property <int> playhead: TimelineStore.playhead-tick;
+    private property <string> sel-key: GraphBackend.selected-key;
+    private property <int> sel-ch: GraphBackend.selected-channel;
+    private property <bool> dragging: false;
+    private property <bool> handle-dragging: false;
+
+    function request-refresh() {
+        if (!GraphBackend.visible || root.dragging || root.handle-dragging) {
+            return;
+        }
+        GraphBackend.refresh(
+            EditorStore.project.sequence,
+            TimelineStore.selected-clip-id,
+            TimelineStore.playhead-tick,
+            root.plot-w,
+            root.plot-h);
+    }
+
+    changed rev => { root.request-refresh(); }
+    changed clip-id => { root.request-refresh(); }
+    changed playhead => { root.request-refresh(); }
+    changed sel-key => { root.request-refresh(); }
+    changed sel-ch => { root.request-refresh(); }
+    changed plot-w => { root.request-refresh(); }
+    changed plot-h => { root.request-refresh(); }
+
+    init => {
+        root.request-refresh();
+    }
+
+    VerticalLayout {
+        padding: AppStore.theme.metrics.spacing.sm;
+        spacing: AppStore.theme.metrics.spacing.xs;
+
+        HorizontalLayout {
+            height: 24px;
+            spacing: AppStore.theme.metrics.spacing.sm;
+
+            CutlassText {
+                text: "Channel";
+                style: AppStore.theme.typography.label;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            if GraphBackend.channel-labels.length > 0: ComboBox {
+                horizontal-stretch: 1;
+                model: GraphBackend.channel-labels;
+                current-index: GraphBackend.channel-index;
+                selected => {
+                    if (self.current-index >= 0
+                            && self.current-index < GraphBackend.channels.length) {
+                        GraphBackend.set-channel(
+                            GraphBackend.channels[self.current-index].key,
+                            GraphBackend.channels[self.current-index].channel);
+                    }
+                }
+            }
+
+            if GraphBackend.channel-labels.length == 0: CutlassText {
+                horizontal-stretch: 1;
+                text: TimelineStore.selected-clip-id == ""
+                    ? "Select a clip with keyframes"
+                    : "No animated scalar channels";
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.secondary;
+                vertical-alignment: TextVerticalAlignment.center;
+            }
+
+            if GraphBackend.preset-available: ComboBox {
+                model: ["Preset ▾", "Bounce", "Elastic", "Back"];
+                current-index: 0;
+                selected => {
+                    if (self.current-index >= 1) {
+                        GraphBackend.apply-preset(self.current-index - 1);
+                        self.current-index = 0;
+                    }
+                }
+            }
+        }
+
+        plot := Rectangle {
+            horizontal-stretch: 1;
+            vertical-stretch: 1;
+            background: #00000033;
+            border-radius: AppStore.theme.metrics.radius.sm;
+            clip: true;
+
+            if GraphBackend.path-commands != "": Rectangle {
+                y: GraphBackend.grid-max-y * 1px;
+                width: 100%;
+                height: 1px;
+                background: #ffffff18;
+            }
+            if GraphBackend.path-commands != "": Rectangle {
+                y: GraphBackend.grid-mid-y * 1px;
+                width: 100%;
+                height: 1px;
+                background: #ffffff14;
+            }
+            if GraphBackend.path-commands != "": Rectangle {
+                y: GraphBackend.grid-min-y * 1px;
+                width: 100%;
+                height: 1px;
+                background: #ffffff18;
+            }
+
+            if GraphBackend.path-commands != "": Text {
+                x: 4px;
+                y: GraphBackend.grid-max-y * 1px - 7px;
+                text: GraphBackend.y-max-label;
+                color: #ffffff66;
+                font-size: 9px;
+            }
+            if GraphBackend.path-commands != "": Text {
+                x: 4px;
+                y: GraphBackend.grid-mid-y * 1px - 7px;
+                text: GraphBackend.y-mid-label;
+                color: #ffffff66;
+                font-size: 9px;
+            }
+            if GraphBackend.path-commands != "": Text {
+                x: 4px;
+                y: GraphBackend.grid-min-y * 1px - 7px;
+                text: GraphBackend.y-min-label;
+                color: #ffffff66;
+                font-size: 9px;
+            }
+
+            if GraphBackend.path-commands != "": Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: root.plot-w;
+                viewbox-height: root.plot-h;
+                commands: GraphBackend.path-commands;
+                stroke: AppStore.theme.accent.primary.with-alpha(0.9);
+                stroke-width: 1.5px;
+                fill: transparent;
+            }
+
+            // Stem lines from segment endpoints to cubic-bezier handles.
+            if GraphBackend.handles-visible: Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: root.plot-w;
+                viewbox-height: root.plot-h;
+                commands: GraphBackend.handle-stem-a;
+                stroke: #ffffff55;
+                stroke-width: 1px;
+                fill: transparent;
+                z: 1;
+            }
+            if GraphBackend.handles-visible: Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: root.plot-w;
+                viewbox-height: root.plot-h;
+                commands: GraphBackend.handle-stem-b;
+                stroke: #ffffff55;
+                stroke-width: 1px;
+                fill: transparent;
+                z: 1;
+            }
+
+            if GraphBackend.playhead-visible: Rectangle {
+                x: GraphBackend.playhead-x * 1px - 0.5px;
+                width: 1px;
+                height: 100%;
+                background: AppStore.theme.accent.primary.with-alpha(0.7);
+            }
+
+            // Empty-area double-click inserts a keyframe at the curve sample.
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                double-clicked => {
+                    GraphBackend.insert-at(self.mouse-x / 1px, self.mouse-y / 1px);
+                }
+            }
+
+            for d[i] in GraphBackend.dots: Rectangle {
+                x: d.px * 1px - 4px;
+                y: d.py * 1px - 4px;
+                width: 8px;
+                height: 8px;
+                border-radius: d.selected ? 1px : 4px;
+                background: d.selected ? AppStore.theme.accent.primary : #FFFFFF;
+                border-width: 1px;
+                border-color: d.selected ? #FFFFFF : #00000066;
+                transform-rotation: 45deg;
+                transform-origin: { x: 4px, y: 4px };
+                z: 2;
+
+                TouchArea {
+                    width: 16px;
+                    height: 16px;
+                    x: -4px;
+                    y: -4px;
+                    mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                            GraphBackend.select-dot(d.tick);
+                            GraphBackend.drag-begin(d.tick);
+                            root.dragging = true;
+                        }
+                        if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
+                            GraphBackend.drag-end(true);
+                            root.dragging = false;
+                        }
+                        if (ev.kind == PointerEventKind.cancel) {
+                            GraphBackend.drag-end(false);
+                            root.dragging = false;
+                        }
+                    }
+                    moved => {
+                        GraphBackend.drag-move(
+                            d.px - 8 + self.mouse-x / 1px,
+                            d.py - 8 + self.mouse-y / 1px);
+                    }
+                    double-clicked => {
+                        GraphBackend.delete-dot(d.tick);
+                        root.dragging = false;
+                    }
+                }
+            }
+
+            if GraphBackend.handles-visible: Rectangle {
+                x: GraphBackend.handle-a-x * 1px - 4px;
+                y: GraphBackend.handle-a-y * 1px - 4px;
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: AppStore.theme.accent.primary;
+                border-width: 1px;
+                border-color: #FFFFFF;
+                z: 3;
+
+                TouchArea {
+                    width: 16px;
+                    height: 16px;
+                    x: -4px;
+                    y: -4px;
+                    mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.crosshair;
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                            GraphBackend.handle-drag-begin(0);
+                            root.handle-dragging = true;
+                        }
+                        if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
+                            GraphBackend.handle-drag-end(true);
+                            root.handle-dragging = false;
+                        }
+                        if (ev.kind == PointerEventKind.cancel) {
+                            GraphBackend.handle-drag-end(false);
+                            root.handle-dragging = false;
+                        }
+                    }
+                    moved => {
+                        GraphBackend.handle-drag-move(
+                            GraphBackend.handle-a-x - 8 + self.mouse-x / 1px,
+                            GraphBackend.handle-a-y - 8 + self.mouse-y / 1px);
+                    }
+                }
+            }
+
+            if GraphBackend.handles-visible: Rectangle {
+                x: GraphBackend.handle-b-x * 1px - 4px;
+                y: GraphBackend.handle-b-y * 1px - 4px;
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: AppStore.theme.accent.primary;
+                border-width: 1px;
+                border-color: #FFFFFF;
+                z: 3;
+
+                TouchArea {
+                    width: 16px;
+                    height: 16px;
+                    x: -4px;
+                    y: -4px;
+                    mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.crosshair;
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                            GraphBackend.handle-drag-begin(1);
+                            root.handle-dragging = true;
+                        }
+                        if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
+                            GraphBackend.handle-drag-end(true);
+                            root.handle-dragging = false;
+                        }
+                        if (ev.kind == PointerEventKind.cancel) {
+                            GraphBackend.handle-drag-end(false);
+                            root.handle-dragging = false;
+                        }
+                    }
+                    moved => {
+                        GraphBackend.handle-drag-move(
+                            GraphBackend.handle-b-x - 8 + self.mouse-x / 1px,
+                            GraphBackend.handle-b-y - 8 + self.mouse-y / 1px);
+                    }
+                }
+            }
+        }
+    }
+}

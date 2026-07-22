@@ -5,6 +5,472 @@ fn t(value: i64, num: i32, den: i32) -> EngineTime {
 }
 
 #[test]
+fn projects_clip_blend_mode() {
+    use cutlass_models::{BlendMode, MediaId, MediaSource, RationalTime, TimeRange, TrackKind};
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("blend", EngineRational::FPS_24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/blend.mp4",
+        1920,
+        1080,
+        EngineRational::FPS_24,
+        480,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            RationalTime::new(0, EngineRational::FPS_24),
+        )
+        .expect("clip");
+    project
+        .set_blend_mode(clip_id, BlendMode::Multiply)
+        .expect("set blend");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clips = projected.sequence.tracks.row_data(0).unwrap().clips;
+    let clip = clips.row_data(0).unwrap();
+    assert_eq!(clip.blend_mode.as_str(), "multiply");
+    assert_eq!(clip.blend_label.as_str(), "Multiply");
+
+    // Default is Normal when unset.
+    let flat = clip_to_slint(
+        &project,
+        &cutlass_models::Clip::from_media(
+            MediaId::from_raw(media.raw()),
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+        ),
+        EngineKind::Video,
+        &HashMap::new(),
+    );
+    assert_eq!(flat.blend_mode.as_str(), "normal");
+    assert_eq!(flat.blend_label.as_str(), "Normal");
+}
+
+#[test]
+fn projects_clip_motion_blur() {
+    use cutlass_models::{MediaSource, MotionBlur, RationalTime, TimeRange, TrackKind};
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("motion-blur", EngineRational::FPS_24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/mb.mp4",
+        1920,
+        1080,
+        EngineRational::FPS_24,
+        480,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            RationalTime::new(0, EngineRational::FPS_24),
+        )
+        .expect("clip");
+    project
+        .set_motion_blur(
+            clip_id,
+            MotionBlur {
+                enabled: true,
+                shutter_deg: 270.0,
+                samples: 12,
+            },
+        )
+        .expect("set motion blur");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clips = projected.sequence.tracks.row_data(0).unwrap().clips;
+    let clip = clips.row_data(0).unwrap();
+    assert!(clip.motion_blur_enabled);
+    assert!((clip.motion_blur_shutter - 270.0).abs() < f32::EPSILON);
+    assert_eq!(clip.motion_blur_samples, 12);
+
+    let flat = clip_to_slint(
+        &project,
+        project.clip(clip_id).unwrap(),
+        EngineKind::Video,
+        &HashMap::new(),
+    );
+    // After reset to default, projection should show blur off.
+    project
+        .set_motion_blur(clip_id, MotionBlur::default())
+        .expect("clear");
+    let cleared = clip_to_slint(
+        &project,
+        project.clip(clip_id).unwrap(),
+        EngineKind::Video,
+        &HashMap::new(),
+    );
+    assert!(!cleared.motion_blur_enabled);
+    assert!((cleared.motion_blur_shutter - 180.0).abs() < f32::EPSILON);
+    assert_eq!(cleared.motion_blur_samples, 8);
+    // Sanity: the earlier enabled projection was not default.
+    assert!(flat.motion_blur_enabled);
+}
+
+#[test]
+fn projects_clip_layer_styles() {
+    use cutlass_models::{
+        LayerShadow, LayerStyles, MediaSource, RationalTime, TimeRange, TrackKind,
+    };
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("styles", EngineRational::FPS_24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/styles.mp4",
+        1920,
+        1080,
+        EngineRational::FPS_24,
+        480,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            RationalTime::new(0, EngineRational::FPS_24),
+        )
+        .expect("clip");
+    project
+        .set_layer_styles(
+            clip_id,
+            LayerStyles {
+                shadow: Some(LayerShadow::default()),
+                ..Default::default()
+            },
+        )
+        .expect("set styles");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clips = projected.sequence.tracks.row_data(0).unwrap().clips;
+    let clip = clips.row_data(0).unwrap();
+    assert!(clip.style_shadow_enabled);
+    assert!(!clip.style_glow_enabled);
+    assert!((clip.style_shadow_blur - 8.0).abs() < f32::EPSILON);
+    assert!((clip.style_shadow_offset_x - 4.0).abs() < f32::EPSILON);
+    assert_eq!(clip.style_shadow_color.red(), 0);
+    assert_eq!(clip.style_shadow_color.alpha(), 128);
+    assert_eq!(clip.kf_style_shadow_blur.row_count(), 0);
+
+    project
+        .set_layer_styles(clip_id, LayerStyles::default())
+        .expect("clear styles");
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clip = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(!clip.style_shadow_enabled);
+}
+
+#[test]
+fn projects_text_background_radius_keyframes() {
+    use cutlass_models::{
+        ClipParam, Easing, Generator, ParamValue, RationalTime, TextBackground, TextParam,
+        TextStyle, TimeRange, TrackKind,
+    };
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("text-bg", EngineRational::FPS_24);
+    let track = project.add_track(TrackKind::Text, "T1");
+    let clip_id = project
+        .add_generated(
+            track,
+            Generator::Text {
+                content: "Hi".into(),
+                style: TextStyle {
+                    background: Some(TextBackground::default()),
+                    ..Default::default()
+                },
+            },
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+        )
+        .expect("text");
+    project
+        .set_param_keyframe(
+            clip_id,
+            ClipParam::Text {
+                param: TextParam::BackgroundRadius,
+            },
+            RationalTime::new(0, EngineRational::FPS_24),
+            ParamValue::Scalar(0.0),
+            Easing::Linear,
+            None,
+        )
+        .expect("kf0");
+    project
+        .set_param_keyframe(
+            clip_id,
+            ClipParam::Text {
+                param: TextParam::BackgroundRadius,
+            },
+            RationalTime::new(24, EngineRational::FPS_24),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+            None,
+        )
+        .expect("kf1");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clip = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(clip.text_style.background_enabled);
+    assert_eq!(clip.kf_text_background_radius.row_count(), 2);
+    assert_eq!(clip.kf_text_background_color.row_count(), 0);
+}
+
+#[test]
+fn projects_new_adjust_sliders_and_keyframes() {
+    use cutlass_models::{
+        ClipParam, ColorAdjustments, Easing, LookParam, MediaSource, ParamValue, RationalTime,
+        TimeRange, TrackKind,
+    };
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("adjust", EngineRational::FPS_24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/adjust.mp4",
+        1920,
+        1080,
+        EngineRational::FPS_24,
+        480,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            RationalTime::new(0, EngineRational::FPS_24),
+        )
+        .expect("clip");
+
+    project
+        .set_clip_adjustments(
+            clip_id,
+            ColorAdjustments {
+                tint: 0.25.into(),
+                hue: (-0.5).into(),
+                highlights: 0.1.into(),
+                shadows: (-0.2).into(),
+                sharpness: 0.75.into(),
+                vignette: 0.4.into(),
+                ..Default::default()
+            },
+        )
+        .expect("adjust");
+    project
+        .set_param_keyframe(
+            clip_id,
+            ClipParam::Look {
+                param: LookParam::AdjustHue,
+            },
+            RationalTime::new(0, EngineRational::FPS_24),
+            ParamValue::Scalar(-1.0),
+            Easing::Linear,
+            None,
+        )
+        .expect("kf0");
+    project
+        .set_param_keyframe(
+            clip_id,
+            ClipParam::Look {
+                param: LookParam::AdjustHue,
+            },
+            RationalTime::new(24, EngineRational::FPS_24),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+            None,
+        )
+        .expect("kf1");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clip = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!((clip.adjust_tint - 0.25).abs() < f32::EPSILON);
+    assert!((clip.adjust_highlights - 0.1).abs() < f32::EPSILON);
+    assert!((clip.adjust_shadows - (-0.2)).abs() < f32::EPSILON);
+    assert!((clip.adjust_sharpness - 0.75).abs() < f32::EPSILON);
+    assert!((clip.adjust_vignette - 0.4).abs() < f32::EPSILON);
+    assert_eq!(clip.kf_look_adjust_hue.row_count(), 2);
+    assert_eq!(clip.kf_look_adjust_tint.row_count(), 0);
+}
+
+#[test]
+fn projects_clip_mask() {
+    use cutlass_models::{Mask, MaskKind, MediaSource, Param, RationalTime, TimeRange, TrackKind};
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("mask", EngineRational::FPS_24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/mask.mp4",
+        1920,
+        1080,
+        EngineRational::FPS_24,
+        480,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            RationalTime::new(0, EngineRational::FPS_24),
+        )
+        .expect("clip");
+
+    let flat = project_to_slint(&project, &HashMap::new(), &HashSet::new())
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(flat.mask_kind.as_str(), "");
+
+    let mut mask = Mask::new(MaskKind::Heart);
+    mask.feather = Param::Constant(0.25);
+    mask.invert = true;
+    mask.rotation = Param::Constant(30.0);
+    project
+        .set_clip_mask(clip_id, Some(mask))
+        .expect("set mask");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clip = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(clip.mask_kind.as_str(), "heart");
+    assert_eq!(clip.mask_label.as_str(), "Heart");
+    assert!(clip.mask_invert);
+    assert!((clip.mask_feather - 0.25).abs() < f32::EPSILON);
+    assert!((clip.mask_rotation - 30.0).abs() < f32::EPSILON);
+    assert_eq!(clip.kf_look_mask_feather.row_count(), 0);
+
+    project.set_clip_mask(clip_id, None).expect("clear");
+    let clip = project_to_slint(&project, &HashMap::new(), &HashSet::new())
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(clip.mask_kind.as_str(), "");
+}
+
+#[test]
+fn projects_clip_chroma() {
+    use cutlass_models::{ChromaKey, MediaSource, Param, RationalTime, TimeRange, TrackKind};
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("chroma", EngineRational::FPS_24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/chroma.mp4",
+        1920,
+        1080,
+        EngineRational::FPS_24,
+        480,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            RationalTime::new(0, EngineRational::FPS_24),
+        )
+        .expect("clip");
+
+    let flat = project_to_slint(&project, &HashMap::new(), &HashSet::new())
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(!flat.chroma_enabled);
+
+    project
+        .set_clip_chroma_key(
+            clip_id,
+            Some(ChromaKey {
+                rgb: [0, 255, 0],
+                strength: Param::Constant(0.5),
+                shadow: Param::Constant(0.1),
+            }),
+        )
+        .expect("set chroma");
+
+    let clip = project_to_slint(&project, &HashMap::new(), &HashSet::new())
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(clip.chroma_enabled);
+    assert_eq!(clip.chroma_color.green(), 255);
+    assert!((clip.chroma_strength - 0.5).abs() < f32::EPSILON);
+    assert!((clip.chroma_shadow - 0.1).abs() < f32::EPSILON);
+
+    project.set_clip_chroma_key(clip_id, None).expect("clear");
+    let clip = project_to_slint(&project, &HashMap::new(), &HashSet::new())
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(!clip.chroma_enabled);
+}
+
+#[test]
 fn sticker_card_gets_catalog_label_and_composited_tag() {
     use cutlass_models::{Clip as MClip, Generator, Rational, TimeRange};
     let span = TimeRange::at_rate(0, 100, Rational::FPS_24);
@@ -202,6 +668,7 @@ fn keyframes_publish_absolute_ticks_and_easing() {
                 tick: 0,
                 value: 0.5f32,
                 easing: Easing::EaseOut,
+                tangents: None,
             },
             Keyframe {
                 tick: 24,
@@ -209,6 +676,7 @@ fn keyframes_publish_absolute_ticks_and_easing() {
                 easing: Easing::Bezier {
                     points: [0.42, 0.0, 0.58, 1.0],
                 },
+                tangents: None,
             },
         ],
     };
@@ -270,6 +738,49 @@ fn speed_label_marks_ramps_with_a_tilde() {
 }
 
 #[test]
+fn pan_projects_constant_and_keyframe_list() {
+    use cutlass_models::{Easing, Keyframe, MediaId, Param, TimeRange};
+    use slint::Model;
+
+    let project = EngineProject::new("pan", EngineRational::FPS_24);
+    let mut clip = cutlass_models::Clip::from_media(
+        MediaId::from_raw(1),
+        TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+        TimeRange::at_rate(10, 48, EngineRational::FPS_24),
+    );
+    // Center default: absent envelope, constant 0.
+    let flat = clip_to_slint(&project, &clip, EngineKind::Audio, &HashMap::new());
+    assert_eq!(flat.pan, 0.0);
+    assert!(!flat.has_pan_envelope);
+    assert_eq!(flat.kf_pan.row_count(), 0);
+
+    clip.pan = Param::Keyframed {
+        keyframes: vec![
+            Keyframe {
+                tick: 0,
+                value: -1.0,
+                easing: Easing::Linear,
+                tangents: None,
+            },
+            Keyframe {
+                tick: 48,
+                value: 1.0,
+                easing: Easing::Linear,
+                tangents: None,
+            },
+        ],
+    };
+    let animated = clip_to_slint(&project, &clip, EngineKind::Audio, &HashMap::new());
+    assert!(animated.has_pan_envelope);
+    assert_eq!(animated.kf_pan.row_count(), 2);
+    // Absolute ticks = clip start + relative.
+    assert_eq!(animated.kf_pan.row_data(0).unwrap().tick, 10);
+    assert_eq!(animated.kf_pan.row_data(0).unwrap().value_x, -1.0);
+    assert_eq!(animated.kf_pan.row_data(1).unwrap().tick, 58);
+    assert_eq!(animated.kf_pan.row_data(1).unwrap().value_x, 1.0);
+}
+
+#[test]
 fn speed_curve_projects_dense_samples_and_handles() {
     use cutlass_models::{MediaId, MediaSource, TimeRange, speed_preset};
     use slint::Model;
@@ -308,4 +819,178 @@ fn speed_curve_projects_dense_samples_and_handles() {
     );
     assert_eq!(ramped.speed_curve_samples.row_count(), SPEED_GRAPH_SAMPLES);
     assert!(ramped.speed_curve_avg > 0.0);
+}
+
+#[test]
+fn projects_typed_effect_params_and_color_roundtrips() {
+    use cutlass_models::{ClipParam, Generator, ParamValue, TimeRange, TrackKind};
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("effects", EngineRational::FPS_24);
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let clip_id = project
+        .add_generated(
+            track,
+            Generator::SolidColor {
+                rgba: [128, 128, 128, 255],
+            },
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+        )
+        .expect("clip");
+    project.add_effect(clip_id, "duotone").expect("duotone");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clip = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(clip.effects.row_count(), 1);
+    let fx = clip.effects.row_data(0).unwrap();
+    assert_eq!(fx.effect_id.as_str(), "duotone");
+    assert_eq!(fx.params.row_count(), 3);
+
+    let shadow = fx.params.row_data(0).unwrap();
+    assert_eq!(shadow.name.as_str(), "shadow_color");
+    assert_eq!(shadow.kind.as_str(), "color");
+    assert_eq!(shadow.color.red(), 20);
+    assert_eq!(shadow.color.green(), 16);
+    assert_eq!(shadow.color.blue(), 60);
+    assert_eq!(shadow.color.alpha(), 255);
+
+    let intensity = fx.params.row_data(2).unwrap();
+    assert_eq!(intensity.kind.as_str(), "scalar");
+    assert!((intensity.value - 1.0).abs() < f32::EPSILON);
+
+    project
+        .set_param_constant(
+            clip_id,
+            ClipParam::Effect {
+                effect: 0,
+                param: 0,
+            },
+            ParamValue::Color([10, 20, 30, 255]),
+        )
+        .expect("set shadow");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let shadow = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap()
+        .effects
+        .row_data(0)
+        .unwrap()
+        .params
+        .row_data(0)
+        .unwrap();
+    assert_eq!(shadow.kind.as_str(), "color");
+    assert_eq!(shadow.color.red(), 10);
+    assert_eq!(shadow.color.green(), 20);
+    assert_eq!(shadow.color.blue(), 30);
+    assert_eq!(shadow.color.alpha(), 255);
+
+    // color_overlay also projects its vec2 offset.
+    project
+        .add_effect(clip_id, "color_overlay")
+        .expect("overlay");
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let overlay = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap()
+        .effects
+        .row_data(1)
+        .unwrap();
+    let offset = overlay.params.row_data(1).unwrap();
+    assert_eq!(offset.name.as_str(), "offset");
+    assert_eq!(offset.kind.as_str(), "vec2");
+    assert!((offset.vec2_x - 0.0).abs() < f32::EPSILON);
+    assert!((offset.vec2_y - 0.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn projects_per_axis_scale_and_linked_flag() {
+    use cutlass_models::{ClipTransform, MediaSource, RationalTime, Scale2, TimeRange, TrackKind};
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("scale2", EngineRational::FPS_24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/scale2.mp4",
+        1920,
+        1080,
+        EngineRational::FPS_24,
+        480,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            RationalTime::new(0, EngineRational::FPS_24),
+        )
+        .expect("clip");
+
+    // Uniform: linked.
+    project
+        .set_transform(
+            clip_id,
+            ClipTransform {
+                scale: Scale2::uniform(1.5),
+                ..ClipTransform::IDENTITY
+            },
+            None,
+        )
+        .expect("uniform");
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clip = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!((clip.transform_scale - 1.5).abs() < f32::EPSILON);
+    assert!((clip.transform_scale_y - 1.5).abs() < f32::EPSILON);
+    assert!(clip.transform_scale_linked);
+
+    // Split: not linked; X projects on transform_scale, Y on scale_y.
+    project
+        .set_transform(
+            clip_id,
+            ClipTransform {
+                scale: Scale2 { x: 2.0, y: 0.5 },
+                ..ClipTransform::IDENTITY
+            },
+            None,
+        )
+        .expect("split");
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clip = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!((clip.transform_scale - 2.0).abs() < f32::EPSILON);
+    assert!((clip.transform_scale_y - 0.5).abs() < f32::EPSILON);
+    assert!(!clip.transform_scale_linked);
 }

@@ -1,0 +1,489 @@
+// CapCut-style mask section for any visual clip. Kind / invert are structural
+// SetClipMask edits; feather / center / size / rotation / roundness ride the
+// generic look_mask_* param callbacks. No live-preview path for mask params
+// (unlike style_* / look filter) — sliders commit on release only.
+
+import { CutlassText, CutlassScrollView } from "../../components/index.slint";
+import { AppState } from "../../state.slint";
+import { AppStore, TimelineStore } from "../../store/index.slint";
+import { InspectorBackend, ScalarParamSample } from "../../lib/inspector-backend.slint";
+import { CatalogEntry, Clip } from "../../models/index.slint";
+import { LabelCell, SectionHeader, SliderRow } from "inspector-widgets.slint";
+
+component MaskRow inherits Rectangle {
+    in property <string> label;
+    in property <string> id;
+    in property <bool> selected;
+    callback picked(id: string);
+
+    height: 26px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: root.selected
+        ? AppStore.theme.accent.primary.with-alpha(0.12)
+        : (ta.has-hover ? #ffffff10 : transparent);
+
+    CutlassText {
+        x: AppStore.theme.metrics.spacing.sm;
+        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.label;
+        style: AppStore.theme.typography.body;
+        foreground: root.selected ? AppStore.theme.accent.primary : AppStore.theme.text.primary;
+        overflow: TextOverflow.elide;
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.picked(root.id);
+            AppState.refocus-shortcuts();
+        }
+    }
+}
+
+// Kind picker: "None" + mask_catalog() (via InspectorBackend.mask-catalog).
+component MaskDropdown inherits Rectangle {
+    in property <[CatalogEntry]> entries: InspectorBackend.mask-catalog;
+    in property <string> current-id;
+    in property <string> current-label;
+
+    callback selected(id: string);
+
+    height: 28px;
+    horizontal-stretch: 1;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: trigger.has-hover ? #232323 : #1a1a1a;
+
+    HorizontalLayout {
+        padding-left: AppStore.theme.metrics.spacing.sm;
+        padding-right: AppStore.theme.metrics.spacing.sm;
+        spacing: AppStore.theme.metrics.spacing.xs;
+
+        CutlassText {
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+            text: root.current-id == "" ? "None" : root.current-label;
+            style: AppStore.theme.typography.body;
+            foreground: root.current-id == "" ? AppStore.theme.text.muted : AppStore.theme.text.primary;
+            overflow: TextOverflow.elide;
+        }
+
+        Rectangle {
+            width: 12px;
+            vertical-stretch: 1;
+
+            Image {
+                width: 12px;
+                height: 12px;
+                y: (parent.height - self.height) / 2;
+                source: @image-url("../../../../../assets/icon/ui/chevron-down.svg");
+                image-fit: contain;
+                colorize: AppStore.theme.text.muted;
+            }
+        }
+    }
+
+    trigger := TouchArea {
+        clicked => {
+            popup.show();
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: root.width;
+        height: 220px;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: AppStore.theme.panel.background;
+            border-radius: AppStore.theme.metrics.radius.md;
+            border-width: 1px;
+            border-color: #ffffff1f;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000040;
+            drop-shadow-offset-y: 3px;
+
+            VerticalLayout {
+                padding: AppStore.theme.metrics.spacing.sm;
+                spacing: 0;
+
+                CutlassScrollView {
+                    vertical-stretch: 1;
+                    viewport-width: self.width;
+                    viewport-height: list.preferred-height;
+                    show-horizontal-scrollbar: false;
+                    interactive: false;
+
+                    list := VerticalLayout {
+                        spacing: 0;
+                        alignment: LayoutAlignment.start;
+
+                        MaskRow {
+                            label: "None";
+                            id: "";
+                            selected: root.current-id == "";
+                            picked(id) => {
+                                root.selected(id);
+                                popup.close();
+                            }
+                        }
+
+                        for entry in root.entries: MaskRow {
+                            label: entry.label;
+                            id: entry.id;
+                            selected: entry.id == root.current-id;
+                            picked(id) => {
+                                root.selected(id);
+                                popup.close();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component InvertToggle inherits Rectangle {
+    in property <bool> active;
+    callback toggled();
+
+    width: 42px;
+    height: 22px;
+    vertical-stretch: 0;
+    border-radius: 11px;
+    background: active ? AppStore.theme.accent.primary : #ffffff1a;
+
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        x: root.active ? parent.width - self.width - 3px : 3px;
+        y: 3px;
+        border-radius: 8px;
+        background: #f7f7f7;
+    }
+
+    TouchArea {
+        clicked => {
+            root.toggled();
+        }
+    }
+}
+
+export component MaskInspector inherits VerticalLayout {
+    in property <Clip> model;
+
+    spacing: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    private property <bool> has-mask: model.mask-kind != "";
+    private property <bool> playhead-inside: TimelineStore.playhead-tick >= model.timeline-start.value
+        && TimelineStore.playhead-tick < model.timeline-start.value + model.source-range.duration.value;
+
+    private property <ScalarParamSample> feather-sample: InspectorBackend.sample-scalar-param(
+        model, "look_mask_feather", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> center-x-sample: InspectorBackend.sample-scalar-param(
+        model, "look_mask_center_x", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> center-y-sample: InspectorBackend.sample-scalar-param(
+        model, "look_mask_center_y", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> size-w-sample: InspectorBackend.sample-scalar-param(
+        model, "look_mask_size_x", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> size-h-sample: InspectorBackend.sample-scalar-param(
+        model, "look_mask_size_y", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> rotation-sample: InspectorBackend.sample-scalar-param(
+        model, "look_mask_rotation", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> roundness-sample: InspectorBackend.sample-scalar-param(
+        model, "look_mask_roundness", TimelineStore.playhead-tick);
+
+    function toggle-kf(param: string, on-keyframe: bool, vx: float, vy: float) {
+        if (on-keyframe) {
+            InspectorBackend.remove-param-keyframe(model.id, param, TimelineStore.playhead-tick);
+        } else {
+            InspectorBackend.set-param-keyframe(model.id, param, TimelineStore.playhead-tick, vx, vy, 0);
+        }
+    }
+
+    function ease-kf(param: string, easing: int, vx: float, vy: float) {
+        InspectorBackend.set-param-keyframe(model.id, param, TimelineStore.playhead-tick, vx, vy, easing);
+    }
+
+    function commit-scalar(param: string, sample: ScalarParamSample, value: float) {
+        if (sample.row.animated) {
+            root.ease-kf(param, sample.row.on-keyframe ? sample.row.easing : 0, value, 0);
+        } else {
+            InspectorBackend.set-param-constant(model.id, param, value, 0);
+        }
+    }
+
+    function commit-center(x: float, y: float) {
+        if (root.center-x-sample.row.animated) {
+            root.ease-kf(
+                "look_mask_center",
+                root.center-x-sample.row.on-keyframe ? root.center-x-sample.row.easing : 0,
+                x,
+                y);
+        } else {
+            InspectorBackend.set-param-constant(model.id, "look_mask_center", x, y);
+        }
+    }
+
+    function commit-size(w: float, h: float) {
+        if (root.size-w-sample.row.animated) {
+            root.ease-kf(
+                "look_mask_size",
+                root.size-w-sample.row.on-keyframe ? root.size-w-sample.row.easing : 0,
+                w,
+                h);
+        } else {
+            InspectorBackend.set-param-constant(model.id, "look_mask_size", w, h);
+        }
+    }
+
+    SectionHeader {
+        title: "Mask";
+    }
+
+    HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+        height: 28px;
+        vertical-stretch: 0;
+
+        LabelCell {
+            label: "Shape";
+        }
+
+        MaskDropdown {
+            current-id: root.model.mask-kind;
+            current-label: root.model.mask-label;
+            selected(id) => {
+                InspectorBackend.set-clip-mask-kind(root.model.id, id);
+            }
+        }
+    }
+
+    if root.has-mask: HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+        height: 28px;
+        vertical-stretch: 0;
+
+        LabelCell {
+            label: "Invert";
+        }
+
+        InvertToggle {
+            active: root.model.mask-invert;
+            toggled => {
+                InspectorBackend.set-clip-mask-invert(root.model.id, !root.model.mask-invert);
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+
+    if root.has-mask: SliderRow {
+        label: "Feather";
+        suffix: "";
+        value: root.feather-sample.value;
+        minimum: 0;
+        maximum: 1;
+        step: 0.01;
+        decimals: 2;
+        reset-value: 0;
+        kf-visible: true;
+        kf: root.feather-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-scalar("look_mask_feather", root.feather-sample, clamp(v, 0, 1));
+        }
+        kf-toggle => {
+            root.toggle-kf("look_mask_feather", root.feather-sample.row.on-keyframe, root.feather-sample.value, 0);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_mask_feather", e, root.feather-sample.value, 0);
+        }
+    }
+
+    if root.has-mask: SliderRow {
+        label: "Center X";
+        suffix: "";
+        value: root.center-x-sample.value;
+        minimum: -1;
+        maximum: 1;
+        step: 0.01;
+        decimals: 2;
+        reset-value: 0;
+        kf-visible: true;
+        kf: root.center-x-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-center(clamp(v, -1, 1), root.center-y-sample.value);
+        }
+        kf-toggle => {
+            root.toggle-kf(
+                "look_mask_center",
+                root.center-x-sample.row.on-keyframe,
+                root.center-x-sample.value,
+                root.center-y-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf(
+                "look_mask_center",
+                e,
+                root.center-x-sample.value,
+                root.center-y-sample.value);
+        }
+    }
+
+    if root.has-mask: SliderRow {
+        label: "Center Y";
+        suffix: "";
+        value: root.center-y-sample.value;
+        minimum: -1;
+        maximum: 1;
+        step: 0.01;
+        decimals: 2;
+        reset-value: 0;
+        kf-visible: true;
+        kf: root.center-y-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-center(root.center-x-sample.value, clamp(v, -1, 1));
+        }
+        kf-toggle => {
+            root.toggle-kf(
+                "look_mask_center",
+                root.center-y-sample.row.on-keyframe,
+                root.center-x-sample.value,
+                root.center-y-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf(
+                "look_mask_center",
+                e,
+                root.center-x-sample.value,
+                root.center-y-sample.value);
+        }
+    }
+
+    if root.has-mask: SliderRow {
+        label: "Width";
+        suffix: "";
+        value: root.size-w-sample.value;
+        minimum: 0.05;
+        maximum: 3;
+        step: 0.01;
+        decimals: 2;
+        reset-value: 1;
+        kf-visible: true;
+        kf: root.size-w-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-size(clamp(v, 0.05, 3), root.size-h-sample.value);
+        }
+        kf-toggle => {
+            root.toggle-kf(
+                "look_mask_size",
+                root.size-w-sample.row.on-keyframe,
+                root.size-w-sample.value,
+                root.size-h-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf(
+                "look_mask_size",
+                e,
+                root.size-w-sample.value,
+                root.size-h-sample.value);
+        }
+    }
+
+    if root.has-mask: SliderRow {
+        label: "Height";
+        suffix: "";
+        value: root.size-h-sample.value;
+        minimum: 0.05;
+        maximum: 3;
+        step: 0.01;
+        decimals: 2;
+        reset-value: 1;
+        kf-visible: true;
+        kf: root.size-h-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-size(root.size-w-sample.value, clamp(v, 0.05, 3));
+        }
+        kf-toggle => {
+            root.toggle-kf(
+                "look_mask_size",
+                root.size-h-sample.row.on-keyframe,
+                root.size-w-sample.value,
+                root.size-h-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf(
+                "look_mask_size",
+                e,
+                root.size-w-sample.value,
+                root.size-h-sample.value);
+        }
+    }
+
+    if root.has-mask: SliderRow {
+        label: "Rotation";
+        suffix: "°";
+        value: root.rotation-sample.value;
+        minimum: -180;
+        maximum: 180;
+        step: 1;
+        decimals: 0;
+        reset-value: 0;
+        kf-visible: true;
+        kf: root.rotation-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-scalar("look_mask_rotation", root.rotation-sample, clamp(v, -180, 180));
+        }
+        kf-toggle => {
+            root.toggle-kf("look_mask_rotation", root.rotation-sample.row.on-keyframe, root.rotation-sample.value, 0);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_mask_rotation", e, root.rotation-sample.value, 0);
+        }
+    }
+
+    // Roundness is rectangle-only in the model; hide for other kinds.
+    if root.has-mask && root.model.mask-kind == "rectangle": SliderRow {
+        label: "Roundness";
+        suffix: "";
+        value: root.roundness-sample.value;
+        minimum: 0;
+        maximum: 1;
+        step: 0.01;
+        decimals: 2;
+        reset-value: 0;
+        kf-visible: true;
+        kf: root.roundness-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-scalar("look_mask_roundness", root.roundness-sample, clamp(v, 0, 1));
+        }
+        kf-toggle => {
+            root.toggle-kf("look_mask_roundness", root.roundness-sample.row.on-keyframe, root.roundness-sample.value, 0);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_mask_roundness", e, root.roundness-sample.value, 0);
+        }
+    }
+}

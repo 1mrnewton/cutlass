@@ -21,6 +21,7 @@ mod export;
 mod export_audio;
 mod grade;
 mod lut_pack;
+mod motion_blur;
 mod render;
 mod resolve;
 mod scene;
@@ -35,9 +36,11 @@ pub use export::{
 };
 pub use export_audio::{EXPORT_AUDIO_CHANNELS, EXPORT_AUDIO_RATE, ExportAudioMixer};
 pub use lut_pack::{STARTER_LUT_SIZE, StarterLut, starter_lut_pack};
+#[doc(hidden)]
+pub use render::text_anim_bench;
 pub use render::{FrameStats, GestureFrames, Renderer, SeekPolicy};
 pub use resolve::{
     GESTURE_IDENTITY_TRANSFORM, GestureScenePartition, ResolveOverrides, canvas_size, resolve,
     resolve_gesture_partitions, resolve_with,
 };
-pub use scene::{LayerSource, Scene, SceneLayer, SizeSpec};
+pub use scene::{LayerSource, Scene, SceneLayer, SizeSpec, TextAnimation};

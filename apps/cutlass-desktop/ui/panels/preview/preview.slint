@@ -5,8 +5,9 @@ import { TimelineLib } from "../../lib/timeline-lib.slint";
 import { TimelineStore, TimelineActions } from "../../store/index.slint";
 import { RationalTime } from "../../models/index.slint";
 import { AppState } from "../../state.slint";
-import { PreviewBackend, PreviewHit, PreviewSelectionBox, PreviewSpritePlacement, PreviewDragResolution, PreviewView } from "../../lib/preview-backend.slint";
+import { PreviewBackend, PreviewHit, PreviewSelectionBox, PreviewSpritePlacement, PreviewDragResolution, PreviewView, MotionPath } from "../../lib/preview-backend.slint";
 import { SelectionBackend } from "../../lib/selection-backend.slint";
+import { MotionPathOverlay } from "motion-path.slint";
 
 export component PreviewPanel inherits PanelBase {
     private property <RationalTime> sequence-duration:
@@ -171,6 +172,33 @@ export component PreviewPanel inherits PanelBase {
                             && PreviewStore.gesture.valid,
                         PreviewStore.gesture);
 
+                    // Motion path for a selected clip with keyframed position.
+                    // Same reactive inputs as sel-box (selection, projection
+                    // republish via sequence, zoom/pan, panel size), plus the
+                    // live keyframe/tangent edit fields while dragging.
+                    private property <MotionPath> motion-path: PreviewBackend.motion-path(
+                        EditorStore.project.sequence,
+                        TimelineStore.selected-clip-id,
+                        self.width / 1px,
+                        self.height / 1px,
+                        PreviewStore.viewport-zoom,
+                        PreviewStore.viewport-pan-x / 1px,
+                        PreviewStore.viewport-pan-y / 1px,
+                        PreviewStore.motion-path-selected-tick,
+                        PreviewStore.motion-path-edit-mode,
+                        PreviewStore.motion-path-edit-tick,
+                        PreviewStore.motion-path-edit-x,
+                        PreviewStore.motion-path-edit-y,
+                        PreviewStore.motion-path-mirror);
+
+                    // Clear motion-path selection when the timeline selection
+                    // changes — selection-only, never touches the project.
+                    private property <string> selected-clip-watch: TimelineStore.selected-clip-id;
+                    changed selected-clip-watch => {
+                        PreviewStore.motion-path-selected-tick = -1;
+                        PreviewStore.motion-path-edit-mode = 0;
+                    }
+
                     private property <bool> show-sprite-stack:
                         self.sprite-ready && self.sprite-hold;
 
@@ -239,6 +267,7 @@ export component PreviewPanel inherits PanelBase {
                                 self.drag-res.anchor-x,
                                 self.drag-res.anchor-y,
                                 self.drag-res.scale,
+                                self.drag-res.scale-y,
                                 self.drag-res.rotation,
                                 self.drag-res.opacity,
                                 TimelineStore.playhead-tick);
@@ -510,11 +539,22 @@ export component PreviewPanel inherits PanelBase {
                                     viewport.drag-res.anchor-x,
                                     viewport.drag-res.anchor-y,
                                     viewport.drag-res.scale,
+                                    viewport.drag-res.scale-y,
                                     viewport.drag-res.rotation,
                                     viewport.drag-res.opacity,
                                     TimelineStore.playhead-tick);
                             }
                         }
+                    }
+
+                    // Motion path: under the selection outline so gizmos stay
+                    // grab-able on top. Empty when position isn't animated.
+                    MotionPathOverlay {
+                        width: 100%;
+                        height: 100%;
+                        path: viewport.motion-path;
+                        view-w: viewport.width / 1px;
+                        view-h: viewport.height / 1px;
                     }
 
                     // CapCut's blue center guides: each axis lights while the

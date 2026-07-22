@@ -1,0 +1,32 @@
+---
+description: Public alpha desktop release gates — versioning, PR→main→tag flow, CHANGELOG as release body. Use when cutting or preparing a Cutlass GitHub Release.
+alwaysApply: false
+---
+
+# Desktop alpha releases
+
+For the full checklist, read and follow
+[`.agents/skills/cutlass-release/SKILL.md`](../../.agents/skills/cutlass-release/SKILL.md).
+Do **not** invent a different ship path.
+
+## Hard gates
+
+- Ship **only** on an explicit user ask to release / publish / cut an alpha.
+- **Never tag from `macos-dev`.** Tag only the merge tip of `main` after a
+  green PR merge.
+- Bump `[workspace.package].version` in root `Cargo.toml` **past** the last
+  shipped Cargo version before tagging (reusing a shipped version reuses asset
+  names and confuses the Release).
+- Keep versions in sync: `Cargo.toml` / `Cargo.lock`,
+  `packaging/macos/Info.plist` (`CFBundleShortVersionString` /
+  `CFBundleVersion`), and examples in `packaging/README.md`.
+- Rewrite `CHANGELOG.md` for **this** release only — the Release workflow
+  uploads the whole file as the GitHub Release body.
+- CI clippy is `cargo clippy --workspace --all-targets -- -D warnings`. Fix
+  locally before opening / merging the release PR.
+- Desktop tags: `alpha-X.Y.Z`. Python / PyPI is a **separate** `py-v*` track —
+  do not mix them into a desktop release unless asked.
+
+## Out of scope unless asked
+
+Notarization, DMG, Intel macOS, Authenticode, `cutlass-py` PyPI publish.

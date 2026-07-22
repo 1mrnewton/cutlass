@@ -1,3 +1,4 @@
+use super::glyphs::GlyphInstanceGpu;
 use crate::effect_render::PassRegistry;
 use crate::gpu::GpuContext;
 
@@ -89,6 +90,11 @@ impl Compositor {
             entries: &[uniform_entry(0)],
         });
 
+        let glyphs_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cutlass.glyphs.bgl"),
+            entries: &[plane_tex_entry(0), sampler_entry(1), uniform_entry(2)],
+        });
+
         let yuv_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass.yuv.wgsl"),
             source: wgsl_with_grade(include_str!("../../shaders/yuv.wgsl")),
@@ -128,6 +134,10 @@ impl Compositor {
         let sdf_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass.shape.wgsl"),
             source: wgsl_with_grade(include_str!("../../shaders/shape.wgsl")),
+        });
+        let glyphs_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cutlass.glyph.wgsl"),
+            source: wgsl_with_grade(include_str!("../../shaders/glyph.wgsl")),
         });
 
         // Opaque video and solids use straight-alpha src-over; RGBA bitmaps
@@ -176,6 +186,15 @@ impl Compositor {
             &sdf_shader,
             STRAIGHT_OVER,
         );
+        // Glyphs are premultiplied atlas samples, like RGBA bitmaps.
+        let glyphs_pipeline = build_instanced_pipeline(
+            device,
+            "cutlass.glyphs",
+            &glyphs_layout,
+            &glyphs_shader,
+            PREMULTIPLIED_OVER,
+            &[GlyphInstanceGpu::LAYOUT],
+        );
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("cutlass.sampler"),
@@ -195,17 +214,20 @@ impl Compositor {
             rgba_fx_pipeline,
             solid_pipeline,
             sdf_pipeline,
+            glyphs_pipeline,
             yuv_layout,
             yuv_fx_layout,
             rgba_layout,
             rgba_fx_layout,
             solid_layout,
             sdf_layout,
+            glyphs_layout,
             sampler,
             target: None,
             pass_registry: PassRegistry::new(device),
             offscreen: None,
             lut_cache: std::collections::HashMap::new(),
+            glyph_atlases: std::cell::RefCell::new(std::collections::HashMap::new()),
             #[cfg(target_vendor = "apple")]
             metal_import: crate::metal_import::MetalSurfaceImporter::new(gpu),
             #[cfg(target_os = "windows")]
@@ -256,6 +278,17 @@ fn build_pipeline(
     shader: &wgpu::ShaderModule,
     blend: wgpu::BlendState,
 ) -> wgpu::RenderPipeline {
+    build_instanced_pipeline(device, label, layout, shader, blend, &[])
+}
+
+fn build_instanced_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::BindGroupLayout,
+    shader: &wgpu::ShaderModule,
+    blend: wgpu::BlendState,
+    vertex_buffers: &[wgpu::VertexBufferLayout<'_>],
+) -> wgpu::RenderPipeline {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
         bind_group_layouts: &[Some(layout)],
@@ -267,7 +300,7 @@ fn build_pipeline(
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some("vs"),
-            buffers: &[],
+            buffers: vertex_buffers,
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         primitive: wgpu::PrimitiveState {

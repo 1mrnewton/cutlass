@@ -471,7 +471,7 @@ impl Project {
             .ok_or(ModelError::UnknownClip(clip_id))?;
         if clip.is_generated() {
             return Err(ModelError::InvalidParam(
-                "volume requires a media-backed clip".into(),
+                "audio parameters require a media-backed clip".into(),
             ));
         }
         let duration = clip.timeline.duration.value;
@@ -506,12 +506,17 @@ impl Project {
     /// Set a clip's framing (CapCut crop, M1): the normalized kept region
     /// plus horizontal/vertical mirroring. Visual clips only — audio has no
     /// frame to crop. Rejected on a degenerate or out-of-frame crop rect.
+    ///
+    /// `at` composes with animation CapCut-style (same as [`Self::set_transform`]):
+    /// `Some(playhead)` writes a keyframe when crop is already animated;
+    /// `None` (or a never-animated crop) flattens to a constant.
     pub fn set_clip_crop(
         &mut self,
         clip_id: ClipId,
         crop: CropRect,
         flip_h: bool,
         flip_v: bool,
+        at: Option<RationalTime>,
     ) -> Result<(), ModelError> {
         crop.validate()?;
         let track_id = self
@@ -529,11 +534,20 @@ impl Project {
                 kind,
             });
         }
+        if let Some(at) = at {
+            check_same_rate(at.rate, self.timeline.frame_rate)?;
+        }
         let clip = self
             .timeline
             .clip_mut(clip_id)
             .ok_or(ModelError::UnknownClip(clip_id))?;
-        clip.crop = crop;
+        match at {
+            Some(at) if clip.crop.is_animated() => {
+                let tick = clip.animation_tick(at.value);
+                clip.crop.set_keyframe(tick, crop, Easing::Linear);
+            }
+            _ => clip.crop.set_constant(crop),
+        }
         clip.flip_h = flip_h;
         clip.flip_v = flip_v;
         Ok(())

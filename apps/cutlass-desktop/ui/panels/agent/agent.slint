@@ -253,11 +253,23 @@ component TranscriptEntry inherits VerticalLayout {
         }
     }
 
-    if entry.kind == "assistant": CutlassText {
-        text: entry.text;
-        wrap: word-wrap;
-        style: AppStore.theme.typography.body;
-        foreground: AppStore.theme.text.secondary;
+    if entry.kind == "assistant": VerticalLayout {
+        spacing: AppStore.theme.metrics.spacing.xs;
+        alignment: start;
+
+        CutlassText {
+            text: entry.text;
+            wrap: word-wrap;
+            style: AppStore.theme.typography.body;
+            foreground: AppStore.theme.text.secondary;
+        }
+
+        if entry.text != "": SubtleButton {
+            label: "Copy";
+            clicked => {
+                AgentStore.copy-text(entry.text);
+            }
+        }
     }
 
     if entry.kind == "reasoning": reasoning-card := Rectangle {

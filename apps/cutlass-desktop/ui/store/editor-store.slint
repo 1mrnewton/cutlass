@@ -120,7 +120,7 @@ export global EditorStore {
     // Live drag motion: render with an uncommitted override — session state
     // on the engine, no history entry, no projection republish. Fires at
     // pointer-move rate; the worker coalesces to the newest value.
-    callback on-preview-transform-overridden(clip-id: string, position-x: float, position-y: float, anchor-x: float, anchor-y: float, scale: float, rotation: float, opacity: float, tick: int);
+    callback on-preview-transform-overridden(clip-id: string, position-x: float, position-y: float, anchor-x: float, anchor-y: float, scale-x: float, scale-y: float, rotation: float, opacity: float, tick: int);
     // Transform handle / clip press: prepare partitioned gesture frames.
     callback on-preview-gesture-started(clip-id: string, tick: int);
     // Press ended without a drag: drop prepared sprite frames.
@@ -130,7 +130,7 @@ export global EditorStore {
     callback on-preview-override-cleared(tick: int);
     // Gesture commit (drag release / arrow nudge): one undoable
     // SetClipTransform; the worker clears any override in the same step.
-    callback on-clip-transform-committed(clip-id: string, position-x: float, position-y: float, anchor-x: float, anchor-y: float, scale: float, rotation: float, opacity: float, tick: int);
+    callback on-clip-transform-committed(clip-id: string, position-x: float, position-y: float, anchor-x: float, anchor-y: float, scale-x: float, scale-y: float, rotation: float, opacity: float, tick: int);
 
     // --- project lifecycle (app-owned drafts) ------------------------------
     // Flush the live draft to disk now (Cmd/Ctrl+S). Edits already auto-save,

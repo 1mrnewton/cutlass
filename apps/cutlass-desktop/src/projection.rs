@@ -29,6 +29,14 @@ use crate::{
     TransitionView,
 };
 
+mod helpers;
+mod keyframes;
+mod look;
+
+use helpers::*;
+use keyframes::*;
+use look::*;
+
 /// Project the engine's project state into the Slint view model.
 ///
 /// `generator_sizes` maps raw clip ids of generated clips to their
@@ -261,9 +269,14 @@ fn clip_to_slint(
     let (shape_width, shape_height) = clip_shape_size(clip);
     let (filter_id, filter_label, filter_intensity) = clip_filter(clip);
     let (lut_id, lut_label, lut_path, lut_intensity) = clip_lut(clip);
-    let (animation_in_id, animation_in_label) = clip_animation(clip.animation_in.as_ref());
-    let (animation_out_id, animation_out_label) = clip_animation(clip.animation_out.as_ref());
-    let (animation_combo_id, animation_combo_label) = clip_animation(clip.animation_combo.as_ref());
+    let blend_mode = clip.blend_mode.id().to_string();
+    let blend_label = clip.blend_mode.label().to_string();
+    let mask = clip_mask(clip, clip_start);
+    let chroma = clip_chroma(clip, clip_start);
+    let styles = clip_layer_styles(clip, clip_start);
+    let animation_in = clip_animation(clip.animation_in.as_ref());
+    let animation_out = clip_animation(clip.animation_out.as_ref());
+    let animation_combo = clip_animation(clip.animation_combo.as_ref());
     let caps = clip_capabilities(project, clip, track_kind);
 
     Clip {
@@ -282,6 +295,7 @@ fn clip_to_slint(
         // envelope start for an animated one (the inspector samples the
         // published curve UI-side for playhead accuracy).
         volume: clip.volume.sample(0),
+        pan: clip.pan.sample(0),
         fade_in_s: time_to_seconds(EngineTime::new(clip.fade_in, clip.timeline.start.rate)) as f32,
         fade_out_s: time_to_seconds(EngineTime::new(clip.fade_out, clip.timeline.start.rate))
             as f32,
@@ -309,38 +323,162 @@ fn clip_to_slint(
         transform_position_y: transform.position[1],
         transform_anchor_x: transform.anchor_point[0],
         transform_anchor_y: transform.anchor_point[1],
-        transform_scale: transform.scale,
+        transform_scale: transform.scale.x,
+        transform_scale_y: transform.scale.y,
+        transform_scale_linked: transform.scale.is_uniform(),
         transform_rotation: transform.rotation,
         transform_opacity: transform.opacity,
-        crop_x: clip.crop.x,
-        crop_y: clip.crop.y,
-        crop_w: clip.crop.w,
-        crop_h: clip.crop.h,
+        // Clip-start sample (same convention as transform/volume above).
+        // Playhead-accurate crop sampling is UI-side; no kf-crop list yet
+        // (crop inspector is constant-commit / gizmo-only).
+        crop_x: clip.crop.sample(0).x,
+        crop_y: clip.crop.sample(0).y,
+        crop_w: clip.crop.sample(0).w,
+        crop_h: clip.crop.sample(0).h,
         flip_h: clip.flip_h,
         flip_v: clip.flip_v,
+        blend_mode: blend_mode.into(),
+        blend_label: blend_label.into(),
+        motion_blur_enabled: clip.motion_blur.enabled,
+        motion_blur_shutter: clip.motion_blur.shutter_deg,
+        motion_blur_samples: clip.motion_blur.samples as i32,
+        mask_kind: mask.kind.into(),
+        mask_label: mask.label.into(),
+        mask_invert: mask.invert,
+        mask_feather: mask.feather,
+        mask_center_x: mask.center[0],
+        mask_center_y: mask.center[1],
+        mask_size_w: mask.size[0],
+        mask_size_h: mask.size[1],
+        mask_rotation: mask.rotation,
+        mask_roundness: mask.roundness,
+        chroma_enabled: chroma.enabled,
+        chroma_color: chroma.color,
+        chroma_strength: chroma.strength,
+        chroma_shadow: chroma.shadow,
+        style_shadow_enabled: styles.shadow_enabled,
+        style_shadow_color: styles.shadow_color,
+        style_shadow_offset_x: styles.shadow_offset[0],
+        style_shadow_offset_y: styles.shadow_offset[1],
+        style_shadow_blur: styles.shadow_blur,
+        style_glow_enabled: styles.glow_enabled,
+        style_glow_color: styles.glow_color,
+        style_glow_radius: styles.glow_radius,
+        style_glow_intensity: styles.glow_intensity,
+        style_outline_enabled: styles.outline_enabled,
+        style_outline_color: styles.outline_color,
+        style_outline_width: styles.outline_width,
+        style_background_enabled: styles.background_enabled,
+        style_background_color: styles.background_color,
+        style_background_padding: styles.background_padding,
+        style_background_radius: styles.background_radius,
         filter_id: filter_id.into(),
         filter_label: filter_label.into(),
         filter_intensity,
-        adjust_brightness: clip.adjust.brightness,
-        adjust_contrast: clip.adjust.contrast,
-        adjust_saturation: clip.adjust.saturation,
-        adjust_exposure: clip.adjust.exposure,
-        adjust_temperature: clip.adjust.temperature,
+        adjust_brightness: clip.adjust.brightness.sample(0),
+        adjust_contrast: clip.adjust.contrast.sample(0),
+        adjust_saturation: clip.adjust.saturation.sample(0),
+        adjust_exposure: clip.adjust.exposure.sample(0),
+        adjust_temperature: clip.adjust.temperature.sample(0),
+        adjust_tint: clip.adjust.tint.sample(0),
+        adjust_hue: clip.adjust.hue.sample(0),
+        adjust_highlights: clip.adjust.highlights.sample(0),
+        adjust_shadows: clip.adjust.shadows.sample(0),
+        adjust_sharpness: clip.adjust.sharpness.sample(0),
+        adjust_vignette: clip.adjust.vignette.sample(0),
         lut_id: lut_id.into(),
         lut_label: lut_label.into(),
         lut_path: lut_path.into(),
         lut_intensity,
-        animation_in_id: animation_in_id.into(),
-        animation_in_label: animation_in_label.into(),
-        animation_out_id: animation_out_id.into(),
-        animation_out_label: animation_out_label.into(),
-        animation_combo_id: animation_combo_id.into(),
-        animation_combo_label: animation_combo_label.into(),
+        animation_in_id: animation_in.id.into(),
+        animation_in_label: animation_in.label.into(),
+        animation_in_speed: animation_in.speed,
+        animation_in_intensity: animation_in.intensity,
+        animation_in_stagger: animation_in.stagger,
+        animation_in_has_speed: animation_in.has_speed,
+        animation_in_has_intensity: animation_in.has_intensity,
+        animation_in_has_stagger: animation_in.has_stagger,
+        animation_out_id: animation_out.id.into(),
+        animation_out_label: animation_out.label.into(),
+        animation_out_speed: animation_out.speed,
+        animation_out_intensity: animation_out.intensity,
+        animation_out_stagger: animation_out.stagger,
+        animation_out_has_speed: animation_out.has_speed,
+        animation_out_has_intensity: animation_out.has_intensity,
+        animation_out_has_stagger: animation_out.has_stagger,
+        animation_combo_id: animation_combo.id.into(),
+        animation_combo_label: animation_combo.label.into(),
+        animation_combo_speed: animation_combo.speed,
+        animation_combo_intensity: animation_combo.intensity,
+        animation_combo_stagger: animation_combo.stagger,
+        animation_combo_has_speed: animation_combo.has_speed,
+        animation_combo_has_intensity: animation_combo.has_intensity,
+        animation_combo_has_stagger: animation_combo.has_stagger,
         kf_position: keyframes_to_slint(&clip.transform.position, clip_start, |v| (v[0], v[1])),
         kf_anchor: keyframes_to_slint(&clip.transform.anchor_point, clip_start, |v| (v[0], v[1])),
-        kf_scale: keyframes_to_slint(&clip.transform.scale, clip_start, |v| (*v, 0.0)),
+        kf_scale: keyframes_to_slint(&clip.transform.scale, clip_start, |v| (v.x, v.y)),
         kf_rotation: keyframes_to_slint(&clip.transform.rotation, clip_start, |v| (*v, 0.0)),
         kf_opacity: keyframes_to_slint(&clip.transform.opacity, clip_start, |v| (*v, 0.0)),
+        kf_text_size: text_keyframes(clip, clip_start, |style| &style.size),
+        kf_text_fill: text_color_keyframes(clip, clip_start, |style| &style.fill),
+        kf_text_letter_spacing: text_keyframes(clip, clip_start, |style| &style.letter_spacing),
+        kf_text_line_spacing: text_keyframes(clip, clip_start, |style| &style.line_spacing),
+        kf_text_stroke_width: text_stroke_keyframes(clip, clip_start, |stroke| &stroke.width),
+        kf_text_stroke_color: text_stroke_color_keyframes(clip, clip_start, |stroke| &stroke.rgba),
+        kf_text_background_color: text_background_color_keyframes(clip, clip_start, |bg| &bg.rgba),
+        kf_text_background_radius: text_background_keyframes(clip, clip_start, |bg| &bg.radius),
+        kf_text_shadow_blur: text_shadow_keyframes(clip, clip_start, |shadow| &shadow.blur),
+        kf_text_shadow_distance: text_shadow_keyframes(clip, clip_start, |shadow| &shadow.distance),
+        kf_text_shadow_color: text_shadow_color_keyframes(clip, clip_start, |shadow| &shadow.rgba),
+        kf_look_filter_intensity: clip.filter.as_ref().map_or_else(empty_keyframes, |filter| {
+            keyframes_to_slint(&filter.intensity, clip_start, |v| (*v, 0.0))
+        }),
+        kf_look_lut_intensity: clip.lut.as_ref().map_or_else(empty_keyframes, |lut| {
+            keyframes_to_slint(&lut.intensity, clip_start, |v| (*v, 0.0))
+        }),
+        kf_look_adjust_brightness: keyframes_to_slint(&clip.adjust.brightness, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        kf_look_adjust_contrast: keyframes_to_slint(&clip.adjust.contrast, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        kf_look_adjust_saturation: keyframes_to_slint(&clip.adjust.saturation, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        kf_look_adjust_exposure: keyframes_to_slint(&clip.adjust.exposure, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        kf_look_adjust_temperature: keyframes_to_slint(&clip.adjust.temperature, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        kf_look_adjust_tint: keyframes_to_slint(&clip.adjust.tint, clip_start, |v| (*v, 0.0)),
+        kf_look_adjust_hue: keyframes_to_slint(&clip.adjust.hue, clip_start, |v| (*v, 0.0)),
+        kf_look_adjust_highlights: keyframes_to_slint(&clip.adjust.highlights, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        kf_look_adjust_shadows: keyframes_to_slint(&clip.adjust.shadows, clip_start, |v| (*v, 0.0)),
+        kf_look_adjust_sharpness: keyframes_to_slint(&clip.adjust.sharpness, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        kf_look_adjust_vignette: keyframes_to_slint(&clip.adjust.vignette, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        // Layer-style scalar / vec2 curves. Color style params intentionally
+        // omit kf lists (color keyframes stay AI-only for now).
+        kf_style_shadow_offset: styles.kf_shadow_offset,
+        kf_style_shadow_blur: styles.kf_shadow_blur,
+        kf_style_glow_radius: styles.kf_glow_radius,
+        kf_style_glow_intensity: styles.kf_glow_intensity,
+        kf_style_outline_width: styles.kf_outline_width,
+        kf_style_background_padding: styles.kf_background_padding,
+        kf_style_background_radius: styles.kf_background_radius,
+        kf_look_mask_feather: mask.kf_feather,
+        kf_look_mask_center: mask.kf_center,
+        kf_look_mask_size: mask.kf_size,
+        kf_look_mask_rotation: mask.kf_rotation,
+        kf_look_mask_roundness: mask.kf_roundness,
+        kf_look_chroma_strength: chroma.kf_strength,
+        kf_look_chroma_shadow: chroma.kf_shadow,
         kf_speed_curve: speed_curve_to_slint(&clip.speed_curve),
         has_speed_curve: clip.has_speed_curve(),
         speed_curve_avg: clip.speed_curve_average() as f32,
@@ -351,6 +489,8 @@ fn clip_to_slint(
         kf_volume: keyframes_to_slint(&clip.volume, clip_start, |v| (*v, 0.0)),
         has_volume_envelope: clip.has_volume_envelope(),
         volume_path: volume_path(clip).into(),
+        kf_pan: keyframes_to_slint(&clip.pan, clip_start, |v| (*v, 0.0)),
+        has_pan_envelope: clip.has_pan_envelope(),
         effects: project_effects(clip),
         // Beat markers (M8 Phase 6) as absolute sequence ticks, already
         // filtered to the clip's current window by the model helper.
@@ -362,60 +502,6 @@ fn clip_to_slint(
         ),
         caps,
     }
-}
-
-fn clip_filter(clip: &EngineClip) -> (String, String, f32) {
-    let Some(filter) = &clip.filter else {
-        return (String::new(), String::new(), 0.0);
-    };
-    let label = cutlass_models::filter_spec(&filter.id)
-        .map(|s| s.label)
-        .unwrap_or(filter.id.as_str())
-        .to_string();
-    (filter.id.clone(), label, filter.intensity)
-}
-
-/// Project a clip's `.cube` LUT as (id, label, intensity). The id is the
-/// file's stem — for catalog downloads that IS the catalog id (the LUT
-/// worker names files `<id>.cube`) — and the label prettifies it
-/// (`cutlass-vivid` → "Vivid").
-fn clip_lut(clip: &EngineClip) -> (String, String, String, f32) {
-    let Some(lut) = &clip.lut else {
-        return (String::new(), String::new(), String::new(), 0.0);
-    };
-    let id = std::path::Path::new(&lut.path)
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| lut.path.clone());
-    (id.clone(), lut_label(&id), lut.path.clone(), lut.intensity)
-}
-
-/// Human label for a LUT id/stem: strip the first-party prefix, split on
-/// separators, capitalize words (`cutlass-teal_orange` → "Teal Orange").
-pub(crate) fn lut_label(id: &str) -> String {
-    let base = id.strip_prefix("cutlass-").unwrap_or(id);
-    base.split(['-', '_', ' '])
-        .filter(|word| !word.is_empty())
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn clip_animation(animation: Option<&cutlass_models::AnimationRef>) -> (String, String) {
-    let Some(animation) = animation else {
-        return (String::new(), String::new());
-    };
-    let label = cutlass_models::animation_spec(&animation.id)
-        .map(|s| s.label)
-        .unwrap_or(animation.id.as_str())
-        .to_string();
-    (animation.id.clone(), label)
 }
 
 /// Project a clip's speed ramp keyframes (M2 speed curves) as the inspector's
@@ -438,6 +524,11 @@ fn speed_curve_to_slint(curve: &Param<f32>) -> ModelRc<ParamKeyframe> {
                 bez_y1,
                 bez_x2,
                 bez_y2,
+                has_tangents: false,
+                out_tx: 0.0,
+                out_ty: 0.0,
+                in_tx: 0.0,
+                in_ty: 0.0,
             }
         })
         .collect();
@@ -499,8 +590,10 @@ fn volume_path(clip: &EngineClip) -> String {
 }
 
 /// Project a clip's effect chain (M4) for the inspector Effects section, each
-/// parameter sampled at the clip start with its catalog label and range.
+/// parameter sampled at the clip start with its catalog label, kind, and range.
 fn project_effects(clip: &EngineClip) -> ModelRc<EffectView> {
+    use cutlass_models::EffectParamKind;
+
     let rows: Vec<EffectView> = clip
         .effects
         .iter()
@@ -511,12 +604,39 @@ fn project_effects(clip: &EngineClip) -> ModelRc<EffectView> {
                 .map(|spec| {
                     spec.params
                         .iter()
-                        .map(|p| EffectParamView {
-                            name: p.name.into(),
-                            label: p.label.into(),
-                            value: fx.sample_param(p.name, 0.0).unwrap_or(p.default),
-                            min: p.min,
-                            max: p.max,
+                        .map(|p| {
+                            let (kind, value, color, vec2) = match p.kind {
+                                EffectParamKind::Scalar => (
+                                    "scalar",
+                                    fx.sample_param(p.name, 0.0).unwrap_or(p.default),
+                                    [0, 0, 0, 0],
+                                    [0.0, 0.0],
+                                ),
+                                EffectParamKind::Color => (
+                                    "color",
+                                    0.0,
+                                    fx.sample_color_param(p.name, 0.0)
+                                        .unwrap_or(p.default_color),
+                                    [0.0, 0.0],
+                                ),
+                                EffectParamKind::Vec2 => (
+                                    "vec2",
+                                    0.0,
+                                    [0, 0, 0, 0],
+                                    fx.sample_vec2_param(p.name, 0.0).unwrap_or(p.default_vec2),
+                                ),
+                            };
+                            EffectParamView {
+                                name: p.name.into(),
+                                label: p.label.into(),
+                                kind: kind.into(),
+                                value,
+                                min: p.min,
+                                max: p.max,
+                                color: rgba_color(color),
+                                vec2_x: vec2[0],
+                                vec2_y: vec2[1],
+                            }
                         })
                         .collect()
                 })
@@ -552,460 +672,6 @@ fn project_transitions(track: &EngineTrack) -> ModelRc<TransitionView> {
         })
         .collect();
     model(rows)
-}
-
-/// Project one animatable property's keyframes for the UI: clip-relative
-/// engine ticks become ABSOLUTE sequence ticks (start + offset), easing is
-/// flattened to the Slint encoding, and `split` maps the value into the
-/// `(value-x, value-y)` pair (scalars leave y at 0). Empty ⇔ constant.
-fn keyframes_to_slint<T: Lerp>(
-    param: &Param<T>,
-    clip_start: i64,
-    split: impl Fn(&T) -> (f32, f32),
-) -> ModelRc<ParamKeyframe> {
-    let rows: Vec<ParamKeyframe> = param
-        .keyframes()
-        .iter()
-        .map(|kf: &Keyframe<T>| {
-            let (value_x, value_y) = split(&kf.value);
-            let (easing, [bez_x1, bez_y1, bez_x2, bez_y2]) = easing_to_ui(kf.easing);
-            ParamKeyframe {
-                tick: clamp_i32(clip_start + kf.tick),
-                value_x,
-                value_y,
-                easing,
-                bez_x1,
-                bez_y1,
-                bez_x2,
-                bez_y2,
-            }
-        })
-        .collect();
-    model(rows)
-}
-
-/// The clip's speed as a display/scale float (1.0 for degenerate rationals,
-/// which the model rejects anyway).
-fn speed_factor(speed: EngineRational) -> f32 {
-    if speed.num <= 0 || speed.den <= 0 {
-        return 1.0;
-    }
-    speed.num as f32 / speed.den as f32
-}
-
-/// Retime badge for the timeline card: `2x` / `0.5x` (trailing zeros
-/// trimmed), with ` R` appended when reversed — a reversed 1× clip shows
-/// just `R`. A speed ramp (M2 curve) shows its *effective* average rate with
-/// a `~` prefix (`~1.4x`) so it reads as varying, not constant. Empty ⇔
-/// forward 1× with no ramp (no badge).
-fn speed_label(clip: &EngineClip) -> String {
-    if !clip.is_retimed() {
-        return String::new();
-    }
-    let mut parts: Vec<String> = Vec::new();
-    // A ramp's effective rate is the base speed times the curve's average;
-    // the `~` marks that the instantaneous rate varies across the clip.
-    let ramped = clip.has_speed_curve();
-    let factor = speed_factor(clip.speed)
-        * if ramped {
-            clip.speed_curve_average() as f32
-        } else {
-            1.0
-        };
-    if ramped || (factor - 1.0).abs() > f32::EPSILON {
-        let mut s = format!("{factor:.2}");
-        while s.ends_with('0') {
-            s.pop();
-        }
-        if s.ends_with('.') {
-            s.pop();
-        }
-        parts.push(format!("{}{s}x", if ramped { "~" } else { "" }));
-    }
-    if clip.reversed {
-        parts.push("R".into());
-    }
-    parts.join(" ")
-}
-
-/// `time` as seconds, exact rational division in floating point.
-fn time_to_seconds(time: EngineTime) -> f64 {
-    if time.rate.num <= 0 || time.rate.den <= 0 {
-        return 0.0;
-    }
-    time.value as f64 * f64::from(time.rate.den) / f64::from(time.rate.num)
-}
-
-/// Clip badge: CapCut-style `3.4s` under a minute, `M:SS` (or `H:MM:SS`)
-/// from there up.
-fn clip_duration_label(duration: EngineTime) -> String {
-    let secs = time_to_seconds(duration).max(0.0);
-    if secs < 60.0 {
-        format!("{secs:.1}s")
-    } else {
-        let whole = secs.round() as i64;
-        let (h, m, s) = (whole / 3600, (whole / 60) % 60, whole % 60);
-        if h > 0 {
-            format!("{h}:{m:02}:{s:02}")
-        } else {
-            format!("{m}:{s:02}")
-        }
-    }
-}
-
-/// Trim headroom for generated clips, which have no source bounds. Big enough
-/// to never clamp, small enough that `clip end + room` can't overflow `i32`.
-const UNBOUNDED_ROOM: i32 = i32::MAX / 4;
-
-/// How far (sequence ticks) each clip edge can extend before running out of
-/// source media: `(head, tail)`. Head room is the media before the in-point,
-/// tail room the media after the out-point, both projected to the sequence
-/// rate *conservatively* (see [`room_to_sequence_ticks`]) so the trim ghost
-/// never offers an extension `Project::trim_clip` would reject.
-fn trim_rooms(project: &EngineProject, clip: &EngineClip) -> (i32, i32) {
-    let tl_rate = project.timeline().frame_rate;
-    match &clip.content {
-        ClipSource::Media { media, source } => {
-            let Some(media) = project.media(*media) else {
-                return (0, 0);
-            };
-            // Stills extend freely: the one frame repeats, and the pool
-            // duration is a default placement length, not material bounds
-            // (the engine relaxes `trim_clip` the same way).
-            if media.is_image {
-                return (UNBOUNDED_ROOM, UNBOUNDED_ROOM);
-            }
-            let head_media = source.start.value;
-            let tail_media = media.duration.value - source.end_tick();
-            (
-                room_to_sequence_ticks(head_media, media.frame_rate, tl_rate),
-                room_to_sequence_ticks(tail_media, media.frame_rate, tl_rate),
-            )
-        }
-        ClipSource::Generated(_) => (UNBOUNDED_ROOM, UNBOUNDED_ROOM),
-    }
-}
-
-/// Largest number of sequence ticks an edge may extend such that the engine's
-/// media-rate resample of that delta stays within `room_media` ticks.
-///
-/// `Project::trim_clip` re-derives the source delta by resampling the
-/// timeline delta (round-to-nearest), so a naive media→sequence conversion
-/// can overshoot by a tick and get the commit rejected. Convert, then verify
-/// by round-tripping and step down until it fits; when the rates differ, keep
-/// one extra media tick in reserve for the duration-resample's own rounding.
-fn room_to_sequence_ticks(
-    room_media: i64,
-    media_rate: EngineRational,
-    tl_rate: EngineRational,
-) -> i32 {
-    let mut room = room_media.max(0);
-    if !rate_eq(media_rate, tl_rate) {
-        room = (room - 1).max(0);
-    }
-    let mut ticks = resample(EngineTime::new(room, media_rate), tl_rate).value;
-    while ticks > 0 && resample(EngineTime::new(ticks, tl_rate), media_rate).value > room {
-        ticks -= 1;
-    }
-    clamp_i32(ticks)
-}
-
-/// `(lane label, text-generator content)` for a clip.
-fn clip_labels(project: &EngineProject, clip: &EngineClip) -> (String, String) {
-    match &clip.content {
-        ClipSource::Media { media, .. } => {
-            let name = project
-                .media(*media)
-                .map(media_name)
-                .unwrap_or_else(|| format!("Clip {}", clip.id.raw()));
-            (name, String::new())
-        }
-        ClipSource::Generated(generator) => match generator {
-            Generator::Text { content, .. } => ("Text".to_owned(), content.clone()),
-            Generator::SolidColor { .. } => ("Solid".to_owned(), String::new()),
-            Generator::Shape { .. } => ("Shape".to_owned(), String::new()),
-            Generator::Sticker { asset } => (
-                cutlass_models::sticker_spec(asset)
-                    .map_or_else(|| "Sticker".to_owned(), |s| s.label.to_owned()),
-                String::new(),
-            ),
-            Generator::Lottie { path, .. } => (
-                std::path::Path::new(path)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .map_or_else(|| "Animation".to_owned(), str::to_owned),
-                String::new(),
-            ),
-            Generator::Effect => ("Effect".to_owned(), String::new()),
-            Generator::Filter => ("Filter".to_owned(), String::new()),
-            Generator::Adjustment => ("Adjustment".to_owned(), String::new()),
-        },
-    }
-}
-
-fn clip_shape_size(clip: &EngineClip) -> (f32, f32) {
-    match &clip.content {
-        // Geometry became animatable (`Param`) on this branch; the inspector
-        // edits the clip-start sample, like every other projected property.
-        ClipSource::Generated(Generator::Shape { width, height, .. }) => {
-            (width.sample(0), height.sample(0))
-        }
-        _ => (0.0, 0.0),
-    }
-}
-
-/// `(generator-kind tag, fill color)` for the timeline card. The tag selects
-/// the card's preview rendering (see `panels/timeline/clip.slint`); the color
-/// is the solid/shape fill (transparent for everything else).
-fn clip_generator_visual(clip: &EngineClip) -> (&'static str, Color) {
-    let transparent = Color::from_argb_u8(0, 0, 0, 0);
-    match &clip.content {
-        ClipSource::Generated(Generator::Text { .. }) => ("text", transparent),
-        ClipSource::Generated(Generator::SolidColor { rgba }) => ("solid", rgba_color(*rgba)),
-        ClipSource::Generated(Generator::Shape { shape, rgba, .. }) => {
-            // The shape family grew on this branch; every non-ellipse figure
-            // reads fine on the card as the generic cornered swatch.
-            let tag = match shape {
-                cutlass_models::Shape::Ellipse => "ellipse",
-                _ => "rect",
-            };
-            (tag, rgba_color(rgba.sample(0)))
-        }
-        // Only catalog-backed stickers tag as composited (drives preview
-        // hit-testing); a legacy empty asset draws nothing, so no tag.
-        ClipSource::Generated(Generator::Sticker { asset })
-            if cutlass_models::sticker_spec(asset).is_some() =>
-        {
-            ("sticker", transparent)
-        }
-        // File-backed Lotties composite like stickers (preview hit-testing).
-        ClipSource::Generated(Generator::Lottie { .. }) => ("sticker", transparent),
-        _ => ("", transparent),
-    }
-}
-
-fn rgba_color(rgba: [u8; 4]) -> Color {
-    Color::from_argb_u8(rgba[3], rgba[0], rgba[1], rgba[2])
-}
-
-/// Project a clip's text styling into the Slint `TextStyle`. Non-text clips
-/// (and text clips written before styling existed) get the engine default
-/// look, so the inspector always has a coherent style to edit.
-fn clip_text_style(clip: &EngineClip) -> TextClipStyle {
-    let style = match &clip.content {
-        ClipSource::Generated(Generator::Text { style, .. }) => style.clone(),
-        _ => EngineTextStyle::default(),
-    };
-    text_style_to_ui(&style)
-}
-
-/// Convert an engine `TextStyle` to the Slint struct. Effect opacities are
-/// pulled out of their rgba alpha into a dedicated 0..=1 control, and the
-/// swatch colors are made opaque so the picker preview reads cleanly.
-fn text_style_to_ui(style: &EngineTextStyle) -> TextClipStyle {
-    let opaque = |rgba: [u8; 4]| Color::from_rgb_u8(rgba[0], rgba[1], rgba[2]);
-    let alpha01 = |rgba: [u8; 4]| rgba[3] as f32 / 255.0;
-    let stroke = style.stroke.unwrap_or_default();
-    let background = style.background.unwrap_or_default();
-    let shadow = style.shadow.unwrap_or_default();
-    TextClipStyle {
-        font: style.font.clone().into(),
-        size: style.size,
-        bold: style.bold,
-        italic: style.italic,
-        underline: style.underline,
-        case: text_case_to_int(style.case),
-        fill: Color::from_argb_u8(style.fill[3], style.fill[0], style.fill[1], style.fill[2]),
-        letter_spacing: style.letter_spacing,
-        line_spacing: style.line_spacing,
-        align_h: align_h_to_int(style.align_h),
-        align_v: align_v_to_int(style.align_v),
-        wrap: style.wrap,
-        stroke_enabled: style.stroke.is_some(),
-        stroke_color: opaque(stroke.rgba),
-        stroke_width: stroke.width,
-        background_enabled: style.background.is_some(),
-        background_color: opaque(background.rgba),
-        background_opacity: alpha01(background.rgba),
-        background_radius: background.radius,
-        shadow_enabled: style.shadow.is_some(),
-        shadow_color: opaque(shadow.rgba),
-        shadow_opacity: alpha01(shadow.rgba),
-        shadow_blur: shadow.blur,
-        shadow_distance: shadow.distance,
-    }
-}
-
-fn text_case_to_int(case: TextCase) -> i32 {
-    match case {
-        TextCase::Normal => 0,
-        TextCase::Upper => 1,
-        TextCase::Lower => 2,
-        TextCase::Title => 3,
-    }
-}
-
-fn align_h_to_int(align: TextAlignH) -> i32 {
-    match align {
-        TextAlignH::Left => 0,
-        TextAlignH::Center => 1,
-        TextAlignH::Right => 2,
-    }
-}
-
-fn align_v_to_int(align: TextAlignV) -> i32 {
-    match align {
-        TextAlignV::Top => 0,
-        TextAlignV::Middle => 1,
-        TextAlignV::Bottom => 2,
-    }
-}
-
-/// The engine's composite canvas size, as Slint lengths. Delegating to the
-/// renderer's `canvas_size` (rather than mirroring it) keeps preview
-/// hit-test geometry pixel-identical to the composited frame by
-/// construction — including the M1 aspect presets.
-fn canvas_size(project: &EngineProject) -> (f32, f32) {
-    let (w, h) = cutlass_render::canvas_size(project);
-    (w as f32, h as f32)
-}
-
-/// `CanvasAspect` as the preset index the canvas dialog's ratio list uses.
-fn aspect_to_index(aspect: cutlass_models::CanvasAspect) -> i32 {
-    cutlass_models::CanvasAspect::ALL
-        .iter()
-        .position(|a| *a == aspect)
-        .map_or(0, |i| i as i32)
-}
-
-/// Lane kinds the UI surfaces today. Filter lanes are still phantom until
-/// their engine lands (v1 roadmap M0 "hide phantom kinds", M5): the model
-/// keeps them — they round-trip through save/load untouched and composite
-/// nothing — but the projection skips them so users never see lanes that do
-/// nothing. Adjustment lanes became real in M4; effect lanes surfaced with
-/// standalone effect segments (CapCut effects-as-track-clips).
-fn kind_visible(kind: EngineKind) -> bool {
-    kind != EngineKind::Filter
-}
-
-fn track_kind(kind: EngineKind) -> TrackKind {
-    match kind {
-        EngineKind::Video => TrackKind::Video,
-        EngineKind::Audio => TrackKind::Audio,
-        EngineKind::Text => TrackKind::Text,
-        EngineKind::Sticker => TrackKind::Sticker,
-        EngineKind::Effect => TrackKind::Effect,
-        EngineKind::Filter => TrackKind::Filter,
-        EngineKind::Adjustment => TrackKind::Adjustment,
-    }
-}
-
-fn clip_capabilities(
-    project: &EngineProject,
-    clip: &EngineClip,
-    kind: EngineKind,
-) -> ClipCapabilities {
-    let caps = EngineCaps::for_clip(project, clip, kind);
-    ClipCapabilities {
-        has_transform: caps.has_transform,
-        has_crop: caps.has_crop,
-        has_audio: caps.has_audio,
-        has_speed: caps.has_speed,
-        has_text: caps.has_text,
-        has_shape: caps.has_shape,
-        has_effects: caps.has_effects,
-        has_filter_adjust: caps.has_filter_adjust,
-        can_split: caps.can_split,
-        can_reverse: caps.can_reverse,
-        can_ripple_delete: caps.can_ripple_delete,
-        can_extract_audio: caps.can_extract_audio,
-    }
-}
-
-/// One color per lane kind (the engine has no per-track color). Matches the
-/// palette the UI previously hardcoded in `editor-store.slint`.
-fn kind_color(kind: EngineKind) -> Color {
-    let (r, g, b) = match kind {
-        EngineKind::Video => (0x4A, 0x6F, 0xA5),
-        EngineKind::Audio => (0xC9, 0x98, 0x46),
-        EngineKind::Text => (0x5E, 0x8B, 0x7E),
-        EngineKind::Sticker => (0xBF, 0x6F, 0x4A),
-        EngineKind::Effect => (0x7B, 0x68, 0xA6),
-        EngineKind::Filter => (0x4A, 0x8C, 0x8C),
-        EngineKind::Adjustment => (0x6C, 0x5B, 0x7B),
-    };
-    Color::from_rgb_u8(r, g, b)
-}
-
-fn marker_to_slint(marker: &EngineMarker) -> TimelineMarker {
-    let [r, g, b, a] = marker.color.rgba();
-    TimelineMarker {
-        id: marker.id.raw().to_string().into(),
-        tick: clamp_i32(marker.tick.value),
-        name: marker.name.clone().into(),
-        color: Color::from_argb_u8(a, r, g, b),
-        color_name: marker_color_name(marker.color).into(),
-    }
-}
-
-fn marker_color_name(color: cutlass_models::MarkerColor) -> &'static str {
-    use cutlass_models::MarkerColor;
-    match color {
-        MarkerColor::Teal => "teal",
-        MarkerColor::Blue => "blue",
-        MarkerColor::Purple => "purple",
-        MarkerColor::Pink => "pink",
-        MarkerColor::Red => "red",
-        MarkerColor::Orange => "orange",
-        MarkerColor::Yellow => "yellow",
-        MarkerColor::Green => "green",
-    }
-}
-
-fn rational(rate: cutlass_models::Rational) -> Rational {
-    Rational {
-        num: rate.num,
-        den: rate.den,
-    }
-}
-
-fn rational_time(time: EngineTime) -> RationalTime {
-    RationalTime {
-        // Slint's time model is `i32`; clamp the engine's `i64` ticks. Realistic
-        // projects stay well inside `i32` (≈24 days at 1000 fps).
-        value: clamp_i32(time.value),
-        rate: rational(time.rate),
-    }
-}
-
-fn time_range(range: EngineRange) -> TimeRange {
-    TimeRange {
-        start: rational_time(range.start),
-        duration: rational_time(range.duration),
-    }
-}
-
-/// The single choke point projecting engine `i64` ticks into Slint's `i32`
-/// time model (keyframes roadmap Phase 4 — tick audit). Every tick that
-/// crosses the boundary (`rational_time`, markers, keyframe + speed-ramp
-/// rows) routes through here so an out-of-range value **saturates** instead
-/// of wrapping — a clip parked past the bound clamps to the edge of the
-/// addressable timeline rather than teleporting to a negative tick.
-///
-/// ## Timeline-length bound
-///
-/// `i32::MAX` ticks is the hard ceiling. In wall-clock time that is
-/// `i32::MAX / fps` seconds: ≈ 20.7 hours at 30 fps, ≈ 8.3 hours at 72 fps,
-/// ≈ 24.8 days at 1000 fps. Real projects stay orders of magnitude inside
-/// it; the clamp only exists so a pathological/corrupt tick can never alias
-/// to a bogus on-screen position. Promoting the Slint model to `i64` is the
-/// long-term fix (tracked in `timeline-roadmap.md`).
-fn clamp_i32(value: i64) -> i32 {
-    value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
-}
-
-fn model<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
-    ModelRc::from(Rc::new(VecModel::from(items)))
 }
 
 #[cfg(test)]

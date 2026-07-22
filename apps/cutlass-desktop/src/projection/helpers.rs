@@ -196,6 +196,12 @@ pub(super) fn clip_generator_visual(clip: &EngineClip) -> (&'static str, Color) 
         }
         // File-backed Lotties composite like stickers (preview hit-testing).
         ClipSource::Generated(Generator::Lottie { .. }) => ("sticker", transparent),
+        // Canvas-pass lane bars (effect / filter / adjustment): not drawn as
+        // layer quads — tags drive inspector gating for no-op blend/styles/
+        // motion-blur controls (see resolve CanvasPass guards).
+        ClipSource::Generated(Generator::Effect) => ("effect", transparent),
+        ClipSource::Generated(Generator::Filter) => ("filter", transparent),
+        ClipSource::Generated(Generator::Adjustment) => ("adjustment", transparent),
         _ => ("", transparent),
     }
 }

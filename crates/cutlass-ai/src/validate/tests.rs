@@ -1360,6 +1360,23 @@ fn set_clip_blend_mode_lowers_and_guards() {
         err.contains("nope") || err.contains("unknown variant"),
         "{err}"
     );
+
+    let adj_lane = project.add_track(TrackKind::Adjustment, "ADJ");
+    let adj = project
+        .add_generated(
+            adj_lane,
+            Generator::Adjustment,
+            TimeRange::at_rate(0, 24, R24),
+        )
+        .unwrap();
+    let msg = reject(
+        &project,
+        WireCommand::SetClipBlendMode(wire::SetClipBlendMode {
+            clip: adj.raw(),
+            mode: wire::WireBlendMode::Multiply,
+        }),
+    );
+    assert!(msg.contains("adjustment/effect/filter"), "{msg}");
 }
 
 #[test]
@@ -1418,6 +1435,21 @@ fn set_motion_blur_lowers_and_guards() {
         }),
     );
     assert!(msg.contains("shutter") || msg.contains("720"), "{msg}");
+
+    let fx_lane = project.add_track(TrackKind::Effect, "FX");
+    let fx = project
+        .add_generated(fx_lane, Generator::Effect, TimeRange::at_rate(0, 24, R24))
+        .unwrap();
+    let msg = reject(
+        &project,
+        WireCommand::SetMotionBlur(wire::SetMotionBlur {
+            clip: fx.raw(),
+            enabled: true,
+            shutter_deg: None,
+            samples: None,
+        }),
+    );
+    assert!(msg.contains("adjustment/effect/filter"), "{msg}");
 }
 
 #[test]
@@ -1486,6 +1518,30 @@ fn set_layer_styles_lowers_and_guards() {
         }),
     );
     assert!(msg.contains("visual frame"), "{msg}");
+
+    let filter_lane = project.add_track(TrackKind::Filter, "FLT");
+    let filter_clip = project
+        .add_generated(
+            filter_lane,
+            Generator::Filter,
+            TimeRange::at_rate(0, 24, R24),
+        )
+        .unwrap();
+    let msg = reject(
+        &project,
+        WireCommand::SetClipLayerStyles(wire::SetClipLayerStyles {
+            clip: filter_clip.raw(),
+            styles: wire::WireLayerStyles {
+                shadow: Some(wire::WireLayerShadow {
+                    rgba: [0, 0, 0, 128],
+                    offset: [2.0, 2.0],
+                    blur: 4.0,
+                }),
+                ..Default::default()
+            },
+        }),
+    );
+    assert!(msg.contains("adjustment/effect/filter"), "{msg}");
 }
 
 #[test]

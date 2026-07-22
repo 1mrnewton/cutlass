@@ -109,6 +109,7 @@ pub(super) fn set_clip_blend_mode(
 ) -> Result<EditCommand, Rejection> {
     let clip = clip_ref(project, args.clip)?;
     reject_audio_lane(project, clip, "blend modes need a visual frame", args.clip)?;
+    reject_canvas_pass_layer_props(clip, args.clip, "blend modes")?;
     Ok(EditCommand::SetClipBlendMode {
         clip: clip.id,
         mode: lower_blend_mode(args.mode),
@@ -121,6 +122,7 @@ pub(super) fn set_motion_blur(
 ) -> Result<EditCommand, Rejection> {
     let clip = clip_ref(project, args.clip)?;
     reject_audio_lane(project, clip, "motion blur needs a visual frame", args.clip)?;
+    reject_canvas_pass_layer_props(clip, args.clip, "motion blur")?;
     let mut motion_blur = clip.motion_blur;
     motion_blur.enabled = args.enabled;
     if let Some(shutter) = args.shutter_deg {
@@ -144,10 +146,30 @@ pub(super) fn set_clip_layer_styles(
 ) -> Result<EditCommand, Rejection> {
     let clip = clip_ref(project, args.clip)?;
     reject_audio_lane(project, clip, "layer styles need a visual frame", args.clip)?;
+    reject_canvas_pass_layer_props(clip, args.clip, "layer styles")?;
     Ok(EditCommand::SetClipLayerStyles {
         clip: clip.id,
         styles: lower_layer_styles(&args.styles),
     })
+}
+
+/// Adjustment / effect / filter lane bars resolve as canvas-wide passes —
+/// blend, layer styles, and motion blur only apply to layer quads.
+fn reject_canvas_pass_layer_props(
+    clip: &cutlass_models::Clip,
+    raw: u64,
+    what: &str,
+) -> Result<(), Rejection> {
+    if matches!(
+        generated_content(clip),
+        Some(Generator::Effect | Generator::Filter | Generator::Adjustment)
+    ) {
+        return Err(Rejection::new(format!(
+            "clip {raw} is an adjustment/effect/filter lane clip; {what} only \
+             apply to layer quads (not canvas-pass lanes)"
+        )));
+    }
+    Ok(())
 }
 
 fn lower_layer_styles(wire: &WireLayerStyles) -> LayerStyles {

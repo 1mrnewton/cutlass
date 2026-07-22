@@ -24,6 +24,12 @@ export component TransformInspector inherits VerticalLayout {
     spacing: AppStore.theme.metrics.spacing.lg;
     alignment: LayoutAlignment.start;
 
+    // Canvas-pass lane clips skip motion blur at resolve time (see
+    // motion_blur.rs / resolve.rs CanvasPass guards).
+    private property <bool> is-canvas-pass: model.generator-kind == "adjustment"
+        || model.generator-kind == "effect"
+        || model.generator-kind == "filter";
+
     private property <float> canvas-w: EditorStore.project.sequence.width / 1px;
     private property <float> canvas-h: EditorStore.project.sequence.height / 1px;
 
@@ -477,8 +483,9 @@ export component TransformInspector inherits VerticalLayout {
     }
 
     // Transform-only motion blur (export supersampling). Plain values —
-    // not keyframable. Applies when the transform is animated.
-    SectionHeader {
+    // not keyframable. Applies when the transform is animated. Hidden for
+    // canvas-pass lanes — resolve skips blur on CanvasPass layers.
+    if !root.is-canvas-pass: SectionHeader {
         title: "Motion blur";
         checkable: true;
         interactive: true;
@@ -493,7 +500,7 @@ export component TransformInspector inherits VerticalLayout {
         }
     }
 
-    if root.model.motion-blur-enabled: SliderRow {
+    if !root.is-canvas-pass && root.model.motion-blur-enabled: SliderRow {
         label: "Shutter";
         suffix: "°";
         value: root.model.motion-blur-shutter;
@@ -513,7 +520,7 @@ export component TransformInspector inherits VerticalLayout {
         }
     }
 
-    if root.model.motion-blur-enabled: SliderRow {
+    if !root.is-canvas-pass && root.model.motion-blur-enabled: SliderRow {
         label: "Samples";
         value: root.model.motion-blur-samples;
         minimum: 2;

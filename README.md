@@ -14,28 +14,32 @@ project format that hasn't settled yet.
 
 - Import video, audio, and images onto a multi-lane timeline.
 - Cut, trim, split, move, duplicate, link/unlink, ripple-delete, multi-select.
-- Speed changes (flat or ramped), reverse, crop, flip, move/scale/rotate,
-  opacity.
+- Speed changes (flat or ramped), reverse, crop, flip, move/scale/rotate
+  (per-axis scale), opacity.
 - Styled text, solid colors, shapes, and bundled stickers, static and animated.
 - Entrance/exit/combo animations from a catalog.
-- Keyframes on transforms and effect settings.
+- Keyframes on transforms and effect settings, with a graph editor and easing
+  presets; motion paths support bezier tangents.
+- Blend modes, layer styles (shadow / glow / outline / background), animatable
+  crop, and per-clip transform motion blur.
 - Canvas presets (16:9, 9:16, 1:1, 4:5, 21:9) and a background color.
 
 **Effects and color**
 
-- GPU effect passes: gaussian blur, vignette, pixelate. The rest of the
-  catalog (sharpen, glitch, grain, glow, and so on) is selectable but renders
-  as a no-op until its shader lands.
-- Per-clip masks (linear, mirror, circle, rectangle, heart, star) and chroma
-  key.
-- Filter presets and color adjustments per clip, plus lane-wide adjustment
-  layers that grade everything beneath them.
+- GPU effect passes: gaussian blur, vignette, pixelate, plus typed params
+  (including duotone). The rest of the catalog (sharpen, glitch, grain, glow,
+  and so on) is selectable but renders as a no-op until its shader lands.
+- Per-clip mask geometry (linear, mirror, circle, rectangle, heart, star) and
+  chroma key.
+- Filter presets and expanded color adjust (11 sliders) per clip, plus
+  lane-wide adjustment / effect / filter passes that grade everything beneath
+  them.
 - Transitions: crossfade and wipe-left are implemented; the other catalog
   entries currently play as a crossfade.
 
 **Audio**
 
-- Volume envelopes and draggable fade handles.
+- Volume envelopes, stereo pan, and draggable fade handles.
 - Speed changes resample the audio, ramps included. Pitch follows the rate
   for now; pitch-preserving stretch is planned but not built.
 - Noise reduction per clip (RNNoise).

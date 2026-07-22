@@ -661,6 +661,11 @@ component VisualClipInspector inherits VerticalLayout {
     spacing: AppStore.theme.metrics.spacing.none;
 
     private property <bool> is-shape: model.generator-kind == "rect" || model.generator-kind == "ellipse";
+    // Effect/filter/adjustment lane bars resolve as CanvasPass (Normal /
+    // no layer styles) — hide no-op style controls (see resolve.rs).
+    private property <bool> is-canvas-pass: model.generator-kind == "adjustment"
+        || model.generator-kind == "effect"
+        || model.generator-kind == "filter";
     private property <int> selected-tab: 0;
 
     InspectorTabHeader {
@@ -792,9 +797,11 @@ component VisualClipInspector inherits VerticalLayout {
                 model: root.model;
             }
 
-            InspectorDivider { }
+            // Layer styles are layer-quad only; canvas-pass lanes skip them
+            // at resolve (see resolve.rs CanvasPass guards).
+            if !root.is-canvas-pass: InspectorDivider { }
 
-            StylesInspector {
+            if !root.is-canvas-pass: StylesInspector {
                 model: root.model;
             }
 

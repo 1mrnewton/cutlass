@@ -116,6 +116,89 @@ fn projects_clip_layer_styles() {
 }
 
 #[test]
+fn projects_new_adjust_sliders_and_keyframes() {
+    use cutlass_models::{
+        ClipParam, ColorAdjustments, Easing, LookParam, MediaSource, ParamValue, RationalTime,
+        TimeRange, TrackKind,
+    };
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("adjust", EngineRational::FPS_24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/adjust.mp4",
+        1920,
+        1080,
+        EngineRational::FPS_24,
+        480,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            RationalTime::new(0, EngineRational::FPS_24),
+        )
+        .expect("clip");
+
+    project
+        .set_clip_adjustments(
+            clip_id,
+            ColorAdjustments {
+                tint: 0.25.into(),
+                hue: (-0.5).into(),
+                highlights: 0.1.into(),
+                shadows: (-0.2).into(),
+                sharpness: 0.75.into(),
+                vignette: 0.4.into(),
+                ..Default::default()
+            },
+        )
+        .expect("adjust");
+    project
+        .set_param_keyframe(
+            clip_id,
+            ClipParam::Look {
+                param: LookParam::AdjustHue,
+            },
+            RationalTime::new(0, EngineRational::FPS_24),
+            ParamValue::Scalar(-1.0),
+            Easing::Linear,
+        )
+        .expect("kf0");
+    project
+        .set_param_keyframe(
+            clip_id,
+            ClipParam::Look {
+                param: LookParam::AdjustHue,
+            },
+            RationalTime::new(24, EngineRational::FPS_24),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+        )
+        .expect("kf1");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clip = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!((clip.adjust_tint - 0.25).abs() < f32::EPSILON);
+    assert!((clip.adjust_highlights - 0.1).abs() < f32::EPSILON);
+    assert!((clip.adjust_shadows - (-0.2)).abs() < f32::EPSILON);
+    assert!((clip.adjust_sharpness - 0.75).abs() < f32::EPSILON);
+    assert!((clip.adjust_vignette - 0.4).abs() < f32::EPSILON);
+    assert_eq!(clip.kf_look_adjust_hue.row_count(), 2);
+    assert_eq!(clip.kf_look_adjust_tint.row_count(), 0);
+}
+
+#[test]
 fn projects_clip_mask() {
     use cutlass_models::{Mask, MaskKind, MediaSource, Param, RationalTime, TimeRange, TrackKind};
     use slint::Model;

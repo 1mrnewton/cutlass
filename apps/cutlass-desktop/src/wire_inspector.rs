@@ -452,45 +452,20 @@ pub(crate) fn wire_inspector(
     );
 
     let set_adjust_handle = preview_worker.handle();
-    app.global::<InspectorBackend>().on_set_clip_adjust(
-        move |clip_id, brightness, contrast, saturation, exposure, temperature| {
-            set_adjust_handle.set_clip_adjust(
-                clip_id.to_string(),
-                cutlass_models::ColorAdjustments {
-                    brightness: brightness.into(),
-                    contrast: contrast.into(),
-                    saturation: saturation.into(),
-                    exposure: exposure.into(),
-                    temperature: temperature.into(),
-                    ..Default::default()
-                },
-            );
-        },
-    );
+    app.global::<InspectorBackend>()
+        .on_set_clip_adjust(move |clip_id, adjust| {
+            set_adjust_handle
+                .set_clip_adjust(clip_id.to_string(), inspector::adjust_from_ui(&adjust));
+        });
 
     let preview_look_handle = preview_worker.handle();
     app.global::<InspectorBackend>().on_preview_clip_look(
-        move |clip_id,
-              filter_id,
-              intensity,
-              brightness,
-              contrast,
-              saturation,
-              exposure,
-              temperature,
-              tick| {
+        move |clip_id, filter_id, intensity, adjust, tick| {
             preview_look_handle.preview_clip_look(
                 clip_id.to_string(),
                 filter_id.to_string(),
                 intensity,
-                cutlass_models::ColorAdjustments {
-                    brightness: brightness.into(),
-                    contrast: contrast.into(),
-                    saturation: saturation.into(),
-                    exposure: exposure.into(),
-                    temperature: temperature.into(),
-                    ..Default::default()
-                },
+                inspector::adjust_from_ui(&adjust),
                 i64::from(tick),
             );
         },

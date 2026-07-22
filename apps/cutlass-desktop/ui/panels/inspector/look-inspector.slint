@@ -6,7 +6,7 @@ import { CutlassText, CutlassScrollView } from "../../components/index.slint";
 import { AppState } from "../../state.slint";
 import { AppStore, TimelineStore } from "../../store/index.slint";
 import { InspectorBackend, ScalarParamSample } from "../../lib/inspector-backend.slint";
-import { CatalogEntry, Clip } from "../../models/index.slint";
+import { CatalogEntry, Clip, ClipAdjust } from "../../models/index.slint";
 import { LabelCell, SectionHeader, SliderRow } from "inspector-widgets.slint";
 
 component FilterRow inherits Rectangle {
@@ -294,6 +294,12 @@ export component LookInspector inherits VerticalLayout {
     private property <ScalarParamSample> saturation-sample: InspectorBackend.sample-scalar-param(model, "look_adjust_saturation", TimelineStore.playhead-tick);
     private property <ScalarParamSample> exposure-sample: InspectorBackend.sample-scalar-param(model, "look_adjust_exposure", TimelineStore.playhead-tick);
     private property <ScalarParamSample> temperature-sample: InspectorBackend.sample-scalar-param(model, "look_adjust_temperature", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> tint-sample: InspectorBackend.sample-scalar-param(model, "look_adjust_tint", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> hue-sample: InspectorBackend.sample-scalar-param(model, "look_adjust_hue", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> highlights-sample: InspectorBackend.sample-scalar-param(model, "look_adjust_highlights", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> shadows-sample: InspectorBackend.sample-scalar-param(model, "look_adjust_shadows", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> sharpness-sample: InspectorBackend.sample-scalar-param(model, "look_adjust_sharpness", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> vignette-sample: InspectorBackend.sample-scalar-param(model, "look_adjust_vignette", TimelineStore.playhead-tick);
 
     function toggle-kf(param: string, on-keyframe: bool, value: float) {
         if (on-keyframe) {
@@ -315,41 +321,200 @@ export component LookInspector inherits VerticalLayout {
         }
     }
 
-    function preview-look(
-        filter-id: string,
-        intensity: float,
-        brightness: float,
-        contrast: float,
-        saturation: float,
-        exposure: float,
-        temperature: float,
-    ) {
+    function model-adjust() -> ClipAdjust {
+        return {
+            brightness: root.model.adjust-brightness,
+            contrast: root.model.adjust-contrast,
+            saturation: root.model.adjust-saturation,
+            exposure: root.model.adjust-exposure,
+            temperature: root.model.adjust-temperature,
+            tint: root.model.adjust-tint,
+            hue: root.model.adjust-hue,
+            highlights: root.model.adjust-highlights,
+            shadows: root.model.adjust-shadows,
+            sharpness: root.model.adjust-sharpness,
+            vignette: root.model.adjust-vignette,
+        };
+    }
+
+    function preview-look(filter-id: string, intensity: float, adjust: ClipAdjust) {
         InspectorBackend.preview-clip-look(
             root.model.id,
             filter-id,
             intensity,
-            brightness,
-            contrast,
-            saturation,
-            exposure,
-            temperature,
+            adjust,
             TimelineStore.playhead-tick);
     }
 
-    function commit-adjust(
-        brightness: float,
-        contrast: float,
-        saturation: float,
-        exposure: float,
-        temperature: float,
-    ) {
-        InspectorBackend.set-clip-adjust(
-            root.model.id,
-            brightness,
-            contrast,
-            saturation,
-            exposure,
-            temperature);
+    function commit-adjust(adjust: ClipAdjust) {
+        InspectorBackend.set-clip-adjust(root.model.id, adjust);
+    }
+
+    // Build a full adjust payload with one field overridden (slider drag/commit).
+    function adjust-with-brightness(v: float) -> ClipAdjust {
+        return {
+            brightness: v,
+            contrast: root.model.adjust-contrast,
+            saturation: root.model.adjust-saturation,
+            exposure: root.model.adjust-exposure,
+            temperature: root.model.adjust-temperature,
+            tint: root.model.adjust-tint,
+            hue: root.model.adjust-hue,
+            highlights: root.model.adjust-highlights,
+            shadows: root.model.adjust-shadows,
+            sharpness: root.model.adjust-sharpness,
+            vignette: root.model.adjust-vignette,
+        };
+    }
+    function adjust-with-contrast(v: float) -> ClipAdjust {
+        return {
+            brightness: root.model.adjust-brightness,
+            contrast: v,
+            saturation: root.model.adjust-saturation,
+            exposure: root.model.adjust-exposure,
+            temperature: root.model.adjust-temperature,
+            tint: root.model.adjust-tint,
+            hue: root.model.adjust-hue,
+            highlights: root.model.adjust-highlights,
+            shadows: root.model.adjust-shadows,
+            sharpness: root.model.adjust-sharpness,
+            vignette: root.model.adjust-vignette,
+        };
+    }
+    function adjust-with-saturation(v: float) -> ClipAdjust {
+        return {
+            brightness: root.model.adjust-brightness,
+            contrast: root.model.adjust-contrast,
+            saturation: v,
+            exposure: root.model.adjust-exposure,
+            temperature: root.model.adjust-temperature,
+            tint: root.model.adjust-tint,
+            hue: root.model.adjust-hue,
+            highlights: root.model.adjust-highlights,
+            shadows: root.model.adjust-shadows,
+            sharpness: root.model.adjust-sharpness,
+            vignette: root.model.adjust-vignette,
+        };
+    }
+    function adjust-with-exposure(v: float) -> ClipAdjust {
+        return {
+            brightness: root.model.adjust-brightness,
+            contrast: root.model.adjust-contrast,
+            saturation: root.model.adjust-saturation,
+            exposure: v,
+            temperature: root.model.adjust-temperature,
+            tint: root.model.adjust-tint,
+            hue: root.model.adjust-hue,
+            highlights: root.model.adjust-highlights,
+            shadows: root.model.adjust-shadows,
+            sharpness: root.model.adjust-sharpness,
+            vignette: root.model.adjust-vignette,
+        };
+    }
+    function adjust-with-temperature(v: float) -> ClipAdjust {
+        return {
+            brightness: root.model.adjust-brightness,
+            contrast: root.model.adjust-contrast,
+            saturation: root.model.adjust-saturation,
+            exposure: root.model.adjust-exposure,
+            temperature: v,
+            tint: root.model.adjust-tint,
+            hue: root.model.adjust-hue,
+            highlights: root.model.adjust-highlights,
+            shadows: root.model.adjust-shadows,
+            sharpness: root.model.adjust-sharpness,
+            vignette: root.model.adjust-vignette,
+        };
+    }
+    function adjust-with-tint(v: float) -> ClipAdjust {
+        return {
+            brightness: root.model.adjust-brightness,
+            contrast: root.model.adjust-contrast,
+            saturation: root.model.adjust-saturation,
+            exposure: root.model.adjust-exposure,
+            temperature: root.model.adjust-temperature,
+            tint: v,
+            hue: root.model.adjust-hue,
+            highlights: root.model.adjust-highlights,
+            shadows: root.model.adjust-shadows,
+            sharpness: root.model.adjust-sharpness,
+            vignette: root.model.adjust-vignette,
+        };
+    }
+    function adjust-with-hue(v: float) -> ClipAdjust {
+        return {
+            brightness: root.model.adjust-brightness,
+            contrast: root.model.adjust-contrast,
+            saturation: root.model.adjust-saturation,
+            exposure: root.model.adjust-exposure,
+            temperature: root.model.adjust-temperature,
+            tint: root.model.adjust-tint,
+            hue: v,
+            highlights: root.model.adjust-highlights,
+            shadows: root.model.adjust-shadows,
+            sharpness: root.model.adjust-sharpness,
+            vignette: root.model.adjust-vignette,
+        };
+    }
+    function adjust-with-highlights(v: float) -> ClipAdjust {
+        return {
+            brightness: root.model.adjust-brightness,
+            contrast: root.model.adjust-contrast,
+            saturation: root.model.adjust-saturation,
+            exposure: root.model.adjust-exposure,
+            temperature: root.model.adjust-temperature,
+            tint: root.model.adjust-tint,
+            hue: root.model.adjust-hue,
+            highlights: v,
+            shadows: root.model.adjust-shadows,
+            sharpness: root.model.adjust-sharpness,
+            vignette: root.model.adjust-vignette,
+        };
+    }
+    function adjust-with-shadows(v: float) -> ClipAdjust {
+        return {
+            brightness: root.model.adjust-brightness,
+            contrast: root.model.adjust-contrast,
+            saturation: root.model.adjust-saturation,
+            exposure: root.model.adjust-exposure,
+            temperature: root.model.adjust-temperature,
+            tint: root.model.adjust-tint,
+            hue: root.model.adjust-hue,
+            highlights: root.model.adjust-highlights,
+            shadows: v,
+            sharpness: root.model.adjust-sharpness,
+            vignette: root.model.adjust-vignette,
+        };
+    }
+    function adjust-with-sharpness(v: float) -> ClipAdjust {
+        return {
+            brightness: root.model.adjust-brightness,
+            contrast: root.model.adjust-contrast,
+            saturation: root.model.adjust-saturation,
+            exposure: root.model.adjust-exposure,
+            temperature: root.model.adjust-temperature,
+            tint: root.model.adjust-tint,
+            hue: root.model.adjust-hue,
+            highlights: root.model.adjust-highlights,
+            shadows: root.model.adjust-shadows,
+            sharpness: v,
+            vignette: root.model.adjust-vignette,
+        };
+    }
+    function adjust-with-vignette(v: float) -> ClipAdjust {
+        return {
+            brightness: root.model.adjust-brightness,
+            contrast: root.model.adjust-contrast,
+            saturation: root.model.adjust-saturation,
+            exposure: root.model.adjust-exposure,
+            temperature: root.model.adjust-temperature,
+            tint: root.model.adjust-tint,
+            hue: root.model.adjust-hue,
+            highlights: root.model.adjust-highlights,
+            shadows: root.model.adjust-shadows,
+            sharpness: root.model.adjust-sharpness,
+            vignette: v,
+        };
     }
 
     SectionHeader {
@@ -409,11 +574,7 @@ export component LookInspector inherits VerticalLayout {
             root.preview-look(
                 root.model.filter-id,
                 clamp(v, 0, 100) / 100,
-                root.model.adjust-brightness,
-                root.model.adjust-contrast,
-                root.model.adjust-saturation,
-                root.model.adjust-exposure,
-                root.model.adjust-temperature);
+                root.model-adjust());
         }
         commit(v) => {
             InspectorBackend.set-clip-filter(
@@ -514,22 +675,11 @@ export component LookInspector inherits VerticalLayout {
         step: 1;
         reset-value: 0;
         preview(v) => {
-            root.preview-look(
-                root.model.filter-id,
-                root.model.filter-intensity,
-                clamp(v, -100, 100) / 100,
-                root.model.adjust-contrast,
-                root.model.adjust-saturation,
-                root.model.adjust-exposure,
-                root.model.adjust-temperature);
+            root.preview-look(root.model.filter-id, root.model.filter-intensity,
+                root.adjust-with-brightness(clamp(v, -100, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(
-                clamp(v, -100, 100) / 100,
-                root.model.adjust-contrast,
-                root.model.adjust-saturation,
-                root.model.adjust-exposure,
-                root.model.adjust-temperature);
+            root.commit-adjust(root.adjust-with-brightness(clamp(v, -100, 100) / 100));
         }
         kf-visible: true;
         kf: root.brightness-sample.row;
@@ -551,22 +701,11 @@ export component LookInspector inherits VerticalLayout {
         step: 1;
         reset-value: 0;
         preview(v) => {
-            root.preview-look(
-                root.model.filter-id,
-                root.model.filter-intensity,
-                root.model.adjust-brightness,
-                clamp(v, -100, 100) / 100,
-                root.model.adjust-saturation,
-                root.model.adjust-exposure,
-                root.model.adjust-temperature);
+            root.preview-look(root.model.filter-id, root.model.filter-intensity,
+                root.adjust-with-contrast(clamp(v, -100, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(
-                root.model.adjust-brightness,
-                clamp(v, -100, 100) / 100,
-                root.model.adjust-saturation,
-                root.model.adjust-exposure,
-                root.model.adjust-temperature);
+            root.commit-adjust(root.adjust-with-contrast(clamp(v, -100, 100) / 100));
         }
         kf-visible: true;
         kf: root.contrast-sample.row;
@@ -588,22 +727,11 @@ export component LookInspector inherits VerticalLayout {
         step: 1;
         reset-value: 0;
         preview(v) => {
-            root.preview-look(
-                root.model.filter-id,
-                root.model.filter-intensity,
-                root.model.adjust-brightness,
-                root.model.adjust-contrast,
-                clamp(v, -100, 100) / 100,
-                root.model.adjust-exposure,
-                root.model.adjust-temperature);
+            root.preview-look(root.model.filter-id, root.model.filter-intensity,
+                root.adjust-with-saturation(clamp(v, -100, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(
-                root.model.adjust-brightness,
-                root.model.adjust-contrast,
-                clamp(v, -100, 100) / 100,
-                root.model.adjust-exposure,
-                root.model.adjust-temperature);
+            root.commit-adjust(root.adjust-with-saturation(clamp(v, -100, 100) / 100));
         }
         kf-visible: true;
         kf: root.saturation-sample.row;
@@ -625,22 +753,11 @@ export component LookInspector inherits VerticalLayout {
         step: 1;
         reset-value: 0;
         preview(v) => {
-            root.preview-look(
-                root.model.filter-id,
-                root.model.filter-intensity,
-                root.model.adjust-brightness,
-                root.model.adjust-contrast,
-                root.model.adjust-saturation,
-                clamp(v, -100, 100) / 100,
-                root.model.adjust-temperature);
+            root.preview-look(root.model.filter-id, root.model.filter-intensity,
+                root.adjust-with-exposure(clamp(v, -100, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(
-                root.model.adjust-brightness,
-                root.model.adjust-contrast,
-                root.model.adjust-saturation,
-                clamp(v, -100, 100) / 100,
-                root.model.adjust-temperature);
+            root.commit-adjust(root.adjust-with-exposure(clamp(v, -100, 100) / 100));
         }
         kf-visible: true;
         kf: root.exposure-sample.row;
@@ -662,22 +779,11 @@ export component LookInspector inherits VerticalLayout {
         step: 1;
         reset-value: 0;
         preview(v) => {
-            root.preview-look(
-                root.model.filter-id,
-                root.model.filter-intensity,
-                root.model.adjust-brightness,
-                root.model.adjust-contrast,
-                root.model.adjust-saturation,
-                root.model.adjust-exposure,
-                clamp(v, -100, 100) / 100);
+            root.preview-look(root.model.filter-id, root.model.filter-intensity,
+                root.adjust-with-temperature(clamp(v, -100, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(
-                root.model.adjust-brightness,
-                root.model.adjust-contrast,
-                root.model.adjust-saturation,
-                root.model.adjust-exposure,
-                clamp(v, -100, 100) / 100);
+            root.commit-adjust(root.adjust-with-temperature(clamp(v, -100, 100) / 100));
         }
         kf-visible: true;
         kf: root.temperature-sample.row;
@@ -687,6 +793,162 @@ export component LookInspector inherits VerticalLayout {
         }
         kf-set-easing(e) => {
             root.ease-kf("look_adjust_temperature", e, root.temperature-sample.value);
+        }
+    }
+
+    SliderRow {
+        label: "Tint";
+        suffix: "%";
+        value: root.tint-sample.value * 100;
+        minimum: -100;
+        maximum: 100;
+        step: 1;
+        reset-value: 0;
+        preview(v) => {
+            root.preview-look(root.model.filter-id, root.model.filter-intensity,
+                root.adjust-with-tint(clamp(v, -100, 100) / 100));
+        }
+        commit(v) => {
+            root.commit-adjust(root.adjust-with-tint(clamp(v, -100, 100) / 100));
+        }
+        kf-visible: true;
+        kf: root.tint-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        kf-toggle => {
+            root.toggle-kf("look_adjust_tint", root.tint-sample.row.on-keyframe, root.tint-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_adjust_tint", e, root.tint-sample.value);
+        }
+    }
+
+    SliderRow {
+        label: "Hue";
+        suffix: "%";
+        value: root.hue-sample.value * 100;
+        minimum: -100;
+        maximum: 100;
+        step: 1;
+        reset-value: 0;
+        preview(v) => {
+            root.preview-look(root.model.filter-id, root.model.filter-intensity,
+                root.adjust-with-hue(clamp(v, -100, 100) / 100));
+        }
+        commit(v) => {
+            root.commit-adjust(root.adjust-with-hue(clamp(v, -100, 100) / 100));
+        }
+        kf-visible: true;
+        kf: root.hue-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        kf-toggle => {
+            root.toggle-kf("look_adjust_hue", root.hue-sample.row.on-keyframe, root.hue-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_adjust_hue", e, root.hue-sample.value);
+        }
+    }
+
+    SliderRow {
+        label: "Highlights";
+        suffix: "%";
+        value: root.highlights-sample.value * 100;
+        minimum: -100;
+        maximum: 100;
+        step: 1;
+        reset-value: 0;
+        preview(v) => {
+            root.preview-look(root.model.filter-id, root.model.filter-intensity,
+                root.adjust-with-highlights(clamp(v, -100, 100) / 100));
+        }
+        commit(v) => {
+            root.commit-adjust(root.adjust-with-highlights(clamp(v, -100, 100) / 100));
+        }
+        kf-visible: true;
+        kf: root.highlights-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        kf-toggle => {
+            root.toggle-kf("look_adjust_highlights", root.highlights-sample.row.on-keyframe, root.highlights-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_adjust_highlights", e, root.highlights-sample.value);
+        }
+    }
+
+    SliderRow {
+        label: "Shadows";
+        suffix: "%";
+        value: root.shadows-sample.value * 100;
+        minimum: -100;
+        maximum: 100;
+        step: 1;
+        reset-value: 0;
+        preview(v) => {
+            root.preview-look(root.model.filter-id, root.model.filter-intensity,
+                root.adjust-with-shadows(clamp(v, -100, 100) / 100));
+        }
+        commit(v) => {
+            root.commit-adjust(root.adjust-with-shadows(clamp(v, -100, 100) / 100));
+        }
+        kf-visible: true;
+        kf: root.shadows-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        kf-toggle => {
+            root.toggle-kf("look_adjust_shadows", root.shadows-sample.row.on-keyframe, root.shadows-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_adjust_shadows", e, root.shadows-sample.value);
+        }
+    }
+
+    SliderRow {
+        label: "Sharpness";
+        suffix: "%";
+        value: root.sharpness-sample.value * 100;
+        minimum: 0;
+        maximum: 100;
+        step: 1;
+        reset-value: 0;
+        preview(v) => {
+            root.preview-look(root.model.filter-id, root.model.filter-intensity,
+                root.adjust-with-sharpness(clamp(v, 0, 100) / 100));
+        }
+        commit(v) => {
+            root.commit-adjust(root.adjust-with-sharpness(clamp(v, 0, 100) / 100));
+        }
+        kf-visible: true;
+        kf: root.sharpness-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        kf-toggle => {
+            root.toggle-kf("look_adjust_sharpness", root.sharpness-sample.row.on-keyframe, root.sharpness-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_adjust_sharpness", e, root.sharpness-sample.value);
+        }
+    }
+
+    SliderRow {
+        label: "Vignette";
+        suffix: "%";
+        value: root.vignette-sample.value * 100;
+        minimum: 0;
+        maximum: 100;
+        step: 1;
+        reset-value: 0;
+        preview(v) => {
+            root.preview-look(root.model.filter-id, root.model.filter-intensity,
+                root.adjust-with-vignette(clamp(v, 0, 100) / 100));
+        }
+        commit(v) => {
+            root.commit-adjust(root.adjust-with-vignette(clamp(v, 0, 100) / 100));
+        }
+        kf-visible: true;
+        kf: root.vignette-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        kf-toggle => {
+            root.toggle-kf("look_adjust_vignette", root.vignette-sample.row.on-keyframe, root.vignette-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_adjust_vignette", e, root.vignette-sample.value);
         }
     }
 }

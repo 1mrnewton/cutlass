@@ -61,6 +61,22 @@ export struct TextClipStyle {
     shadow-distance: float,
 }
 
+/// Manual color-adjust panel values (normalized). Signed sliders use
+/// `-1..=1`; sharpness / vignette use `0..=1`.
+export struct ClipAdjust {
+    brightness: float,
+    contrast: float,
+    saturation: float,
+    exposure: float,
+    temperature: float,
+    tint: float,
+    hue: float,
+    highlights: float,
+    shadows: float,
+    sharpness: float,
+    vignette: float,
+}
+
 // One keyframe of an animatable clip property, projected for the inspector
 // and timeline keyframe UI (M2). `tick` is the ABSOLUTE sequence tick (clip
 // start + clip-relative offset) so playhead math needs no conversions.
@@ -353,6 +369,12 @@ export struct Clip {
     adjust-saturation: float,
     adjust-exposure: float,
     adjust-temperature: float,
+    adjust-tint: float,
+    adjust-hue: float,
+    adjust-highlights: float,
+    adjust-shadows: float,
+    adjust-sharpness: float,
+    adjust-vignette: float,
     // Optional `.cube` LUT, projected read-only. `lut-id` is the catalog id
     // (the file's stem); `lut-path` is the absolute `.cube` path used to
     // re-apply intensity for catalog and user-picked files. Edits go through
@@ -415,6 +437,12 @@ export struct Clip {
     kf-look-adjust-saturation: [ParamKeyframe],
     kf-look-adjust-exposure: [ParamKeyframe],
     kf-look-adjust-temperature: [ParamKeyframe],
+    kf-look-adjust-tint: [ParamKeyframe],
+    kf-look-adjust-hue: [ParamKeyframe],
+    kf-look-adjust-highlights: [ParamKeyframe],
+    kf-look-adjust-shadows: [ParamKeyframe],
+    kf-look-adjust-sharpness: [ParamKeyframe],
+    kf-look-adjust-vignette: [ParamKeyframe],
     // Layer-style scalar / vec2 curves (absolute ticks). Color style params
     // intentionally omit kf lists (AI-only for now).
     kf-style-shadow-offset: [ParamKeyframe],

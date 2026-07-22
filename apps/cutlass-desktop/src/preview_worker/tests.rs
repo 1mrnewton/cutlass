@@ -1119,6 +1119,25 @@ fn set_mask_kind_preserves_feather_and_geometry_round_trips() {
 }
 
 #[test]
+fn sanitize_adjustments_clamps_new_sliders() {
+    use super::overrides::sanitize_adjustments;
+    use cutlass_models::ColorAdjustments;
+
+    let raw = ColorAdjustments {
+        tint: 2.0.into(),
+        hue: (-3.0).into(),
+        sharpness: (-0.5).into(),
+        vignette: 1.5.into(),
+        ..Default::default()
+    };
+    let clean = sanitize_adjustments(&raw);
+    assert_eq!(clean.tint, 1.0.into());
+    assert_eq!(clean.hue, (-1.0).into());
+    assert_eq!(clean.sharpness, 0.0.into());
+    assert_eq!(clean.vignette, 1.0.into());
+}
+
+#[test]
 fn set_chroma_enable_color_and_disable() {
     use crate::projection::project_to_slint;
     use cutlass_models::{ChromaKey, Param};

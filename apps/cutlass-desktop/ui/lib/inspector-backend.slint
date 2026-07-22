@@ -1,4 +1,4 @@
-import { CatalogEntry, Clip, Sequence, TrackKind, TextClipStyle } from "../models/index.slint";
+import { CatalogEntry, Clip, ClipAdjust, Sequence, TrackKind, TextClipStyle } from "../models/index.slint";
 
 export struct SelectedClipInfo {
     found: bool,
@@ -334,16 +334,9 @@ export global InspectorBackend {
         stagger: float,
     );
 
-    // Set all five manual color adjustment sliders in one undoable edit.
-    // Values are normalized -1..=1.
-    callback set-clip-adjust(
-        clip-id: string,
-        brightness: float,
-        contrast: float,
-        saturation: float,
-        exposure: float,
-        temperature: float,
-    );
+    // Set all manual color adjustment sliders in one undoable edit.
+    // Signed values are normalized -1..=1; sharpness/vignette are 0..=1.
+    callback set-clip-adjust(clip-id: string, adjust: ClipAdjust);
 
     // Atomic live preview of the whole look: filter plus all adjustments.
     // The worker coalesces bursts and clears this session-only override on
@@ -352,11 +345,7 @@ export global InspectorBackend {
         clip-id: string,
         filter-id: string,
         intensity: float,
-        brightness: float,
-        contrast: float,
-        saturation: float,
-        exposure: float,
-        temperature: float,
+        adjust: ClipAdjust,
         tick: int,
     );
 

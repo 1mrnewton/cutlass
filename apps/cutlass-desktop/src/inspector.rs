@@ -8,14 +8,31 @@ use crate::params::{
 use crate::placement::position_preserving_center;
 use crate::preview_select::{canvas_config, clip_placement};
 use crate::{
-    AudioSample, Clip, CompensatedPosition, ScalarParamSample, SelectedClipInfo, Sequence,
-    TextClipStyle, TrackKind, TransformSample,
+    AudioSample, Clip, ClipAdjust, CompensatedPosition, ScalarParamSample, SelectedClipInfo,
+    Sequence, TextClipStyle, TrackKind, TransformSample,
 };
 use cutlass_models::{
     TextAlignH, TextAlignV, TextBackground, TextCase, TextShadow, TextStroke,
     TextStyle as ModelTextStyle,
 };
 use slint::Model;
+
+/// Convert the inspector's Slint [`ClipAdjust`] into the engine model.
+pub fn adjust_from_ui(adjust: &ClipAdjust) -> cutlass_models::ColorAdjustments {
+    cutlass_models::ColorAdjustments {
+        brightness: adjust.brightness.into(),
+        contrast: adjust.contrast.into(),
+        saturation: adjust.saturation.into(),
+        exposure: adjust.exposure.into(),
+        temperature: adjust.temperature.into(),
+        tint: adjust.tint.into(),
+        hue: adjust.hue.into(),
+        highlights: adjust.highlights.into(),
+        shadows: adjust.shadows.into(),
+        sharpness: adjust.sharpness.into(),
+        vignette: adjust.vignette.into(),
+    }
+}
 
 /// Convert the inspector's Slint `TextClipStyle` into the engine model.
 ///
@@ -166,6 +183,12 @@ pub fn sample_scalar_param(clip: &Clip, param: &str, playhead: i32) -> ScalarPar
         "look_adjust_saturation" => &clip.kf_look_adjust_saturation,
         "look_adjust_exposure" => &clip.kf_look_adjust_exposure,
         "look_adjust_temperature" => &clip.kf_look_adjust_temperature,
+        "look_adjust_tint" => &clip.kf_look_adjust_tint,
+        "look_adjust_hue" => &clip.kf_look_adjust_hue,
+        "look_adjust_highlights" => &clip.kf_look_adjust_highlights,
+        "look_adjust_shadows" => &clip.kf_look_adjust_shadows,
+        "look_adjust_sharpness" => &clip.kf_look_adjust_sharpness,
+        "look_adjust_vignette" => &clip.kf_look_adjust_vignette,
         "style_shadow_blur" => &clip.kf_style_shadow_blur,
         "style_glow_radius" => &clip.kf_style_glow_radius,
         "style_glow_intensity" => &clip.kf_style_glow_intensity,

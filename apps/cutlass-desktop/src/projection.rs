@@ -363,6 +363,12 @@ fn clip_to_slint(
         adjust_saturation: clip.adjust.saturation.sample(0),
         adjust_exposure: clip.adjust.exposure.sample(0),
         adjust_temperature: clip.adjust.temperature.sample(0),
+        adjust_tint: clip.adjust.tint.sample(0),
+        adjust_hue: clip.adjust.hue.sample(0),
+        adjust_highlights: clip.adjust.highlights.sample(0),
+        adjust_shadows: clip.adjust.shadows.sample(0),
+        adjust_sharpness: clip.adjust.sharpness.sample(0),
+        adjust_vignette: clip.adjust.vignette.sample(0),
         lut_id: lut_id.into(),
         lut_label: lut_label.into(),
         lut_path: lut_path.into(),
@@ -424,6 +430,18 @@ fn clip_to_slint(
             (*v, 0.0)
         }),
         kf_look_adjust_temperature: keyframes_to_slint(&clip.adjust.temperature, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        kf_look_adjust_tint: keyframes_to_slint(&clip.adjust.tint, clip_start, |v| (*v, 0.0)),
+        kf_look_adjust_hue: keyframes_to_slint(&clip.adjust.hue, clip_start, |v| (*v, 0.0)),
+        kf_look_adjust_highlights: keyframes_to_slint(&clip.adjust.highlights, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        kf_look_adjust_shadows: keyframes_to_slint(&clip.adjust.shadows, clip_start, |v| (*v, 0.0)),
+        kf_look_adjust_sharpness: keyframes_to_slint(&clip.adjust.sharpness, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        kf_look_adjust_vignette: keyframes_to_slint(&clip.adjust.vignette, clip_start, |v| {
             (*v, 0.0)
         }),
         // Layer-style scalar / vec2 curves. Color style params intentionally

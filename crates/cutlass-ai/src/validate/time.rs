@@ -121,6 +121,7 @@ pub(super) fn param_value(
         | WireClipParam::Rotation
         | WireClipParam::Opacity
         | WireClipParam::Volume
+        | WireClipParam::Pan
         | WireClipParam::Speed
         | WireClipParam::Shape {
             param:

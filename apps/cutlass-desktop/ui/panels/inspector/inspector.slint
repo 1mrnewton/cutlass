@@ -446,7 +446,7 @@ component AudioMixInspector inherits VerticalLayout {
 
     // Diamond toggle: on a keyframe ⇒ remove it; else ⇒ write one at the
     // playhead holding the value shown, so toggling never jumps the gain.
-    function toggle-kf(on-keyframe: bool, gain: float) {
+    function toggle-volume-kf(on-keyframe: bool, gain: float) {
         if (on-keyframe) {
             InspectorBackend.remove-param-keyframe(root.model.id, "volume", TimelineStore.playhead-tick);
         } else {
@@ -456,9 +456,23 @@ component AudioMixInspector inherits VerticalLayout {
     }
 
     // Re-ease the keyframe under the playhead (same tick + gain, new curve).
-    function ease-kf(easing: int, gain: float) {
+    function ease-volume-kf(easing: int, gain: float) {
         InspectorBackend.set-param-keyframe(
             root.model.id, "volume", TimelineStore.playhead-tick, gain, 0, easing);
+    }
+
+    function toggle-pan-kf(on-keyframe: bool, pan: float) {
+        if (on-keyframe) {
+            InspectorBackend.remove-param-keyframe(root.model.id, "pan", TimelineStore.playhead-tick);
+        } else {
+            InspectorBackend.set-param-keyframe(
+                root.model.id, "pan", TimelineStore.playhead-tick, pan, 0, 0);
+        }
+    }
+
+    function ease-pan-kf(easing: int, pan: float) {
+        InspectorBackend.set-param-keyframe(
+            root.model.id, "pan", TimelineStore.playhead-tick, pan, 0, easing);
     }
 
     SectionHeader {
@@ -481,6 +495,7 @@ component AudioMixInspector inherits VerticalLayout {
         // on a flat clip it sets the constant level (CapCut's basic slider).
         // Animated + playhead outside the clip: leave the envelope alone
         // rather than flattening it.
+        // No live `preview` — volume commits on release only (same as pan).
         commit(v) => {
             if (root.sample.volume-row.animated) {
                 if (root.playhead-inside) {
@@ -492,10 +507,44 @@ component AudioMixInspector inherits VerticalLayout {
             }
         }
         kf-toggle => {
-            root.toggle-kf(root.sample.volume-row.on-keyframe, root.sample.volume);
+            root.toggle-volume-kf(root.sample.volume-row.on-keyframe, root.sample.volume);
         }
         kf-set-easing(e) => {
-            root.ease-kf(e, root.sample.volume);
+            root.ease-volume-kf(e, root.sample.volume);
+        }
+    }
+
+    SliderRow {
+        label: "L/R";
+        suffix: "";
+        // −1 full left … +1 full right; center detent at 0.
+        value: root.sample.pan;
+        minimum: -1;
+        maximum: 1;
+        step: 0.01;
+        decimals: 2;
+        reset-value: 0;
+        kf-visible: true;
+        kf: root.sample.pan-row;
+        kf-can-toggle: root.playhead-inside;
+        // Flat: set-param-constant (no dedicated set_clip_pan — volume alone
+        // has set-clip-audio because fades ride with it). Animated: keyframe
+        // at the playhead. No live preview (mirrors volume).
+        commit(v) => {
+            if (root.sample.pan-row.animated) {
+                if (root.playhead-inside) {
+                    InspectorBackend.set-param-keyframe(
+                        root.model.id, "pan", TimelineStore.playhead-tick, v, 0, 0);
+                }
+            } else {
+                InspectorBackend.set-param-constant(root.model.id, "pan", v, 0);
+            }
+        }
+        kf-toggle => {
+            root.toggle-pan-kf(root.sample.pan-row.on-keyframe, root.sample.pan);
+        }
+        kf-set-easing(e) => {
+            root.ease-pan-kf(e, root.sample.pan);
         }
     }
 

@@ -757,6 +757,77 @@ fn clip_crop_merges_edges_and_rejects_empty_frames() {
 }
 
 #[test]
+fn pan_keyframe_lowers_and_rejects_out_of_range() {
+    let (project, _, _, _, clip, title) = fixture();
+
+    let edit = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Pan,
+            at: 1.0,
+            value: Some(-0.5),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: Some(wire::WireEasing::Linear),
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Pan,
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Scalar(-0.5),
+            easing: Easing::Linear,
+        }
+    );
+
+    let edit = lower(
+        &project,
+        WireCommand::SetParamConstant(wire::SetParamConstant {
+            clip,
+            param: wire::WireClipParam::Pan,
+            value: Some(0.25),
+            position: None,
+            rgba: None,
+            rect: None,
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetParamConstant {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Pan,
+            value: ParamValue::Scalar(0.25),
+        }
+    );
+
+    // Range + media-backed gating are enforced by the model when the edit
+    // lands (same as volume keyframes — wire lower accepts the scalar shape).
+    let mut project = project;
+    assert!(
+        project
+            .set_param_constant(
+                ClipId::from_raw(clip),
+                ClipParam::Pan,
+                ParamValue::Scalar(-1.01),
+            )
+            .is_err()
+    );
+    assert!(
+        project
+            .set_param_constant(
+                ClipId::from_raw(title),
+                ClipParam::Pan,
+                ParamValue::Scalar(0.5),
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn crop_keyframe_uses_rect_on_wire() {
     let (project, _, _, _, clip, _) = fixture();
 

@@ -243,6 +243,10 @@ export struct Clip {
     // the clip edges. Meaningful on audio-lane clips; defaults elsewhere.
     // Edits go through `InspectorBackend.set-clip-audio` on the worker.
     volume: float,
+    // Stereo pan (−1 full left … +1 full right). Clip-start sample; the
+    // inspector samples `kf-pan` at the playhead. Edits ride
+    // `set-param-constant` / `set-param-keyframe` with param "pan".
+    pan: float,
     fade-in-s: float,
     fade-out-s: float,
     // Noise reduction (CapCut "Reduce noise", M8 Phase 5): true ⇒ the mixers
@@ -489,6 +493,11 @@ export struct Clip {
     // True ⇔ the clip's gain is a non-constant envelope — drives the
     // inspector's diamond state and the on-clip automation line + badge.
     has-volume-envelope: bool,
+    // Pan automation: absolute-tick keyframes (transform / volume pattern).
+    // Empty ⇔ a constant pan (read it from `pan`). Edits ride param "pan".
+    kf-pan: [ParamKeyframe],
+    // True ⇔ the clip's pan is a non-constant envelope.
+    has-pan-envelope: bool,
     // The volume envelope as an SVG path-commands string in a normalized
     // 1000×1000 viewbox (x = clip start→end, y = gain 0..200% top-down,
     // densely sampled so easing curvature shows). "" ⇔ a flat clip, so no

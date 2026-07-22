@@ -49,12 +49,14 @@ export struct CompensatedPosition {
     position-y: float,
 }
 
-// The clip's audio gain sampled at the playhead, plus the volume envelope's
+// The clip's audio gain + pan sampled at the playhead, plus each envelope's
 // keyframe row state — the audio analogue of `TransformSample`, feeding the
-// inspector's volume diamond (M8 volume envelopes).
+// inspector's volume/pan diamonds.
 export struct AudioSample {
     volume: float,
     volume-row: ParamRowState,
+    pan: float,
+    pan-row: ParamRowState,
 }
 
 // Selection lookup and clip-property writes for the inspector panel.
@@ -108,11 +110,11 @@ export global InspectorBackend {
         rotation: float,
     ) -> CompensatedPosition;
 
-    // Sample the clip's volume envelope at the playhead and report its
-    // keyframe row state, mirroring `sample-transform` for the audio sheet
-    // (M8 volume envelopes). Implemented in Rust over the projected
-    // `kf-volume` curve with the engine's `Param` math, so the readout always
-    // matches the mixed gain.
+    // Sample the clip's volume + pan envelopes at the playhead and report
+    // their keyframe row state, mirroring `sample-transform` for the audio
+    // sheet. Implemented in Rust over the projected `kf-volume` / `kf-pan`
+    // curves with the engine's `Param` math, so the readout always matches
+    // the mixed gain and balance.
     pure callback sample-audio(clip: Clip, playhead-tick: int) -> AudioSample;
 
     // Sample a scalar text-style or look parameter by its inspector command
@@ -124,7 +126,7 @@ export global InspectorBackend {
     ) -> ScalarParamSample;
 
     // Insert or replace a keyframe on `param` ("position" | "anchor" | "scale" |
-    // "rotation" | "opacity" | "volume") at the absolute sequence tick.
+    // "rotation" | "opacity" | "volume" | "pan") at the absolute sequence tick.
     // Scalars ride `value-x`; position uses both axes. `easing`: 0 linear,
     // 1 ease-in, 2 ease-out, 3 ease-in-out. One undoable engine edit.
     callback set-param-keyframe(

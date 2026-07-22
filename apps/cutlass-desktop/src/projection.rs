@@ -287,6 +287,7 @@ fn clip_to_slint(
         // envelope start for an animated one (the inspector samples the
         // published curve UI-side for playhead accuracy).
         volume: clip.volume.sample(0),
+        pan: clip.pan.sample(0),
         fade_in_s: time_to_seconds(EngineTime::new(clip.fade_in, clip.timeline.start.rate)) as f32,
         fade_out_s: time_to_seconds(EngineTime::new(clip.fade_out, clip.timeline.start.rate))
             as f32,
@@ -473,6 +474,8 @@ fn clip_to_slint(
         kf_volume: keyframes_to_slint(&clip.volume, clip_start, |v| (*v, 0.0)),
         has_volume_envelope: clip.has_volume_envelope(),
         volume_path: volume_path(clip).into(),
+        kf_pan: keyframes_to_slint(&clip.pan, clip_start, |v| (*v, 0.0)),
+        has_pan_envelope: clip.has_pan_envelope(),
         effects: project_effects(clip),
         // Beat markers (M8 Phase 6) as absolute sequence ticks, already
         // filtered to the clip's current window by the model helper.

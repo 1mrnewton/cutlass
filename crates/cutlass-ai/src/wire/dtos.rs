@@ -310,6 +310,10 @@ pub enum WireClipParam {
     /// Keyframing it draws volume automation; this is how you fade audio in
     /// or out over time or duck music under a voice. Media-backed clips only.
     Volume,
+    /// Stereo pan envelope (−1.0 = full left, 0.0 = center, +1.0 = full
+    /// right). Keyframing it draws balance automation. Media-backed clips
+    /// only (including video clips with sound — same target rule as volume).
+    Pan,
     /// Playback-rate ramp (scalar: 1.0 = normal speed). Media-backed clips
     /// only; keyframes use normalized positions within the clip.
     Speed,

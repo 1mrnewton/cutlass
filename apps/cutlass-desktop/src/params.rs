@@ -126,6 +126,13 @@ pub(crate) fn sampled_volume(clip: &Clip, playhead: i32) -> f32 {
     scalar_param(&clip.kf_volume, clip.volume).sample(tick)
 }
 
+/// The clip's stereo pan sampled at the (clamped) playhead — same `Param`
+/// math as [`sampled_volume`]. An empty `kf-pan` ⇔ the constant in `pan`.
+pub(crate) fn sampled_pan(clip: &Clip, playhead: i32) -> f32 {
+    let tick = clamped_tick(clip, playhead);
+    scalar_param(&clip.kf_pan, clip.pan).sample(tick)
+}
+
 /// Sample one scalar text-style or color-look property at the playhead. The
 /// string keys deliberately match the inspector command keys, keeping each
 /// property's display value and diamond state on the same projected curve.
@@ -357,6 +364,19 @@ mod tests {
         assert_eq!(t.position, [0.25, 0.0]);
         assert_eq!(t.rotation, 45.0);
         assert_eq!(t.scale, 1.0);
+    }
+
+    #[test]
+    fn sampled_pan_tracks_constant_and_keyframed_curve() {
+        // Mirrors volume: constant field when kf-pan is empty; playhead
+        // sample on an envelope. Last keyframe sits inside [start, end).
+        let mut c = clip(0, 100);
+        c.pan = -0.25;
+        assert_eq!(sampled_pan(&c, 50), -0.25);
+        c.kf_pan = kfs(vec![kf(0, -1.0), kf(80, 1.0)]);
+        assert!((sampled_pan(&c, 40) - 0.0).abs() < 1e-6);
+        assert_eq!(sampled_pan(&c, 0), -1.0);
+        assert_eq!(sampled_pan(&c, 80), 1.0);
     }
 
     #[test]

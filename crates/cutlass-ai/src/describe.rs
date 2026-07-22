@@ -119,6 +119,9 @@ pub struct ClipSummary {
     /// Audio gain multiplier (set_clip_audio); absent when 1.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<f64>,
+    /// Stereo pan (−1 left … +1 right); absent when centered (0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pan: Option<f64>,
     /// Fade-in seconds (set_clip_audio); absent when 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade_in: Option<f64>,
@@ -374,6 +377,7 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                     speed_ramp: clip.has_speed_curve().then_some(true),
                     pitch_follows_speed: (!clip.preserve_pitch).then_some(true),
                     volume: clip.volume.constant().filter(|v| *v != 1.0).map(f64::from),
+                    pan: clip.pan.constant().filter(|v| *v != 0.0).map(f64::from),
                     fade_in: (clip.fade_in > 0).then(|| seconds(clip.fade_in, rate)),
                     fade_out: (clip.fade_out > 0).then(|| seconds(clip.fade_out, rate)),
                     crop: {

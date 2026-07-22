@@ -787,7 +787,7 @@
       }
     },
     {
-      "description": "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), crop, volume, speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, color-look `{look:{param}}`, and style `{style:{param}}` properties. Use `value` for scalars, `position` for position/anchor_point and vec2 params, `rgba` for colors, and `rect` as [x,y,w,h] for crop. Effect names and valid properties are visible in describe_project.",
+      "description": "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), crop, volume, pan (−1 left … +1 right), speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, color-look `{look:{param}}`, and style `{style:{param}}` properties. Use `value` for scalars, `position` for position/anchor_point and vec2 params, `rgba` for colors, and `rect` as [x,y,w,h] for crop. Effect names and valid properties are visible in describe_project.",
       "name": "set_param_keyframe",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -892,6 +892,11 @@
               {
                 "const": "volume",
                 "description": "Audio gain envelope (0.0 = mute, 1.0 = unchanged, up to 10.0 boost).\nKeyframing it draws volume automation; this is how you fade audio in\nor out over time or duck music under a voice. Media-backed clips only.",
+                "type": "string"
+              },
+              {
+                "const": "pan",
+                "description": "Stereo pan envelope (−1.0 = full left, 0.0 = center, +1.0 = full\nright). Keyframing it draws balance automation. Media-backed clips\nonly (including video clips with sound — same target rule as volume).",
                 "type": "string"
               },
               {
@@ -1186,6 +1191,11 @@
                 "type": "string"
               },
               {
+                "const": "pan",
+                "description": "Stereo pan envelope (−1.0 = full left, 0.0 = center, +1.0 = full\nright). Keyframing it draws balance automation. Media-backed clips\nonly (including video clips with sound — same target rule as volume).",
+                "type": "string"
+              },
+              {
                 "const": "speed",
                 "description": "Playback-rate ramp (scalar: 1.0 = normal speed). Media-backed clips\nonly; keyframes use normalized positions within the clip.",
                 "type": "string"
@@ -1420,6 +1430,11 @@
               {
                 "const": "volume",
                 "description": "Audio gain envelope (0.0 = mute, 1.0 = unchanged, up to 10.0 boost).\nKeyframing it draws volume automation; this is how you fade audio in\nor out over time or duck music under a voice. Media-backed clips only.",
+                "type": "string"
+              },
+              {
+                "const": "pan",
+                "description": "Stereo pan envelope (−1.0 = full left, 0.0 = center, +1.0 = full\nright). Keyframing it draws balance automation. Media-backed clips\nonly (including video clips with sound — same target rule as volume).",
                 "type": "string"
               },
               {
@@ -3020,5 +3035,5 @@
       }
     }
   ],
-  "version": 33
+  "version": 34
 }

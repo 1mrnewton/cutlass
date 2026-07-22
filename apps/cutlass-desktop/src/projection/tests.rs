@@ -606,6 +606,47 @@ fn speed_label_marks_ramps_with_a_tilde() {
 }
 
 #[test]
+fn pan_projects_constant_and_keyframe_list() {
+    use cutlass_models::{Easing, Keyframe, MediaId, Param, TimeRange};
+    use slint::Model;
+
+    let project = EngineProject::new("pan", EngineRational::FPS_24);
+    let mut clip = cutlass_models::Clip::from_media(
+        MediaId::from_raw(1),
+        TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+        TimeRange::at_rate(10, 48, EngineRational::FPS_24),
+    );
+    // Center default: absent envelope, constant 0.
+    let flat = clip_to_slint(&project, &clip, EngineKind::Audio, &HashMap::new());
+    assert_eq!(flat.pan, 0.0);
+    assert!(!flat.has_pan_envelope);
+    assert_eq!(flat.kf_pan.row_count(), 0);
+
+    clip.pan = Param::Keyframed {
+        keyframes: vec![
+            Keyframe {
+                tick: 0,
+                value: -1.0,
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                tick: 48,
+                value: 1.0,
+                easing: Easing::Linear,
+            },
+        ],
+    };
+    let animated = clip_to_slint(&project, &clip, EngineKind::Audio, &HashMap::new());
+    assert!(animated.has_pan_envelope);
+    assert_eq!(animated.kf_pan.row_count(), 2);
+    // Absolute ticks = clip start + relative.
+    assert_eq!(animated.kf_pan.row_data(0).unwrap().tick, 10);
+    assert_eq!(animated.kf_pan.row_data(0).unwrap().value_x, -1.0);
+    assert_eq!(animated.kf_pan.row_data(1).unwrap().tick, 58);
+    assert_eq!(animated.kf_pan.row_data(1).unwrap().value_x, 1.0);
+}
+
+#[test]
 fn speed_curve_projects_dense_samples_and_handles() {
     use cutlass_models::{MediaId, MediaSource, TimeRange, speed_preset};
     use slint::Model;

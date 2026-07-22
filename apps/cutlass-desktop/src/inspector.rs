@@ -2,7 +2,7 @@
 //! sample its animated transform at the playhead for the keyframe UI.
 
 use crate::params::{
-    apply_sampled_transform, row_state, sampled_scalar_param, sampled_transform,
+    apply_sampled_transform, row_state, sampled_pan, sampled_scalar_param, sampled_transform,
     sampled_vec2_param, sampled_volume,
 };
 use crate::placement::position_preserving_center;
@@ -243,13 +243,15 @@ pub fn compensate_anchor_position(
     }
 }
 
-/// The inspector's per-playhead view of a clip's audio gain: the envelope
-/// sampled at the (clamped) playhead plus the keyframe row state driving the
-/// volume row's diamond. The audio analogue of [`sample_transform`].
+/// The inspector's per-playhead view of a clip's audio mix: volume + pan
+/// envelopes sampled at the (clamped) playhead plus each keyframe row state
+/// driving the diamonds. The audio analogue of [`sample_transform`].
 pub fn sample_audio(clip: &Clip, playhead: i32) -> AudioSample {
     AudioSample {
         volume: sampled_volume(clip, playhead),
         volume_row: row_state(&clip.kf_volume, playhead),
+        pan: sampled_pan(clip, playhead),
+        pan_row: row_state(&clip.kf_pan, playhead),
     }
 }
 

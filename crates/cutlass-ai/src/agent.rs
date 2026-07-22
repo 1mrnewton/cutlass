@@ -949,6 +949,7 @@ fn param_name(param: &wire::WireClipParam) -> String {
         wire::WireClipParam::Opacity => "opacity".into(),
         wire::WireClipParam::Crop => "crop".into(),
         wire::WireClipParam::Volume => "volume".into(),
+        wire::WireClipParam::Pan => "pan".into(),
         wire::WireClipParam::Speed => "speed".into(),
         wire::WireClipParam::Effect { index, param } => format!("effect {index} {param}"),
         wire::WireClipParam::Shape { param } => format!("shape {param:?}").to_lowercase(),
@@ -980,6 +981,9 @@ fn param_value_phrase(
                 .map(|v| format!("{:.0}%", v * 100.0))
                 .unwrap_or_else(|| "?".into())
         }
+        wire::WireClipParam::Pan => value
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "?".into()),
         wire::WireClipParam::Rotation => value
             .map(|v| format!("{v:.0}°"))
             .unwrap_or_else(|| "?".into()),

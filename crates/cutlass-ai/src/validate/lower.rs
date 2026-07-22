@@ -18,6 +18,7 @@ pub(super) fn clip_param(
         WireClipParam::Opacity => ClipParam::Opacity,
         WireClipParam::Crop => ClipParam::Crop,
         WireClipParam::Volume => ClipParam::Volume,
+        WireClipParam::Pan => ClipParam::Pan,
         WireClipParam::Speed => ClipParam::Speed,
         WireClipParam::Effect { index, param } => {
             let (effect, slot, _) = effect_param_slot(clip, *index, param, wire_clip)?;

@@ -1,5 +1,91 @@
 use super::*;
 
+/// Lower the agent-facing property selector to the model selector. Effect
+/// parameters retain the wire's stable catalog names and resolve to their
+/// instance slot here.
+pub(super) fn clip_param(
+    param: &WireClipParam,
+    clip: &Clip,
+    wire_clip: u64,
+) -> Result<ClipParam, Rejection> {
+    use crate::wire::{WireLookParam, WireShapeParam, WireTextParam};
+
+    Ok(match param {
+        WireClipParam::Position => ClipParam::Position,
+        WireClipParam::AnchorPoint => ClipParam::AnchorPoint,
+        WireClipParam::Scale => ClipParam::Scale,
+        WireClipParam::Rotation => ClipParam::Rotation,
+        WireClipParam::Opacity => ClipParam::Opacity,
+        WireClipParam::Volume => ClipParam::Volume,
+        WireClipParam::Speed => ClipParam::Speed,
+        WireClipParam::Effect { index, param } => {
+            let effect = effect_index(clip, *index, wire_clip)?;
+            let instance = &clip.effects[effect];
+            let spec = cutlass_models::effect_spec(&instance.effect_id).ok_or_else(|| {
+                Rejection::new(format!(
+                    "effect '{}' on clip {wire_clip} is not in the catalog",
+                    instance.effect_id
+                ))
+            })?;
+            let slot = spec
+                .params
+                .iter()
+                .position(|p| p.name == param)
+                .ok_or_else(|| {
+                    let names: Vec<&str> = spec.params.iter().map(|p| p.name).collect();
+                    Rejection::new(format!(
+                        "effect '{}' has no parameter '{}'; parameters: {}",
+                        instance.effect_id,
+                        param,
+                        names.join(", ")
+                    ))
+                })?;
+            ClipParam::Effect {
+                effect: effect as u32,
+                param: slot as u32,
+            }
+        }
+        WireClipParam::Shape { param } => ClipParam::Shape {
+            param: match param {
+                WireShapeParam::Width => cutlass_models::ShapeParam::Width,
+                WireShapeParam::Height => cutlass_models::ShapeParam::Height,
+                WireShapeParam::CornerRadius => cutlass_models::ShapeParam::CornerRadius,
+                WireShapeParam::InnerRatio => cutlass_models::ShapeParam::InnerRatio,
+                WireShapeParam::Fill => cutlass_models::ShapeParam::Fill,
+                WireShapeParam::StrokeColor => cutlass_models::ShapeParam::StrokeColor,
+                WireShapeParam::StrokeWidth => cutlass_models::ShapeParam::StrokeWidth,
+            },
+        },
+        WireClipParam::Text { param } => ClipParam::Text {
+            param: match param {
+                WireTextParam::Size => cutlass_models::TextParam::Size,
+                WireTextParam::Fill => cutlass_models::TextParam::Fill,
+                WireTextParam::LetterSpacing => cutlass_models::TextParam::LetterSpacing,
+                WireTextParam::LineSpacing => cutlass_models::TextParam::LineSpacing,
+                WireTextParam::StrokeWidth => cutlass_models::TextParam::StrokeWidth,
+                WireTextParam::StrokeColor => cutlass_models::TextParam::StrokeColor,
+                WireTextParam::ShadowBlur => cutlass_models::TextParam::ShadowBlur,
+                WireTextParam::ShadowDistance => cutlass_models::TextParam::ShadowDistance,
+                WireTextParam::ShadowColor => cutlass_models::TextParam::ShadowColor,
+            },
+        },
+        WireClipParam::Look { param } => ClipParam::Look {
+            param: match param {
+                WireLookParam::FilterIntensity => cutlass_models::LookParam::FilterIntensity,
+                WireLookParam::LutIntensity => cutlass_models::LookParam::LutIntensity,
+                WireLookParam::AdjustBrightness => cutlass_models::LookParam::AdjustBrightness,
+                WireLookParam::AdjustContrast => cutlass_models::LookParam::AdjustContrast,
+                WireLookParam::AdjustSaturation => cutlass_models::LookParam::AdjustSaturation,
+                WireLookParam::AdjustExposure => cutlass_models::LookParam::AdjustExposure,
+                WireLookParam::AdjustTemperature => cutlass_models::LookParam::AdjustTemperature,
+                WireLookParam::MaskFeather => cutlass_models::LookParam::MaskFeather,
+                WireLookParam::ChromaStrength => cutlass_models::LookParam::ChromaStrength,
+                WireLookParam::ChromaShadow => cutlass_models::LookParam::ChromaShadow,
+            },
+        },
+    })
+}
+
 pub(super) fn unit_slider(value: f64, name: &str) -> Result<f32, Rejection> {
     if !value.is_finite() || !(-1.0..=1.0).contains(&value) {
         return Err(Rejection::new(format!(

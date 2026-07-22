@@ -323,12 +323,15 @@ pub struct SetTransition {
 }
 
 /// An animatable clip property the keyframe commands can address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WireClipParam {
     /// Canvas placement of the content center (vec2: use the `position`
     /// argument, not `value`).
     Position,
+    /// Canvas point around which the clip scales and rotates (vec2: use the
+    /// `position` argument, not `value`).
+    AnchorPoint,
     /// Uniform scale (1.0 = fit inside the canvas).
     Scale,
     /// Clockwise rotation in degrees.
@@ -339,6 +342,63 @@ pub enum WireClipParam {
     /// Keyframing it draws volume automation; this is how you fade audio in
     /// or out over time or duck music under a voice. Media-backed clips only.
     Volume,
+    /// Playback-rate ramp (scalar: 1.0 = normal speed). Media-backed clips
+    /// only; keyframes use normalized positions within the clip.
+    Speed,
+    /// A scalar parameter of an effect already on the clip. `index` is the
+    /// effect-chain position and `param` is its catalog name, as in
+    /// `set_effect_param`.
+    Effect { index: u32, param: String },
+    /// A visual property of a generated shape clip.
+    Shape { param: WireShapeParam },
+    /// A visual style property of a generated text clip.
+    Text { param: WireTextParam },
+    /// A scalar property of the clip's color look.
+    Look { param: WireLookParam },
+}
+
+/// Animatable properties of a generated shape clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WireShapeParam {
+    Width,
+    Height,
+    CornerRadius,
+    InnerRatio,
+    Fill,
+    StrokeColor,
+    StrokeWidth,
+}
+
+/// Animatable visual-style properties of a generated text clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WireTextParam {
+    Size,
+    Fill,
+    LetterSpacing,
+    LineSpacing,
+    StrokeWidth,
+    StrokeColor,
+    ShadowBlur,
+    ShadowDistance,
+    ShadowColor,
+}
+
+/// Animatable scalar properties of a clip's color look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WireLookParam {
+    FilterIntensity,
+    LutIntensity,
+    AdjustBrightness,
+    AdjustContrast,
+    AdjustSaturation,
+    AdjustExposure,
+    AdjustTemperature,
+    MaskFeather,
+    ChromaStrength,
+    ChromaShadow,
 }
 
 /// Interpolation toward the next keyframe. (Custom bezier curves exist in
@@ -362,14 +422,18 @@ pub struct SetParamKeyframe {
     /// Timeline position of the keyframe, in seconds. Must fall inside the
     /// clip.
     pub at: f64,
-    /// New value for `scale` / `rotation` / `opacity`. Ignored for
-    /// `position`.
+    /// New value for scalar parameters. Ignored for position and color
+    /// parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// New `[x, y]` for `position` (fractions of canvas size from center,
-    /// +x right, +y down). Ignored for scalar params.
+    /// New `[x, y]` for `position` or `anchor_point` (fractions of canvas size
+    /// from center, +x right, +y down). Ignored for scalar and color params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f64; 2]>,
+    /// New `[red, green, blue, alpha]` color for shape or text color
+    /// parameters. Ignored for scalar and vec2 params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rgba: Option<[u8; 4]>,
     /// Interpolation toward the next keyframe. Defaults to linear.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub easing: Option<WireEasing>,
@@ -391,13 +455,18 @@ pub struct RemoveParamKeyframe {
 pub struct SetParamConstant {
     pub clip: u64,
     pub param: WireClipParam,
-    /// New value for `scale` / `rotation` / `opacity`. Ignored for
-    /// `position`.
+    /// New value for scalar parameters. Ignored for position and color
+    /// parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// New `[x, y]` for `position`. Ignored for scalar params.
+    /// New `[x, y]` for `position` or `anchor_point`. Ignored for scalar and
+    /// color params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f64; 2]>,
+    /// New `[red, green, blue, alpha]` color for shape or text color
+    /// parameters. Ignored for scalar and vec2 params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rgba: Option<[u8; 4]>,
 }
 
 /// Change a media clip's constant playback speed and/or direction. The clip
@@ -1145,11 +1214,11 @@ tools! {
     "set_transition" => SetTransition(SetTransition),
         "Set the duration in seconds of the transition at a clip's right cut (centered on the cut).";
     "set_param_keyframe" => SetParamKeyframe(SetParamKeyframe),
-        "Add or replace a keyframe on a clip property (position, scale, rotation, opacity) at a timeline position in seconds, animating it over time. Use 'value' for scalar params, 'position' for position.";
+        "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), volume, speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, and color-look `{look:{param}}` properties. Use `value` for scalars, `position` for position/anchor_point, and `rgba` for text or shape colors. Effect names and valid properties are visible in describe_project.";
     "remove_param_keyframe" => RemoveParamKeyframe(RemoveParamKeyframe),
-        "Remove the keyframe at a timeline position (seconds) on a clip property. Removing the last keyframe freezes the property at that value.";
+        "Remove the keyframe at a timeline position (seconds) on any animatable clip property. Use the same `param` selector as set_param_keyframe. Removing the last keyframe freezes the property at that value.";
     "set_param_constant" => SetParamConstant(SetParamConstant),
-        "Set a clip property to a fixed value and remove all its keyframes (stops its animation).";
+        "Set any animatable clip property to a fixed value and remove all its keyframes (stops its animation). Use the same `param` selector as set_param_keyframe, with `value` for scalars, `position` for position/anchor_point, or `rgba` for text and shape colors.";
     "set_clip_speed" => SetClipSpeed(SetClipSpeed),
         "Change a media clip's playback speed (2.0 = double speed, 0.5 = slow motion) and/or play it in reverse. The clip's timeline length re-derives from the speed; its audio time-stretches to match (pitch preserved by default). Not valid for generated clips.";
     "set_speed_curve" => SetSpeedCurve(SetSpeedCurve),

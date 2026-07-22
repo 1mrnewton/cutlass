@@ -1,4 +1,5 @@
 use super::*;
+use crate::wire::{WireShapeParam, WireTextParam};
 
 // --- seconds → ticks ---------------------------------------------------------
 
@@ -26,16 +27,6 @@ fn gcd(mut a: i32, mut b: i32) -> i32 {
     a.max(1)
 }
 
-pub(super) fn clip_param(param: WireClipParam) -> ClipParam {
-    match param {
-        WireClipParam::Position => ClipParam::Position,
-        WireClipParam::Scale => ClipParam::Scale,
-        WireClipParam::Rotation => ClipParam::Rotation,
-        WireClipParam::Opacity => ClipParam::Opacity,
-        WireClipParam::Volume => ClipParam::Volume,
-    }
-}
-
 pub(super) fn easing(easing: Option<WireEasing>) -> Easing {
     match easing {
         None | Some(WireEasing::Linear) => Easing::Linear,
@@ -48,22 +39,59 @@ pub(super) fn easing(easing: Option<WireEasing>) -> Easing {
 /// Build the typed parameter value from the wire's `value` / `position`
 /// fields, rejecting the wrong shape with a message naming the right one.
 pub(super) fn param_value(
-    param: WireClipParam,
+    param: &WireClipParam,
     value: Option<f64>,
     position: Option<[f64; 2]>,
+    rgba: Option<[u8; 4]>,
 ) -> Result<ParamValue, Rejection> {
     match param {
-        WireClipParam::Position => position
+        WireClipParam::Position | WireClipParam::AnchorPoint => position
             .map(|p| ParamValue::Vec2([p[0] as f32, p[1] as f32]))
             .ok_or_else(|| {
-                Rejection::new("param 'position' needs the 'position' argument as [x, y]")
+                Rejection::new(
+                    "position and anchor_point params need the 'position' argument as [x, y]",
+                )
             }),
         WireClipParam::Scale
         | WireClipParam::Rotation
         | WireClipParam::Opacity
-        | WireClipParam::Volume => value.map(|v| ParamValue::Scalar(v as f32)).ok_or_else(|| {
+        | WireClipParam::Volume
+        | WireClipParam::Speed
+        | WireClipParam::Effect { .. }
+        | WireClipParam::Shape {
+            param:
+                WireShapeParam::Width
+                | WireShapeParam::Height
+                | WireShapeParam::CornerRadius
+                | WireShapeParam::InnerRatio
+                | WireShapeParam::StrokeWidth,
+        }
+        | WireClipParam::Text {
+            param:
+                WireTextParam::Size
+                | WireTextParam::LetterSpacing
+                | WireTextParam::LineSpacing
+                | WireTextParam::StrokeWidth
+                | WireTextParam::ShadowBlur
+                | WireTextParam::ShadowDistance,
+        }
+        | WireClipParam::Look { .. } => {
+            value.map(|v| ParamValue::Scalar(v as f32)).ok_or_else(|| {
+                Rejection::new(
+                    format!("param '{param:?}' needs the 'value' argument (a number)",)
+                        .to_lowercase(),
+                )
+            })
+        }
+        WireClipParam::Shape {
+            param: WireShapeParam::Fill | WireShapeParam::StrokeColor,
+        }
+        | WireClipParam::Text {
+            param: WireTextParam::Fill | WireTextParam::StrokeColor | WireTextParam::ShadowColor,
+        } => rgba.map(ParamValue::Color).ok_or_else(|| {
             Rejection::new(
-                format!("param '{param:?}' needs the 'value' argument (a number)",).to_lowercase(),
+                format!("param '{param:?}' needs the 'rgba' argument as [red, green, blue, alpha]",)
+                    .to_lowercase(),
             )
         }),
     }

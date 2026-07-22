@@ -57,6 +57,161 @@ fn reject(project: &Project, cmd: WireCommand) -> String {
 }
 
 #[test]
+fn extended_wire_clip_params_lower_to_model_params() {
+    let (mut project, _, _, _, clip, title) = fixture();
+    project
+        .add_effect(ClipId::from_raw(clip), "gaussian_blur")
+        .unwrap();
+    let sticker_track = project.add_track(TrackKind::Sticker, "Shapes");
+    let shape = project
+        .add_generated(
+            sticker_track,
+            Generator::shape(cutlass_models::Shape::Rectangle, [0, 0, 0, 255]),
+            TimeRange::at_rate(0, 72, R24),
+        )
+        .unwrap()
+        .raw();
+
+    let cases = [
+        (
+            clip,
+            wire::WireClipParam::AnchorPoint,
+            Some([0.25, -0.25]),
+            None,
+            None,
+            ClipParam::AnchorPoint,
+            ParamValue::Vec2([0.25, -0.25]),
+        ),
+        (
+            clip,
+            wire::WireClipParam::Speed,
+            None,
+            Some(1.5),
+            None,
+            ClipParam::Speed,
+            ParamValue::Scalar(1.5),
+        ),
+        (
+            clip,
+            wire::WireClipParam::Effect {
+                index: 0,
+                param: "radius".into(),
+            },
+            None,
+            Some(8.0),
+            None,
+            ClipParam::Effect {
+                effect: 0,
+                param: 0,
+            },
+            ParamValue::Scalar(8.0),
+        ),
+        (
+            shape,
+            wire::WireClipParam::Shape {
+                param: wire::WireShapeParam::Fill,
+            },
+            None,
+            None,
+            Some([12, 34, 56, 255]),
+            ClipParam::Shape {
+                param: cutlass_models::ShapeParam::Fill,
+            },
+            ParamValue::Color([12, 34, 56, 255]),
+        ),
+        (
+            title,
+            wire::WireClipParam::Text {
+                param: wire::WireTextParam::Size,
+            },
+            None,
+            Some(72.0),
+            None,
+            ClipParam::Text {
+                param: cutlass_models::TextParam::Size,
+            },
+            ParamValue::Scalar(72.0),
+        ),
+        (
+            clip,
+            wire::WireClipParam::Look {
+                param: wire::WireLookParam::AdjustContrast,
+            },
+            None,
+            Some(0.5),
+            None,
+            ClipParam::Look {
+                param: cutlass_models::LookParam::AdjustContrast,
+            },
+            ParamValue::Scalar(0.5),
+        ),
+    ];
+
+    for (target, param, position, value, rgba, expected_param, expected_value) in cases {
+        let edit = lower(
+            &project,
+            WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+                clip: target,
+                param,
+                at: 2.0,
+                value,
+                position,
+                rgba,
+                easing: Some(wire::WireEasing::EaseOut),
+            }),
+        );
+        assert_eq!(
+            edit,
+            EditCommand::SetParamKeyframe {
+                clip: ClipId::from_raw(target),
+                param: expected_param,
+                at: RationalTime::new(48, R24),
+                value: expected_value,
+                easing: Easing::EaseOut,
+            }
+        );
+    }
+}
+
+#[test]
+fn extended_wire_params_work_for_constant_and_removal() {
+    let (project, _, _, _, clip, _) = fixture();
+
+    assert_eq!(
+        lower(
+            &project,
+            WireCommand::SetParamConstant(wire::SetParamConstant {
+                clip,
+                param: wire::WireClipParam::AnchorPoint,
+                value: None,
+                position: Some([0.25, 0.5]),
+                rgba: None,
+            }),
+        ),
+        EditCommand::SetParamConstant {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::AnchorPoint,
+            value: ParamValue::Vec2([0.25, 0.5]),
+        }
+    );
+    assert_eq!(
+        lower(
+            &project,
+            WireCommand::RemoveParamKeyframe(wire::RemoveParamKeyframe {
+                clip,
+                param: wire::WireClipParam::Speed,
+                at: 1.0,
+            }),
+        ),
+        EditCommand::RemoveParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Speed,
+            at: RationalTime::new(24, R24),
+        }
+    );
+}
+
+#[test]
 fn add_transition_rejects_canvas_pass_lanes() {
     // Effect/filter/adjustment segments resolve to canvas-wide passes the
     // renderer can't nest inside a transition; the agent gets a rejection
@@ -688,7 +843,7 @@ fn look_commands_lower_and_guard() {
         EditCommand::SetClipFilter { filter, .. } => {
             let filter = filter.expect("filter set");
             assert_eq!(filter.id, "vivid");
-            assert!((filter.intensity - 0.9).abs() < 1e-6);
+            assert!((filter.intensity.sample_at(0.0) - 0.9).abs() < 1e-6);
         }
         other => panic!("expected SetClipFilter, got {other:?}"),
     }

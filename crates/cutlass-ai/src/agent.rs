@@ -940,13 +940,19 @@ fn rgba(c: [u8; 4]) -> String {
     format!("#{:02x}{:02x}{:02x}{:02x}", c[0], c[1], c[2], c[3])
 }
 
-fn param_name(param: wire::WireClipParam) -> &'static str {
+fn param_name(param: &wire::WireClipParam) -> String {
     match param {
-        wire::WireClipParam::Position => "position",
-        wire::WireClipParam::Scale => "scale",
-        wire::WireClipParam::Rotation => "rotation",
-        wire::WireClipParam::Opacity => "opacity",
-        wire::WireClipParam::Volume => "volume",
+        wire::WireClipParam::Position => "position".into(),
+        wire::WireClipParam::AnchorPoint => "anchor point".into(),
+        wire::WireClipParam::Scale => "scale".into(),
+        wire::WireClipParam::Rotation => "rotation".into(),
+        wire::WireClipParam::Opacity => "opacity".into(),
+        wire::WireClipParam::Volume => "volume".into(),
+        wire::WireClipParam::Speed => "speed".into(),
+        wire::WireClipParam::Effect { index, param } => format!("effect {index} {param}"),
+        wire::WireClipParam::Shape { param } => format!("shape {param:?}").to_lowercase(),
+        wire::WireClipParam::Text { param } => format!("text {param:?}").to_lowercase(),
+        wire::WireClipParam::Look { param } => format!("look {param:?}").to_lowercase(),
     }
 }
 
@@ -954,12 +960,13 @@ fn param_name(param: wire::WireClipParam) -> &'static str {
 /// "[0.25, -0.10]". Falls back to "?" when the call omitted the value (the
 /// validation rejection carries the real message).
 fn param_value_phrase(
-    param: wire::WireClipParam,
+    param: &wire::WireClipParam,
     value: Option<f64>,
     position: Option<[f64; 2]>,
+    color: Option<[u8; 4]>,
 ) -> String {
     match param {
-        wire::WireClipParam::Position => position
+        wire::WireClipParam::Position | wire::WireClipParam::AnchorPoint => position
             .map(|p| format!("[{:.2}, {:.2}]", p[0], p[1]))
             .unwrap_or_else(|| "?".into()),
         wire::WireClipParam::Scale | wire::WireClipParam::Opacity | wire::WireClipParam::Volume => {
@@ -970,6 +977,16 @@ fn param_value_phrase(
         wire::WireClipParam::Rotation => value
             .map(|v| format!("{v:.0}°"))
             .unwrap_or_else(|| "?".into()),
+        wire::WireClipParam::Shape {
+            param: wire::WireShapeParam::Fill | wire::WireShapeParam::StrokeColor,
+        }
+        | wire::WireClipParam::Text {
+            param:
+                wire::WireTextParam::Fill
+                | wire::WireTextParam::StrokeColor
+                | wire::WireTextParam::ShadowColor,
+        } => color.map(rgba).unwrap_or_else(|| "?".into()),
+        _ => value.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
     }
 }
 
@@ -1091,21 +1108,21 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
         WireCommand::SetParamKeyframe(a) => format!(
             "keyframed clip {} {} = {} at {}",
             a.clip,
-            param_name(a.param),
-            param_value_phrase(a.param, a.value, a.position),
+            param_name(&a.param),
+            param_value_phrase(&a.param, a.value, a.position, a.rgba),
             secs(a.at),
         ),
         WireCommand::RemoveParamKeyframe(a) => format!(
             "removed clip {} {} keyframe at {}",
             a.clip,
-            param_name(a.param),
+            param_name(&a.param),
             secs(a.at),
         ),
         WireCommand::SetParamConstant(a) => format!(
             "set clip {} {} to {} (animation cleared)",
             a.clip,
-            param_name(a.param),
-            param_value_phrase(a.param, a.value, a.position),
+            param_name(&a.param),
+            param_value_phrase(&a.param, a.value, a.position, a.rgba),
         ),
         WireCommand::SetClipSpeed(a) => {
             let mut parts = Vec::new();

@@ -397,10 +397,10 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         WireCommand::SetParamKeyframe(args) => {
             let clip = clip_ref(project, args.clip)?;
             let at = keyframe_position(project, clip, args.at)?;
-            let value = param_value(args.param, args.value, args.position)?;
+            let value = param_value(&args.param, args.value, args.position, args.rgba)?;
             EditCommand::SetParamKeyframe {
                 clip: clip.id,
-                param: clip_param(args.param),
+                param: clip_param(&args.param, clip, args.clip)?,
                 at,
                 value,
                 easing: easing(args.easing),
@@ -411,7 +411,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
             let at = keyframe_position(project, clip, args.at)?;
             EditCommand::RemoveParamKeyframe {
                 clip: clip.id,
-                param: clip_param(args.param),
+                param: clip_param(&args.param, clip, args.clip)?,
                 at,
             }
         }
@@ -773,10 +773,10 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         }
         WireCommand::SetParamConstant(args) => {
             let clip = clip_ref(project, args.clip)?;
-            let value = param_value(args.param, args.value, args.position)?;
+            let value = param_value(&args.param, args.value, args.position, args.rgba)?;
             EditCommand::SetParamConstant {
                 clip: clip.id,
-                param: clip_param(args.param),
+                param: clip_param(&args.param, clip, args.clip)?,
                 value,
             }
         }

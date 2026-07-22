@@ -779,6 +779,7 @@ pub(super) fn message_invalidates_preview(msg: &WorkerMsg) -> bool {
             | WorkerMsg::SetBlendMode { .. }
             | WorkerMsg::SetLayerStyles { .. }
             | WorkerMsg::SetMask { .. }
+            | WorkerMsg::SetChroma { .. }
             | WorkerMsg::SetClipFilter { .. }
             | WorkerMsg::SetClipAdjust { .. }
             | WorkerMsg::SetClipLut { .. }

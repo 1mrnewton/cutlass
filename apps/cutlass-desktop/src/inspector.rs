@@ -175,6 +175,8 @@ pub fn sample_scalar_param(clip: &Clip, param: &str, playhead: i32) -> ScalarPar
         "look_mask_feather" => &clip.kf_look_mask_feather,
         "look_mask_rotation" => &clip.kf_look_mask_rotation,
         "look_mask_roundness" => &clip.kf_look_mask_roundness,
+        "look_chroma_strength" => &clip.kf_look_chroma_strength,
+        "look_chroma_shadow" => &clip.kf_look_chroma_shadow,
         _ => {
             return ScalarParamSample {
                 value: 0.0,

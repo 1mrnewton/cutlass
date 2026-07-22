@@ -264,6 +264,7 @@ fn clip_to_slint(
     let blend_mode = clip.blend_mode.id().to_string();
     let blend_label = clip.blend_mode.label().to_string();
     let mask = clip_mask(clip, clip_start);
+    let chroma = clip_chroma(clip, clip_start);
     let styles = clip_layer_styles(clip, clip_start);
     let animation_in = clip_animation(clip.animation_in.as_ref());
     let animation_out = clip_animation(clip.animation_out.as_ref());
@@ -334,6 +335,10 @@ fn clip_to_slint(
         mask_size_h: mask.size[1],
         mask_rotation: mask.rotation,
         mask_roundness: mask.roundness,
+        chroma_enabled: chroma.enabled,
+        chroma_color: chroma.color,
+        chroma_strength: chroma.strength,
+        chroma_shadow: chroma.shadow,
         style_shadow_enabled: styles.shadow_enabled,
         style_shadow_color: styles.shadow_color,
         style_shadow_offset_x: styles.shadow_offset[0],
@@ -435,6 +440,8 @@ fn clip_to_slint(
         kf_look_mask_size: mask.kf_size,
         kf_look_mask_rotation: mask.kf_rotation,
         kf_look_mask_roundness: mask.kf_roundness,
+        kf_look_chroma_strength: chroma.kf_strength,
+        kf_look_chroma_shadow: chroma.kf_shadow,
         kf_speed_curve: speed_curve_to_slint(&clip.speed_curve),
         has_speed_curve: clip.has_speed_curve(),
         speed_curve_avg: clip.speed_curve_average() as f32,
@@ -513,6 +520,37 @@ fn clip_mask(clip: &EngineClip, clip_start: i64) -> ProjectedMask {
         kf_size: keyframes_to_slint(&mask.size, clip_start, |v| (v[0], v[1])),
         kf_rotation: keyframes_to_slint(&mask.rotation, clip_start, |v| (*v, 0.0)),
         kf_roundness: keyframes_to_slint(&mask.roundness, clip_start, |v| (*v, 0.0)),
+    }
+}
+
+/// Projected chroma-key fields + strength/shadow keyframe lists.
+struct ProjectedChroma {
+    enabled: bool,
+    color: Color,
+    strength: f32,
+    shadow: f32,
+    kf_strength: ModelRc<ParamKeyframe>,
+    kf_shadow: ModelRc<ParamKeyframe>,
+}
+
+fn clip_chroma(clip: &EngineClip, clip_start: i64) -> ProjectedChroma {
+    let Some(chroma) = &clip.chroma_key else {
+        return ProjectedChroma {
+            enabled: false,
+            color: Color::from_rgb_u8(0, 255, 0),
+            strength: 0.5,
+            shadow: 0.0,
+            kf_strength: empty_keyframes(),
+            kf_shadow: empty_keyframes(),
+        };
+    };
+    ProjectedChroma {
+        enabled: true,
+        color: Color::from_rgb_u8(chroma.rgb[0], chroma.rgb[1], chroma.rgb[2]),
+        strength: chroma.strength.sample(0),
+        shadow: chroma.shadow.sample(0),
+        kf_strength: keyframes_to_slint(&chroma.strength, clip_start, |v| (*v, 0.0)),
+        kf_shadow: keyframes_to_slint(&chroma.shadow, clip_start, |v| (*v, 0.0)),
     }
 }
 

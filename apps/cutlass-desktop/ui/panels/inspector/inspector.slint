@@ -26,6 +26,7 @@ import { TransformInspector } from "transform-inspector.slint";
 import { CropInspector } from "crop-inspector.slint";
 import { LookInspector } from "look-inspector.slint";
 import { MaskInspector } from "mask-inspector.slint";
+import { ChromaInspector } from "chroma-inspector.slint";
 import { StylesInspector } from "styles-inspector.slint";
 import { AnimationInspector } from "animation-inspector.slint";
 import { EffectsInspector } from "effects-inspector.slint";
@@ -731,6 +732,12 @@ component VisualClipInspector inherits VerticalLayout {
             InspectorDivider { }
 
             MaskInspector {
+                model: root.model;
+            }
+
+            InspectorDivider { }
+
+            ChromaInspector {
                 model: root.model;
             }
 

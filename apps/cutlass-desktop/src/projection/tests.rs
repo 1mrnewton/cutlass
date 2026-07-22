@@ -187,6 +187,77 @@ fn projects_clip_mask() {
 }
 
 #[test]
+fn projects_clip_chroma() {
+    use cutlass_models::{ChromaKey, MediaSource, Param, RationalTime, TimeRange, TrackKind};
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("chroma", EngineRational::FPS_24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/chroma.mp4",
+        1920,
+        1080,
+        EngineRational::FPS_24,
+        480,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            RationalTime::new(0, EngineRational::FPS_24),
+        )
+        .expect("clip");
+
+    let flat = project_to_slint(&project, &HashMap::new(), &HashSet::new())
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(!flat.chroma_enabled);
+
+    project
+        .set_clip_chroma_key(
+            clip_id,
+            Some(ChromaKey {
+                rgb: [0, 255, 0],
+                strength: Param::Constant(0.5),
+                shadow: Param::Constant(0.1),
+            }),
+        )
+        .expect("set chroma");
+
+    let clip = project_to_slint(&project, &HashMap::new(), &HashSet::new())
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(clip.chroma_enabled);
+    assert_eq!(clip.chroma_color.green(), 255);
+    assert!((clip.chroma_strength - 0.5).abs() < f32::EPSILON);
+    assert!((clip.chroma_shadow - 0.1).abs() < f32::EPSILON);
+
+    project.set_clip_chroma_key(clip_id, None).expect("clear");
+    let clip = project_to_slint(&project, &HashMap::new(), &HashSet::new())
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(!clip.chroma_enabled);
+}
+
+#[test]
 fn sticker_card_gets_catalog_label_and_composited_tag() {
     use cutlass_models::{Clip as MClip, Generator, Rational, TimeRange};
     let span = TimeRange::at_rate(0, 100, Rational::FPS_24);

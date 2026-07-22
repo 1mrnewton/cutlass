@@ -254,6 +254,44 @@ pub(crate) fn wire_inspector(
             set_mask_invert_handle.set_mask(clip_id.to_string(), Some(mask));
         });
 
+    let toggle_chroma_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_toggle_clip_chroma(move |clip_id, enabled| {
+            let chroma = enabled.then_some(cutlass_models::ChromaKey {
+                rgb: [0, 255, 0],
+                strength: cutlass_models::Param::Constant(0.5),
+                shadow: cutlass_models::Param::Constant(0.0),
+            });
+            toggle_chroma_handle.set_chroma(clip_id.to_string(), chroma);
+        });
+
+    let set_chroma_color_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_set_clip_chroma_color(move |clip_id, r, g, b| {
+            let Some(project) = set_chroma_color_handle.snapshot_project() else {
+                return;
+            };
+            let Some(raw) = clip_id.as_str().parse::<u64>().ok() else {
+                tracing::error!(clip = %clip_id, "set-clip-chroma-color ignored: unparsable clip id");
+                return;
+            };
+            let clip_key = cutlass_models::ClipId::from_raw(raw);
+            let Some(clip) = project.clip(clip_key) else {
+                tracing::error!(clip = %clip_id, "set-clip-chroma-color ignored: unknown clip");
+                return;
+            };
+            let Some(mut chroma) = clip.chroma_key.clone() else {
+                tracing::error!(clip = %clip_id, "set-clip-chroma-color ignored: chroma off");
+                return;
+            };
+            chroma.rgb = [
+                r.clamp(0, 255) as u8,
+                g.clamp(0, 255) as u8,
+                b.clamp(0, 255) as u8,
+            ];
+            set_chroma_color_handle.set_chroma(clip_id.to_string(), Some(chroma));
+        });
+
     let toggle_style_handle = preview_worker.handle();
     app.global::<InspectorBackend>()
         .on_toggle_clip_style(move |clip_id, block, enabled| {

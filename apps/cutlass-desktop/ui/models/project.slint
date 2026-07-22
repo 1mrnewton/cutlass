@@ -315,6 +315,12 @@ export struct Clip {
     mask-size-h: float,
     mask-rotation: float,
     mask-roundness: float,
+    // CapCut chroma key. Enable / color go through `toggle-clip-chroma` /
+    // `set-clip-chroma-color`; strength / shadow ride look_chroma_* params.
+    chroma-enabled: bool,
+    chroma-color: color,
+    chroma-strength: float,
+    chroma-shadow: float,
     // Layer-quad styles (CapCut shadow/glow/outline/background). Structural
     // enable/disable goes through `InspectorBackend.toggle-clip-style`; field
     // edits ride the generic param callbacks (or `set-clip-style-color`).
@@ -424,6 +430,8 @@ export struct Clip {
     kf-look-mask-size: [ParamKeyframe],
     kf-look-mask-rotation: [ParamKeyframe],
     kf-look-mask-roundness: [ParamKeyframe],
+    kf-look-chroma-strength: [ParamKeyframe],
+    kf-look-chroma-shadow: [ParamKeyframe],
     // Playback-rate ramp (M2 speed curves): the speed-multiplier curve over
     // the clip's NORMALIZED span — `tick` is 0..=1000 (0 = clip start, 1000 =
     // clip end), `value-x` the multiplier. Empty ⇔ a flat constant-speed

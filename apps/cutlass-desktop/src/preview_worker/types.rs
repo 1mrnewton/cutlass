@@ -336,6 +336,12 @@ pub(super) enum WorkerMsg {
         clip: String,
         mask: Option<Mask>,
     },
+    /// Set (or clear) chroma keying on a visual clip. `None` clears.
+    /// One undoable history entry.
+    SetChroma {
+        clip: String,
+        chroma: Option<ChromaKey>,
+    },
     /// Set (or clear) a visual clip's filter preset. `filter_id == ""`
     /// clears; intensity is normalized 0..=1. One undoable history entry.
     SetClipFilter {

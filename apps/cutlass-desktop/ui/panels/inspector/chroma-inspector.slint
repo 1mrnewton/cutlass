@@ -1,0 +1,125 @@
+// CapCut chroma key (green screen) for media-backed visual clips. Enable /
+// color are structural SetClipChroma edits; strength / shadow ride the
+// generic look_chroma_* param callbacks (LookParam already supports them).
+// No live-preview path for chroma — sliders commit on release only.
+
+import { CutlassColorSwatch } from "../../components/index.slint";
+import { AppStore, TimelineStore } from "../../store/index.slint";
+import { InspectorBackend, ScalarParamSample } from "../../lib/inspector-backend.slint";
+import { Clip } from "../../models/index.slint";
+import { LabelCell, SectionHeader, SliderRow } from "inspector-widgets.slint";
+
+export component ChromaInspector inherits VerticalLayout {
+    in property <Clip> model;
+
+    spacing: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    private property <bool> playhead-inside: TimelineStore.playhead-tick >= model.timeline-start.value
+        && TimelineStore.playhead-tick < model.timeline-start.value + model.source-range.duration.value;
+
+    private property <ScalarParamSample> strength-sample: InspectorBackend.sample-scalar-param(
+        model, "look_chroma_strength", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> shadow-sample: InspectorBackend.sample-scalar-param(
+        model, "look_chroma_shadow", TimelineStore.playhead-tick);
+
+    function toggle-kf(param: string, on-keyframe: bool, vx: float, vy: float) {
+        if (on-keyframe) {
+            InspectorBackend.remove-param-keyframe(model.id, param, TimelineStore.playhead-tick);
+        } else {
+            InspectorBackend.set-param-keyframe(model.id, param, TimelineStore.playhead-tick, vx, vy, 0);
+        }
+    }
+
+    function ease-kf(param: string, easing: int, vx: float, vy: float) {
+        InspectorBackend.set-param-keyframe(model.id, param, TimelineStore.playhead-tick, vx, vy, easing);
+    }
+
+    function commit-scalar(param: string, sample: ScalarParamSample, value: float) {
+        if (sample.row.animated) {
+            root.ease-kf(param, sample.row.on-keyframe ? sample.row.easing : 0, value, 0);
+        } else {
+            InspectorBackend.set-param-constant(model.id, param, value, 0);
+        }
+    }
+
+    SectionHeader {
+        title: "Chroma key";
+        active: model.chroma-enabled;
+        checkable: true;
+        interactive: true;
+        toggled => {
+            InspectorBackend.toggle-clip-chroma(model.id, !model.chroma-enabled);
+        }
+        reset => {
+            InspectorBackend.toggle-clip-chroma(model.id, false);
+        }
+    }
+
+    if model.chroma-enabled: HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+
+        LabelCell {
+            label: "Key";
+        }
+
+        CutlassColorSwatch {
+            value: model.chroma-color;
+            changed(c) => {
+                InspectorBackend.set-clip-chroma-color(model.id, c.red, c.green, c.blue);
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+
+    if model.chroma-enabled: SliderRow {
+        label: "Strength";
+        suffix: "";
+        value: root.strength-sample.value;
+        minimum: 0;
+        maximum: 1;
+        step: 0.01;
+        decimals: 2;
+        reset-value: 0.5;
+        kf-visible: true;
+        kf: root.strength-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-scalar("look_chroma_strength", root.strength-sample, clamp(v, 0, 1));
+        }
+        kf-toggle => {
+            root.toggle-kf("look_chroma_strength", root.strength-sample.row.on-keyframe, root.strength-sample.value, 0);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_chroma_strength", e, root.strength-sample.value, 0);
+        }
+    }
+
+    if model.chroma-enabled: SliderRow {
+        label: "Shadow";
+        suffix: "";
+        value: root.shadow-sample.value;
+        minimum: 0;
+        maximum: 1;
+        step: 0.01;
+        decimals: 2;
+        reset-value: 0;
+        kf-visible: true;
+        kf: root.shadow-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-scalar("look_chroma_shadow", root.shadow-sample, clamp(v, 0, 1));
+        }
+        kf-toggle => {
+            root.toggle-kf("look_chroma_shadow", root.shadow-sample.row.on-keyframe, root.shadow-sample.value, 0);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_chroma_shadow", e, root.shadow-sample.value, 0);
+        }
+    }
+}

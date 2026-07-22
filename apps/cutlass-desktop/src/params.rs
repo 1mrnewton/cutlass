@@ -163,6 +163,8 @@ pub(crate) fn sampled_scalar_param(clip: &Clip, param: &str, playhead: i32) -> O
         "look_mask_feather" => (&clip.kf_look_mask_feather, clip.mask_feather),
         "look_mask_rotation" => (&clip.kf_look_mask_rotation, clip.mask_rotation),
         "look_mask_roundness" => (&clip.kf_look_mask_roundness, clip.mask_roundness),
+        "look_chroma_strength" => (&clip.kf_look_chroma_strength, clip.chroma_strength),
+        "look_chroma_shadow" => (&clip.kf_look_chroma_shadow, clip.chroma_shadow),
         _ => return None,
     };
     Some(scalar_param(keyframes, constant).sample(tick))
@@ -251,6 +253,8 @@ pub(crate) fn merged_keyframe_ticks(clip: &Clip) -> slint::ModelRc<i32> {
         &clip.kf_look_mask_size,
         &clip.kf_look_mask_rotation,
         &clip.kf_look_mask_roundness,
+        &clip.kf_look_chroma_strength,
+        &clip.kf_look_chroma_shadow,
     ]
     .iter()
     .flat_map(|kfs| kfs.iter().map(|kf| kf.tick))

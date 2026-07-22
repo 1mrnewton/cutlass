@@ -710,6 +710,14 @@ fn look_edits_invalidate_preview() {
         clip: "1".into(),
         mask: Some(cutlass_models::Mask::new(cutlass_models::MaskKind::Circle)),
     }));
+    assert!(message_invalidates_preview(&WorkerMsg::SetChroma {
+        clip: "1".into(),
+        chroma: Some(cutlass_models::ChromaKey {
+            rgb: [0, 255, 0],
+            strength: cutlass_models::Param::Constant(0.5),
+            shadow: cutlass_models::Param::Constant(0.0),
+        }),
+    }));
 }
 
 #[test]
@@ -1108,6 +1116,119 @@ fn set_mask_kind_preserves_feather_and_geometry_round_trips() {
         .unwrap();
     assert_eq!(c.mask_kind.as_str(), "");
     assert!(!c.mask_invert);
+}
+
+#[test]
+fn set_chroma_enable_color_and_disable() {
+    use crate::projection::project_to_slint;
+    use cutlass_models::{ChromaKey, Param};
+    use slint::Model;
+    use std::collections::{HashMap, HashSet};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("chroma", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/chroma.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+
+    engine
+        .apply(Command::Edit(EditCommand::SetClipChroma {
+            clip,
+            chroma: Some(ChromaKey {
+                rgb: [0, 255, 0],
+                strength: Param::Constant(0.5),
+                shadow: Param::Constant(0.0),
+            }),
+        }))
+        .expect("enable chroma");
+
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(c.chroma_enabled);
+    assert_eq!(c.chroma_color.red(), 0);
+    assert_eq!(c.chroma_color.green(), 255);
+    assert_eq!(c.chroma_color.blue(), 0);
+    assert!((c.chroma_strength - 0.5).abs() < f32::EPSILON);
+
+    // Color set round-trips (snapshot + replace path).
+    engine
+        .apply(Command::Edit(EditCommand::SetClipChroma {
+            clip,
+            chroma: Some(ChromaKey {
+                rgb: [10, 20, 30],
+                strength: Param::Constant(0.5),
+                shadow: Param::Constant(0.0),
+            }),
+        }))
+        .expect("set color");
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(c.chroma_color.red(), 10);
+    assert_eq!(c.chroma_color.green(), 20);
+    assert_eq!(c.chroma_color.blue(), 30);
+
+    engine
+        .apply(Command::Edit(EditCommand::SetClipChroma {
+            clip,
+            chroma: None,
+        }))
+        .expect("disable");
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(!c.chroma_enabled);
+}
+
+#[test]
+fn set_chroma_enqueues_worker_msg() {
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let chroma = cutlass_models::ChromaKey {
+        rgb: [0, 255, 0],
+        strength: cutlass_models::Param::Constant(0.5),
+        shadow: cutlass_models::Param::Constant(0.0),
+    };
+    handle.set_chroma("42".into(), Some(chroma.clone()));
+    let WorkerMsg::SetChroma { clip, chroma: got } = rx.try_recv().unwrap() else {
+        panic!("expected SetChroma");
+    };
+    assert_eq!(clip, "42");
+    assert_eq!(got, Some(chroma));
 }
 
 #[test]

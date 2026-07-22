@@ -257,6 +257,13 @@ export global InspectorBackend {
     // Toggle mask invert on a clip that already has a mask. One undoable edit.
     callback set-clip-mask-invert(clip-id: string, invert: bool);
 
+    // Enable or clear chroma keying. Enabling installs green `[0,255,0]` with
+    // strength `0.5` / shadow `0`. One undoable edit.
+    callback toggle-clip-chroma(clip-id: string, enabled: bool);
+
+    // Set the chroma key color (RGB 0..=255) on a keyed clip. One undoable edit.
+    callback set-clip-chroma-color(clip-id: string, r: int, g: int, b: int);
+
     // Enable or clear one layer-style block on a visual clip. `block` is
     // "shadow" | "glow" | "outline" | "background". Enabling installs the
     // model default for that block; disabling clears it. One undoable edit.

@@ -125,6 +125,29 @@ pub(super) fn set_mask_and_publish(
     publish_projection(engine, ui);
 }
 
+/// Set or clear chroma keying (CapCut green screen).
+pub(super) fn set_chroma_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    chroma: Option<ChromaKey>,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-chroma ignored: unparsable clip id");
+        return;
+    };
+    let enabled = chroma.is_some();
+    if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipChroma {
+        clip: clip_id,
+        chroma,
+    })) {
+        error!(%clip_id, "set clip chroma failed: {e}");
+        return;
+    }
+    info!(%clip_id, enabled, "set clip chroma");
+    publish_projection(engine, ui);
+}
+
 /// Set or clear a visual clip's filter preset. A live look drag may have left
 /// an override in place; clear it first so the commit becomes authoritative.
 pub(super) fn set_clip_filter_and_publish(

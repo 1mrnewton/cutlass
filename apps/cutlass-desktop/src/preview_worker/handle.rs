@@ -275,6 +275,10 @@ impl WorkerHandle {
         let _ = self.tx.send(WorkerMsg::SetMask { clip, mask });
     }
 
+    pub fn set_chroma(&self, clip: String, chroma: Option<ChromaKey>) {
+        let _ = self.tx.send(WorkerMsg::SetChroma { clip, chroma });
+    }
+
     pub fn set_clip_filter(&self, clip: String, filter_id: String, intensity: f32) {
         let _ = self.tx.send(WorkerMsg::SetClipFilter {
             clip,

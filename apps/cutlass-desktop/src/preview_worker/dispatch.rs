@@ -179,6 +179,7 @@ pub(super) fn dispatch(
             set_layer_styles_and_publish(engine, &clip, styles, ui)
         }
         WorkerMsg::SetMask { clip, mask } => set_mask_and_publish(engine, &clip, mask, ui),
+        WorkerMsg::SetChroma { clip, chroma } => set_chroma_and_publish(engine, &clip, chroma, ui),
         WorkerMsg::SetClipFilter {
             clip,
             filter_id,

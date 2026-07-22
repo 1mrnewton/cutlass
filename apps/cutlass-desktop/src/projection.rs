@@ -848,8 +848,10 @@ fn volume_path(clip: &EngineClip) -> String {
 }
 
 /// Project a clip's effect chain (M4) for the inspector Effects section, each
-/// parameter sampled at the clip start with its catalog label and range.
+/// parameter sampled at the clip start with its catalog label, kind, and range.
 fn project_effects(clip: &EngineClip) -> ModelRc<EffectView> {
+    use cutlass_models::EffectParamKind;
+
     let rows: Vec<EffectView> = clip
         .effects
         .iter()
@@ -860,12 +862,39 @@ fn project_effects(clip: &EngineClip) -> ModelRc<EffectView> {
                 .map(|spec| {
                     spec.params
                         .iter()
-                        .map(|p| EffectParamView {
-                            name: p.name.into(),
-                            label: p.label.into(),
-                            value: fx.sample_param(p.name, 0.0).unwrap_or(p.default),
-                            min: p.min,
-                            max: p.max,
+                        .map(|p| {
+                            let (kind, value, color, vec2) = match p.kind {
+                                EffectParamKind::Scalar => (
+                                    "scalar",
+                                    fx.sample_param(p.name, 0.0).unwrap_or(p.default),
+                                    [0, 0, 0, 0],
+                                    [0.0, 0.0],
+                                ),
+                                EffectParamKind::Color => (
+                                    "color",
+                                    0.0,
+                                    fx.sample_color_param(p.name, 0.0)
+                                        .unwrap_or(p.default_color),
+                                    [0.0, 0.0],
+                                ),
+                                EffectParamKind::Vec2 => (
+                                    "vec2",
+                                    0.0,
+                                    [0, 0, 0, 0],
+                                    fx.sample_vec2_param(p.name, 0.0).unwrap_or(p.default_vec2),
+                                ),
+                            };
+                            EffectParamView {
+                                name: p.name.into(),
+                                label: p.label.into(),
+                                kind: kind.into(),
+                                value,
+                                min: p.min,
+                                max: p.max,
+                                color: rgba_color(color),
+                                vec2_x: vec2[0],
+                                vec2_y: vec2[1],
+                            }
                         })
                         .collect()
                 })

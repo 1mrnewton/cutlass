@@ -411,11 +411,12 @@ pub(super) enum WorkerMsg {
         index: u32,
     },
     /// Set one effect parameter (by catalog name) to a constant (M4).
+    /// Scalars, colors, and vec2s share this message.
     SetEffectParam {
         clip: String,
         index: u32,
         param: String,
-        value: f32,
+        value: ParamValue,
     },
     /// Add a catalog transition at the junction after `clip` (M4).
     AddTransition {

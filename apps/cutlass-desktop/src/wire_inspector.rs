@@ -699,6 +699,33 @@ pub(crate) fn wire_inspector(
                 value,
             );
         });
+    let set_effect_param_color_handle = preview_worker.handle();
+    app.global::<EffectsBackend>().on_set_effect_param_color(
+        move |clip_id, index, param, r, g, b, a| {
+            let rgba = [
+                r.clamp(0, 255) as u8,
+                g.clamp(0, 255) as u8,
+                b.clamp(0, 255) as u8,
+                a.clamp(0, 255) as u8,
+            ];
+            set_effect_param_color_handle.set_effect_param_value(
+                clip_id.to_string(),
+                index.max(0) as u32,
+                param.to_string(),
+                cutlass_models::ParamValue::Color(rgba),
+            );
+        },
+    );
+    let set_effect_param_vec2_handle = preview_worker.handle();
+    app.global::<EffectsBackend>()
+        .on_set_effect_param_vec2(move |clip_id, index, param, x, y| {
+            set_effect_param_vec2_handle.set_effect_param_value(
+                clip_id.to_string(),
+                index.max(0) as u32,
+                param.to_string(),
+                cutlass_models::ParamValue::Vec2([x, y]),
+            );
+        });
     let add_transition_handle = preview_worker.handle();
     app.global::<EffectsBackend>()
         .on_add_transition(move |clip_id, transition_id| {

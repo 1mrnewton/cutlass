@@ -645,3 +645,103 @@ fn speed_curve_projects_dense_samples_and_handles() {
     assert_eq!(ramped.speed_curve_samples.row_count(), SPEED_GRAPH_SAMPLES);
     assert!(ramped.speed_curve_avg > 0.0);
 }
+
+#[test]
+fn projects_typed_effect_params_and_color_roundtrips() {
+    use cutlass_models::{ClipParam, Generator, ParamValue, TimeRange, TrackKind};
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("effects", EngineRational::FPS_24);
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let clip_id = project
+        .add_generated(
+            track,
+            Generator::SolidColor {
+                rgba: [128, 128, 128, 255],
+            },
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+        )
+        .expect("clip");
+    project.add_effect(clip_id, "duotone").expect("duotone");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clip = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(clip.effects.row_count(), 1);
+    let fx = clip.effects.row_data(0).unwrap();
+    assert_eq!(fx.effect_id.as_str(), "duotone");
+    assert_eq!(fx.params.row_count(), 3);
+
+    let shadow = fx.params.row_data(0).unwrap();
+    assert_eq!(shadow.name.as_str(), "shadow_color");
+    assert_eq!(shadow.kind.as_str(), "color");
+    assert_eq!(shadow.color.red(), 20);
+    assert_eq!(shadow.color.green(), 16);
+    assert_eq!(shadow.color.blue(), 60);
+    assert_eq!(shadow.color.alpha(), 255);
+
+    let intensity = fx.params.row_data(2).unwrap();
+    assert_eq!(intensity.kind.as_str(), "scalar");
+    assert!((intensity.value - 1.0).abs() < f32::EPSILON);
+
+    project
+        .set_param_constant(
+            clip_id,
+            ClipParam::Effect {
+                effect: 0,
+                param: 0,
+            },
+            ParamValue::Color([10, 20, 30, 255]),
+        )
+        .expect("set shadow");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let shadow = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap()
+        .effects
+        .row_data(0)
+        .unwrap()
+        .params
+        .row_data(0)
+        .unwrap();
+    assert_eq!(shadow.kind.as_str(), "color");
+    assert_eq!(shadow.color.red(), 10);
+    assert_eq!(shadow.color.green(), 20);
+    assert_eq!(shadow.color.blue(), 30);
+    assert_eq!(shadow.color.alpha(), 255);
+
+    // color_overlay also projects its vec2 offset.
+    project
+        .add_effect(clip_id, "color_overlay")
+        .expect("overlay");
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let overlay = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap()
+        .effects
+        .row_data(1)
+        .unwrap();
+    let offset = overlay.params.row_data(1).unwrap();
+    assert_eq!(offset.name.as_str(), "offset");
+    assert_eq!(offset.kind.as_str(), "vec2");
+    assert!((offset.vec2_x - 0.0).abs() < f32::EPSILON);
+    assert!((offset.vec2_y - 0.0).abs() < f32::EPSILON);
+}

@@ -17,9 +17,29 @@ export global EffectsBackend {
     // Remove the effect at chain `index` from the clip.
     callback remove-effect(clip-id: string, index: int);
 
-    // Set one effect parameter (addressed by its catalog `param` name) to a
-    // constant. Animated edits go through the keyframe path instead.
+    // Set one scalar effect parameter (addressed by its catalog `param` name)
+    // to a constant. Animated edits go through the keyframe path instead.
     callback set-effect-param(clip-id: string, index: int, param: string, value: float);
+
+    // Set a color effect parameter (`rgba` channels 0..=255).
+    callback set-effect-param-color(
+        clip-id: string,
+        index: int,
+        param: string,
+        r: int,
+        g: int,
+        b: int,
+        a: int,
+    );
+
+    // Set a vec2 effect parameter (`[x, y]`).
+    callback set-effect-param-vec2(
+        clip-id: string,
+        index: int,
+        param: string,
+        x: float,
+        y: float,
+    );
 
     // Add `transition-id` at the junction after `clip-id` (needs an abutting
     // right neighbor; the engine rejects otherwise).

@@ -358,6 +358,16 @@ impl WorkerHandle {
     }
 
     pub fn set_effect_param(&self, clip: String, index: u32, param: String, value: f32) {
+        self.set_effect_param_value(clip, index, param, ParamValue::Scalar(value));
+    }
+
+    pub fn set_effect_param_value(
+        &self,
+        clip: String,
+        index: u32,
+        param: String,
+        value: ParamValue,
+    ) {
         let _ = self.tx.send(WorkerMsg::SetEffectParam {
             clip,
             index,

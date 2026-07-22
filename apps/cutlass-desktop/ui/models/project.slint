@@ -97,16 +97,21 @@ export struct ParamKeyframe {
     bez-y2: float,
 }
 
-// One scalar parameter of a clip effect (M4), projected for the inspector
-// Effects section. `value` is the current (clip-start) sample; `min`/`max`
-// bound the slider per the catalog.
+// One parameter of a clip effect, projected for the inspector Effects
+// section. `kind` is "scalar" | "vec2" | "color". Scalars use `value` +
+// `min`/`max`; colors use `color`; vec2s use `vec2-x` / `vec2-y` (also
+// bounded by `min`/`max` per component).
 @rust-attr(derive(serde::Serialize, serde::Deserialize))
 export struct EffectParamView {
     name: string,
     label: string,
+    kind: string,
     value: float,
     min: float,
     max: float,
+    color: color,
+    vec2-x: float,
+    vec2-y: float,
 }
 
 // One effect on a clip's chain (M4). The chain index is the position in the

@@ -3,8 +3,8 @@
 
 use cutlass_core::{Rational, RationalTime};
 use cutlass_models::{
-    AnimationRef, AnimationSlot, ClipParam, Easing, Generator, ParamValue, Project,
-    TextParam, TextStyle as ModelTextStyle, TimeRange, TrackKind,
+    AnimationRef, AnimationSlot, ClipParam, Easing, Generator, ParamValue, Project, TextParam,
+    TextStyle as ModelTextStyle, TimeRange, TrackKind,
 };
 use cutlass_render::{Renderer, resolve};
 
@@ -114,7 +114,10 @@ fn keyframed_text_size_grows_glyph_coverage() {
     let s2 = size_at(&scene2);
     assert!((s0 - 24.0).abs() < 0.5, "t0 size {s0}");
     assert!((s2 - 96.0).abs() < 0.5, "t48 size {s2}");
-    assert!(s1 > s0 && s1 < s2, "mid size {s1} not between {s0} and {s2}");
+    assert!(
+        s1 > s0 && s1 < s2,
+        "mid size {s1} not between {s0} and {s2}"
+    );
 }
 
 #[test]

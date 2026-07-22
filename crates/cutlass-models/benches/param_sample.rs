@@ -1,9 +1,9 @@
-//! Hot-path Param / AnimatedTransform sampling.
+//! Hot-path Param / AnimatedTransform / LayerStyles sampling.
 //!
 //! Run: `cargo bench -p cutlass-models --bench param_sample`
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use cutlass_models::{AnimatedTransform, Easing, Keyframe, Param};
+use cutlass_models::{AnimatedTransform, Easing, Keyframe, LayerShadow, LayerStyles, Param};
 
 fn keyframed_scalar() -> Param<f32> {
     Param::Keyframed {
@@ -105,5 +105,101 @@ fn bench_transform_sample(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_param_sample, bench_transform_sample);
+/// Per-frame cost of sampling a keyframed layer-style shadow (blur + offset
+/// + color) — what resolve pays before handing styles to the compositor.
+fn keyframed_layer_styles() -> LayerStyles {
+    LayerStyles {
+        shadow: Some(LayerShadow {
+            rgba: Param::Keyframed {
+                keyframes: vec![
+                    Keyframe {
+                        tick: 0,
+                        value: [0, 0, 0, 64],
+                        easing: Easing::Linear,
+                    },
+                    Keyframe {
+                        tick: 48,
+                        value: [0, 0, 0, 200],
+                        easing: Easing::EaseInOut,
+                    },
+                    Keyframe {
+                        tick: 96,
+                        value: [20, 10, 0, 128],
+                        easing: Easing::from_preset_id("snappy").unwrap(),
+                    },
+                ],
+            },
+            offset: Param::Keyframed {
+                keyframes: vec![
+                    Keyframe {
+                        tick: 0,
+                        value: [0.0, 0.0],
+                        easing: Easing::EaseOut,
+                    },
+                    Keyframe {
+                        tick: 60,
+                        value: [12.0, 8.0],
+                        easing: Easing::from_preset_id("overshoot").unwrap(),
+                    },
+                    Keyframe {
+                        tick: 120,
+                        value: [4.0, 4.0],
+                        easing: Easing::Linear,
+                    },
+                ],
+            },
+            blur: Param::Keyframed {
+                keyframes: vec![
+                    Keyframe {
+                        tick: 0,
+                        value: 0.0,
+                        easing: Easing::EaseIn,
+                    },
+                    Keyframe {
+                        tick: 40,
+                        value: 24.0,
+                        easing: Easing::EaseInOut,
+                    },
+                    Keyframe {
+                        tick: 100,
+                        value: 8.0,
+                        easing: Easing::Linear,
+                    },
+                ],
+            },
+        }),
+        ..Default::default()
+    }
+}
+
+fn sample_styles_shadow(styles: &LayerStyles, tick: i64) -> f32 {
+    let shadow = styles.shadow.as_ref().expect("shadow");
+    let blur = shadow.blur.sample(tick);
+    let offset = shadow.offset.sample(tick);
+    let rgba = shadow.rgba.sample(tick);
+    blur + offset[0] + offset[1] + f32::from(rgba[3])
+}
+
+fn bench_layer_styles_sample(c: &mut Criterion) {
+    let styles = keyframed_layer_styles();
+    c.bench_function("layer_styles_shadow_sample_mid", |b| {
+        b.iter(|| black_box(sample_styles_shadow(&styles, black_box(45))))
+    });
+    c.bench_function("layer_styles_shadow_sample_sweep", |b| {
+        b.iter(|| {
+            let mut acc = 0.0f32;
+            for tick in 0..128 {
+                acc += sample_styles_shadow(&styles, tick);
+            }
+            black_box(acc)
+        })
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_param_sample,
+    bench_transform_sample,
+    bench_layer_styles_sample
+);
 criterion_main!(benches);

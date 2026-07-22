@@ -156,7 +156,12 @@ fn text_generator_maps_style_and_defers_size() {
     approx2(layer.center, [960.0, 540.0]);
     assert_eq!(layer.size, SizeSpec::BitmapScaled(1.0));
     match &layer.source {
-        LayerSource::Text { content, style } => {
+        LayerSource::Text {
+            content,
+            style,
+            animation,
+        } => {
+            assert!(animation.is_none());
             assert_eq!(content, "Hi");
             approx(style.font_size, 90.0);
             assert_eq!(style.color, [255, 0, 0, 255]);

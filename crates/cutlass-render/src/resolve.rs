@@ -23,18 +23,21 @@
 use cutlass_compositor::ColorGrade;
 use cutlass_core::{RationalTime, resample};
 use cutlass_models::{
-    ClipId, ClipSource, ClipTransform, ColorAdjustments, EffectInstance, Filter, Generator,
-    MediaKind, Param, Project, Shape, ShapePath, ShapeStroke, TextAlignH, TextAlignV,
-    TextStyle as ModelTextStyle,
+    AnimationSlot, ClipId, ClipSource, ClipTransform, ColorAdjustments, Easing, EffectInstance,
+    Filter, Generator, MediaKind, Param, Project, Shape, ShapePath, ShapeStroke, TextAlignH,
+    TextAlignV, TextStyle as ModelTextStyle, look_animation_combo_period_ticks,
+    look_animation_window_ticks,
 };
 use cutlass_shapes::{BezierPath, PathPoint, SDF_AA, SdfParams, Stroke};
 use cutlass_text::{
     FontFamily, TextAlign, TextBackground, TextShadow, TextStroke, TextStyle, TextVerticalAlign,
 };
 
-use crate::animation::apply_look_animations;
+use crate::animation::{apply_look_animations, is_per_character};
 use crate::grade::resolve_color_grade;
-use crate::scene::{LayerSource, ResolvedPass, Scene, SceneLayer, SceneLut, SizeSpec};
+use crate::scene::{
+    LayerSource, ResolvedPass, Scene, SceneLayer, SceneLut, SizeSpec, TextAnimation,
+};
 
 /// Vertical reference height that a generator's reference-pixel sizes (text
 /// `size`, shape `width`/`height`) are authored against. Matches the model's
@@ -427,10 +430,68 @@ fn resolve_clip(
             )
             .map(|mut layer| {
                 layer.clip = Some(clip.id);
+                if let LayerSource::Text { animation, .. } = &mut layer.source {
+                    *animation = sample_text_animation(clip, local_tick, local_tick_f, t.rate);
+                }
                 layer
             }))
         }
     }
+}
+
+/// Sample an active per-character look preset into resolve-time data.
+fn sample_text_animation(
+    clip: &cutlass_models::Clip,
+    local_tick: i64,
+    local_tick_f: f64,
+    rate: cutlass_core::Rational,
+) -> Option<TextAnimation> {
+    let duration = clip.timeline.duration.value.max(1);
+    let window = look_animation_window_ticks(duration, rate);
+
+    if let Some(combo) = &clip.animation_combo {
+        if is_per_character(&combo.id) {
+            let period = look_animation_combo_period_ticks(rate);
+            let phase = ((local_tick_f % period as f64) / period as f64).clamp(0.0, 1.0) as f32;
+            return Some(TextAnimation {
+                id: combo.id.clone(),
+                slot: AnimationSlot::Combo,
+                t: phase,
+            });
+        }
+        return None;
+    }
+
+    if let Some(anim) = &clip.animation_in
+        && is_per_character(&anim.id)
+        && local_tick < window
+    {
+        let raw = (local_tick_f / window as f64).clamp(0.0, 1.0) as f32;
+        let eased = Easing::EaseOut.apply(raw);
+        return Some(TextAnimation {
+            id: anim.id.clone(),
+            slot: AnimationSlot::In,
+            t: eased,
+        });
+    }
+
+    if let Some(anim) = &clip.animation_out
+        && is_per_character(&anim.id)
+    {
+        let out_start = duration - window;
+        if local_tick >= out_start {
+            let raw = ((local_tick_f - out_start as f64) / (window - 1).max(1) as f64)
+                .clamp(0.0, 1.0) as f32;
+            let eased = Easing::EaseIn.apply(raw);
+            return Some(TextAnimation {
+                id: anim.id.clone(),
+                slot: AnimationSlot::Out,
+                t: eased,
+            });
+        }
+    }
+
+    None
 }
 
 /// Sample `clip.effects` at clip-local `tick` into compositor-ready passes.
@@ -485,6 +546,7 @@ pub(crate) fn resolve_generator(
                 source: LayerSource::Text {
                     content: text,
                     style: map_text_style(style, cw, ch),
+                    animation: None,
                 },
                 center,
                 anchor_point,
@@ -867,5 +929,7 @@ fn fit_scale(nw: f32, nh: f32, cw: f32, ch: f32) -> f32 {
     (cw / nw).min(ch / nh)
 }
 
+#[cfg(test)]
+mod per_char_tests;
 #[cfg(test)]
 mod tests;

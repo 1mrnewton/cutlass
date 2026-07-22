@@ -496,7 +496,56 @@ const ANIMATIONS: &[AnimationSpec] = &[
         slot: AnimationSlot::Combo,
         text_only: false,
     },
-    // Text-only combos (the text panel's animation chips).
+    // Text-only per-character presets (glyph atlas path).
+    AnimationSpec {
+        id: "char_typewriter",
+        label: "Typewriter",
+        slot: AnimationSlot::In,
+        text_only: true,
+    },
+    AnimationSpec {
+        id: "char_fade_in",
+        label: "Fade in",
+        slot: AnimationSlot::In,
+        text_only: true,
+    },
+    AnimationSpec {
+        id: "char_bounce_in",
+        label: "Bounce in",
+        slot: AnimationSlot::In,
+        text_only: true,
+    },
+    AnimationSpec {
+        id: "char_slide_in",
+        label: "Slide in",
+        slot: AnimationSlot::In,
+        text_only: true,
+    },
+    AnimationSpec {
+        id: "char_pop_in",
+        label: "Pop in",
+        slot: AnimationSlot::In,
+        text_only: true,
+    },
+    AnimationSpec {
+        id: "char_fade_out",
+        label: "Fade out",
+        slot: AnimationSlot::Out,
+        text_only: true,
+    },
+    AnimationSpec {
+        id: "char_fall_away",
+        label: "Fall away",
+        slot: AnimationSlot::Out,
+        text_only: true,
+    },
+    AnimationSpec {
+        id: "char_typewriter_out",
+        label: "Type out",
+        slot: AnimationSlot::Out,
+        text_only: true,
+    },
+    // Text-only combos (the text panel's looping chips).
     AnimationSpec {
         id: "typewriter",
         label: "Typewriter",
@@ -530,6 +579,18 @@ const ANIMATIONS: &[AnimationSpec] = &[
     AnimationSpec {
         id: "wave",
         label: "Wave",
+        slot: AnimationSlot::Combo,
+        text_only: true,
+    },
+    AnimationSpec {
+        id: "char_jitter",
+        label: "Jitter",
+        slot: AnimationSlot::Combo,
+        text_only: true,
+    },
+    AnimationSpec {
+        id: "char_pulse",
+        label: "Pulse",
         slot: AnimationSlot::Combo,
         text_only: true,
     },

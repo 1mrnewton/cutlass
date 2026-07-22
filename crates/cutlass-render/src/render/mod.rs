@@ -9,6 +9,7 @@ mod api;
 mod effects;
 mod media_cache;
 mod realize;
+mod text_anim;
 
 #[cfg(test)]
 mod tests;

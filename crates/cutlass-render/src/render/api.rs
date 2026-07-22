@@ -374,7 +374,7 @@ impl Renderer {
             // Bitmap layers (text, pen paths) size to their raster.
             SizeSpec::BitmapScaled(_) => {
                 let image = match &layer.source {
-                    LayerSource::Text { content, style } => self.text.rasterize(content, style),
+                    LayerSource::Text { content, style, .. } => self.text.rasterize(content, style),
                     LayerSource::PathShape {
                         path,
                         fill,

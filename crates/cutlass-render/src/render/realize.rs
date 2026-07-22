@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use cutlass_compositor::{
-    ColorGrade, CompositeLayer, CompositorConfig, CompositorLayer, FrameSink, LayerEffects,
-    LayerPlacement, PassInstance, RgbaImage, SdfLayer,
+    ColorGrade, CompositeLayer, CompositorConfig, CompositorLayer, FrameSink, GlyphInstance,
+    GlyphsLayer, LayerEffects, LayerPlacement, PassInstance, RgbaImage, SdfLayer,
 };
 use cutlass_core::VideoFrame;
 use cutlass_models::{MediaId, Project};
@@ -14,6 +14,7 @@ use crate::scene::{LayerSource, ResolvedPass, Scene, SceneLut, SizeSpec};
 
 use super::effects::{EffectChain, layer_effects, pack_effects};
 use super::media_cache::{CubeLutState, LottieState, StickerSequence, layer_lut};
+use super::text_anim::{atlas_key, cluster_deltas, extent_origin, place_clusters};
 use super::{FrameStats, Renderer, SLOW_FRAME_LOG_MS, SeekPolicy};
 
 fn composite_from_realized<'a>(
@@ -129,6 +130,33 @@ fn composite_from_realized<'a>(
             .with_effects(effects)
             .with_color_grade(*color_grade)
             .with_lut(layer_lut(lut, luts)),
+        Realized::Glyphs {
+            glyphs,
+            instances,
+            atlas_key,
+            background,
+            placement,
+            fx,
+            color_grade,
+            lut,
+            ..
+        } => {
+            // Background is composited as a separate preceding layer in the
+            // job walk; this arm only builds the glyph instances.
+            let _ = background;
+            CompositeLayer::glyphs(
+                GlyphsLayer {
+                    atlas_key: *atlas_key,
+                    glyphs,
+                    instances,
+                },
+                *placement,
+            )
+            .with_fx(*fx)
+            .with_effects(effects)
+            .with_color_grade(*color_grade)
+            .with_lut(layer_lut(lut, luts))
+        }
         Realized::Transition { .. } | Realized::CanvasPass { .. } => {
             unreachable!("non-layer realized items handled separately")
         }
@@ -211,6 +239,20 @@ enum Realized {
         color_grade: Option<ColorGrade>,
         lut: Option<SceneLut>,
     },
+    /// Per-character text: cluster bitmaps + instanced placements.
+    Glyphs {
+        glyphs: Vec<RgbaImage>,
+        instances: Vec<GlyphInstance>,
+        atlas_key: u64,
+        /// Optional whole-run background card drawn behind the glyphs.
+        background: Option<(RgbaImage, LayerPlacement)>,
+        /// Layer opacity multiplier (instance opacities are pre-multiplied).
+        placement: LayerPlacement,
+        effects: Vec<ResolvedPass>,
+        fx: LayerEffects,
+        color_grade: Option<ColorGrade>,
+        lut: Option<SceneLut>,
+    },
 }
 
 impl Realized {
@@ -224,7 +266,8 @@ impl Realized {
             | Realized::Lottie { effects, .. }
             | Realized::Bitmap { effects, .. }
             | Realized::Solid { effects, .. }
-            | Realized::Sdf { effects, .. } => Some(effects),
+            | Realized::Sdf { effects, .. }
+            | Realized::Glyphs { effects, .. } => Some(effects),
         }
     }
 }
@@ -307,35 +350,111 @@ impl Renderer {
                         lut: scene_lut,
                     });
                 }
-                LayerSource::Text { content, style } => {
-                    let image = self.text.rasterize(content, style);
-                    if image.width == 0 || image.height == 0 {
-                        continue; // nothing rasterized (no fonts / empty run)
-                    }
+                LayerSource::Text {
+                    content,
+                    style,
+                    animation,
+                } => {
                     let scale = match layer.size {
                         SizeSpec::BitmapScaled(s) => s,
                         SizeSpec::Fixed(_) => 1.0,
                     };
-                    let size = [image.width as f32 * scale, image.height as f32 * scale];
-                    let placement = LayerPlacement {
-                        center: layer.text_quad_center(
+                    if let Some(anim) = animation {
+                        let shaped = self.text.shape(content, style);
+                        if !shaped.has_ink() {
+                            continue;
+                        }
+                        let painted = cutlass_text::paint_animated(&shaped, style);
+                        // Deltas use the ink-tight shaped clusters (logical
+                        // order / baselines); placement uses painted images.
+                        let deltas = cluster_deltas(&shaped, anim);
+                        let extent_size = [
+                            painted.extent.0 as f32 * scale,
+                            painted.extent.1 as f32 * scale,
+                        ];
+                        let aligned = layer.text_quad_center(
                             style,
-                            size,
+                            extent_size,
                             [scene.width as f32, scene.height as f32],
-                        ),
-                        size,
-                        rotation: layer.rotation,
-                        opacity: layer.opacity,
-                    };
-                    realized.push(Realized::Bitmap {
-                        image,
-                        placement,
-                        uv: layer.uv,
-                        effects: layer.effects.clone(),
-                        fx,
-                        color_grade,
-                        lut: scene_lut,
-                    });
+                        );
+                        let origin = extent_origin(aligned, painted.extent, scale);
+                        let glyphs: Vec<RgbaImage> =
+                            painted.clusters.iter().map(|c| c.image.clone()).collect();
+                        // place_clusters reads offsets/baselines from ShapedText;
+                        // rebuild a shaped view over the painted clusters.
+                        let painted_shaped = cutlass_text::ShapedText {
+                            extent: painted.extent,
+                            clusters: painted.clusters.clone(),
+                        };
+                        let instances = place_clusters(
+                            &painted_shaped,
+                            &deltas,
+                            origin,
+                            scale,
+                            layer.rotation,
+                            layer.opacity,
+                        );
+                        if instances.is_empty() {
+                            continue;
+                        }
+                        let background = painted.background.map(|bg| {
+                            let size = [bg.width as f32 * scale, bg.height as f32 * scale];
+                            let center = [
+                                origin[0] + painted.background_offset[0] * scale + size[0] * 0.5,
+                                origin[1] + painted.background_offset[1] * scale + size[1] * 0.5,
+                            ];
+                            (
+                                bg,
+                                LayerPlacement {
+                                    center,
+                                    size,
+                                    rotation: layer.rotation,
+                                    opacity: layer.opacity,
+                                },
+                            )
+                        });
+                        realized.push(Realized::Glyphs {
+                            glyphs,
+                            instances,
+                            atlas_key: atlas_key(content, style),
+                            background,
+                            placement: LayerPlacement {
+                                center: aligned,
+                                size: extent_size,
+                                rotation: 0.0,
+                                opacity: 1.0,
+                            },
+                            effects: layer.effects.clone(),
+                            fx,
+                            color_grade,
+                            lut: scene_lut,
+                        });
+                    } else {
+                        let image = self.text.rasterize(content, style);
+                        if image.width == 0 || image.height == 0 {
+                            continue; // nothing rasterized (no fonts / empty run)
+                        }
+                        let size = [image.width as f32 * scale, image.height as f32 * scale];
+                        let placement = LayerPlacement {
+                            center: layer.text_quad_center(
+                                style,
+                                size,
+                                [scene.width as f32, scene.height as f32],
+                            ),
+                            size,
+                            rotation: layer.rotation,
+                            opacity: layer.opacity,
+                        };
+                        realized.push(Realized::Bitmap {
+                            image,
+                            placement,
+                            uv: layer.uv,
+                            effects: layer.effects.clone(),
+                            fx,
+                            color_grade,
+                            lut: scene_lut,
+                        });
+                    }
                 }
                 LayerSource::Media { media, source_time } => {
                     let slot = occurrence.entry(*media).or_insert(0);
@@ -577,6 +696,46 @@ impl Renderer {
                         progress: *progress,
                     });
                 }
+                Realized::Glyphs {
+                    background: Some((bg_image, bg_placement)),
+                    effects,
+                    fx,
+                    color_grade,
+                    lut,
+                    ..
+                } => {
+                    // Whole-run background card sits behind the glyphs.
+                    let bg_effects = if effects.is_empty() {
+                        &[]
+                    } else {
+                        let chain = &instance_store[effect_idx];
+                        effect_idx += 1;
+                        chain.as_slice()
+                    };
+                    layer_storage.push(
+                        CompositeLayer::rgba(bg_image, *bg_placement)
+                            .with_fx(*fx)
+                            .with_effects(bg_effects)
+                            .with_color_grade(*color_grade)
+                            .with_lut(layer_lut(lut, &self.luts)),
+                    );
+                    jobs.push(LayerJob::Plain {
+                        storage_idx: layer_storage.len() - 1,
+                    });
+                    // Glyphs share the same effect chain reference when present.
+                    let glyph_effects = if effects.is_empty() { &[] } else { bg_effects };
+                    layer_storage.push(composite_from_realized(
+                        r,
+                        &self.stills,
+                        &self.stickers,
+                        &self.lottie,
+                        &self.luts,
+                        glyph_effects,
+                    ));
+                    jobs.push(LayerJob::Plain {
+                        storage_idx: layer_storage.len() - 1,
+                    });
+                }
                 other => {
                     let effects = other
                         .effects()
@@ -704,7 +863,14 @@ impl Renderer {
                     lut: None,
                 }
             }
-            LayerSource::Text { content, style } => {
+            LayerSource::Text {
+                content,
+                style,
+                animation,
+            } => {
+                // Transition sides keep the bitmap path — per-character
+                // animation on a transition edge is not a supported surface.
+                let _ = animation;
                 let image = self.text.rasterize(content, style);
                 if image.width == 0 || image.height == 0 {
                     return Err(RenderError::unsupported("empty text layer"));

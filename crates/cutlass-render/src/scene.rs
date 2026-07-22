@@ -9,9 +9,22 @@
 //! while [`Renderer`](crate::Renderer) does the decode + rasterize + composite.
 
 use cutlass_compositor::ColorGrade;
-use cutlass_models::{ChromaKey, ClipId, Mask, MediaId};
+use cutlass_models::{AnimationSlot, ChromaKey, ClipId, Mask, MediaId};
 use cutlass_shapes::{BezierPath, SdfParams, Stroke};
 use cutlass_text::{TextAlign, TextStyle, TextVerticalAlign};
+
+/// Sampled per-character text animation attached to a [`LayerSource::Text`].
+///
+/// Pure resolve-time data: the preset id, which slot it came from, and a
+/// normalized progress / phase in `0…1`. Realize expands this into per-cluster
+/// placement deltas — the Scene stays GPU-free and unit-testable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextAnimation {
+    pub id: String,
+    pub slot: AnimationSlot,
+    /// Eased entrance/exit progress, or combo phase (both in `0…1`).
+    pub t: f32,
+}
 
 pub use cutlass_core::RationalTime;
 
@@ -267,8 +280,13 @@ pub enum LayerSource {
         /// Seconds since the clip's timeline start.
         local_time: f64,
     },
-    /// A rasterized text run.
-    Text { content: String, style: TextStyle },
+    /// A text run. When `animation` is `Some`, realize draws per-character
+    /// instanced glyphs; otherwise the whole run is rasterized as one bitmap.
+    Text {
+        content: String,
+        style: TextStyle,
+        animation: Option<TextAnimation>,
+    },
     /// A solid RGBA fill across the placed quad.
     Solid([u8; 4]),
     /// Apply this layer's effect chain and color grade to the current canvas.
@@ -372,6 +390,7 @@ mod tests {
             source: LayerSource::Text {
                 content: "hi".into(),
                 style: TextStyle::new(48.0),
+                animation: None,
             },
             center: [50.0, 25.0],
             anchor_point: [0.5, 0.5],

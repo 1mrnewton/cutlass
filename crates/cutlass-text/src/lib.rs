@@ -30,6 +30,7 @@
 //! [`TextRenderer::load_font`] to add bundled/custom faces for deterministic,
 //! platform-independent output.
 
+mod animated;
 mod effects;
 mod style;
 
@@ -43,6 +44,7 @@ use cosmic_text::{
 };
 use cutlass_core::RgbaImage;
 
+pub use animated::{AnimatedText, paint_animated};
 pub use style::{
     FontFamily, TextAlign, TextBackground, TextShadow, TextStroke, TextStyle, TextVerticalAlign,
 };

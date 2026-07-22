@@ -2,7 +2,8 @@
 
 use cutlass_core::Rational;
 use cutlass_models::{
-    Clip, ClipTransform, Easing, look_animation_combo_period_ticks, look_animation_window_ticks,
+    Clip, ClipTransform, Easing, animation_spec, look_animation_combo_period_ticks,
+    look_animation_window_ticks,
 };
 
 /// Normalized slide distance as a fraction of canvas height (+y down).
@@ -39,12 +40,17 @@ pub(crate) fn apply_look_animations(
     let mut deltas = Vec::with_capacity(2);
 
     if let Some(combo) = &clip.animation_combo {
-        let period = look_animation_combo_period_ticks(rate);
-        let phase = (local_tick_f % period as f64) / period as f64;
-        deltas.push(sample_combo(&combo.id, phase));
+        // Per-character (text_only) presets are sampled into TextAnimation at
+        // resolve time and applied per glyph — skip the whole-layer path.
+        if !is_per_character(&combo.id) {
+            let period = look_animation_combo_period_ticks(rate);
+            let phase = (local_tick_f % period as f64) / period as f64;
+            deltas.push(sample_combo(&combo.id, phase));
+        }
     } else {
         if let Some(anim) = &clip.animation_in
             && local_tick < window
+            && !is_per_character(&anim.id)
         {
             let raw = (local_tick_f / window as f64).clamp(0.0, 1.0);
             let eased = f64::from(Easing::EaseOut.apply(raw as f32));
@@ -52,7 +58,7 @@ pub(crate) fn apply_look_animations(
         }
         if let Some(anim) = &clip.animation_out {
             let out_start = duration - window;
-            if local_tick >= out_start {
+            if local_tick >= out_start && !is_per_character(&anim.id) {
                 let raw = ((local_tick_f - out_start as f64) / (window - 1).max(1) as f64)
                     .clamp(0.0, 1.0);
                 let eased = f64::from(Easing::EaseIn.apply(raw as f32));
@@ -77,6 +83,11 @@ fn compose_transform(base: ClipTransform, deltas: &[AnimationDelta]) -> ClipTran
         xf.opacity = (xf.opacity * delta.opacity).clamp(0.0, 1.0);
     }
     xf
+}
+
+/// Text-only catalog presets animate per character on the glyph path.
+pub(crate) fn is_per_character(id: &str) -> bool {
+    animation_spec(id).is_some_and(|s| s.text_only)
 }
 
 fn sample_entrance(id: &str, t: f64) -> AnimationDelta {
@@ -176,32 +187,8 @@ fn sample_combo(id: &str, phase: f64) -> AnimationDelta {
             opacity: (0.85 + 0.15 * ((phase * std::f64::consts::PI).sin() + 1.0) * 0.5) as f32,
             ..AnimationDelta::IDENTITY
         },
-        "typewriter" => AnimationDelta {
-            opacity: if phase < 0.85 { 1.0 } else { 0.2 },
-            ..AnimationDelta::IDENTITY
-        },
-        "text_fade" => AnimationDelta {
-            opacity: (0.65 + 0.35 * ((phase * std::f64::consts::PI).sin() + 1.0) * 0.5) as f32,
-            ..AnimationDelta::IDENTITY
-        },
-        "text_bounce" => AnimationDelta {
-            position: [0.0, (0.03 * wave.abs()) as f32],
-            scale: (1.0 + 0.04 * wave.abs()) as f32,
-            ..AnimationDelta::IDENTITY
-        },
-        "text_slide" => AnimationDelta {
-            position: [(0.02 * wave) as f32, 0.0],
-            ..AnimationDelta::IDENTITY
-        },
-        "pop" => AnimationDelta {
-            scale: (1.0 + 0.12 * (phase * std::f64::consts::PI).sin().max(0.0)) as f32,
-            ..AnimationDelta::IDENTITY
-        },
-        "wave" => AnimationDelta {
-            rotation: (10.0 * wave) as f32,
-            position: [(0.015 * wave) as f32, 0.0],
-            ..AnimationDelta::IDENTITY
-        },
+        // text_only presets (typewriter, text_fade, …) are handled by
+        // `render::text_anim` — they must not reach this whole-layer sampler.
         _ => AnimationDelta::IDENTITY,
     }
 }
@@ -242,13 +229,15 @@ mod tests {
     #[test]
     fn catalog_ids_all_have_handlers() {
         for spec in animation_catalog() {
+            // Per-character (text_only) presets are sampled in text_anim.rs.
+            if spec.text_only {
+                assert!(animation_spec(spec.id).is_some());
+                continue;
+            }
             let delta = match spec.slot {
                 cutlass_models::AnimationSlot::In => sample_entrance(spec.id, 0.5),
                 cutlass_models::AnimationSlot::Out => sample_exit(spec.id, 0.92),
-                cutlass_models::AnimationSlot::Combo => {
-                    let phase = if spec.id == "typewriter" { 0.9 } else { 0.07 };
-                    sample_combo(spec.id, phase)
-                }
+                cutlass_models::AnimationSlot::Combo => sample_combo(spec.id, 0.07),
             };
             assert!(
                 delta != AnimationDelta::IDENTITY,

@@ -1,5 +1,5 @@
 use cutlass_compositor::ColorGrade;
-use cutlass_models::{Param, Shape, ShapePath, ShapeStroke};
+use cutlass_models::{BlendMode, Param, Shape, ShapePath, ShapeStroke};
 use cutlass_shapes::{BezierPath, PathPoint, SDF_AA, SdfParams, Stroke};
 
 use crate::scene::{LayerSource, ResolvedPass, SceneLayer, SizeSpec};
@@ -74,6 +74,7 @@ pub(super) fn resolve_shape(
             chroma_key: None,
             color_grade,
             lut: None,
+            blend_mode: BlendMode::Normal,
         });
     }
 
@@ -100,6 +101,7 @@ pub(super) fn resolve_shape(
             chroma_key: None,
             color_grade,
             lut: None,
+            blend_mode: BlendMode::Normal,
         });
     }
 
@@ -143,6 +145,7 @@ pub(super) fn resolve_shape(
         chroma_key: None,
         color_grade,
         lut: None,
+        blend_mode: BlendMode::Normal,
     })
 }
 

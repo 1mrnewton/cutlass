@@ -5,8 +5,9 @@ use std::path::Path;
 
 use cutlass_compositor::{ColorGrade, GpuContext};
 use cutlass_models::{
-    ChromaKey, ColorAdjustments, Filter, Generator, Mask, MaskKind, MediaSource, Project, Rational,
-    RationalTime, Shape, ShapePath, ShapePathPoint, TextStyle, TimeRange, TrackKind,
+    BlendMode, ChromaKey, ColorAdjustments, Filter, Generator, Mask, MaskKind, MediaSource,
+    Project, Rational, RationalTime, Shape, ShapePath, ShapePathPoint, TextStyle, TimeRange,
+    TrackKind,
 };
 use cutlass_render::Renderer;
 
@@ -507,4 +508,41 @@ fn mono_filter_at_zero_intensity_matches_no_filter() {
     let top_left = graded.pixel(0, 0);
     let baseline_px = baseline.pixel(0, 0);
     assert_px_close(top_left, baseline_px, tol, "mono filter intensity 0");
+}
+
+#[test]
+fn multiply_red_solid_over_green_solid_is_black() {
+    let mut project = Project::new("p", FPS_24);
+    let bottom = project.add_track(TrackKind::Sticker, "S1");
+    project
+        .add_generated(
+            bottom,
+            Generator::SolidColor {
+                rgba: [0, 255, 0, 255],
+            },
+            TimeRange::at_rate(0, 100, FPS_24),
+        )
+        .unwrap();
+    let top = project.add_track(TrackKind::Sticker, "S2");
+    let red = project
+        .add_generated(
+            top,
+            Generator::SolidColor {
+                rgba: [255, 0, 0, 255],
+            },
+            TimeRange::at_rate(0, 100, FPS_24),
+        )
+        .unwrap();
+    project.set_blend_mode(red, BlendMode::Multiply).unwrap();
+
+    let Ok(mut renderer) = Renderer::new_headless() else {
+        eprintln!("skipping: no headless GPU available");
+        return;
+    };
+    let image = renderer.render_frame(&project, rt(0)).expect("render");
+    let center = image.pixel(960, 540);
+    assert!(
+        center[0] < 16 && center[1] < 16 && center[2] < 16 && center[3] > 240,
+        "multiply red over green should be ~black, got {center:?}"
+    );
 }

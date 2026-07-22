@@ -9,7 +9,7 @@
 //! while [`Renderer`](crate::Renderer) does the decode + rasterize + composite.
 
 use cutlass_compositor::ColorGrade;
-use cutlass_models::{AnimationSlot, ClipId, MaskKind, MediaId};
+use cutlass_models::{AnimationSlot, BlendMode, ClipId, MaskKind, MediaId};
 use cutlass_shapes::{BezierPath, SdfParams, Stroke};
 use cutlass_text::{TextAlign, TextStyle, TextVerticalAlign};
 
@@ -190,6 +190,9 @@ pub struct SceneLayer {
     /// File-backed: the renderer parses and uploads the table on first use
     /// and skips missing/unparseable files gracefully.
     pub lut: Option<SceneLut>,
+    /// How this layer composites over the stack below (`Normal` = source-over).
+    /// Canvas-wide passes and transition wrappers stay `Normal`.
+    pub blend_mode: BlendMode,
 }
 
 /// Mask values sampled at a clip-local tick.
@@ -376,6 +379,7 @@ mod tests {
             chroma_key: None,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
         }
     }
 
@@ -402,6 +406,7 @@ mod tests {
             chroma_key: None,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
         }
     }
 
@@ -424,6 +429,7 @@ mod tests {
             chroma_key: None,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
         }
     }
 

@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use cutlass_compositor::{
-    ColorGrade, CompositeLayer, GlyphInstance, GlyphsLayer, LayerEffects, LayerPlacement,
-    PassInstance, RgbaImage, SdfLayer,
+    BlendMode, ColorGrade, CompositeLayer, GlyphInstance, GlyphsLayer, LayerEffects,
+    LayerPlacement, PassInstance, RgbaImage, SdfLayer,
 };
 use cutlass_core::VideoFrame;
 use cutlass_models::{MediaId, Project};
@@ -14,7 +14,7 @@ use cutlass_shapes::ShapeStyle;
 use crate::error::RenderError;
 use crate::scene::{LayerSource, ResolvedPass, Scene, SceneLut, SizeSpec};
 
-use super::super::effects::layer_effects;
+use super::super::effects::{blend_mode, layer_effects};
 use super::super::media_cache::{CubeLutState, LottieState, StickerSequence, layer_lut};
 use super::super::{Renderer, SeekPolicy};
 use super::text;
@@ -34,12 +34,14 @@ pub(super) fn composite_from_realized<'a>(
             fx,
             color_grade,
             lut,
+            blend_mode,
             ..
         } => CompositeLayer::solid(*rgba, *placement)
             .with_fx(*fx)
             .with_effects(effects)
             .with_color_grade(*color_grade)
-            .with_lut(layer_lut(lut, luts)),
+            .with_lut(layer_lut(lut, luts))
+            .with_blend_mode(*blend_mode),
         Realized::Bitmap {
             image,
             placement,
@@ -47,13 +49,15 @@ pub(super) fn composite_from_realized<'a>(
             fx,
             color_grade,
             lut,
+            blend_mode,
             ..
         } => CompositeLayer::rgba(image, *placement)
             .with_uv(*uv)
             .with_fx(*fx)
             .with_effects(effects)
             .with_color_grade(*color_grade)
-            .with_lut(layer_lut(lut, luts)),
+            .with_lut(layer_lut(lut, luts))
+            .with_blend_mode(*blend_mode),
         Realized::Frame {
             frame,
             placement,
@@ -61,13 +65,15 @@ pub(super) fn composite_from_realized<'a>(
             fx,
             color_grade,
             lut,
+            blend_mode,
             ..
         } => CompositeLayer::frame(frame, *placement)
             .with_uv(*uv)
             .with_fx(*fx)
             .with_effects(effects)
             .with_color_grade(*color_grade)
-            .with_lut(layer_lut(lut, luts)),
+            .with_lut(layer_lut(lut, luts))
+            .with_blend_mode(*blend_mode),
         Realized::Still {
             media,
             placement,
@@ -75,13 +81,15 @@ pub(super) fn composite_from_realized<'a>(
             fx,
             color_grade,
             lut,
+            blend_mode,
             ..
         } => CompositeLayer::rgba(&stills[media], *placement)
             .with_uv(*uv)
             .with_fx(*fx)
             .with_effects(effects)
             .with_color_grade(*color_grade)
-            .with_lut(layer_lut(lut, luts)),
+            .with_lut(layer_lut(lut, luts))
+            .with_blend_mode(*blend_mode),
         Realized::Sticker {
             asset,
             frame_index,
@@ -90,13 +98,15 @@ pub(super) fn composite_from_realized<'a>(
             fx,
             color_grade,
             lut,
+            blend_mode,
             ..
         } => CompositeLayer::rgba(&stickers[asset].frames[*frame_index], *placement)
             .with_uv(*uv)
             .with_fx(*fx)
             .with_effects(effects)
             .with_color_grade(*color_grade)
-            .with_lut(layer_lut(lut, luts)),
+            .with_lut(layer_lut(lut, luts))
+            .with_blend_mode(*blend_mode),
         Realized::Lottie {
             path,
             frame_index,
@@ -105,6 +115,7 @@ pub(super) fn composite_from_realized<'a>(
             fx,
             color_grade,
             lut,
+            blend_mode,
             ..
         } => {
             // Realize only emits `Realized::Lottie` after `ensure_lottie_frame`
@@ -119,6 +130,7 @@ pub(super) fn composite_from_realized<'a>(
                 .with_effects(effects)
                 .with_color_grade(*color_grade)
                 .with_lut(layer_lut(lut, luts))
+                .with_blend_mode(*blend_mode)
         }
         Realized::Sdf {
             shape,
@@ -126,12 +138,14 @@ pub(super) fn composite_from_realized<'a>(
             fx,
             color_grade,
             lut,
+            blend_mode,
             ..
         } => CompositeLayer::sdf(*shape, *placement)
             .with_fx(*fx)
             .with_effects(effects)
             .with_color_grade(*color_grade)
-            .with_lut(layer_lut(lut, luts)),
+            .with_lut(layer_lut(lut, luts))
+            .with_blend_mode(*blend_mode),
         Realized::Glyphs {
             glyphs,
             instances,
@@ -141,6 +155,7 @@ pub(super) fn composite_from_realized<'a>(
             fx,
             color_grade,
             lut,
+            blend_mode,
             ..
         } => {
             // Background is composited as a separate preceding layer in the
@@ -158,6 +173,7 @@ pub(super) fn composite_from_realized<'a>(
             .with_effects(effects)
             .with_color_grade(*color_grade)
             .with_lut(layer_lut(lut, luts))
+            .with_blend_mode(*blend_mode)
         }
         Realized::Transition { .. } | Realized::CanvasPass { .. } => {
             unreachable!("non-layer realized items handled separately")
@@ -186,6 +202,7 @@ pub(super) enum Realized {
         fx: LayerEffects,
         color_grade: Option<ColorGrade>,
         lut: Option<SceneLut>,
+        blend_mode: BlendMode,
     },
     Still {
         media: MediaId,
@@ -195,6 +212,7 @@ pub(super) enum Realized {
         fx: LayerEffects,
         color_grade: Option<ColorGrade>,
         lut: Option<SceneLut>,
+        blend_mode: BlendMode,
     },
     Sticker {
         asset: String,
@@ -205,6 +223,7 @@ pub(super) enum Realized {
         fx: LayerEffects,
         color_grade: Option<ColorGrade>,
         lut: Option<SceneLut>,
+        blend_mode: BlendMode,
     },
     Lottie {
         path: String,
@@ -215,6 +234,7 @@ pub(super) enum Realized {
         fx: LayerEffects,
         color_grade: Option<ColorGrade>,
         lut: Option<SceneLut>,
+        blend_mode: BlendMode,
     },
     Bitmap {
         image: RgbaImage,
@@ -224,6 +244,7 @@ pub(super) enum Realized {
         fx: LayerEffects,
         color_grade: Option<ColorGrade>,
         lut: Option<SceneLut>,
+        blend_mode: BlendMode,
     },
     Solid {
         rgba: [u8; 4],
@@ -232,6 +253,7 @@ pub(super) enum Realized {
         fx: LayerEffects,
         color_grade: Option<ColorGrade>,
         lut: Option<SceneLut>,
+        blend_mode: BlendMode,
     },
     Sdf {
         shape: SdfLayer,
@@ -240,6 +262,7 @@ pub(super) enum Realized {
         fx: LayerEffects,
         color_grade: Option<ColorGrade>,
         lut: Option<SceneLut>,
+        blend_mode: BlendMode,
     },
     /// Per-character text: cluster bitmaps + instanced placements.
     Glyphs {
@@ -254,6 +277,7 @@ pub(super) enum Realized {
         fx: LayerEffects,
         color_grade: Option<ColorGrade>,
         lut: Option<SceneLut>,
+        blend_mode: BlendMode,
     },
 }
 
@@ -299,6 +323,7 @@ impl Renderer {
         };
         let fx = layer_effects(layer);
         let color_grade = layer.color_grade;
+        let mode = blend_mode(layer.blend_mode);
         let realized = match &layer.source {
             LayerSource::Solid(rgba) => {
                 let size = fixed_size(layer.size, [scene.width as f32, scene.height as f32]);
@@ -309,6 +334,7 @@ impl Renderer {
                     fx,
                     color_grade,
                     lut: None,
+                    blend_mode: mode,
                 }
             }
             LayerSource::Text {
@@ -328,6 +354,7 @@ impl Renderer {
                     layer.effects.clone(),
                     fx,
                     color_grade,
+                    mode,
                 )?
             }
             LayerSource::Media { media, source_time } => {
@@ -341,6 +368,7 @@ impl Renderer {
                     fx,
                     color_grade,
                     lut: None,
+                    blend_mode: mode,
                 }
             }
             LayerSource::Still { media } => {
@@ -354,6 +382,7 @@ impl Renderer {
                     fx,
                     color_grade,
                     lut: None,
+                    blend_mode: mode,
                 }
             }
             LayerSource::Lottie { path, local_time } => {
@@ -368,6 +397,7 @@ impl Renderer {
                         fx,
                         color_grade,
                         lut: None,
+                        blend_mode: mode,
                     },
                     // Missing file inside a transition: a transparent side,
                     // matching the draw-nothing policy of the main path.
@@ -378,6 +408,7 @@ impl Renderer {
                         fx,
                         color_grade,
                         lut: None,
+                        blend_mode: mode,
                     },
                 }
             }
@@ -396,6 +427,7 @@ impl Renderer {
                     fx,
                     color_grade,
                     lut: None,
+                    blend_mode: mode,
                 }
             }
             LayerSource::Shape {
@@ -420,6 +452,7 @@ impl Renderer {
                     fx,
                     color_grade,
                     lut: None,
+                    blend_mode: mode,
                 }
             }
             LayerSource::PathShape {
@@ -449,6 +482,7 @@ impl Renderer {
                     fx,
                     color_grade,
                     lut: None,
+                    blend_mode: mode,
                 }
             }
             LayerSource::Transition { .. } => {

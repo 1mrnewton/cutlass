@@ -1,5 +1,5 @@
 use cutlass_compositor::ColorGrade;
-use cutlass_models::{Generator, TextAlignH, TextAlignV, TextStyle as ModelTextStyle};
+use cutlass_models::{BlendMode, Generator, TextAlignH, TextAlignV, TextStyle as ModelTextStyle};
 use cutlass_text::{
     FontFamily, TextAlign, TextBackground, TextShadow, TextStroke, TextStyle, TextVerticalAlign,
 };
@@ -51,6 +51,7 @@ pub(crate) fn resolve_generator(
                 chroma_key: None,
                 color_grade,
                 lut: None,
+                blend_mode: BlendMode::Normal,
             })
         }
         Generator::SolidColor { rgba } => Some(SceneLayer {
@@ -67,6 +68,7 @@ pub(crate) fn resolve_generator(
             chroma_key: None,
             color_grade,
             lut: None,
+            blend_mode: BlendMode::Normal,
         }),
         Generator::Shape {
             shape,
@@ -123,6 +125,7 @@ pub(crate) fn resolve_generator(
                 chroma_key: None,
                 color_grade,
                 lut: None,
+                blend_mode: BlendMode::Normal,
             })
         }
         Generator::Sticker { asset } => {
@@ -151,6 +154,7 @@ pub(crate) fn resolve_generator(
                 chroma_key: None,
                 color_grade,
                 lut: None,
+                blend_mode: BlendMode::Normal,
             })
         }
     }?;
@@ -179,6 +183,7 @@ fn canvas_pass(
         chroma_key: None,
         color_grade,
         lut: None,
+        blend_mode: BlendMode::Normal,
     })
 }
 

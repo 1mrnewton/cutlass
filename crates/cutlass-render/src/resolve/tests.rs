@@ -2,9 +2,9 @@ use super::*;
 use crate::grade::effective_grade;
 use crate::scene::{LayerSource, SizeSpec};
 use cutlass_models::{
-    AnimationRef, AnimationSlot, CanvasAspect, CanvasSettings, ClipTransform, ColorAdjustments,
-    CropRect, Filter, Generator, MediaSource, Project, Rational, RationalTime, Shape,
-    TextStyle as ModelTextStyle, TimeRange, TrackKind,
+    AnimationRef, AnimationSlot, BlendMode, CanvasAspect, CanvasSettings, ClipTransform,
+    ColorAdjustments, CropRect, Filter, Generator, MediaSource, Project, Rational, RationalTime,
+    Shape, TextStyle as ModelTextStyle, TimeRange, TrackKind,
 };
 
 const FPS_24: Rational = Rational::FPS_24;
@@ -520,6 +520,7 @@ fn quad_center_rotates_about_the_anchor() {
         chroma_key: None,
         color_grade: None,
         lut: None,
+        blend_mode: BlendMode::Normal,
     };
     // to_center (960, 540) rotated 90° cw (+y down) → (-540, 960).
     approx2(layer.quad_center([1920.0, 1080.0]), [420.0, 1500.0]);
@@ -1393,4 +1394,74 @@ fn gesture_partitions_return_none_inside_transition_window() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn video_clip_blend_mode_reaches_scene_layer() {
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project.set_blend_mode(clip, BlendMode::Multiply).unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    assert_eq!(scene.layers.len(), 1);
+    assert_eq!(scene.layers[0].blend_mode, BlendMode::Multiply);
+}
+
+#[test]
+fn text_generator_blend_mode_reaches_scene_layer() {
+    let mut project = Project::new("p", FPS_24);
+    let track = project.add_track(TrackKind::Text, "T1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::Text {
+                content: "Hi".into(),
+                style: ModelTextStyle::default(),
+            },
+            tr(0, 100),
+        )
+        .unwrap();
+    project.set_blend_mode(clip, BlendMode::Screen).unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    assert_eq!(scene.layers.len(), 1);
+    assert!(matches!(scene.layers[0].source, LayerSource::Text { .. }));
+    assert_eq!(scene.layers[0].blend_mode, BlendMode::Screen);
+}
+
+#[test]
+fn adjustment_lane_blend_mode_stays_normal_on_canvas_pass() {
+    let mut project = Project::new("p", FPS_24);
+    let base = project.add_track(TrackKind::Sticker, "S1");
+    project
+        .add_generated(
+            base,
+            Generator::SolidColor {
+                rgba: [255, 0, 0, 255],
+            },
+            tr(0, 100),
+        )
+        .unwrap();
+    let adjustment = project.add_track(TrackKind::Adjustment, "A1");
+    let bar = project
+        .add_generated(adjustment, Generator::Adjustment, tr(0, 100))
+        .unwrap();
+    project
+        .set_clip_adjustments(
+            bar,
+            ColorAdjustments {
+                saturation: (-1.0).into(),
+                ..ColorAdjustments::default()
+            },
+        )
+        .unwrap();
+    // Even if the bar carries a blend mode, canvas passes must stay Normal.
+    project.set_blend_mode(bar, BlendMode::Multiply).unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    assert_eq!(scene.layers.len(), 2);
+    assert_eq!(scene.layers[1].source, LayerSource::CanvasPass);
+    assert_eq!(scene.layers[1].blend_mode, BlendMode::Normal);
 }

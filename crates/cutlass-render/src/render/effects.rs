@@ -1,4 +1,6 @@
-use cutlass_compositor::{LayerChromaKey, LayerEffects, LayerMask, PassInstance, mask_kind};
+use cutlass_compositor::{
+    BlendMode, LayerChromaKey, LayerEffects, LayerMask, PassInstance, mask_kind,
+};
 use cutlass_models::MaskKind;
 
 use crate::scene::ResolvedPass;
@@ -63,5 +65,24 @@ fn mask_kind_id(kind: MaskKind) -> u32 {
         MaskKind::Rectangle => mask_kind::RECTANGLE,
         MaskKind::Heart => mask_kind::HEART,
         MaskKind::Star => mask_kind::STAR,
+    }
+}
+
+/// Map a model blend mode onto the compositor's GPU blend id.
+pub(super) fn blend_mode(mode: cutlass_models::BlendMode) -> BlendMode {
+    match mode {
+        cutlass_models::BlendMode::Normal => BlendMode::Normal,
+        cutlass_models::BlendMode::Darken => BlendMode::Darken,
+        cutlass_models::BlendMode::Multiply => BlendMode::Multiply,
+        cutlass_models::BlendMode::ColorBurn => BlendMode::ColorBurn,
+        cutlass_models::BlendMode::Lighten => BlendMode::Lighten,
+        cutlass_models::BlendMode::Screen => BlendMode::Screen,
+        cutlass_models::BlendMode::ColorDodge => BlendMode::ColorDodge,
+        cutlass_models::BlendMode::Add => BlendMode::Add,
+        cutlass_models::BlendMode::Overlay => BlendMode::Overlay,
+        cutlass_models::BlendMode::SoftLight => BlendMode::SoftLight,
+        cutlass_models::BlendMode::HardLight => BlendMode::HardLight,
+        cutlass_models::BlendMode::Difference => BlendMode::Difference,
+        cutlass_models::BlendMode::Exclusion => BlendMode::Exclusion,
     }
 }

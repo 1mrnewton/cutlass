@@ -257,6 +257,7 @@ fn resolve_track_at(
                 chroma_key: None,
                 color_grade: None,
                 lut: None,
+                blend_mode: cutlass_models::BlendMode::Normal,
             }));
         }
     }
@@ -416,6 +417,7 @@ fn resolve_clip(
                 chroma_key,
                 color_grade,
                 lut,
+                blend_mode: clip.blend_mode,
             }))
         }
         ClipSource::Generated(generator) => {
@@ -442,6 +444,11 @@ fn resolve_clip(
             )
             .map(|mut layer| {
                 layer.clip = Some(clip.id);
+                // Canvas passes grade/effect the whole stack — blend modes
+                // only apply to layer quads, so keep those Normal.
+                if !matches!(layer.source, LayerSource::CanvasPass) {
+                    layer.blend_mode = clip.blend_mode;
+                }
                 if let LayerSource::Text { animation, .. } = &mut layer.source {
                     *animation = sample_text_animation(clip, local_tick, local_tick_f, t.rate);
                 }

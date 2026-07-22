@@ -403,3 +403,43 @@ pub(crate) async fn pick_relink_folder() -> Option<std::path::PathBuf> {
         .await
         .map(|file| file.path().to_path_buf())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cutlass_models::{ClipParam, ParamValue, StyleParam};
+
+    #[test]
+    fn style_param_keys_round_trip_through_clip_param_value() {
+        let (param, value) = clip_param_value("style_shadow_blur", 12.5, 0.0).expect("blur");
+        assert_eq!(
+            param,
+            ClipParam::Style {
+                param: StyleParam::ShadowBlur
+            }
+        );
+        assert_eq!(value, ParamValue::Scalar(12.5));
+
+        let (param, value) = clip_param_value("style_shadow_offset", 4.0, -2.0).expect("offset");
+        assert_eq!(
+            param,
+            ClipParam::Style {
+                param: StyleParam::ShadowOffset
+            }
+        );
+        assert_eq!(value, ParamValue::Vec2([4.0, -2.0]));
+
+        // Color packing: RG and BA as u16 lanes (same as text color keys).
+        let rg = ((10u16) << 8) | 20;
+        let ba = ((30u16) << 8) | 40;
+        let (param, value) =
+            clip_param_value("style_glow_color", rg as f32, ba as f32).expect("color");
+        assert_eq!(
+            param,
+            ClipParam::Style {
+                param: StyleParam::GlowColor
+            }
+        );
+        assert_eq!(value, ParamValue::Color([10, 20, 30, 40]));
+    }
+}

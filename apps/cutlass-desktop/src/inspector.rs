@@ -2,7 +2,8 @@
 //! sample its animated transform at the playhead for the keyframe UI.
 
 use crate::params::{
-    apply_sampled_transform, row_state, sampled_scalar_param, sampled_transform, sampled_volume,
+    apply_sampled_transform, row_state, sampled_scalar_param, sampled_transform,
+    sampled_vec2_param, sampled_volume,
 };
 use crate::placement::position_preserving_center;
 use crate::preview_select::{canvas_config, clip_placement};
@@ -115,6 +116,20 @@ pub fn sample_transform(clip: &Clip, playhead: i32) -> TransformSample {
 /// Sample a scalar text-style or look curve at the playhead for inspector
 /// rows. Unknown ids are defensive no-ops; the UI only supplies known keys.
 pub fn sample_scalar_param(clip: &Clip, param: &str, playhead: i32) -> ScalarParamSample {
+    // Axis display keys for the shared `style_shadow_offset` vec2 — same
+    // row-state precedent as transform `position` X/Y.
+    if param == "style_shadow_offset_x" || param == "style_shadow_offset_y" {
+        let offset =
+            sampled_vec2_param(clip, "style_shadow_offset", playhead).unwrap_or([0.0, 0.0]);
+        return ScalarParamSample {
+            value: if param.ends_with("_x") {
+                offset[0]
+            } else {
+                offset[1]
+            },
+            row: row_state(&clip.kf_style_shadow_offset, playhead),
+        };
+    }
     let keyframes = match param {
         "text_size" => &clip.kf_text_size,
         "text_letter_spacing" => &clip.kf_text_letter_spacing,
@@ -129,6 +144,12 @@ pub fn sample_scalar_param(clip: &Clip, param: &str, playhead: i32) -> ScalarPar
         "look_adjust_saturation" => &clip.kf_look_adjust_saturation,
         "look_adjust_exposure" => &clip.kf_look_adjust_exposure,
         "look_adjust_temperature" => &clip.kf_look_adjust_temperature,
+        "style_shadow_blur" => &clip.kf_style_shadow_blur,
+        "style_glow_radius" => &clip.kf_style_glow_radius,
+        "style_glow_intensity" => &clip.kf_style_glow_intensity,
+        "style_outline_width" => &clip.kf_style_outline_width,
+        "style_background_padding" => &clip.kf_style_background_padding,
+        "style_background_radius" => &clip.kf_style_background_radius,
         _ => {
             return ScalarParamSample {
                 value: 0.0,

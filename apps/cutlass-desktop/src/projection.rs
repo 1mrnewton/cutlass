@@ -263,6 +263,7 @@ fn clip_to_slint(
     let (lut_id, lut_label, lut_path, lut_intensity) = clip_lut(clip);
     let blend_mode = clip.blend_mode.id().to_string();
     let blend_label = clip.blend_mode.label().to_string();
+    let styles = clip_layer_styles(clip, clip_start);
     let animation_in = clip_animation(clip.animation_in.as_ref());
     let animation_out = clip_animation(clip.animation_out.as_ref());
     let animation_combo = clip_animation(clip.animation_combo.as_ref());
@@ -322,6 +323,22 @@ fn clip_to_slint(
         flip_v: clip.flip_v,
         blend_mode: blend_mode.into(),
         blend_label: blend_label.into(),
+        style_shadow_enabled: styles.shadow_enabled,
+        style_shadow_color: styles.shadow_color,
+        style_shadow_offset_x: styles.shadow_offset[0],
+        style_shadow_offset_y: styles.shadow_offset[1],
+        style_shadow_blur: styles.shadow_blur,
+        style_glow_enabled: styles.glow_enabled,
+        style_glow_color: styles.glow_color,
+        style_glow_radius: styles.glow_radius,
+        style_glow_intensity: styles.glow_intensity,
+        style_outline_enabled: styles.outline_enabled,
+        style_outline_color: styles.outline_color,
+        style_outline_width: styles.outline_width,
+        style_background_enabled: styles.background_enabled,
+        style_background_color: styles.background_color,
+        style_background_padding: styles.background_padding,
+        style_background_radius: styles.background_radius,
         filter_id: filter_id.into(),
         filter_label: filter_label.into(),
         filter_intensity,
@@ -393,6 +410,15 @@ fn clip_to_slint(
         kf_look_adjust_temperature: keyframes_to_slint(&clip.adjust.temperature, clip_start, |v| {
             (*v, 0.0)
         }),
+        // Layer-style scalar / vec2 curves. Color style params intentionally
+        // omit kf lists (color keyframes stay AI-only for now).
+        kf_style_shadow_offset: styles.kf_shadow_offset,
+        kf_style_shadow_blur: styles.kf_shadow_blur,
+        kf_style_glow_radius: styles.kf_glow_radius,
+        kf_style_glow_intensity: styles.kf_glow_intensity,
+        kf_style_outline_width: styles.kf_outline_width,
+        kf_style_background_padding: styles.kf_background_padding,
+        kf_style_background_radius: styles.kf_background_radius,
         kf_speed_curve: speed_curve_to_slint(&clip.speed_curve),
         has_speed_curve: clip.has_speed_curve(),
         speed_curve_avg: clip.speed_curve_average() as f32,
@@ -413,6 +439,103 @@ fn clip_to_slint(
                 .collect(),
         ),
         caps,
+    }
+}
+
+/// Projected layer-style fields + scalar/vec2 keyframe lists for one clip.
+/// Colors are clip-start samples only (no kf lists — AI-only for now).
+struct ProjectedLayerStyles {
+    shadow_enabled: bool,
+    shadow_color: Color,
+    shadow_offset: [f32; 2],
+    shadow_blur: f32,
+    glow_enabled: bool,
+    glow_color: Color,
+    glow_radius: f32,
+    glow_intensity: f32,
+    outline_enabled: bool,
+    outline_color: Color,
+    outline_width: f32,
+    background_enabled: bool,
+    background_color: Color,
+    background_padding: f32,
+    background_radius: f32,
+    kf_shadow_offset: ModelRc<ParamKeyframe>,
+    kf_shadow_blur: ModelRc<ParamKeyframe>,
+    kf_glow_radius: ModelRc<ParamKeyframe>,
+    kf_glow_intensity: ModelRc<ParamKeyframe>,
+    kf_outline_width: ModelRc<ParamKeyframe>,
+    kf_background_padding: ModelRc<ParamKeyframe>,
+    kf_background_radius: ModelRc<ParamKeyframe>,
+}
+
+fn clip_layer_styles(clip: &EngineClip, clip_start: i64) -> ProjectedLayerStyles {
+    let shadow_enabled = clip.styles.shadow.is_some();
+    let shadow = clip.styles.shadow.clone().unwrap_or_default();
+    let glow_enabled = clip.styles.glow.is_some();
+    let glow = clip.styles.glow.clone().unwrap_or_default();
+    let outline_enabled = clip.styles.outline.is_some();
+    let outline = clip.styles.outline.clone().unwrap_or_default();
+    let background_enabled = clip.styles.background.is_some();
+    let background = clip.styles.background.clone().unwrap_or_default();
+
+    ProjectedLayerStyles {
+        shadow_enabled,
+        shadow_color: rgba_color(shadow.rgba.sample(0)),
+        shadow_offset: shadow.offset.sample(0),
+        shadow_blur: shadow.blur.sample(0),
+        glow_enabled,
+        glow_color: rgba_color(glow.rgba.sample(0)),
+        glow_radius: glow.radius.sample(0),
+        glow_intensity: glow.intensity.sample(0),
+        outline_enabled,
+        outline_color: rgba_color(outline.rgba.sample(0)),
+        outline_width: outline.width.sample(0),
+        background_enabled,
+        background_color: rgba_color(background.rgba.sample(0)),
+        background_padding: background.padding.sample(0),
+        background_radius: background.radius.sample(0),
+        kf_shadow_offset: clip
+            .styles
+            .shadow
+            .as_ref()
+            .map_or_else(empty_keyframes, |s| {
+                keyframes_to_slint(&s.offset, clip_start, |v| (v[0], v[1]))
+            }),
+        kf_shadow_blur: clip
+            .styles
+            .shadow
+            .as_ref()
+            .map_or_else(empty_keyframes, |s| {
+                keyframes_to_slint(&s.blur, clip_start, |v| (*v, 0.0))
+            }),
+        kf_glow_radius: clip.styles.glow.as_ref().map_or_else(empty_keyframes, |s| {
+            keyframes_to_slint(&s.radius, clip_start, |v| (*v, 0.0))
+        }),
+        kf_glow_intensity: clip.styles.glow.as_ref().map_or_else(empty_keyframes, |s| {
+            keyframes_to_slint(&s.intensity, clip_start, |v| (*v, 0.0))
+        }),
+        kf_outline_width: clip
+            .styles
+            .outline
+            .as_ref()
+            .map_or_else(empty_keyframes, |s| {
+                keyframes_to_slint(&s.width, clip_start, |v| (*v, 0.0))
+            }),
+        kf_background_padding: clip
+            .styles
+            .background
+            .as_ref()
+            .map_or_else(empty_keyframes, |s| {
+                keyframes_to_slint(&s.padding, clip_start, |v| (*v, 0.0))
+            }),
+        kf_background_radius: clip
+            .styles
+            .background
+            .as_ref()
+            .map_or_else(empty_keyframes, |s| {
+                keyframes_to_slint(&s.radius, clip_start, |v| (*v, 0.0))
+            }),
     }
 }
 

@@ -302,6 +302,27 @@ export struct Clip {
     // `InspectorBackend.set-clip-blend-mode`.
     blend-mode: string,
     blend-label: string,
+    // Layer-quad styles (CapCut shadow/glow/outline/background). Structural
+    // enable/disable goes through `InspectorBackend.toggle-clip-style`; field
+    // edits ride the generic param callbacks (or `set-clip-style-color`).
+    // Color params project the clip-start sample only — no `kf-*` lists
+    // (color keyframes stay AI-only for now).
+    style-shadow-enabled: bool,
+    style-shadow-color: color,
+    style-shadow-offset-x: float,
+    style-shadow-offset-y: float,
+    style-shadow-blur: float,
+    style-glow-enabled: bool,
+    style-glow-color: color,
+    style-glow-radius: float,
+    style-glow-intensity: float,
+    style-outline-enabled: bool,
+    style-outline-color: color,
+    style-outline-width: float,
+    style-background-enabled: bool,
+    style-background-color: color,
+    style-background-padding: float,
+    style-background-radius: float,
     // Clip-level color grading (filters + manual adjust), projected read-only.
     // Edits go through `InspectorBackend.set-clip-filter` /
     // `set-clip-adjust`; slider drags use a session-only look override.
@@ -375,6 +396,15 @@ export struct Clip {
     kf-look-adjust-saturation: [ParamKeyframe],
     kf-look-adjust-exposure: [ParamKeyframe],
     kf-look-adjust-temperature: [ParamKeyframe],
+    // Layer-style scalar / vec2 curves (absolute ticks). Color style params
+    // intentionally omit kf lists (AI-only for now).
+    kf-style-shadow-offset: [ParamKeyframe],
+    kf-style-shadow-blur: [ParamKeyframe],
+    kf-style-glow-radius: [ParamKeyframe],
+    kf-style-glow-intensity: [ParamKeyframe],
+    kf-style-outline-width: [ParamKeyframe],
+    kf-style-background-padding: [ParamKeyframe],
+    kf-style-background-radius: [ParamKeyframe],
     // Playback-rate ramp (M2 speed curves): the speed-multiplier curve over
     // the clip's NORMALIZED span — `tick` is 0..=1000 (0 = clip start, 1000 =
     // clip end), `value-x` the multiplier. Empty ⇔ a flat constant-speed

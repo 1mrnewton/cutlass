@@ -175,6 +175,9 @@ pub(super) fn dispatch(
         WorkerMsg::SetBlendMode { clip, mode } => {
             set_blend_mode_and_publish(engine, &clip, &mode, ui)
         }
+        WorkerMsg::SetLayerStyles { clip, styles } => {
+            set_layer_styles_and_publish(engine, &clip, styles, ui)
+        }
         WorkerMsg::SetClipFilter {
             clip,
             filter_id,
@@ -333,6 +336,9 @@ pub(super) fn dispatch(
             easing,
             ui,
         ),
+        WorkerMsg::SetParamConstant { clip, param, value } => {
+            set_param_constant_and_publish(engine, &clip, param, value, ui)
+        }
         WorkerMsg::RemoveParamKeyframe { clip, param, tick } => remove_param_keyframe_and_publish(
             engine,
             &clip,

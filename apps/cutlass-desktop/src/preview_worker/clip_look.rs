@@ -77,6 +77,28 @@ pub(super) fn set_blend_mode_and_publish(engine: &mut Engine, clip: &str, mode: 
     publish_projection(engine, ui);
 }
 
+/// Replace a visual clip's layer styles (CapCut shadow/glow/outline/background).
+pub(super) fn set_layer_styles_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    styles: LayerStyles,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-layer-styles ignored: unparsable clip id");
+        return;
+    };
+    if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipLayerStyles {
+        clip: clip_id,
+        styles: styles.clone(),
+    })) {
+        error!(%clip_id, "set clip layer styles failed: {e}");
+        return;
+    }
+    info!(%clip_id, empty = styles.is_empty(), "set clip layer styles");
+    publish_projection(engine, ui);
+}
+
 /// Set or clear a visual clip's filter preset. A live look drag may have left
 /// an override in place; clear it first so the commit becomes authoritative.
 pub(super) fn set_clip_filter_and_publish(

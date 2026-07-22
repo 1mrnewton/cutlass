@@ -1,0 +1,401 @@
+// Layer-quad styles (CapCut shadow / glow / outline / background) for any
+// visual clip. Distinct from text glyph treatments — enable/disable is a
+// structural SetClipLayerStyles edit; field values ride the generic param
+// callbacks (scalars + shadow offset) or set-clip-style-color.
+
+import { CutlassColorSwatch } from "../../components/index.slint";
+import { AppStore, TimelineStore } from "../../store/index.slint";
+import { InspectorBackend, ScalarParamSample } from "../../lib/inspector-backend.slint";
+import { Clip } from "../../models/index.slint";
+import { LabelCell, SectionHeader, SliderRow } from "inspector-widgets.slint";
+
+export component StylesInspector inherits VerticalLayout {
+    in property <Clip> model;
+
+    spacing: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    private property <bool> playhead-inside: TimelineStore.playhead-tick >= model.timeline-start.value
+        && TimelineStore.playhead-tick < model.timeline-start.value + model.source-range.duration.value;
+
+    private property <ScalarParamSample> shadow-blur-sample: InspectorBackend.sample-scalar-param(
+        model, "style_shadow_blur", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> shadow-offset-x-sample: InspectorBackend.sample-scalar-param(
+        model, "style_shadow_offset_x", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> shadow-offset-y-sample: InspectorBackend.sample-scalar-param(
+        model, "style_shadow_offset_y", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> glow-radius-sample: InspectorBackend.sample-scalar-param(
+        model, "style_glow_radius", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> glow-intensity-sample: InspectorBackend.sample-scalar-param(
+        model, "style_glow_intensity", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> outline-width-sample: InspectorBackend.sample-scalar-param(
+        model, "style_outline_width", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> background-padding-sample: InspectorBackend.sample-scalar-param(
+        model, "style_background_padding", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> background-radius-sample: InspectorBackend.sample-scalar-param(
+        model, "style_background_radius", TimelineStore.playhead-tick);
+
+    function toggle-kf(param: string, on-keyframe: bool, vx: float, vy: float) {
+        if (on-keyframe) {
+            InspectorBackend.remove-param-keyframe(model.id, param, TimelineStore.playhead-tick);
+        } else {
+            InspectorBackend.set-param-keyframe(model.id, param, TimelineStore.playhead-tick, vx, vy, 0);
+        }
+    }
+
+    function ease-kf(param: string, easing: int, vx: float, vy: float) {
+        InspectorBackend.set-param-keyframe(model.id, param, TimelineStore.playhead-tick, vx, vy, easing);
+    }
+
+    // Scalar commit: write a keyframe when the curve is already animated
+    // (preserve easing under the playhead); otherwise flatten to a constant.
+    function commit-scalar(param: string, sample: ScalarParamSample, value: float) {
+        if (sample.row.animated) {
+            root.ease-kf(param, sample.row.on-keyframe ? sample.row.easing : 0, value, 0);
+        } else {
+            InspectorBackend.set-param-constant(model.id, param, value, 0);
+        }
+    }
+
+    function commit-offset(x: float, y: float) {
+        if (root.shadow-offset-x-sample.row.animated) {
+            root.ease-kf(
+                "style_shadow_offset",
+                root.shadow-offset-x-sample.row.on-keyframe ? root.shadow-offset-x-sample.row.easing : 0,
+                x,
+                y);
+        } else {
+            InspectorBackend.set-param-constant(model.id, "style_shadow_offset", x, y);
+        }
+    }
+
+    function set-color(key: string, c: color) {
+        InspectorBackend.set-clip-style-color(model.id, key, c.red, c.green, c.blue, c.alpha);
+    }
+
+    SectionHeader {
+        title: "Layer styles";
+    }
+
+    SectionHeader {
+        title: "Shadow";
+        active: model.style-shadow-enabled;
+        checkable: true;
+        interactive: true;
+        toggled => {
+            InspectorBackend.toggle-clip-style(model.id, "shadow", !model.style-shadow-enabled);
+        }
+        reset => {
+            InspectorBackend.toggle-clip-style(model.id, "shadow", false);
+        }
+    }
+
+    if model.style-shadow-enabled: HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+
+        LabelCell {
+            label: "Color";
+        }
+
+        CutlassColorSwatch {
+            value: model.style-shadow-color;
+            changed(c) => {
+                root.set-color("style_shadow_color", c);
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+
+    if model.style-shadow-enabled: SliderRow {
+        label: "Offset X";
+        suffix: "px";
+        value: root.shadow-offset-x-sample.value;
+        minimum: -200;
+        maximum: 200;
+        reset-value: 4;
+        kf-visible: true;
+        kf: root.shadow-offset-x-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-offset(clamp(v, -200, 200), root.shadow-offset-y-sample.value);
+        }
+        kf-toggle => {
+            root.toggle-kf(
+                "style_shadow_offset",
+                root.shadow-offset-x-sample.row.on-keyframe,
+                root.shadow-offset-x-sample.value,
+                root.shadow-offset-y-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf(
+                "style_shadow_offset",
+                e,
+                root.shadow-offset-x-sample.value,
+                root.shadow-offset-y-sample.value);
+        }
+    }
+
+    if model.style-shadow-enabled: SliderRow {
+        label: "Offset Y";
+        suffix: "px";
+        value: root.shadow-offset-y-sample.value;
+        minimum: -200;
+        maximum: 200;
+        reset-value: 4;
+        kf-visible: true;
+        kf: root.shadow-offset-y-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-offset(root.shadow-offset-x-sample.value, clamp(v, -200, 200));
+        }
+        kf-toggle => {
+            root.toggle-kf(
+                "style_shadow_offset",
+                root.shadow-offset-y-sample.row.on-keyframe,
+                root.shadow-offset-x-sample.value,
+                root.shadow-offset-y-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf(
+                "style_shadow_offset",
+                e,
+                root.shadow-offset-x-sample.value,
+                root.shadow-offset-y-sample.value);
+        }
+    }
+
+    if model.style-shadow-enabled: SliderRow {
+        label: "Blur";
+        suffix: "px";
+        value: root.shadow-blur-sample.value;
+        minimum: 0;
+        maximum: 100;
+        reset-value: 8;
+        kf-visible: true;
+        kf: root.shadow-blur-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-scalar("style_shadow_blur", root.shadow-blur-sample, clamp(v, 0, 100));
+        }
+        kf-toggle => {
+            root.toggle-kf("style_shadow_blur", root.shadow-blur-sample.row.on-keyframe, root.shadow-blur-sample.value, 0);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("style_shadow_blur", e, root.shadow-blur-sample.value, 0);
+        }
+    }
+
+    SectionHeader {
+        title: "Glow";
+        active: model.style-glow-enabled;
+        checkable: true;
+        interactive: true;
+        toggled => {
+            InspectorBackend.toggle-clip-style(model.id, "glow", !model.style-glow-enabled);
+        }
+        reset => {
+            InspectorBackend.toggle-clip-style(model.id, "glow", false);
+        }
+    }
+
+    if model.style-glow-enabled: HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+
+        LabelCell {
+            label: "Color";
+        }
+
+        CutlassColorSwatch {
+            value: model.style-glow-color;
+            changed(c) => {
+                root.set-color("style_glow_color", c);
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+
+    if model.style-glow-enabled: SliderRow {
+        label: "Radius";
+        suffix: "px";
+        value: root.glow-radius-sample.value;
+        minimum: 0;
+        maximum: 100;
+        reset-value: 12;
+        kf-visible: true;
+        kf: root.glow-radius-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-scalar("style_glow_radius", root.glow-radius-sample, clamp(v, 0, 100));
+        }
+        kf-toggle => {
+            root.toggle-kf("style_glow_radius", root.glow-radius-sample.row.on-keyframe, root.glow-radius-sample.value, 0);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("style_glow_radius", e, root.glow-radius-sample.value, 0);
+        }
+    }
+
+    if model.style-glow-enabled: SliderRow {
+        label: "Intensity";
+        suffix: "";
+        value: root.glow-intensity-sample.value;
+        minimum: 0;
+        maximum: 4;
+        step: 0.05;
+        decimals: 2;
+        reset-value: 1;
+        kf-visible: true;
+        kf: root.glow-intensity-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-scalar("style_glow_intensity", root.glow-intensity-sample, clamp(v, 0, 4));
+        }
+        kf-toggle => {
+            root.toggle-kf("style_glow_intensity", root.glow-intensity-sample.row.on-keyframe, root.glow-intensity-sample.value, 0);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("style_glow_intensity", e, root.glow-intensity-sample.value, 0);
+        }
+    }
+
+    SectionHeader {
+        title: "Outline";
+        active: model.style-outline-enabled;
+        checkable: true;
+        interactive: true;
+        toggled => {
+            InspectorBackend.toggle-clip-style(model.id, "outline", !model.style-outline-enabled);
+        }
+        reset => {
+            InspectorBackend.toggle-clip-style(model.id, "outline", false);
+        }
+    }
+
+    if model.style-outline-enabled: HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+
+        LabelCell {
+            label: "Color";
+        }
+
+        CutlassColorSwatch {
+            value: model.style-outline-color;
+            changed(c) => {
+                root.set-color("style_outline_color", c);
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+
+    if model.style-outline-enabled: SliderRow {
+        label: "Width";
+        suffix: "px";
+        value: root.outline-width-sample.value;
+        minimum: 0;
+        maximum: 50;
+        reset-value: 4;
+        kf-visible: true;
+        kf: root.outline-width-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-scalar("style_outline_width", root.outline-width-sample, clamp(v, 0, 50));
+        }
+        kf-toggle => {
+            root.toggle-kf("style_outline_width", root.outline-width-sample.row.on-keyframe, root.outline-width-sample.value, 0);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("style_outline_width", e, root.outline-width-sample.value, 0);
+        }
+    }
+
+    SectionHeader {
+        title: "Background";
+        active: model.style-background-enabled;
+        checkable: true;
+        interactive: true;
+        toggled => {
+            InspectorBackend.toggle-clip-style(model.id, "background", !model.style-background-enabled);
+        }
+        reset => {
+            InspectorBackend.toggle-clip-style(model.id, "background", false);
+        }
+    }
+
+    if model.style-background-enabled: HorizontalLayout {
+        spacing: AppStore.theme.metrics.spacing.md;
+
+        LabelCell {
+            label: "Color";
+        }
+
+        CutlassColorSwatch {
+            value: model.style-background-color;
+            changed(c) => {
+                root.set-color("style_background_color", c);
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+
+    if model.style-background-enabled: SliderRow {
+        label: "Padding";
+        suffix: "px";
+        value: root.background-padding-sample.value;
+        minimum: 0;
+        maximum: 100;
+        reset-value: 12;
+        kf-visible: true;
+        kf: root.background-padding-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-scalar("style_background_padding", root.background-padding-sample, clamp(v, 0, 100));
+        }
+        kf-toggle => {
+            root.toggle-kf("style_background_padding", root.background-padding-sample.row.on-keyframe, root.background-padding-sample.value, 0);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("style_background_padding", e, root.background-padding-sample.value, 0);
+        }
+    }
+
+    if model.style-background-enabled: SliderRow {
+        label: "Corner";
+        suffix: "px";
+        value: root.background-radius-sample.value;
+        minimum: 0;
+        maximum: 100;
+        reset-value: 0;
+        kf-visible: true;
+        kf: root.background-radius-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        preview(v) => { }
+        commit(v) => {
+            root.commit-scalar("style_background_radius", root.background-radius-sample, clamp(v, 0, 100));
+        }
+        kf-toggle => {
+            root.toggle-kf("style_background_radius", root.background-radius-sample.row.on-keyframe, root.background-radius-sample.value, 0);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("style_background_radius", e, root.background-radius-sample.value, 0);
+        }
+    }
+}

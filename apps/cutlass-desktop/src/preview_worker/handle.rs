@@ -267,6 +267,10 @@ impl WorkerHandle {
         let _ = self.tx.send(WorkerMsg::SetBlendMode { clip, mode });
     }
 
+    pub fn set_layer_styles(&self, clip: String, styles: LayerStyles) {
+        let _ = self.tx.send(WorkerMsg::SetLayerStyles { clip, styles });
+    }
+
     pub fn set_clip_filter(&self, clip: String, filter_id: String, intensity: f32) {
         let _ = self.tx.send(WorkerMsg::SetClipFilter {
             clip,
@@ -385,6 +389,12 @@ impl WorkerHandle {
             value,
             easing,
         });
+    }
+
+    pub fn set_param_constant(&self, clip: String, param: ClipParam, value: ParamValue) {
+        let _ = self
+            .tx
+            .send(WorkerMsg::SetParamConstant { clip, param, value });
     }
 
     pub fn remove_param_keyframe(&self, clip: String, param: ClipParam, tick: i64) {

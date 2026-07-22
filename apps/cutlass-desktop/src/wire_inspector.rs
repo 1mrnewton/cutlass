@@ -85,6 +85,17 @@ pub(crate) fn wire_inspector(
             kf_remove_handle.remove_param_keyframe(clip_id.to_string(), param, i64::from(tick));
         });
 
+    let param_constant_handle = preview_worker.handle();
+    app.global::<InspectorBackend>().on_set_param_constant(
+        move |clip_id, param, value_x, value_y| {
+            let Some((param, value)) = clip_param_value(param.as_str(), value_x, value_y) else {
+                tracing::error!(param = param.as_str(), "ignoring constant on unknown param");
+                return;
+            };
+            param_constant_handle.set_param_constant(clip_id.to_string(), param, value);
+        },
+    );
+
     // Timeline keyframe diamonds: merged tick model for the selected clip,
     // drag-retime, right-click delete.
     app.global::<KeyframeBackend>()
@@ -178,6 +189,62 @@ pub(crate) fn wire_inspector(
     app.global::<InspectorBackend>()
         .on_set_clip_blend_mode(move |clip_id, mode| {
             set_blend_handle.set_blend_mode(clip_id.to_string(), mode.to_string());
+        });
+
+    let toggle_style_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_toggle_clip_style(move |clip_id, block, enabled| {
+            let Some(project) = toggle_style_handle.snapshot_project() else {
+                return;
+            };
+            let Some(raw) = clip_id.as_str().parse::<u64>().ok() else {
+                tracing::error!(clip = %clip_id, "toggle-clip-style ignored: unparsable clip id");
+                return;
+            };
+            let clip_key = cutlass_models::ClipId::from_raw(raw);
+            let Some(clip) = project.clip(clip_key) else {
+                tracing::error!(clip = %clip_id, "toggle-clip-style ignored: unknown clip");
+                return;
+            };
+            let mut styles = clip.styles.clone();
+            match block.as_str() {
+                "shadow" => {
+                    styles.shadow = enabled.then(cutlass_models::LayerShadow::default);
+                }
+                "glow" => {
+                    styles.glow = enabled.then(cutlass_models::LayerGlow::default);
+                }
+                "outline" => {
+                    styles.outline = enabled.then(cutlass_models::LayerOutline::default);
+                }
+                "background" => {
+                    styles.background = enabled.then(cutlass_models::LayerBackground::default);
+                }
+                other => {
+                    tracing::error!(block = other, "toggle-clip-style ignored: unknown block");
+                    return;
+                }
+            }
+            toggle_style_handle.set_layer_styles(clip_id.to_string(), styles);
+        });
+
+    let style_color_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_set_clip_style_color(move |clip_id, key, r, g, b, a| {
+            let r = r.clamp(0, 255) as u16;
+            let g = g.clamp(0, 255) as u16;
+            let b = b.clamp(0, 255) as u16;
+            let a = a.clamp(0, 255) as u16;
+            let value_x = ((r << 8) | g) as f32;
+            let value_y = ((b << 8) | a) as f32;
+            let Some((param, value)) = clip_param_value(key.as_str(), value_x, value_y) else {
+                tracing::error!(
+                    key = key.as_str(),
+                    "set-clip-style-color ignored: unknown key"
+                );
+                return;
+            };
+            style_color_handle.set_param_constant(clip_id.to_string(), param, value);
         });
 
     let set_filter_handle = preview_worker.handle();

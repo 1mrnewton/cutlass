@@ -30,6 +30,7 @@ import {
 import { AnimationInspector } from "animation-inspector.slint";
 import { TextStyleRows, IconButton, NumberBox } from "text-style-rows.slint";
 import { TextTreatmentRows } from "text-treatment-rows.slint";
+import { StylesInspector } from "styles-inspector.slint";
 
 component PillTab inherits Rectangle {
     in property <string> label;
@@ -793,6 +794,12 @@ export component TextInspector inherits VerticalLayout {
                 track-id: root.track-id;
                 model: root.model;
                 edit-text: root.edit-text;
+            }
+
+            InspectorDivider { }
+
+            StylesInspector {
+                model: root.model;
             }
 
             HorizontalLayout {

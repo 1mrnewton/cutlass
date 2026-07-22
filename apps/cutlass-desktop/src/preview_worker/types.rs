@@ -324,6 +324,12 @@ pub(super) enum WorkerMsg {
         clip: String,
         mode: String,
     },
+    /// Replace a visual clip's layer styles (shadow/glow/outline/background).
+    /// One undoable history entry.
+    SetLayerStyles {
+        clip: String,
+        styles: LayerStyles,
+    },
     /// Set (or clear) a visual clip's filter preset. `filter_id == ""`
     /// clears; intensity is normalized 0..=1. One undoable history entry.
     SetClipFilter {
@@ -468,6 +474,13 @@ pub(super) enum WorkerMsg {
         tick: i64,
         value: ParamValue,
         easing: Easing,
+    },
+    /// Replace one animatable property with a constant, dropping its
+    /// keyframes. One undoable edit.
+    SetParamConstant {
+        clip: String,
+        param: ClipParam,
+        value: ParamValue,
     },
     /// Remove the keyframe sitting exactly at `tick` on one property of
     /// `clip`. Removing the last keyframe collapses the property to a

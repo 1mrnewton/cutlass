@@ -54,6 +54,68 @@ fn projects_clip_blend_mode() {
 }
 
 #[test]
+fn projects_clip_layer_styles() {
+    use cutlass_models::{
+        LayerShadow, LayerStyles, MediaSource, RationalTime, TimeRange, TrackKind,
+    };
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("styles", EngineRational::FPS_24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/styles.mp4",
+        1920,
+        1080,
+        EngineRational::FPS_24,
+        480,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            RationalTime::new(0, EngineRational::FPS_24),
+        )
+        .expect("clip");
+    project
+        .set_layer_styles(
+            clip_id,
+            LayerStyles {
+                shadow: Some(LayerShadow::default()),
+                ..Default::default()
+            },
+        )
+        .expect("set styles");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clips = projected.sequence.tracks.row_data(0).unwrap().clips;
+    let clip = clips.row_data(0).unwrap();
+    assert!(clip.style_shadow_enabled);
+    assert!(!clip.style_glow_enabled);
+    assert!((clip.style_shadow_blur - 8.0).abs() < f32::EPSILON);
+    assert!((clip.style_shadow_offset_x - 4.0).abs() < f32::EPSILON);
+    assert_eq!(clip.style_shadow_color.red(), 0);
+    assert_eq!(clip.style_shadow_color.alpha(), 128);
+    assert_eq!(clip.kf_style_shadow_blur.row_count(), 0);
+
+    project
+        .set_layer_styles(clip_id, LayerStyles::default())
+        .expect("clear styles");
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clip = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(!clip.style_shadow_enabled);
+}
+
+#[test]
 fn sticker_card_gets_catalog_label_and_composited_tag() {
     use cutlass_models::{Clip as MClip, Generator, Rational, TimeRange};
     let span = TimeRange::at_rate(0, 100, Rational::FPS_24);

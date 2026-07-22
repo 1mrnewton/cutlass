@@ -148,9 +148,44 @@ pub(crate) fn sampled_scalar_param(clip: &Clip, param: &str, playhead: i32) -> O
         "look_adjust_saturation" => (&clip.kf_look_adjust_saturation, clip.adjust_saturation),
         "look_adjust_exposure" => (&clip.kf_look_adjust_exposure, clip.adjust_exposure),
         "look_adjust_temperature" => (&clip.kf_look_adjust_temperature, clip.adjust_temperature),
+        "style_shadow_blur" => (&clip.kf_style_shadow_blur, clip.style_shadow_blur),
+        "style_glow_radius" => (&clip.kf_style_glow_radius, clip.style_glow_radius),
+        "style_glow_intensity" => (&clip.kf_style_glow_intensity, clip.style_glow_intensity),
+        "style_outline_width" => (&clip.kf_style_outline_width, clip.style_outline_width),
+        "style_background_padding" => (
+            &clip.kf_style_background_padding,
+            clip.style_background_padding,
+        ),
+        "style_background_radius" => (
+            &clip.kf_style_background_radius,
+            clip.style_background_radius,
+        ),
         _ => return None,
     };
     Some(scalar_param(keyframes, constant).sample(tick))
+}
+
+/// Sample a vec2 param (`position`, `anchor`, `style_shadow_offset`) at the
+/// playhead. Axis-display keys (`style_shadow_offset_x` / `_y`) are handled
+/// in [`crate::inspector::sample_scalar_param`].
+pub(crate) fn sampled_vec2_param(clip: &Clip, param: &str, playhead: i32) -> Option<[f32; 2]> {
+    let tick = clamped_tick(clip, playhead);
+    let (keyframes, constant) = match param {
+        "position" => (
+            &clip.kf_position,
+            [clip.transform_position_x, clip.transform_position_y],
+        ),
+        "anchor" => (
+            &clip.kf_anchor,
+            [clip.transform_anchor_x, clip.transform_anchor_y],
+        ),
+        "style_shadow_offset" => (
+            &clip.kf_style_shadow_offset,
+            [clip.style_shadow_offset_x, clip.style_shadow_offset_y],
+        ),
+        _ => return None,
+    };
+    Some(vec2_param(keyframes, constant).sample(tick))
 }
 
 /// Overwrite the clip's `transform-*` fields with the playhead sample, so
@@ -193,6 +228,13 @@ pub(crate) fn merged_keyframe_ticks(clip: &Clip) -> slint::ModelRc<i32> {
         &clip.kf_look_adjust_saturation,
         &clip.kf_look_adjust_exposure,
         &clip.kf_look_adjust_temperature,
+        &clip.kf_style_shadow_offset,
+        &clip.kf_style_shadow_blur,
+        &clip.kf_style_glow_radius,
+        &clip.kf_style_glow_intensity,
+        &clip.kf_style_outline_width,
+        &clip.kf_style_background_padding,
+        &clip.kf_style_background_radius,
     ]
     .iter()
     .flat_map(|kfs| kfs.iter().map(|kf| kf.tick))
@@ -362,6 +404,25 @@ mod tests {
         assert_eq!(ticks, vec![5, 10, 30]);
 
         assert_eq!(merged_keyframe_ticks(&clip(0, 10)).row_count(), 0);
+    }
+
+    #[test]
+    fn style_shadow_blur_samples_projected_curve() {
+        let mut c = clip(0, 100);
+        c.style_shadow_blur = 8.0;
+        assert_eq!(sampled_scalar_param(&c, "style_shadow_blur", 50), Some(8.0));
+        c.kf_style_shadow_blur = kfs(vec![kf(0, 4.0), kf(40, 12.0)]);
+        assert_eq!(sampled_scalar_param(&c, "style_shadow_blur", 20), Some(8.0));
+        assert_eq!(
+            sampled_vec2_param(&c, "style_shadow_offset", 0),
+            Some([0.0, 0.0])
+        );
+        c.style_shadow_offset_x = 4.0;
+        c.style_shadow_offset_y = -2.0;
+        assert_eq!(
+            sampled_vec2_param(&c, "style_shadow_offset", 10),
+            Some([4.0, -2.0])
+        );
     }
 
     #[test]

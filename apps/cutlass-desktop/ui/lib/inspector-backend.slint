@@ -138,6 +138,17 @@ export global InspectorBackend {
     // semantics). One undoable engine edit.
     callback remove-param-keyframe(clip-id: string, param: string, tick: int);
 
+    // Replace one animatable property with a constant, dropping its
+    // keyframes. Scalars ride `value-x`; vec2 params use both axes; color
+    // params pack RG into `value-x` and BA into `value-y` (u16 lanes).
+    // One undoable engine edit.
+    callback set-param-constant(
+        clip-id: string,
+        param: string,
+        value-x: float,
+        value-y: float,
+    );
+
     // Retime a media clip (CapCut speed, M1): positive rational `num/den`
     // playback rate (2/1 = double speed) plus the reverse flag. The engine
     // keeps the clip's timeline start and source window and re-derives the
@@ -234,6 +245,22 @@ export global InspectorBackend {
     // id from `blend-catalog` (e.g. "multiply"); `"normal"` is the default.
     // One undoable edit.
     callback set-clip-blend-mode(clip-id: string, mode: string);
+
+    // Enable or clear one layer-style block on a visual clip. `block` is
+    // "shadow" | "glow" | "outline" | "background". Enabling installs the
+    // model default for that block; disabling clears it. One undoable edit.
+    callback toggle-clip-style(clip-id: string, block: string, enabled: bool);
+
+    // Set a layer-style color param (`style_shadow_color`, …) as a constant
+    // via the generic param path. Channels are 0..=255. One undoable edit.
+    callback set-clip-style-color(
+        clip-id: string,
+        key: string,
+        r: int,
+        g: int,
+        b: int,
+        a: int,
+    );
 
     // Set (or clear with an empty id) a visual clip's filter preset. Intensity
     // is normalized 0..=1; the inspector displays it as 0..=100%.

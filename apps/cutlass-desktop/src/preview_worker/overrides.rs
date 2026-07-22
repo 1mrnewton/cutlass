@@ -228,6 +228,32 @@ pub(super) fn set_param_keyframe_and_publish(
     }
 }
 
+/// Replace one animatable property with a constant (inspector slider commit
+/// on a non-animated row). Drops any existing keyframes on that property.
+pub(super) fn set_param_constant_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    param: ClipParam,
+    value: ParamValue,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-param-constant ignored: unparsable clip id");
+        return;
+    };
+    match engine.apply(Command::Edit(EditCommand::SetParamConstant {
+        clip: clip_id,
+        param,
+        value,
+    })) {
+        Ok(_) => {
+            info!(%clip_id, ?param, "set param constant");
+            publish_projection(engine, ui);
+        }
+        Err(e) => error!(%clip_id, ?param, "set param constant failed: {e}"),
+    }
+}
+
 /// Remove the keyframe at exactly `at` on one property (inspector diamond
 /// toggled off). The engine rejects when nothing sits there.
 pub(super) fn remove_param_keyframe_and_publish(

@@ -720,6 +720,7 @@ pub(super) fn message_invalidates_preview(msg: &WorkerMsg) -> bool {
             | WorkerMsg::SetSpeedCurvePoint { .. }
             | WorkerMsg::SetClipCrop { .. }
             | WorkerMsg::SetBlendMode { .. }
+            | WorkerMsg::SetLayerStyles { .. }
             | WorkerMsg::SetClipFilter { .. }
             | WorkerMsg::SetClipAdjust { .. }
             | WorkerMsg::SetClipLut { .. }
@@ -734,6 +735,7 @@ pub(super) fn message_invalidates_preview(msg: &WorkerMsg) -> bool {
             // Aspect reshapes the composite, background recolors it.
             | WorkerMsg::SetCanvas { .. }
             | WorkerMsg::SetParamKeyframe { .. }
+            | WorkerMsg::SetParamConstant { .. }
             | WorkerMsg::RemoveParamKeyframe { .. }
             | WorkerMsg::RetimeKeyframes { .. }
             | WorkerMsg::RemoveKeyframesAt { .. }

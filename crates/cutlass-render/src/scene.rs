@@ -201,10 +201,22 @@ pub struct SceneLayer {
 }
 
 /// Mask values sampled at a clip-local tick.
+///
+/// Geometry (`center`, `size`, `rotation_rad`, `roundness`) stays in the same
+/// fraction-of-layer units as the model — the compositor consumes those
+/// fractions directly; no canvas-pixel conversion happens here.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SceneMask {
     pub kind: MaskKind,
     pub feather: f32,
+    /// Mask center offset from the layer center, as a fraction of layer size.
+    pub center: [f32; 2],
+    /// Mask size as a fraction of layer size (`[1,1]` = cover the layer).
+    pub size: [f32; 2],
+    /// Mask rotation in radians (converted from model degrees at resolve).
+    pub rotation_rad: f32,
+    /// Rectangle corner rounding, `0` … `1`.
+    pub roundness: f32,
     pub invert: bool,
 }
 

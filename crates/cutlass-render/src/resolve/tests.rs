@@ -959,9 +959,83 @@ fn mask_and_chroma_key_reach_media_layer() {
     let scene = resolve(&project, rt(5)).unwrap();
     assert_eq!(scene.layers.len(), 1);
     let layer = &scene.layers[0];
-    assert_eq!(layer.mask.unwrap().kind, MaskKind::Circle);
+    let mask = layer.mask.unwrap();
+    assert_eq!(mask.kind, MaskKind::Circle);
+    approx2(mask.center, [0.0, 0.0]);
+    approx2(mask.size, [1.0, 1.0]);
+    approx(mask.rotation_rad, 0.0);
+    approx(mask.roundness, 0.0);
     assert_eq!(layer.chroma_key.unwrap().rgb, [0, 255, 0]);
     assert!((layer.chroma_key.unwrap().strength - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn keyframed_mask_center_samples_per_tick() {
+    use cutlass_models::{LookParam, Mask, MaskKind};
+
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_clip_mask(clip, Some(Mask::new(MaskKind::Circle)))
+        .unwrap();
+    let center = ClipParam::Look {
+        param: LookParam::MaskCenter,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            center,
+            rt(0),
+            ParamValue::Vec2([0.0, 0.0]),
+            Easing::Linear,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            center,
+            rt(40),
+            ParamValue::Vec2([0.5, -0.25]),
+            Easing::Linear,
+        )
+        .unwrap();
+
+    let start = resolve(&project, rt(0)).unwrap();
+    approx2(start.layers[0].mask.unwrap().center, [0.0, 0.0]);
+    let mid = resolve(&project, rt(20)).unwrap();
+    approx2(mid.layers[0].mask.unwrap().center, [0.25, -0.125]);
+    let end = resolve(&project, rt(40)).unwrap();
+    approx2(end.layers[0].mask.unwrap().center, [0.5, -0.25]);
+}
+
+#[test]
+fn mask_rotation_degrees_resolve_to_radians() {
+    use cutlass_models::{LookParam, Mask, MaskKind};
+
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_clip_mask(clip, Some(Mask::new(MaskKind::Rectangle)))
+        .unwrap();
+    project
+        .set_param_constant(
+            clip,
+            ClipParam::Look {
+                param: LookParam::MaskRotation,
+            },
+            ParamValue::Scalar(90.0),
+        )
+        .unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    approx(
+        scene.layers[0].mask.unwrap().rotation_rad,
+        std::f32::consts::FRAC_PI_2,
+    );
 }
 
 #[test]

@@ -41,6 +41,8 @@ pub(super) fn pack_effects(resolved: &[ResolvedPass]) -> EffectChain {
 }
 
 pub(super) fn layer_effects(layer: &crate::scene::SceneLayer) -> LayerEffects {
+    // Geometry consumed in a follow-up — SceneMask also carries
+    // center/size/rotation_rad/roundness; compositor LayerMask does not yet.
     let mask = layer.mask.map(|m| LayerMask {
         kind: mask_kind_id(m.kind),
         feather: m.feather,

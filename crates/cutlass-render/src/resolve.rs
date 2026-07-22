@@ -368,10 +368,17 @@ fn resolve_clip(
             path: l.path.clone(),
             intensity: l.intensity.sample(local_tick),
         });
-    let mask = clip.mask.as_ref().map(|mask| SceneMask {
-        kind: mask.kind,
-        feather: mask.feather.sample(local_tick),
-        invert: mask.invert,
+    let mask = clip.mask.as_ref().map(|mask| {
+        let rotation_deg = mask.rotation.sample(local_tick);
+        SceneMask {
+            kind: mask.kind,
+            feather: mask.feather.sample(local_tick),
+            center: mask.center.sample(local_tick),
+            size: mask.size.sample(local_tick),
+            rotation_rad: rotation_deg.to_radians(),
+            roundness: mask.roundness.sample(local_tick),
+            invert: mask.invert,
+        }
     });
     let chroma_key = clip.chroma_key.as_ref().map(|chroma| SceneChromaKey {
         rgb: chroma.rgb,

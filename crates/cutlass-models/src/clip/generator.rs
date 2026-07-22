@@ -427,7 +427,7 @@ impl Generator {
             .ok_or_else(|| ModelError::InvalidParam(format!("unknown text effect '{preset}'")))?;
         style.stroke = spec.stroke.clone();
         style.shadow = spec.shadow.clone();
-        style.background = spec.background.clone();
+        style.background = spec.background;
         Ok(())
     }
 

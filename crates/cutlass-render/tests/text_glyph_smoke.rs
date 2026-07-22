@@ -20,8 +20,8 @@ fn typewriter_text_renders_glyph_coverage() {
             Generator::Text {
                 content: "Cutlass".into(),
                 style: ModelTextStyle {
-                    size: 72.0,
-                    fill: [255, 255, 255, 255],
+                    size: 72.0.into(),
+                    fill: [255, 255, 255, 255].into(),
                     ..ModelTextStyle::default()
                 },
             },

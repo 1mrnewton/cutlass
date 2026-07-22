@@ -227,8 +227,8 @@ fn gesture_sprite_contains_unwrapped_text_pixels() {
                 content: "hello worldhello worldhello worldhello world".into(),
                 style: TextStyle {
                     font: "Micro 5".into(),
-                    size: 56.0,
-                    letter_spacing: 30.0,
+                    size: 56.0.into(),
+                    letter_spacing: 30.0.into(),
                     wrap: false,
                     ..TextStyle::default()
                 },

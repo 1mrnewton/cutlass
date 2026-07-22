@@ -88,7 +88,7 @@ fn test_project() -> Project {
             Generator::Text {
                 content: "Hi".into(),
                 style: TextStyle {
-                    size: 160.0,
+                    size: 160.0.into(),
                     ..TextStyle::default()
                 },
             },

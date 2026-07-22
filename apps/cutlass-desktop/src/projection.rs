@@ -863,7 +863,7 @@ fn text_style_to_ui(style: &EngineTextStyle) -> TextClipStyle {
     let opaque = |rgba: [u8; 4]| Color::from_rgb_u8(rgba[0], rgba[1], rgba[2]);
     let alpha01 = |rgba: [u8; 4]| rgba[3] as f32 / 255.0;
     let stroke = style.stroke.clone().unwrap_or_default();
-    let background = style.background.clone().unwrap_or_default();
+    let background = style.background.unwrap_or_default();
     let shadow = style.shadow.clone().unwrap_or_default();
     TextClipStyle {
         font: style.font.clone().into(),

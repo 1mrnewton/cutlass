@@ -291,7 +291,7 @@ fn set_generator_preserves_text_style_and_rejects_media_clips() {
     let styled = Generator::Text {
         content: "INTRO".into(),
         style: cutlass_models::TextStyle {
-            size: 120.0,
+            size: 120.0.into(),
             ..Default::default()
         },
     };
@@ -314,7 +314,11 @@ fn set_generator_preserves_text_style_and_rejects_media_clips() {
             ..
         } => {
             assert_eq!(content, "OUTRO");
-            assert_eq!(style.size, 120.0, "existing style must be preserved");
+            assert_eq!(
+                style.size.sample(0),
+                120.0,
+                "existing style must be preserved"
+            );
         }
         other => panic!("unexpected lowering: {other:?}"),
     }

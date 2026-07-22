@@ -449,11 +449,11 @@ fn undo_redo_set_generator_oscillates_style() {
 
     let styled = cutlass_models::TextStyle {
         bold: true,
-        size: 120.0,
-        fill: [10, 20, 30, 255],
+        size: 120.0.into(),
+        fill: [10, 20, 30, 255].into(),
         stroke: Some(cutlass_models::TextStroke {
-            rgba: [0, 0, 0, 255],
-            width: 8.0,
+            rgba: [0, 0, 0, 255].into(),
+            width: 8.0.into(),
         }),
         ..Default::default()
     };

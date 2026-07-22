@@ -16,15 +16,15 @@ use crate::{Clip, ParamKeyframe, ParamRowState};
 /// `(tag, [x1, y1, x2, y2])` — points are zero for the built-in presets.
 ///
 /// Tags: 0 linear, 1 ease-in, 2 ease-out, 3 ease-in-out, 4 custom bezier,
-/// 5 snappy, 6 overshoot, 7 anticipate ([`cutlass_models::EASING_PRESETS`]).
+/// 5 snappy, 6 overshoot, 7 anticipate ([`cutlass_models::EASING_PRESETS`]),
+/// 8 hold.
 pub(crate) fn easing_to_ui(easing: Easing) -> (i32, [f32; 4]) {
     match easing {
         Easing::Linear => (0, [0.0; 4]),
         Easing::EaseIn => (1, [0.0; 4]),
         Easing::EaseOut => (2, [0.0; 4]),
         Easing::EaseInOut => (3, [0.0; 4]),
-        // Placeholder until the flyout offers hold: present as linear.
-        Easing::Hold => (0, [0.0; 4]),
+        Easing::Hold => (8, [0.0; 4]),
         Easing::Bezier { points } => match easing.preset_id() {
             Some("snappy") => (5, points),
             Some("overshoot") => (6, points),
@@ -45,6 +45,7 @@ pub(crate) fn easing_from_ui(tag: i32, points: [f32; 4]) -> Easing {
         5 => Easing::from_preset_id("snappy").unwrap_or(Easing::Linear),
         6 => Easing::from_preset_id("overshoot").unwrap_or(Easing::Linear),
         7 => Easing::from_preset_id("anticipate").unwrap_or(Easing::Linear),
+        8 => Easing::Hold,
         _ => Easing::Linear,
     }
 }
@@ -376,6 +377,7 @@ mod tests {
             Easing::Bezier {
                 points: [0.42, 0.0, 0.58, 1.0],
             },
+            Easing::Hold,
         ] {
             let (tag, points) = easing_to_ui(easing);
             assert_eq!(easing_from_ui(tag, points), easing);

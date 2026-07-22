@@ -61,8 +61,8 @@ export component KeyframeControl inherits HorizontalLayout {
     // Move the playhead to a neighboring keyframe's tick.
     callback jump(tick: int);
     // Re-ease the keyframe under the playhead (0 linear … 3 ease-in-out,
-    // 5 snappy, 6 overshoot, 7 anticipate — tag 4 is custom bezier, unused
-    // in the flyout).
+    // 5 snappy, 6 overshoot, 7 anticipate, 8 hold — tag 4 is custom bezier,
+    // unused in the flyout).
     callback set-easing(easing: int);
 
     private property <color> accent: AppStore.theme.accent.primary;
@@ -74,9 +74,10 @@ export component KeyframeControl inherits HorizontalLayout {
         "Snappy",
         "Overshoot",
         "Anticipate",
+        "Hold",
     ];
     // Map flyout row index → engine easing tag (skip custom-bezier tag 4).
-    private property <[int]> easing-tags: [0, 1, 2, 3, 5, 6, 7];
+    private property <[int]> easing-tags: [0, 1, 2, 3, 5, 6, 7, 8];
 
     spacing: AppStore.theme.metrics.spacing.none;
     alignment: LayoutAlignment.center;

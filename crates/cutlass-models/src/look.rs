@@ -378,17 +378,125 @@ impl AnimationSlot {
     }
 }
 
+/// Default value for [`AnimationRef`] tunable knobs (identity / catalog feel).
+pub const ANIMATION_PARAM_DEFAULT: f32 = 1.0;
+/// Inclusive range for [`AnimationRef::speed`].
+pub const ANIMATION_SPEED_RANGE: (f32, f32) = (0.25, 4.0);
+/// Inclusive range for [`AnimationRef::intensity`].
+pub const ANIMATION_INTENSITY_RANGE: (f32, f32) = (0.0, 2.0);
+/// Inclusive range for [`AnimationRef::stagger`].
+pub const ANIMATION_STAGGER_RANGE: (f32, f32) = (0.0, 2.0);
+
+fn default_anim_param() -> f32 {
+    ANIMATION_PARAM_DEFAULT
+}
+
+fn is_default_anim_param(v: &f32) -> bool {
+    (*v - ANIMATION_PARAM_DEFAULT).abs() < f32::EPSILON
+}
+
+/// Which user-tunable knobs a preset exposes in the inspector / AI wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnimationKnobs {
+    pub speed: bool,
+    pub intensity: bool,
+    pub stagger: bool,
+}
+
+impl AnimationKnobs {
+    /// Speed + intensity (whole-layer and most text presets).
+    pub const SPEED_INTENSITY: Self = Self {
+        speed: true,
+        intensity: true,
+        stagger: false,
+    };
+    /// Speed + intensity + stagger (per-character presets).
+    pub const SPEED_INTENSITY_STAGGER: Self = Self {
+        speed: true,
+        intensity: true,
+        stagger: true,
+    };
+}
+
 /// A reference to a catalog animation, stored per slot on the clip.
+///
+/// `speed` / `intensity` / `stagger` default to [`ANIMATION_PARAM_DEFAULT`]
+/// and serialize only when non-default (additive — old projects still load).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnimationRef {
     /// Catalog id (see [`animation_catalog`]).
     pub id: String,
+    /// Playback rate of the entrance/exit window or combo period (`1` = catalog).
+    #[serde(
+        default = "default_anim_param",
+        skip_serializing_if = "is_default_anim_param"
+    )]
+    pub speed: f32,
+    /// Magnitude of motion / opacity swing (`1` = catalog, `0` = no motion).
+    #[serde(
+        default = "default_anim_param",
+        skip_serializing_if = "is_default_anim_param"
+    )]
+    pub intensity: f32,
+    /// Per-character stagger stretch (`1` = catalog; ignored when the preset
+    /// has no stagger knob).
+    #[serde(
+        default = "default_anim_param",
+        skip_serializing_if = "is_default_anim_param"
+    )]
+    pub stagger: f32,
 }
 
 impl AnimationRef {
     pub fn new(id: impl Into<String>) -> Self {
-        Self { id: id.into() }
+        Self {
+            id: id.into(),
+            speed: ANIMATION_PARAM_DEFAULT,
+            intensity: ANIMATION_PARAM_DEFAULT,
+            stagger: ANIMATION_PARAM_DEFAULT,
+        }
     }
+
+    /// Clamp / zero unsupported knobs against `spec`, rejecting out-of-range
+    /// values on knobs the preset exposes.
+    pub fn normalized_for(self, spec: &AnimationSpec) -> Result<Self, ModelError> {
+        let speed = normalize_knob("speed", self.speed, spec.knobs.speed, ANIMATION_SPEED_RANGE)?;
+        let intensity = normalize_knob(
+            "intensity",
+            self.intensity,
+            spec.knobs.intensity,
+            ANIMATION_INTENSITY_RANGE,
+        )?;
+        let stagger = normalize_knob(
+            "stagger",
+            self.stagger,
+            spec.knobs.stagger,
+            ANIMATION_STAGGER_RANGE,
+        )?;
+        Ok(Self {
+            id: self.id,
+            speed,
+            intensity,
+            stagger,
+        })
+    }
+}
+
+fn normalize_knob(
+    name: &str,
+    value: f32,
+    supported: bool,
+    (lo, hi): (f32, f32),
+) -> Result<f32, ModelError> {
+    if !supported {
+        return Ok(ANIMATION_PARAM_DEFAULT);
+    }
+    if !value.is_finite() || value < lo || value > hi {
+        return Err(ModelError::InvalidParam(format!(
+            "animation {name} {value} outside [{lo}, {hi}]"
+        )));
+    }
+    Ok(value)
 }
 
 /// One animation catalog entry.
@@ -400,200 +508,78 @@ pub struct AnimationSpec {
     /// Presets designed for text clips only (the text panel's animation
     /// chips); rejected on other content.
     pub text_only: bool,
+    /// Which of speed / intensity / stagger the UI and AI may expose.
+    pub knobs: AnimationKnobs,
 }
+
+const fn anim(
+    id: &'static str,
+    label: &'static str,
+    slot: AnimationSlot,
+    text_only: bool,
+    knobs: AnimationKnobs,
+) -> AnimationSpec {
+    AnimationSpec {
+        id,
+        label,
+        slot,
+        text_only,
+        knobs,
+    }
+}
+
+const SI: AnimationKnobs = AnimationKnobs::SPEED_INTENSITY;
+const SIS: AnimationKnobs = AnimationKnobs::SPEED_INTENSITY_STAGGER;
 
 const ANIMATIONS: &[AnimationSpec] = &[
     // Entrances.
-    AnimationSpec {
-        id: "fade_in",
-        label: "Fade in",
-        slot: AnimationSlot::In,
-        text_only: false,
-    },
-    AnimationSpec {
-        id: "slide_up",
-        label: "Slide up",
-        slot: AnimationSlot::In,
-        text_only: false,
-    },
-    AnimationSpec {
-        id: "zoom_in",
-        label: "Zoom in",
-        slot: AnimationSlot::In,
-        text_only: false,
-    },
-    AnimationSpec {
-        id: "spin_in",
-        label: "Spin in",
-        slot: AnimationSlot::In,
-        text_only: false,
-    },
-    AnimationSpec {
-        id: "bounce",
-        label: "Bounce",
-        slot: AnimationSlot::In,
-        text_only: false,
-    },
+    anim("fade_in", "Fade in", AnimationSlot::In, false, SI),
+    anim("slide_up", "Slide up", AnimationSlot::In, false, SI),
+    anim("zoom_in", "Zoom in", AnimationSlot::In, false, SI),
+    anim("spin_in", "Spin in", AnimationSlot::In, false, SI),
+    anim("bounce", "Bounce", AnimationSlot::In, false, SI),
     // Exits.
-    AnimationSpec {
-        id: "fade_out",
-        label: "Fade out",
-        slot: AnimationSlot::Out,
-        text_only: false,
-    },
-    AnimationSpec {
-        id: "slide_down",
-        label: "Slide down",
-        slot: AnimationSlot::Out,
-        text_only: false,
-    },
-    AnimationSpec {
-        id: "zoom_out",
-        label: "Zoom out",
-        slot: AnimationSlot::Out,
-        text_only: false,
-    },
-    AnimationSpec {
-        id: "spin_out",
-        label: "Spin out",
-        slot: AnimationSlot::Out,
-        text_only: false,
-    },
-    AnimationSpec {
-        id: "drop",
-        label: "Drop",
-        slot: AnimationSlot::Out,
-        text_only: false,
-    },
+    anim("fade_out", "Fade out", AnimationSlot::Out, false, SI),
+    anim("slide_down", "Slide down", AnimationSlot::Out, false, SI),
+    anim("zoom_out", "Zoom out", AnimationSlot::Out, false, SI),
+    anim("spin_out", "Spin out", AnimationSlot::Out, false, SI),
+    anim("drop", "Drop", AnimationSlot::Out, false, SI),
     // Combos (looping presence animations).
-    AnimationSpec {
-        id: "pulse",
-        label: "Pulse",
-        slot: AnimationSlot::Combo,
-        text_only: false,
-    },
-    AnimationSpec {
-        id: "rock",
-        label: "Rock",
-        slot: AnimationSlot::Combo,
-        text_only: false,
-    },
-    AnimationSpec {
-        id: "swing",
-        label: "Swing",
-        slot: AnimationSlot::Combo,
-        text_only: false,
-    },
-    AnimationSpec {
-        id: "flicker",
-        label: "Flicker",
-        slot: AnimationSlot::Combo,
-        text_only: false,
-    },
-    AnimationSpec {
-        id: "breathe",
-        label: "Breathe",
-        slot: AnimationSlot::Combo,
-        text_only: false,
-    },
+    anim("pulse", "Pulse", AnimationSlot::Combo, false, SI),
+    anim("rock", "Rock", AnimationSlot::Combo, false, SI),
+    anim("swing", "Swing", AnimationSlot::Combo, false, SI),
+    anim("flicker", "Flicker", AnimationSlot::Combo, false, SI),
+    anim("breathe", "Breathe", AnimationSlot::Combo, false, SI),
     // Text-only per-character presets (glyph atlas path).
-    AnimationSpec {
-        id: "char_typewriter",
-        label: "Typewriter",
-        slot: AnimationSlot::In,
-        text_only: true,
-    },
-    AnimationSpec {
-        id: "char_fade_in",
-        label: "Fade in",
-        slot: AnimationSlot::In,
-        text_only: true,
-    },
-    AnimationSpec {
-        id: "char_bounce_in",
-        label: "Bounce in",
-        slot: AnimationSlot::In,
-        text_only: true,
-    },
-    AnimationSpec {
-        id: "char_slide_in",
-        label: "Slide in",
-        slot: AnimationSlot::In,
-        text_only: true,
-    },
-    AnimationSpec {
-        id: "char_pop_in",
-        label: "Pop in",
-        slot: AnimationSlot::In,
-        text_only: true,
-    },
-    AnimationSpec {
-        id: "char_fade_out",
-        label: "Fade out",
-        slot: AnimationSlot::Out,
-        text_only: true,
-    },
-    AnimationSpec {
-        id: "char_fall_away",
-        label: "Fall away",
-        slot: AnimationSlot::Out,
-        text_only: true,
-    },
-    AnimationSpec {
-        id: "char_typewriter_out",
-        label: "Type out",
-        slot: AnimationSlot::Out,
-        text_only: true,
-    },
+    anim(
+        "char_typewriter",
+        "Typewriter",
+        AnimationSlot::In,
+        true,
+        SIS,
+    ),
+    anim("char_fade_in", "Fade in", AnimationSlot::In, true, SIS),
+    anim("char_bounce_in", "Bounce in", AnimationSlot::In, true, SIS),
+    anim("char_slide_in", "Slide in", AnimationSlot::In, true, SIS),
+    anim("char_pop_in", "Pop in", AnimationSlot::In, true, SIS),
+    anim("char_fade_out", "Fade out", AnimationSlot::Out, true, SIS),
+    anim("char_fall_away", "Fall away", AnimationSlot::Out, true, SIS),
+    anim(
+        "char_typewriter_out",
+        "Type out",
+        AnimationSlot::Out,
+        true,
+        SIS,
+    ),
     // Text-only combos (the text panel's looping chips).
-    AnimationSpec {
-        id: "typewriter",
-        label: "Typewriter",
-        slot: AnimationSlot::Combo,
-        text_only: true,
-    },
-    AnimationSpec {
-        id: "text_fade",
-        label: "Fade",
-        slot: AnimationSlot::Combo,
-        text_only: true,
-    },
-    AnimationSpec {
-        id: "text_bounce",
-        label: "Bounce",
-        slot: AnimationSlot::Combo,
-        text_only: true,
-    },
-    AnimationSpec {
-        id: "text_slide",
-        label: "Slide",
-        slot: AnimationSlot::Combo,
-        text_only: true,
-    },
-    AnimationSpec {
-        id: "pop",
-        label: "Pop",
-        slot: AnimationSlot::Combo,
-        text_only: true,
-    },
-    AnimationSpec {
-        id: "wave",
-        label: "Wave",
-        slot: AnimationSlot::Combo,
-        text_only: true,
-    },
-    AnimationSpec {
-        id: "char_jitter",
-        label: "Jitter",
-        slot: AnimationSlot::Combo,
-        text_only: true,
-    },
-    AnimationSpec {
-        id: "char_pulse",
-        label: "Pulse",
-        slot: AnimationSlot::Combo,
-        text_only: true,
-    },
+    anim("typewriter", "Typewriter", AnimationSlot::Combo, true, SIS),
+    anim("text_fade", "Fade", AnimationSlot::Combo, true, SIS),
+    anim("text_bounce", "Bounce", AnimationSlot::Combo, true, SIS),
+    anim("text_slide", "Slide", AnimationSlot::Combo, true, SIS),
+    anim("pop", "Pop", AnimationSlot::Combo, true, SIS),
+    anim("wave", "Wave", AnimationSlot::Combo, true, SIS),
+    anim("char_jitter", "Jitter", AnimationSlot::Combo, true, SIS),
+    anim("char_pulse", "Pulse", AnimationSlot::Combo, true, SIS),
 ];
 
 /// Every animation preset (UI browsing order; filter by slot / text_only).
@@ -870,6 +856,58 @@ mod tests {
         assert_eq!(animation_spec("pulse").unwrap().slot, AnimationSlot::Combo);
         assert!(animation_spec("typewriter").unwrap().text_only);
         assert!(animation_spec("missing").is_none());
+        // Whole-layer presets expose speed/intensity; per-char also stagger.
+        let fade = animation_spec("fade_in").unwrap();
+        assert!(fade.knobs.speed && fade.knobs.intensity && !fade.knobs.stagger);
+        let wave = animation_spec("wave").unwrap();
+        assert!(wave.knobs.speed && wave.knobs.intensity && wave.knobs.stagger);
+    }
+
+    #[test]
+    fn animation_ref_defaults_and_normalization() {
+        let spec = animation_spec("wave").unwrap();
+        let a = AnimationRef::new("wave");
+        assert_eq!(a.speed, ANIMATION_PARAM_DEFAULT);
+        let ok = a.clone().normalized_for(spec).unwrap();
+        assert_eq!(ok.intensity, 1.0);
+
+        let mut hot = AnimationRef::new("wave");
+        hot.intensity = 1.5;
+        hot.stagger = 0.5;
+        let hot = hot.normalized_for(spec).unwrap();
+        assert_eq!(hot.intensity, 1.5);
+        assert_eq!(hot.stagger, 0.5);
+
+        let mut bad = AnimationRef::new("wave");
+        bad.speed = 99.0;
+        assert!(bad.normalized_for(spec).is_err());
+
+        // Unsupported knobs snap back to default.
+        let fade = animation_spec("fade_in").unwrap();
+        let mut staggered = AnimationRef::new("fade_in");
+        staggered.stagger = 1.5;
+        let cleaned = staggered.normalized_for(fade).unwrap();
+        assert_eq!(cleaned.stagger, ANIMATION_PARAM_DEFAULT);
+    }
+
+    #[test]
+    fn animation_ref_serde_omits_default_knobs() {
+        let a = AnimationRef::new("pulse");
+        assert_eq!(
+            serde_json::to_value(&a).unwrap(),
+            serde_json::json!({"id": "pulse"})
+        );
+        let mut tuned = AnimationRef::new("pulse");
+        tuned.speed = 2.0;
+        assert_eq!(
+            serde_json::to_value(&tuned).unwrap(),
+            serde_json::json!({"id": "pulse", "speed": 2.0})
+        );
+        // Old id-only JSON still loads with defaults.
+        let loaded: AnimationRef =
+            serde_json::from_value(serde_json::json!({"id": "pulse"})).unwrap();
+        assert_eq!(loaded.speed, ANIMATION_PARAM_DEFAULT);
+        assert_eq!(loaded.intensity, ANIMATION_PARAM_DEFAULT);
     }
 
     #[test]

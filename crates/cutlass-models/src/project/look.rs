@@ -197,7 +197,7 @@ impl Project {
         animation: Option<AnimationRef>,
     ) -> Result<(), ModelError> {
         self.require_visual(clip_id, "animations")?;
-        if let Some(animation) = &animation {
+        let animation = if let Some(animation) = animation {
             let spec = animation_spec(&animation.id).ok_or_else(|| {
                 ModelError::InvalidParam(format!("unknown animation '{}'", animation.id))
             })?;
@@ -219,7 +219,10 @@ impl Project {
                     )));
                 }
             }
-        }
+            Some(animation.normalized_for(spec)?)
+        } else {
+            None
+        };
         let clip = self
             .timeline
             .clip_mut(clip_id)

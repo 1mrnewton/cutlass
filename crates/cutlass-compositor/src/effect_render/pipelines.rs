@@ -156,7 +156,11 @@ impl PassRegistry {
             device,
             "cutlass.canvas_grade",
             &effect_layout,
-            include_str!("../../shaders/canvas_grade.wgsl"),
+            &format!(
+                "{}\n{}",
+                include_str!("../../shaders/grade.wgsl"),
+                include_str!("../../shaders/canvas_grade.wgsl")
+            ),
         );
         let lut = build_effect_pipeline(
             device,

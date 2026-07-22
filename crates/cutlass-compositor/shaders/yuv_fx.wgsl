@@ -7,8 +7,10 @@ struct Placement {
     coeffs: vec4<f32>,
     // Color grade: brightness, contrast, saturation, enabled (0 | 1).
     grade_adj0: vec4<f32>,
-    // Color grade: exposure, temperature, tint, pad.
+    // Color grade: exposure, temperature, tint, hue.
     grade_adj1: vec4<f32>,
+    // Color grade: highlights, shadows, sharpness, vignette.
+    grade_adj2: vec4<f32>,
 }
 
 struct Effects {
@@ -32,6 +34,7 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) local: vec2<f32>,
+    @location(2) quad_uv: vec2<f32>,
 }
 
 fn quad_corner(vertex_index: u32) -> vec2<f32> {
@@ -56,6 +59,7 @@ fn vs(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     );
     out.uv = mix(p.uv_rect.xy, p.uv_rect.zw, c + vec2(0.5, 0.5));
     out.local = c * 2.0 * fx.half.xy;
+    out.quad_uv = c + vec2(0.5, 0.5);
     return out;
 }
 
@@ -101,7 +105,19 @@ fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
         alpha = alpha * chroma_alpha(rgb, fx.chroma.rgb, fx.chroma_params.x, fx.chroma_params.y);
     }
 
-    rgb = apply_color_grade(rgb, p.grade_adj0, p.grade_adj1);
+    rgb = apply_color_grade(rgb, p.grade_adj0, p.grade_adj1, p.grade_adj2);
+    let sharp = p.grade_adj2.z;
+    if (sharp > 0.0) {
+        let dims = vec2<f32>(textureDimensions(y_tex));
+        let texel = vec2(1.0) / dims;
+        let n0 = sample_yuv_rgb_fx(in.uv + vec2(texel.x, 0.0));
+        let n1 = sample_yuv_rgb_fx(in.uv - vec2(texel.x, 0.0));
+        let n2 = sample_yuv_rgb_fx(in.uv + vec2(0.0, texel.y));
+        let n3 = sample_yuv_rgb_fx(in.uv - vec2(0.0, texel.y));
+        let avg = (n0 + n1 + n2 + n3) * 0.25;
+        rgb = clamp(rgb + sharp * 1.5 * (rgb - avg), vec3(0.0), vec3(1.0));
+    }
+    rgb = apply_grade_vignette(rgb, in.quad_uv, p.grade_adj2.w);
 
     if fx.mask.w > 0.5 {
         let malpha = mask_alpha(
@@ -119,4 +135,19 @@ fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     return vec4(rgb, alpha);
+}
+
+fn sample_yuv_rgb_fx(uv: vec2<f32>) -> vec3<f32> {
+    let ys = textureSample(y_tex, samp, uv).r;
+    var cbs: f32;
+    var crs: f32;
+    if p.coeffs.w > 0.5 {
+        let cbcr = textureSample(u_tex, samp, uv).rg;
+        cbs = cbcr.r;
+        crs = cbcr.g;
+    } else {
+        cbs = textureSample(u_tex, samp, uv).r;
+        crs = textureSample(v_tex, samp, uv).r;
+    }
+    return yuv_to_rgb(ys, cbs, crs, p.coeffs.x, p.coeffs.y, p.coeffs.z);
 }

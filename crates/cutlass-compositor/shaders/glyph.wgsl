@@ -9,8 +9,10 @@
 struct Globals {
     // Color grade: brightness, contrast, saturation, enabled (0 | 1).
     grade_adj0: vec4<f32>,
-    // Color grade: exposure, temperature, tint, pad.
+    // Color grade: exposure, temperature, tint, hue.
     grade_adj1: vec4<f32>,
+    // Color grade: highlights, shadows, sharpness, vignette.
+    grade_adj2: vec4<f32>,
     // Canvas width/height in pixels (x, y), layer opacity (z), pad (w).
     canvas: vec4<f32>,
 }
@@ -83,6 +85,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
     if premul.a > 0.0 {
         rgb = rgb / premul.a;
     }
-    rgb = apply_color_grade(rgb, g.grade_adj0, g.grade_adj1);
+    rgb = apply_color_grade(rgb, g.grade_adj0, g.grade_adj1, g.grade_adj2);
+    rgb = apply_grade_sharpness(rgb, in.uv, atlas, samp, g.grade_adj2.z);
     return vec4(rgb * layer_a, layer_a);
 }

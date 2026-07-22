@@ -42,30 +42,13 @@ fn assert_near(actual: [u8; 4], expected: [u8; 4], tolerance: u8, what: &str) {
     }
 }
 
-/// CPU mirror of `grade.wgsl`'s `apply_grade`, for tolerance comparisons.
+/// CPU mirror of `grade.wgsl`'s `apply_color_grade`, for tolerance comparisons.
 fn grade_ref_u8(rgba: [u8; 4], grade: ColorGrade) -> [u8; 4] {
-    let mut c = [
+    let c = grade.apply([
         f32::from(rgba[0]) / 255.0,
         f32::from(rgba[1]) / 255.0,
         f32::from(rgba[2]) / 255.0,
-    ];
-    c[0] *= 2f32.powf(2.0 * grade.exposure);
-    c[1] *= 2f32.powf(2.0 * grade.exposure);
-    c[2] *= 2f32.powf(2.0 * grade.exposure);
-    c[0] += 0.25 * grade.temperature;
-    c[2] -= 0.25 * grade.temperature;
-    c[1] += 0.25 * grade.tint;
-    for ch in &mut c {
-        *ch += 0.25 * grade.brightness;
-    }
-    for ch in &mut c {
-        *ch = (*ch - 0.5) * (1.0 + grade.contrast) + 0.5;
-    }
-    let luma = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-    let sat = 1.0 + grade.saturation;
-    c[0] = luma + (c[0] - luma) * sat;
-    c[1] = luma + (c[1] - luma) * sat;
-    c[2] = luma + (c[2] - luma) * sat;
+    ]);
     let quant = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
     [quant(c[0]), quant(c[1]), quant(c[2]), rgba[3]]
 }

@@ -48,6 +48,7 @@ struct TransitionUniforms {
 struct GradeUniforms {
     grade0: [f32; 4],
     grade1: [f32; 4],
+    grade2: [f32; 4],
 }
 
 /// Run an effect chain on `input` view, ping-ponging through `pool`.
@@ -206,13 +207,14 @@ pub(crate) fn run_grade_pass<'a>(
     let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("cutlass.canvas_grade.uniforms"),
         contents: bytemuck::bytes_of(&GradeUniforms {
-            grade0: [
-                grade.exposure,
-                grade.brightness,
-                grade.contrast,
-                grade.saturation,
+            grade0: [grade.brightness, grade.contrast, grade.saturation, 1.0],
+            grade1: [grade.exposure, grade.temperature, grade.tint, grade.hue],
+            grade2: [
+                grade.highlights,
+                grade.shadows,
+                grade.sharpness,
+                grade.vignette,
             ],
-            grade1: [grade.temperature, grade.tint, 0.0, 0.0],
         }),
         usage: wgpu::BufferUsages::UNIFORM,
     });

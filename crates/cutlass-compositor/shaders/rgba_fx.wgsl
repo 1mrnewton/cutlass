@@ -6,8 +6,10 @@ struct Placement {
     uv_rect: vec4<f32>,
     // Color grade: brightness, contrast, saturation, enabled (0 | 1).
     grade_adj0: vec4<f32>,
-    // Color grade: exposure, temperature, tint, pad.
+    // Color grade: exposure, temperature, tint, hue.
     grade_adj1: vec4<f32>,
+    // Color grade: highlights, shadows, sharpness, vignette.
+    grade_adj2: vec4<f32>,
 }
 
 struct Effects {
@@ -32,6 +34,7 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) local: vec2<f32>,
+    @location(2) quad_uv: vec2<f32>,
 }
 
 fn quad_corner(vertex_index: u32) -> vec2<f32> {
@@ -56,6 +59,7 @@ fn vs(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     );
     out.uv = mix(p.uv_rect.xy, p.uv_rect.zw, c + vec2(0.5, 0.5));
     out.local = c * 2.0 * fx.half.xy;
+    out.quad_uv = c + vec2(0.5, 0.5);
     return out;
 }
 
@@ -76,7 +80,9 @@ fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
     // Grade the straight-alpha color after chroma keying (the key targets the
     // source footage), before mask/opacity shape the alpha.
     if premul.a > 0.0 {
-        let graded = apply_color_grade(premul.rgb / premul.a, p.grade_adj0, p.grade_adj1);
+        var graded = apply_color_grade(premul.rgb / premul.a, p.grade_adj0, p.grade_adj1, p.grade_adj2);
+        graded = apply_grade_sharpness(graded, in.uv, tex, samp, p.grade_adj2.z);
+        graded = apply_grade_vignette(graded, in.quad_uv, p.grade_adj2.w);
         premul = vec4(graded * premul.a, premul.a);
     }
 

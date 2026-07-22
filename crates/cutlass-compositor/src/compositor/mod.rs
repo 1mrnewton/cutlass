@@ -78,6 +78,7 @@ pub(super) struct YuvUniforms {
     coeffs: [f32; 4],
     grade_adj0: [f32; 4],
     grade_adj1: [f32; 4],
+    grade_adj2: [f32; 4],
 }
 
 #[repr(C)]
@@ -88,6 +89,7 @@ pub(super) struct SolidUniforms {
     trans_opacity: [f32; 4],
     grade_adj0: [f32; 4],
     grade_adj1: [f32; 4],
+    grade_adj2: [f32; 4],
 }
 
 #[repr(C)]
@@ -98,6 +100,7 @@ pub(super) struct RgbaUniforms {
     uv_rect: [f32; 4],
     grade_adj0: [f32; 4],
     grade_adj1: [f32; 4],
+    grade_adj2: [f32; 4],
 }
 
 #[repr(C)]
@@ -129,6 +132,7 @@ pub(super) struct SdfUniforms {
     star: [f32; 4],
     grade_adj0: [f32; 4],
     grade_adj1: [f32; 4],
+    grade_adj2: [f32; 4],
 }
 
 /// Which pipeline draws a built layer.

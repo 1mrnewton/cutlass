@@ -208,12 +208,13 @@ pub(super) fn placement_affine_rot(
     (linear, trans)
 }
 
-pub(super) fn pack_grade(grade: Option<ColorGrade>) -> ([f32; 4], [f32; 4]) {
+pub(super) fn pack_grade(grade: Option<ColorGrade>) -> ([f32; 4], [f32; 4], [f32; 4]) {
     match grade.filter(|g| !g.is_identity()) {
         Some(g) => (
             [g.brightness, g.contrast, g.saturation, 1.0],
-            [g.exposure, g.temperature, g.tint, 0.0],
+            [g.exposure, g.temperature, g.tint, g.hue],
+            [g.highlights, g.shadows, g.sharpness, g.vignette],
         ),
-        None => ([0.0; 4], [0.0; 4]),
+        None => ([0.0; 4], [0.0; 4], [0.0; 4]),
     }
 }

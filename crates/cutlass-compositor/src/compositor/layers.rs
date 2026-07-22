@@ -73,7 +73,7 @@ impl Compositor {
                 f32::from(rgba[3]) / 255.0,
             ]
         };
-        let (grade_adj0, grade_adj1) = pack_grade(color_grade);
+        let (grade_adj0, grade_adj1, grade_adj2) = pack_grade(color_grade);
         let uniforms = SdfUniforms {
             fill: color(shape.fill),
             stroke_color: stroke.map_or([0.0; 4], |s| color(s.rgba)),
@@ -88,6 +88,7 @@ impl Compositor {
             ],
             grade_adj0,
             grade_adj1,
+            grade_adj2,
         };
         let buffer = gpu
             .device
@@ -123,7 +124,7 @@ impl Compositor {
         color_grade: Option<ColorGrade>,
     ) -> Result<LayerGpu, CompositorError> {
         let (linear, trans) = placement_affine(config, &layer.placement, 0.0);
-        let (grade_adj0, grade_adj1) = pack_grade(color_grade);
+        let (grade_adj0, grade_adj1, grade_adj2) = pack_grade(color_grade);
         let uniforms = SolidUniforms {
             color: [
                 f32::from(rgba[0]) / 255.0,
@@ -135,6 +136,7 @@ impl Compositor {
             trans_opacity: trans,
             grade_adj0,
             grade_adj1,
+            grade_adj2,
         };
         let buffer = gpu
             .device
@@ -203,7 +205,7 @@ impl Compositor {
         let (linear, trans) = placement_affine_rot(config, &layer.placement, rotation);
         let uv_rect = visible_uv_rect(frame, layer.uv);
 
-        let (grade_adj0, grade_adj1) = pack_grade(color_grade);
+        let (grade_adj0, grade_adj1, grade_adj2) = pack_grade(color_grade);
         let uniforms = YuvUniforms {
             linear,
             trans_opacity: trans,
@@ -211,6 +213,7 @@ impl Compositor {
             coeffs: [kr, kb, full, plane_mode],
             grade_adj0,
             grade_adj1,
+            grade_adj2,
         };
 
         let plane_entries = |layout: &wgpu::BindGroupLayout,
@@ -480,13 +483,14 @@ impl Compositor {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let (linear, trans) = placement_affine(config, &layer.placement, 0.0);
-        let (grade_adj0, grade_adj1) = pack_grade(color_grade);
+        let (grade_adj0, grade_adj1, grade_adj2) = pack_grade(color_grade);
         let placement_uniforms = RgbaUniforms {
             linear,
             trans_opacity: trans,
             uv_rect: layer.uv,
             grade_adj0,
             grade_adj1,
+            grade_adj2,
         };
 
         if layer.fx.is_identity() {

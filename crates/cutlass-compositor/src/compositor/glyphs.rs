@@ -40,6 +40,7 @@ pub(super) struct CachedAtlas {
 pub(super) struct GlyphsUniforms {
     grade_adj0: [f32; 4],
     grade_adj1: [f32; 4],
+    grade_adj2: [f32; 4],
     /// Canvas width/height (x, y), layer opacity (z), pad (w).
     canvas: [f32; 4],
 }
@@ -96,10 +97,11 @@ impl Compositor {
             texture: atlas_tex,
             uvs,
         } = self.ensure_atlas(gpu, glyphs)?;
-        let (grade_adj0, grade_adj1) = pack_grade(color_grade);
+        let (grade_adj0, grade_adj1, grade_adj2) = pack_grade(color_grade);
         let uniforms = GlyphsUniforms {
             grade_adj0,
             grade_adj1,
+            grade_adj2,
             canvas: [
                 config.width as f32,
                 config.height as f32,

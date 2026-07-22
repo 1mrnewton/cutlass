@@ -33,8 +33,10 @@ struct Sdf {
     star: vec4<f32>,
     // Color grade: brightness, contrast, saturation, enabled (0 | 1).
     grade_adj0: vec4<f32>,
-    // Color grade: exposure, temperature, tint, pad.
+    // Color grade: exposure, temperature, tint, hue.
     grade_adj1: vec4<f32>,
+    // Color grade: highlights, shadows, sharpness, vignette.
+    grade_adj2: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> s: Sdf;
@@ -247,6 +249,6 @@ fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4(0.0, 0.0, 0.0, 0.0);
     }
     let rgb = (s.stroke_color.rgb * stroke_cov + s.fill.rgb * fill_cov * (1.0 - stroke_cov)) / a;
-    let graded = apply_color_grade(rgb, s.grade_adj0, s.grade_adj1);
+    let graded = apply_color_grade(rgb, s.grade_adj0, s.grade_adj1, s.grade_adj2);
     return vec4(graded, a * s.trans_opacity.z);
 }

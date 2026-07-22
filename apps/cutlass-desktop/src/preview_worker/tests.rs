@@ -685,14 +685,14 @@ fn look_edits_invalidate_preview() {
     assert!(message_invalidates_preview(&WorkerMsg::SetClipLut {
         clip: "1".into(),
         path: "/unused/look.cube".into(),
-        intensity: 0.8.into(),
+        intensity: 0.8,
     }));
     assert!(message_invalidates_preview(&WorkerMsg::SetClipAnimation {
         clip: "1".into(),
         slot: "in".into(),
         animation_id: "fade".into(),
         speed: 1.0,
-        intensity: 1.0.into(),
+        intensity: 1.0,
         stagger: 1.0,
     }));
 }

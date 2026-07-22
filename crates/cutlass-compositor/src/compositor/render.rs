@@ -1,10 +1,11 @@
 use crate::effect_render::{
     OffscreenPool, blit_premultiplied_to_canvas, blit_replace, draw_layer_to_offscreen,
-    effects_need_offscreen, run_effect_chain, run_grade_pass, run_lut_pass, run_transition_pass,
+    effects_need_offscreen, run_blend_composite, run_effect_chain, run_grade_pass, run_lut_pass,
+    run_transition_pass,
 };
 use crate::error::CompositorError;
 use crate::gpu::GpuContext;
-use crate::layer::{CompositeLayer, CompositorConfig, CompositorLayer, LayerLut};
+use crate::layer::{BlendMode, CompositeLayer, CompositorConfig, CompositorLayer, LayerLut};
 use crate::lut::CubeLut;
 
 use super::{
@@ -243,7 +244,9 @@ impl Compositor {
         for item in layers {
             match item {
                 CompositorLayer::Layer(layer)
-                    if !effects_need_offscreen(layer.effects) && layer.lut.is_none() =>
+                    if !effects_need_offscreen(layer.effects)
+                        && layer.lut.is_none()
+                        && layer.blend_mode == BlendMode::Normal =>
                 {
                     let built = self.build_layer(gpu, config, layer)?;
                     let pipeline = pipeline_for(&built.pipeline, self);
@@ -317,13 +320,50 @@ impl Compositor {
                             lut.intensity,
                         );
                     }
-                    blit_premultiplied_to_canvas(
-                        device,
-                        &mut encoder,
-                        &self.pass_registry,
-                        result,
-                        &target.view,
-                    );
+                    if layer.blend_mode == BlendMode::Normal {
+                        blit_premultiplied_to_canvas(
+                            device,
+                            &mut encoder,
+                            &self.pass_registry,
+                            result,
+                            &target.view,
+                        );
+                    } else {
+                        // See OffscreenPool slot invariant: result on S,
+                        // canvas snapshot into (S+1)%3, blend into canvas.
+                        let src_slot = offscreen
+                            .index_of(result)
+                            .expect("effect/lut output is an offscreen pool view");
+                        let snap_slot = (src_slot + 1) % OffscreenPool::SLOTS;
+                        encoder.copy_texture_to_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &target.texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::TexelCopyTextureInfo {
+                                texture: offscreen.texture(snap_slot),
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::Extent3d {
+                                width: config.width,
+                                height: config.height,
+                                depth_or_array_layers: 1,
+                            },
+                        );
+                        run_blend_composite(
+                            device,
+                            &mut encoder,
+                            &self.pass_registry,
+                            offscreen.view(snap_slot),
+                            result,
+                            &target.view,
+                            layer.blend_mode,
+                        );
+                    }
                 }
                 CompositorLayer::CanvasPass {
                     effects,

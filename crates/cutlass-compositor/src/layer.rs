@@ -90,6 +90,48 @@ pub struct LayerChromaKey {
     pub shadow: f32,
 }
 
+/// How a layer's pixels combine with the accumulated canvas below it.
+/// `Normal` is plain source-over (the fast path); every other mode runs
+/// the dst-sampling blend pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Darken,
+    Multiply,
+    ColorBurn,
+    Lighten,
+    Screen,
+    ColorDodge,
+    Add,
+    Overlay,
+    SoftLight,
+    HardLight,
+    Difference,
+    Exclusion,
+}
+
+impl BlendMode {
+    /// WGSL `mode` uniform id (`Normal` = 0, then 1..=12 in declaration order).
+    pub(crate) fn shader_id(self) -> u32 {
+        match self {
+            BlendMode::Normal => 0,
+            BlendMode::Darken => 1,
+            BlendMode::Multiply => 2,
+            BlendMode::ColorBurn => 3,
+            BlendMode::Lighten => 4,
+            BlendMode::Screen => 5,
+            BlendMode::ColorDodge => 6,
+            BlendMode::Add => 7,
+            BlendMode::Overlay => 8,
+            BlendMode::SoftLight => 9,
+            BlendMode::HardLight => 10,
+            BlendMode::Difference => 11,
+            BlendMode::Exclusion => 12,
+        }
+    }
+}
+
 /// Per-layer mask and chroma-key state for the fx pipelines.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct LayerEffects {
@@ -214,6 +256,9 @@ pub struct CompositeLayer<'a> {
     /// Skipped while the layer is a transition side (matching effect chains,
     /// which also pause during the blend).
     pub lut: Option<LayerLut<'a>>,
+    /// How this layer composites over the accumulated canvas. `Normal` keeps
+    /// the direct src-over fast path; other modes force the offscreen blend pass.
+    pub blend_mode: BlendMode,
 }
 
 /// A layer, a canvas-wide pass, or a dual-source transition submitted to the compositor.
@@ -252,6 +297,7 @@ impl<'a> CompositeLayer<'a> {
             fx: LayerEffects::IDENTITY,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
         }
     }
 
@@ -265,6 +311,7 @@ impl<'a> CompositeLayer<'a> {
             fx: LayerEffects::IDENTITY,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
         }
     }
 
@@ -278,6 +325,7 @@ impl<'a> CompositeLayer<'a> {
             fx: LayerEffects::IDENTITY,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
         }
     }
 
@@ -291,6 +339,7 @@ impl<'a> CompositeLayer<'a> {
             fx: LayerEffects::IDENTITY,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
         }
     }
 
@@ -307,6 +356,7 @@ impl<'a> CompositeLayer<'a> {
             fx: LayerEffects::IDENTITY,
             color_grade: None,
             lut: None,
+            blend_mode: BlendMode::Normal,
         }
     }
 
@@ -344,6 +394,12 @@ impl<'a> CompositeLayer<'a> {
     /// identity fast path and drops the pass entirely.
     pub fn with_lut(mut self, lut: Option<LayerLut<'a>>) -> Self {
         self.lut = lut.filter(|l| l.intensity > 0.0);
+        self
+    }
+
+    /// Set the per-layer blend mode (`Normal` keeps the direct fast path).
+    pub fn with_blend_mode(mut self, blend_mode: BlendMode) -> Self {
+        self.blend_mode = blend_mode;
         self
     }
 }

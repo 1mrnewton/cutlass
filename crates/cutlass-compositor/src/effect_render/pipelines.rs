@@ -1,6 +1,7 @@
 use crate::passes::resolve_transition_pass;
 
 use super::RT_FORMAT;
+use super::blend::build_blend_pipeline;
 use super::blit::{build_blit_pipeline, build_replace_pipeline};
 
 /// GPU pipelines for catalog effect and transition passes.
@@ -23,6 +24,9 @@ pub(crate) struct PassRegistry {
     /// Full-canvas replacement blit for canvas-wide passes.
     pub replace_pipeline: wgpu::RenderPipeline,
     pub blit_layout: wgpu::BindGroupLayout,
+    /// Dst-sampling blend modes (non-`Normal`).
+    pub blend_pipeline: wgpu::RenderPipeline,
+    pub blend_layout: wgpu::BindGroupLayout,
 }
 
 impl PassRegistry {
@@ -64,6 +68,16 @@ impl PassRegistry {
                 tex3d_entry(2),
                 sampler_entry(3),
                 uniform_entry(4),
+            ],
+        });
+
+        let blend_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cutlass.blend.bgl"),
+            entries: &[
+                tex_entry(0),
+                tex_entry(1),
+                sampler_entry(2),
+                uniform_entry(3),
             ],
         });
 
@@ -123,6 +137,7 @@ impl PassRegistry {
         );
         let blit_pipeline = build_blit_pipeline(device, &blit_layout);
         let replace_pipeline = build_replace_pipeline(device, &blit_layout);
+        let blend_pipeline = build_blend_pipeline(device, &blend_layout);
 
         Self {
             passthrough,
@@ -141,6 +156,8 @@ impl PassRegistry {
             blit_pipeline,
             replace_pipeline,
             blit_layout,
+            blend_pipeline,
+            blend_layout,
         }
     }
 

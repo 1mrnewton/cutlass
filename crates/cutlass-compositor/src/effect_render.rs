@@ -7,11 +7,13 @@ use crate::error::CompositorError;
 use crate::grade::ColorGrade;
 use crate::passes::{PassInstance, effect_is_noop};
 
+mod blend;
 mod blit;
 mod lut;
 mod pipelines;
 mod pool;
 
+pub(crate) use blend::run_blend_composite;
 pub(crate) use blit::{blit_premultiplied_to_canvas, blit_replace};
 pub(crate) use lut::run_lut_pass;
 pub(crate) use pipelines::PassRegistry;

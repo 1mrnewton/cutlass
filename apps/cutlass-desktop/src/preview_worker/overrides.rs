@@ -174,6 +174,12 @@ pub(super) fn sanitize_adjustments(adjust: &ColorAdjustments) -> ColorAdjustment
         saturation: clamp_signed_unit(adjust.saturation.sample(0)).into(),
         exposure: clamp_signed_unit(adjust.exposure.sample(0)).into(),
         temperature: clamp_signed_unit(adjust.temperature.sample(0)).into(),
+        tint: clamp_signed_unit(adjust.tint.sample(0)).into(),
+        hue: clamp_signed_unit(adjust.hue.sample(0)).into(),
+        highlights: clamp_signed_unit(adjust.highlights.sample(0)).into(),
+        shadows: clamp_signed_unit(adjust.shadows.sample(0)).into(),
+        sharpness: clamp_unit(adjust.sharpness.sample(0)).into(),
+        vignette: clamp_unit(adjust.vignette.sample(0)).into(),
     }
 }
 

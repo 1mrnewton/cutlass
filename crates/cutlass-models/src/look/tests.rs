@@ -156,6 +156,74 @@ fn validation_rejects_out_of_range_values() {
     };
     assert!(adjust.validate().is_err());
     assert!(ColorAdjustments::default().is_neutral());
+
+    // Signed adjust sliders accept negatives; one-directional ones do not.
+    assert!(
+        ColorAdjustments {
+            tint: (-0.5).into(),
+            ..Default::default()
+        }
+        .validate()
+        .is_ok()
+    );
+    assert!(
+        ColorAdjustments {
+            sharpness: (-0.5).into(),
+            ..Default::default()
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        ColorAdjustments {
+            vignette: 1.5.into(),
+            ..Default::default()
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+#[test]
+fn color_adjustments_serde_skips_zeros_and_loads_legacy_json() {
+    let neutral = ColorAdjustments::default();
+    assert_eq!(
+        serde_json::to_value(&neutral).unwrap(),
+        serde_json::json!({})
+    );
+
+    let tuned = ColorAdjustments {
+        tint: 0.25.into(),
+        hue: (-0.5).into(),
+        sharpness: 0.75.into(),
+        ..Default::default()
+    };
+    let value = serde_json::to_value(&tuned).unwrap();
+    let obj = value.as_object().unwrap();
+    assert_eq!(obj.get("tint"), Some(&serde_json::json!(0.25)));
+    assert_eq!(obj.get("hue"), Some(&serde_json::json!(-0.5)));
+    assert_eq!(obj.get("sharpness"), Some(&serde_json::json!(0.75)));
+    assert!(!obj.contains_key("brightness"));
+    assert!(!obj.contains_key("vignette"));
+
+    let roundtrip: ColorAdjustments = serde_json::from_value(value).unwrap();
+    assert_eq!(roundtrip, tuned);
+
+    // Pre-slider JSON without the new keys deserializes to neutral zeros.
+    let legacy: ColorAdjustments = serde_json::from_value(serde_json::json!({
+        "brightness": 0.1,
+        "temperature": -0.2
+    }))
+    .unwrap();
+    assert_eq!(legacy.brightness, 0.1.into());
+    assert_eq!(legacy.temperature, (-0.2).into());
+    assert_eq!(legacy.tint, 0.0.into());
+    assert_eq!(legacy.hue, 0.0.into());
+    assert_eq!(legacy.highlights, 0.0.into());
+    assert_eq!(legacy.shadows, 0.0.into());
+    assert_eq!(legacy.sharpness, 0.0.into());
+    assert_eq!(legacy.vignette, 0.0.into());
+    assert!(!legacy.is_neutral());
 }
 
 #[test]

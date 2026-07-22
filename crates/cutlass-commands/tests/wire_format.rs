@@ -259,6 +259,7 @@ fn edit_samples() -> Vec<EditCommand> {
                 saturation: 0.3.into(),
                 exposure: 0.0.into(),
                 temperature: (-0.4).into(),
+                ..Default::default()
             },
         },
         EditCommand::SetClipAnimation {

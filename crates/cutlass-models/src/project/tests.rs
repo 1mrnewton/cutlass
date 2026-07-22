@@ -661,6 +661,7 @@ fn duplicate_clip_preserves_full_property_snapshot() {
             saturation: 0.3.into(),
             exposure: (-0.4).into(),
             temperature: 0.5.into(),
+            ..Default::default()
         };
         clip.animation_in = Some(AnimationRef::new("zoom_in"));
         clip.animation_out = Some(AnimationRef::new("drop"));
@@ -965,6 +966,7 @@ fn split_clip_preserves_full_property_snapshot_and_rebases_tail_curves() {
             saturation: 0.3.into(),
             exposure: (-0.4).into(),
             temperature: 0.5.into(),
+            ..Default::default()
         };
         clip.animation_in = Some(AnimationRef::new("zoom_in"));
         clip.animation_out = Some(AnimationRef::new("drop"));
@@ -2172,6 +2174,37 @@ fn filter_intensity_keyframes_sample_at_clip_local_ticks() {
         .intensity
         .sample(5);
     assert!((intensity - 0.5).abs() < f32::EPSILON);
+}
+
+#[test]
+fn adjust_hue_keyframes_through_project_api() {
+    let (mut project, media_id, track) = project_with_media(100);
+    let clip = project.add_clip(track, media_id, tr(0, 50), rt(0)).unwrap();
+    let param = ClipParam::Look {
+        param: crate::LookParam::AdjustHue,
+    };
+    project
+        .set_param_keyframe(clip, param, rt(0), ParamValue::Scalar(-1.0), Easing::Linear)
+        .unwrap();
+    project
+        .set_param_keyframe(clip, param, rt(10), ParamValue::Scalar(1.0), Easing::Linear)
+        .unwrap();
+    let hue = project.clip(clip).unwrap().adjust.hue.sample(5);
+    assert!((hue - 0.0).abs() < f32::EPSILON);
+
+    assert!(
+        project
+            .set_param_keyframe(
+                clip,
+                ClipParam::Look {
+                    param: crate::LookParam::AdjustSharpness,
+                },
+                rt(0),
+                ParamValue::Scalar(-0.5),
+                Easing::Linear,
+            )
+            .is_err()
+    );
 }
 
 #[test]

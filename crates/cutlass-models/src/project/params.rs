@@ -52,6 +52,12 @@ fn look_param_mut(clip: &mut Clip, param: LookParam) -> Result<&mut Param<f32>, 
         LookParam::AdjustSaturation => Ok(&mut clip.adjust.saturation),
         LookParam::AdjustExposure => Ok(&mut clip.adjust.exposure),
         LookParam::AdjustTemperature => Ok(&mut clip.adjust.temperature),
+        LookParam::AdjustTint => Ok(&mut clip.adjust.tint),
+        LookParam::AdjustHue => Ok(&mut clip.adjust.hue),
+        LookParam::AdjustHighlights => Ok(&mut clip.adjust.highlights),
+        LookParam::AdjustShadows => Ok(&mut clip.adjust.shadows),
+        LookParam::AdjustSharpness => Ok(&mut clip.adjust.sharpness),
+        LookParam::AdjustVignette => Ok(&mut clip.adjust.vignette),
         LookParam::ChromaStrength => clip
             .chroma_key
             .as_mut()
@@ -82,7 +88,12 @@ fn validate_look_value(param: LookParam, value: f32) -> Result<(), ModelError> {
         | LookParam::AdjustContrast
         | LookParam::AdjustSaturation
         | LookParam::AdjustExposure
-        | LookParam::AdjustTemperature => (-1.0..=1.0).contains(&value),
+        | LookParam::AdjustTemperature
+        | LookParam::AdjustTint
+        | LookParam::AdjustHue
+        | LookParam::AdjustHighlights
+        | LookParam::AdjustShadows => (-1.0..=1.0).contains(&value),
+        LookParam::AdjustSharpness | LookParam::AdjustVignette => (0.0..=1.0).contains(&value),
         LookParam::MaskFeather
         | LookParam::MaskCenter
         | LookParam::MaskSize

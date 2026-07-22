@@ -209,6 +209,7 @@ mod tests {
             contrast: (-3.0).into(),
             exposure: f32::NAN.into(),
             temperature: 1.5.into(),
+            ..Default::default()
         };
         let grade = effective_grade(Some(&filter), &adjust);
         assert_eq!(grade.brightness, 1.0);

@@ -462,6 +462,7 @@ pub(crate) fn wire_inspector(
                     saturation: saturation.into(),
                     exposure: exposure.into(),
                     temperature: temperature.into(),
+                    ..Default::default()
                 },
             );
         },
@@ -488,6 +489,7 @@ pub(crate) fn wire_inspector(
                     saturation: saturation.into(),
                     exposure: exposure.into(),
                     temperature: temperature.into(),
+                    ..Default::default()
                 },
                 i64::from(tick),
             );

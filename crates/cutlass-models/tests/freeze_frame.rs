@@ -113,6 +113,7 @@ fn freeze_helper_bakes_visual_state_and_clears_dynamic_semantics() {
         saturation: 0.3.into(),
         exposure: 0.1.into(),
         temperature: (-0.2).into(),
+        ..Default::default()
     };
     source.animation_in = Some(AnimationRef::new("fade_in"));
     source.animation_out = Some(AnimationRef::new("fade_out"));

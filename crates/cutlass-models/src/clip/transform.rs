@@ -193,6 +193,12 @@ pub enum LookParam {
     AdjustSaturation,
     AdjustExposure,
     AdjustTemperature,
+    AdjustTint,
+    AdjustHue,
+    AdjustHighlights,
+    AdjustShadows,
+    AdjustSharpness,
+    AdjustVignette,
     /// Mask edge softness (`0` … `1`). Scalar.
     MaskFeather,
     /// Mask center offset as a fraction of layer size. Vec2.

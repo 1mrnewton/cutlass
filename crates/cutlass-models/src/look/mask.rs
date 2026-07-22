@@ -171,6 +171,12 @@ pub(crate) fn mask_scalar_mut(
         | LookParam::AdjustSaturation
         | LookParam::AdjustExposure
         | LookParam::AdjustTemperature
+        | LookParam::AdjustTint
+        | LookParam::AdjustHue
+        | LookParam::AdjustHighlights
+        | LookParam::AdjustShadows
+        | LookParam::AdjustSharpness
+        | LookParam::AdjustVignette
         | LookParam::ChromaStrength
         | LookParam::ChromaShadow => Err(ModelError::InvalidParam(format!(
             "look parameter {param:?} is not a scalar mask property"
@@ -197,6 +203,12 @@ pub(crate) fn mask_vec2_mut(
         | LookParam::AdjustSaturation
         | LookParam::AdjustExposure
         | LookParam::AdjustTemperature
+        | LookParam::AdjustTint
+        | LookParam::AdjustHue
+        | LookParam::AdjustHighlights
+        | LookParam::AdjustShadows
+        | LookParam::AdjustSharpness
+        | LookParam::AdjustVignette
         | LookParam::ChromaStrength
         | LookParam::ChromaShadow => Err(ModelError::InvalidParam(format!(
             "look parameter {param:?} is not a vec2 mask property"
@@ -230,6 +242,12 @@ pub(crate) fn validate_mask_value(param: LookParam, value: f32) -> Result<(), Mo
         | LookParam::AdjustSaturation
         | LookParam::AdjustExposure
         | LookParam::AdjustTemperature
+        | LookParam::AdjustTint
+        | LookParam::AdjustHue
+        | LookParam::AdjustHighlights
+        | LookParam::AdjustShadows
+        | LookParam::AdjustSharpness
+        | LookParam::AdjustVignette
         | LookParam::ChromaStrength
         | LookParam::ChromaShadow => Err(ModelError::InvalidParam(format!(
             "look parameter {param:?} is not a scalar"

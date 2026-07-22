@@ -176,6 +176,42 @@ pub(crate) fn clip_param_value(
             },
             ParamValue::Scalar(value_x),
         ),
+        "look_adjust_tint" => (
+            ClipParam::Look {
+                param: LookParam::AdjustTint,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_hue" => (
+            ClipParam::Look {
+                param: LookParam::AdjustHue,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_highlights" => (
+            ClipParam::Look {
+                param: LookParam::AdjustHighlights,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_shadows" => (
+            ClipParam::Look {
+                param: LookParam::AdjustShadows,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_sharpness" => (
+            ClipParam::Look {
+                param: LookParam::AdjustSharpness,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_vignette" => (
+            ClipParam::Look {
+                param: LookParam::AdjustVignette,
+            },
+            ParamValue::Scalar(value_x),
+        ),
         "look_mask_feather" => (
             ClipParam::Look {
                 param: LookParam::MaskFeather,

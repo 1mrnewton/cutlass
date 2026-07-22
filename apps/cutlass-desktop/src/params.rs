@@ -63,6 +63,7 @@ fn scalar_param(kfs: &slint::ModelRc<ParamKeyframe>, constant: f32) -> Param<f32
             tick: i64::from(kf.tick),
             value: kf.value_x,
             easing: easing_of(&kf),
+            tangents: None,
         })
         .collect();
     if keyframes.is_empty() {
@@ -79,6 +80,7 @@ fn vec2_param(kfs: &slint::ModelRc<ParamKeyframe>, constant: [f32; 2]) -> Param<
             tick: i64::from(kf.tick),
             value: [kf.value_x, kf.value_y],
             easing: easing_of(&kf),
+            tangents: None,
         })
         .collect();
     if keyframes.is_empty() {

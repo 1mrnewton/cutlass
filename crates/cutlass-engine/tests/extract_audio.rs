@@ -104,11 +104,13 @@ fn auto_extract_is_exact_and_undo_redo_restores_identical_entities() {
                     tick: 0,
                     value: 0.5,
                     easing: Easing::EaseIn,
+                    tangents: None,
                 },
                 Keyframe {
                     tick: 1_000,
                     value: 1.75,
                     easing: Easing::EaseOut,
+                    tangents: None,
                 },
             ],
         };
@@ -119,11 +121,13 @@ fn auto_extract_is_exact_and_undo_redo_restores_identical_entities() {
                     tick: 0,
                     value: 0.2,
                     easing: Easing::Linear,
+                    tangents: None,
                 },
                 Keyframe {
                     tick: 72,
                     value: 0.9,
                     easing: Easing::EaseInOut,
+                    tangents: None,
                 },
             ],
         };

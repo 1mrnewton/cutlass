@@ -618,6 +618,7 @@ fn set_param_keyframe_undo_redo_roundtrip() {
             at: rt(0),
             value: ParamValue::Scalar(0.0),
             easing: Easing::Linear,
+            tangents: None,
         }))
         .expect("first keyframe");
     engine
@@ -627,6 +628,7 @@ fn set_param_keyframe_undo_redo_roundtrip() {
             at: rt(24),
             value: ParamValue::Scalar(1.0),
             easing: Easing::EaseInOut,
+            tangents: None,
         }))
         .expect("second keyframe");
 
@@ -1032,6 +1034,7 @@ fn remove_param_keyframe_undo_restores_curve() {
                 at: rt(tick),
                 value: ParamValue::Scalar(value + 1.0),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .expect("keyframe");
     }
@@ -1083,6 +1086,7 @@ fn set_param_constant_undo_restores_keyframes() {
                 at: rt(tick),
                 value: ParamValue::Scalar(tick as f32),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .expect("keyframe");
     }
@@ -1124,6 +1128,7 @@ fn param_keyframe_outside_clip_rejected() {
                 at: rt(48), // exclusive end — outside
                 value: ParamValue::Scalar(0.5),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .is_err()
     );
@@ -1151,6 +1156,7 @@ fn transform_gesture_at_playhead_keyframes_animated_property() {
                 at: rt(tick),
                 value: ParamValue::Scalar(value),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .expect("keyframe");
     }
@@ -1751,6 +1757,7 @@ fn move_effect_undo_redo_restores_exact_instances() {
                 at: rt(tick),
                 value: ParamValue::Scalar(value),
                 easing,
+                tangents: None,
             }))
             .expect("set animated effect param");
     }
@@ -1794,6 +1801,7 @@ fn effect_param_keyframe_through_clip_param() {
             at: rt(0),
             value: ParamValue::Scalar(0.0),
             easing: Easing::Linear,
+            tangents: None,
         }))
         .expect("kf0");
     engine
@@ -1803,6 +1811,7 @@ fn effect_param_keyframe_through_clip_param() {
             at: rt(24),
             value: ParamValue::Scalar(8.0),
             easing: Easing::Linear,
+            tangents: None,
         }))
         .expect("kf24");
 
@@ -1859,6 +1868,7 @@ fn shape_param_keyframe_undo_redo_roundtrip() {
                 at: rt(tick),
                 value: ParamValue::Scalar(value),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .expect("keyframe");
     }
@@ -1897,6 +1907,7 @@ fn shape_fill_color_keyframes_animate_and_flatten() {
                 at: rt(tick),
                 value: ParamValue::Color(rgba),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .expect("keyframe");
     }
@@ -1940,6 +1951,7 @@ fn shape_param_commands_reject_bad_targets_without_history() {
                 at: rt(0),
                 value: ParamValue::Scalar(4.0),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .is_err()
     );
@@ -1954,6 +1966,7 @@ fn shape_param_commands_reject_bad_targets_without_history() {
                 at: rt(0),
                 value: ParamValue::Scalar(0.5),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .is_err()
     );
@@ -1969,6 +1982,7 @@ fn shape_param_commands_reject_bad_targets_without_history() {
                 at: rt(0),
                 value: ParamValue::Scalar(100.0),
                 easing: Easing::Linear,
+                tangents: None,
             }))
             .is_err()
     );

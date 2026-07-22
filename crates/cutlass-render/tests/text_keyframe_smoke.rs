@@ -49,6 +49,7 @@ fn keyframed_text_size_grows_glyph_coverage() {
             rt(0),
             ParamValue::Scalar(24.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -60,6 +61,7 @@ fn keyframed_text_size_grows_glyph_coverage() {
             rt(48),
             ParamValue::Scalar(96.0),
             Easing::from_preset_id("snappy").unwrap(),
+            None,
         )
         .unwrap();
 
@@ -209,6 +211,7 @@ fn keyframed_text_opacity_matches_tolerance() {
             rt(0),
             ParamValue::Scalar(0.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -218,6 +221,7 @@ fn keyframed_text_opacity_matches_tolerance() {
             rt(24),
             ParamValue::Scalar(1.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
 

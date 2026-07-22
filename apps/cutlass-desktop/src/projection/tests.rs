@@ -148,6 +148,7 @@ fn projects_text_background_radius_keyframes() {
             RationalTime::new(0, EngineRational::FPS_24),
             ParamValue::Scalar(0.0),
             Easing::Linear,
+            None,
         )
         .expect("kf0");
     project
@@ -159,6 +160,7 @@ fn projects_text_background_radius_keyframes() {
             RationalTime::new(24, EngineRational::FPS_24),
             ParamValue::Scalar(1.0),
             Easing::Linear,
+            None,
         )
         .expect("kf1");
 
@@ -227,6 +229,7 @@ fn projects_new_adjust_sliders_and_keyframes() {
             RationalTime::new(0, EngineRational::FPS_24),
             ParamValue::Scalar(-1.0),
             Easing::Linear,
+            None,
         )
         .expect("kf0");
     project
@@ -238,6 +241,7 @@ fn projects_new_adjust_sliders_and_keyframes() {
             RationalTime::new(24, EngineRational::FPS_24),
             ParamValue::Scalar(1.0),
             Easing::Linear,
+            None,
         )
         .expect("kf1");
 
@@ -599,6 +603,7 @@ fn keyframes_publish_absolute_ticks_and_easing() {
                 tick: 0,
                 value: 0.5f32,
                 easing: Easing::EaseOut,
+                tangents: None,
             },
             Keyframe {
                 tick: 24,
@@ -606,6 +611,7 @@ fn keyframes_publish_absolute_ticks_and_easing() {
                 easing: Easing::Bezier {
                     points: [0.42, 0.0, 0.58, 1.0],
                 },
+                tangents: None,
             },
         ],
     };
@@ -689,11 +695,13 @@ fn pan_projects_constant_and_keyframe_list() {
                 tick: 0,
                 value: -1.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: 48,
                 value: 1.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
         ],
     };

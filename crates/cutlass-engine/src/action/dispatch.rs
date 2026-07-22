@@ -240,8 +240,10 @@ fn dispatch_edit(
             at,
             value,
             easing,
+            tangents,
         } => {
-            let inverse = edit::set_param::set_keyframe(ctx, clip, param, at, value, easing)?;
+            let inverse =
+                edit::set_param::set_keyframe(ctx, clip, param, at, value, easing, tangents)?;
             Ok((
                 ApplyOutcome::Edited(EditOutcome::Updated(clip)),
                 Some(inverse),

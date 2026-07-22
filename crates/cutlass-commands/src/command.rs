@@ -180,14 +180,19 @@ pub enum EditCommand {
     },
     /// Insert or replace a keyframe on one animatable clip property at an
     /// absolute timeline position (must fall inside the clip). A constant
-    /// property becomes a single-keyframe curve. The inverse restores the
-    /// previous parameter state.
+    /// property becomes a single-keyframe curve. Optional spatial `tangents`
+    /// shape a position motion path (rejected on non-position params). The
+    /// inverse restores the previous parameter state (full-clip snapshot).
     SetParamKeyframe {
         clip: ClipId,
         param: ClipParam,
         at: RationalTime,
         value: ParamValue,
         easing: Easing,
+        /// Spatial bezier handles for position motion paths. `None` is
+        /// straight-line (legacy). Only valid when `param` is [`ClipParam::Position`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tangents: Option<cutlass_models::SpatialTangents>,
     },
     /// Remove the keyframe at exactly `at` on one property. Removing the
     /// last keyframe collapses the property to a constant of that

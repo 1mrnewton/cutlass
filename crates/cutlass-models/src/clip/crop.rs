@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::ModelError;
-use crate::param::Lerp;
+use crate::param::{Lerp, SegmentSample};
 
 /// Normalized crop window into a clip's content (CapCut crop, M1).
 ///
@@ -36,6 +36,8 @@ impl Lerp for CropRect {
         }
     }
 }
+
+impl SegmentSample for CropRect {}
 
 /// Smallest croppable extent per axis (1% of the content) — keeps the kept
 /// region non-degenerate so placement math and UV rects never collapse.

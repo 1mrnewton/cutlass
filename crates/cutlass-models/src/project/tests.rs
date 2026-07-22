@@ -54,7 +54,14 @@ fn style_params_keyframe_through_project_api() {
         param: crate::StyleParam::ShadowBlur,
     };
     project
-        .set_param_keyframe(clip, blur, rt(100), ParamValue::Scalar(4.0), Easing::Linear)
+        .set_param_keyframe(
+            clip,
+            blur,
+            rt(100),
+            ParamValue::Scalar(4.0),
+            Easing::Linear,
+            None,
+        )
         .unwrap();
     project
         .set_param_keyframe(
@@ -63,6 +70,7 @@ fn style_params_keyframe_through_project_api() {
             rt(140),
             ParamValue::Scalar(20.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -89,7 +97,8 @@ fn style_params_keyframe_through_project_api() {
                 color,
                 rt(100),
                 ParamValue::Scalar(1.0),
-                Easing::Linear
+                Easing::Linear,
+                None
             )
             .is_err()
     );
@@ -117,7 +126,14 @@ fn style_params_keyframe_through_project_api() {
         Some([10, 20, 30, 40])
     );
     project
-        .set_param_keyframe(clip, blur, rt(120), ParamValue::Scalar(8.0), Easing::Linear)
+        .set_param_keyframe(
+            clip,
+            blur,
+            rt(120),
+            ParamValue::Scalar(8.0),
+            Easing::Linear,
+            None,
+        )
         .unwrap();
     project.remove_param_keyframe(clip, blur, rt(120)).unwrap();
 
@@ -125,8 +141,115 @@ fn style_params_keyframe_through_project_api() {
     let bare = project.add_clip(track, media, tr(0, 48), rt(200)).unwrap();
     assert!(
         project
-            .set_param_keyframe(bare, blur, rt(200), ParamValue::Scalar(4.0), Easing::Linear)
+            .set_param_keyframe(
+                bare,
+                blur,
+                rt(200),
+                ParamValue::Scalar(4.0),
+                Easing::Linear,
+                None
+            )
             .is_err()
+    );
+}
+
+#[test]
+fn spatial_tangents_routing_accepts_position_only() {
+    use crate::SpatialTangents;
+    use crate::look::{LayerShadow, LayerStyles};
+
+    let (mut project, media_id, track) = project_with_media(200);
+    let clip = project
+        .add_clip(track, media_id, tr(0, 48), rt(100))
+        .unwrap();
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow::default()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let handles = SpatialTangents {
+        out_t: [0.0, 0.4],
+        in_t: [0.0, 0.0],
+    };
+    // Position accepts tangents.
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            rt(100),
+            ParamValue::Vec2([0.0, 0.0]),
+            Easing::Linear,
+            Some(handles),
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            rt(140),
+            ParamValue::Vec2([0.5, 0.5]),
+            Easing::Linear,
+            Some(SpatialTangents {
+                out_t: [0.0, 0.0],
+                in_t: [-0.4, 0.0],
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        project.clip(clip).unwrap().transform.position.keyframes()[0].tangents,
+        Some(handles)
+    );
+
+    // Scalar opacity rejects.
+    let err = project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Opacity,
+            rt(100),
+            ParamValue::Scalar(0.5),
+            Easing::Linear,
+            Some(handles),
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("spatial tangents are only supported on position"),
+        "{err}"
+    );
+
+    // Vec2 shadow-offset also rejects (motion paths are position-only).
+    let offset = ClipParam::Style {
+        param: crate::StyleParam::ShadowOffset,
+    };
+    let err = project
+        .set_param_keyframe(
+            clip,
+            offset,
+            rt(100),
+            ParamValue::Vec2([4.0, 4.0]),
+            Easing::Linear,
+            Some(handles),
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("spatial tangents are only supported on position"),
+        "{err}"
+    );
+
+    // Parallel tangents-only API mirrors the gate.
+    let err = project
+        .set_param_keyframe_tangents(clip, offset, rt(100), Some(handles))
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("spatial tangents are only supported on position"),
+        "{err}"
     );
 }
 
@@ -149,7 +272,8 @@ fn effect_color_param_keyframes_through_project_api() {
                 color,
                 rt(100),
                 ParamValue::Scalar(0.5),
-                Easing::Linear
+                Easing::Linear,
+                None
             )
             .is_err()
     );
@@ -160,6 +284,7 @@ fn effect_color_param_keyframes_through_project_api() {
             rt(100),
             ParamValue::Color([0, 0, 0, 255]),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -169,6 +294,7 @@ fn effect_color_param_keyframes_through_project_api() {
             rt(140),
             ParamValue::Color([255, 0, 0, 255]),
             Easing::Linear,
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -212,6 +338,7 @@ fn shape_params_keyframe_through_project_api() {
             rt(100),
             ParamValue::Scalar(100.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -221,6 +348,7 @@ fn shape_params_keyframe_through_project_api() {
             rt(140),
             ParamValue::Scalar(500.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     let ClipSource::Generated(Generator::Shape { width: w, .. }) =
@@ -242,7 +370,8 @@ fn shape_params_keyframe_through_project_api() {
                 width,
                 rt(100),
                 ParamValue::Color([0; 4]),
-                Easing::Linear
+                Easing::Linear,
+                None
             )
             .is_err()
     );
@@ -290,6 +419,7 @@ fn text_background_radius_keyframe_through_project_api() {
             rt(100),
             ParamValue::Scalar(0.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -299,6 +429,7 @@ fn text_background_radius_keyframe_through_project_api() {
             rt(140),
             ParamValue::Scalar(1.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     let ClipSource::Generated(Generator::Text { style, .. }) =
@@ -315,6 +446,7 @@ fn text_background_radius_keyframe_through_project_api() {
             rt(120),
             ParamValue::Scalar(1.5),
             Easing::Linear,
+            None
         ),
         Err(ModelError::InvalidParam(_))
     ));
@@ -329,6 +461,7 @@ fn text_background_radius_keyframe_through_project_api() {
             rt(200),
             ParamValue::Scalar(0.5),
             Easing::Linear,
+            None
         ),
         Err(ModelError::InvalidParam(_))
     ));
@@ -851,6 +984,7 @@ fn duplicate_clip_clones_generated_content_and_template_flag() {
             rt(5),
             ParamValue::Scalar(0.75),
             Easing::EaseInOut,
+            None,
         )
         .unwrap();
 
@@ -1613,11 +1747,13 @@ fn set_clip_speed_curve_rejects_bad_targets() {
                 tick: 0,
                 value: 0.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
             crate::param::Keyframe {
                 tick: 1000,
                 value: 1.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
         ],
     };
@@ -1807,6 +1943,7 @@ fn set_clip_audio_none_volume_preserves_envelope() {
             rt(0),
             ParamValue::Scalar(1.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -1816,6 +1953,7 @@ fn set_clip_audio_none_volume_preserves_envelope() {
             rt(50),
             ParamValue::Scalar(0.2),
             Easing::Linear,
+            None,
         )
         .unwrap();
     assert!(project.clip(clip).unwrap().has_volume_envelope());
@@ -1904,6 +2042,7 @@ fn pan_param_keyframe_through_project_api() {
             rt(0),
             ParamValue::Scalar(-1.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -1913,6 +2052,7 @@ fn pan_param_keyframe_through_project_api() {
             rt(50),
             ParamValue::Scalar(1.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     let c = project.clip(clip).unwrap();
@@ -2053,6 +2193,7 @@ fn crop_param_keyframe_validates_each_value() {
             rt(0),
             ParamValue::Rect([ok.x, ok.y, ok.w, ok.h]),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -2062,6 +2203,7 @@ fn crop_param_keyframe_validates_each_value() {
             rt(50),
             ParamValue::Rect([0.2, 0.2, 0.4, 0.4]),
             Easing::Linear,
+            None,
         )
         .unwrap();
     assert!(project.clip(clip).unwrap().crop.is_animated());
@@ -2072,6 +2214,7 @@ fn crop_param_keyframe_validates_each_value() {
             rt(25),
             ParamValue::Rect([0.0, 0.0, 0.001, 1.0]),
             Easing::Linear,
+            None
         ),
         Err(ModelError::InvalidParam(_))
     ));
@@ -2401,10 +2544,24 @@ fn filter_intensity_keyframes_sample_at_clip_local_ticks() {
         param: crate::LookParam::FilterIntensity,
     };
     project
-        .set_param_keyframe(clip, param, rt(0), ParamValue::Scalar(0.0), Easing::Linear)
+        .set_param_keyframe(
+            clip,
+            param,
+            rt(0),
+            ParamValue::Scalar(0.0),
+            Easing::Linear,
+            None,
+        )
         .unwrap();
     project
-        .set_param_keyframe(clip, param, rt(10), ParamValue::Scalar(1.0), Easing::Linear)
+        .set_param_keyframe(
+            clip,
+            param,
+            rt(10),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+            None,
+        )
         .unwrap();
 
     let intensity = project
@@ -2426,10 +2583,24 @@ fn adjust_hue_keyframes_through_project_api() {
         param: crate::LookParam::AdjustHue,
     };
     project
-        .set_param_keyframe(clip, param, rt(0), ParamValue::Scalar(-1.0), Easing::Linear)
+        .set_param_keyframe(
+            clip,
+            param,
+            rt(0),
+            ParamValue::Scalar(-1.0),
+            Easing::Linear,
+            None,
+        )
         .unwrap();
     project
-        .set_param_keyframe(clip, param, rt(10), ParamValue::Scalar(1.0), Easing::Linear)
+        .set_param_keyframe(
+            clip,
+            param,
+            rt(10),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+            None,
+        )
         .unwrap();
     let hue = project.clip(clip).unwrap().adjust.hue.sample(5);
     assert!((hue - 0.0).abs() < f32::EPSILON);
@@ -2444,6 +2615,7 @@ fn adjust_hue_keyframes_through_project_api() {
                 rt(0),
                 ParamValue::Scalar(-0.5),
                 Easing::Linear,
+                None
             )
             .is_err()
     );
@@ -2469,6 +2641,7 @@ fn mask_geometry_keyframes_through_project_api() {
             rt(100),
             ParamValue::Scalar(0.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -2478,6 +2651,7 @@ fn mask_geometry_keyframes_through_project_api() {
             rt(140),
             ParamValue::Scalar(90.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
     assert!(
@@ -2504,7 +2678,8 @@ fn mask_geometry_keyframes_through_project_api() {
                 center,
                 rt(100),
                 ParamValue::Scalar(0.5),
-                Easing::Linear
+                Easing::Linear,
+                None
             )
             .is_err()
     );
@@ -2515,6 +2690,7 @@ fn mask_geometry_keyframes_through_project_api() {
             rt(100),
             ParamValue::Vec2([0.1, -0.2]),
             Easing::Linear,
+            None,
         )
         .unwrap();
 
@@ -2528,7 +2704,8 @@ fn mask_geometry_keyframes_through_project_api() {
                 rotation,
                 rt(200),
                 ParamValue::Scalar(15.0),
-                Easing::Linear
+                Easing::Linear,
+                None
             )
             .is_err()
     );

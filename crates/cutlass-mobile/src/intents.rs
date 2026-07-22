@@ -1470,6 +1470,7 @@ fn toggle_transform_keyframe(
                 at: position,
                 value,
                 easing: Easing::Linear,
+                tangents: None,
             }))?;
         }
         Ok(serde_json::json!({ "clip": clip.raw(), "keyframed": true }))

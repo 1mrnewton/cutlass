@@ -22,7 +22,7 @@ use crate::look::{
 };
 use crate::media::MediaSource;
 use crate::metadata::ProjectMetadata;
-use crate::param::{Easing, Param};
+use crate::param::{Easing, Param, SpatialTangents};
 use crate::schema::ProjectSchema;
 use crate::time::{
     Rational, RationalTime, TimeRange, check_same_rate, resample, time_add, time_sub,
@@ -223,6 +223,11 @@ impl Project {
 
     /// Insert or replace a keyframe on one animatable clip property. `at` is
     /// an absolute timeline position and must fall inside the clip.
+    ///
+    /// `tangents` shapes a cubic-bezier motion path and is accepted only on
+    /// [`ClipParam::Position`] (canvas-fraction handles). Other params reject
+    /// a non-`None` value with "spatial tangents are only supported on
+    /// position". `None` clears/keeps straight-line motion on position.
     pub fn set_param_keyframe(
         &mut self,
         clip_id: ClipId,
@@ -230,7 +235,16 @@ impl Project {
         at: RationalTime,
         value: ParamValue,
         easing: Easing,
+        tangents: Option<SpatialTangents>,
     ) -> Result<(), ModelError> {
+        if tangents.is_some() && param != ClipParam::Position {
+            return Err(ModelError::InvalidParam(
+                "spatial tangents are only supported on position".into(),
+            ));
+        }
+        if let Some(t) = tangents {
+            t.validate()?;
+        }
         // Volume (M8) is an audio property, not a transform: validate the
         // gain range and an audio-capable target, then write to the envelope.
         if param == ClipParam::Volume {
@@ -279,7 +293,7 @@ impl Project {
             .timeline
             .clip_mut(clip_id)
             .ok_or(ModelError::UnknownClip(clip_id))?;
-        match param {
+        let result = match param {
             ClipParam::Effect { effect, param } => super::helpers::effect_mut(clip, effect)?
                 .set_param_value_keyframe(param as usize, tick, value, easing),
             ClipParam::Shape { param } => super::helpers::generator_mut(clip)?
@@ -301,7 +315,44 @@ impl Project {
             _ => clip
                 .transform
                 .set_param_keyframe(param, tick, value, easing),
+        };
+        result?;
+        if param == ClipParam::Position {
+            // Always write the tangents slot so a None command clears a
+            // previous curve (EditCommand redo / AI wire).
+            clip.transform
+                .position
+                .set_keyframe_tangents(tick, tangents)?;
         }
+        Ok(())
+    }
+
+    /// Set or clear spatial bezier tangents on a position keyframe at `at`.
+    /// Rejected for every param other than [`ClipParam::Position`].
+    pub fn set_param_keyframe_tangents(
+        &mut self,
+        clip_id: ClipId,
+        param: ClipParam,
+        at: RationalTime,
+        tangents: Option<SpatialTangents>,
+    ) -> Result<(), ModelError> {
+        if param != ClipParam::Position {
+            return Err(ModelError::InvalidParam(
+                "spatial tangents are only supported on position".into(),
+            ));
+        }
+        if let Some(t) = tangents {
+            t.validate()?;
+        }
+        self.check_param_target(clip_id)?;
+        let tick = self.keyframe_tick(clip_id, at)?;
+        let clip = self
+            .timeline
+            .clip_mut(clip_id)
+            .ok_or(ModelError::UnknownClip(clip_id))?;
+        clip.transform
+            .position
+            .set_keyframe_tangents(tick, tangents)
     }
 
     /// Remove the keyframe at exactly `at` (absolute timeline position) on

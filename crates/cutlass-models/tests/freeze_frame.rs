@@ -75,11 +75,13 @@ fn freeze_helper_bakes_visual_state_and_clears_dynamic_semantics() {
                 tick: 0,
                 value: 0.5,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: 1_000,
                 value: 1.5,
                 easing: Easing::Linear,
+                tangents: None,
             },
         ],
     };
@@ -210,6 +212,7 @@ fn frozen_frame_holds_keyframed_crop_at_freeze_tick() {
             rt(0),
             cutlass_models::ParamValue::Rect([a.x, a.y, a.w, a.h]),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -219,6 +222,7 @@ fn frozen_frame_holds_keyframed_crop_at_freeze_tick() {
             rt(40),
             cutlass_models::ParamValue::Rect([b.x, b.y, b.w, b.h]),
             Easing::Linear,
+            None,
         )
         .unwrap();
     let source = project.clip(clip).unwrap().clone();

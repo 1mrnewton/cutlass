@@ -1,4 +1,6 @@
-use cutlass_models::{ClipId, ClipParam, Easing, ModelError, ParamValue, RationalTime};
+use cutlass_models::{
+    ClipId, ClipParam, Easing, ModelError, ParamValue, RationalTime, SpatialTangents,
+};
 
 use crate::action::edit::restore_clip::RestoreClipAction;
 use crate::action::{ApplyContext, EditAction};
@@ -15,10 +17,11 @@ pub fn set_keyframe(
     at: RationalTime,
     value: ParamValue,
     easing: Easing,
+    tangents: Option<SpatialTangents>,
 ) -> Result<Box<dyn EditAction>, EngineError> {
     let before = snapshot(ctx, clip)?;
     ctx.project
-        .set_param_keyframe(clip, param, at, value, easing)?;
+        .set_param_keyframe(clip, param, at, value, easing, tangents)?;
     Ok(Box::new(RestoreClipAction { clip: before }))
 }
 

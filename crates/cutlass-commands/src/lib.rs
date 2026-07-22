@@ -12,7 +12,7 @@ pub use cutlass_models::{
     AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
     ClipTransform, ColorAdjustments, CropRect, Easing, Filter, Generator, LayerShadow, LayerStyles,
     Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId, Param, ParamValue, Rational, RationalTime,
-    Replaceable, StabilizeLevel, TemplateMeta, TimeRange, TrackId, TrackKind,
+    Replaceable, SpatialTangents, StabilizeLevel, TemplateMeta, TimeRange, TrackId, TrackKind,
 };
 
 use tracing::info;

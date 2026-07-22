@@ -233,6 +233,7 @@ fn keyframed_text_background_samples_card_per_tick() {
             rt(0),
             ParamValue::Color([0, 0, 0, 255]),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -242,10 +243,18 @@ fn keyframed_text_background_samples_card_per_tick() {
             rt(50),
             ParamValue::Color([200, 100, 0, 255]),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
-        .set_param_keyframe(clip, radius, rt(0), ParamValue::Scalar(0.0), Easing::Linear)
+        .set_param_keyframe(
+            clip,
+            radius,
+            rt(0),
+            ParamValue::Scalar(0.0),
+            Easing::Linear,
+            None,
+        )
         .unwrap();
     project
         .set_param_keyframe(
@@ -254,6 +263,7 @@ fn keyframed_text_background_samples_card_per_tick() {
             rt(50),
             ParamValue::Scalar(1.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
 
@@ -419,6 +429,7 @@ fn keyframed_crop_samples_uv_per_tick() {
             rt(0),
             ParamValue::Rect([a.x, a.y, a.w, a.h]),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -428,6 +439,7 @@ fn keyframed_crop_samples_uv_per_tick() {
             rt(10),
             ParamValue::Rect([b.x, b.y, b.w, b.h]),
             Easing::Linear,
+            None,
         )
         .unwrap();
 
@@ -993,7 +1005,7 @@ fn animated_shape_params_sample_at_the_clip_tick() {
         (fill, 50, ParamValue::Color([200, 100, 0, 255])),
     ] {
         project
-            .set_param_keyframe(clip, param, rt(at), value, Easing::Linear)
+            .set_param_keyframe(clip, param, rt(at), value, Easing::Linear, None)
             .unwrap();
     }
 
@@ -1200,6 +1212,7 @@ fn keyframed_mask_center_samples_per_tick() {
             rt(0),
             ParamValue::Vec2([0.0, 0.0]),
             Easing::Linear,
+            None,
         )
         .unwrap();
     project
@@ -1209,6 +1222,7 @@ fn keyframed_mask_center_samples_per_tick() {
             rt(40),
             ParamValue::Vec2([0.5, -0.25]),
             Easing::Linear,
+            None,
         )
         .unwrap();
 
@@ -1860,7 +1874,14 @@ fn keyframed_glow_radius_samples_per_tick() {
         param: StyleParam::GlowRadius,
     };
     project
-        .set_param_keyframe(clip, radius, rt(0), ParamValue::Scalar(4.0), Easing::Linear)
+        .set_param_keyframe(
+            clip,
+            radius,
+            rt(0),
+            ParamValue::Scalar(4.0),
+            Easing::Linear,
+            None,
+        )
         .unwrap();
     project
         .set_param_keyframe(
@@ -1869,6 +1890,7 @@ fn keyframed_glow_radius_samples_per_tick() {
             rt(40),
             ParamValue::Scalar(20.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
 

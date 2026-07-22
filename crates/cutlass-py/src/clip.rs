@@ -890,7 +890,7 @@ fn apply_clip_animation(
             let abs = clip_key_time(clip_start, clip_dur, rel, rate);
             project
                 .model_mut()
-                .set_param_keyframe(clip_id, param, abs, val, easing)
+                .set_param_keyframe(clip_id, param, abs, val, easing, None)
                 .map_err(model_err)?;
         }
         return Ok(());
@@ -901,7 +901,7 @@ fn apply_clip_animation(
     let abs = clip_key_time(clip_start, clip_dur, at, rate);
     project
         .model_mut()
-        .set_param_keyframe(clip_id, param, abs, val, default_easing)
+        .set_param_keyframe(clip_id, param, abs, val, default_easing, None)
         .map_err(model_err)
 }
 

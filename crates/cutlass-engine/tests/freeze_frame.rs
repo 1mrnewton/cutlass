@@ -274,11 +274,13 @@ fn reverse_and_speed_curve_choose_the_pre_mutation_held_frame() {
                         tick: 0,
                         value: 0.5,
                         easing: Easing::Linear,
+                        tangents: None,
                     },
                     Keyframe {
                         tick: 1_000,
                         value: 2.0,
                         easing: Easing::Linear,
+                        tangents: None,
                     },
                 ],
             }),

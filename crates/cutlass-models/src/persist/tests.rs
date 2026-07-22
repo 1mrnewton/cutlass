@@ -505,6 +505,7 @@ fn keyframed_transform_survives_save_load() {
             RationalTime::new(0, R24),
             ParamValue::Scalar(0.0),
             Easing::EaseInOut,
+            None,
         )
         .unwrap();
     project
@@ -514,6 +515,7 @@ fn keyframed_transform_survives_save_load() {
             RationalTime::new(24, R24),
             ParamValue::Scalar(1.0),
             Easing::Linear,
+            None,
         )
         .unwrap();
 

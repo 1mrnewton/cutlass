@@ -606,11 +606,13 @@ mod tests {
                     tick: 0,
                     value: -1.0,
                     easing: Easing::Linear,
+                    tangents: None,
                 },
                 Keyframe {
                     tick: 100,
                     value: 1.0,
                     easing: Easing::Linear,
+                    tangents: None,
                 },
             ],
         };

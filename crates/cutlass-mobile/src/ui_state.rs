@@ -629,6 +629,7 @@ mod tests {
                 RationalTime::new(30, FPS),
                 ParamValue::Scalar(2.0),
                 Easing::Linear,
+                None,
             )
             .unwrap();
         project
@@ -638,6 +639,7 @@ mod tests {
                 RationalTime::new(60, FPS),
                 ParamValue::Scalar(0.5),
                 Easing::Linear,
+                None,
             )
             .unwrap();
 

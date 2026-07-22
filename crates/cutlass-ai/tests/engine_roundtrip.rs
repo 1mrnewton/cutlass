@@ -224,6 +224,7 @@ fn move_effect_lowers_applies_and_undoes_exactly() {
                 RationalTime::new(tick, R24),
                 ParamValue::Scalar(value),
                 easing,
+                None,
             )
             .unwrap();
     }
@@ -351,6 +352,7 @@ fn duplicate_clip_wire_preserves_properties_and_round_trips_one_edit() {
             RationalTime::new(24, R24),
             ParamValue::Scalar(1.5),
             Easing::EaseOut,
+            None,
         )
         .unwrap();
     project.add_effect(source, "gaussian_blur").unwrap();

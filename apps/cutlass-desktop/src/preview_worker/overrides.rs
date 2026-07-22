@@ -238,6 +238,7 @@ pub(super) fn set_param_keyframe_and_publish(
         at,
         value,
         easing,
+        tangents: None,
     })) {
         Ok(_) => {
             info!(%clip_id, ?param, tick = at.value, "set param keyframe");
@@ -396,6 +397,7 @@ pub(super) fn retime_keyframes_and_publish(
             at: RationalTime::new(to_tick, tl_rate),
             value,
             easing,
+            tangents: None,
         })) {
             error!(%clip_id, ?param, "retime keyframes failed setting: {e}");
             engine.rollback_group();

@@ -34,11 +34,13 @@ fn extracted_audio_companion_copies_only_audio_and_retime_state() {
                 tick: 0,
                 value: 0.25,
                 easing: Easing::EaseIn,
+                tangents: None,
             },
             Keyframe {
                 tick: 79,
                 value: 0.8,
                 easing: Easing::Linear,
+                tangents: None,
             },
         ],
     };
@@ -48,11 +50,13 @@ fn extracted_audio_companion_copies_only_audio_and_retime_state() {
                 tick: 0,
                 value: -0.5,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: 79,
                 value: 0.5,
                 easing: Easing::EaseOut,
+                tangents: None,
             },
         ],
     };
@@ -540,11 +544,13 @@ fn linear_ramp(v0: f32, v1: f32) -> Param<f32> {
                 tick: 0,
                 value: v0,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: SPEED_CURVE_SCALE,
                 value: v1,
                 easing: Easing::Linear,
+                tangents: None,
             },
         ],
     }
@@ -615,6 +621,7 @@ fn curve_integral_holds_flat_outside_keyframes() {
             tick: SPEED_CURVE_SCALE / 2,
             value: 2.0,
             easing: Easing::Linear,
+            tangents: None,
         }],
     };
     assert!((clip.speed_curve_integral(0.25) - 0.5).abs() < 1e-6);
@@ -632,16 +639,19 @@ fn source_time_at_curve_sweeps_full_window_symmetrically() {
                 tick: 0,
                 value: 0.5,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: SPEED_CURVE_SCALE / 2,
                 value: 2.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: SPEED_CURVE_SCALE,
                 value: 0.5,
                 easing: Easing::Linear,
+                tangents: None,
             },
         ],
     };
@@ -677,6 +687,7 @@ fn validate_speed_curve_rejects_out_of_range_values_and_ticks() {
             tick: SPEED_CURVE_SCALE + 1,
             value: 1.0,
             easing: Easing::Linear,
+            tangents: None,
         }],
     };
     assert!(validate_speed_curve(&bad_tick).is_err());
@@ -778,11 +789,13 @@ fn volume_envelope_roundtrips_and_validates() {
                 tick: 0,
                 value: 0.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: 24,
                 value: 1.0,
                 easing: Easing::EaseOut,
+                tangents: None,
             },
         ],
     };
@@ -799,6 +812,7 @@ fn volume_envelope_roundtrips_and_validates() {
             tick: 0,
             value: MAX_CLIP_VOLUME + 1.0,
             easing: Easing::Linear,
+            tangents: None,
         }],
     };
     assert!(validate_volume_envelope(&hot).is_err());
@@ -813,11 +827,13 @@ fn pan_envelope_roundtrips_and_validates() {
                 tick: 0,
                 value: -1.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: 24,
                 value: 1.0,
                 easing: Easing::EaseOut,
+                tangents: None,
             },
         ],
     };
@@ -841,6 +857,7 @@ fn pan_envelope_roundtrips_and_validates() {
             tick: 0,
             value: MAX_CLIP_PAN + 1.0,
             easing: Easing::Linear,
+            tangents: None,
         }],
     };
     assert!(validate_pan_envelope(&hot).is_err());
@@ -881,11 +898,13 @@ fn audio_gain_follows_a_keyframed_envelope() {
                 tick: 0,
                 value: 0.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: 100,
                 value: 1.0,
                 easing: Easing::Linear,
+                tangents: None,
             },
         ],
     };
@@ -970,11 +989,13 @@ fn keyframed_crop_roundtrips_and_lerps() {
                 tick: 0,
                 value: a,
                 easing: Easing::Linear,
+                tangents: None,
             },
             Keyframe {
                 tick: 10,
                 value: b,
                 easing: Easing::Linear,
+                tangents: None,
             },
         ],
     };
@@ -1170,11 +1191,13 @@ fn keyframed_layer_shadow_blur_roundtrips_through_serde() {
                     tick: 0,
                     value: 4.0,
                     easing: Easing::Linear,
+                    tangents: None,
                 },
                 Keyframe {
                     tick: 10,
                     value: 16.0,
                     easing: Easing::EaseIn,
+                    tangents: None,
                 },
             ],
         },
@@ -1760,11 +1783,13 @@ fn keyframed_text_background_rgba_roundtrips() {
                     tick: 0,
                     value: [0, 0, 0, 255],
                     easing: Easing::Linear,
+                    tangents: None,
                 },
                 Keyframe {
                     tick: 10,
                     value: [255, 0, 0, 255],
                     easing: Easing::Linear,
+                    tangents: None,
                 },
             ],
         },

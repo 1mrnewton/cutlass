@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::ModelError;
-use crate::param::{Easing, Lerp, Param};
+use crate::param::{Easing, Lerp, Param, SegmentSample};
 
 /// Per-axis scale. Serializes as a bare number when uniform (so old builds
 /// and old saves stay interchangeable) and as `[x, y]` when split.
@@ -85,6 +85,8 @@ impl Lerp for Scale2 {
         }
     }
 }
+
+impl SegmentSample for Scale2 {}
 
 impl Serialize for Scale2 {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

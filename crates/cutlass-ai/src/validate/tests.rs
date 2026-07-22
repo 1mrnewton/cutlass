@@ -195,6 +195,7 @@ fn extended_wire_clip_params_lower_to_model_params() {
                 at: RationalTime::new(48, R24),
                 value: expected_value,
                 easing: Easing::EaseOut,
+                tangents: None,
             }
         );
     }
@@ -250,6 +251,7 @@ fn named_and_bezier_easings_lower_on_set_param_keyframe() {
                 at: RationalTime::new(24, R24),
                 value: ParamValue::Scalar(0.5),
                 easing: expected,
+                tangents: None,
             }
         );
     }
@@ -296,6 +298,7 @@ fn hold_easing_lowers_from_wire_json() {
             at: RationalTime::new(24, R24),
             value: ParamValue::Scalar(0.5),
             easing: Easing::Hold,
+            tangents: None,
         }
     );
 }
@@ -746,6 +749,7 @@ fn scale_keyframe_accepts_scalar_and_position_vec2() {
             at: RationalTime::new(24, R24),
             value: ParamValue::Scalar(2.0),
             easing: Easing::Linear,
+            tangents: None,
         }
     );
 
@@ -770,6 +774,7 @@ fn scale_keyframe_accepts_scalar_and_position_vec2() {
             at: RationalTime::new(24, R24),
             value: ParamValue::Vec2([2.0, 1.0]),
             easing: Easing::Linear,
+            tangents: None,
         }
     );
 }
@@ -902,6 +907,7 @@ fn pan_keyframe_lowers_and_rejects_out_of_range() {
             at: RationalTime::new(24, R24),
             value: ParamValue::Scalar(-0.5),
             easing: Easing::Linear,
+            tangents: None,
         }
     );
 
@@ -973,6 +979,7 @@ fn crop_keyframe_uses_rect_on_wire() {
             at: RationalTime::new(24, R24),
             value: ParamValue::Rect([0.1, 0.2, 0.5, 0.5]),
             easing: Easing::Linear,
+            tangents: None,
         }
     );
 
@@ -1331,6 +1338,7 @@ fn style_param_keyframe_lowers_by_value_kind() {
             at: RationalTime::new(24, R24),
             value: ParamValue::Scalar(12.0),
             easing: Easing::Linear,
+            tangents: None,
         }
     );
 
@@ -1376,6 +1384,7 @@ fn style_param_keyframe_lowers_by_value_kind() {
             at: RationalTime::new(24, R24),
             value: ParamValue::Vec2([4.0, -2.0]),
             easing: Easing::Linear,
+            tangents: None,
         }
     );
 
@@ -1421,6 +1430,7 @@ fn style_param_keyframe_lowers_by_value_kind() {
             at: RationalTime::new(24, R24),
             value: ParamValue::Color([255, 200, 0, 255]),
             easing: Easing::Linear,
+            tangents: None,
         }
     );
 
@@ -1649,6 +1659,7 @@ fn set_clip_adjustments_lowers_new_sliders_and_rejects_ranges() {
             at: RationalTime::new(0, R24),
             value: ParamValue::Scalar(0.5),
             easing: Easing::Linear,
+            tangents: None,
         }
     );
 }
@@ -1702,6 +1713,7 @@ fn mask_center_keyframe_uses_position_on_masked_clip() {
             at: RationalTime::new(24, R24),
             value: ParamValue::Vec2([0.25, -0.1]),
             easing: Easing::Linear,
+            tangents: None,
         }
     );
 
@@ -2573,6 +2585,7 @@ fn typed_effect_params_accept_rgba_and_position_on_wire() {
             at: RationalTime::new(24, R24),
             value: ParamValue::Color([20, 16, 60, 255]),
             easing: Easing::Linear,
+            tangents: None,
         }
     );
 

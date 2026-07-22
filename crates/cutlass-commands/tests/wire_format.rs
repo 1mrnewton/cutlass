@@ -13,8 +13,8 @@ use cutlass_commands::{
     AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
     ClipTransform, ColorAdjustments, Command, CropRect, Easing, EditCommand, EditOutcome, Filter,
     Generator, LayerShadow, LayerStyles, Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId,
-    Param, ParamValue, ProjectCommand, Rational, RationalTime, Replaceable, StabilizeLevel,
-    TemplateMeta, TemplatePick, TimeRange, TrackId, TrackKind,
+    Param, ParamValue, ProjectCommand, Rational, RationalTime, Replaceable, SpatialTangents,
+    StabilizeLevel, TemplateMeta, TemplatePick, TimeRange, TrackId, TrackKind,
 };
 use serde_json::{Value, json};
 
@@ -156,6 +156,18 @@ fn edit_samples() -> Vec<EditCommand> {
             at: t(45),
             value: ParamValue::Scalar(1.5),
             easing: Easing::EaseInOut,
+            tangents: None,
+        },
+        EditCommand::SetParamKeyframe {
+            clip: clip(4),
+            param: ClipParam::Position,
+            at: t(45),
+            value: ParamValue::Vec2([0.25, -0.5]),
+            easing: Easing::Linear,
+            tangents: Some(SpatialTangents {
+                out_t: [0.0, 0.5],
+                in_t: [-0.25, 0.0],
+            }),
         },
         EditCommand::RemoveParamKeyframe {
             clip: clip(4),
@@ -478,7 +490,7 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
 #[test]
 fn command_variant_counts_are_locked() {
     assert_eq!(project_samples().len(), 9);
-    assert_eq!(edit_samples().len(), 61);
+    assert_eq!(edit_samples().len(), 62);
 }
 
 #[test]
@@ -657,6 +669,7 @@ fn golden_set_param_keyframe() {
         at: t(45),
         value: ParamValue::Scalar(1.5),
         easing: Easing::EaseInOut,
+        tangents: None,
     });
     assert_eq!(
         serde_json::to_value(&cmd).unwrap(),
@@ -667,6 +680,33 @@ fn golden_set_param_keyframe() {
             "at": {"value": 45, "rate": {"num": 30, "den": 1}},
             "value": {"scalar": 1.5},
             "easing": "ease_in_out",
+        })
+    );
+}
+
+#[test]
+fn golden_set_param_keyframe_with_spatial_tangents() {
+    let cmd = Command::Edit(EditCommand::SetParamKeyframe {
+        clip: clip(4),
+        param: ClipParam::Position,
+        at: t(45),
+        value: ParamValue::Vec2([0.25, -0.5]),
+        easing: Easing::Linear,
+        tangents: Some(SpatialTangents {
+            out_t: [0.0, 0.5],
+            in_t: [-0.25, 0.0],
+        }),
+    });
+    assert_eq!(
+        serde_json::to_value(&cmd).unwrap(),
+        json!({
+            "type": "SetParamKeyframe",
+            "clip": 4,
+            "param": "position",
+            "at": {"value": 45, "rate": {"num": 30, "den": 1}},
+            "value": {"vec2": [0.25, -0.5]},
+            "easing": "linear",
+            "tangents": {"o": [0.0, 0.5], "i": [-0.25, 0.0]},
         })
     );
 }

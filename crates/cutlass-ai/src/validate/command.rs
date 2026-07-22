@@ -350,6 +350,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 at,
                 value,
                 easing: easing(args.easing)?,
+                tangents: None,
             }
         }
         WireCommand::RemoveParamKeyframe(args) => {

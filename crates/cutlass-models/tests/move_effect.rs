@@ -32,6 +32,7 @@ fn project_with_effect_chain() -> (Project, ClipId) {
             RationalTime::new(0, R24),
             ParamValue::Scalar(0.2),
             Easing::EaseIn,
+            None,
         )
         .unwrap();
     project
@@ -44,6 +45,7 @@ fn project_with_effect_chain() -> (Project, ClipId) {
             RationalTime::new(24, R24),
             ParamValue::Scalar(0.8),
             Easing::EaseOut,
+            None,
         )
         .unwrap();
     project.set_effect_param(clip, 2, 0, 0.75).unwrap();

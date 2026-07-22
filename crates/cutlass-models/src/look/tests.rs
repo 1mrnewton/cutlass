@@ -105,11 +105,13 @@ fn default_geometry_mask_omits_new_keys_and_keyframed_center_roundtrips() {
                 tick: 0,
                 value: [0.0, 0.0],
                 easing: crate::param::Easing::Linear,
+                tangents: None,
             },
             crate::param::Keyframe {
                 tick: 10,
                 value: [0.25, -0.1],
                 easing: crate::param::Easing::EaseIn,
+                tangents: None,
             },
         ],
     };

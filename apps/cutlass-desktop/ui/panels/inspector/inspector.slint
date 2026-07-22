@@ -729,15 +729,17 @@ component VisualClipInspector inherits VerticalLayout {
                 model: root.model;
             }
 
-            InspectorDivider { }
+            // Masks and chroma keys are media-only in the model
+            // (require_visual_media) — hide them for generated clips.
+            if model.generator-kind == "": InspectorDivider { }
 
-            MaskInspector {
+            if model.generator-kind == "": MaskInspector {
                 model: root.model;
             }
 
-            InspectorDivider { }
+            if model.generator-kind == "": InspectorDivider { }
 
-            ChromaInspector {
+            if model.generator-kind == "": ChromaInspector {
                 model: root.model;
             }
 

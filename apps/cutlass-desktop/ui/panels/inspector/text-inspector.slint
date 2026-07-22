@@ -30,8 +30,6 @@ import {
 import { AnimationInspector } from "animation-inspector.slint";
 import { TextStyleRows, IconButton, NumberBox } from "text-style-rows.slint";
 import { TextTreatmentRows } from "text-treatment-rows.slint";
-import { MaskInspector } from "mask-inspector.slint";
-import { ChromaInspector } from "chroma-inspector.slint";
 import { StylesInspector } from "styles-inspector.slint";
 
 component PillTab inherits Rectangle {
@@ -796,18 +794,6 @@ export component TextInspector inherits VerticalLayout {
                 track-id: root.track-id;
                 model: root.model;
                 edit-text: root.edit-text;
-            }
-
-            InspectorDivider { }
-
-            MaskInspector {
-                model: root.model;
-            }
-
-            InspectorDivider { }
-
-            ChromaInspector {
-                model: root.model;
             }
 
             InspectorDivider { }

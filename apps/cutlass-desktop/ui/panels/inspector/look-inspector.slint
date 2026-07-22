@@ -351,8 +351,17 @@ export component LookInspector inherits VerticalLayout {
             TimelineStore.playhead-tick);
     }
 
-    function commit-adjust(adjust: ClipAdjust) {
-        InspectorBackend.set-clip-adjust(root.model.id, adjust);
+    // Commit one adjust channel without touching the others: a whole-block
+    // `set-clip-adjust` would rebuild every channel as a constant and wipe
+    // keyframed curves on the channels the slider didn't move. Animated rows
+    // write a keyframe at the playhead (preserving the easing when sitting on
+    // one); flat rows replace just their own channel's constant.
+    function commit-adjust-scalar(param: string, sample: ScalarParamSample, value: float) {
+        if (sample.row.animated) {
+            root.ease-kf(param, sample.row.on-keyframe ? sample.row.easing : 0, value);
+        } else {
+            InspectorBackend.set-param-constant(root.model.id, param, value, 0);
+        }
     }
 
     // Build a full adjust payload with one field overridden (slider drag/commit).
@@ -684,7 +693,7 @@ export component LookInspector inherits VerticalLayout {
                 root.adjust-with-brightness(clamp(v, -100, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(root.adjust-with-brightness(clamp(v, -100, 100) / 100));
+            root.commit-adjust-scalar("look_adjust_brightness", root.brightness-sample, clamp(v, -100, 100) / 100);
         }
         kf-visible: true;
         kf: root.brightness-sample.row;
@@ -710,7 +719,7 @@ export component LookInspector inherits VerticalLayout {
                 root.adjust-with-contrast(clamp(v, -100, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(root.adjust-with-contrast(clamp(v, -100, 100) / 100));
+            root.commit-adjust-scalar("look_adjust_contrast", root.contrast-sample, clamp(v, -100, 100) / 100);
         }
         kf-visible: true;
         kf: root.contrast-sample.row;
@@ -736,7 +745,7 @@ export component LookInspector inherits VerticalLayout {
                 root.adjust-with-saturation(clamp(v, -100, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(root.adjust-with-saturation(clamp(v, -100, 100) / 100));
+            root.commit-adjust-scalar("look_adjust_saturation", root.saturation-sample, clamp(v, -100, 100) / 100);
         }
         kf-visible: true;
         kf: root.saturation-sample.row;
@@ -762,7 +771,7 @@ export component LookInspector inherits VerticalLayout {
                 root.adjust-with-exposure(clamp(v, -100, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(root.adjust-with-exposure(clamp(v, -100, 100) / 100));
+            root.commit-adjust-scalar("look_adjust_exposure", root.exposure-sample, clamp(v, -100, 100) / 100);
         }
         kf-visible: true;
         kf: root.exposure-sample.row;
@@ -788,7 +797,7 @@ export component LookInspector inherits VerticalLayout {
                 root.adjust-with-temperature(clamp(v, -100, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(root.adjust-with-temperature(clamp(v, -100, 100) / 100));
+            root.commit-adjust-scalar("look_adjust_temperature", root.temperature-sample, clamp(v, -100, 100) / 100);
         }
         kf-visible: true;
         kf: root.temperature-sample.row;
@@ -814,7 +823,7 @@ export component LookInspector inherits VerticalLayout {
                 root.adjust-with-tint(clamp(v, -100, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(root.adjust-with-tint(clamp(v, -100, 100) / 100));
+            root.commit-adjust-scalar("look_adjust_tint", root.tint-sample, clamp(v, -100, 100) / 100);
         }
         kf-visible: true;
         kf: root.tint-sample.row;
@@ -840,7 +849,7 @@ export component LookInspector inherits VerticalLayout {
                 root.adjust-with-hue(clamp(v, -100, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(root.adjust-with-hue(clamp(v, -100, 100) / 100));
+            root.commit-adjust-scalar("look_adjust_hue", root.hue-sample, clamp(v, -100, 100) / 100);
         }
         kf-visible: true;
         kf: root.hue-sample.row;
@@ -866,7 +875,7 @@ export component LookInspector inherits VerticalLayout {
                 root.adjust-with-highlights(clamp(v, -100, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(root.adjust-with-highlights(clamp(v, -100, 100) / 100));
+            root.commit-adjust-scalar("look_adjust_highlights", root.highlights-sample, clamp(v, -100, 100) / 100);
         }
         kf-visible: true;
         kf: root.highlights-sample.row;
@@ -892,7 +901,7 @@ export component LookInspector inherits VerticalLayout {
                 root.adjust-with-shadows(clamp(v, -100, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(root.adjust-with-shadows(clamp(v, -100, 100) / 100));
+            root.commit-adjust-scalar("look_adjust_shadows", root.shadows-sample, clamp(v, -100, 100) / 100);
         }
         kf-visible: true;
         kf: root.shadows-sample.row;
@@ -918,7 +927,7 @@ export component LookInspector inherits VerticalLayout {
                 root.adjust-with-sharpness(clamp(v, 0, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(root.adjust-with-sharpness(clamp(v, 0, 100) / 100));
+            root.commit-adjust-scalar("look_adjust_sharpness", root.sharpness-sample, clamp(v, 0, 100) / 100);
         }
         kf-visible: true;
         kf: root.sharpness-sample.row;
@@ -944,7 +953,7 @@ export component LookInspector inherits VerticalLayout {
                 root.adjust-with-vignette(clamp(v, 0, 100) / 100));
         }
         commit(v) => {
-            root.commit-adjust(root.adjust-with-vignette(clamp(v, 0, 100) / 100));
+            root.commit-adjust-scalar("look_adjust_vignette", root.vignette-sample, clamp(v, 0, 100) / 100);
         }
         kf-visible: true;
         kf: root.vignette-sample.row;

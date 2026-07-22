@@ -1189,6 +1189,77 @@ fn set_mask_kind_preserves_feather_and_geometry_round_trips() {
     assert!(!c.mask_invert);
 }
 
+/// Regression: adjust sliders commit ONE channel via `SetParamConstant`
+/// (look_adjust_* keys); they must not rebuild the whole `ColorAdjustments`
+/// block, which would flatten keyframed curves on the untouched channels.
+#[test]
+fn adjust_constant_commit_keeps_other_channels_keyframed() {
+    use cutlass_models::{ClipParam, Easing, LookParam, ParamValue};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("adjust", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/adjust.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    let brightness = ClipParam::Look {
+        param: LookParam::AdjustBrightness,
+    };
+    project
+        .set_param_keyframe(
+            clip,
+            brightness,
+            RationalTime::new(0, r),
+            ParamValue::Scalar(-0.5),
+            Easing::Linear,
+            None,
+        )
+        .expect("kf 0");
+    project
+        .set_param_keyframe(
+            clip,
+            brightness,
+            RationalTime::new(24, r),
+            ParamValue::Scalar(0.5),
+            Easing::Linear,
+            None,
+        )
+        .expect("kf 24");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+
+    // The contrast slider lands as a single-channel constant.
+    engine
+        .apply(Command::Edit(EditCommand::SetParamConstant {
+            clip,
+            param: ClipParam::Look {
+                param: LookParam::AdjustContrast,
+            },
+            value: ParamValue::Scalar(0.3),
+        }))
+        .expect("set contrast");
+
+    let adjust = &engine.project().clip(clip).unwrap().adjust;
+    assert!(
+        adjust.brightness.is_animated(),
+        "brightness keyframes must survive a contrast commit"
+    );
+    assert!((adjust.brightness.sample(0) - -0.5).abs() < f32::EPSILON);
+    assert!((adjust.contrast.sample(0) - 0.3).abs() < f32::EPSILON);
+}
+
 #[test]
 fn sanitize_adjustments_clamps_new_sliders() {
     use super::overrides::sanitize_adjustments;

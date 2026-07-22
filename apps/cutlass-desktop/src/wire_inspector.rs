@@ -263,7 +263,8 @@ pub(crate) fn wire_inspector(
                 return;
             };
             let mut styles = clip.styles.clone();
-            if !apply_style_preview_constant(&mut styles, key.as_str(), value, 0.0) {
+            let local_tick = clip.animation_tick(i64::from(tick));
+            if !apply_style_preview_constant(&mut styles, key.as_str(), value, 0.0, local_tick) {
                 tracing::error!(
                     key = key.as_str(),
                     "preview-clip-style ignored: unknown key"
@@ -298,7 +299,14 @@ pub(crate) fn wire_inspector(
             let value_x = ((r << 8) | g) as f32;
             let value_y = ((b << 8) | a) as f32;
             let mut styles = clip.styles.clone();
-            if !apply_style_preview_constant(&mut styles, key.as_str(), value_x, value_y) {
+            let local_tick = clip.animation_tick(i64::from(tick));
+            if !apply_style_preview_constant(
+                &mut styles,
+                key.as_str(),
+                value_x,
+                value_y,
+                local_tick,
+            ) {
                 tracing::error!(
                     key = key.as_str(),
                     "preview-clip-style-color ignored: unknown key"

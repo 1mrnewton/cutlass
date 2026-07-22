@@ -267,13 +267,15 @@ pub(crate) fn clip_param_value(
 /// Apply one layer-style field as a [`Param::Constant`] onto a cloned
 /// [`LayerStyles`] for live preview. Ensures the owning block exists (model
 /// default) then overwrites the named field. Supports axis keys
-/// `style_shadow_offset_x` / `_y` (keeps the other axis from the current
-/// sampled offset). Returns `false` for unknown keys.
+/// `style_shadow_offset_x` / `_y` (keeps the other axis from the offset
+/// sampled at the clip-relative `tick`, so a keyframed offset previews the
+/// playhead's composite value). Returns `false` for unknown keys.
 pub(crate) fn apply_style_preview_constant(
     styles: &mut cutlass_models::LayerStyles,
     key: &str,
     value_x: f32,
     value_y: f32,
+    tick: i64,
 ) -> bool {
     use cutlass_models::{
         ClipParam, LayerBackground, LayerGlow, LayerOutline, LayerShadow, Param, ParamValue,
@@ -285,7 +287,7 @@ pub(crate) fn apply_style_preview_constant(
             let y = styles
                 .shadow
                 .as_ref()
-                .map(|s| s.offset.sample(0)[1])
+                .map(|s| s.offset.sample(tick)[1])
                 .unwrap_or(4.0);
             ("style_shadow_offset", value_x, y)
         }
@@ -293,7 +295,7 @@ pub(crate) fn apply_style_preview_constant(
             let x = styles
                 .shadow
                 .as_ref()
-                .map(|s| s.offset.sample(0)[0])
+                .map(|s| s.offset.sample(tick)[0])
                 .unwrap_or(4.0);
             ("style_shadow_offset", x, value_x)
         }

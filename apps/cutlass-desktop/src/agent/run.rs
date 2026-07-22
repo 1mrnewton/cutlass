@@ -428,8 +428,10 @@ pub(crate) fn run_one_prompt(
     let provider = match cutlass_ai::config::provider_from_ai(&section) {
         Ok(provider) => provider,
         Err(e) => {
-            let configured = section.is_configured();
-            with_store(store, move |s| s.set_configured(configured));
+            // The settings may look structurally complete, but no provider can
+            // be built from them — every prompt would error, so surface the
+            // unconfigured state instead of a chat box that can't work.
+            with_store(store, |s| s.set_configured(false));
             push_entry(
                 store,
                 "error",

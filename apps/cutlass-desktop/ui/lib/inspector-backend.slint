@@ -68,6 +68,9 @@ export global InspectorBackend {
     in-out property <[CatalogEntry]> animation-in-catalog: [];
     in-out property <[CatalogEntry]> animation-out-catalog: [];
     in-out property <[CatalogEntry]> animation-combo-catalog: [];
+    // Text panel: includes per-character presets (text_only) in every slot.
+    in-out property <[CatalogEntry]> animation-text-in-catalog: [];
+    in-out property <[CatalogEntry]> animation-text-out-catalog: [];
     in-out property <[CatalogEntry]> animation-text-combo-catalog: [];
 
     pure callback resolve-selection(

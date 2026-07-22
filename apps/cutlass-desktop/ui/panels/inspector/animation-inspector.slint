@@ -168,7 +168,9 @@ export component AnimationInspector inherits VerticalLayout {
         AnimationDropdown {
             current-id: root.model.animation-in-id;
             current-label: root.model.animation-in-label;
-            catalog: InspectorBackend.animation-in-catalog;
+            catalog: root.text-only-combos
+                ? InspectorBackend.animation-text-in-catalog
+                : InspectorBackend.animation-in-catalog;
             selected(id) => {
                 InspectorBackend.set-clip-animation(root.model.id, "in", id);
             }
@@ -191,7 +193,9 @@ export component AnimationInspector inherits VerticalLayout {
         AnimationDropdown {
             current-id: root.model.animation-out-id;
             current-label: root.model.animation-out-label;
-            catalog: InspectorBackend.animation-out-catalog;
+            catalog: root.text-only-combos
+                ? InspectorBackend.animation-text-out-catalog
+                : InspectorBackend.animation-out-catalog;
             selected(id) => {
                 InspectorBackend.set-clip-animation(root.model.id, "out", id);
             }

@@ -327,43 +327,52 @@ pub(crate) fn wire_inspector(
             .collect();
         inspector.set_filter_catalog(ModelRc::new(VecModel::from(filter_rows)));
 
+        let entry = |s: &cutlass_models::AnimationSpec| CatalogEntry {
+            id: s.id.into(),
+            label: s.label.into(),
+        };
+        // Media / general clips: whole-layer presets only.
         let animation_in: Vec<CatalogEntry> = cutlass_models::animation_catalog()
             .iter()
-            .filter(|s| s.slot == cutlass_models::AnimationSlot::In)
-            .map(|s| CatalogEntry {
-                id: s.id.into(),
-                label: s.label.into(),
-            })
+            .filter(|s| s.slot == cutlass_models::AnimationSlot::In && !s.text_only)
+            .map(entry)
             .collect();
         inspector.set_animation_in_catalog(ModelRc::new(VecModel::from(animation_in)));
 
         let animation_out: Vec<CatalogEntry> = cutlass_models::animation_catalog()
             .iter()
-            .filter(|s| s.slot == cutlass_models::AnimationSlot::Out)
-            .map(|s| CatalogEntry {
-                id: s.id.into(),
-                label: s.label.into(),
-            })
+            .filter(|s| s.slot == cutlass_models::AnimationSlot::Out && !s.text_only)
+            .map(entry)
             .collect();
         inspector.set_animation_out_catalog(ModelRc::new(VecModel::from(animation_out)));
 
         let animation_combo: Vec<CatalogEntry> = cutlass_models::animation_catalog()
             .iter()
             .filter(|s| s.slot == cutlass_models::AnimationSlot::Combo && !s.text_only)
-            .map(|s| CatalogEntry {
-                id: s.id.into(),
-                label: s.label.into(),
-            })
+            .map(entry)
             .collect();
         inspector.set_animation_combo_catalog(ModelRc::new(VecModel::from(animation_combo)));
 
+        // Text panel: whole-layer + per-character presets in every slot.
+        let animation_text_in: Vec<CatalogEntry> = cutlass_models::animation_catalog()
+            .iter()
+            .filter(|s| s.slot == cutlass_models::AnimationSlot::In)
+            .map(entry)
+            .collect();
+        inspector.set_animation_text_in_catalog(ModelRc::new(VecModel::from(animation_text_in)));
+
+        let animation_text_out: Vec<CatalogEntry> = cutlass_models::animation_catalog()
+            .iter()
+            .filter(|s| s.slot == cutlass_models::AnimationSlot::Out)
+            .map(entry)
+            .collect();
+        inspector.set_animation_text_out_catalog(ModelRc::new(VecModel::from(animation_text_out)));
+
+        // Text combo tab: per-character loops plus whole-layer presence presets.
         let animation_text_combo: Vec<CatalogEntry> = cutlass_models::animation_catalog()
             .iter()
             .filter(|s| s.slot == cutlass_models::AnimationSlot::Combo)
-            .map(|s| CatalogEntry {
-                id: s.id.into(),
-                label: s.label.into(),
-            })
+            .map(entry)
             .collect();
         inspector
             .set_animation_text_combo_catalog(ModelRc::new(VecModel::from(animation_text_combo)));

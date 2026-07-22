@@ -234,8 +234,16 @@ export global InspectorBackend {
     callback pick-clip-lut(clip-id: string);
 
     // Set (or clear with an empty id) one look-animation slot: "in", "out",
-    // or "combo". One undoable edit; combo exclusivity is enforced by the model.
-    callback set-clip-animation(clip-id: string, slot: string, animation-id: string);
+    // or "combo". Knobs are speed / intensity / stagger (defaults 1.0).
+    // One undoable edit; combo exclusivity is enforced by the model.
+    callback set-clip-animation(
+        clip-id: string,
+        slot: string,
+        animation-id: string,
+        speed: float,
+        intensity: float,
+        stagger: float,
+    );
 
     // Set all five manual color adjustment sliders in one undoable edit.
     // Values are normalized -1..=1.

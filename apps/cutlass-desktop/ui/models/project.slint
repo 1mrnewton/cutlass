@@ -120,6 +120,11 @@ export struct TransitionView {
 export struct CatalogEntry {
     id: string,
     label: string,
+    // Animation catalog only — which tunable knobs the preset exposes.
+    // Ignored (left false) for effect / filter / LUT / font catalogs.
+    has-speed: bool,
+    has-intensity: bool,
+    has-stagger: bool,
 }
 
 // A bundled sticker for the Library's Stickers tab: catalog id, display
@@ -315,10 +320,28 @@ export struct Clip {
     // read-only — edits go through `InspectorBackend.set-clip-animation`.
     animation-in-id: string,
     animation-in-label: string,
+    animation-in-speed: float,
+    animation-in-intensity: float,
+    animation-in-stagger: float,
+    animation-in-has-speed: bool,
+    animation-in-has-intensity: bool,
+    animation-in-has-stagger: bool,
     animation-out-id: string,
     animation-out-label: string,
+    animation-out-speed: float,
+    animation-out-intensity: float,
+    animation-out-stagger: float,
+    animation-out-has-speed: bool,
+    animation-out-has-intensity: bool,
+    animation-out-has-stagger: bool,
     animation-combo-id: string,
     animation-combo-label: string,
+    animation-combo-speed: float,
+    animation-combo-intensity: float,
+    animation-combo-stagger: float,
+    animation-combo-has-speed: bool,
+    animation-combo-has-intensity: bool,
+    animation-combo-has-stagger: bool,
     // Keyframe curves per animatable property (M2), in tick order with
     // ABSOLUTE sequence ticks. Empty ⇔ the property is a constant (read it
     // from `transform-*` above). Edits go through

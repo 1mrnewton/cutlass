@@ -808,11 +808,22 @@ impl WorkerHandle {
         let _ = self.tx.send(WorkerMsg::SetAgentRules { rules });
     }
 
-    pub fn set_clip_animation(&self, clip: String, slot: String, animation_id: String) {
+    pub fn set_clip_animation(
+        &self,
+        clip: String,
+        slot: String,
+        animation_id: String,
+        speed: f32,
+        intensity: f32,
+        stagger: f32,
+    ) {
         let _ = self.tx.send(WorkerMsg::SetClipAnimation {
             clip,
             slot,
             animation_id,
+            speed,
+            intensity,
+            stagger,
         });
     }
 

@@ -182,11 +182,14 @@ pub(crate) fn wire_inspector(
 
     let set_animation_handle = preview_worker.handle();
     app.global::<InspectorBackend>()
-        .on_set_clip_animation(move |clip_id, slot, animation_id| {
+        .on_set_clip_animation(move |clip_id, slot, animation_id, speed, intensity, stagger| {
             set_animation_handle.set_clip_animation(
                 clip_id.to_string(),
                 slot.to_string(),
                 animation_id.to_string(),
+                speed,
+                intensity,
+                stagger,
             );
         });
 
@@ -323,6 +326,9 @@ pub(crate) fn wire_inspector(
             .map(|s| CatalogEntry {
                 id: s.id.into(),
                 label: s.label.into(),
+                has_speed: false,
+                has_intensity: false,
+                has_stagger: false,
             })
             .collect();
         inspector.set_filter_catalog(ModelRc::new(VecModel::from(filter_rows)));
@@ -330,6 +336,9 @@ pub(crate) fn wire_inspector(
         let entry = |s: &cutlass_models::AnimationSpec| CatalogEntry {
             id: s.id.into(),
             label: s.label.into(),
+            has_speed: s.knobs.speed,
+            has_intensity: s.knobs.intensity,
+            has_stagger: s.knobs.stagger,
         };
         // Media / general clips: whole-layer presets only.
         let animation_in: Vec<CatalogEntry> = cutlass_models::animation_catalog()
@@ -384,6 +393,9 @@ pub(crate) fn wire_inspector(
             .map(|s| CatalogEntry {
                 id: s.id.into(),
                 label: s.label.into(),
+                has_speed: false,
+                has_intensity: false,
+                has_stagger: false,
             })
             .collect();
         effects.set_effect_catalog(ModelRc::new(VecModel::from(effect_rows)));
@@ -392,6 +404,9 @@ pub(crate) fn wire_inspector(
             .map(|s| CatalogEntry {
                 id: s.id.into(),
                 label: s.label.into(),
+                has_speed: false,
+                has_intensity: false,
+                has_stagger: false,
             })
             .collect();
         effects.set_transition_catalog(ModelRc::new(VecModel::from(transition_rows)));

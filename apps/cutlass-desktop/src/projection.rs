@@ -261,9 +261,9 @@ fn clip_to_slint(
     let (shape_width, shape_height) = clip_shape_size(clip);
     let (filter_id, filter_label, filter_intensity) = clip_filter(clip);
     let (lut_id, lut_label, lut_path, lut_intensity) = clip_lut(clip);
-    let (animation_in_id, animation_in_label) = clip_animation(clip.animation_in.as_ref());
-    let (animation_out_id, animation_out_label) = clip_animation(clip.animation_out.as_ref());
-    let (animation_combo_id, animation_combo_label) = clip_animation(clip.animation_combo.as_ref());
+    let animation_in = clip_animation(clip.animation_in.as_ref());
+    let animation_out = clip_animation(clip.animation_out.as_ref());
+    let animation_combo = clip_animation(clip.animation_combo.as_ref());
     let caps = clip_capabilities(project, clip, track_kind);
 
     Clip {
@@ -330,12 +330,30 @@ fn clip_to_slint(
         lut_label: lut_label.into(),
         lut_path: lut_path.into(),
         lut_intensity,
-        animation_in_id: animation_in_id.into(),
-        animation_in_label: animation_in_label.into(),
-        animation_out_id: animation_out_id.into(),
-        animation_out_label: animation_out_label.into(),
-        animation_combo_id: animation_combo_id.into(),
-        animation_combo_label: animation_combo_label.into(),
+        animation_in_id: animation_in.id.into(),
+        animation_in_label: animation_in.label.into(),
+        animation_in_speed: animation_in.speed,
+        animation_in_intensity: animation_in.intensity,
+        animation_in_stagger: animation_in.stagger,
+        animation_in_has_speed: animation_in.has_speed,
+        animation_in_has_intensity: animation_in.has_intensity,
+        animation_in_has_stagger: animation_in.has_stagger,
+        animation_out_id: animation_out.id.into(),
+        animation_out_label: animation_out.label.into(),
+        animation_out_speed: animation_out.speed,
+        animation_out_intensity: animation_out.intensity,
+        animation_out_stagger: animation_out.stagger,
+        animation_out_has_speed: animation_out.has_speed,
+        animation_out_has_intensity: animation_out.has_intensity,
+        animation_out_has_stagger: animation_out.has_stagger,
+        animation_combo_id: animation_combo.id.into(),
+        animation_combo_label: animation_combo.label.into(),
+        animation_combo_speed: animation_combo.speed,
+        animation_combo_intensity: animation_combo.intensity,
+        animation_combo_stagger: animation_combo.stagger,
+        animation_combo_has_speed: animation_combo.has_speed,
+        animation_combo_has_intensity: animation_combo.has_intensity,
+        animation_combo_has_stagger: animation_combo.has_stagger,
         kf_position: keyframes_to_slint(&clip.transform.position, clip_start, |v| (v[0], v[1])),
         kf_anchor: keyframes_to_slint(&clip.transform.anchor_point, clip_start, |v| (v[0], v[1])),
         kf_scale: keyframes_to_slint(&clip.transform.scale, clip_start, |v| (*v, 0.0)),
@@ -407,15 +425,52 @@ pub(crate) fn lut_label(id: &str) -> String {
         .join(" ")
 }
 
-fn clip_animation(animation: Option<&cutlass_models::AnimationRef>) -> (String, String) {
+/// Projected look-animation slot: id, label, knobs, and which knobs the
+/// catalog exposes for the inspector sliders.
+struct ClipAnimationProj {
+    id: String,
+    label: String,
+    speed: f32,
+    intensity: f32,
+    stagger: f32,
+    has_speed: bool,
+    has_intensity: bool,
+    has_stagger: bool,
+}
+
+fn clip_animation(animation: Option<&cutlass_models::AnimationRef>) -> ClipAnimationProj {
     let Some(animation) = animation else {
-        return (String::new(), String::new());
+        return ClipAnimationProj {
+            id: String::new(),
+            label: String::new(),
+            speed: 1.0,
+            intensity: 1.0,
+            stagger: 1.0,
+            has_speed: false,
+            has_intensity: false,
+            has_stagger: false,
+        };
     };
-    let label = cutlass_models::animation_spec(&animation.id)
+    let spec = cutlass_models::animation_spec(&animation.id);
+    let label = spec
         .map(|s| s.label)
         .unwrap_or(animation.id.as_str())
         .to_string();
-    (animation.id.clone(), label)
+    let knobs = spec.map(|s| s.knobs).unwrap_or(cutlass_models::AnimationKnobs {
+        speed: false,
+        intensity: false,
+        stagger: false,
+    });
+    ClipAnimationProj {
+        id: animation.id.clone(),
+        label,
+        speed: animation.speed,
+        intensity: animation.intensity,
+        stagger: animation.stagger,
+        has_speed: knobs.speed,
+        has_intensity: knobs.intensity,
+        has_stagger: knobs.stagger,
+    }
 }
 
 /// Project a clip's speed ramp keyframes (M2 speed curves) as the inspector's

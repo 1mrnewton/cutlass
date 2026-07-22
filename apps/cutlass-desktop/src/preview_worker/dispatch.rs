@@ -193,7 +193,19 @@ pub(super) fn dispatch(
             clip,
             slot,
             animation_id,
-        } => set_clip_animation_and_publish(engine, &clip, &slot, &animation_id, ui),
+            speed,
+            intensity,
+            stagger,
+        } => set_clip_animation_and_publish(
+            engine,
+            &clip,
+            &slot,
+            &animation_id,
+            speed,
+            intensity,
+            stagger,
+            ui,
+        ),
         // Only reached when a look-preview burst interleaves with another
         // coalesced gesture's drain. The dedicated loop arm coalesces the
         // common case.

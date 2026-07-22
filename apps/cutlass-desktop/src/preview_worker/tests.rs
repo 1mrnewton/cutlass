@@ -691,6 +691,9 @@ fn look_edits_invalidate_preview() {
         clip: "1".into(),
         slot: "in".into(),
         animation_id: "fade".into(),
+        speed: 1.0,
+        intensity: 1.0,
+        stagger: 1.0,
     }));
 }
 

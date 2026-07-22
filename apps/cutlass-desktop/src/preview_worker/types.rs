@@ -347,6 +347,9 @@ pub(super) enum WorkerMsg {
         clip: String,
         slot: String,
         animation_id: String,
+        speed: f32,
+        intensity: f32,
+        stagger: f32,
     },
     /// Live color-grading preview: replace one clip's filter + adjustments
     /// through the engine's session-only look override. Bursts coalesce to

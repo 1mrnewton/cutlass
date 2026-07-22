@@ -50,6 +50,10 @@ pub(crate) fn wire_inspector(
 
     app.global::<InspectorBackend>()
         .on_sample_audio(|clip, playhead| inspector::sample_audio(&clip, playhead));
+    app.global::<InspectorBackend>()
+        .on_sample_scalar_param(|clip, param, playhead| {
+            inspector::sample_scalar_param(&clip, param.as_str(), playhead)
+        });
 
     let kf_set_handle = preview_worker.handle();
     app.global::<InspectorBackend>().on_set_param_keyframe(

@@ -12,10 +12,11 @@ import {
     EditorStore,
     TimelineStore,
 } from "../../store/index.slint";
-import { InspectorBackend } from "../../lib/inspector-backend.slint";
+import { InspectorBackend, ScalarParamSample } from "../../lib/inspector-backend.slint";
 import { Clip, TextClipStyle } from "../../models/index.slint";
 import { AppState } from "../../state.slint";
 import { LabelCell } from "inspector-widgets.slint";
+import { KeyframeControl } from "keyframe-control.slint";
 
 export component IconButton inherits Rectangle {
     in property <string> label;
@@ -150,6 +151,26 @@ export component TextStyleRows inherits VerticalLayout {
     alignment: LayoutAlignment.start;
 
     private property <TextClipStyle> style;
+    private property <bool> playhead-inside: TimelineStore.playhead-tick >= model.timeline-start.value
+        && TimelineStore.playhead-tick < model.timeline-start.value + model.source-range.duration.value;
+    private property <ScalarParamSample> size-sample: InspectorBackend.sample-scalar-param(
+        model, "text_size", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> letter-spacing-sample: InspectorBackend.sample-scalar-param(
+        model, "text_letter_spacing", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> line-spacing-sample: InspectorBackend.sample-scalar-param(
+        model, "text_line_spacing", TimelineStore.playhead-tick);
+
+    function toggle-kf(param: string, on-keyframe: bool, value: float) {
+        if (on-keyframe) {
+            InspectorBackend.remove-param-keyframe(model.id, param, TimelineStore.playhead-tick);
+        } else {
+            InspectorBackend.set-param-keyframe(model.id, param, TimelineStore.playhead-tick, value, 0, 0);
+        }
+    }
+
+    function ease-kf(param: string, easing: int, value: float) {
+        InspectorBackend.set-param-keyframe(model.id, param, TimelineStore.playhead-tick, value, 0, easing);
+    }
 
     function commit-style() {
         if (root.edit-text != model.text-content || root.style != model.text-style) {
@@ -194,7 +215,7 @@ export component TextStyleRows inherits VerticalLayout {
         }
 
         font-size-row := HorizontalLayout {
-            property <float> model-size: model.text-style.size;
+            property <float> model-size: root.size-sample.value;
             spacing: AppStore.theme.metrics.spacing.md;
 
             changed model-size => {
@@ -213,7 +234,7 @@ export component TextStyleRows inherits VerticalLayout {
                 vertical-stretch: 0;
                 minimum: 8;
                 maximum: 240;
-                value: clamp(model.text-style.size, 8, 240);
+                value: clamp(root.size-sample.value, 8, 240);
                 changed(v) => {
                     // Track the live value while dragging; the model size
                     // only changes on commit (release).
@@ -240,7 +261,7 @@ export component TextStyleRows inherits VerticalLayout {
                 accessibility-label: "Font size";
                 commit-on-blur: true;
                 revert-on-escape: true;
-                text: Math.round(model.text-style.size) + "";
+                text: Math.round(root.size-sample.value) + "";
                 accepted(entered) => {
                     if (entered.is-float()) {
                         root.begin-edit();
@@ -260,6 +281,18 @@ export component TextStyleRows inherits VerticalLayout {
                 cancelled => {
                     self.text = Math.round(model.text-style.size) + "";
                     AppState.refocus-shortcuts();
+                }
+            }
+
+            KeyframeControl {
+                state: root.size-sample.row;
+                can-toggle: root.playhead-inside;
+                toggle => {
+                    root.toggle-kf("text_size", root.size-sample.row.on-keyframe, root.size-sample.value);
+                }
+                jump(tick) => { TimelineStore.playhead-tick = tick; }
+                set-easing(easing) => {
+                    root.ease-kf("text_size", easing, root.size-sample.value);
                 }
             }
         }
@@ -399,11 +432,23 @@ export component TextStyleRows inherits VerticalLayout {
                 show-prefix-icon: true;
                 prefix-icon: @image-url("../../../../../assets/icon/text/letter-spacing.svg");
                 accessibility-label: "Character spacing";
-                value: model.text-style.letter-spacing;
+                value: root.letter-spacing-sample.value;
                 commit(v) => {
                     root.begin-edit();
                     root.style.letter-spacing = v;
                     root.commit-style();
+                }
+            }
+
+            KeyframeControl {
+                state: root.letter-spacing-sample.row;
+                can-toggle: root.playhead-inside;
+                toggle => {
+                    root.toggle-kf("text_letter_spacing", root.letter-spacing-sample.row.on-keyframe, root.letter-spacing-sample.value);
+                }
+                jump(tick) => { TimelineStore.playhead-tick = tick; }
+                set-easing(easing) => {
+                    root.ease-kf("text_letter_spacing", easing, root.letter-spacing-sample.value);
                 }
             }
 
@@ -412,11 +457,23 @@ export component TextStyleRows inherits VerticalLayout {
                 show-prefix-icon: true;
                 prefix-icon: @image-url("../../../../../assets/icon/text/line-height.svg");
                 accessibility-label: "Line spacing percent";
-                value: model.text-style.line-spacing * 100;
+                value: root.line-spacing-sample.value * 100;
                 commit(v) => {
                     root.begin-edit();
                     root.style.line-spacing = max(v, 10) / 100;
                     root.commit-style();
+                }
+            }
+
+            KeyframeControl {
+                state: root.line-spacing-sample.row;
+                can-toggle: root.playhead-inside;
+                toggle => {
+                    root.toggle-kf("text_line_spacing", root.line-spacing-sample.row.on-keyframe, root.line-spacing-sample.value);
+                }
+                jump(tick) => { TimelineStore.playhead-tick = tick; }
+                set-easing(easing) => {
+                    root.ease-kf("text_line_spacing", easing, root.line-spacing-sample.value);
                 }
             }
 

@@ -23,6 +23,11 @@ export struct ParamRowState {
     easing: int,
 }
 
+export struct ScalarParamSample {
+    value: float,
+    row: ParamRowState,
+}
+
 export struct TransformSample {
     position-x: float,
     position-y: float,
@@ -103,6 +108,14 @@ export global InspectorBackend {
     // `kf-volume` curve with the engine's `Param` math, so the readout always
     // matches the mixed gain.
     pure callback sample-audio(clip: Clip, playhead-tick: int) -> AudioSample;
+
+    // Sample a scalar text-style or look parameter by its inspector command
+    // id. This is the same projected curve used for the row's keyframe state.
+    pure callback sample-scalar-param(
+        clip: Clip,
+        param: string,
+        playhead-tick: int,
+    ) -> ScalarParamSample;
 
     // Insert or replace a keyframe on `param` ("position" | "anchor" | "scale" |
     // "rotation" | "opacity" | "volume") at the absolute sequence tick.

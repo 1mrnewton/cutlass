@@ -65,7 +65,14 @@ pub(crate) fn clip_param_value(
     value_x: f32,
     value_y: f32,
 ) -> Option<(cutlass_models::ClipParam, cutlass_models::ParamValue)> {
-    use cutlass_models::{ClipParam, ParamValue};
+    use cutlass_models::{ClipParam, LookParam, ParamValue, TextParam};
+    // Color commands use two exact u16 lanes: RG and BA. Scalar rows always
+    // leave `value_y` at zero, so this encoding cannot be confused with one.
+    let color = || {
+        let rg = value_x.round().clamp(0.0, u16::MAX as f32) as u16;
+        let ba = value_y.round().clamp(0.0, u16::MAX as f32) as u16;
+        ParamValue::Color([(rg >> 8) as u8, rg as u8, (ba >> 8) as u8, ba as u8])
+    };
     Some(match param {
         "position" => (ClipParam::Position, ParamValue::Vec2([value_x, value_y])),
         "anchor" => (ClipParam::AnchorPoint, ParamValue::Vec2([value_x, value_y])),
@@ -73,6 +80,120 @@ pub(crate) fn clip_param_value(
         "rotation" => (ClipParam::Rotation, ParamValue::Scalar(value_x)),
         "opacity" => (ClipParam::Opacity, ParamValue::Scalar(value_x)),
         "volume" => (ClipParam::Volume, ParamValue::Scalar(value_x)),
+        "text_size" => (
+            ClipParam::Text {
+                param: TextParam::Size,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "text_fill" => (
+            ClipParam::Text {
+                param: TextParam::Fill,
+            },
+            color(),
+        ),
+        "text_letter_spacing" => (
+            ClipParam::Text {
+                param: TextParam::LetterSpacing,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "text_line_spacing" => (
+            ClipParam::Text {
+                param: TextParam::LineSpacing,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "text_stroke_width" => (
+            ClipParam::Text {
+                param: TextParam::StrokeWidth,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "text_stroke_color" => (
+            ClipParam::Text {
+                param: TextParam::StrokeColor,
+            },
+            color(),
+        ),
+        "text_shadow_blur" => (
+            ClipParam::Text {
+                param: TextParam::ShadowBlur,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "text_shadow_distance" => (
+            ClipParam::Text {
+                param: TextParam::ShadowDistance,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "text_shadow_color" => (
+            ClipParam::Text {
+                param: TextParam::ShadowColor,
+            },
+            color(),
+        ),
+        "look_filter_intensity" => (
+            ClipParam::Look {
+                param: LookParam::FilterIntensity,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_lut_intensity" => (
+            ClipParam::Look {
+                param: LookParam::LutIntensity,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_brightness" => (
+            ClipParam::Look {
+                param: LookParam::AdjustBrightness,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_contrast" => (
+            ClipParam::Look {
+                param: LookParam::AdjustContrast,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_saturation" => (
+            ClipParam::Look {
+                param: LookParam::AdjustSaturation,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_exposure" => (
+            ClipParam::Look {
+                param: LookParam::AdjustExposure,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_adjust_temperature" => (
+            ClipParam::Look {
+                param: LookParam::AdjustTemperature,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_mask_feather" => (
+            ClipParam::Look {
+                param: LookParam::MaskFeather,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_chroma_strength" => (
+            ClipParam::Look {
+                param: LookParam::ChromaStrength,
+            },
+            ParamValue::Scalar(value_x),
+        ),
+        "look_chroma_shadow" => (
+            ClipParam::Look {
+                param: LookParam::ChromaShadow,
+            },
+            ParamValue::Scalar(value_x),
+        ),
         _ => return None,
     })
 }

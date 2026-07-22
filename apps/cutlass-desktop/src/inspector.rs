@@ -1,12 +1,14 @@
 //! Inspector helpers: resolve the selected clip for the property sheet, and
 //! sample its animated transform at the playhead for the keyframe UI.
 
-use crate::params::{apply_sampled_transform, row_state, sampled_transform, sampled_volume};
+use crate::params::{
+    apply_sampled_transform, row_state, sampled_scalar_param, sampled_transform, sampled_volume,
+};
 use crate::placement::position_preserving_center;
 use crate::preview_select::{canvas_config, clip_placement};
 use crate::{
-    AudioSample, Clip, CompensatedPosition, SelectedClipInfo, Sequence, TextClipStyle, TrackKind,
-    TransformSample,
+    AudioSample, Clip, CompensatedPosition, ScalarParamSample, SelectedClipInfo, Sequence,
+    TextClipStyle, TrackKind, TransformSample,
 };
 use cutlass_models::{
     TextAlignH, TextAlignV, TextBackground, TextCase, TextShadow, TextStroke,
@@ -107,6 +109,36 @@ pub fn sample_transform(clip: &Clip, playhead: i32) -> TransformSample {
         scale_row: row_state(&clip.kf_scale, playhead),
         rotation_row: row_state(&clip.kf_rotation, playhead),
         opacity_row: row_state(&clip.kf_opacity, playhead),
+    }
+}
+
+/// Sample a scalar text-style or look curve at the playhead for inspector
+/// rows. Unknown ids are defensive no-ops; the UI only supplies known keys.
+pub fn sample_scalar_param(clip: &Clip, param: &str, playhead: i32) -> ScalarParamSample {
+    let keyframes = match param {
+        "text_size" => &clip.kf_text_size,
+        "text_letter_spacing" => &clip.kf_text_letter_spacing,
+        "text_line_spacing" => &clip.kf_text_line_spacing,
+        "text_stroke_width" => &clip.kf_text_stroke_width,
+        "text_shadow_blur" => &clip.kf_text_shadow_blur,
+        "text_shadow_distance" => &clip.kf_text_shadow_distance,
+        "look_filter_intensity" => &clip.kf_look_filter_intensity,
+        "look_lut_intensity" => &clip.kf_look_lut_intensity,
+        "look_adjust_brightness" => &clip.kf_look_adjust_brightness,
+        "look_adjust_contrast" => &clip.kf_look_adjust_contrast,
+        "look_adjust_saturation" => &clip.kf_look_adjust_saturation,
+        "look_adjust_exposure" => &clip.kf_look_adjust_exposure,
+        "look_adjust_temperature" => &clip.kf_look_adjust_temperature,
+        _ => {
+            return ScalarParamSample {
+                value: 0.0,
+                row: Default::default(),
+            };
+        }
+    };
+    ScalarParamSample {
+        value: sampled_scalar_param(clip, param, playhead).unwrap_or_default(),
+        row: row_state(keyframes, playhead),
     }
 }
 

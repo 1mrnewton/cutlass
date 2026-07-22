@@ -359,6 +359,36 @@ fn clip_to_slint(
         kf_scale: keyframes_to_slint(&clip.transform.scale, clip_start, |v| (*v, 0.0)),
         kf_rotation: keyframes_to_slint(&clip.transform.rotation, clip_start, |v| (*v, 0.0)),
         kf_opacity: keyframes_to_slint(&clip.transform.opacity, clip_start, |v| (*v, 0.0)),
+        kf_text_size: text_keyframes(clip, clip_start, |style| &style.size),
+        kf_text_fill: text_color_keyframes(clip, clip_start, |style| &style.fill),
+        kf_text_letter_spacing: text_keyframes(clip, clip_start, |style| &style.letter_spacing),
+        kf_text_line_spacing: text_keyframes(clip, clip_start, |style| &style.line_spacing),
+        kf_text_stroke_width: text_stroke_keyframes(clip, clip_start, |stroke| &stroke.width),
+        kf_text_stroke_color: text_stroke_color_keyframes(clip, clip_start, |stroke| &stroke.rgba),
+        kf_text_shadow_blur: text_shadow_keyframes(clip, clip_start, |shadow| &shadow.blur),
+        kf_text_shadow_distance: text_shadow_keyframes(clip, clip_start, |shadow| &shadow.distance),
+        kf_text_shadow_color: text_shadow_color_keyframes(clip, clip_start, |shadow| &shadow.rgba),
+        kf_look_filter_intensity: clip.filter.as_ref().map_or_else(empty_keyframes, |filter| {
+            keyframes_to_slint(&filter.intensity, clip_start, |v| (*v, 0.0))
+        }),
+        kf_look_lut_intensity: clip.lut.as_ref().map_or_else(empty_keyframes, |lut| {
+            keyframes_to_slint(&lut.intensity, clip_start, |v| (*v, 0.0))
+        }),
+        kf_look_adjust_brightness: keyframes_to_slint(&clip.adjust.brightness, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        kf_look_adjust_contrast: keyframes_to_slint(&clip.adjust.contrast, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        kf_look_adjust_saturation: keyframes_to_slint(&clip.adjust.saturation, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        kf_look_adjust_exposure: keyframes_to_slint(&clip.adjust.exposure, clip_start, |v| {
+            (*v, 0.0)
+        }),
+        kf_look_adjust_temperature: keyframes_to_slint(&clip.adjust.temperature, clip_start, |v| {
+            (*v, 0.0)
+        }),
         kf_speed_curve: speed_curve_to_slint(&clip.speed_curve),
         has_speed_curve: clip.has_speed_curve(),
         speed_curve_avg: clip.speed_curve_average() as f32,
@@ -644,6 +674,100 @@ fn keyframes_to_slint<T: Lerp>(
         })
         .collect();
     model(rows)
+}
+
+fn empty_keyframes() -> ModelRc<ParamKeyframe> {
+    model(Vec::new())
+}
+
+fn text_keyframes(
+    clip: &EngineClip,
+    clip_start: i64,
+    param: impl FnOnce(&EngineTextStyle) -> &Param<f32>,
+) -> ModelRc<ParamKeyframe> {
+    match &clip.content {
+        ClipSource::Generated(Generator::Text { style, .. }) => {
+            keyframes_to_slint(param(style), clip_start, |v| (*v, 0.0))
+        }
+        _ => empty_keyframes(),
+    }
+}
+
+fn text_color_keyframes(
+    clip: &EngineClip,
+    clip_start: i64,
+    param: impl FnOnce(&EngineTextStyle) -> &Param<[u8; 4]>,
+) -> ModelRc<ParamKeyframe> {
+    match &clip.content {
+        ClipSource::Generated(Generator::Text { style, .. }) => {
+            keyframes_to_slint(param(style), clip_start, |_| (0.0, 0.0))
+        }
+        _ => empty_keyframes(),
+    }
+}
+
+fn text_stroke_keyframes(
+    clip: &EngineClip,
+    clip_start: i64,
+    param: impl FnOnce(&cutlass_models::TextStroke) -> &Param<f32>,
+) -> ModelRc<ParamKeyframe> {
+    match &clip.content {
+        ClipSource::Generated(Generator::Text { style, .. }) => style
+            .stroke
+            .as_ref()
+            .map_or_else(empty_keyframes, |stroke| {
+                keyframes_to_slint(param(stroke), clip_start, |v| (*v, 0.0))
+            }),
+        _ => empty_keyframes(),
+    }
+}
+
+fn text_stroke_color_keyframes(
+    clip: &EngineClip,
+    clip_start: i64,
+    param: impl FnOnce(&cutlass_models::TextStroke) -> &Param<[u8; 4]>,
+) -> ModelRc<ParamKeyframe> {
+    match &clip.content {
+        ClipSource::Generated(Generator::Text { style, .. }) => style
+            .stroke
+            .as_ref()
+            .map_or_else(empty_keyframes, |stroke| {
+                keyframes_to_slint(param(stroke), clip_start, |_| (0.0, 0.0))
+            }),
+        _ => empty_keyframes(),
+    }
+}
+
+fn text_shadow_keyframes(
+    clip: &EngineClip,
+    clip_start: i64,
+    param: impl FnOnce(&cutlass_models::TextShadow) -> &Param<f32>,
+) -> ModelRc<ParamKeyframe> {
+    match &clip.content {
+        ClipSource::Generated(Generator::Text { style, .. }) => style
+            .shadow
+            .as_ref()
+            .map_or_else(empty_keyframes, |shadow| {
+                keyframes_to_slint(param(shadow), clip_start, |v| (*v, 0.0))
+            }),
+        _ => empty_keyframes(),
+    }
+}
+
+fn text_shadow_color_keyframes(
+    clip: &EngineClip,
+    clip_start: i64,
+    param: impl FnOnce(&cutlass_models::TextShadow) -> &Param<[u8; 4]>,
+) -> ModelRc<ParamKeyframe> {
+    match &clip.content {
+        ClipSource::Generated(Generator::Text { style, .. }) => style
+            .shadow
+            .as_ref()
+            .map_or_else(empty_keyframes, |shadow| {
+                keyframes_to_slint(param(shadow), clip_start, |_| (0.0, 0.0))
+            }),
+        _ => empty_keyframes(),
+    }
 }
 
 /// The clip's speed as a display/scale float (1.0 for degenerate rationals,

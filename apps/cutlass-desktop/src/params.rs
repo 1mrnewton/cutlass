@@ -112,6 +112,33 @@ pub(crate) fn sampled_volume(clip: &Clip, playhead: i32) -> f32 {
     scalar_param(&clip.kf_volume, clip.volume).sample(tick)
 }
 
+/// Sample one scalar text-style or color-look property at the playhead. The
+/// string keys deliberately match the inspector command keys, keeping each
+/// property's display value and diamond state on the same projected curve.
+pub(crate) fn sampled_scalar_param(clip: &Clip, param: &str, playhead: i32) -> Option<f32> {
+    let tick = clamped_tick(clip, playhead);
+    let (keyframes, constant) = match param {
+        "text_size" => (&clip.kf_text_size, clip.text_style.size),
+        "text_letter_spacing" => (&clip.kf_text_letter_spacing, clip.text_style.letter_spacing),
+        "text_line_spacing" => (&clip.kf_text_line_spacing, clip.text_style.line_spacing),
+        "text_stroke_width" => (&clip.kf_text_stroke_width, clip.text_style.stroke_width),
+        "text_shadow_blur" => (&clip.kf_text_shadow_blur, clip.text_style.shadow_blur),
+        "text_shadow_distance" => (
+            &clip.kf_text_shadow_distance,
+            clip.text_style.shadow_distance,
+        ),
+        "look_filter_intensity" => (&clip.kf_look_filter_intensity, clip.filter_intensity),
+        "look_lut_intensity" => (&clip.kf_look_lut_intensity, clip.lut_intensity),
+        "look_adjust_brightness" => (&clip.kf_look_adjust_brightness, clip.adjust_brightness),
+        "look_adjust_contrast" => (&clip.kf_look_adjust_contrast, clip.adjust_contrast),
+        "look_adjust_saturation" => (&clip.kf_look_adjust_saturation, clip.adjust_saturation),
+        "look_adjust_exposure" => (&clip.kf_look_adjust_exposure, clip.adjust_exposure),
+        "look_adjust_temperature" => (&clip.kf_look_adjust_temperature, clip.adjust_temperature),
+        _ => return None,
+    };
+    Some(scalar_param(keyframes, constant).sample(tick))
+}
+
 /// Overwrite the clip's `transform-*` fields with the playhead sample, so
 /// geometry code that reads those fields (placement, hit-test, gestures)
 /// follows the rendered frame on animated clips.
@@ -136,6 +163,22 @@ pub(crate) fn merged_keyframe_ticks(clip: &Clip) -> slint::ModelRc<i32> {
         &clip.kf_scale,
         &clip.kf_rotation,
         &clip.kf_opacity,
+        &clip.kf_text_size,
+        &clip.kf_text_fill,
+        &clip.kf_text_letter_spacing,
+        &clip.kf_text_line_spacing,
+        &clip.kf_text_stroke_width,
+        &clip.kf_text_stroke_color,
+        &clip.kf_text_shadow_blur,
+        &clip.kf_text_shadow_distance,
+        &clip.kf_text_shadow_color,
+        &clip.kf_look_filter_intensity,
+        &clip.kf_look_lut_intensity,
+        &clip.kf_look_adjust_brightness,
+        &clip.kf_look_adjust_contrast,
+        &clip.kf_look_adjust_saturation,
+        &clip.kf_look_adjust_exposure,
+        &clip.kf_look_adjust_temperature,
     ]
     .iter()
     .flat_map(|kfs| kfs.iter().map(|kf| kf.tick))

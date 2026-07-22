@@ -351,6 +351,25 @@ export struct Clip {
     kf-scale: [ParamKeyframe],
     kf-rotation: [ParamKeyframe],
     kf-opacity: [ParamKeyframe],
+    // Text visual-style curves. Color curves are published too so their
+    // ticks participate in the clip's merged timeline diamonds.
+    kf-text-size: [ParamKeyframe],
+    kf-text-fill: [ParamKeyframe],
+    kf-text-letter-spacing: [ParamKeyframe],
+    kf-text-line-spacing: [ParamKeyframe],
+    kf-text-stroke-width: [ParamKeyframe],
+    kf-text-stroke-color: [ParamKeyframe],
+    kf-text-shadow-blur: [ParamKeyframe],
+    kf-text-shadow-distance: [ParamKeyframe],
+    kf-text-shadow-color: [ParamKeyframe],
+    // Clip color-look curves.
+    kf-look-filter-intensity: [ParamKeyframe],
+    kf-look-lut-intensity: [ParamKeyframe],
+    kf-look-adjust-brightness: [ParamKeyframe],
+    kf-look-adjust-contrast: [ParamKeyframe],
+    kf-look-adjust-saturation: [ParamKeyframe],
+    kf-look-adjust-exposure: [ParamKeyframe],
+    kf-look-adjust-temperature: [ParamKeyframe],
     // Playback-rate ramp (M2 speed curves): the speed-multiplier curve over
     // the clip's NORMALIZED span — `tick` is 0..=1000 (0 = clip start, 1000 =
     // clip end), `value-x` the multiplier. Empty ⇔ a flat constant-speed

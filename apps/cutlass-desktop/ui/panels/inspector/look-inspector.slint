@@ -5,7 +5,7 @@
 import { CutlassText, CutlassScrollView } from "../../components/index.slint";
 import { AppState } from "../../state.slint";
 import { AppStore, TimelineStore } from "../../store/index.slint";
-import { InspectorBackend } from "../../lib/inspector-backend.slint";
+import { InspectorBackend, ScalarParamSample } from "../../lib/inspector-backend.slint";
 import { CatalogEntry, Clip } from "../../models/index.slint";
 import { LabelCell, SectionHeader, SliderRow } from "inspector-widgets.slint";
 
@@ -186,6 +186,27 @@ export component LookInspector inherits VerticalLayout {
 
     spacing: AppStore.theme.metrics.spacing.lg;
     alignment: LayoutAlignment.start;
+    private property <bool> playhead-inside: TimelineStore.playhead-tick >= model.timeline-start.value
+        && TimelineStore.playhead-tick < model.timeline-start.value + model.source-range.duration.value;
+    private property <ScalarParamSample> filter-sample: InspectorBackend.sample-scalar-param(model, "look_filter_intensity", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> lut-sample: InspectorBackend.sample-scalar-param(model, "look_lut_intensity", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> brightness-sample: InspectorBackend.sample-scalar-param(model, "look_adjust_brightness", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> contrast-sample: InspectorBackend.sample-scalar-param(model, "look_adjust_contrast", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> saturation-sample: InspectorBackend.sample-scalar-param(model, "look_adjust_saturation", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> exposure-sample: InspectorBackend.sample-scalar-param(model, "look_adjust_exposure", TimelineStore.playhead-tick);
+    private property <ScalarParamSample> temperature-sample: InspectorBackend.sample-scalar-param(model, "look_adjust_temperature", TimelineStore.playhead-tick);
+
+    function toggle-kf(param: string, on-keyframe: bool, value: float) {
+        if (on-keyframe) {
+            InspectorBackend.remove-param-keyframe(model.id, param, TimelineStore.playhead-tick);
+        } else {
+            InspectorBackend.set-param-keyframe(model.id, param, TimelineStore.playhead-tick, value, 0, 0);
+        }
+    }
+
+    function ease-kf(param: string, easing: int, value: float) {
+        InspectorBackend.set-param-keyframe(model.id, param, TimelineStore.playhead-tick, value, 0, easing);
+    }
 
     init => {
         // First open fetches the LUT catalog; later opens reuse the result
@@ -257,7 +278,7 @@ export component LookInspector inherits VerticalLayout {
     if root.model.filter-id != "": SliderRow {
         label: "Intensity";
         suffix: "%";
-        value: root.model.filter-intensity * 100;
+        value: root.filter-sample.value * 100;
         minimum: 0;
         maximum: 100;
         step: 1;
@@ -278,6 +299,15 @@ export component LookInspector inherits VerticalLayout {
                 root.model.id,
                 root.model.filter-id,
                 clamp(v, 0, 100) / 100);
+        }
+        kf-visible: true;
+        kf: root.filter-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        kf-toggle => {
+            root.toggle-kf("look_filter_intensity", root.filter-sample.row.on-keyframe, root.filter-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_filter_intensity", e, root.filter-sample.value);
         }
     }
 
@@ -324,7 +354,7 @@ export component LookInspector inherits VerticalLayout {
     if root.model.lut-path != "": SliderRow {
         label: "Intensity";
         suffix: "%";
-        value: root.model.lut-intensity * 100;
+        value: root.lut-sample.value * 100;
         minimum: 0;
         maximum: 100;
         step: 1;
@@ -339,6 +369,15 @@ export component LookInspector inherits VerticalLayout {
                 root.model.lut-path,
                 clamp(v, 0, 100) / 100);
         }
+        kf-visible: true;
+        kf: root.lut-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        kf-toggle => {
+            root.toggle-kf("look_lut_intensity", root.lut-sample.row.on-keyframe, root.lut-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_lut_intensity", e, root.lut-sample.value);
+        }
     }
 
     SectionHeader {
@@ -348,7 +387,7 @@ export component LookInspector inherits VerticalLayout {
     SliderRow {
         label: "Brightness";
         suffix: "%";
-        value: root.model.adjust-brightness * 100;
+        value: root.brightness-sample.value * 100;
         minimum: -100;
         maximum: 100;
         step: 1;
@@ -370,13 +409,22 @@ export component LookInspector inherits VerticalLayout {
                 root.model.adjust-saturation,
                 root.model.adjust-exposure,
                 root.model.adjust-temperature);
+        }
+        kf-visible: true;
+        kf: root.brightness-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        kf-toggle => {
+            root.toggle-kf("look_adjust_brightness", root.brightness-sample.row.on-keyframe, root.brightness-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_adjust_brightness", e, root.brightness-sample.value);
         }
     }
 
     SliderRow {
         label: "Contrast";
         suffix: "%";
-        value: root.model.adjust-contrast * 100;
+        value: root.contrast-sample.value * 100;
         minimum: -100;
         maximum: 100;
         step: 1;
@@ -398,13 +446,22 @@ export component LookInspector inherits VerticalLayout {
                 root.model.adjust-saturation,
                 root.model.adjust-exposure,
                 root.model.adjust-temperature);
+        }
+        kf-visible: true;
+        kf: root.contrast-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        kf-toggle => {
+            root.toggle-kf("look_adjust_contrast", root.contrast-sample.row.on-keyframe, root.contrast-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_adjust_contrast", e, root.contrast-sample.value);
         }
     }
 
     SliderRow {
         label: "Saturation";
         suffix: "%";
-        value: root.model.adjust-saturation * 100;
+        value: root.saturation-sample.value * 100;
         minimum: -100;
         maximum: 100;
         step: 1;
@@ -426,13 +483,22 @@ export component LookInspector inherits VerticalLayout {
                 clamp(v, -100, 100) / 100,
                 root.model.adjust-exposure,
                 root.model.adjust-temperature);
+        }
+        kf-visible: true;
+        kf: root.saturation-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        kf-toggle => {
+            root.toggle-kf("look_adjust_saturation", root.saturation-sample.row.on-keyframe, root.saturation-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_adjust_saturation", e, root.saturation-sample.value);
         }
     }
 
     SliderRow {
         label: "Exposure";
         suffix: "%";
-        value: root.model.adjust-exposure * 100;
+        value: root.exposure-sample.value * 100;
         minimum: -100;
         maximum: 100;
         step: 1;
@@ -454,13 +520,22 @@ export component LookInspector inherits VerticalLayout {
                 root.model.adjust-saturation,
                 clamp(v, -100, 100) / 100,
                 root.model.adjust-temperature);
+        }
+        kf-visible: true;
+        kf: root.exposure-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        kf-toggle => {
+            root.toggle-kf("look_adjust_exposure", root.exposure-sample.row.on-keyframe, root.exposure-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_adjust_exposure", e, root.exposure-sample.value);
         }
     }
 
     SliderRow {
         label: "Temperature";
         suffix: "%";
-        value: root.model.adjust-temperature * 100;
+        value: root.temperature-sample.value * 100;
         minimum: -100;
         maximum: 100;
         step: 1;
@@ -482,6 +557,15 @@ export component LookInspector inherits VerticalLayout {
                 root.model.adjust-saturation,
                 root.model.adjust-exposure,
                 clamp(v, -100, 100) / 100);
+        }
+        kf-visible: true;
+        kf: root.temperature-sample.row;
+        kf-can-toggle: root.playhead-inside;
+        kf-toggle => {
+            root.toggle-kf("look_adjust_temperature", root.temperature-sample.row.on-keyframe, root.temperature-sample.value);
+        }
+        kf-set-easing(e) => {
+            root.ease-kf("look_adjust_temperature", e, root.temperature-sample.value);
         }
     }
 }

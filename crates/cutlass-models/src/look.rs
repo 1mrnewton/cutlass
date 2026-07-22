@@ -1,6 +1,7 @@
 //! Clip "look" extensions (mobile-support Phase I): mask, chroma key,
 //! stabilization, filter presets, color adjustments, entrance/exit
-//! animations, and the audio role tag.
+//! animations, layer styles (shadow/glow/outline/background), and the
+//! audio role tag.
 //!
 //! These persist and validate like every other clip property. Color
 //! adjustments and filter presets are composited per-clip (see
@@ -23,6 +24,7 @@ mod blend;
 mod chroma;
 mod filter;
 mod mask;
+mod styles;
 mod text_effect;
 
 pub use adjust::ColorAdjustments;
@@ -35,6 +37,7 @@ pub use blend::BlendMode;
 pub use chroma::{ChromaKey, StabilizeLevel};
 pub use filter::{Filter, FilterSpec, Lut, filter_catalog, filter_spec};
 pub use mask::{Mask, MaskKind, MaskSpec, mask_catalog};
+pub use styles::{LayerBackground, LayerGlow, LayerOutline, LayerShadow, LayerStyles};
 pub use text_effect::{TextEffectSpec, text_effect_catalog, text_effect_spec};
 
 // --- Audio roles ------------------------------------------------------------------

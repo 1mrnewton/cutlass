@@ -70,6 +70,11 @@ pub struct Clip {
     /// so old projects load unchanged.
     #[serde(default, skip_serializing_if = "is_normal_blend")]
     pub blend_mode: crate::look::BlendMode,
+    /// Layer-quad styles (shadow/glow/outline/background) rendered from this
+    /// clip's alpha by the compositor. Empty (and absent from saves) when
+    /// never styled, so old projects load unchanged. Visual clips only.
+    #[serde(default, skip_serializing_if = "crate::look::LayerStyles::is_empty")]
+    pub styles: crate::look::LayerStyles,
     /// Playback rate (CapCut speed, M1): source time advances `speed`× per
     /// unit of timeline time — `2/1` plays double speed (the clip occupies
     /// half its source duration on the timeline), `1/2` is 50% slow motion.
@@ -355,6 +360,7 @@ impl Clip {
             link: None,
             transform: AnimatedTransform::identity(),
             blend_mode: crate::look::BlendMode::default(),
+            styles: crate::look::LayerStyles::default(),
             speed: unit_speed(),
             reversed: false,
             speed_curve: default_speed_curve(),
@@ -505,6 +511,7 @@ impl Clip {
             link: None,
             transform: AnimatedTransform::identity(),
             blend_mode: crate::look::BlendMode::default(),
+            styles: crate::look::LayerStyles::default(),
             speed: unit_speed(),
             reversed: false,
             speed_curve: default_speed_curve(),

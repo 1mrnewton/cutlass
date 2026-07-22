@@ -103,6 +103,46 @@ fn validation_rejects_out_of_range_values() {
 }
 
 #[test]
+fn layer_styles_defaults_and_empty() {
+    assert!(LayerStyles::default().is_empty());
+    let shadow = LayerShadow::default();
+    assert_eq!(shadow.rgba, Param::Constant([0, 0, 0, 128]));
+    assert_eq!(shadow.offset, Param::Constant([4.0, 4.0]));
+    assert_eq!(shadow.blur, Param::Constant(8.0));
+    assert!(LayerShadow::default().validate().is_ok());
+    assert!(LayerGlow::default().validate().is_ok());
+    assert!(LayerOutline::default().validate().is_ok());
+    assert!(LayerBackground::default().validate().is_ok());
+}
+
+#[test]
+fn layer_styles_validation_rejects_out_of_range_values() {
+    let shadow = LayerShadow {
+        blur: (-1.0).into(),
+        ..Default::default()
+    };
+    assert!(shadow.validate().is_err());
+
+    let glow = LayerGlow {
+        intensity: 5.0.into(),
+        ..Default::default()
+    };
+    assert!(glow.validate().is_err());
+
+    let bad_offset = LayerShadow {
+        offset: Param::Constant([f32::NAN, 4.0]),
+        ..Default::default()
+    };
+    assert!(bad_offset.validate().is_err());
+
+    let styles = LayerStyles {
+        shadow: Some(shadow),
+        ..Default::default()
+    };
+    assert!(styles.validate().is_err());
+}
+
+#[test]
 fn animation_catalog_slots_and_text_flags() {
     assert_eq!(animation_spec("fade_in").unwrap().slot, AnimationSlot::In);
     assert_eq!(animation_spec("drop").unwrap().slot, AnimationSlot::Out);

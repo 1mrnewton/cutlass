@@ -10,8 +10,8 @@ use crate::effects::EffectInstance;
 use crate::error::ModelError;
 use crate::ids::{ClipId, MediaId, ProjectId, TrackId};
 use crate::look::{
-    AnimationRef, AnimationSlot, AudioRole, BlendMode, ChromaKey, ColorAdjustments, Filter, Lut,
-    Mask, StabilizeLevel, animation_spec,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, ChromaKey, ColorAdjustments, Filter,
+    LayerStyles, Lut, Mask, StabilizeLevel, animation_spec,
 };
 use crate::media::MediaSource;
 use crate::metadata::ProjectMetadata;
@@ -95,6 +95,22 @@ impl Project {
             .clip_mut(clip_id)
             .expect("clip existence checked above")
             .blend_mode = mode;
+        Ok(())
+    }
+
+    /// Set layer-quad styles (shadow/glow/outline/background) on a visual
+    /// clip. Empty styles clear every block; values are validated first.
+    pub fn set_layer_styles(
+        &mut self,
+        clip_id: ClipId,
+        styles: LayerStyles,
+    ) -> Result<(), ModelError> {
+        self.require_visual(clip_id, "layer styles")?;
+        styles.validate()?;
+        self.timeline
+            .clip_mut(clip_id)
+            .expect("clip existence checked above")
+            .styles = styles;
         Ok(())
     }
 

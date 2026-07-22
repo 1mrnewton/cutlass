@@ -64,9 +64,10 @@ pub use ids::{ClipId, LinkId, MarkerId, MediaId, ProjectId, TemplateId, TrackId}
 pub use look::{
     ANIMATION_INTENSITY_RANGE, ANIMATION_PARAM_DEFAULT, ANIMATION_SPEED_RANGE,
     ANIMATION_STAGGER_RANGE, AnimationKnobs, AnimationRef, AnimationSlot, AnimationSpec, AudioRole,
-    BlendMode, ChromaKey, ColorAdjustments, Filter, FilterSpec, Lut, Mask, MaskKind, MaskSpec,
-    StabilizeLevel, TextEffectSpec, animation_catalog, animation_spec, filter_catalog, filter_spec,
-    mask_catalog, text_effect_catalog, text_effect_spec,
+    BlendMode, ChromaKey, ColorAdjustments, Filter, FilterSpec, LayerBackground, LayerGlow,
+    LayerOutline, LayerShadow, LayerStyles, Lut, Mask, MaskKind, MaskSpec, StabilizeLevel,
+    TextEffectSpec, animation_catalog, animation_spec, filter_catalog, filter_spec, mask_catalog,
+    text_effect_catalog, text_effect_spec,
 };
 pub use media::{MediaKind, MediaSource, STILL_DEFAULT_DURATION_TICKS, STILL_TICK_RATE};
 pub use metadata::ProjectMetadata;

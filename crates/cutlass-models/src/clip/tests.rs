@@ -988,6 +988,75 @@ fn clip_without_blend_mode_field_deserializes_to_normal() {
 }
 
 #[test]
+fn empty_layer_styles_are_elided_from_serde() {
+    let clip = Clip::generated(Generator::text("plain"), tr(0, 10, R24));
+    assert!(clip.styles.is_empty());
+    let json = serde_json::to_string(&clip).expect("serialize");
+    assert!(
+        !json.contains("\"styles\""),
+        "empty styles must be absent from saves: {json}"
+    );
+}
+
+#[test]
+fn clip_without_styles_field_deserializes_empty() {
+    let clip = Clip::generated(Generator::text("old"), tr(0, 10, R24));
+    let mut value = serde_json::to_value(&clip).expect("serialize");
+    value
+        .as_object_mut()
+        .expect("clip serializes to a map")
+        .remove("styles");
+
+    let loaded: Clip = serde_json::from_value(value).expect("deserialize legacy clip");
+    assert!(loaded.styles.is_empty());
+    assert_eq!(loaded.content, clip.content);
+}
+
+#[test]
+fn layer_shadow_roundtrips_through_serde() {
+    let mut clip = Clip::generated(Generator::text("styles"), tr(0, 10, R24));
+    clip.styles.shadow = Some(crate::look::LayerShadow::default());
+    let json = serde_json::to_string(&clip).expect("serialize");
+    assert!(json.contains("\"styles\""));
+    assert!(json.contains("\"shadow\""));
+    let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(
+        loaded.styles.shadow.as_ref().unwrap().blur,
+        Param::Constant(8.0)
+    );
+}
+
+#[test]
+fn keyframed_layer_shadow_blur_roundtrips_through_serde() {
+    let mut clip = Clip::generated(Generator::text("styles"), tr(0, 10, R24));
+    let shadow = crate::look::LayerShadow {
+        blur: Param::Keyframed {
+            keyframes: vec![
+                Keyframe {
+                    tick: 0,
+                    value: 4.0,
+                    easing: Easing::Linear,
+                },
+                Keyframe {
+                    tick: 10,
+                    value: 16.0,
+                    easing: Easing::EaseIn,
+                },
+            ],
+        },
+        ..Default::default()
+    };
+    clip.styles.shadow = Some(shadow);
+    let json = serde_json::to_string(&clip).expect("serialize");
+    assert!(json.contains("\"kf\""));
+    let loaded: Clip = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(
+        loaded.styles.shadow.as_ref().unwrap().blur,
+        clip.styles.shadow.as_ref().unwrap().blur
+    );
+}
+
+#[test]
 fn transform_roundtrips_through_serde() {
     let mut clip = Clip::generated(Generator::Adjustment, tr(0, 10, R24));
     clip.transform = ClipTransform {

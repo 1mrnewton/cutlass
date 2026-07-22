@@ -1979,8 +1979,8 @@ fn project_clone_is_independent_snapshot() {
 // --- Phase I look properties --------------------------------------------
 
 use crate::look::{
-    AnimationRef, AnimationSlot, AudioRole, BlendMode, ChromaKey, ColorAdjustments, Filter, Mask,
-    MaskKind, StabilizeLevel,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, ChromaKey, ColorAdjustments, Filter,
+    LayerShadow, LayerStyles, Mask, MaskKind, StabilizeLevel,
 };
 
 #[test]
@@ -2017,6 +2017,15 @@ fn look_setters_persist_on_a_media_clip() {
         )
         .unwrap();
     project.set_blend_mode(clip, BlendMode::Multiply).unwrap();
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow::default()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
     let c = project.clip(clip).unwrap();
     assert_eq!(c.mask.as_ref().unwrap().kind, MaskKind::Circle);
@@ -2025,10 +2034,15 @@ fn look_setters_persist_on_a_media_clip() {
     assert_eq!(c.filter.as_ref().unwrap().id, "vivid");
     assert_eq!(c.adjust.brightness, 0.25.into());
     assert_eq!(c.blend_mode, BlendMode::Multiply);
+    assert!(c.styles.shadow.is_some());
 
     // Clearing works and the fields vanish from saves again.
     project.set_clip_mask(clip, None).unwrap();
     assert!(project.clip(clip).unwrap().mask.is_none());
+    project
+        .set_layer_styles(clip, LayerStyles::default())
+        .unwrap();
+    assert!(project.clip(clip).unwrap().styles.is_empty());
 }
 
 #[test]
@@ -2110,6 +2124,19 @@ fn look_setters_reject_wrong_content() {
             Err(ModelError::IncompatibleTrackKind { .. })
         ),
         "blend modes need pixels"
+    );
+    assert!(
+        matches!(
+            project.set_layer_styles(
+                aclip,
+                LayerStyles {
+                    shadow: Some(LayerShadow::default()),
+                    ..Default::default()
+                }
+            ),
+            Err(ModelError::IncompatibleTrackKind { .. })
+        ),
+        "layer styles need pixels"
     );
 
     // Stills have no motion to stabilize.

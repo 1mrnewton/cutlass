@@ -174,6 +174,79 @@ fn extended_wire_clip_params_lower_to_model_params() {
 }
 
 #[test]
+fn named_and_bezier_easings_lower_on_set_param_keyframe() {
+    let (project, _, _, _, clip, _) = fixture();
+
+    let cases = [
+        (
+            wire::WireEasing::Snappy,
+            Easing::from_preset_id("snappy").unwrap(),
+        ),
+        (
+            wire::WireEasing::Overshoot,
+            Easing::from_preset_id("overshoot").unwrap(),
+        ),
+        (
+            wire::WireEasing::Anticipate,
+            Easing::from_preset_id("anticipate").unwrap(),
+        ),
+        (
+            wire::WireEasing::Bezier {
+                points: [0.42, 0.0, 0.58, 1.0],
+            },
+            Easing::Bezier {
+                points: [0.42, 0.0, 0.58, 1.0],
+            },
+        ),
+    ];
+
+    for (wire_easing, expected) in cases {
+        let edit = lower(
+            &project,
+            WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+                clip,
+                param: wire::WireClipParam::Opacity,
+                at: 1.0,
+                value: Some(0.5),
+                position: None,
+                rgba: None,
+                easing: Some(wire_easing),
+            }),
+        );
+        assert_eq!(
+            edit,
+            EditCommand::SetParamKeyframe {
+                clip: ClipId::from_raw(clip),
+                param: ClipParam::Opacity,
+                at: RationalTime::new(24, R24),
+                value: ParamValue::Scalar(0.5),
+                easing: expected,
+            }
+        );
+    }
+
+    let err = validate(
+        &WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Opacity,
+            at: 1.0,
+            value: Some(0.5),
+            position: None,
+            rgba: None,
+            easing: Some(wire::WireEasing::Bezier {
+                points: [1.5, 0.0, 0.5, 1.0],
+            }),
+        }),
+        &project,
+    )
+    .expect_err("x control point outside 0..=1 must reject");
+    assert!(
+        err.to_string().contains("invalid easing"),
+        "unexpected rejection: {err}"
+    );
+}
+
+#[test]
 fn extended_wire_params_work_for_constant_and_removal() {
     let (project, _, _, _, clip, _) = fixture();
 

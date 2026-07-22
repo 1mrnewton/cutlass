@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 /// 23: effect-chain reordering (`move_effect`).
 /// 24: explicit-target audio extraction (`extract_audio`).
 /// 25: explicit-target, property-preserving clip duplication (`duplicate_clip`).
-pub const TOOL_SCHEMA_VERSION: u32 = 25;
+pub const TOOL_SCHEMA_VERSION: u32 = 26;
 
 /// Model-facing clip lists stay small enough for deterministic validation and
 /// useful rejection messages while covering realistic linked groups.
@@ -401,15 +401,25 @@ pub enum WireLookParam {
     ChromaShadow,
 }
 
-/// Interpolation toward the next keyframe. (Custom bezier curves exist in
-/// the engine but are inspector-only; the agent surface stays simple.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Interpolation toward the next keyframe.
+///
+/// Named presets (`snappy` / `overshoot` / `anticipate`) encode as cubic
+/// beziers in the engine. `bezier` accepts raw CSS-style control points
+/// `(x1, y1, x2, y2)` with `x` in `0..=1` (y may overshoot).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WireEasing {
     Linear,
     EaseIn,
     EaseOut,
     EaseInOut,
+    Snappy,
+    Overshoot,
+    Anticipate,
+    Bezier {
+        /// Control points `[x1, y1, x2, y2]`.
+        points: [f32; 4],
+    },
 }
 
 /// Add or replace a keyframe on one animatable clip property, making the

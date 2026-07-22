@@ -27,13 +27,25 @@ fn gcd(mut a: i32, mut b: i32) -> i32 {
     a.max(1)
 }
 
-pub(super) fn easing(easing: Option<WireEasing>) -> Easing {
-    match easing {
+pub(super) fn easing(easing: Option<WireEasing>) -> Result<Easing, Rejection> {
+    let easing = match easing {
         None | Some(WireEasing::Linear) => Easing::Linear,
         Some(WireEasing::EaseIn) => Easing::EaseIn,
         Some(WireEasing::EaseOut) => Easing::EaseOut,
         Some(WireEasing::EaseInOut) => Easing::EaseInOut,
-    }
+        Some(WireEasing::Snappy) => Easing::from_preset_id("snappy").unwrap_or(Easing::Linear),
+        Some(WireEasing::Overshoot) => {
+            Easing::from_preset_id("overshoot").unwrap_or(Easing::Linear)
+        }
+        Some(WireEasing::Anticipate) => {
+            Easing::from_preset_id("anticipate").unwrap_or(Easing::Linear)
+        }
+        Some(WireEasing::Bezier { points }) => Easing::Bezier { points },
+    };
+    easing
+        .validate()
+        .map_err(|e| Rejection::new(format!("invalid easing: {e}")))?;
+    Ok(easing)
 }
 
 /// Build the typed parameter value from the wire's `value` / `position`

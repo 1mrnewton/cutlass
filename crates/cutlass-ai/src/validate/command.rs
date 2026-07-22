@@ -403,7 +403,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 param: clip_param(&args.param, clip, args.clip)?,
                 at,
                 value,
-                easing: easing(args.easing),
+                easing: easing(args.easing)?,
             }
         }
         WireCommand::RemoveParamKeyframe(args) => {

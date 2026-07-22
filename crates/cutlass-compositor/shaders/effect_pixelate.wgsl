@@ -1,8 +1,8 @@
-// Block-average pixelate; cell size in params.x.
+// Block-average pixelate; cell size in params[0].x.
 
 struct EffectUniforms {
     texel_size: vec4<f32>,
-    params: vec4<f32>,
+    params: array<vec4<f32>, 4>,
 }
 
 @group(0) @binding(0) var input_tex: texture_2d<f32>;
@@ -32,7 +32,7 @@ fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let cell = max(uniforms.params.x, 1.0);
+    let cell = max(uniforms.params[0].x, 1.0);
     let dims = vec2<f32>(1.0 / uniforms.texel_size.x, 1.0 / uniforms.texel_size.y);
     let px = floor(in.uv * dims / cell) * cell + vec2<f32>(cell * 0.5);
     let sample_uv = px / dims;

@@ -1109,6 +1109,55 @@ fn clip_with_gaussian_blur_carries_sampled_radius() {
 }
 
 #[test]
+fn color_overlay_flattens_typed_params_in_catalog_order() {
+    let mut project = Project::new("p", FPS_24);
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::SolidColor {
+                rgba: [255, 0, 0, 255],
+            },
+            tr(0, 100),
+        )
+        .unwrap();
+    project.add_effect(clip, "color_overlay").unwrap();
+    project
+        .set_param_constant(
+            clip,
+            ClipParam::Effect {
+                effect: 0,
+                param: 0,
+            },
+            ParamValue::Color([51, 102, 153, 204]),
+        )
+        .unwrap();
+    project
+        .set_param_constant(
+            clip,
+            ClipParam::Effect {
+                effect: 0,
+                param: 1,
+            },
+            ParamValue::Vec2([0.25, -0.5]),
+        )
+        .unwrap();
+    project.set_effect_param(clip, 0, 2, 0.75).unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    let params = &scene.layers[0].effects[0].params;
+    // color (4) + offset (2) + amount (1)
+    assert_eq!(params.len(), 7);
+    approx(params[0], 51.0 / 255.0);
+    approx(params[1], 102.0 / 255.0);
+    approx(params[2], 153.0 / 255.0);
+    approx(params[3], 204.0 / 255.0);
+    approx(params[4], 0.25);
+    approx(params[5], -0.5);
+    approx(params[6], 0.75);
+}
+
+#[test]
 fn adjustment_lane_resolves_to_canvas_pass_above_lower_layers() {
     let mut project = Project::new("p", FPS_24);
     let base = project.add_track(TrackKind::Sticker, "S1");

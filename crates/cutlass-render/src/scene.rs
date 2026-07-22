@@ -34,6 +34,11 @@ pub struct TextAnimation {
 pub use cutlass_core::RationalTime;
 
 /// One sampled GPU effect pass attached to a clip at resolve time.
+///
+/// `params` is the catalog-ordered flattened value list for the GPU uniform
+/// upload: each scalar contributes 1 float, each vec2 contributes 2, and each
+/// color contributes 4 floats in `0…1` (encoded 8-bit ÷ 255). Slot order
+/// matches [`cutlass_models::EffectSpec::params`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedPass {
     pub id: String,

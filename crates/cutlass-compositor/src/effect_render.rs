@@ -29,11 +29,30 @@ struct TexelUniforms {
     texel_size: [f32; 4],
 }
 
+/// Max flattened floats uploaded per effect pass (`4 × vec4`).
+const EFFECT_PARAM_FLOATS: usize = 16;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct EffectUniforms {
     texel_size: [f32; 4],
-    params: [f32; 4],
+    /// Catalog-ordered flattened params packed as `array<vec4, 4>` in WGSL.
+    params: [[f32; 4]; 4],
+}
+
+/// Pack a flattened effect param list into the GPU uniform block (16 floats).
+/// Extra values beyond capacity are dropped after a debug assert.
+pub(crate) fn pack_effect_params(params: &[f32]) -> [[f32; 4]; 4] {
+    debug_assert!(
+        params.len() <= EFFECT_PARAM_FLOATS,
+        "effect params ({}) exceed uniform capacity ({EFFECT_PARAM_FLOATS})",
+        params.len()
+    );
+    let mut out = [[0.0f32; 4]; 4];
+    for (i, &v) in params.iter().take(EFFECT_PARAM_FLOATS).enumerate() {
+        out[i / 4][i % 4] = v;
+    }
+    out
 }
 
 #[repr(C)]
@@ -76,6 +95,7 @@ pub(crate) fn run_effect_chain<'a>(
         match effect.id {
             "gaussian_blur" => {
                 let radius = effect.params.first().copied().unwrap_or(0.0);
+                let blur_params = [radius];
                 let mid_idx = 1usize;
                 let out_idx = 2usize;
                 let mid_view = pool.view(mid_idx);
@@ -89,7 +109,7 @@ pub(crate) fn run_effect_chain<'a>(
                     mid_view,
                     width,
                     height,
-                    radius,
+                    &blur_params,
                 );
                 draw_effect_pass(
                     device,
@@ -100,7 +120,7 @@ pub(crate) fn run_effect_chain<'a>(
                     out_view,
                     width,
                     height,
-                    radius,
+                    &blur_params,
                 );
                 read_idx = out_idx;
                 current_input = out_view;
@@ -108,7 +128,6 @@ pub(crate) fn run_effect_chain<'a>(
             }
             _ => {
                 let pipeline = registry.effect_pipeline(effect.id);
-                let param0 = effect.params.first().copied().unwrap_or(0.0);
                 draw_effect_pass(
                     device,
                     encoder,
@@ -118,7 +137,7 @@ pub(crate) fn run_effect_chain<'a>(
                     write_view,
                     width,
                     height,
-                    param0,
+                    effect.params,
                 );
             }
         }
@@ -269,11 +288,11 @@ pub(super) fn draw_effect_pass(
     output: &wgpu::TextureView,
     width: u32,
     height: u32,
-    param0: f32,
+    params: &[f32],
 ) {
     let uniforms = EffectUniforms {
         texel_size: texel_size(width, height),
-        params: [param0, 0.0, 0.0, 0.0],
+        params: pack_effect_params(params),
     };
     let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("cutlass.effect.uniforms"),
@@ -359,4 +378,26 @@ pub(crate) fn check_dimensions(width: u32, height: u32) -> Result<(), Compositor
         return Err(CompositorError::InvalidDimensions { width, height });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pack_effect_params;
+
+    #[test]
+    fn pack_effect_params_fills_slots_in_order() {
+        let packed = pack_effect_params(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(packed[0], [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(packed[1], [5.0, 6.0, 0.0, 0.0]);
+        assert_eq!(packed[2], [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(packed[3], [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn pack_effect_params_fills_full_capacity() {
+        let params: Vec<f32> = (0..16).map(|i| i as f32).collect();
+        let packed = pack_effect_params(&params);
+        assert_eq!(packed[0], [0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(packed[3], [12.0, 13.0, 14.0, 15.0]);
+    }
 }

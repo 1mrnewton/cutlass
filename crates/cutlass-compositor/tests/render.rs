@@ -758,6 +758,40 @@ fn vignette_darkens_corners_vs_center() {
 }
 
 #[test]
+fn gaussian_blur_radius_softens_a_hard_edge() {
+    let gpu = gpu_or_skip!();
+    let mut comp = Compositor::new(&gpu);
+    let config = CompositorConfig::new(64, 64).with_background([0, 0, 0, 255]);
+    // Half white / half black vertical split — blur should mix across the seam.
+    let mut pixels = Vec::with_capacity(64 * 64 * 4);
+    for _y in 0..64 {
+        for x in 0..64 {
+            let v = if x < 32 { 255 } else { 0 };
+            pixels.extend_from_slice(&[v, v, v, 255]);
+        }
+    }
+    let bmp = RgbaImage::new(64, 64, pixels);
+    let sharp = CompositeLayer::rgba(&bmp, LayerPlacement::full_canvas(&config));
+    let sharp_img = comp.render(&gpu, &config, &[sharp]).expect("sharp");
+
+    let blur = PassInstance {
+        id: "gaussian_blur",
+        params: &[8.0],
+    };
+    let effects = [blur];
+    let soft =
+        CompositeLayer::rgba(&bmp, LayerPlacement::full_canvas(&config)).with_effects(&effects);
+    let soft_img = comp.render(&gpu, &config, &[soft]).expect("blur");
+
+    let sharp_seam = sharp_img.pixel(31, 32)[0] as i16;
+    let soft_seam = soft_img.pixel(31, 32)[0] as i16;
+    assert!(
+        (soft_seam - sharp_seam).abs() > 10,
+        "blur should pull dark ink across the seam: sharp={sharp_seam} soft={soft_seam}"
+    );
+}
+
+#[test]
 fn pixelate_produces_uniform_blocks() {
     let gpu = gpu_or_skip!();
     let mut comp = Compositor::new(&gpu);

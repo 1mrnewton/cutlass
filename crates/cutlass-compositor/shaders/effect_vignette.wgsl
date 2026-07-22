@@ -1,8 +1,8 @@
-// Radial vignette; amount in params.x.
+// Radial vignette; amount in params[0].x.
 
 struct EffectUniforms {
     texel_size: vec4<f32>,
-    params: vec4<f32>,
+    params: array<vec4<f32>, 4>,
 }
 
 @group(0) @binding(0) var input_tex: texture_2d<f32>;
@@ -33,7 +33,7 @@ fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let color = textureSample(input_tex, input_sampler, in.uv);
-    let amount = clamp(uniforms.params.x, 0.0, 1.0);
+    let amount = clamp(uniforms.params[0].x, 0.0, 1.0);
     let centered = in.uv - vec2<f32>(0.5, 0.5);
     let dist = length(centered) * 1.41421356;
     let factor = 1.0 - amount * smoothstep(0.35, 1.0, dist);

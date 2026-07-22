@@ -592,11 +592,33 @@ fn resolve_effects(clip: &cutlass_models::Clip, tick: i64) -> Vec<ResolvedPass> 
 }
 
 fn pack_effect(fx: &EffectInstance, tick: f64) -> Result<ResolvedPass, cutlass_models::ModelError> {
+    use cutlass_models::EffectParamKind;
+
     let spec = fx.spec()?;
-    let mut params = Vec::with_capacity(spec.params.len());
+    let mut params = Vec::with_capacity(spec.params.len() * 4);
     for pspec in spec.params {
-        let value = fx.sample_param(pspec.name, tick).unwrap_or(pspec.default);
-        params.push(value);
+        match pspec.kind {
+            EffectParamKind::Scalar => {
+                let value = fx.sample_param(pspec.name, tick).unwrap_or(pspec.default);
+                params.push(value);
+            }
+            EffectParamKind::Vec2 => {
+                let value = fx
+                    .sample_vec2_param(pspec.name, tick)
+                    .unwrap_or(pspec.default_vec2);
+                params.push(value[0]);
+                params.push(value[1]);
+            }
+            EffectParamKind::Color => {
+                let value = fx
+                    .sample_color_param(pspec.name, tick)
+                    .unwrap_or(pspec.default_color);
+                params.push(f32::from(value[0]) / 255.0);
+                params.push(f32::from(value[1]) / 255.0);
+                params.push(f32::from(value[2]) / 255.0);
+                params.push(f32::from(value[3]) / 255.0);
+            }
+        }
     }
     Ok(ResolvedPass {
         id: fx.effect_id.clone(),

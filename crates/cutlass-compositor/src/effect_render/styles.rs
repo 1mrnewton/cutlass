@@ -71,6 +71,7 @@ pub(crate) fn run_style_blur(
     let iters = ((radius / 16.0).ceil() as u32).clamp(1, 3);
     let per_pass = radius / iters as f32;
     for _ in 0..iters {
+        let blur_params = [per_pass];
         draw_effect_pass(
             device,
             encoder,
@@ -80,7 +81,7 @@ pub(crate) fn run_style_blur(
             pool.view(slot_b),
             width,
             height,
-            per_pass,
+            &blur_params,
         );
         draw_effect_pass(
             device,
@@ -91,7 +92,7 @@ pub(crate) fn run_style_blur(
             pool.view(slot_a),
             width,
             height,
-            per_pass,
+            &blur_params,
         );
     }
 }

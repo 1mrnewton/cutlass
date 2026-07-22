@@ -1,8 +1,8 @@
-// Separable horizontal box blur; radius in pixels (params.x).
+// Separable horizontal box blur; radius in pixels (params[0].x).
 
 struct EffectUniforms {
     texel_size: vec4<f32>,
-    params: vec4<f32>,
+    params: array<vec4<f32>, 4>,
 }
 
 @group(0) @binding(0) var input_tex: texture_2d<f32>;
@@ -44,7 +44,7 @@ fn sample_at(uv: vec2<f32>) -> vec4<f32> {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let r = max(uniforms.params.x, 0.0);
+    let r = max(uniforms.params[0].x, 0.0);
     if (r <= 0.0) {
         return sample_at(in.uv);
     }

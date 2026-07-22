@@ -91,6 +91,24 @@ export struct PreviewSpritePlacement {
     opacity: float,
 }
 
+// One keyframe diamond on the motion-path overlay (viewport-element px).
+// `selected` accents the diamond; commit 2 draws tangent handles from it.
+export struct MotionPathKeyframe {
+    x: float,
+    y: float,
+    tick: int,
+    selected: bool,
+}
+
+// Motion-path overlay for a selected clip whose position is keyframed.
+// `path-commands` is SVG path data ("M x y L x y …") in viewport px —
+// one string, cheap to diff. Empty / invisible when position isn't animated.
+export struct MotionPath {
+    visible: bool,
+    path-commands: string,
+    keyframes: [MotionPathKeyframe],
+}
+
 export global PreviewBackend {
     // Topmost hit at (x, y) in viewport-element coordinates, given the
     // viewport's current size and zoom/pan. Locked lanes don't hit-test
@@ -115,6 +133,12 @@ export global PreviewBackend {
     // identity-transform raster to the live gesture transform using the same
     // placement math as the selection box.
     pure callback sprite-placement(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* gesture-active */, PreviewDragResolution /* gesture */, ) -> PreviewSpritePlacement;
+
+    // Motion-path overlay for a selected clip with keyframed position:
+    // sampled polyline (SVG commands) + keyframe diamonds in viewport px.
+    // `selected-tick` marks one diamond (-1 ⇔ none). Recomputed with the
+    // same reactive inputs as selection-box (selection, projection, zoom/pan).
+    pure callback motion-path(Sequence /* sequence */, string /* clip-id */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, int    /* selected-tick */, ) -> MotionPath;
 
     // Move gesture (preview roadmap Phase 3): press point + current cursor
     // (viewport-element px) → new normalized position, center-guide magnet

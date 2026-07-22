@@ -88,6 +88,21 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
         },
     );
 
+    app.global::<PreviewBackend>().on_motion_path(
+        |sequence, clip_id, view_w, view_h, zoom, pan_x, pan_y, selected_tick| {
+            preview_motion_path::motion_path_in_viewport(
+                &sequence,
+                clip_id.as_str(),
+                view_w,
+                view_h,
+                zoom,
+                pan_x,
+                pan_y,
+                selected_tick,
+            )
+        },
+    );
+
     app.global::<PreviewBackend>().on_resolve_drag(
         |sequence,
          clip_id,

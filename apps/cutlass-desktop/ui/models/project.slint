@@ -95,6 +95,14 @@ export struct ParamKeyframe {
     bez-y1: float,
     bez-x2: float,
     bez-y2: float,
+    // Spatial bezier handles for position motion paths (canvas-fraction
+    // offsets from the keyframe value). `has-tangents` false ⇔ straight
+    // segment (legacy / non-position params). Ignored by scalar samplers.
+    has-tangents: bool,
+    out-tx: float,
+    out-ty: float,
+    in-tx: float,
+    in-ty: float,
 }
 
 // One parameter of a clip effect, projected for the inspector Effects

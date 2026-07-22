@@ -5,8 +5,9 @@ import { TimelineLib } from "../../lib/timeline-lib.slint";
 import { TimelineStore, TimelineActions } from "../../store/index.slint";
 import { RationalTime } from "../../models/index.slint";
 import { AppState } from "../../state.slint";
-import { PreviewBackend, PreviewHit, PreviewSelectionBox, PreviewSpritePlacement, PreviewDragResolution, PreviewView } from "../../lib/preview-backend.slint";
+import { PreviewBackend, PreviewHit, PreviewSelectionBox, PreviewSpritePlacement, PreviewDragResolution, PreviewView, MotionPath } from "../../lib/preview-backend.slint";
 import { SelectionBackend } from "../../lib/selection-backend.slint";
+import { MotionPathOverlay } from "motion-path.slint";
 
 export component PreviewPanel inherits PanelBase {
     private property <RationalTime> sequence-duration:
@@ -170,6 +171,19 @@ export component PreviewPanel inherits PanelBase {
                             && PreviewStore.gesture-clip == TimelineStore.selected-clip-id
                             && PreviewStore.gesture.valid,
                         PreviewStore.gesture);
+
+                    // Motion path for a selected clip with keyframed position.
+                    // Same reactive inputs as sel-box (selection, projection
+                    // republish via sequence, zoom/pan, panel size).
+                    private property <MotionPath> motion-path: PreviewBackend.motion-path(
+                        EditorStore.project.sequence,
+                        TimelineStore.selected-clip-id,
+                        self.width / 1px,
+                        self.height / 1px,
+                        PreviewStore.viewport-zoom,
+                        PreviewStore.viewport-pan-x / 1px,
+                        PreviewStore.viewport-pan-y / 1px,
+                        PreviewStore.motion-path-selected-tick);
 
                     private property <bool> show-sprite-stack:
                         self.sprite-ready && self.sprite-hold;
@@ -517,6 +531,16 @@ export component PreviewPanel inherits PanelBase {
                                     TimelineStore.playhead-tick);
                             }
                         }
+                    }
+
+                    // Motion path: under the selection outline so gizmos stay
+                    // grab-able on top. Empty when position isn't animated.
+                    MotionPathOverlay {
+                        width: 100%;
+                        height: 100%;
+                        path: viewport.motion-path;
+                        view-w: viewport.width / 1px;
+                        view-h: viewport.height / 1px;
                     }
 
                     // CapCut's blue center guides: each axis lights while the

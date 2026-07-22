@@ -797,6 +797,11 @@ fn speed_curve_to_slint(curve: &Param<f32>) -> ModelRc<ParamKeyframe> {
                 bez_y1,
                 bez_x2,
                 bez_y2,
+                has_tangents: false,
+                out_tx: 0.0,
+                out_ty: 0.0,
+                in_tx: 0.0,
+                in_ty: 0.0,
             }
         })
         .collect();
@@ -957,6 +962,10 @@ fn keyframes_to_slint<T: Lerp>(
         .map(|kf: &Keyframe<T>| {
             let (value_x, value_y) = split(&kf.value);
             let (easing, [bez_x1, bez_y1, bez_x2, bez_y2]) = easing_to_ui(kf.easing);
+            let (has_tangents, out_tx, out_ty, in_tx, in_ty) = match kf.tangents {
+                Some(t) => (true, t.out_t[0], t.out_t[1], t.in_t[0], t.in_t[1]),
+                None => (false, 0.0, 0.0, 0.0, 0.0),
+            };
             ParamKeyframe {
                 tick: clamp_i32(clip_start + kf.tick),
                 value_x,
@@ -966,6 +975,11 @@ fn keyframes_to_slint<T: Lerp>(
                 bez_y1,
                 bez_x2,
                 bez_y2,
+                has_tangents,
+                out_tx,
+                out_ty,
+                in_tx,
+                in_ty,
             }
         })
         .collect();

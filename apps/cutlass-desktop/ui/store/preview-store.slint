@@ -15,6 +15,10 @@ export global PreviewStore {
     // instead of the full canvas.
     callback viewport-changed(width: length, height: length);
 
+    // Selected motion-path keyframe tick (absolute sequence tick), or -1
+    // when none. Drives diamond accent + (commit 2) tangent handles.
+    in-out property <int> motion-path-selected-tick: -1;
+
     // Live transform gesture (preview roadmap Phases 3–5): the uncommitted
     // resolution of whatever gesture is in flight — a preview move/scale/
     // rotate drag or an inspector slider — mirrored UI-wide. The projection

@@ -24,6 +24,7 @@ mod params;
 mod paths;
 mod placement;
 mod preview_gesture;
+mod preview_motion_path;
 mod preview_select;
 mod preview_view;
 mod preview_worker;

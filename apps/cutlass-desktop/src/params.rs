@@ -7,10 +7,21 @@
 //! preview selection geometry can be playhead-accurate without a projection
 //! republish per tick.
 
-use cutlass_models::{ClipTransform, Easing, Keyframe, Param, Scale2};
+use cutlass_models::{ClipTransform, Easing, Keyframe, Param, Scale2, SpatialTangents};
 use slint::Model;
 
 use crate::{Clip, ParamKeyframe, ParamRowState};
+
+/// Spatial tangents carried on a projected keyframe, if any.
+fn tangents_of(kf: &ParamKeyframe) -> Option<SpatialTangents> {
+    if !kf.has_tangents {
+        return None;
+    }
+    Some(SpatialTangents {
+        out_t: [kf.out_tx, kf.out_ty],
+        in_t: [kf.in_tx, kf.in_ty],
+    })
+}
 
 /// Encode an engine easing for the Slint `ParamKeyframe`:
 /// `(tag, [x1, y1, x2, y2])` — points are zero for the built-in presets.
@@ -80,7 +91,7 @@ fn vec2_param(kfs: &slint::ModelRc<ParamKeyframe>, constant: [f32; 2]) -> Param<
             tick: i64::from(kf.tick),
             value: [kf.value_x, kf.value_y],
             easing: easing_of(&kf),
-            tangents: None,
+            tangents: tangents_of(&kf),
         })
         .collect();
     if keyframes.is_empty() {
@@ -88,6 +99,15 @@ fn vec2_param(kfs: &slint::ModelRc<ParamKeyframe>, constant: [f32; 2]) -> Param<
     } else {
         Param::Keyframed { keyframes }
     }
+}
+
+/// Rebuild the clip's position `Param` from the projected `kf-position` list
+/// (absolute ticks + optional spatial tangents). Empty ⇔ constant.
+pub(crate) fn position_param(clip: &Clip) -> Param<[f32; 2]> {
+    vec2_param(
+        &clip.kf_position,
+        [clip.transform_position_x, clip.transform_position_y],
+    )
 }
 
 /// Clamp the playhead into the clip's extent, mirroring the engine's
@@ -343,6 +363,11 @@ mod tests {
             bez_y1: 0.0,
             bez_x2: 0.0,
             bez_y2: 0.0,
+            has_tangents: false,
+            out_tx: 0.0,
+            out_ty: 0.0,
+            in_tx: 0.0,
+            in_ty: 0.0,
         }
     }
 

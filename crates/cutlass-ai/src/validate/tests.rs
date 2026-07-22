@@ -190,6 +190,7 @@ fn named_and_bezier_easings_lower_on_set_param_keyframe() {
             wire::WireEasing::Anticipate,
             Easing::from_preset_id("anticipate").unwrap(),
         ),
+        (wire::WireEasing::Hold, Easing::Hold),
         (
             wire::WireEasing::Bezier {
                 points: [0.42, 0.0, 0.58, 1.0],
@@ -243,6 +244,30 @@ fn named_and_bezier_easings_lower_on_set_param_keyframe() {
     assert!(
         err.to_string().contains("invalid easing"),
         "unexpected rejection: {err}"
+    );
+}
+
+#[test]
+fn hold_easing_lowers_from_wire_json() {
+    let (project, _, _, _, clip, _) = fixture();
+    let cmd: WireCommand = serde_json::from_value(serde_json::json!({
+        "command": "set_param_keyframe",
+        "clip": clip,
+        "param": "opacity",
+        "at": 1.0,
+        "value": 0.5,
+        "easing": "hold",
+    }))
+    .expect("\"hold\" is a valid wire easing tag");
+    assert_eq!(
+        lower(&project, cmd),
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Opacity,
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Scalar(0.5),
+            easing: Easing::Hold,
+        }
     );
 }
 

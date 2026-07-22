@@ -40,6 +40,7 @@ pub(super) fn easing(easing: Option<WireEasing>) -> Result<Easing, Rejection> {
         Some(WireEasing::Anticipate) => {
             Easing::from_preset_id("anticipate").unwrap_or(Easing::Linear)
         }
+        Some(WireEasing::Hold) => Easing::Hold,
         Some(WireEasing::Bezier { points }) => Easing::Bezier { points },
     };
     easing

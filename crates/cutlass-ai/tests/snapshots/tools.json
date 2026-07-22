@@ -776,7 +776,7 @@
           "easing": {
             "anyOf": [
               {
-                "description": "Interpolation toward the next keyframe.\n\nNamed presets (`snappy` / `overshoot` / `anticipate`) encode as cubic\nbeziers in the engine. `bezier` accepts raw CSS-style control points\n`(x1, y1, x2, y2)` with `x` in `0..=1` (y may overshoot).",
+                "description": "Interpolation toward the next keyframe.\n\nNamed presets (`snappy` / `overshoot` / `anticipate`) encode as cubic\nbeziers in the engine. `hold` is step interpolation — the value stays at\nthis keyframe until the next one. `bezier` accepts raw CSS-style control\npoints `(x1, y1, x2, y2)` with `x` in `0..=1` (y may overshoot).",
                 "oneOf": [
                   {
                     "enum": [
@@ -786,7 +786,8 @@
                       "ease_in_out",
                       "snappy",
                       "overshoot",
-                      "anticipate"
+                      "anticipate",
+                      "hold"
                     ],
                     "type": "string"
                   },
@@ -2510,5 +2511,5 @@
       }
     }
   ],
-  "version": 26
+  "version": 27
 }

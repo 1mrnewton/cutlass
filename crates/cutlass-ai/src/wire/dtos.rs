@@ -359,8 +359,9 @@ pub enum WireLookParam {
 /// Interpolation toward the next keyframe.
 ///
 /// Named presets (`snappy` / `overshoot` / `anticipate`) encode as cubic
-/// beziers in the engine. `bezier` accepts raw CSS-style control points
-/// `(x1, y1, x2, y2)` with `x` in `0..=1` (y may overshoot).
+/// beziers in the engine. `hold` is step interpolation — the value stays at
+/// this keyframe until the next one. `bezier` accepts raw CSS-style control
+/// points `(x1, y1, x2, y2)` with `x` in `0..=1` (y may overshoot).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WireEasing {
@@ -371,6 +372,7 @@ pub enum WireEasing {
     Snappy,
     Overshoot,
     Anticipate,
+    Hold,
     Bezier {
         /// Control points `[x1, y1, x2, y2]`.
         points: [f32; 4],

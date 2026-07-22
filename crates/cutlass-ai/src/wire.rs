@@ -46,7 +46,10 @@ use serde::{Deserialize, Serialize};
 /// 23: effect-chain reordering (`move_effect`).
 /// 24: explicit-target audio extraction (`extract_audio`).
 /// 25: explicit-target, property-preserving clip duplication (`duplicate_clip`).
-pub const TOOL_SCHEMA_VERSION: u32 = 26;
+/// 26: named easing presets (snappy/overshoot/anticipate) and raw bezier on
+///     `set_param_keyframe`.
+/// 27: `hold` (step) easing on `set_param_keyframe`.
+pub const TOOL_SCHEMA_VERSION: u32 = 27;
 
 mod dtos;
 mod tools;

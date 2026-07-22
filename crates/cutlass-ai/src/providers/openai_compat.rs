@@ -18,34 +18,75 @@ use crate::provider::{
     ProviderStreamEvent, ToolCall,
 };
 
+/// Optional OpenRouter-only request extras (provider pinning + app headers).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenAiCompatExtras {
+    /// `provider.order` upstream preference list.
+    pub provider_order: Option<Vec<String>>,
+    /// When false with a non-empty order, OR will not fall back to other hosts.
+    pub allow_fallbacks: bool,
+    /// Send `HTTP-Referer` / `X-Title` attribution headers.
+    pub openrouter_headers: bool,
+}
+
 pub struct OpenAiCompatProvider {
     base_url: String,
     model: String,
     api_key: Option<String>,
+    extras: OpenAiCompatExtras,
     agent: ureq::Agent,
 }
 
 impl OpenAiCompatProvider {
     pub fn new(base_url: &str, model: &str, api_key: Option<String>) -> Self {
+        Self::with_extras(base_url, model, api_key, OpenAiCompatExtras::default())
+    }
+
+    pub fn with_extras(
+        base_url: &str,
+        model: &str,
+        api_key: Option<String>,
+        extras: OpenAiCompatExtras,
+    ) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key,
+            extras,
             agent: ureq::AgentBuilder::new()
                 .timeout_connect(Duration::from_secs(10))
                 .build(),
         }
     }
 
+    fn apply_auth_headers(&self, mut http: ureq::Request) -> ureq::Request {
+        if let Some(key) = &self.api_key {
+            http = http.set("Authorization", &format!("Bearer {key}"));
+        }
+        if self.extras.openrouter_headers {
+            http = http
+                .set("HTTP-Referer", crate::catalog::OPENROUTER_HTTP_REFERER)
+                .set("X-Title", crate::catalog::OPENROUTER_APP_TITLE);
+        }
+        http
+    }
+
     /// Liveness probe for the Settings dialog: `GET {base_url}/models`, the
     /// OpenAI-compatible health endpoint (Ollama/LM Studio/OpenAI all serve
     /// it). Returns a short human summary on success; spends no tokens.
     pub fn test_connection(&self) -> Result<String, ProviderError> {
+        let ids = self.list_models()?;
+        Ok(match ids.len() {
+            0 => "Connected.".to_string(),
+            1 => "Connected · 1 model available.".to_string(),
+            n => format!("Connected · {n} models available."),
+        })
+    }
+
+    /// `GET {base_url}/models` → installed model ids (OpenAI `data[].id`).
+    pub fn list_models(&self) -> Result<Vec<String>, ProviderError> {
         let url = format!("{}/models", self.base_url);
-        let mut http = self.agent.get(&url);
-        if let Some(key) = &self.api_key {
-            http = http.set("Authorization", &format!("Bearer {key}"));
-        }
+        let http = self.apply_auth_headers(self.agent.get(&url));
         match http.call() {
             Ok(response) => {
                 let body = response
@@ -53,12 +94,15 @@ impl OpenAiCompatProvider {
                     .map_err(|e| ProviderError::Network(format!("reading /models: {e}")))?;
                 let parsed: serde_json::Value = serde_json::from_str(&body)
                     .map_err(|e| ProviderError::Protocol(format!("bad /models response: {e}")))?;
-                let count = parsed["data"].as_array().map(|a| a.len()).unwrap_or(0);
-                Ok(match count {
-                    0 => "Connected.".to_string(),
-                    1 => "Connected · 1 model available.".to_string(),
-                    n => format!("Connected · {n} models available."),
-                })
+                let ids = parsed["data"]
+                    .as_array()
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                Ok(ids)
             }
             Err(ureq::Error::Status(status, response)) => {
                 let message = response
@@ -96,6 +140,14 @@ impl OpenAiCompatProvider {
                 })
                 .collect();
         }
+        if let Some(order) = &self.extras.provider_order
+            && !order.is_empty()
+        {
+            body["provider"] = serde_json::json!({
+                "order": order,
+                "allow_fallbacks": self.extras.allow_fallbacks,
+            });
+        }
         body
     }
 }
@@ -118,13 +170,11 @@ impl ChatProvider for OpenAiCompatProvider {
             if cancel.load(Ordering::Relaxed) {
                 return Err(ProviderError::Cancelled);
             }
-            let mut http = self
-                .agent
-                .post(&url)
-                .set("Content-Type", "application/json");
-            if let Some(key) = &self.api_key {
-                http = http.set("Authorization", &format!("Bearer {key}"));
-            }
+            let http = self.apply_auth_headers(
+                self.agent
+                    .post(&url)
+                    .set("Content-Type", "application/json"),
+            );
             match http.send_string(&body) {
                 Ok(response) => break response,
                 Err(ureq::Error::Status(status, response)) => {
@@ -600,6 +650,28 @@ mod tests {
         assert_eq!(body["messages"][2]["tool_call_id"], "call_1");
         assert_eq!(body["tools"].as_array().unwrap().len(), 47);
         assert_eq!(body["tools"][0]["function"]["name"], "add_track");
+        assert!(body.get("provider").is_none());
+    }
+
+    #[test]
+    fn request_body_includes_openrouter_provider_pin() {
+        let extras = OpenAiCompatExtras {
+            provider_order: Some(vec!["groq".into()]),
+            allow_fallbacks: false,
+            openrouter_headers: true,
+        };
+        let provider = OpenAiCompatProvider::with_extras(
+            "https://openrouter.ai/api/v1",
+            "openai/gpt-oss-120b",
+            Some("sk-or".into()),
+            extras,
+        );
+        let body = provider.request_body(&ChatRequest {
+            messages: &[],
+            tools: &[],
+        });
+        assert_eq!(body["provider"]["order"][0], "groq");
+        assert_eq!(body["provider"]["allow_fallbacks"], false);
     }
 
     #[test]

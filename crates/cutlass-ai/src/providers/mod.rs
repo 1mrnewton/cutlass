@@ -8,7 +8,7 @@ pub mod openai_compat;
 pub mod openai_responses;
 pub mod scripted;
 
-pub use openai_compat::OpenAiCompatProvider;
+pub use openai_compat::{OpenAiCompatExtras, OpenAiCompatProvider};
 pub use openai_responses::OpenAiResponsesProvider;
 pub use scripted::ScriptedProvider;
 
@@ -38,6 +38,19 @@ enum OpenAiProviderInner {
     Responses(OpenAiResponsesProvider),
 }
 
+/// OpenRouter Chat Completions extras for a curated model slug.
+pub fn openrouter_compat_extras(model_id: &str) -> OpenAiCompatExtras {
+    let mut extras = OpenAiCompatExtras {
+        openrouter_headers: true,
+        ..OpenAiCompatExtras::default()
+    };
+    if let Some(pin) = crate::catalog::openrouter_model(model_id).and_then(|m| m.pin) {
+        extras.provider_order = Some(pin.order.iter().map(|s| (*s).to_string()).collect());
+        extras.allow_fallbacks = pin.allow_fallbacks;
+    }
+    extras
+}
+
 impl OpenAiProvider {
     pub fn new(
         base_url: &str,
@@ -46,11 +59,30 @@ impl OpenAiProvider {
         protocol: OpenAiProtocol,
         reasoning_summary: ReasoningSummary,
     ) -> Self {
+        Self::with_extras(
+            base_url,
+            model,
+            api_key,
+            protocol,
+            reasoning_summary,
+            OpenAiCompatExtras::default(),
+        )
+    }
+
+    pub fn with_extras(
+        base_url: &str,
+        model: &str,
+        api_key: Option<String>,
+        protocol: OpenAiProtocol,
+        reasoning_summary: ReasoningSummary,
+        extras: OpenAiCompatExtras,
+    ) -> Self {
         let inner = match protocol {
-            OpenAiProtocol::ChatCompletions => {
-                OpenAiProviderInner::Chat(OpenAiCompatProvider::new(base_url, model, api_key))
-            }
+            OpenAiProtocol::ChatCompletions => OpenAiProviderInner::Chat(
+                OpenAiCompatProvider::with_extras(base_url, model, api_key, extras),
+            ),
             OpenAiProtocol::Responses => {
+                // Responses is Advanced-only; OpenRouter extras do not apply.
                 OpenAiProviderInner::Responses(OpenAiResponsesProvider::new(
                     base_url,
                     model,
@@ -66,6 +98,16 @@ impl OpenAiProvider {
         match &self.inner {
             OpenAiProviderInner::Chat(provider) => provider.test_connection(),
             OpenAiProviderInner::Responses(provider) => provider.test_connection(),
+        }
+    }
+
+    /// Installed model ids from `GET /v1/models` (Chat Completions path).
+    pub fn list_models(&self) -> Result<Vec<String>, ProviderError> {
+        match &self.inner {
+            OpenAiProviderInner::Chat(provider) => provider.list_models(),
+            OpenAiProviderInner::Responses(_) => Err(ProviderError::Protocol(
+                "list_models is only available for Chat Completions endpoints".into(),
+            )),
         }
     }
 }

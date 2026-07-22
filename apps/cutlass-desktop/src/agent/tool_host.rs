@@ -250,11 +250,6 @@ pub(crate) fn abort_status_message(reason: &str, ordinary_host_call_attempted: b
     if !ordinary_host_call_attempted {
         return if reason == "cancelled" {
             "Stopped — nothing was applied.".to_string()
-        } else if reason.contains("402") {
-            // The managed proxy's out-of-credits answer.
-            "Out of Cutlass credits — buy a pack in Settings > Account. \
-             Nothing was applied."
-                .to_string()
         } else {
             format!("{reason} — nothing was applied.")
         };
@@ -264,8 +259,6 @@ pub(crate) fn abort_status_message(reason: &str, ordinary_host_call_attempted: b
                          applied; any host actions that already completed remain in effect.";
     if reason == "cancelled" {
         format!("Stopped — {effect_notice}")
-    } else if reason.contains("402") {
-        format!("Out of Cutlass credits — buy a pack in Settings > Account. {effect_notice}")
     } else {
         format!("{reason} — {effect_notice}")
     }

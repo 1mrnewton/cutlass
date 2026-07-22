@@ -17,8 +17,7 @@ import {
     CutlassScrollView,
 } from "../components/index.slint";
 import { AppStore } from "../store/index.slint";
-import { CacheUsageRow, SettingsBackend } from "../lib/settings-backend.slint";
-import { AccountBackend } from "../lib/account-backend.slint";
+import { AiModelRow, CacheUsageRow, SettingsBackend } from "../lib/settings-backend.slint";
 import { AppState } from "../state.slint";
 
 // One row in the left rail.
@@ -78,8 +77,7 @@ component FieldRow inherits HorizontalLayout {
     @children
 }
 
-// Pill chip for two-way mode picks (AI provider: custom endpoint vs
-// Cutlass account).
+// Pill chip for two-way mode picks (API protocol, reasoning summary).
 component ModeChip inherits Rectangle {
     in property <string> label;
     in property <bool> active;
@@ -101,6 +99,51 @@ component ModeChip inherits Rectangle {
     }
 
     ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Curated model row for Local / OpenRouter pickers.
+component ModelPickRow inherits Rectangle {
+    in property <AiModelRow> entry;
+    // Driven by SettingsBackend.ai-model so clicks update instantly.
+    in property <bool> selected;
+    callback clicked();
+
+    height: 32px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: root.selected ? AppStore.theme.accent.primary.with-alpha(0.18)
+        : ta.has-hover && root.entry.available ? #ffffff0a
+        : transparent;
+    border-width: 1px;
+    border-color: root.selected ? AppStore.theme.accent.primary : transparent;
+    opacity: root.entry.available ? 1.0 : 0.45;
+
+    HorizontalLayout {
+        padding-left: AppStore.theme.metrics.spacing.sm;
+        padding-right: AppStore.theme.metrics.spacing.sm;
+        spacing: AppStore.theme.metrics.spacing.sm;
+        alignment: center;
+
+        CutlassText {
+            horizontal-stretch: 1;
+            text: root.entry.display;
+            style: AppStore.theme.typography.label;
+            foreground: root.selected
+                ? AppStore.theme.accent.primary
+                : AppStore.theme.text.primary;
+        }
+        if root.entry.vendor != "": CutlassText {
+            text: root.entry.vendor;
+            style: AppStore.theme.typography.caption;
+            foreground: AppStore.theme.text.secondary;
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.entry.available;
         clicked => {
             root.clicked();
         }
@@ -311,13 +354,6 @@ export component SettingsDialog inherits Rectangle {
                             SettingsBackend.refresh-caches();
                         }
                     }
-                    NavItem {
-                        label: "Account";
-                        selected: root.section == 3;
-                        clicked => {
-                            root.section = 3;
-                        }
-                    }
 
                     Rectangle {
                         vertical-stretch: 1;
@@ -352,7 +388,7 @@ export component SettingsDialog inherits Rectangle {
                                 text: "AI provider";
                             }
                             Hint {
-                                text: "Where the assistant runs: your own endpoint (Ollama, LM Studio, any OpenAI-compatible server) or your Cutlass account. Changes apply on your next prompt — no restart.";
+                                text: "Local models on your machine, OpenRouter for cloud, or Advanced for any OpenAI-compatible endpoint. Changes apply on your next prompt — no restart.";
                             }
 
                             HorizontalLayout {
@@ -360,28 +396,165 @@ export component SettingsDialog inherits Rectangle {
                                 alignment: start;
 
                                 ModeChip {
-                                    label: "My endpoint";
-                                    active: !SettingsBackend.ai-use-account;
+                                    label: "Local";
+                                    active: SettingsBackend.ai-source == "local";
                                     clicked => {
-                                        SettingsBackend.ai-use-account = false;
+                                        SettingsBackend.ai-source = "local";
+                                        SettingsBackend.refresh-local-models();
                                     }
                                 }
                                 ModeChip {
-                                    label: "Cutlass account";
-                                    active: SettingsBackend.ai-use-account;
+                                    label: "OpenRouter";
+                                    active: SettingsBackend.ai-source == "openrouter";
                                     clicked => {
-                                        SettingsBackend.ai-use-account = true;
+                                        SettingsBackend.ai-source = "openrouter";
+                                        SettingsBackend.refresh-local-models();
+                                    }
+                                }
+                                ModeChip {
+                                    label: "Advanced";
+                                    active: SettingsBackend.ai-source == "custom";
+                                    clicked => {
+                                        SettingsBackend.ai-source = "custom";
+                                        SettingsBackend.refresh-local-models();
                                     }
                                 }
                             }
 
-                            if SettingsBackend.ai-use-account: Hint {
-                                text: "Prompts run through Cutlass on prepaid credits — no keys to manage. Sign in and top up under Account.";
-                            }
-
-                            if !SettingsBackend.ai-use-account: VerticalLayout {
+                            // --- Local ------------------------------------
+                            if SettingsBackend.ai-source == "local": VerticalLayout {
                                 spacing: AppStore.theme.metrics.spacing.md;
 
+                                Hint {
+                                    text: "Point at Ollama, LM Studio, or any local OpenAI-compatible server. Only models Cutlass supports are listed.";
+                                }
+                                FieldRow {
+                                    label: "Endpoint";
+                                    CutlassLineInput {
+                                        text <=> SettingsBackend.ai-base-url;
+                                        placeholder-text: "http://localhost:11434/v1";
+                                        accessibility-label: "Local AI endpoint";
+                                        mono: true;
+                                    }
+                                }
+                                FieldRow {
+                                    label: "Model";
+                                    VerticalLayout {
+                                        spacing: 4px;
+                                        for row in SettingsBackend.ai-model-rows: ModelPickRow {
+                                            entry: row;
+                                            selected: SettingsBackend.ai-model == row.id;
+                                            clicked => {
+                                                SettingsBackend.ai-model = row.id;
+                                            }
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: AppStore.theme.metrics.spacing.md;
+                                    alignment: start;
+
+                                    SubtleButton {
+                                        label: SettingsBackend.ai-testing ? "Refreshing…" : "Refresh models";
+                                        enabled: !SettingsBackend.ai-testing
+                                            && SettingsBackend.ai-base-url != "";
+                                        clicked => {
+                                            SettingsBackend.refresh-local-models();
+                                        }
+                                    }
+                                    SubtleButton {
+                                        label: SettingsBackend.ai-testing ? "Testing…" : "Test connection";
+                                        enabled: !SettingsBackend.ai-testing
+                                            && SettingsBackend.ai-base-url != ""
+                                            && SettingsBackend.ai-model != "";
+                                        clicked => {
+                                            SettingsBackend.test-connection();
+                                        }
+                                    }
+                                    CutlassText {
+                                        vertical-alignment: center;
+                                        text: SettingsBackend.ai-test-status;
+                                        wrap: word-wrap;
+                                        style: AppStore.theme.typography.caption;
+                                        foreground: SettingsBackend.ai-test-ok
+                                            ? AppStore.theme.accent.primary
+                                            : #FF6B6B;
+                                    }
+                                }
+                            }
+
+                            // --- OpenRouter -------------------------------
+                            if SettingsBackend.ai-source == "openrouter": VerticalLayout {
+                                spacing: AppStore.theme.metrics.spacing.md;
+
+                                Hint {
+                                    text: "One OpenRouter key unlocks the curated cloud models below. Got provider keys? Attach them in OpenRouter's BYOK settings — Cutlass only needs your OR key.";
+                                }
+                                FieldRow {
+                                    label: "API key";
+                                    CutlassLineInput {
+                                        text <=> SettingsBackend.ai-api-key;
+                                        placeholder-text: "sk-or-…";
+                                        accessibility-label: "OpenRouter API key";
+                                        input-type: InputType.password;
+                                        mono: true;
+                                    }
+                                }
+                                FieldRow {
+                                    label: "Key from env";
+                                    CutlassLineInput {
+                                        text <=> SettingsBackend.ai-api-key-env;
+                                        placeholder-text: "e.g. OPENROUTER_API_KEY (overrides the key above)";
+                                        accessibility-label: "OpenRouter API key environment variable";
+                                        mono: true;
+                                    }
+                                }
+                                FieldRow {
+                                    label: "Model";
+                                    VerticalLayout {
+                                        spacing: 4px;
+                                        for row in SettingsBackend.ai-model-rows: ModelPickRow {
+                                            entry: row;
+                                            selected: SettingsBackend.ai-model == row.id;
+                                            clicked => {
+                                                SettingsBackend.ai-model = row.id;
+                                            }
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: AppStore.theme.metrics.spacing.md;
+                                    alignment: start;
+
+                                    SubtleButton {
+                                        label: SettingsBackend.ai-testing ? "Testing…" : "Test connection";
+                                        enabled: !SettingsBackend.ai-testing
+                                            && SettingsBackend.ai-model != ""
+                                            && (SettingsBackend.ai-api-key != ""
+                                                || SettingsBackend.ai-api-key-env != "");
+                                        clicked => {
+                                            SettingsBackend.test-connection();
+                                        }
+                                    }
+                                    CutlassText {
+                                        vertical-alignment: center;
+                                        text: SettingsBackend.ai-test-status;
+                                        wrap: word-wrap;
+                                        style: AppStore.theme.typography.caption;
+                                        foreground: SettingsBackend.ai-test-ok
+                                            ? AppStore.theme.accent.primary
+                                            : #FF6B6B;
+                                    }
+                                }
+                            }
+
+                            // --- Advanced (freeform) ----------------------
+                            if SettingsBackend.ai-source == "custom": VerticalLayout {
+                                spacing: AppStore.theme.metrics.spacing.md;
+
+                                Hint {
+                                    text: "Escape hatch for outages, unlisted providers, or self-hosted gateways. OpenAI-compatible Chat Completions or Responses.";
+                                }
                                 FieldRow {
                                     label: "Endpoint";
                                     CutlassLineInput {
@@ -633,108 +806,6 @@ export component SettingsDialog inherits Rectangle {
 
                             for cache in SettingsBackend.cache-rows: CacheUsageCard {
                                 cache: cache;
-                            }
-                        }
-
-                        // --- Account --------------------------------------
-                        if root.section == 3: VerticalLayout {
-                            spacing: AppStore.theme.metrics.spacing.md;
-
-                            PaneTitle {
-                                text: "Account";
-                            }
-                            Hint {
-                                text: "Optional. Everything with your own API keys works signed-out; a Cutlass account adds prepaid credits for managed cloud generation. Sign-in and purchases happen on the website in your browser — no passwords, no card data in the app.";
-                            }
-
-                            // Signed out: one button — provider choice
-                            // happens on the website.
-                            if AccountBackend.status != "signed-in": VerticalLayout {
-                                spacing: AppStore.theme.metrics.spacing.md;
-
-                                HorizontalLayout {
-                                    alignment: start;
-                                    AccentButton {
-                                        label: AccountBackend.status == "signing-in"
-                                            ? "Waiting for approval…"
-                                            : "Sign in with browser";
-                                        enabled: AccountBackend.status != "signing-in";
-                                        clicked => {
-                                            AccountBackend.sign-in();
-                                        }
-                                    }
-                                }
-
-                                // The device-flow code the user confirms on
-                                // the approval page (pre-filled there; shown
-                                // here to verify it matches).
-                                if AccountBackend.status == "signing-in" && AccountBackend.user-code != "": VerticalLayout {
-                                    spacing: AppStore.theme.metrics.spacing.xs;
-                                    Hint {
-                                        text: "Check that the code in your browser matches:";
-                                    }
-                                    CutlassText {
-                                        text: AccountBackend.user-code;
-                                        style: AppStore.theme.typography.heading-md;
-                                    }
-                                }
-                            }
-
-                            // Signed in: identity + balance.
-                            if AccountBackend.status == "signed-in": VerticalLayout {
-                                spacing: AppStore.theme.metrics.spacing.md;
-
-                                FieldRow {
-                                    label: "Signed in as";
-                                    CutlassText {
-                                        vertical-alignment: center;
-                                        horizontal-stretch: 1;
-                                        text: AccountBackend.email + "  (" + AccountBackend.provider + ")";
-                                        style: AppStore.theme.typography.body;
-                                        overflow: elide;
-                                    }
-                                }
-                                FieldRow {
-                                    label: "Credits";
-                                    CutlassText {
-                                        vertical-alignment: center;
-                                        horizontal-stretch: 1;
-                                        text: AccountBackend.balance-known
-                                            ? AccountBackend.credits + " credits"
-                                            : "—";
-                                        style: AppStore.theme.typography.body;
-                                    }
-                                    SubtleButton {
-                                        label: "Refresh";
-                                        clicked => {
-                                            AccountBackend.refresh-balance();
-                                        }
-                                    }
-                                }
-
-                                HorizontalLayout {
-                                    alignment: start;
-                                    spacing: AppStore.theme.metrics.spacing.md;
-                                    SubtleButton {
-                                        label: "Buy credits";
-                                        clicked => {
-                                            AccountBackend.buy-credits();
-                                        }
-                                    }
-                                    SubtleButton {
-                                        label: "Sign out";
-                                        clicked => {
-                                            AccountBackend.sign-out();
-                                        }
-                                    }
-                                }
-                            }
-
-                            if AccountBackend.error != "": CutlassText {
-                                text: AccountBackend.error;
-                                wrap: word-wrap;
-                                style: AppStore.theme.typography.caption;
-                                foreground: #FF6B6B;
                             }
                         }
 

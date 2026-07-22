@@ -1,10 +1,8 @@
 //! AI generation (Library AI sections): the Rust half of `AiBackend`.
 //!
 //! One worker thread owns the whole pipeline: route decision → start job →
-//! poll to terminal → thumbnail. **The routing rule** (BYOK-first): a
-//! `[providers.fal]` key routes straight to fal.ai (backend uninvolved);
-//! else a keychain session takes the managed path (backend debits
-//! credits, 402 surfaces as a top-up prompt); else generation is
+//! poll to terminal → thumbnail. Generation requires a `[providers.fal]`
+//! key (direct fal.ai; backend uninvolved). Without a key, generation is
 //! unavailable and the UI says how to enable it.
 //!
 //! Results are provider-CDN URLs; import downloads into the quota-managed
@@ -19,11 +17,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Sender, unbounded};
 use cutlass_cloud::cache::DownloadCache;
 use cutlass_cloud::dto::{GenerateRequest, JobStatus};
-use cutlass_cloud::generate::{
-    FalGenerationProvider, GenerationKind, GenerationProvider, ManagedGenerationProvider,
-};
-use cutlass_cloud::token_store::{self, StoredSession};
-use cutlass_cloud::{CloudError, auth, download};
+use cutlass_cloud::generate::{FalGenerationProvider, GenerationKind, GenerationProvider};
+use cutlass_cloud::{CloudError, download};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 use tracing::{info, warn};
 
@@ -101,10 +96,9 @@ struct Entry {
 }
 
 /// Which route a generation takes, decided fresh per request (settings
-/// and sessions change under a running app).
+/// can change under a running app).
 enum Route {
     Byok(String),
-    Managed(StoredSession),
     None,
 }
 
@@ -146,11 +140,8 @@ impl Worker {
             .map(|s| s.provider("fal").resolve_key())
             .unwrap_or_default()
             .filter(|k| !k.is_empty());
-        if let Some(key) = fal_key {
-            return Route::Byok(key);
-        }
-        match token_store::load() {
-            Some(session) => Route::Managed(session),
+        match fal_key {
+            Some(key) => Route::Byok(key),
             None => Route::None,
         }
     }
@@ -161,11 +152,10 @@ impl Worker {
                 "Runs on your fal.ai key — the Cutlass backend is not involved.",
                 true,
             ),
-            Route::Managed(_) => (
-                "Runs on Cutlass credits (Settings > Account shows your balance).",
-                true,
+            Route::None => (
+                "Generation is off: add a fal.ai key under [providers.fal].",
+                false,
             ),
-            Route::None => ("Generation is off: sign in or add a fal.ai key.", false),
         };
         self.on_ui(move |b| {
             b.set_route_label(label.into());
@@ -173,33 +163,11 @@ impl Worker {
         });
     }
 
-    /// A ready-to-call provider for the current route, refreshing the
-    /// managed session token when stale.
+    /// A ready-to-call provider for the current route.
     fn provider(&self) -> Result<Box<dyn GenerationProvider>, String> {
         match self.route() {
             Route::Byok(key) => Ok(Box::new(FalGenerationProvider::new(&key))),
-            Route::Managed(mut session) => {
-                let base_url = crate::account::base_url();
-                if session.needs_refresh() {
-                    match auth::refresh(&base_url, &session.refresh_token) {
-                        Ok(pair) => {
-                            session = StoredSession::from_pair(&pair);
-                            if let Err(e) = token_store::store(&session) {
-                                warn!("keychain store after refresh failed: {e}");
-                            }
-                        }
-                        Err(e) => {
-                            return Err(format!("Session expired — sign in again. ({e})"));
-                        }
-                    }
-                }
-                Ok(Box::new(ManagedGenerationProvider::new(
-                    auth::AuthedClient::new(&base_url, &session.access_token),
-                )))
-            }
-            Route::None => {
-                Err("Sign in (Settings > Account) or add a fal.ai key to generate.".into())
-            }
+            Route::None => Err("Add a fal.ai key under [providers.fal] to generate.".into()),
         }
     }
 
@@ -479,10 +447,6 @@ fn extension_of(kind: GenerationKind, url: &str) -> String {
 
 fn user_message(e: CloudError) -> String {
     match &e {
-        CloudError::Status { status: 402, .. } => {
-            "Out of credits — buy a pack in Settings > Account.".into()
-        }
-        CloudError::Status { status: 401, .. } => "Session expired — sign in again.".into(),
         CloudError::Network(_) => "Couldn't reach the generation service.".into(),
         CloudError::Status { status, .. } => format!("The generation service said no ({status})."),
         _ => "Generation failed — try again.".into(),

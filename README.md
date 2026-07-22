@@ -68,17 +68,23 @@ Download a build from the [releases page](https://github.com/1Mr-Newton/cutlass/
 
 ## Setting up the AI assistant
 
-Cutlass doesn't ship a model. Point it at any OpenAI-compatible endpoint:
-a local one like [Ollama](https://ollama.com), or a cloud provider.
-
-Create `~/.cutlass/config.toml`:
+Cutlass doesn't ship a model. Use **Local** (Ollama / LM Studio), **OpenRouter**
+for cloud, or **Advanced** for any OpenAI-compatible endpoint. The Settings
+dialog is the usual path; or create `~/.cutlass/config.toml`:
 
 ```toml
+# Local (Ollama / LM Studio) — curated models only
 [ai]
-base_url = "http://localhost:11434/v1"   # e.g. Ollama
+source = "local"
+base_url = "http://localhost:11434/v1"
 model = "qwen3:14b"
-# api_key = "sk-..."                      # for cloud endpoints, or:
-# api_key_env = "OPENAI_API_KEY"          # read the key from an env var
+
+# Or OpenRouter cloud — one key, curated slugs
+# [ai]
+# source = "openrouter"
+# model = "openai/gpt-5.6-sol"
+# api_key = "sk-or-…"
+# # api_key_env = "OPENROUTER_API_KEY"
 ```
 
 The key stays in that file or your environment; it's never written into

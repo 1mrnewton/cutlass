@@ -59,6 +59,7 @@
 //! review. A command missing any step is not in the vocabulary.
 
 pub mod agent;
+pub mod catalog;
 pub mod config;
 pub mod describe;
 pub mod extend;
@@ -71,6 +72,12 @@ pub mod wire;
 pub use agent::{
     ActionLogEntry, AgentConfig, AgentEvent, EngineBridge, PromptOutcome, PromptStatus, run_prompt,
     run_prompt_with_host,
+};
+pub use catalog::{
+    DEFAULT_LOCAL_MODEL, DEFAULT_OPENROUTER_MODEL, LOCAL_MODELS, LocalModel, OPENROUTER_BASE_URL,
+    OPENROUTER_MODELS, OpenRouterModel, ProviderPin, is_known_local_model,
+    is_known_openrouter_model, local_model, local_models_availability, openrouter_model,
+    resolve_local_installed_id,
 };
 pub use describe::{EditorContext, ProjectSummary, summarize};
 pub use extend::{

@@ -1,4 +1,3 @@
-mod account;
 mod agent;
 mod agent_app_control;
 mod agent_jobs;
@@ -42,6 +41,7 @@ mod timecode;
 mod timeline;
 mod timeline_map;
 mod transport;
+mod updates;
 mod window;
 
 use slint::BackendSelector;

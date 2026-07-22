@@ -42,6 +42,7 @@ pub(crate) fn wire_settings(
     // Seed the dialog from the loaded config. The theme rides AppStore so it
     // drives the live theme binding the whole shell reads.
     settings_backend.set_config_path(config_path.display().to_string().into());
+    settings_backend.set_ai_source(app_settings.ai.source.key().into());
     settings_backend.set_ai_base_url(app_settings.ai.base_url.clone().into());
     settings_backend.set_ai_model(app_settings.ai.model.clone().into());
     settings_backend.set_ai_api_protocol(app_settings.ai.api_protocol.key().into());
@@ -55,7 +56,7 @@ pub(crate) fn wire_settings(
             .unwrap_or_default()
             .into(),
     );
-    settings_backend.set_ai_use_account(app_settings.ai.use_account);
+    publish_ai_model_rows(&settings_backend, &app_settings.ai, &[]);
     let storage_root = cache_registry.storage_root();
     settings_backend.set_storage_root(storage_root.to_string_lossy().into_owned().into());
     settings_backend.set_download_quota_mib(download_quota_mib.to_string().into());
@@ -544,6 +545,8 @@ pub(crate) fn wire_settings(
                     return false;
                 }
             };
+            let ai_source =
+                cutlass_settings::AiSource::from_key(&sb.get_ai_source()).unwrap_or_default();
             let ai_base_url = sb.get_ai_base_url().trim().to_string();
             let ai_model = sb.get_ai_model().trim().to_string();
             let ai_api_protocol =
@@ -554,19 +557,33 @@ pub(crate) fn wire_settings(
                     .unwrap_or_default();
             let ai_api_key = non_empty(&sb.get_ai_api_key());
             let ai_api_key_env = non_empty(&sb.get_ai_api_key_env());
-            let ai_use_account = sb.get_ai_use_account();
+            let draft = cutlass_settings::AiSettings {
+                source: ai_source,
+                base_url: ai_base_url.clone(),
+                model: ai_model.clone(),
+                api_protocol: ai_api_protocol,
+                reasoning_summary: ai_reasoning_summary,
+                api_key: ai_api_key.clone(),
+                api_key_env: ai_api_key_env.clone(),
+                autonomy: cutlass_settings::Autonomy::default(),
+            };
+            // Allow saving a partial draft so users can switch modes; reject
+            // only when fields look ready but fail allowlist / key checks.
+            if draft.is_configured()
+                && let Err(error) = cutlass_ai::config::validate_ai_settings(&draft)
+            {
+                sb.set_save_error(error.into());
+                return false;
+            }
+            // Preserve autonomy from disk — Settings UI does not edit it.
             let theme =
                 cutlass_settings::ThemeChoice::from_index(app.global::<AppStore>().get_theme_id());
             let persisted = registry.try_with_settings_persistence(|| {
                 let mut settings = cutlass_settings::load(&config_path)
                     .map_err(|error| ("load", error.to_string()))?;
-                settings.ai.base_url = ai_base_url;
-                settings.ai.model = ai_model;
-                settings.ai.api_protocol = ai_api_protocol;
-                settings.ai.reasoning_summary = ai_reasoning_summary;
-                settings.ai.api_key = ai_api_key;
-                settings.ai.api_key_env = ai_api_key_env;
-                settings.ai.use_account = ai_use_account;
+                let autonomy = settings.ai.autonomy;
+                settings.ai = draft;
+                settings.ai.autonomy = autonomy;
                 settings.appearance.theme = theme;
                 settings.storage.download_quota_mib = quota.mib;
                 cutlass_settings::save(&config_path, &settings)
@@ -635,63 +652,102 @@ pub(crate) fn wire_settings(
                 return;
             };
             let sb = app.global::<SettingsBackend>();
-            let base_url = sb.get_ai_base_url().trim().to_string();
-            let model = sb.get_ai_model().trim().to_string();
-            let protocol =
-                match cutlass_settings::AiApiProtocol::from_key(&sb.get_ai_api_protocol())
-                    .unwrap_or_default()
-                {
-                    cutlass_settings::AiApiProtocol::ChatCompletions => {
-                        cutlass_ai::providers::OpenAiProtocol::ChatCompletions
-                    }
-                    cutlass_settings::AiApiProtocol::Responses => {
-                        cutlass_ai::providers::OpenAiProtocol::Responses
-                    }
-                };
-            let reasoning_summary =
-                match cutlass_settings::ReasoningSummary::from_key(&sb.get_ai_reasoning_summary())
-                    .unwrap_or_default()
-                {
-                    cutlass_settings::ReasoningSummary::Auto => {
-                        cutlass_ai::providers::ReasoningSummary::Auto
-                    }
-                    cutlass_settings::ReasoningSummary::Off => {
-                        cutlass_ai::providers::ReasoningSummary::Off
-                    }
-                };
-            let api_key = non_empty(&sb.get_ai_api_key());
-            let api_key_env = non_empty(&sb.get_ai_api_key_env());
+            let draft = ai_draft_from_backend(&sb);
             sb.set_ai_testing(true);
             sb.set_ai_test_ok(false);
             sb.set_ai_test_status(SharedString::new());
 
             let app_weak = app.as_weak();
             std::thread::spawn(move || {
-                let result =
-                    cutlass_ai::config::resolve_api_key(api_key.as_deref(), api_key_env.as_deref())
-                        .and_then(|key| {
-                            cutlass_ai::providers::OpenAiProvider::new(
-                                &base_url,
-                                &model,
-                                key,
-                                protocol,
-                                reasoning_summary,
-                            )
-                            .test_connection()
-                            .map_err(|e| e.to_string())
-                        });
+                let source = draft.source;
+                let result = cutlass_ai::config::provider_from_ai(&draft).and_then(|provider| {
+                    let message = provider.test_connection().map_err(|e| e.to_string())?;
+                    let installed = if source == cutlass_settings::AiSource::Local {
+                        provider.list_models().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    Ok((message, installed))
+                });
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(app) = app_weak.upgrade() {
                         let sb = app.global::<SettingsBackend>();
                         sb.set_ai_testing(false);
                         match result {
-                            Ok(msg) => {
+                            Ok((msg, installed)) => {
                                 sb.set_ai_test_ok(true);
                                 sb.set_ai_test_status(msg.into());
+                                if source == cutlass_settings::AiSource::Local {
+                                    publish_ai_model_rows(&sb, &draft, &installed);
+                                }
                             }
                             Err(e) => {
                                 sb.set_ai_test_ok(false);
                                 sb.set_ai_test_status(e.into());
+                            }
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    {
+        let app_weak = app.as_weak();
+        settings_backend.on_refresh_local_models(move || {
+            let Some(app) = app_weak.upgrade() else {
+                return;
+            };
+            let sb = app.global::<SettingsBackend>();
+            let draft = ai_draft_from_backend(&sb);
+            if draft.source != cutlass_settings::AiSource::Local {
+                publish_ai_model_rows(&sb, &draft, &[]);
+                return;
+            }
+            let base_url = draft.base_url.trim().to_string();
+            if base_url.is_empty() {
+                sb.set_ai_test_ok(false);
+                sb.set_ai_test_status("Enter a local endpoint URL first.".into());
+                publish_ai_model_rows(&sb, &draft, &[]);
+                return;
+            }
+            sb.set_ai_testing(true);
+            sb.set_ai_test_status(SharedString::new());
+            let app_weak = app.as_weak();
+            std::thread::spawn(move || {
+                let result = cutlass_ai::providers::OpenAiProvider::new(
+                    &base_url,
+                    "probe",
+                    None,
+                    cutlass_ai::providers::OpenAiProtocol::ChatCompletions,
+                    cutlass_ai::providers::ReasoningSummary::Off,
+                )
+                .list_models()
+                .map_err(|e| e.to_string());
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = app_weak.upgrade() {
+                        let sb = app.global::<SettingsBackend>();
+                        sb.set_ai_testing(false);
+                        match result {
+                            Ok(installed) => {
+                                let available = cutlass_ai::local_models_availability(&installed)
+                                    .iter()
+                                    .filter(|(_, ok, _)| *ok)
+                                    .count();
+                                sb.set_ai_test_ok(true);
+                                sb.set_ai_test_status(
+                                    format!(
+                                        "Found {available} supported model(s) of {} installed.",
+                                        installed.len()
+                                    )
+                                    .into(),
+                                );
+                                publish_ai_model_rows(&sb, &draft, &installed);
+                            }
+                            Err(e) => {
+                                sb.set_ai_test_ok(false);
+                                sb.set_ai_test_status(e.into());
+                                publish_ai_model_rows(&sb, &draft, &[]);
                             }
                         }
                     }
@@ -717,4 +773,75 @@ pub(crate) fn wire_settings(
             }
         });
     }
+}
+
+fn ai_draft_from_backend(sb: &SettingsBackend<'_>) -> cutlass_settings::AiSettings {
+    cutlass_settings::AiSettings {
+        source: cutlass_settings::AiSource::from_key(&sb.get_ai_source()).unwrap_or_default(),
+        base_url: sb.get_ai_base_url().trim().to_string(),
+        model: sb.get_ai_model().trim().to_string(),
+        api_protocol: cutlass_settings::AiApiProtocol::from_key(&sb.get_ai_api_protocol())
+            .unwrap_or_default(),
+        reasoning_summary: cutlass_settings::ReasoningSummary::from_key(
+            &sb.get_ai_reasoning_summary(),
+        )
+        .unwrap_or_default(),
+        api_key: non_empty(&sb.get_ai_api_key()),
+        api_key_env: non_empty(&sb.get_ai_api_key_env()),
+        autonomy: cutlass_settings::Autonomy::default(),
+    }
+}
+
+fn publish_ai_model_rows(
+    sb: &SettingsBackend<'_>,
+    ai: &cutlass_settings::AiSettings,
+    installed: &[String],
+) {
+    let selected = ai.model.trim();
+    // After a Local probe, rewrite the selection to the installed id so the
+    // picker highlight (`ai-model == row.id`) stays correct across aliases.
+    if ai.source == cutlass_settings::AiSource::Local
+        && !installed.is_empty()
+        && let Some(entry) = cutlass_ai::local_model(selected)
+        && let Some(resolved) = cutlass_ai::resolve_local_installed_id(entry.id, installed)
+        && selected != resolved
+    {
+        sb.set_ai_model(resolved.into());
+    }
+    let selected = sb.get_ai_model();
+    let selected = selected.as_str();
+    let rows: Vec<AiModelRow> = match ai.source {
+        cutlass_settings::AiSource::Local => cutlass_ai::LOCAL_MODELS
+            .iter()
+            .map(|entry| {
+                let resolved = if installed.is_empty() {
+                    None
+                } else {
+                    cutlass_ai::resolve_local_installed_id(entry.id, installed)
+                };
+                // Before a probe, treat curated models as selectable.
+                let available = installed.is_empty() || resolved.is_some();
+                let id = resolved.unwrap_or_else(|| entry.id.to_string());
+                AiModelRow {
+                    id: id.clone().into(),
+                    display: entry.display.into(),
+                    vendor: SharedString::new(),
+                    available,
+                    selected: selected == id || selected == entry.id,
+                }
+            })
+            .collect(),
+        cutlass_settings::AiSource::OpenRouter => cutlass_ai::OPENROUTER_MODELS
+            .iter()
+            .map(|entry| AiModelRow {
+                id: entry.id.into(),
+                display: entry.display.into(),
+                vendor: entry.vendor.into(),
+                available: true,
+                selected: selected == entry.id,
+            })
+            .collect(),
+        cutlass_settings::AiSource::Custom => Vec::new(),
+    };
+    sb.set_ai_model_rows(ModelRc::new(VecModel::from(rows)));
 }

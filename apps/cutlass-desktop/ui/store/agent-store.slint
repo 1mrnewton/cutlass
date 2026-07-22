@@ -82,4 +82,7 @@ export global AgentStore {
     // EditorStore.project.agent-rules, so imported-project rules are
     // always visible here before they shape a prompt.
     callback set-project-rules(rules: string);
+
+    // Copy assistant message text to the system clipboard.
+    callback copy-text(text: string);
 }

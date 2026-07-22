@@ -703,10 +703,10 @@ fn abort_status_distinguishes_sandbox_only_from_host_effects() {
         "{cancelled_after_host}"
     );
 
-    let credits_after_host = abort_status_message("HTTP 402", true);
-    assert!(credits_after_host.contains("Out of Cutlass credits"));
-    assert!(credits_after_host.contains("Timeline edits staged by this prompt were rolled back"));
-    assert!(credits_after_host.contains("remain in effect"));
+    let failed_after_host = abort_status_message("HTTP 500", true);
+    assert!(failed_after_host.contains("HTTP 500"));
+    assert!(failed_after_host.contains("Timeline edits staged by this prompt were rolled back"));
+    assert!(failed_after_host.contains("remain in effect"));
 }
 
 #[test]

@@ -2,7 +2,7 @@
 //!
 //! One crate owns all backend/provider HTTP for the editor, shaped like
 //! `cutlass-ai`: engine-free, blocking HTTP on worker threads, trait-based
-//! so tests use scripted fakes. Three responsibilities:
+//! so tests use scripted fakes. Responsibilities:
 //!
 //! - [`dto`]: the request/response types for every `cutlass-backend` route —
 //!   **the contract source of truth**. The backend consumes this crate as a
@@ -18,22 +18,17 @@
 //!   client downloads **directly from provider CDNs** into a quota-managed
 //!   cache (LRU eviction, clear-cache action) with atomic tmp-then-rename
 //!   writes, progress callbacks, and cancellation.
-//! - [`auth`] / [`token_store`]: the account half — device-authorization
-//!   sign-in (RFC 8628 through the system browser against the website's
-//!   better-auth), JWT refresh, balance, ledger; tokens live in the OS
-//!   keychain, never in a file. Billing UI lives on the website.
+//! - [`generate`]: BYOK fal.ai generation (image / video / TTS).
 //!
-//! **The routing rule** (BYOK-first): a user-configured provider key routes
-//! the call direct to the provider; else a signed-in session takes the
-//! managed path through the backend; else only the anonymous surface
-//! (stock, catalogs) is available.
+//! **The routing rule** (BYOK): a user-configured provider key routes the
+//! call direct to the provider; else only the anonymous surface (stock,
+//! catalogs) is available.
 //!
 //! Invariants carried from the rest of the app: network stays off the UI
 //! thread (callers run this on workers); the editor never blocks on the
 //! backend (catalog fetches are background work, failures degrade to the
 //! Library placeholders); BYOK keys never transit our servers.
 
-pub mod auth;
 pub mod cache;
 pub mod client;
 pub mod download;
@@ -41,18 +36,12 @@ pub mod dto;
 pub mod error;
 pub mod generate;
 pub mod stock;
-pub mod token_store;
 
 pub use client::CloudClient;
 pub use error::CloudError;
 pub use stock::{DirectStockProvider, StockProvider};
 
-/// Default production backend base URL. Overridable via the `[account]`
+/// Default production backend base URL. Overridable via the `[cloud]`
 /// table in `~/.cutlass/config.toml` (points at staging or a self-hosted
 /// instance).
 pub const DEFAULT_BASE_URL: &str = "https://api.cutlass.sh";
-
-/// Default production auth base URL — the website, where better-auth
-/// lives (`/api/auth/*`, the `/device` approval page, `/account`
-/// billing). Overridable via `[account] auth_base_url`.
-pub const DEFAULT_AUTH_BASE_URL: &str = "https://cutlass.sh";

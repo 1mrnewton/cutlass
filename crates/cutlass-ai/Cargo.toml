@@ -11,6 +11,7 @@ repository.workspace = true
 base64 = "0.22"
 cutlass-commands = { path = "../cutlass-commands" }
 cutlass-models = { path = "../cutlass-models" }
+cutlass-settings = { path = "../cutlass-settings" }
 schemars = "1"
 serde.workspace = true
 serde_json.workspace = true
@@ -18,5 +19,4 @@ ureq = "2"
 
 [dev-dependencies]
 cutlass-engine = { path = "../cutlass-engine" }
-cutlass-settings = { path = "../cutlass-settings" }
 tempfile = "3"

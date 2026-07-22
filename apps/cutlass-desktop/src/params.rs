@@ -23,6 +23,8 @@ pub(crate) fn easing_to_ui(easing: Easing) -> (i32, [f32; 4]) {
         Easing::EaseIn => (1, [0.0; 4]),
         Easing::EaseOut => (2, [0.0; 4]),
         Easing::EaseInOut => (3, [0.0; 4]),
+        // Placeholder until the flyout offers hold: present as linear.
+        Easing::Hold => (0, [0.0; 4]),
         Easing::Bezier { points } => match easing.preset_id() {
             Some("snappy") => (5, points),
             Some("overshoot") => (6, points),

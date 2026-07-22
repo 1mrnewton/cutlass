@@ -216,6 +216,115 @@ fn easing_integrals_match_closed_form_endpoints() {
 }
 
 #[test]
+fn hold_keeps_value_until_next_keyframe() {
+    let p = Param::Keyframed {
+        keyframes: vec![
+            Keyframe {
+                tick: 0,
+                value: 1.0f32,
+                easing: Easing::Hold,
+            },
+            Keyframe {
+                tick: 10,
+                value: 5.0,
+                easing: Easing::Linear,
+            },
+        ],
+    };
+    // k0's value holds through the whole open interval…
+    assert_eq!(p.sample(0), 1.0);
+    assert_eq!(p.sample(5), 1.0);
+    assert_eq!(p.sample(9), 1.0);
+    assert_eq!(p.sample_at(9.99), 1.0);
+    // …and jumps to k1's value exactly at k1's tick.
+    assert_eq!(p.sample(10), 5.0);
+    assert_eq!(p.sample(11), 5.0);
+}
+
+#[test]
+fn hold_between_curved_segments() {
+    // linear → hold → linear: neighbors are unaffected by the step.
+    let p = Param::Keyframed {
+        keyframes: vec![
+            Keyframe {
+                tick: 0,
+                value: 0.0f32,
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                tick: 10,
+                value: 10.0,
+                easing: Easing::Hold,
+            },
+            Keyframe {
+                tick: 20,
+                value: 20.0,
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                tick: 30,
+                value: 30.0,
+                easing: Easing::Linear,
+            },
+        ],
+    };
+    assert_eq!(p.sample(5), 5.0); // linear segment interpolates
+    assert_eq!(p.sample(10), 10.0);
+    assert_eq!(p.sample(15), 10.0); // hold segment stays at 10
+    assert_eq!(p.sample(19), 10.0);
+    assert_eq!(p.sample(20), 20.0); // jump lands on the next keyframe
+    assert_eq!(p.sample(25), 25.0); // trailing linear segment unaffected
+}
+
+#[test]
+fn hold_easing_roundtrips_as_hold_tag() {
+    let p = Param::Keyframed {
+        keyframes: vec![
+            Keyframe {
+                tick: 0,
+                value: 1.0f32,
+                easing: Easing::Hold,
+            },
+            Keyframe {
+                tick: 12,
+                value: 2.0,
+                easing: Easing::Linear,
+            },
+        ],
+    };
+    let json = serde_json::to_string(&p).unwrap();
+    assert_eq!(
+        json,
+        r#"{"kf":[{"t":0,"v":1.0,"e":"hold"},{"t":12,"v":2.0}]}"#
+    );
+    let back: Param<f32> = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, p);
+}
+
+#[test]
+fn hold_subsegment_stays_hold() {
+    // Interior slice: no jump inside, still a hold.
+    assert_eq!(Easing::Hold.subsegment(0.2, 0.8).unwrap(), Easing::Hold);
+    // Slice reaching the endpoint keeps the jump at its own end.
+    assert_eq!(Easing::Hold.subsegment(0.5, 1.0).unwrap(), Easing::Hold);
+    // Invalid ranges still fail closed.
+    assert!(Easing::Hold.subsegment(0.8, 0.2).is_err());
+}
+
+#[test]
+fn hold_integral_is_zero() {
+    assert_eq!(Easing::Hold.integral_to(0.0), 0.0);
+    assert_eq!(Easing::Hold.integral_to(0.5), 0.0);
+    assert_eq!(Easing::Hold.integral_to(1.0), 0.0);
+}
+
+#[test]
+fn hold_validates_ok() {
+    assert!(Easing::Hold.validate().is_ok());
+    assert_eq!(Easing::Hold.preset_id(), None);
+}
+
+#[test]
 fn bezier_validation_rejects_bad_x() {
     assert!(
         Easing::Bezier {

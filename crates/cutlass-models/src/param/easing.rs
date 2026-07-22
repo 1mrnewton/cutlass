@@ -16,6 +16,9 @@ pub enum Easing {
     EaseOut,
     /// Accelerate then decelerate (smoothstep).
     EaseInOut,
+    /// Step interpolation — the segment keeps the departing keyframe's value
+    /// until the next keyframe.
+    Hold,
     /// CSS-style cubic bezier: control points `(x1, y1)`, `(x2, y2)` with
     /// `x1`/`x2` in `0..=1`. `y` outside `0..=1` overshoots, like CSS.
     Bezier { points: [f32; 4] },
@@ -89,6 +92,17 @@ impl Easing {
             Easing::EaseIn => t * t,
             Easing::EaseOut => t * (2.0 - t),
             Easing::EaseInOut => t * t * (3.0 - 2.0 * t),
+            // The jump lands exactly at the next keyframe: `sample_at` picks
+            // the following segment when tick == k1.tick (partition_point
+            // uses `<=`), so k1's value already applies there; returning 0
+            // through the open interval keeps k0's value everywhere before.
+            Easing::Hold => {
+                if t < 1.0 {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
             Easing::Bezier {
                 points: [x1, y1, x2, y2],
             } => cubic_bezier(t, x1, y1, x2, y2),
@@ -116,6 +130,9 @@ impl Easing {
                 let t3 = t * t * t;
                 t3 - 0.5 * t3 * t
             }
+            // The eased value is 0 through the whole open interval; the
+            // measure-zero jump at t = 1 contributes nothing to the integral.
+            Easing::Hold => 0.0,
             Easing::Bezier {
                 points: [x1, y1, x2, y2],
             } => {
@@ -165,9 +182,16 @@ impl Easing {
         if self == Easing::Linear {
             return Ok(Easing::Linear);
         }
+        // Any subrange of a hold is still a hold: the value stays at the
+        // start throughout, and a subrange ending at `to == 1.0` keeps the
+        // jump at its own end.
+        if self == Easing::Hold {
+            return Ok(Easing::Hold);
+        }
 
         let [x1, y1, x2, y2] = match self {
             Easing::Linear => unreachable!("linear handled above"),
+            Easing::Hold => unreachable!("hold handled above"),
             // x(s) = s for control x values 1/3 and 2/3. The y controls
             // below are the cubic Bézier forms of t², 2t-t², and smoothstep.
             Easing::EaseIn => [1.0 / 3.0, 0.0, 2.0 / 3.0, 1.0 / 3.0],

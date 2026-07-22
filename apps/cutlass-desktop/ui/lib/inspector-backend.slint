@@ -64,6 +64,9 @@ export global InspectorBackend {
     // Clip blend-mode catalog (CapCut "Blend"), populated once at startup
     // from `BlendMode::ALL`.
     in-out property <[CatalogEntry]> blend-catalog: [];
+    // Mask shape catalog (CapCut mask panel), populated once at startup
+    // from `mask_catalog()`.
+    in-out property <[CatalogEntry]> mask-catalog: [];
     // Clip-level filter preset catalog, populated once at startup.
     in-out property <[CatalogEntry]> filter-catalog: [];
     // Cloud LUT catalog (downloaded `.cube` starter pack). Populated by the
@@ -245,6 +248,14 @@ export global InspectorBackend {
     // id from `blend-catalog` (e.g. "multiply"); `"normal"` is the default.
     // One undoable edit.
     callback set-clip-blend-mode(clip-id: string, mode: string);
+
+    // Set (or clear with an empty id) a visual clip's mask kind. Switching
+    // kind preserves feather / invert / geometry; enabling from none uses
+    // `Mask::new`. One undoable edit.
+    callback set-clip-mask-kind(clip-id: string, kind: string);
+
+    // Toggle mask invert on a clip that already has a mask. One undoable edit.
+    callback set-clip-mask-invert(clip-id: string, invert: bool);
 
     // Enable or clear one layer-style block on a visual clip. `block` is
     // "shadow" | "glow" | "outline" | "background". Enabling installs the

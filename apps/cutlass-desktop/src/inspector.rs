@@ -116,8 +116,8 @@ pub fn sample_transform(clip: &Clip, playhead: i32) -> TransformSample {
 /// Sample a scalar text-style or look curve at the playhead for inspector
 /// rows. Unknown ids are defensive no-ops; the UI only supplies known keys.
 pub fn sample_scalar_param(clip: &Clip, param: &str, playhead: i32) -> ScalarParamSample {
-    // Axis display keys for the shared `style_shadow_offset` vec2 — same
-    // row-state precedent as transform `position` X/Y.
+    // Axis display keys for shared vec2 params — same row-state precedent as
+    // transform `position` X/Y.
     if param == "style_shadow_offset_x" || param == "style_shadow_offset_y" {
         let offset =
             sampled_vec2_param(clip, "style_shadow_offset", playhead).unwrap_or([0.0, 0.0]);
@@ -128,6 +128,28 @@ pub fn sample_scalar_param(clip: &Clip, param: &str, playhead: i32) -> ScalarPar
                 offset[1]
             },
             row: row_state(&clip.kf_style_shadow_offset, playhead),
+        };
+    }
+    if param == "look_mask_center_x" || param == "look_mask_center_y" {
+        let center = sampled_vec2_param(clip, "look_mask_center", playhead).unwrap_or([0.0, 0.0]);
+        return ScalarParamSample {
+            value: if param.ends_with("_x") {
+                center[0]
+            } else {
+                center[1]
+            },
+            row: row_state(&clip.kf_look_mask_center, playhead),
+        };
+    }
+    if param == "look_mask_size_x" || param == "look_mask_size_y" {
+        let size = sampled_vec2_param(clip, "look_mask_size", playhead).unwrap_or([1.0, 1.0]);
+        return ScalarParamSample {
+            value: if param.ends_with("_x") {
+                size[0]
+            } else {
+                size[1]
+            },
+            row: row_state(&clip.kf_look_mask_size, playhead),
         };
     }
     let keyframes = match param {
@@ -150,6 +172,9 @@ pub fn sample_scalar_param(clip: &Clip, param: &str, playhead: i32) -> ScalarPar
         "style_outline_width" => &clip.kf_style_outline_width,
         "style_background_padding" => &clip.kf_style_background_padding,
         "style_background_radius" => &clip.kf_style_background_radius,
+        "look_mask_feather" => &clip.kf_look_mask_feather,
+        "look_mask_rotation" => &clip.kf_look_mask_rotation,
+        "look_mask_roundness" => &clip.kf_look_mask_roundness,
         _ => {
             return ScalarParamSample {
                 value: 0.0,

@@ -116,6 +116,77 @@ fn projects_clip_layer_styles() {
 }
 
 #[test]
+fn projects_clip_mask() {
+    use cutlass_models::{Mask, MaskKind, MediaSource, Param, RationalTime, TimeRange, TrackKind};
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("mask", EngineRational::FPS_24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/mask.mp4",
+        1920,
+        1080,
+        EngineRational::FPS_24,
+        480,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            RationalTime::new(0, EngineRational::FPS_24),
+        )
+        .expect("clip");
+
+    let flat = project_to_slint(&project, &HashMap::new(), &HashSet::new())
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(flat.mask_kind.as_str(), "");
+
+    let mut mask = Mask::new(MaskKind::Heart);
+    mask.feather = Param::Constant(0.25);
+    mask.invert = true;
+    mask.rotation = Param::Constant(30.0);
+    project
+        .set_clip_mask(clip_id, Some(mask))
+        .expect("set mask");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clip = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(clip.mask_kind.as_str(), "heart");
+    assert_eq!(clip.mask_label.as_str(), "Heart");
+    assert!(clip.mask_invert);
+    assert!((clip.mask_feather - 0.25).abs() < f32::EPSILON);
+    assert!((clip.mask_rotation - 30.0).abs() < f32::EPSILON);
+    assert_eq!(clip.kf_look_mask_feather.row_count(), 0);
+
+    project.set_clip_mask(clip_id, None).expect("clear");
+    let clip = project_to_slint(&project, &HashMap::new(), &HashSet::new())
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(clip.mask_kind.as_str(), "");
+}
+
+#[test]
 fn sticker_card_gets_catalog_label_and_composited_tag() {
     use cutlass_models::{Clip as MClip, Generator, Rational, TimeRange};
     let span = TimeRange::at_rate(0, 100, Rational::FPS_24);

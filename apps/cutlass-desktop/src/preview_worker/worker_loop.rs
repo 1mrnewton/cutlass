@@ -778,6 +778,7 @@ pub(super) fn message_invalidates_preview(msg: &WorkerMsg) -> bool {
             | WorkerMsg::SetClipCrop { .. }
             | WorkerMsg::SetBlendMode { .. }
             | WorkerMsg::SetLayerStyles { .. }
+            | WorkerMsg::SetMask { .. }
             | WorkerMsg::SetClipFilter { .. }
             | WorkerMsg::SetClipAdjust { .. }
             | WorkerMsg::SetClipLut { .. }

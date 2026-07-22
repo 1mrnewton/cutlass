@@ -160,14 +160,17 @@ pub(crate) fn sampled_scalar_param(clip: &Clip, param: &str, playhead: i32) -> O
             &clip.kf_style_background_radius,
             clip.style_background_radius,
         ),
+        "look_mask_feather" => (&clip.kf_look_mask_feather, clip.mask_feather),
+        "look_mask_rotation" => (&clip.kf_look_mask_rotation, clip.mask_rotation),
+        "look_mask_roundness" => (&clip.kf_look_mask_roundness, clip.mask_roundness),
         _ => return None,
     };
     Some(scalar_param(keyframes, constant).sample(tick))
 }
 
-/// Sample a vec2 param (`position`, `anchor`, `style_shadow_offset`) at the
-/// playhead. Axis-display keys (`style_shadow_offset_x` / `_y`) are handled
-/// in [`crate::inspector::sample_scalar_param`].
+/// Sample a vec2 param (`position`, `anchor`, `style_shadow_offset`,
+/// `look_mask_center`, `look_mask_size`) at the playhead. Axis-display keys
+/// (`*_x` / `*_y`) are handled in [`crate::inspector::sample_scalar_param`].
 pub(crate) fn sampled_vec2_param(clip: &Clip, param: &str, playhead: i32) -> Option<[f32; 2]> {
     let tick = clamped_tick(clip, playhead);
     let (keyframes, constant) = match param {
@@ -182,6 +185,14 @@ pub(crate) fn sampled_vec2_param(clip: &Clip, param: &str, playhead: i32) -> Opt
         "style_shadow_offset" => (
             &clip.kf_style_shadow_offset,
             [clip.style_shadow_offset_x, clip.style_shadow_offset_y],
+        ),
+        "look_mask_center" => (
+            &clip.kf_look_mask_center,
+            [clip.mask_center_x, clip.mask_center_y],
+        ),
+        "look_mask_size" => (
+            &clip.kf_look_mask_size,
+            [clip.mask_size_w, clip.mask_size_h],
         ),
         _ => return None,
     };
@@ -235,6 +246,11 @@ pub(crate) fn merged_keyframe_ticks(clip: &Clip) -> slint::ModelRc<i32> {
         &clip.kf_style_outline_width,
         &clip.kf_style_background_padding,
         &clip.kf_style_background_radius,
+        &clip.kf_look_mask_feather,
+        &clip.kf_look_mask_center,
+        &clip.kf_look_mask_size,
+        &clip.kf_look_mask_rotation,
+        &clip.kf_look_mask_roundness,
     ]
     .iter()
     .flat_map(|kfs| kfs.iter().map(|kf| kf.tick))

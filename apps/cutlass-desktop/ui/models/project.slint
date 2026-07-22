@@ -302,6 +302,19 @@ export struct Clip {
     // `InspectorBackend.set-clip-blend-mode`.
     blend-mode: string,
     blend-label: string,
+    // CapCut mask: kind id (empty ⇔ none) + invert + geometry samples.
+    // Kind / invert go through `set-clip-mask-*`; geometry rides look_mask_*
+    // generic param callbacks.
+    mask-kind: string,
+    mask-label: string,
+    mask-invert: bool,
+    mask-feather: float,
+    mask-center-x: float,
+    mask-center-y: float,
+    mask-size-w: float,
+    mask-size-h: float,
+    mask-rotation: float,
+    mask-roundness: float,
     // Layer-quad styles (CapCut shadow/glow/outline/background). Structural
     // enable/disable goes through `InspectorBackend.toggle-clip-style`; field
     // edits ride the generic param callbacks (or `set-clip-style-color`).
@@ -405,6 +418,12 @@ export struct Clip {
     kf-style-outline-width: [ParamKeyframe],
     kf-style-background-padding: [ParamKeyframe],
     kf-style-background-radius: [ParamKeyframe],
+    // Mask geometry curves (absolute ticks). Empty when the clip has no mask.
+    kf-look-mask-feather: [ParamKeyframe],
+    kf-look-mask-center: [ParamKeyframe],
+    kf-look-mask-size: [ParamKeyframe],
+    kf-look-mask-rotation: [ParamKeyframe],
+    kf-look-mask-roundness: [ParamKeyframe],
     // Playback-rate ramp (M2 speed curves): the speed-multiplier curve over
     // the clip's NORMALIZED span — `tick` is 0..=1000 (0 = clip start, 1000 =
     // clip end), `value-x` the multiplier. Empty ⇔ a flat constant-speed

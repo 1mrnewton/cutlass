@@ -271,6 +271,10 @@ impl WorkerHandle {
         let _ = self.tx.send(WorkerMsg::SetLayerStyles { clip, styles });
     }
 
+    pub fn set_mask(&self, clip: String, mask: Option<Mask>) {
+        let _ = self.tx.send(WorkerMsg::SetMask { clip, mask });
+    }
+
     pub fn set_clip_filter(&self, clip: String, filter_id: String, intensity: f32) {
         let _ = self.tx.send(WorkerMsg::SetClipFilter {
             clip,

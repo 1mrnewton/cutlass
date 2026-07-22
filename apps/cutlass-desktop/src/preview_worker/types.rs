@@ -330,6 +330,12 @@ pub(super) enum WorkerMsg {
         clip: String,
         styles: LayerStyles,
     },
+    /// Set (or clear) a visual clip's shaped alpha mask. `None` clears.
+    /// One undoable history entry.
+    SetMask {
+        clip: String,
+        mask: Option<Mask>,
+    },
     /// Set (or clear) a visual clip's filter preset. `filter_id == ""`
     /// clears; intensity is normalized 0..=1. One undoable history entry.
     SetClipFilter {

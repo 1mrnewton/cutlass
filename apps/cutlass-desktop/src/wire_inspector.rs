@@ -191,6 +191,69 @@ pub(crate) fn wire_inspector(
             set_blend_handle.set_blend_mode(clip_id.to_string(), mode.to_string());
         });
 
+    let set_mask_kind_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_set_clip_mask_kind(move |clip_id, kind| {
+            let Some(project) = set_mask_kind_handle.snapshot_project() else {
+                return;
+            };
+            let Some(raw) = clip_id.as_str().parse::<u64>().ok() else {
+                tracing::error!(clip = %clip_id, "set-clip-mask-kind ignored: unparsable clip id");
+                return;
+            };
+            let clip_key = cutlass_models::ClipId::from_raw(raw);
+            let Some(clip) = project.clip(clip_key) else {
+                tracing::error!(clip = %clip_id, "set-clip-mask-kind ignored: unknown clip");
+                return;
+            };
+            let mask = if kind.is_empty() {
+                None
+            } else {
+                let Some(spec) = cutlass_models::mask_catalog()
+                    .iter()
+                    .find(|s| s.kind.id() == kind.as_str())
+                else {
+                    tracing::error!(
+                        kind = kind.as_str(),
+                        "set-clip-mask-kind ignored: unknown kind"
+                    );
+                    return;
+                };
+                // Preserve feather / invert / geometry when switching kind;
+                // enable-from-none uses Mask::new defaults.
+                let mut mask = clip
+                    .mask
+                    .clone()
+                    .unwrap_or_else(|| cutlass_models::Mask::new(spec.kind));
+                mask.kind = spec.kind;
+                Some(mask)
+            };
+            set_mask_kind_handle.set_mask(clip_id.to_string(), mask);
+        });
+
+    let set_mask_invert_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_set_clip_mask_invert(move |clip_id, invert| {
+            let Some(project) = set_mask_invert_handle.snapshot_project() else {
+                return;
+            };
+            let Some(raw) = clip_id.as_str().parse::<u64>().ok() else {
+                tracing::error!(clip = %clip_id, "set-clip-mask-invert ignored: unparsable clip id");
+                return;
+            };
+            let clip_key = cutlass_models::ClipId::from_raw(raw);
+            let Some(clip) = project.clip(clip_key) else {
+                tracing::error!(clip = %clip_id, "set-clip-mask-invert ignored: unknown clip");
+                return;
+            };
+            let Some(mut mask) = clip.mask.clone() else {
+                tracing::error!(clip = %clip_id, "set-clip-mask-invert ignored: clip has no mask");
+                return;
+            };
+            mask.invert = invert;
+            set_mask_invert_handle.set_mask(clip_id.to_string(), Some(mask));
+        });
+
     let toggle_style_handle = preview_worker.handle();
     app.global::<InspectorBackend>()
         .on_toggle_clip_style(move |clip_id, block, enabled| {
@@ -489,6 +552,18 @@ pub(crate) fn wire_inspector(
             })
             .collect();
         inspector.set_blend_catalog(ModelRc::new(VecModel::from(blend_rows)));
+
+        let mask_rows: Vec<CatalogEntry> = cutlass_models::mask_catalog()
+            .iter()
+            .map(|s| CatalogEntry {
+                id: s.kind.id().into(),
+                label: s.label.into(),
+                has_speed: false,
+                has_intensity: false,
+                has_stagger: false,
+            })
+            .collect();
+        inspector.set_mask_catalog(ModelRc::new(VecModel::from(mask_rows)));
 
         let filter_rows: Vec<CatalogEntry> = cutlass_models::filter_catalog()
             .iter()

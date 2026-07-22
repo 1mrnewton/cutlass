@@ -706,6 +706,10 @@ fn look_edits_invalidate_preview() {
             ..Default::default()
         },
     }));
+    assert!(message_invalidates_preview(&WorkerMsg::SetMask {
+        clip: "1".into(),
+        mask: Some(cutlass_models::Mask::new(cutlass_models::MaskKind::Circle)),
+    }));
 }
 
 #[test]
@@ -961,6 +965,149 @@ fn set_layer_styles_updates_projected_clip() {
     let track = projected.sequence.tracks.row_data(0).unwrap();
     let c = track.clips.row_data(0).unwrap();
     assert!(!c.style_shadow_enabled);
+}
+
+#[test]
+fn set_mask_enqueues_worker_msg() {
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let mask = cutlass_models::Mask::new(cutlass_models::MaskKind::Circle);
+    handle.set_mask("42".into(), Some(mask.clone()));
+    let WorkerMsg::SetMask { clip, mask: got } = rx.try_recv().unwrap() else {
+        panic!("expected SetMask");
+    };
+    assert_eq!(clip, "42");
+    assert_eq!(got, Some(mask));
+}
+
+#[test]
+fn set_mask_kind_preserves_feather_and_geometry_round_trips() {
+    use crate::projection::project_to_slint;
+    use cutlass_models::{LookParam, Mask, MaskKind, Param};
+    use slint::Model;
+    use std::collections::{HashMap, HashSet};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("mask", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/mask.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+
+    let mut mask = Mask::new(MaskKind::Circle);
+    mask.feather = Param::Constant(0.4);
+    mask.center = Param::Constant([0.1, -0.2]);
+    engine
+        .apply(Command::Edit(EditCommand::SetClipMask {
+            clip,
+            mask: Some(mask),
+        }))
+        .expect("set mask");
+
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(c.mask_kind.as_str(), "circle");
+    assert!((c.mask_feather - 0.4).abs() < f32::EPSILON);
+    assert!(!c.mask_invert);
+
+    // Kind switch preserves feather / geometry (wire_inspector snapshot path).
+    let mut switched = engine.project().clip(clip).unwrap().mask.clone().unwrap();
+    switched.kind = MaskKind::Rectangle;
+    engine
+        .apply(Command::Edit(EditCommand::SetClipMask {
+            clip,
+            mask: Some(switched),
+        }))
+        .expect("switch kind");
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(c.mask_kind.as_str(), "rectangle");
+    assert!((c.mask_feather - 0.4).abs() < f32::EPSILON);
+    assert!((c.mask_center_x - 0.1).abs() < f32::EPSILON);
+
+    // Invert toggles.
+    let mut inverted = engine.project().clip(clip).unwrap().mask.clone().unwrap();
+    inverted.invert = true;
+    engine
+        .apply(Command::Edit(EditCommand::SetClipMask {
+            clip,
+            mask: Some(inverted),
+        }))
+        .expect("invert");
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!(c.mask_invert);
+
+    // Geometry param round-trips through the desktop look_mask_* path.
+    engine
+        .apply(Command::Edit(EditCommand::SetParamConstant {
+            clip,
+            param: cutlass_models::ClipParam::Look {
+                param: LookParam::MaskRotation,
+            },
+            value: cutlass_models::ParamValue::Scalar(45.0),
+        }))
+        .expect("set rotation");
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert!((c.mask_rotation - 45.0).abs() < f32::EPSILON);
+
+    engine
+        .apply(Command::Edit(EditCommand::SetClipMask { clip, mask: None }))
+        .expect("clear");
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let c = projected
+        .sequence
+        .tracks
+        .row_data(0)
+        .unwrap()
+        .clips
+        .row_data(0)
+        .unwrap();
+    assert_eq!(c.mask_kind.as_str(), "");
+    assert!(!c.mask_invert);
 }
 
 #[test]

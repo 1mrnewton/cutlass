@@ -263,6 +263,7 @@ fn clip_to_slint(
     let (lut_id, lut_label, lut_path, lut_intensity) = clip_lut(clip);
     let blend_mode = clip.blend_mode.id().to_string();
     let blend_label = clip.blend_mode.label().to_string();
+    let mask = clip_mask(clip, clip_start);
     let styles = clip_layer_styles(clip, clip_start);
     let animation_in = clip_animation(clip.animation_in.as_ref());
     let animation_out = clip_animation(clip.animation_out.as_ref());
@@ -323,6 +324,16 @@ fn clip_to_slint(
         flip_v: clip.flip_v,
         blend_mode: blend_mode.into(),
         blend_label: blend_label.into(),
+        mask_kind: mask.kind.into(),
+        mask_label: mask.label.into(),
+        mask_invert: mask.invert,
+        mask_feather: mask.feather,
+        mask_center_x: mask.center[0],
+        mask_center_y: mask.center[1],
+        mask_size_w: mask.size[0],
+        mask_size_h: mask.size[1],
+        mask_rotation: mask.rotation,
+        mask_roundness: mask.roundness,
         style_shadow_enabled: styles.shadow_enabled,
         style_shadow_color: styles.shadow_color,
         style_shadow_offset_x: styles.shadow_offset[0],
@@ -419,6 +430,11 @@ fn clip_to_slint(
         kf_style_outline_width: styles.kf_outline_width,
         kf_style_background_padding: styles.kf_background_padding,
         kf_style_background_radius: styles.kf_background_radius,
+        kf_look_mask_feather: mask.kf_feather,
+        kf_look_mask_center: mask.kf_center,
+        kf_look_mask_size: mask.kf_size,
+        kf_look_mask_rotation: mask.kf_rotation,
+        kf_look_mask_roundness: mask.kf_roundness,
         kf_speed_curve: speed_curve_to_slint(&clip.speed_curve),
         has_speed_curve: clip.has_speed_curve(),
         speed_curve_avg: clip.speed_curve_average() as f32,
@@ -439,6 +455,64 @@ fn clip_to_slint(
                 .collect(),
         ),
         caps,
+    }
+}
+
+/// Projected mask fields + geometry keyframe lists for one clip.
+struct ProjectedMask {
+    kind: String,
+    label: String,
+    invert: bool,
+    feather: f32,
+    center: [f32; 2],
+    size: [f32; 2],
+    rotation: f32,
+    roundness: f32,
+    kf_feather: ModelRc<ParamKeyframe>,
+    kf_center: ModelRc<ParamKeyframe>,
+    kf_size: ModelRc<ParamKeyframe>,
+    kf_rotation: ModelRc<ParamKeyframe>,
+    kf_roundness: ModelRc<ParamKeyframe>,
+}
+
+fn clip_mask(clip: &EngineClip, clip_start: i64) -> ProjectedMask {
+    let Some(mask) = &clip.mask else {
+        let defaults = cutlass_models::Mask::new(cutlass_models::MaskKind::Circle);
+        return ProjectedMask {
+            kind: String::new(),
+            label: String::new(),
+            invert: false,
+            feather: defaults.feather.sample(0),
+            center: defaults.center.sample(0),
+            size: defaults.size.sample(0),
+            rotation: defaults.rotation.sample(0),
+            roundness: defaults.roundness.sample(0),
+            kf_feather: empty_keyframes(),
+            kf_center: empty_keyframes(),
+            kf_size: empty_keyframes(),
+            kf_rotation: empty_keyframes(),
+            kf_roundness: empty_keyframes(),
+        };
+    };
+    let label = cutlass_models::mask_catalog()
+        .iter()
+        .find(|s| s.kind == mask.kind)
+        .map(|s| s.label.to_string())
+        .unwrap_or_else(|| mask.kind.id().to_string());
+    ProjectedMask {
+        kind: mask.kind.id().to_string(),
+        label,
+        invert: mask.invert,
+        feather: mask.feather.sample(0),
+        center: mask.center.sample(0),
+        size: mask.size.sample(0),
+        rotation: mask.rotation.sample(0),
+        roundness: mask.roundness.sample(0),
+        kf_feather: keyframes_to_slint(&mask.feather, clip_start, |v| (*v, 0.0)),
+        kf_center: keyframes_to_slint(&mask.center, clip_start, |v| (v[0], v[1])),
+        kf_size: keyframes_to_slint(&mask.size, clip_start, |v| (v[0], v[1])),
+        kf_rotation: keyframes_to_slint(&mask.rotation, clip_start, |v| (*v, 0.0)),
+        kf_roundness: keyframes_to_slint(&mask.roundness, clip_start, |v| (*v, 0.0)),
     }
 }
 

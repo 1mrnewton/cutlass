@@ -102,6 +102,29 @@ pub(super) fn set_layer_styles_and_publish(
     publish_projection(engine, ui);
 }
 
+/// Set or clear a visual clip's shaped alpha mask (CapCut mask panel).
+pub(super) fn set_mask_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    mask: Option<Mask>,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-mask ignored: unparsable clip id");
+        return;
+    };
+    let kind = mask.as_ref().map(|m| m.kind.id());
+    if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipMask {
+        clip: clip_id,
+        mask,
+    })) {
+        error!(%clip_id, "set clip mask failed: {e}");
+        return;
+    }
+    info!(%clip_id, ?kind, "set clip mask");
+    publish_projection(engine, ui);
+}
+
 /// Set or clear a visual clip's filter preset. A live look drag may have left
 /// an override in place; clear it first so the commit becomes authoritative.
 pub(super) fn set_clip_filter_and_publish(

@@ -96,7 +96,7 @@ pub(super) fn set_clip_lut_and_publish(
     };
     let lut = (!path.is_empty()).then(|| Lut {
         path: path.to_string(),
-        intensity: intensity.clamp(0.0, 1.0),
+        intensity: intensity.clamp(0.0, 1.0).into(),
     });
     if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipLut {
         clip: clip_id,
@@ -123,10 +123,10 @@ pub(super) fn set_clip_adjust_and_publish(
         error!(clip, "set-clip-adjust ignored: unparsable clip id");
         return;
     };
-    let adjust = sanitize_adjustments(adjust);
+    let adjust = sanitize_adjustments(&adjust);
     if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipAdjustments {
         clip: clip_id,
-        adjust,
+        adjust: adjust.clone(),
     })) {
         error!(%clip_id, ?adjust, "set clip adjustments failed: {e}");
         return;

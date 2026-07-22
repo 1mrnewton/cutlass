@@ -595,21 +595,21 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         WireCommand::SetClipAdjustments(args) => {
             let clip = clip_ref(project, args.clip)?;
             reject_audio_lane(project, clip, "adjustments need a visual frame", args.clip)?;
-            let mut adjust = clip.adjust;
+            let mut adjust = clip.adjust.clone();
             if let Some(v) = args.brightness {
-                adjust.brightness = unit_slider(v, "brightness")?;
+                adjust.brightness = unit_slider(v, "brightness")?.into();
             }
             if let Some(v) = args.contrast {
-                adjust.contrast = unit_slider(v, "contrast")?;
+                adjust.contrast = unit_slider(v, "contrast")?.into();
             }
             if let Some(v) = args.saturation {
-                adjust.saturation = unit_slider(v, "saturation")?;
+                adjust.saturation = unit_slider(v, "saturation")?.into();
             }
             if let Some(v) = args.exposure {
-                adjust.exposure = unit_slider(v, "exposure")?;
+                adjust.exposure = unit_slider(v, "exposure")?.into();
             }
             if let Some(v) = args.temperature {
-                adjust.temperature = unit_slider(v, "temperature")?;
+                adjust.temperature = unit_slider(v, "temperature")?.into();
             }
             adjust
                 .validate()

@@ -538,29 +538,29 @@ fn duplicate_clip_preserves_full_property_snapshot() {
 
         clip.mask = Some(Mask {
             kind: MaskKind::Heart,
-            feather: 0.35,
+            feather: 0.35.into(),
             invert: true,
         });
         clip.chroma_key = Some(ChromaKey {
             rgb: [3, 240, 17],
-            strength: 0.72,
-            shadow: 0.18,
+            strength: 0.72.into(),
+            shadow: 0.18.into(),
         });
         clip.stabilize = Some(StabilizeLevel::MaxSmooth);
         clip.filter = Some(Filter {
             id: "vivid".into(),
-            intensity: 0.63,
+            intensity: 0.63.into(),
         });
         clip.lut = Some(crate::look::Lut {
             path: "/tmp/cinematic.cube".into(),
-            intensity: 0.71,
+            intensity: 0.71.into(),
         });
         clip.adjust = ColorAdjustments {
-            brightness: 0.1,
-            contrast: -0.2,
-            saturation: 0.3,
-            exposure: -0.4,
-            temperature: 0.5,
+            brightness: 0.1.into(),
+            contrast: (-0.2).into(),
+            saturation: 0.3.into(),
+            exposure: (-0.4).into(),
+            temperature: 0.5.into(),
         };
         clip.animation_in = Some(AnimationRef::new("zoom_in"));
         clip.animation_out = Some(AnimationRef::new("drop"));
@@ -841,29 +841,29 @@ fn split_clip_preserves_full_property_snapshot_and_rebases_tail_curves() {
 
         clip.mask = Some(Mask {
             kind: crate::look::MaskKind::Heart,
-            feather: 0.35,
+            feather: 0.35.into(),
             invert: true,
         });
         clip.chroma_key = Some(ChromaKey {
             rgb: [3, 240, 17],
-            strength: 0.72,
-            shadow: 0.18,
+            strength: 0.72.into(),
+            shadow: 0.18.into(),
         });
         clip.stabilize = Some(StabilizeLevel::MaxSmooth);
         clip.filter = Some(Filter {
             id: "vivid".into(),
-            intensity: 0.63,
+            intensity: 0.63.into(),
         });
         clip.lut = Some(Lut {
             path: "/tmp/cinematic.cube".into(),
-            intensity: 0.71,
+            intensity: 0.71.into(),
         });
         clip.adjust = ColorAdjustments {
-            brightness: 0.1,
-            contrast: -0.2,
-            saturation: 0.3,
-            exposure: -0.4,
-            temperature: 0.5,
+            brightness: 0.1.into(),
+            contrast: (-0.2).into(),
+            saturation: 0.3.into(),
+            exposure: (-0.4).into(),
+            temperature: 0.5.into(),
         };
         clip.animation_in = Some(AnimationRef::new("zoom_in"));
         clip.animation_out = Some(AnimationRef::new("drop"));
@@ -1996,8 +1996,8 @@ fn look_setters_persist_on_a_media_clip() {
             clip,
             Some(ChromaKey {
                 rgb: [0, 255, 0],
-                strength: 0.7,
-                shadow: 0.2,
+                strength: 0.7.into(),
+                shadow: 0.2.into(),
             }),
         )
         .unwrap();
@@ -2011,22 +2011,50 @@ fn look_setters_persist_on_a_media_clip() {
         .set_clip_adjustments(
             clip,
             ColorAdjustments {
-                brightness: 0.25,
+                brightness: 0.25.into(),
                 ..Default::default()
             },
         )
         .unwrap();
 
     let c = project.clip(clip).unwrap();
-    assert_eq!(c.mask.unwrap().kind, MaskKind::Circle);
-    assert_eq!(c.chroma_key.unwrap().strength, 0.7);
+    assert_eq!(c.mask.as_ref().unwrap().kind, MaskKind::Circle);
+    assert_eq!(c.chroma_key.as_ref().unwrap().strength, 0.7.into());
     assert_eq!(c.stabilize, Some(StabilizeLevel::Smooth));
     assert_eq!(c.filter.as_ref().unwrap().id, "vivid");
-    assert_eq!(c.adjust.brightness, 0.25);
+    assert_eq!(c.adjust.brightness, 0.25.into());
 
     // Clearing works and the fields vanish from saves again.
     project.set_clip_mask(clip, None).unwrap();
     assert!(project.clip(clip).unwrap().mask.is_none());
+}
+
+#[test]
+fn filter_intensity_keyframes_sample_at_clip_local_ticks() {
+    let (mut project, media_id, track) = project_with_media(100);
+    let clip = project.add_clip(track, media_id, tr(0, 50), rt(0)).unwrap();
+    project
+        .set_clip_filter(clip, Some(Filter::new("vivid")))
+        .unwrap();
+    let param = ClipParam::Look {
+        param: crate::LookParam::FilterIntensity,
+    };
+    project
+        .set_param_keyframe(clip, param, rt(0), ParamValue::Scalar(0.0), Easing::Linear)
+        .unwrap();
+    project
+        .set_param_keyframe(clip, param, rt(10), ParamValue::Scalar(1.0), Easing::Linear)
+        .unwrap();
+
+    let intensity = project
+        .clip(clip)
+        .unwrap()
+        .filter
+        .as_ref()
+        .unwrap()
+        .intensity
+        .sample(5);
+    assert!((intensity - 0.5).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -2059,7 +2087,7 @@ fn look_setters_reject_wrong_content() {
             .set_clip_adjustments(
                 bar,
                 ColorAdjustments {
-                    contrast: -0.5,
+                    contrast: (-0.5).into(),
                     ..Default::default()
                 }
             )
@@ -2103,7 +2131,7 @@ fn look_setters_reject_wrong_content() {
     let clip = p2.add_clip(t2, m2, tr(0, 50), rt(0)).unwrap();
     assert!(p2.set_clip_filter(clip, Some(Filter::new("nope"))).is_err());
     let mut hot = Filter::new("vivid");
-    hot.intensity = 1.5;
+    hot.intensity = 1.5.into();
     assert!(p2.set_clip_filter(clip, Some(hot)).is_err());
 }
 

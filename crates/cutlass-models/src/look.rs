@@ -15,6 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::ModelError;
+use crate::param::Param;
 
 // --- Mask -------------------------------------------------------------------
 
@@ -45,12 +46,12 @@ impl MaskKind {
 }
 
 /// A shaped alpha mask over a clip's content. `None` on the clip ⇔ no mask.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mask {
     pub kind: MaskKind,
     /// Edge softness, `0` (hard) … `1` (fully feathered).
-    #[serde(default, skip_serializing_if = "is_zero_f32")]
-    pub feather: f32,
+    #[serde(default = "default_zero_param", skip_serializing_if = "is_zero_param")]
+    pub feather: Param<f32>,
     /// Keep the outside instead of the inside.
     #[serde(default, skip_serializing_if = "is_false")]
     pub invert: bool,
@@ -61,13 +62,13 @@ impl Mask {
     pub fn new(kind: MaskKind) -> Self {
         Self {
             kind,
-            feather: 0.0,
+            feather: Param::Constant(0.0),
             invert: false,
         }
     }
 
     pub fn validate(&self) -> Result<(), ModelError> {
-        validate_unit("mask feather", self.feather)
+        validate_unit_param("mask feather", &self.feather)
     }
 }
 
@@ -114,22 +115,22 @@ pub fn mask_catalog() -> &'static [MaskSpec] {
 
 /// Green-screen keying (CapCut chroma key): pixels near `rgb` turn
 /// transparent. `None` on the clip ⇔ keying off.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChromaKey {
     /// Key color, opaque `[r, g, b]`.
     pub rgb: [u8; 3],
     /// Keying strength (tolerance), `0` … `1`.
-    #[serde(default, skip_serializing_if = "is_zero_f32")]
-    pub strength: f32,
+    #[serde(default = "default_zero_param", skip_serializing_if = "is_zero_param")]
+    pub strength: Param<f32>,
     /// Shadow retention, `0` … `1`.
-    #[serde(default, skip_serializing_if = "is_zero_f32")]
-    pub shadow: f32,
+    #[serde(default = "default_zero_param", skip_serializing_if = "is_zero_param")]
+    pub shadow: Param<f32>,
 }
 
 impl ChromaKey {
     pub fn validate(&self) -> Result<(), ModelError> {
-        validate_unit("chroma strength", self.strength)?;
-        validate_unit("chroma shadow", self.shadow)
+        validate_unit_param("chroma strength", &self.strength)?;
+        validate_unit_param("chroma shadow", &self.shadow)
     }
 }
 
@@ -181,10 +182,10 @@ pub struct Filter {
     pub id: String,
     /// Blend of the graded result over the original, `0` … `1`.
     #[serde(
-        default = "default_filter_intensity",
+        default = "default_filter_intensity_param",
         skip_serializing_if = "is_default_filter_intensity"
     )]
-    pub intensity: f32,
+    pub intensity: Param<f32>,
 }
 
 impl Filter {
@@ -192,7 +193,7 @@ impl Filter {
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
-            intensity: default_filter_intensity(),
+            intensity: Param::Constant(default_filter_intensity()),
         }
     }
 
@@ -203,7 +204,7 @@ impl Filter {
                 self.id
             )));
         }
-        validate_unit("filter intensity", self.intensity)
+        validate_unit_param("filter intensity", &self.intensity)
     }
 }
 
@@ -211,8 +212,12 @@ fn default_filter_intensity() -> f32 {
     0.8
 }
 
-fn is_default_filter_intensity(v: &f32) -> bool {
-    *v == default_filter_intensity()
+fn default_filter_intensity_param() -> Param<f32> {
+    Param::Constant(default_filter_intensity())
+}
+
+fn is_default_filter_intensity(v: &Param<f32>) -> bool {
+    v.constant() == Some(default_filter_intensity())
 }
 
 /// One filter catalog entry.
@@ -289,10 +294,10 @@ pub struct Lut {
     pub path: String,
     /// Blend of the looked-up result over the original, `0` … `1`.
     #[serde(
-        default = "default_filter_intensity",
+        default = "default_filter_intensity_param",
         skip_serializing_if = "is_default_filter_intensity"
     )]
-    pub intensity: f32,
+    pub intensity: Param<f32>,
 }
 
 impl Lut {
@@ -300,7 +305,7 @@ impl Lut {
     pub fn new(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
-            intensity: default_filter_intensity(),
+            intensity: Param::Constant(default_filter_intensity()),
         }
     }
 
@@ -308,7 +313,7 @@ impl Lut {
         if self.path.trim().is_empty() {
             return Err(ModelError::InvalidParam("empty LUT path".into()));
         }
-        validate_unit("LUT intensity", self.intensity)
+        validate_unit_param("LUT intensity", &self.intensity)
     }
 }
 
@@ -316,41 +321,57 @@ impl Lut {
 
 /// Manual color grade (CapCut adjust panel): signed strengths, `0` neutral.
 /// Lives on visual clips and on `Generator::Adjustment` lane bars.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColorAdjustments {
-    #[serde(default, skip_serializing_if = "is_zero_f32")]
-    pub brightness: f32,
-    #[serde(default, skip_serializing_if = "is_zero_f32")]
-    pub contrast: f32,
-    #[serde(default, skip_serializing_if = "is_zero_f32")]
-    pub saturation: f32,
-    #[serde(default, skip_serializing_if = "is_zero_f32")]
-    pub exposure: f32,
-    #[serde(default, skip_serializing_if = "is_zero_f32")]
-    pub temperature: f32,
+    #[serde(default = "default_zero_param", skip_serializing_if = "is_zero_param")]
+    pub brightness: Param<f32>,
+    #[serde(default = "default_zero_param", skip_serializing_if = "is_zero_param")]
+    pub contrast: Param<f32>,
+    #[serde(default = "default_zero_param", skip_serializing_if = "is_zero_param")]
+    pub saturation: Param<f32>,
+    #[serde(default = "default_zero_param", skip_serializing_if = "is_zero_param")]
+    pub exposure: Param<f32>,
+    #[serde(default = "default_zero_param", skip_serializing_if = "is_zero_param")]
+    pub temperature: Param<f32>,
 }
 
 impl ColorAdjustments {
     /// True iff every slider sits at neutral — the serde skip predicate.
     pub fn is_neutral(&self) -> bool {
-        *self == Self::default()
+        [
+            &self.brightness,
+            &self.contrast,
+            &self.saturation,
+            &self.exposure,
+            &self.temperature,
+        ]
+        .iter()
+        .all(|param| is_zero_param(param))
     }
 
     pub fn validate(&self) -> Result<(), ModelError> {
         for (name, value) in [
-            ("brightness", self.brightness),
-            ("contrast", self.contrast),
-            ("saturation", self.saturation),
-            ("exposure", self.exposure),
-            ("temperature", self.temperature),
+            ("brightness", &self.brightness),
+            ("contrast", &self.contrast),
+            ("saturation", &self.saturation),
+            ("exposure", &self.exposure),
+            ("temperature", &self.temperature),
         ] {
-            if !value.is_finite() || !(-1.0..=1.0).contains(&value) {
-                return Err(ModelError::InvalidParam(format!(
-                    "{name} = {value} out of range [-1, 1]"
-                )));
-            }
+            validate_adjust_param(name, value)?;
         }
         Ok(())
+    }
+}
+
+impl Default for ColorAdjustments {
+    fn default() -> Self {
+        Self {
+            brightness: default_zero_param(),
+            contrast: default_zero_param(),
+            saturation: default_zero_param(),
+            exposure: default_zero_param(),
+            temperature: default_zero_param(),
+        }
     }
 }
 
@@ -749,8 +770,30 @@ fn validate_unit(what: &str, v: f32) -> Result<(), ModelError> {
     Ok(())
 }
 
-fn is_zero_f32(v: &f32) -> bool {
-    *v == 0.0
+fn default_zero_param() -> Param<f32> {
+    Param::Constant(0.0)
+}
+
+fn is_zero_param(v: &Param<f32>) -> bool {
+    v.constant() == Some(0.0)
+}
+
+fn validate_unit_param(what: &str, param: &Param<f32>) -> Result<(), ModelError> {
+    param.validate_shape()?;
+    param.for_each_value(|value| validate_unit(what, *value))
+}
+
+fn validate_adjust_param(what: &str, param: &Param<f32>) -> Result<(), ModelError> {
+    param.validate_shape()?;
+    param.for_each_value(|value| {
+        if value.is_finite() && (-1.0..=1.0).contains(value) {
+            Ok(())
+        } else {
+            Err(ModelError::InvalidParam(format!(
+                "{what} = {value} out of range [-1, 1]"
+            )))
+        }
+    })
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -808,8 +851,8 @@ mod tests {
 
         let chroma = ChromaKey {
             rgb: [0, 255, 0],
-            strength: 0.0,
-            shadow: 0.0,
+            strength: 0.0.into(),
+            shadow: 0.0.into(),
         };
         assert_eq!(
             serde_json::to_value(chroma).unwrap(),
@@ -826,23 +869,23 @@ mod tests {
     #[test]
     fn validation_rejects_out_of_range_values() {
         let mut mask = Mask::new(MaskKind::Linear);
-        mask.feather = 1.5;
+        mask.feather = 1.5.into();
         assert!(mask.validate().is_err());
 
         let chroma = ChromaKey {
             rgb: [0, 255, 0],
-            strength: -0.1,
-            shadow: 0.0,
+            strength: (-0.1).into(),
+            shadow: 0.0.into(),
         };
         assert!(chroma.validate().is_err());
 
         assert!(Filter::new("nope").validate().is_err());
         let mut filter = Filter::new("vivid");
-        filter.intensity = 2.0;
+        filter.intensity = 2.0.into();
         assert!(filter.validate().is_err());
 
         let adjust = ColorAdjustments {
-            brightness: -1.5,
+            brightness: (-1.5).into(),
             ..Default::default()
         };
         assert!(adjust.validate().is_err());

@@ -321,11 +321,11 @@ fn clip_to_slint(
         filter_id: filter_id.into(),
         filter_label: filter_label.into(),
         filter_intensity,
-        adjust_brightness: clip.adjust.brightness,
-        adjust_contrast: clip.adjust.contrast,
-        adjust_saturation: clip.adjust.saturation,
-        adjust_exposure: clip.adjust.exposure,
-        adjust_temperature: clip.adjust.temperature,
+        adjust_brightness: clip.adjust.brightness.sample(0),
+        adjust_contrast: clip.adjust.contrast.sample(0),
+        adjust_saturation: clip.adjust.saturation.sample(0),
+        adjust_exposure: clip.adjust.exposure.sample(0),
+        adjust_temperature: clip.adjust.temperature.sample(0),
         lut_id: lut_id.into(),
         lut_label: lut_label.into(),
         lut_path: lut_path.into(),
@@ -390,7 +390,7 @@ fn clip_filter(clip: &EngineClip) -> (String, String, f32) {
         .map(|s| s.label)
         .unwrap_or(filter.id.as_str())
         .to_string();
-    (filter.id.clone(), label, filter.intensity)
+    (filter.id.clone(), label, filter.intensity.sample(0))
 }
 
 /// Project a clip's `.cube` LUT as (id, label, intensity). The id is the
@@ -405,7 +405,12 @@ fn clip_lut(clip: &EngineClip) -> (String, String, String, f32) {
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_else(|| lut.path.clone());
-    (id.clone(), lut_label(&id), lut.path.clone(), lut.intensity)
+    (
+        id.clone(),
+        lut_label(&id),
+        lut.path.clone(),
+        lut.intensity.sample(0),
+    )
 }
 
 /// Human label for a LUT id/stem: strip the first-party prefix, split on

@@ -546,7 +546,7 @@ fn worker_loop(
                         }
                         other => {
                             if std::mem::take(&mut pending) {
-                                apply_look_override(engine, &clip, &filter_id, intensity, adjust);
+                                apply_look_override(engine, &clip, &filter_id, intensity, &adjust);
                             }
                             dispatch(
                                 engine,
@@ -567,7 +567,7 @@ fn worker_loop(
                 }
                 last_tick = tick;
                 if pending {
-                    apply_look_override(engine, &clip, &filter_id, intensity, adjust);
+                    apply_look_override(engine, &clip, &filter_id, intensity, &adjust);
                 }
                 render_frame(
                     engine,

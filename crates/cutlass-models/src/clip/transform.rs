@@ -125,6 +125,12 @@ pub enum ClipParam {
     Text {
         param: TextParam,
     },
+    /// An animatable property of the clip's color look. Structural look
+    /// selections (filter id, LUT path, mask shape, chroma color) remain
+    /// ordinary clip edits.
+    Look {
+        param: LookParam,
+    },
 }
 
 /// The animatable properties of a [`Generator::Shape`] (see
@@ -166,6 +172,22 @@ pub enum TextParam {
     ShadowBlur,
     ShadowDistance,
     ShadowColor,
+}
+
+/// The animatable scalar properties in a clip's color look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LookParam {
+    FilterIntensity,
+    LutIntensity,
+    AdjustBrightness,
+    AdjustContrast,
+    AdjustSaturation,
+    AdjustExposure,
+    AdjustTemperature,
+    MaskFeather,
+    ChromaStrength,
+    ChromaShadow,
 }
 
 /// A value for a [`ClipParam`]: scalar properties take `Scalar`, `position`
@@ -375,7 +397,8 @@ impl AnimatedTransform {
             | ClipParam::Speed
             | ClipParam::Volume
             | ClipParam::Shape { .. }
-            | ClipParam::Text { .. } => {
+            | ClipParam::Text { .. }
+            | ClipParam::Look { .. } => {
                 return Err(not_a_transform_param());
             }
         }
@@ -395,7 +418,8 @@ impl AnimatedTransform {
             | ClipParam::Speed
             | ClipParam::Volume
             | ClipParam::Shape { .. }
-            | ClipParam::Text { .. } => {
+            | ClipParam::Text { .. }
+            | ClipParam::Look { .. } => {
                 return Err(not_a_transform_param());
             }
         };
@@ -444,7 +468,8 @@ impl AnimatedTransform {
             | ClipParam::Speed
             | ClipParam::Volume
             | ClipParam::Shape { .. }
-            | ClipParam::Text { .. } => {
+            | ClipParam::Text { .. }
+            | ClipParam::Look { .. } => {
                 return Err(not_a_transform_param());
             }
         }

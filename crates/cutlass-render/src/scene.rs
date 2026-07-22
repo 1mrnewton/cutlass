@@ -9,7 +9,7 @@
 //! while [`Renderer`](crate::Renderer) does the decode + rasterize + composite.
 
 use cutlass_compositor::ColorGrade;
-use cutlass_models::{AnimationSlot, ChromaKey, ClipId, Mask, MediaId};
+use cutlass_models::{AnimationSlot, ClipId, MaskKind, MediaId};
 use cutlass_shapes::{BezierPath, SdfParams, Stroke};
 use cutlass_text::{TextAlign, TextStyle, TextVerticalAlign};
 
@@ -180,9 +180,9 @@ pub struct SceneLayer {
     /// GPU effect chain sampled at clip-local tick (empty when none).
     pub effects: Vec<ResolvedPass>,
     /// Shaped alpha mask (media clips only).
-    pub mask: Option<Mask>,
+    pub mask: Option<SceneMask>,
     /// Green-screen keying (media clips only).
-    pub chroma_key: Option<ChromaKey>,
+    pub chroma_key: Option<SceneChromaKey>,
     /// Resolved color grade (filter preset + manual adjustments); `None` when
     /// the clip's look is identity.
     pub color_grade: Option<ColorGrade>,
@@ -190,6 +190,22 @@ pub struct SceneLayer {
     /// File-backed: the renderer parses and uploads the table on first use
     /// and skips missing/unparseable files gracefully.
     pub lut: Option<SceneLut>,
+}
+
+/// Mask values sampled at a clip-local tick.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneMask {
+    pub kind: MaskKind,
+    pub feather: f32,
+    pub invert: bool,
+}
+
+/// Chroma-key values sampled at a clip-local tick.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneChromaKey {
+    pub rgb: [u8; 3],
+    pub strength: f32,
+    pub shadow: f32,
 }
 
 /// A file-backed `.cube` LUT reference on a [`SceneLayer`].

@@ -34,9 +34,10 @@ use cutlass_text::{
 };
 
 use crate::animation::{apply_look_animations, is_per_character, scaled_ticks, text_knobs};
-use crate::grade::resolve_color_grade;
+use crate::grade::resolve_color_grade_at;
 use crate::scene::{
-    LayerSource, ResolvedPass, Scene, SceneLayer, SceneLut, SizeSpec, TextAnimation,
+    LayerSource, ResolvedPass, Scene, SceneChromaKey, SceneLayer, SceneLut, SceneMask, SizeSpec,
+    TextAnimation,
 };
 
 /// Vertical reference height that a generator's reference-pixel sizes (text
@@ -351,17 +352,27 @@ fn resolve_clip(
         Some((id, filter, adjust)) if id == clip.id => (filter, adjust),
         _ => (clip.filter.as_ref(), &clip.adjust),
     };
-    let color_grade = resolve_color_grade(filter, adjust);
+    let color_grade = resolve_color_grade_at(filter, adjust, local_tick);
     // File-backed `.cube` LUT (applied after the grade). Zero intensity is
     // identity — drop it here so downstream stages keep their fast paths.
     let lut = clip
         .lut
         .as_ref()
-        .filter(|l| l.intensity > 0.0)
+        .filter(|l| l.intensity.sample(local_tick) > 0.0)
         .map(|l| SceneLut {
             path: l.path.clone(),
-            intensity: l.intensity,
+            intensity: l.intensity.sample(local_tick),
         });
+    let mask = clip.mask.as_ref().map(|mask| SceneMask {
+        kind: mask.kind,
+        feather: mask.feather.sample(local_tick),
+        invert: mask.invert,
+    });
+    let chroma_key = clip.chroma_key.as_ref().map(|chroma| SceneChromaKey {
+        rgb: chroma.rgb,
+        strength: chroma.strength.sample(local_tick),
+        shadow: chroma.shadow.sample(local_tick),
+    });
 
     match &clip.content {
         ClipSource::Media { media, .. } => {
@@ -400,8 +411,8 @@ fn resolve_clip(
                 opacity,
                 uv,
                 effects,
-                mask: clip.mask,
-                chroma_key: clip.chroma_key,
+                mask,
+                chroma_key,
                 color_grade,
                 lut,
             }))
@@ -862,12 +873,20 @@ fn to_bezier(path: &ShapePath) -> BezierPath {
 
 /// Map a model [`ModelTextStyle`] onto a [`cutlass_text`] render style.
 ///
+/// Quantize layout-affecting metrics so slow keyframe ramps reuse shape /
+/// atlas caches instead of reshaping every frame (0.25px steps).
+fn quantize_layout_px(v: f32) -> f32 {
+    const STEP: f32 = 0.25;
+    (v / STEP).round() * STEP
+}
+
 /// Reference-pixel metrics are scaled against the 1080px authoring height.
 /// The raster remains ink-tight even when wrapping uses the canvas width;
 /// alignment is applied later to the finished bitmap's placement.
 fn map_text_style(style: &ModelTextStyle, cw: f32, ch: f32, tick: i64) -> TextStyle {
     let scale = ch / REFERENCE_HEIGHT;
-    let font_size = style.size.sample(tick) * scale;
+    let font_size = quantize_layout_px(style.size.sample(tick) * scale);
+    let letter_spacing = quantize_layout_px(style.letter_spacing.sample(tick) * scale);
     let family = if style.font.is_empty() {
         FontFamily::SansSerif
     } else {
@@ -889,10 +908,12 @@ fn map_text_style(style: &ModelTextStyle, cw: f32, ch: f32, tick: i64) -> TextSt
         .with_bold(style.bold)
         .with_italic(style.italic)
         .with_underline(style.underline)
-        .with_letter_spacing(style.letter_spacing.sample(tick) * scale)
+        .with_letter_spacing(letter_spacing)
         .with_align(align)
         .with_vertical_align(vertical_align)
-        .with_line_height(font_size * style.line_spacing.sample(tick));
+        .with_line_height(quantize_layout_px(
+            font_size * style.line_spacing.sample(tick),
+        ));
     if style.wrap {
         mapped = mapped.with_max_width(cw.max(1.0));
     }

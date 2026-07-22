@@ -48,7 +48,7 @@ pub type Map<K, V> = rustc_hash::FxHashMap<K, V>;
 
 pub use capabilities::{ClipAction, ClipCapabilities};
 pub use clip::{
-    AnimatedTransform, Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator,
+    AnimatedTransform, Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator, LookParam,
     MAX_CLIP_VOLUME, MAX_SHAPE_DIM, MAX_SPEED, MAX_STAR_POINTS, MAX_STROKE_WIDTH,
     MIN_CROP_FRACTION, MIN_SPEED, ParamValue, Replaceable, SHAPE_DROP_HEIGHT, SHAPE_DROP_WIDTH,
     SPEED_CURVE_SCALE, Shape, ShapeParam, ShapePath, ShapePathPoint, ShapeStroke, SlotMedia,

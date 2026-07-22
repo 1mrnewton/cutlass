@@ -69,27 +69,50 @@ pub(crate) fn preset_recipe(id: &str) -> Option<ColorGrade> {
 }
 
 /// Fold a clip's filter preset and manual adjustments into one compositor grade.
+#[cfg(test)]
 pub(crate) fn effective_grade(filter: Option<&Filter>, adjust: &ColorAdjustments) -> ColorGrade {
-    let intensity = filter.map(|f| clamp_unit(f.intensity)).unwrap_or(0.0);
+    effective_grade_at(filter, adjust, 0)
+}
+
+/// Fold a clip's filter preset and manual adjustments at a clip-local tick.
+pub(crate) fn effective_grade_at(
+    filter: Option<&Filter>,
+    adjust: &ColorAdjustments,
+    tick: i64,
+) -> ColorGrade {
+    let intensity = filter
+        .map(|f| clamp_unit(f.intensity.sample(tick)))
+        .unwrap_or(0.0);
     let preset = filter
         .and_then(|f| preset_recipe(&f.id))
         .unwrap_or(ColorGrade::IDENTITY);
 
     let mut grade = scale_grade(preset, intensity);
-    grade.exposure += clamp_adjust(adjust.exposure);
-    grade.brightness += clamp_adjust(adjust.brightness);
-    grade.contrast += clamp_adjust(adjust.contrast);
-    grade.saturation += clamp_adjust(adjust.saturation);
-    grade.temperature += clamp_adjust(adjust.temperature);
+    grade.exposure += clamp_adjust(adjust.exposure.sample(tick));
+    grade.brightness += clamp_adjust(adjust.brightness.sample(tick));
+    grade.contrast += clamp_adjust(adjust.contrast.sample(tick));
+    grade.saturation += clamp_adjust(adjust.saturation.sample(tick));
+    grade.temperature += clamp_adjust(adjust.temperature.sample(tick));
     clamp_grade(grade)
 }
 
 /// Resolve a grade for compositor submission. `None` is the identity fast path.
+#[cfg(test)]
 pub(crate) fn resolve_color_grade(
     filter: Option<&Filter>,
     adjust: &ColorAdjustments,
 ) -> Option<ColorGrade> {
     let grade = effective_grade(filter, adjust);
+    (!grade.is_identity()).then_some(grade)
+}
+
+/// Resolve a grade at a clip-local tick.
+pub(crate) fn resolve_color_grade_at(
+    filter: Option<&Filter>,
+    adjust: &ColorAdjustments,
+    tick: i64,
+) -> Option<ColorGrade> {
+    let grade = effective_grade_at(filter, adjust, tick);
     (!grade.is_identity()).then_some(grade)
 }
 
@@ -149,7 +172,7 @@ mod tests {
     fn intensity_zero_with_neutral_adjust_yields_identity() {
         let filter = Filter {
             id: "mono".into(),
-            intensity: 0.0,
+            intensity: 0.0.into(),
         };
         let grade = effective_grade(Some(&filter), &ColorAdjustments::default());
         assert_eq!(grade, ColorGrade::IDENTITY);
@@ -178,14 +201,14 @@ mod tests {
     fn clamps_out_of_range_and_non_finite_inputs() {
         let filter = Filter {
             id: "vivid".into(),
-            intensity: f32::NAN,
+            intensity: f32::NAN.into(),
         };
         let adjust = ColorAdjustments {
-            saturation: f32::INFINITY,
-            brightness: 2.0,
-            contrast: -3.0,
-            exposure: f32::NAN,
-            temperature: 1.5,
+            saturation: f32::INFINITY.into(),
+            brightness: 2.0.into(),
+            contrast: (-3.0).into(),
+            exposure: f32::NAN.into(),
+            temperature: 1.5.into(),
         };
         let grade = effective_grade(Some(&filter), &adjust);
         assert_eq!(grade.brightness, 1.0);
@@ -196,10 +219,10 @@ mod tests {
 
         let filter = Filter {
             id: "mono".into(),
-            intensity: 1.0,
+            intensity: 1.0.into(),
         };
         let adjust = ColorAdjustments {
-            saturation: -1.5,
+            saturation: (-1.5).into(),
             ..ColorAdjustments::default()
         };
         let grade = effective_grade(Some(&filter), &adjust);
@@ -211,10 +234,10 @@ mod tests {
     fn preset_scaled_by_intensity_plus_adjustments() {
         let filter = Filter {
             id: "warm".into(),
-            intensity: 0.5,
+            intensity: 0.5.into(),
         };
         let adjust = ColorAdjustments {
-            brightness: 0.1,
+            brightness: 0.1.into(),
             ..ColorAdjustments::default()
         };
         let grade = effective_grade(Some(&filter), &adjust);
@@ -227,7 +250,7 @@ mod tests {
         let grade = resolve_color_grade(
             Some(&Filter {
                 id: "mono".into(),
-                intensity: 0.5,
+                intensity: 0.5.into(),
             }),
             &ColorAdjustments::default(),
         )

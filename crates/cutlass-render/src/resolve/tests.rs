@@ -558,7 +558,7 @@ fn resolve_with_substitutes_transform_and_generator_for_one_clip() {
             clip,
             None,
             &ColorAdjustments {
-                brightness: 0.25,
+                brightness: 0.25.into(),
                 ..ColorAdjustments::default()
             },
         )),
@@ -571,7 +571,7 @@ fn resolve_with_substitutes_transform_and_generator_for_one_clip() {
         Some(effective_grade(
             None,
             &ColorAdjustments {
-                brightness: 0.25,
+                brightness: 0.25.into(),
                 ..ColorAdjustments::default()
             }
         ))
@@ -881,7 +881,7 @@ fn clip_adjust_and_filter_flow_into_scene_layer_grade() {
         .set_clip_adjustments(
             adjust_clip,
             ColorAdjustments {
-                saturation: -1.0,
+                saturation: (-1.0).into(),
                 ..ColorAdjustments::default()
             },
         )
@@ -891,7 +891,7 @@ fn clip_adjust_and_filter_flow_into_scene_layer_grade() {
     let expected = effective_grade(
         None,
         &ColorAdjustments {
-            saturation: -1.0,
+            saturation: (-1.0).into(),
             ..ColorAdjustments::default()
         },
     );
@@ -910,7 +910,7 @@ fn clip_adjust_and_filter_flow_into_scene_layer_grade() {
         .unwrap();
     let filter = Filter {
         id: "mono".into(),
-        intensity: 0.8,
+        intensity: 0.8.into(),
     };
     project
         .set_clip_filter(filter_clip, Some(filter.clone()))
@@ -946,8 +946,8 @@ fn mask_and_chroma_key_reach_media_layer() {
             clip,
             Some(ChromaKey {
                 rgb: [0, 255, 0],
-                strength: 0.5,
-                shadow: 0.0,
+                strength: 0.5.into(),
+                shadow: 0.0.into(),
             }),
         )
         .unwrap();
@@ -1051,7 +1051,7 @@ fn adjustment_lane_resolves_to_canvas_pass_above_lower_layers() {
         .set_clip_adjustments(
             bar,
             ColorAdjustments {
-                saturation: -1.0,
+                saturation: (-1.0).into(),
                 ..ColorAdjustments::default()
             },
         )
@@ -1068,7 +1068,7 @@ fn adjustment_lane_resolves_to_canvas_pass_above_lower_layers() {
         Some(effective_grade(
             None,
             &ColorAdjustments {
-                saturation: -1.0,
+                saturation: (-1.0).into(),
                 ..ColorAdjustments::default()
             },
         ))
@@ -1094,7 +1094,7 @@ fn filter_lane_resolves_to_canvas_pass_grade() {
         .unwrap();
     let filter = Filter {
         id: "mono".into(),
-        intensity: 1.0,
+        intensity: 1.0.into(),
     };
     project.set_clip_filter(bar, Some(filter.clone())).unwrap();
 
@@ -1164,7 +1164,7 @@ fn identity_or_inactive_lane_passes_are_elided() {
         .set_clip_adjustments(
             bar,
             ColorAdjustments {
-                exposure: 1.0,
+                exposure: 1.0.into(),
                 ..ColorAdjustments::default()
             },
         )
@@ -1205,7 +1205,7 @@ fn gesture_partitions_fall_back_when_canvas_pass_sits_above_clip() {
         .set_clip_adjustments(
             bar,
             ColorAdjustments {
-                exposure: 1.0,
+                exposure: 1.0.into(),
                 ..ColorAdjustments::default()
             },
         )
@@ -1275,7 +1275,7 @@ fn transition_between_canvas_passes_falls_back_to_plain_clip() {
             .set_clip_adjustments(
                 clip,
                 ColorAdjustments {
-                    exposure: 1.0,
+                    exposure: 1.0.into(),
                     ..ColorAdjustments::default()
                 },
             )

@@ -29,7 +29,7 @@ pub(super) fn lower_mask(wire: &WireMask) -> Result<Mask, Rejection> {
     }
     let mask = Mask {
         kind: lower_mask_kind(wire.kind),
-        feather: feather as f32,
+        feather: (feather as f32).into(),
         invert: wire.invert.unwrap_or(false),
     };
     mask.validate().map_err(|e| Rejection::new(e.to_string()))?;
@@ -48,8 +48,8 @@ pub(super) fn lower_chroma(wire: &WireChromaKey) -> Result<ChromaKey, Rejection>
     }
     let chroma = ChromaKey {
         rgb: wire.rgb,
-        strength: strength as f32,
-        shadow: shadow as f32,
+        strength: (strength as f32).into(),
+        shadow: (shadow as f32).into(),
     };
     chroma
         .validate()
@@ -74,7 +74,7 @@ pub(super) fn lower_filter(wire: &crate::wire::WireFilter) -> Result<Filter, Rej
     }
     let filter = Filter {
         id: wire.id.clone(),
-        intensity: intensity as f32,
+        intensity: (intensity as f32).into(),
     };
     filter.validate().map_err(|e| {
         let ids = filter_catalog()

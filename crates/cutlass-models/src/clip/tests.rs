@@ -66,7 +66,7 @@ fn extracted_audio_companion_copies_only_audio_and_retime_state() {
     source.flip_h = true;
     source.filter = Some(crate::look::Filter {
         id: "vivid".into(),
-        intensity: 0.4,
+        intensity: 0.4.into(),
     });
     source.animation_in = Some(crate::look::AnimationRef::new("fade_in"));
     source.replaceable = Some(Replaceable::new(3));

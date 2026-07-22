@@ -216,7 +216,7 @@ pub(super) fn dispatch(
             adjust,
             tick,
         } => {
-            apply_look_override(engine, &clip, &filter_id, intensity, adjust);
+            apply_look_override(engine, &clip, &filter_id, intensity, &adjust);
             render_frame(
                 engine,
                 tl_rate,

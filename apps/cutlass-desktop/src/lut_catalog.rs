@@ -153,12 +153,12 @@ impl Worker {
             let entries: Vec<CatalogEntry> = rows
                 .iter()
                 .map(|(id, name)| CatalogEntry {
-                id: id.as_str().into(),
-                label: name.as_str().into(),
-                has_speed: false,
-                has_intensity: false,
-                has_stagger: false,
-            })
+                    id: id.as_str().into(),
+                    label: name.as_str().into(),
+                    has_speed: false,
+                    has_intensity: false,
+                    has_stagger: false,
+                })
                 .collect();
             backend.set_lut_catalog(ModelRc::new(VecModel::from(entries)));
             backend.set_lut_status(status.as_str().into());

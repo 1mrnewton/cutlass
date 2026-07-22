@@ -134,7 +134,7 @@ pub(super) fn apply_look_override(
     clip: &str,
     filter_id: &str,
     intensity: f32,
-    adjust: ColorAdjustments,
+    adjust: &ColorAdjustments,
 ) {
     match parse_raw_id(clip).map(ClipId::from_raw) {
         Some(id) => engine.set_look_override(Some((
@@ -153,17 +153,17 @@ pub(super) fn filter_from_ui(filter_id: &str, intensity: f32) -> Option<Filter> 
     }
     Some(Filter {
         id: id.to_string(),
-        intensity: clamp_unit(intensity),
+        intensity: clamp_unit(intensity).into(),
     })
 }
 
-pub(super) fn sanitize_adjustments(adjust: ColorAdjustments) -> ColorAdjustments {
+pub(super) fn sanitize_adjustments(adjust: &ColorAdjustments) -> ColorAdjustments {
     ColorAdjustments {
-        brightness: clamp_signed_unit(adjust.brightness),
-        contrast: clamp_signed_unit(adjust.contrast),
-        saturation: clamp_signed_unit(adjust.saturation),
-        exposure: clamp_signed_unit(adjust.exposure),
-        temperature: clamp_signed_unit(adjust.temperature),
+        brightness: clamp_signed_unit(adjust.brightness.sample(0)).into(),
+        contrast: clamp_signed_unit(adjust.contrast.sample(0)).into(),
+        saturation: clamp_signed_unit(adjust.saturation.sample(0)).into(),
+        exposure: clamp_signed_unit(adjust.exposure.sample(0)).into(),
+        temperature: clamp_signed_unit(adjust.temperature.sample(0)).into(),
     }
 }
 

@@ -3,8 +3,9 @@
 use std::path::Path;
 
 use crate::clip::{
-    Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator, ParamValue, Replaceable,
-    SlotMedia, look_animation_combo_period_ticks, look_animation_window_ticks, split_speed_curve,
+    Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator, LookParam, ParamValue,
+    Replaceable, SlotMedia, look_animation_combo_period_ticks, look_animation_window_ticks,
+    split_speed_curve,
 };
 use crate::effects::EffectInstance;
 use crate::error::ModelError;
@@ -25,6 +26,65 @@ use crate::track::{Track, TrackKind};
 use crate::transition::Transition;
 
 use super::Project;
+
+fn look_param_mut(clip: &mut Clip, param: LookParam) -> Result<&mut Param<f32>, ModelError> {
+    let missing =
+        |name: &str| ModelError::InvalidParam(format!("{name} is not enabled on this clip"));
+    match param {
+        LookParam::FilterIntensity => clip
+            .filter
+            .as_mut()
+            .map(|filter| &mut filter.intensity)
+            .ok_or_else(|| missing("filter")),
+        LookParam::LutIntensity => clip
+            .lut
+            .as_mut()
+            .map(|lut| &mut lut.intensity)
+            .ok_or_else(|| missing("LUT")),
+        LookParam::AdjustBrightness => Ok(&mut clip.adjust.brightness),
+        LookParam::AdjustContrast => Ok(&mut clip.adjust.contrast),
+        LookParam::AdjustSaturation => Ok(&mut clip.adjust.saturation),
+        LookParam::AdjustExposure => Ok(&mut clip.adjust.exposure),
+        LookParam::AdjustTemperature => Ok(&mut clip.adjust.temperature),
+        LookParam::MaskFeather => clip
+            .mask
+            .as_mut()
+            .map(|mask| &mut mask.feather)
+            .ok_or_else(|| missing("mask")),
+        LookParam::ChromaStrength => clip
+            .chroma_key
+            .as_mut()
+            .map(|chroma| &mut chroma.strength)
+            .ok_or_else(|| missing("chroma key")),
+        LookParam::ChromaShadow => clip
+            .chroma_key
+            .as_mut()
+            .map(|chroma| &mut chroma.shadow)
+            .ok_or_else(|| missing("chroma key")),
+    }
+}
+
+fn validate_look_value(param: LookParam, value: f32) -> Result<(), ModelError> {
+    let valid = match param {
+        LookParam::FilterIntensity
+        | LookParam::LutIntensity
+        | LookParam::MaskFeather
+        | LookParam::ChromaStrength
+        | LookParam::ChromaShadow => (0.0..=1.0).contains(&value),
+        LookParam::AdjustBrightness
+        | LookParam::AdjustContrast
+        | LookParam::AdjustSaturation
+        | LookParam::AdjustExposure
+        | LookParam::AdjustTemperature => (-1.0..=1.0).contains(&value),
+    };
+    if value.is_finite() && valid {
+        Ok(())
+    } else {
+        Err(ModelError::InvalidParam(format!(
+            "look parameter {param:?} = {value} is out of range"
+        )))
+    }
+}
 
 impl Project {
     /// Set a clip's spatial transform (preview move/scale/rotate, inspector
@@ -178,6 +238,12 @@ impl Project {
                 .set_shape_param_keyframe(param, tick, value, easing),
             ClipParam::Text { param } => super::helpers::generator_mut(clip)?
                 .set_text_param_keyframe(param, tick, value, easing),
+            ClipParam::Look { param } => {
+                let value = super::helpers::scalar_param(value)?;
+                validate_look_value(param, value)?;
+                look_param_mut(clip, param)?.set_keyframe(tick, value, easing);
+                Ok(())
+            }
             _ => clip
                 .transform
                 .set_param_keyframe(param, tick, value, easing),
@@ -223,6 +289,16 @@ impl Project {
             ClipParam::Text { param } => {
                 super::helpers::generator_mut(clip)?.remove_text_param_keyframe(param, tick)
             }
+            ClipParam::Look { param } => {
+                if look_param_mut(clip, param)?.remove_keyframe(tick) {
+                    Ok(())
+                } else {
+                    Err(ModelError::InvalidParam(format!(
+                        "no {param:?} keyframe at {} to remove",
+                        at.value
+                    )))
+                }
+            }
             _ => clip.transform.remove_param_keyframe(param, tick),
         }
     }
@@ -260,6 +336,12 @@ impl Project {
             }
             ClipParam::Text { param } => {
                 super::helpers::generator_mut(clip)?.set_text_param_constant(param, value)
+            }
+            ClipParam::Look { param } => {
+                let value = super::helpers::scalar_param(value)?;
+                validate_look_value(param, value)?;
+                look_param_mut(clip, param)?.set_constant(value);
+                Ok(())
             }
             _ => clip.transform.set_param_constant(param, value),
         }

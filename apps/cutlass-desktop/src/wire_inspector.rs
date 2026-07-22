@@ -181,8 +181,8 @@ pub(crate) fn wire_inspector(
         });
 
     let set_animation_handle = preview_worker.handle();
-    app.global::<InspectorBackend>()
-        .on_set_clip_animation(move |clip_id, slot, animation_id, speed, intensity, stagger| {
+    app.global::<InspectorBackend>().on_set_clip_animation(
+        move |clip_id, slot, animation_id, speed, intensity, stagger| {
             set_animation_handle.set_clip_animation(
                 clip_id.to_string(),
                 slot.to_string(),
@@ -191,7 +191,8 @@ pub(crate) fn wire_inspector(
                 intensity,
                 stagger,
             );
-        });
+        },
+    );
 
     let set_adjust_handle = preview_worker.handle();
     app.global::<InspectorBackend>().on_set_clip_adjust(
@@ -199,11 +200,11 @@ pub(crate) fn wire_inspector(
             set_adjust_handle.set_clip_adjust(
                 clip_id.to_string(),
                 cutlass_models::ColorAdjustments {
-                    brightness,
-                    contrast,
-                    saturation,
-                    exposure,
-                    temperature,
+                    brightness: brightness.into(),
+                    contrast: contrast.into(),
+                    saturation: saturation.into(),
+                    exposure: exposure.into(),
+                    temperature: temperature.into(),
                 },
             );
         },
@@ -225,11 +226,11 @@ pub(crate) fn wire_inspector(
                 filter_id.to_string(),
                 intensity,
                 cutlass_models::ColorAdjustments {
-                    brightness,
-                    contrast,
-                    saturation,
-                    exposure,
-                    temperature,
+                    brightness: brightness.into(),
+                    contrast: contrast.into(),
+                    saturation: saturation.into(),
+                    exposure: exposure.into(),
+                    temperature: temperature.into(),
                 },
                 i64::from(tick),
             );

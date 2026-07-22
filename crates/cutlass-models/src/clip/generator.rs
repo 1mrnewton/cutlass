@@ -11,6 +11,12 @@ mod params;
 
 /// What a clip draws. Either a trimmed range of imported media, or synthetic
 /// content rendered by the engine (text, shapes, solids, ...).
+///
+/// `Generated` dwarfs `Media` because [`Generator`] carries the full text
+/// style / shape params inline. That's deliberate: projects hold at most a
+/// few hundred clips and the resolver walks them every frame, so inline
+/// storage beats boxing (one less pointer chase on the hot path).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClipSource {
     /// A trimmed portion of a [`MediaSource`](crate::MediaSource).

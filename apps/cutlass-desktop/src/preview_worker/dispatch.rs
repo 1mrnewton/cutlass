@@ -211,16 +211,16 @@ pub(super) fn dispatch(
             speed,
             intensity,
             stagger,
-        } => set_clip_animation_and_publish(
-            engine,
-            &clip,
-            &slot,
-            &animation_id,
-            speed,
-            intensity,
-            stagger,
-            ui,
-        ),
+        } => {
+            // Empty id ⇔ clear the slot.
+            let animation = (!animation_id.is_empty()).then_some(cutlass_models::AnimationRef {
+                id: animation_id,
+                speed,
+                intensity,
+                stagger,
+            });
+            set_clip_animation_and_publish(engine, &clip, &slot, animation, ui)
+        }
         // Only reached when a look-preview burst interleaves with another
         // coalesced gesture's drain. The dedicated loop arm coalesces the
         // common case.

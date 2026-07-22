@@ -502,6 +502,12 @@ pub enum EditCommand {
 /// Untagged on the wire: the flat `{"type": …}` object of the inner enums is
 /// the whole format (variant names are disjoint across the two sets), so
 /// callers never spell the project/edit split in JSON.
+///
+/// `Edit` outweighs `Project` because some edits (layer styles, masks)
+/// carry whole param blocks inline. Commands are transient — built once per
+/// user action, applied, dropped — so boxing buys nothing and would churn
+/// every construction site.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Command {

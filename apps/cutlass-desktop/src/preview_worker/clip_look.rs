@@ -271,10 +271,7 @@ pub(super) fn set_clip_animation_and_publish(
     engine: &mut Engine,
     clip: &str,
     slot: &str,
-    animation_id: &str,
-    speed: f32,
-    intensity: f32,
-    stagger: f32,
+    animation: Option<cutlass_models::AnimationRef>,
     ui: &UiSink,
 ) {
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
@@ -285,25 +282,15 @@ pub(super) fn set_clip_animation_and_publish(
         error!(slot, "set-clip-animation ignored: unknown slot");
         return;
     };
-    let animation = if animation_id.is_empty() {
-        None
-    } else {
-        Some(cutlass_models::AnimationRef {
-            id: animation_id.to_string(),
-            speed,
-            intensity,
-            stagger,
-        })
-    };
     if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipAnimation {
         clip: clip_id,
         slot: animation_slot,
-        animation,
+        animation: animation.clone(),
     })) {
-        error!(%clip_id, slot, animation_id, "set clip animation failed: {e}");
+        error!(%clip_id, slot, ?animation, "set clip animation failed: {e}");
         return;
     }
-    info!(%clip_id, slot, animation_id, speed, intensity, stagger, "set clip animation");
+    info!(%clip_id, slot, ?animation, "set clip animation");
     publish_projection(engine, ui);
 }
 

@@ -288,6 +288,23 @@ impl Generator {
                     )),
                 }
             }
+            TextParam::BackgroundColor | TextParam::BackgroundRadius => {
+                match &mut style.background {
+                    Some(background) => match param {
+                        TextParam::BackgroundRadius => f(
+                            TextParamTarget::Scalar(&mut background.radius),
+                            scalar(|v| validate_text_range(v, 0.0, 1.0, "text background radius")),
+                        ),
+                        _ => f(
+                            TextParamTarget::Color(&mut background.rgba),
+                            TextParamKind::Color,
+                        ),
+                    },
+                    None => Err(ModelError::InvalidParam(
+                        "text has no background — set one via SetGenerator first".into(),
+                    )),
+                }
+            }
         }
     }
 }

@@ -143,6 +143,18 @@ pub(crate) fn clip_param_value(
             },
             color(),
         ),
+        "text_background_color" => (
+            ClipParam::Text {
+                param: TextParam::BackgroundColor,
+            },
+            color(),
+        ),
+        "text_background_radius" => (
+            ClipParam::Text {
+                param: TextParam::BackgroundRadius,
+            },
+            ParamValue::Scalar(value_x),
+        ),
         "look_filter_intensity" => (
             ClipParam::Look {
                 param: LookParam::FilterIntensity,

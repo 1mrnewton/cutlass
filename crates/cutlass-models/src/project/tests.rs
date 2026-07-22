@@ -264,6 +264,77 @@ fn shape_params_keyframe_through_project_api() {
 }
 
 #[test]
+fn text_background_radius_keyframe_through_project_api() {
+    let mut project = Project::new("p", R24);
+    let track = project.add_track(TrackKind::Text, "T1");
+    let with_bg = project
+        .add_generated(
+            track,
+            Generator::Text {
+                content: "Card".into(),
+                style: crate::TextStyle {
+                    background: Some(crate::TextBackground::default()),
+                    ..Default::default()
+                },
+            },
+            tr(100, 48),
+        )
+        .unwrap();
+    let radius = ClipParam::Text {
+        param: crate::TextParam::BackgroundRadius,
+    };
+    project
+        .set_param_keyframe(
+            with_bg,
+            radius,
+            rt(100),
+            ParamValue::Scalar(0.0),
+            Easing::Linear,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            with_bg,
+            radius,
+            rt(140),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+        )
+        .unwrap();
+    let ClipSource::Generated(Generator::Text { style, .. }) =
+        &project.clip(with_bg).unwrap().content
+    else {
+        panic!("expected text");
+    };
+    assert!((style.background.as_ref().unwrap().radius.sample(20) - 0.5).abs() < 1e-5);
+
+    assert!(matches!(
+        project.set_param_keyframe(
+            with_bg,
+            radius,
+            rt(120),
+            ParamValue::Scalar(1.5),
+            Easing::Linear,
+        ),
+        Err(ModelError::InvalidParam(_))
+    ));
+
+    let bare = project
+        .add_generated(track, Generator::text("Bare"), tr(200, 48))
+        .unwrap();
+    assert!(matches!(
+        project.set_param_keyframe(
+            bare,
+            radius,
+            rt(200),
+            ParamValue::Scalar(0.5),
+            Easing::Linear,
+        ),
+        Err(ModelError::InvalidParam(_))
+    ));
+}
+
+#[test]
 fn add_generated_rejects_invalid_shape() {
     let mut project = Project::new("p", R24);
     let track = project.add_track(TrackKind::Sticker, "S1");

@@ -93,19 +93,19 @@ impl Default for TextStroke {
 }
 
 /// A filled card drawn behind the title block.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextBackground {
     /// Card color (RGBA, 0-255); the alpha doubles as the opacity slider.
-    pub rgba: [u8; 4],
+    pub rgba: Param<[u8; 4]>,
     /// Corner rounding, `0.0` (square) ..= `1.0` (pill).
-    pub radius: f32,
+    pub radius: Param<f32>,
 }
 
 impl Default for TextBackground {
     fn default() -> Self {
         Self {
-            rgba: [0, 0, 0, 255],
-            radius: 0.0,
+            rgba: Param::Constant([0, 0, 0, 255]),
+            radius: Param::Constant(0.0),
         }
     }
 }
@@ -249,7 +249,11 @@ impl TextStyle {
             })?;
         }
         if let Some(background) = &self.background {
-            validate_range(background.radius, 0.0, 1.0, "text background radius")?;
+            background.rgba.validate_shape()?;
+            background.radius.validate_shape()?;
+            background
+                .radius
+                .for_each_value(|v| validate_range(*v, 0.0, 1.0, "text background radius"))?;
         }
         if let Some(shadow) = &self.shadow {
             shadow.rgba.validate_shape()?;

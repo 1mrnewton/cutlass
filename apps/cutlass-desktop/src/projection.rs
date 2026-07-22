@@ -1284,7 +1284,7 @@ fn text_style_to_ui(style: &EngineTextStyle) -> TextClipStyle {
     let opaque = |rgba: [u8; 4]| Color::from_rgb_u8(rgba[0], rgba[1], rgba[2]);
     let alpha01 = |rgba: [u8; 4]| rgba[3] as f32 / 255.0;
     let stroke = style.stroke.clone().unwrap_or_default();
-    let background = style.background.unwrap_or_default();
+    let background = style.background.clone().unwrap_or_default();
     let shadow = style.shadow.clone().unwrap_or_default();
     TextClipStyle {
         font: style.font.clone().into(),
@@ -1306,9 +1306,9 @@ fn text_style_to_ui(style: &EngineTextStyle) -> TextClipStyle {
         stroke_color: opaque(stroke.rgba.sample(0)),
         stroke_width: stroke.width.sample(0),
         background_enabled: style.background.is_some(),
-        background_color: opaque(background.rgba),
-        background_opacity: alpha01(background.rgba),
-        background_radius: background.radius,
+        background_color: opaque(background.rgba.sample(0)),
+        background_opacity: alpha01(background.rgba.sample(0)),
+        background_radius: background.radius.sample(0),
         shadow_enabled: style.shadow.is_some(),
         shadow_color: opaque(shadow.rgba.sample(0)),
         shadow_opacity: alpha01(shadow.rgba.sample(0)),

@@ -246,8 +246,8 @@ pub(super) fn map_text_style(style: &ModelTextStyle, cw: f32, ch: f32, tick: i64
     }
     if let Some(background) = &style.background {
         mapped = mapped.with_background(TextBackground {
-            rgba: background.rgba,
-            radius: background.radius,
+            rgba: background.rgba.sample(tick),
+            radius: background.radius.sample(tick),
         });
     }
     if let Some(shadow) = &style.shadow {

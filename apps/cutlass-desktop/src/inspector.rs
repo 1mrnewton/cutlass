@@ -68,8 +68,8 @@ pub fn text_style_from_ui(style: &TextClipStyle) -> ModelTextStyle {
             width: style.stroke_width.into(),
         }),
         background: style.background_enabled.then(|| TextBackground {
-            rgba: rgb_alpha(style.background_color, style.background_opacity),
-            radius: style.background_radius,
+            rgba: rgb_alpha(style.background_color, style.background_opacity).into(),
+            radius: style.background_radius.into(),
         }),
         shadow: style.shadow_enabled.then(|| TextShadow {
             rgba: rgb_alpha(style.shadow_color, style.shadow_opacity).into(),

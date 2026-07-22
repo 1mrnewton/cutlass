@@ -129,8 +129,8 @@ fn text_generator_maps_style_and_defers_size() {
             width: 8.0.into(),
         }),
         background: Some(cutlass_models::TextBackground {
-            rgba: [0, 0, 255, 200],
-            radius: 0.5,
+            rgba: [0, 0, 255, 200].into(),
+            radius: 0.5.into(),
         }),
         shadow: Some(cutlass_models::TextShadow {
             rgba: [0, 0, 0, 230].into(),

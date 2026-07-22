@@ -1705,8 +1705,8 @@ fn text_style_roundtrips_through_serde() {
             width: 8.0.into(),
         }),
         background: Some(TextBackground {
-            rgba: [255, 255, 0, 200],
-            radius: 0.5,
+            rgba: [255, 255, 0, 200].into(),
+            radius: 0.5.into(),
         }),
         shadow: Some(TextShadow {
             rgba: [0, 0, 0, 230].into(),
@@ -1737,6 +1737,45 @@ fn text_style_roundtrips_through_serde() {
 }
 
 #[test]
+fn legacy_bare_text_background_json_loads_as_constants() {
+    // Pre-Param saves wrote bare rgba/radius; Constant serializes identically.
+    let json = r#"{"rgba":[0,0,0,255],"radius":0.5}"#;
+    let background: TextBackground = serde_json::from_str(json).expect("legacy background");
+    assert_eq!(
+        background,
+        TextBackground {
+            rgba: Param::Constant([0, 0, 0, 255]),
+            radius: Param::Constant(0.5),
+        }
+    );
+}
+
+#[test]
+fn keyframed_text_background_rgba_roundtrips() {
+    let background = TextBackground {
+        rgba: Param::Keyframed {
+            keyframes: vec![
+                Keyframe {
+                    tick: 0,
+                    value: [0, 0, 0, 255],
+                    easing: Easing::Linear,
+                },
+                Keyframe {
+                    tick: 10,
+                    value: [255, 0, 0, 255],
+                    easing: Easing::Linear,
+                },
+            ],
+        },
+        radius: Param::Constant(0.25),
+    };
+    let json = serde_json::to_string(&background).expect("serialize");
+    let loaded: TextBackground = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(loaded, background);
+    assert_eq!(loaded.rgba.sample(5), [128, 0, 0, 255]);
+}
+
+#[test]
 fn text_generator_validation_rejects_unsafe_metrics() {
     let invalid = |style| {
         Generator::Text {
@@ -1764,8 +1803,8 @@ fn text_generator_validation_rejects_unsafe_metrics() {
     }));
     assert!(invalid(TextStyle {
         background: Some(TextBackground {
-            rgba: [0, 0, 0, 255],
-            radius: 1.01,
+            rgba: [0, 0, 0, 255].into(),
+            radius: 1.01.into(),
         }),
         ..Default::default()
     }));
@@ -1786,8 +1825,8 @@ fn text_generator_validation_rejects_unsafe_metrics() {
                 width: 40.0.into(),
             }),
             background: Some(TextBackground {
-                rgba: [0, 0, 0, 200],
-                radius: 1.0,
+                rgba: [0, 0, 0, 200].into(),
+                radius: 1.0.into(),
             }),
             shadow: Some(TextShadow {
                 rgba: [0, 0, 0, 230].into(),

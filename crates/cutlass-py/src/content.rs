@@ -162,8 +162,8 @@ impl TextBackground {
     fn new(color: &Bound<'_, PyAny>, radius: f32) -> PyResult<Self> {
         Ok(Self {
             inner: ModelTextBackground {
-                rgba: parse_color(color)?,
-                radius,
+                rgba: parse_color(color)?.into(),
+                radius: radius.into(),
             },
         })
     }

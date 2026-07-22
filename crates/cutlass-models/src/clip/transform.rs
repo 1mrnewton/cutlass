@@ -187,6 +187,11 @@ pub enum TextParam {
     ShadowBlur,
     ShadowDistance,
     ShadowColor,
+    /// Background card color. Color; requires a background block.
+    BackgroundColor,
+    /// Background card corner rounding (`0` … `1`). Scalar; requires a
+    /// background block.
+    BackgroundRadius,
 }
 
 /// The animatable properties in a clip's color look / mask.

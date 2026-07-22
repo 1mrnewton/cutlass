@@ -14,6 +14,8 @@ pub(crate) struct PassRegistry {
     pub blur_v: wgpu::RenderPipeline,
     pub vignette: wgpu::RenderPipeline,
     pub pixelate: wgpu::RenderPipeline,
+    pub color_overlay: wgpu::RenderPipeline,
+    pub duotone: wgpu::RenderPipeline,
     pub crossfade: wgpu::RenderPipeline,
     pub wipe: wgpu::RenderPipeline,
     pub grade: wgpu::RenderPipeline,
@@ -140,6 +142,18 @@ impl PassRegistry {
             &effect_layout,
             include_str!("../../shaders/effect_pixelate.wgsl"),
         );
+        let color_overlay = build_effect_pipeline(
+            device,
+            "cutlass.color_overlay",
+            &effect_layout,
+            include_str!("../../shaders/effect_color_overlay.wgsl"),
+        );
+        let duotone = build_effect_pipeline(
+            device,
+            "cutlass.duotone",
+            &effect_layout,
+            include_str!("../../shaders/effect_duotone.wgsl"),
+        );
         let crossfade = build_transition_pipeline(
             device,
             "cutlass.crossfade",
@@ -192,6 +206,8 @@ impl PassRegistry {
             blur_v,
             vignette,
             pixelate,
+            color_overlay,
+            duotone,
             crossfade,
             wipe,
             grade,
@@ -219,6 +235,8 @@ impl PassRegistry {
             "gaussian_blur" => &self.blur_h,
             "vignette" => &self.vignette,
             "pixelate" => &self.pixelate,
+            "color_overlay" => &self.color_overlay,
+            "duotone" => &self.duotone,
             _ => &self.passthrough,
         }
     }

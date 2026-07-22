@@ -187,6 +187,15 @@ const CATALOG: &[EffectSpec] = &[
             scalar("amount", "Amount", 0.5, 0.0, 1.0),
         ],
     },
+    EffectSpec {
+        id: "duotone",
+        label: "Duotone",
+        params: &[
+            color("shadow_color", "Shadow", [20, 16, 60, 255]),
+            color("highlight_color", "Highlight", [255, 220, 160, 255]),
+            scalar("intensity", "Intensity", 1.0, 0.0, 1.0),
+        ],
+    },
 ];
 
 /// Every effect the model knows about (validation + UI browsing).

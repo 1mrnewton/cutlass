@@ -15,8 +15,11 @@ use cutlass_compositor::{
     ColorGrade, CompositeLayer, Compositor, CompositorConfig, GpuContext, LayerChromaKey,
     LayerEffects, LayerMask, LayerPlacement, PassInstance, mask_kind,
 };
-use cutlass_core::RationalTime;
+use cutlass_core::{RationalTime, RgbaImage};
 use cutlass_decoder::{OutputMode, open_video_decoder, probe};
+use cutlass_models::AnimationSlot;
+use cutlass_render::{TextAnimation, text_anim_bench};
+use cutlass_text::{ClusterBox, ShapedText};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -25,6 +28,10 @@ fn main() {
         .map(PathBuf::from)
         .expect("usage: composite_bench <media> [frames]");
     let frames: i64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(60);
+
+    // CPU-only glyph-instance path — useful even when GPU / media is unavailable.
+    bench_animated_text_cpu(frames.max(1) as usize);
+    println!();
 
     let gpu = match GpuContext::new_headless_blocking() {
         Ok(g) => g,
@@ -79,6 +86,46 @@ fn main() {
         );
         println!();
     }
+}
+
+/// Per-cluster text animation (shape → deltas → glyph instances). No GPU.
+fn bench_animated_text_cpu(iters: usize) {
+    println!("=== animated text (CPU: cluster_deltas + place_clusters) ===");
+    const N: usize = 128;
+    let shaped = ShapedText {
+        extent: ((N as u32) * 10, 24),
+        clusters: (0..N)
+            .map(|i| ClusterBox {
+                text_range: i..i + 1,
+                line: 0,
+                offset: [i as f32 * 10.0, 0.0],
+                baseline: 18.0,
+                image: RgbaImage::new(8, 16, vec![255; 8 * 16 * 4]),
+            })
+            .collect(),
+    };
+    let anim = TextAnimation {
+        id: "wave".into(),
+        slot: AnimationSlot::Combo,
+        t: 0.42,
+        intensity: 1.1,
+        stagger: 0.9,
+    };
+
+    let mut samples = Vec::with_capacity(iters);
+    let total = Instant::now();
+    for i in 0..iters {
+        let mut a = anim.clone();
+        a.t = (i as f32 / iters as f32).fract();
+        let start = Instant::now();
+        let deltas = text_anim_bench::cluster_deltas(&shaped, &a);
+        let instances =
+            text_anim_bench::place_clusters(&shaped, &deltas, [32.0, 48.0], 1.0, 0.0, 1.0);
+        std::hint::black_box(instances.len());
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    let stats = Stats::from_samples(samples, total.elapsed().as_secs_f64());
+    stats.print(&format!("  wave {N} clusters × {iters}"));
 }
 
 fn prime_frame(path: &Path, mode: OutputMode) -> Option<cutlass_core::VideoFrame> {

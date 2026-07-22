@@ -24,8 +24,13 @@ tempfile = "3"
 serde_json.workspace = true
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 cutlass-compositor = { path = "../cutlass-compositor" }
 cutlass-core = { path = "../cutlass-core" }
 # The zero-copy parity test inspects the adapter backend to skip on non-Metal
 # (software) hosts where the Apple import path doesn't apply.
 wgpu = { workspace = true }
+
+[[bench]]
+name = "text_anim"
+harness = false

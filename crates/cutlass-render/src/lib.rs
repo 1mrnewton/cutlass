@@ -36,6 +36,8 @@ pub use export::{
 pub use export_audio::{EXPORT_AUDIO_CHANNELS, EXPORT_AUDIO_RATE, ExportAudioMixer};
 pub use lut_pack::{STARTER_LUT_SIZE, StarterLut, starter_lut_pack};
 pub use render::{FrameStats, GestureFrames, Renderer, SeekPolicy};
+#[doc(hidden)]
+pub use render::text_anim_bench;
 pub use resolve::{
     GESTURE_IDENTITY_TRANSFORM, GestureScenePartition, ResolveOverrides, canvas_size, resolve,
     resolve_gesture_partitions, resolve_with,

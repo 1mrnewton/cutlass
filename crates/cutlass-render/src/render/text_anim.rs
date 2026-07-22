@@ -13,7 +13,7 @@ use crate::scene::TextAnimation;
 
 /// Multiplicative / additive delta applied to one cluster's rest placement.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct ClusterDelta {
+pub struct ClusterDelta {
     /// Offset from rest center, in *run* pixels (scaled later).
     pub position: [f32; 2],
     pub scale: f32,
@@ -42,7 +42,7 @@ impl ClusterDelta {
 }
 
 /// Compute per-cluster deltas for `anim` over `shaped`.
-pub(super) fn cluster_deltas(shaped: &ShapedText, anim: &TextAnimation) -> Vec<ClusterDelta> {
+pub fn cluster_deltas(shaped: &ShapedText, anim: &TextAnimation) -> Vec<ClusterDelta> {
     let n = shaped.clusters.len().max(1) as f32;
     shaped
         .clusters
@@ -213,7 +213,7 @@ fn bounce_out(t: f32) -> f32 {
 /// alignment). `scale` is the bitmap scale factor. `layer_rotation` /
 /// `layer_opacity` are the clip's whole-layer transform (already excluding
 /// per-character look presets).
-pub(super) fn place_clusters(
+pub fn place_clusters(
     shaped: &ShapedText,
     deltas: &[ClusterDelta],
     origin: [f32; 2],

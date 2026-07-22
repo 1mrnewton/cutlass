@@ -11,6 +11,12 @@ mod media_cache;
 mod realize;
 mod text_anim;
 
+/// Hot-path helpers exposed for Criterion benches — not a stable API.
+#[doc(hidden)]
+pub mod text_anim_bench {
+    pub use super::text_anim::{ClusterDelta, cluster_deltas, place_clusters};
+}
+
 #[cfg(test)]
 mod tests;
 

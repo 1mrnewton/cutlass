@@ -54,7 +54,8 @@ pub(super) fn fit_clip_transform(
     let (cw, ch) = (canvas_w as f32, canvas_h as f32);
     let fit = (cw / w).min(ch / h);
     let cover = (cw / w).max(ch / h);
-    let scale = if fill { cover / fit } else { 1.0 };
+    // Fit/fill writes a uniform scale (both axes).
+    let scale = cutlass_models::Scale2::uniform(if fill { cover / fit } else { 1.0 });
     let sampled = clip.transform.sample_at(clip.animation_tick_f(tick as f64));
     Some(ClipTransform {
         position: [0.0, 0.0],
@@ -320,8 +321,22 @@ pub(super) fn keyframes_at(
     {
         hits.push((ClipParam::Position, ParamValue::Vec2(kf.value), kf.easing));
     }
+    if let Some(kf) = transform
+        .scale
+        .keyframes()
+        .iter()
+        .find(|k| k.tick == rel_tick)
+    {
+        // Prefer Scalar when uniform so diamond retimes stay byte-compat with
+        // older agent/UI paths; Vec2 when axes are split.
+        let value = if kf.value.is_uniform() {
+            ParamValue::Scalar(kf.value.x)
+        } else {
+            ParamValue::Vec2([kf.value.x, kf.value.y])
+        };
+        hits.push((ClipParam::Scale, value, kf.easing));
+    }
     let scalars = [
-        (ClipParam::Scale, &transform.scale),
         (ClipParam::Rotation, &transform.rotation),
         (ClipParam::Opacity, &transform.opacity),
     ];

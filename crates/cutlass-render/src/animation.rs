@@ -100,7 +100,7 @@ fn compose_transform(base: ClipTransform, deltas: &[AnimationDelta]) -> ClipTran
     for delta in deltas {
         xf.position[0] += delta.position[0];
         xf.position[1] += delta.position[1];
-        xf.scale *= delta.scale;
+        xf.scale *= delta.scale; // uniform look-animation delta on both axes
         xf.rotation += delta.rotation;
         xf.opacity = (xf.opacity * delta.opacity).clamp(0.0, 1.0);
     }
@@ -330,7 +330,7 @@ mod tests {
         let mut clip = solid_clip(48);
         clip.animation_in = Some(AnimationRef::new("zoom_in"));
         let start = apply_look_animations(&clip, ClipTransform::IDENTITY, 0, 0.0, R24);
-        assert!(start.scale < 0.5);
+        assert!(start.scale.x < 0.5);
     }
 
     #[test]
@@ -360,6 +360,6 @@ mod tests {
         clip.animation_combo = Some(AnimationRef::new("pulse"));
         let a = apply_look_animations(&clip, ClipTransform::IDENTITY, 0, 0.0, R24);
         let b = apply_look_animations(&clip, ClipTransform::IDENTITY, 6, 6.0, R24);
-        assert!((a.scale - b.scale).abs() > 0.01);
+        assert!((a.scale.x - b.scale.x).abs() > 0.01);
     }
 }

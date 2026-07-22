@@ -4,7 +4,7 @@ use crate::scene::{LayerSource, SceneShadow, SizeSpec};
 use cutlass_models::{
     AnimationRef, AnimationSlot, BlendMode, CanvasAspect, CanvasSettings, ClipParam, ClipTransform,
     ColorAdjustments, CropRect, Easing, Filter, Generator, LayerGlow, LayerOutline, LayerShadow,
-    LayerStyles, MediaSource, Param, ParamValue, Project, Rational, RationalTime, Shape,
+    LayerStyles, MediaSource, Param, ParamValue, Project, Rational, RationalTime, Scale2, Shape,
     StyleParam, TextStyle as ModelTextStyle, TimeRange, TrackKind,
 };
 
@@ -155,7 +155,7 @@ fn text_generator_maps_style_and_defers_size() {
     assert_eq!(scene.layers.len(), 1);
     let layer = &scene.layers[0];
     approx2(layer.center, [960.0, 540.0]);
-    assert_eq!(layer.size, SizeSpec::BitmapScaled(1.0));
+    assert_eq!(layer.size, SizeSpec::BitmapScaled([1.0, 1.0]));
     match &layer.source {
         LayerSource::Text {
             content,
@@ -356,7 +356,7 @@ fn empty_or_unknown_sticker_asset_places_nothing() {
         None,
         1920.0,
         1080.0,
-        1.0,
+        Scale2::ONE,
         0,
         0.0,
         Vec::new(),
@@ -484,7 +484,7 @@ fn transform_offsets_center_and_scales_size() {
             clip,
             ClipTransform {
                 position: [0.25, -0.1],
-                scale: 2.0,
+                scale: 2.0.into(),
                 opacity: 0.5,
                 ..ClipTransform::IDENTITY
             },
@@ -500,6 +500,91 @@ fn transform_offsets_center_and_scales_size() {
         other => panic!("expected fixed size, got {other:?}"),
     }
     approx(layer.opacity, 0.5);
+}
+
+#[test]
+fn per_axis_scale_stretches_media_width_only() {
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_transform(
+            clip,
+            ClipTransform {
+                scale: Scale2 { x: 2.0, y: 1.0 },
+                ..ClipTransform::IDENTITY
+            },
+            None,
+        )
+        .unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    match scene.layers[0].size {
+        // Width doubled, height unchanged.
+        SizeSpec::Fixed(size) => approx2(size, [3840.0, 1080.0]),
+        other => panic!("expected fixed size, got {other:?}"),
+    }
+}
+
+#[test]
+fn shape_stroke_uses_isotropic_scale() {
+    let mut project = Project::new("p", FPS_24);
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let generator = Generator::Shape {
+        shape: Shape::Rectangle,
+        rgba: Param::Constant([255, 0, 0, 255]),
+        width: Param::Constant(100.0),
+        height: Param::Constant(50.0),
+        corner_radius: Param::Constant(0.0),
+        stroke: Some(cutlass_models::ShapeStroke::new([0, 0, 0, 255], 6.0)),
+    };
+    let clip = project.add_generated(track, generator, tr(0, 100)).unwrap();
+
+    // Uniform [2,2]: stroke doubles (ref_scale = 1 on 1080p canvas).
+    project
+        .set_transform(
+            clip,
+            ClipTransform {
+                scale: Scale2::uniform(2.0),
+                ..ClipTransform::IDENTITY
+            },
+            None,
+        )
+        .unwrap();
+    let scene = resolve(&project, rt(5)).unwrap();
+    match &scene.layers[0].source {
+        LayerSource::Shape { stroke, .. } => {
+            approx(stroke.expect("stroke").width, 12.0);
+        }
+        other => panic!("expected shape, got {other:?}"),
+    }
+
+    // Split [4,1]: geometric mean is still 2 → stroke still doubles.
+    project
+        .set_transform(
+            clip,
+            ClipTransform {
+                scale: Scale2 { x: 4.0, y: 1.0 },
+                ..ClipTransform::IDENTITY
+            },
+            None,
+        )
+        .unwrap();
+    let scene = resolve(&project, rt(5)).unwrap();
+    match &scene.layers[0].source {
+        LayerSource::Shape { stroke, .. } => {
+            approx(stroke.expect("stroke").width, 12.0);
+        }
+        other => panic!("expected shape, got {other:?}"),
+    }
+    // Placement still stretches per-axis (width ×4, height ×1) plus pad.
+    match scene.layers[0].size {
+        SizeSpec::Fixed(size) => {
+            assert!(size[0] > size[1] * 3.0, "width should dominate under [4,1]");
+        }
+        other => panic!("expected fixed size, got {other:?}"),
+    }
 }
 
 #[test]
@@ -672,7 +757,7 @@ fn resolve_with_substitutes_transform_and_generator_for_one_clip() {
             clip,
             ClipTransform {
                 position: [0.25, 0.0],
-                scale: 0.5,
+                scale: 0.5.into(),
                 ..ClipTransform::IDENTITY
             },
         )),
@@ -972,7 +1057,7 @@ fn pen_path_resolves_to_a_bitmap_scaled_path_layer() {
         other => panic!("expected path source, got {other:?}"),
     }
     // Transform scale rides the quad, not the raster.
-    assert_eq!(layer.size, SizeSpec::BitmapScaled(1.0));
+    assert_eq!(layer.size, SizeSpec::BitmapScaled([1.0, 1.0]));
 }
 
 #[test]
@@ -1836,7 +1921,7 @@ fn transform_scale_doubles_outline_width() {
         .set_transform(
             clip,
             ClipTransform {
-                scale: 2.0,
+                scale: 2.0.into(),
                 ..ClipTransform::IDENTITY
             },
             None,

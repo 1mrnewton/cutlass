@@ -120,7 +120,7 @@ fn bench_animated_text_cpu(iters: usize) {
         let start = Instant::now();
         let deltas = text_anim_bench::cluster_deltas(&shaped, &a);
         let instances =
-            text_anim_bench::place_clusters(&shaped, &deltas, [32.0, 48.0], 1.0, 0.0, 1.0);
+            text_anim_bench::place_clusters(&shaped, &deltas, [32.0, 48.0], [1.0, 1.0], 0.0, 1.0);
         std::hint::black_box(instances.len());
         samples.push(start.elapsed().as_secs_f64() * 1000.0);
     }

@@ -66,7 +66,7 @@ fn extracted_audio_companion_copies_only_audio_and_retime_state() {
     source.transform = ClipTransform {
         position: [0.2, -0.3],
         anchor_point: [0.1, 0.9],
-        scale: 1.5,
+        scale: 1.5.into(),
         rotation: 20.0,
         opacity: 0.6,
     }
@@ -1195,7 +1195,7 @@ fn transform_roundtrips_through_serde() {
     let mut clip = Clip::generated(Generator::Adjustment, tr(0, 10, R24));
     clip.transform = ClipTransform {
         position: [-0.25, 0.5],
-        scale: 1.5,
+        scale: 1.5.into(),
         rotation: 90.0,
         opacity: 0.25,
         ..ClipTransform::IDENTITY
@@ -1223,7 +1223,7 @@ fn legacy_plain_transform_json_deserializes_as_constants() {
         clip.transform.sample(0),
         ClipTransform {
             position: [0.25, -0.1],
-            scale: 2.0,
+            scale: 2.0.into(),
             rotation: 45.0,
             opacity: 0.5,
             ..ClipTransform::IDENTITY
@@ -1236,7 +1236,7 @@ fn constant_transform_serializes_in_pre_m2_shape() {
     let mut clip = Clip::generated(Generator::Adjustment, tr(0, 10, R24));
     clip.transform = ClipTransform {
         position: [0.25, 0.5],
-        scale: 1.5,
+        scale: 1.5.into(),
         rotation: 0.0,
         opacity: 1.0,
         ..ClipTransform::IDENTITY
@@ -1289,7 +1289,7 @@ fn animated_transform_samples_per_property() {
     .unwrap();
     // Scale animates; everything else stays constant.
     let mid = t.sample(5);
-    assert_eq!(mid.scale, 1.5);
+    assert_eq!(mid.scale, 1.5.into());
     assert_eq!(mid.position, [0.0, 0.0]);
     assert_eq!(mid.opacity, 1.0);
 }
@@ -1309,7 +1309,7 @@ fn compose_at_writes_keyframe_only_on_animated_properties() {
 
     let edit = ClipTransform {
         position: [0.3, 0.0],
-        scale: 2.0,
+        scale: 2.0.into(),
         rotation: 0.0,
         opacity: 1.0,
         ..ClipTransform::IDENTITY
@@ -1318,9 +1318,9 @@ fn compose_at_writes_keyframe_only_on_animated_properties() {
 
     // Scale gained a keyframe at tick 10; the curve still animates.
     assert_eq!(t.scale.keyframes().len(), 3);
-    assert_eq!(t.sample(10).scale, 2.0);
-    assert_eq!(t.sample(0).scale, 1.0);
-    assert_eq!(t.sample(20).scale, 3.0);
+    assert_eq!(t.sample(10).scale, 2.0.into());
+    assert_eq!(t.sample(0).scale, 1.0.into());
+    assert_eq!(t.sample(20).scale, 3.0.into());
     // Position was constant and stays constant.
     assert!(!t.position.is_animated());
     assert_eq!(t.sample(0).position, [0.3, 0.0]);
@@ -1334,17 +1334,18 @@ fn remove_param_keyframe_errors_when_absent() {
         .unwrap();
     assert!(t.remove_param_keyframe(ClipParam::Scale, 5).is_ok());
     assert!(!t.scale.is_animated());
-    assert_eq!(t.scale.constant(), Some(2.0));
+    assert_eq!(t.scale.constant(), Some(2.0.into()));
 }
 
 #[test]
 fn param_kind_mismatch_rejected() {
     let mut t = AnimatedTransform::identity();
+    // Scale accepts Scalar (uniform) and Vec2 (per-axis); Color still rejects.
     assert!(matches!(
         t.set_param_keyframe(
             ClipParam::Scale,
             0,
-            ParamValue::Vec2([1.0, 1.0]),
+            ParamValue::Color([255, 0, 0, 255]),
             Easing::Linear
         ),
         Err(ModelError::InvalidParam(_))
@@ -1855,7 +1856,7 @@ fn transform_validation() {
     assert!(
         ClipTransform {
             position: [0.4, -0.4],
-            scale: 3.0,
+            scale: 3.0.into(),
             rotation: -720.0,
             opacity: 0.0,
             ..ClipTransform::IDENTITY
@@ -1865,11 +1866,20 @@ fn transform_validation() {
     );
 
     let bad_scale = ClipTransform {
-        scale: -0.5,
+        scale: Scale2::uniform(-0.5),
         ..ClipTransform::IDENTITY
     };
     assert!(matches!(
         bad_scale.validate(),
+        Err(ModelError::InvalidTransform(_))
+    ));
+
+    let bad_axis = ClipTransform {
+        scale: Scale2 { x: 1.0, y: 0.0 },
+        ..ClipTransform::IDENTITY
+    };
+    assert!(matches!(
+        bad_axis.validate(),
         Err(ModelError::InvalidTransform(_))
     ));
 
@@ -1890,6 +1900,62 @@ fn transform_validation() {
         bad_position.validate(),
         Err(ModelError::InvalidTransform(_))
     ));
+}
+
+#[test]
+fn scale2_uniform_serializes_as_bare_float() {
+    let s = Scale2::uniform(1.5);
+    let json = serde_json::to_string(&s).unwrap();
+    assert_eq!(json, "1.5");
+    let loaded: Scale2 = serde_json::from_str(&json).unwrap();
+    assert_eq!(loaded, s);
+}
+
+#[test]
+fn scale2_split_serializes_as_array_and_roundtrips() {
+    let s = Scale2 { x: 2.0, y: 1.0 };
+    let json = serde_json::to_string(&s).unwrap();
+    assert_eq!(json, "[2.0,1.0]");
+    let loaded: Scale2 = serde_json::from_str(&json).unwrap();
+    assert_eq!(loaded, s);
+}
+
+#[test]
+fn legacy_keyframed_f32_scale_loads_as_uniform() {
+    // Pre-Scale2 keyframed saves wrote bare f32 values in each keyframe.
+    let json = r#"{"kf":[{"t":0,"v":1.0},{"t":10,"v":2.0}]}"#;
+    let p: Param<Scale2> = serde_json::from_str(json).unwrap();
+    assert_eq!(p.sample(0), Scale2::ONE);
+    assert_eq!(p.sample(5), Scale2::uniform(1.5));
+    assert_eq!(p.sample(10), Scale2::uniform(2.0));
+}
+
+#[test]
+fn scale_param_accepts_scalar_and_vec2_keyframes() {
+    let mut t = AnimatedTransform::identity();
+    t.set_param_keyframe(ClipParam::Scale, 0, ParamValue::Scalar(1.0), Easing::Linear)
+        .unwrap();
+    t.set_param_keyframe(
+        ClipParam::Scale,
+        10,
+        ParamValue::Vec2([2.0, 1.0]),
+        Easing::Linear,
+    )
+    .unwrap();
+    assert_eq!(t.sample(0).scale, Scale2::ONE);
+    assert_eq!(t.sample(5).scale, Scale2 { x: 1.5, y: 1.0 });
+    assert_eq!(t.sample(10).scale, Scale2 { x: 2.0, y: 1.0 });
+}
+
+#[test]
+fn scale2_lerp_and_isotropic() {
+    use crate::param::Lerp;
+    let a = Scale2 { x: 1.0, y: 1.0 };
+    let b = Scale2 { x: 3.0, y: 5.0 };
+    assert_eq!(Scale2::lerp(a, b, 0.5), Scale2 { x: 2.0, y: 3.0 });
+    // Geometric mean: sqrt(4*1) = 2.
+    assert!((Scale2 { x: 4.0, y: 1.0 }.isotropic() - 2.0).abs() < 1e-6);
+    assert!((Scale2::uniform(2.0).isotropic() - 2.0).abs() < 1e-6);
 }
 
 // --- source_time_at: errors -------------------------------------------

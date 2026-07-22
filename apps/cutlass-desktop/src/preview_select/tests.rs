@@ -25,6 +25,8 @@ fn media_clip(id: &str, start: i32, dur: i32, w: i32, h: i32) -> Clip {
         media_width: w,
         media_height: h,
         transform_scale: 1.0,
+        transform_scale_y: 1.0,
+        transform_scale_linked: true,
         transform_opacity: 1.0,
         transform_anchor_x: 0.5,
         transform_anchor_y: 0.5,
@@ -171,6 +173,8 @@ fn hit_honors_clip_transform() {
     // top-left quadrant at scale 0.5.
     let mut clip = media_clip("A", 0, 100, 1920, 1080);
     clip.transform_scale = 0.5;
+    clip.transform_scale_y = 0.5;
+    clip.transform_scale_linked = true;
     clip.transform_position_x = -0.25;
     clip.transform_position_y = -0.25;
     let seq = sequence(vec![track("1", TrackKind::Video, vec![clip])]);
@@ -193,6 +197,8 @@ fn hit_honors_rotation() {
     // falls outside (270 half-height) while 300 px below falls inside.
     let mut clip = media_clip("A", 0, 100, 1920, 1080);
     clip.transform_scale = 0.5;
+    clip.transform_scale_y = 0.5;
+    clip.transform_scale_linked = true;
     clip.transform_rotation = 90.0;
     let seq = sequence(vec![track("1", TrackKind::Video, vec![clip])]);
 
@@ -323,6 +329,8 @@ fn generator_selection_box_hugs_content_bounds() {
 fn generator_content_box_rides_the_transform_scale() {
     let mut clip = generated_clip("E", "ellipse", 960, 540);
     clip.transform_scale = 0.5;
+    clip.transform_scale_y = 0.5;
+    clip.transform_scale_linked = true;
     let seq = sequence(vec![track("1", TrackKind::Video, vec![clip])]);
     let b = selection_box(&seq, "E", 10, VW, VH, None);
     assert!(b.visible);
@@ -405,6 +413,8 @@ fn selection_box_rotates_corners() {
     // canvas (1230, 60), viewport (615, 30).
     let mut clip = media_clip("A", 0, 100, 1920, 1080);
     clip.transform_scale = 0.5;
+    clip.transform_scale_y = 0.5;
+    clip.transform_scale_linked = true;
     clip.transform_rotation = 90.0;
     let seq = sequence(vec![track("1", TrackKind::Video, vec![clip])]);
     let b = selection_box(&seq, "A", 10, VW, VH, None);
@@ -431,11 +441,13 @@ fn selection_geometry_follows_the_playhead_sample() {
         ParamKeyframe {
             tick: 0,
             value_x: 1.0,
+            value_y: 1.0,
             ..Default::default()
         },
         ParamKeyframe {
             tick: 40,
             value_x: 0.5,
+            value_y: 0.5,
             ..Default::default()
         },
     ])));
@@ -604,6 +616,8 @@ fn sprite_placement_falls_back_to_committed_transform() {
     clip.transform_position_x = 0.1;
     clip.transform_position_y = -0.2;
     clip.transform_scale = 0.6;
+    clip.transform_scale_y = 0.6;
+    clip.transform_scale_linked = true;
     clip.transform_rotation = 30.0;
     clip.transform_opacity = 0.7;
     let seq = sequence(vec![track("1", TrackKind::Video, vec![clip])]);

@@ -144,7 +144,7 @@ fn edit_samples() -> Vec<EditCommand> {
             transform: ClipTransform {
                 position: [0.25, -0.5],
                 anchor_point: [0.5, 0.5],
-                scale: 2.0,
+                scale: 2.0.into(),
                 rotation: 90.0,
                 opacity: 0.75,
             },

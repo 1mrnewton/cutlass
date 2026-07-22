@@ -32,7 +32,7 @@ pub(super) fn realize_text_layer(
 ) -> Option<Realized> {
     let scale = match layer.size {
         SizeSpec::BitmapScaled(s) => s,
-        SizeSpec::Fixed(_) => 1.0,
+        SizeSpec::Fixed(_) => [1.0, 1.0],
     };
     if let Some(anim) = animation {
         let shaped = text.shape(content, style);
@@ -44,8 +44,8 @@ pub(super) fn realize_text_layer(
         // order / baselines); placement uses painted images.
         let deltas = cluster_deltas(&shaped, anim);
         let extent_size = [
-            painted.extent.0 as f32 * scale,
-            painted.extent.1 as f32 * scale,
+            painted.extent.0 as f32 * scale[0],
+            painted.extent.1 as f32 * scale[1],
         ];
         let aligned = layer.text_quad_center(style, extent_size, canvas);
         let origin = extent_origin(aligned, painted.extent, scale);
@@ -68,10 +68,10 @@ pub(super) fn realize_text_layer(
             return None;
         }
         let background = painted.background.map(|bg| {
-            let size = [bg.width as f32 * scale, bg.height as f32 * scale];
+            let size = [bg.width as f32 * scale[0], bg.height as f32 * scale[1]];
             let center = [
-                origin[0] + painted.background_offset[0] * scale + size[0] * 0.5,
-                origin[1] + painted.background_offset[1] * scale + size[1] * 0.5,
+                origin[0] + painted.background_offset[0] * scale[0] + size[0] * 0.5,
+                origin[1] + painted.background_offset[1] * scale[1] + size[1] * 0.5,
             ];
             (
                 bg,
@@ -106,7 +106,10 @@ pub(super) fn realize_text_layer(
         if image.width == 0 || image.height == 0 {
             return None; // nothing rasterized (no fonts / empty run)
         }
-        let size = [image.width as f32 * scale, image.height as f32 * scale];
+        let size = [
+            image.width as f32 * scale[0],
+            image.height as f32 * scale[1],
+        ];
         let placement = LayerPlacement {
             center: layer.text_quad_center(style, size, canvas),
             size,
@@ -149,9 +152,12 @@ pub(super) fn realize_text_bitmap(
     }
     let scale = match layer.size {
         SizeSpec::BitmapScaled(s) => s,
-        SizeSpec::Fixed(_) => 1.0,
+        SizeSpec::Fixed(_) => [1.0, 1.0],
     };
-    let size = [image.width as f32 * scale, image.height as f32 * scale];
+    let size = [
+        image.width as f32 * scale[0],
+        image.height as f32 * scale[1],
+    ];
     let placement = LayerPlacement {
         center: layer.text_quad_center(style, size, canvas),
         size,

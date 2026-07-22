@@ -311,7 +311,7 @@ fn build_clip(project: &Project, track: &Track, clip: &Clip, rate: Rational) -> 
             // canvas dims; the shells use 0..1 with 0.5 at the center.
             pos_x: 0.5 + t.position[0],
             pos_y: 0.5 + t.position[1],
-            scale: t.scale,
+            scale: t.scale.x,
             rotation_degrees: t.rotation,
             opacity: t.opacity,
         }
@@ -681,7 +681,7 @@ mod tests {
                 ClipTransform {
                     position: [0.25, -0.10],
                     anchor_point: [0.5, 0.5],
-                    scale: 0.5,
+                    scale: 0.5.into(),
                     rotation: 90.0,
                     opacity: 0.8,
                 },

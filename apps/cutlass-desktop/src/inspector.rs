@@ -119,7 +119,9 @@ pub fn sample_transform(clip: &Clip, playhead: i32) -> TransformSample {
         position_y: t.position[1],
         anchor_x: t.anchor_point[0],
         anchor_y: t.anchor_point[1],
-        scale: t.scale,
+        // Commit 1: inspector still exposes a single uniform scale (X);
+        // per-axis rows land in commit 2.
+        scale: t.scale.x,
         rotation: t.rotation,
         opacity: t.opacity,
         position_row: row_state(&clip.kf_position, playhead),
@@ -228,7 +230,11 @@ pub fn compensate_anchor_position(
     let canvas = canvas_config(&sequence);
     let mut c = clip.clone();
     apply_sampled_transform(&mut c, playhead);
+    // Anchor compensation uses placement size; keep axes uniform while the
+    // inspector still drives a single scale slider.
     c.transform_scale = scale;
+    c.transform_scale_y = scale;
+    c.transform_scale_linked = true;
     c.transform_rotation = rotation;
     let placement = clip_placement(&c, &canvas);
     let position = position_preserving_center(
@@ -346,6 +352,8 @@ mod tests {
             media_width: 1920,
             media_height: 1080,
             transform_scale: 1.0,
+            transform_scale_y: 1.0,
+            transform_scale_linked: true,
             transform_opacity: 1.0,
             transform_anchor_x: 0.5,
             transform_anchor_y: 0.5,

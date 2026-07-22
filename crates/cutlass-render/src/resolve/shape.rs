@@ -1,5 +1,5 @@
 use cutlass_compositor::ColorGrade;
-use cutlass_models::{BlendMode, Param, Shape, ShapePath, ShapeStroke};
+use cutlass_models::{BlendMode, Param, Scale2, Shape, ShapePath, ShapeStroke};
 use cutlass_shapes::{BezierPath, PathPoint, SDF_AA, SdfParams, Stroke};
 
 use crate::scene::{LayerSource, ResolvedPass, SceneLayer, SizeSpec};
@@ -7,11 +7,11 @@ use crate::scene::{LayerSource, ResolvedPass, SceneLayer, SizeSpec};
 /// Resolve one shape generator at `tick` into a placed layer.
 ///
 /// All `Param` curves are sampled here (the resolver is the "animation →
-/// values" boundary), and every length is converted to canvas pixels with
-/// `px_scale` (reference scale × the clip's animated transform scale), so
-/// downstream stages see plain numbers. Parametric shapes become SDF layers
-/// whose quad is padded for stroke overhang + anti-aliasing; pen paths become
-/// CPU-raster layers that scale like text bitmaps.
+/// values" boundary). Box width/height use per-axis transform scale; stroke
+/// width, corner radius, and AA pad use the isotropic scale so lengths stay
+/// stable under stretch. Parametric shapes become SDF layers whose quad is
+/// padded for stroke overhang + anti-aliasing; pen paths become CPU-raster
+/// layers that scale like text bitmaps.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_shape(
     shape: &Shape,
@@ -21,35 +21,32 @@ pub(super) fn resolve_shape(
     corner_radius: &Param<f32>,
     stroke: Option<&ShapeStroke>,
     tick: i64,
-    px_scale: f32,
+    ref_scale: f32,
+    scale: Scale2,
     center: [f32; 2],
     anchor_point: [f32; 2],
     rotation: f32,
     opacity: f32,
     uv: [f32; 4],
     color_grade: Option<ColorGrade>,
-    transform_scale: f32,
     effects: Vec<ResolvedPass>,
 ) -> Option<SceneLayer> {
     let fill = rgba.sample(tick);
+    // Isotropic: stroke widths should not stretch with non-uniform scale.
+    let px_iso = ref_scale * scale.isotropic();
     let stroke_px = stroke.map(|s| Stroke {
         rgba: s.rgba.sample(tick),
-        width: (s.width.sample(tick) * px_scale).max(0.0),
+        width: (s.width.sample(tick) * px_iso).max(0.0),
     });
 
     // Pen paths: rasterized on the CPU at the *reference* scale so the memo
     // stays warm under transform-scale animation (the quad magnifies the
-    // bitmap, like text). `px_scale / transform_scale` recovers ref_scale.
+    // bitmap, like text).
     if let Shape::Path(path) = shape {
         let bezier = to_bezier(path);
         if !bezier.is_drawable() {
             return None;
         }
-        let raster_scale = if transform_scale > 0.0 {
-            px_scale / transform_scale
-        } else {
-            px_scale
-        };
         return Some(SceneLayer {
             clip: None,
             source: LayerSource::PathShape {
@@ -61,11 +58,12 @@ pub(super) fn resolve_shape(
                     rgba: s.rgba.sample(tick),
                     width: s.width.sample(tick).max(0.0),
                 }),
-                raster_scale,
+                raster_scale: ref_scale,
             },
             center,
             anchor_point,
-            size: SizeSpec::BitmapScaled(transform_scale),
+            // Per-axis placement of the path bitmap quad.
+            size: SizeSpec::BitmapScaled([scale.x, scale.y]),
             rotation,
             opacity,
             uv,
@@ -79,12 +77,14 @@ pub(super) fn resolve_shape(
         });
     }
 
-    let w = width.sample(tick) * px_scale;
-    let h = height.sample(tick) * px_scale;
+    // Per-axis placement of the shape box.
+    let w = width.sample(tick) * ref_scale * scale.x;
+    let h = height.sample(tick) * ref_scale * scale.y;
     if w <= 0.0 || h <= 0.0 {
         return None;
     }
-    let radius = (corner_radius.sample(tick) * px_scale).max(0.0);
+    // Isotropic: corner rounding tracks stroke-like lengths under stretch.
+    let radius = (corner_radius.sample(tick) * px_iso).max(0.0);
 
     // Plain rectangles keep the no-texture solid fast path.
     if matches!(shape, Shape::Rectangle) && radius == 0.0 && stroke_px.is_none() {

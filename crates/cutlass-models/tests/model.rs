@@ -71,7 +71,7 @@ fn set_transform_updates_visual_and_rejects_audio() {
 
     let t = ClipTransform {
         position: [0.1, 0.2],
-        scale: 2.0,
+        scale: 2.0.into(),
         rotation: -30.0,
         opacity: 0.5,
         ..ClipTransform::IDENTITY
@@ -90,7 +90,7 @@ fn set_transform_updates_visual_and_rejects_audio() {
     // Invalid values are rejected and leave the stored transform unchanged.
     for bad in [
         ClipTransform {
-            scale: 0.0,
+            scale: 0.0.into(),
             ..ClipTransform::IDENTITY
         },
         ClipTransform {

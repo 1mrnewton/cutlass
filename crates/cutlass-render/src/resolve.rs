@@ -68,7 +68,7 @@ pub struct ResolveOverrides<'a> {
 pub const GESTURE_IDENTITY_TRANSFORM: ClipTransform = ClipTransform {
     position: [0.0, 0.0],
     anchor_point: [0.5, 0.5],
-    scale: 1.0,
+    scale: cutlass_models::Scale2::ONE,
     rotation: 0.0,
     opacity: 1.0,
 };
@@ -385,8 +385,10 @@ fn resolve_clip(
         strength: chroma.strength.sample(local_tick),
         shadow: chroma.shadow.sample(local_tick),
     });
-    // Reference px → canvas px (same convention as shape strokes).
-    let px = (ch / REFERENCE_HEIGHT) * xf.scale;
+    // Isotropic: stroke / blur / style ref-px → canvas px. Geometric mean
+    // keeps widths stable under uniform scale and splits the difference
+    // under stretch.
+    let px = (ch / REFERENCE_HEIGHT) * xf.scale.isotropic();
     let styles_src = match overrides.styles {
         Some((id, s)) if id == clip.id => s,
         _ => &clip.styles,
@@ -416,9 +418,10 @@ fn resolve_clip(
                 MediaKind::Audio => return Ok(None),
             };
             let fit = fit_scale(src.width as f32, src.height as f32, cw, ch);
+            // Per-axis placement: width × x, height × y.
             let size = SizeSpec::Fixed([
-                src.width as f32 * fit * xf.scale,
-                src.height as f32 * fit * xf.scale,
+                src.width as f32 * fit * xf.scale.x,
+                src.height as f32 * fit * xf.scale.y,
             ]);
             Ok(Some(SceneLayer {
                 clip: Some(clip.id),

@@ -504,9 +504,12 @@ impl Renderer {
                 }
                 let scale = match layer.size {
                     SizeSpec::BitmapScaled(s) => s,
-                    SizeSpec::Fixed(_) => 1.0,
+                    SizeSpec::Fixed(_) => [1.0, 1.0],
                 };
-                let size = [image.width as f32 * scale, image.height as f32 * scale];
+                let size = [
+                    image.width as f32 * scale[0],
+                    image.height as f32 * scale[1],
+                ];
                 Realized::Bitmap {
                     image,
                     placement: place(size),

@@ -309,6 +309,9 @@ export struct Clip {
     transform-anchor-x: float,
     transform-anchor-y: float,
     transform-scale: float,
+    // Per-axis Y; `transform-scale` is X. Linked when x == y (uniform).
+    transform-scale-y: float,
+    transform-scale-linked: bool,
     transform-rotation: float,
     transform-opacity: float,
     // Framing (M1 crop): the normalized kept-region window into the

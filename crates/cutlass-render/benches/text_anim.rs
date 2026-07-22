@@ -57,7 +57,7 @@ fn bench_cluster_pipeline(c: &mut Criterion) {
                 black_box(&shaped),
                 black_box(&deltas),
                 black_box([40.0, 60.0]),
-                black_box(1.0),
+                black_box([1.0, 1.0]),
                 black_box(0.1),
                 black_box(1.0),
             ))
@@ -71,7 +71,7 @@ fn bench_cluster_pipeline(c: &mut Criterion) {
                 &shaped,
                 &deltas,
                 [40.0, 60.0],
-                1.0,
+                [1.0, 1.0],
                 0.1,
                 1.0,
             ))

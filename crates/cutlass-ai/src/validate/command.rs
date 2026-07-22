@@ -113,7 +113,9 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                     args.anchor_x.map_or(current.anchor_point[0], |v| v as f32),
                     args.anchor_y.map_or(current.anchor_point[1], |v| v as f32),
                 ],
-                scale: args.scale.map_or(current.scale, |v| v as f32),
+                scale: args
+                    .scale
+                    .map_or(current.scale, |v| cutlass_models::Scale2::uniform(v as f32)),
                 rotation: args.rotation.map_or(current.rotation, |v| v as f32),
                 opacity: args.opacity.map_or(current.opacity, |v| v as f32),
             };

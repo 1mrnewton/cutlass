@@ -66,7 +66,7 @@ fn intro_template() -> Intro {
         ClipTransform {
             position: [0.1, 0.2],
             anchor_point: [0.5, 0.5],
-            scale: 1.5,
+            scale: 1.5.into(),
             rotation: 15.0,
             opacity: 0.8,
         },

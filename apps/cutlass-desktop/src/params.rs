@@ -7,7 +7,7 @@
 //! preview selection geometry can be playhead-accurate without a projection
 //! republish per tick.
 
-use cutlass_models::{ClipTransform, Easing, Keyframe, Param};
+use cutlass_models::{ClipTransform, Easing, Keyframe, Param, Scale2};
 use slint::Model;
 
 use crate::{Clip, ParamKeyframe, ParamRowState};
@@ -112,7 +112,14 @@ pub(crate) fn sampled_transform(clip: &Clip, playhead: i32) -> ClipTransform {
             [clip.transform_anchor_x, clip.transform_anchor_y],
         )
         .sample(tick),
-        scale: scalar_param(&clip.kf_scale, clip.transform_scale).sample(tick),
+        scale: {
+            let [x, y] = vec2_param(
+                &clip.kf_scale,
+                [clip.transform_scale, clip.transform_scale_y],
+            )
+            .sample(tick);
+            Scale2 { x, y }
+        },
         rotation: scalar_param(&clip.kf_rotation, clip.transform_rotation).sample(tick),
         opacity: scalar_param(&clip.kf_opacity, clip.transform_opacity).sample(tick),
     }
@@ -227,7 +234,9 @@ pub(crate) fn apply_sampled_transform(clip: &mut Clip, playhead: i32) {
     clip.transform_position_y = t.position[1];
     clip.transform_anchor_x = t.anchor_point[0];
     clip.transform_anchor_y = t.anchor_point[1];
-    clip.transform_scale = t.scale;
+    clip.transform_scale = t.scale.x;
+    clip.transform_scale_y = t.scale.y;
+    clip.transform_scale_linked = t.scale.is_uniform();
     clip.transform_rotation = t.rotation;
     clip.transform_opacity = t.opacity;
 }
@@ -325,7 +334,8 @@ mod tests {
         ParamKeyframe {
             tick,
             value_x: value,
-            value_y: 0.0,
+            // Scale keyframes project both axes; scalars ignore value_y.
+            value_y: value,
             easing: 0,
             bez_x1: 0.0,
             bez_y1: 0.0,
@@ -354,6 +364,8 @@ mod tests {
                 duration: rt(dur),
             },
             transform_scale: 1.0,
+            transform_scale_y: 1.0,
+            transform_scale_linked: true,
             transform_opacity: 1.0,
             transform_anchor_x: 0.5,
             transform_anchor_y: 0.5,
@@ -369,7 +381,7 @@ mod tests {
         let t = sampled_transform(&c, 50);
         assert_eq!(t.position, [0.25, 0.0]);
         assert_eq!(t.rotation, 45.0);
-        assert_eq!(t.scale, 1.0);
+        assert_eq!(t.scale, Scale2::ONE);
     }
 
     #[test]
@@ -389,11 +401,11 @@ mod tests {
     fn animated_scale_samples_at_playhead_and_clamps() {
         let mut c = clip(100, 50);
         c.kf_scale = kfs(vec![kf(100, 1.0), kf(140, 2.0)]);
-        assert_eq!(sampled_transform(&c, 120).scale, 1.5);
-        assert_eq!(sampled_transform(&c, 100).scale, 1.0);
+        assert_eq!(sampled_transform(&c, 120).scale, Scale2::uniform(1.5));
+        assert_eq!(sampled_transform(&c, 100).scale, Scale2::ONE);
         // Before the clip / after the last keyframe: first / last value holds.
-        assert_eq!(sampled_transform(&c, 0).scale, 1.0);
-        assert_eq!(sampled_transform(&c, 1000).scale, 2.0);
+        assert_eq!(sampled_transform(&c, 0).scale, Scale2::ONE);
+        assert_eq!(sampled_transform(&c, 1000).scale, Scale2::uniform(2.0));
     }
 
     #[test]

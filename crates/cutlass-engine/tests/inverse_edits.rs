@@ -530,7 +530,7 @@ fn undo_redo_set_clip_transform_oscillates() {
 
     let moved = ClipTransform {
         position: [0.25, -0.1],
-        scale: 0.5,
+        scale: 0.5.into(),
         rotation: 45.0,
         opacity: 0.8,
         ..ClipTransform::IDENTITY
@@ -575,7 +575,7 @@ fn invalid_transform_rejected_and_state_unchanged() {
             .apply(Command::Edit(EditCommand::SetClipTransform {
                 clip: clip_id,
                 transform: ClipTransform {
-                    scale: 0.0,
+                    scale: 0.0.into(),
                     ..ClipTransform::IDENTITY
                 },
                 at: None,
@@ -1160,7 +1160,7 @@ fn transform_gesture_at_playhead_keyframes_animated_property() {
         .apply(Command::Edit(EditCommand::SetClipTransform {
             clip: clip_id,
             transform: ClipTransform {
-                scale: 2.5,
+                scale: 2.5.into(),
                 ..ClipTransform::IDENTITY
             },
             at: Some(rt(20)),
@@ -1170,9 +1170,9 @@ fn transform_gesture_at_playhead_keyframes_animated_property() {
     let transform = engine.project().clip(clip_id).unwrap().transform.clone();
     // Scale gained a keyframe; the endpoints survive.
     assert_eq!(transform.scale.keyframes().len(), 3);
-    assert_eq!(transform.sample(20).scale, 2.5);
-    assert_eq!(transform.sample(0).scale, 1.0);
-    assert_eq!(transform.sample(40).scale, 3.0);
+    assert_eq!(transform.sample(20).scale, 2.5.into());
+    assert_eq!(transform.sample(0).scale, 1.0.into());
+    assert_eq!(transform.sample(40).scale, 3.0.into());
     // Un-animated properties stay constant.
     assert!(!transform.position.is_animated());
 }

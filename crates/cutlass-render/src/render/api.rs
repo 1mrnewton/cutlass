@@ -363,7 +363,7 @@ impl Renderer {
             None,
             canvas_w as f32,
             canvas_h as f32,
-            1.0,
+            cutlass_models::Scale2::ONE,
             tick,
             // Sizing doesn't depend on the animation clock.
             0.0,

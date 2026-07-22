@@ -1,5 +1,7 @@
 use cutlass_compositor::ColorGrade;
-use cutlass_models::{BlendMode, Generator, TextAlignH, TextAlignV, TextStyle as ModelTextStyle};
+use cutlass_models::{
+    BlendMode, Generator, Scale2, TextAlignH, TextAlignV, TextStyle as ModelTextStyle,
+};
 use cutlass_text::{
     FontFamily, TextAlign, TextBackground, TextShadow, TextStroke, TextStyle, TextVerticalAlign,
 };
@@ -20,7 +22,7 @@ pub(crate) fn resolve_generator(
     lut: Option<SceneLut>,
     cw: f32,
     ch: f32,
-    scale: f32,
+    scale: Scale2,
     tick: i64,
     local_seconds: f64,
     effects: Vec<ResolvedPass>,
@@ -42,7 +44,8 @@ pub(crate) fn resolve_generator(
                 },
                 center,
                 anchor_point,
-                size: SizeSpec::BitmapScaled(scale),
+                // Per-axis placement of the text bitmap quad.
+                size: SizeSpec::BitmapScaled([scale.x, scale.y]),
                 rotation,
                 opacity,
                 uv,
@@ -60,7 +63,8 @@ pub(crate) fn resolve_generator(
             source: LayerSource::Solid(*rgba),
             center,
             anchor_point,
-            size: SizeSpec::Fixed([cw * scale, ch * scale]),
+            // Per-axis placement relative to the canvas.
+            size: SizeSpec::Fixed([cw * scale.x, ch * scale.y]),
             rotation,
             opacity,
             uv,
@@ -87,14 +91,14 @@ pub(crate) fn resolve_generator(
             corner_radius,
             stroke.as_ref(),
             tick,
-            ref_scale * scale,
+            ref_scale,
+            scale,
             center,
             anchor_point,
             rotation,
             opacity,
             uv,
             color_grade,
-            scale,
             effects,
         ),
         Generator::Effect => canvas_pass(effects, None, has_lut, cw, ch),
@@ -107,9 +111,9 @@ pub(crate) fn resolve_generator(
             height,
         } => {
             // Same placement convention as stickers: intrinsic pixels are
-            // reference pixels. The stored size drives placement so this
-            // stays pure — the renderer probes the file itself.
-            let px = ref_scale * scale;
+            // reference pixels. Per-axis transform scale stretches the quad.
+            let px_x = ref_scale * scale.x;
+            let px_y = ref_scale * scale.y;
             Some(SceneLayer {
                 clip: None,
                 source: LayerSource::Lottie {
@@ -118,7 +122,7 @@ pub(crate) fn resolve_generator(
                 },
                 center,
                 anchor_point,
-                size: SizeSpec::Fixed([*width as f32 * px, *height as f32 * px]),
+                size: SizeSpec::Fixed([*width as f32 * px_x, *height as f32 * px_y]),
                 rotation,
                 opacity,
                 uv,
@@ -139,7 +143,8 @@ pub(crate) fn resolve_generator(
             // same convention as shapes: a 256 px sticker lands at a
             // CapCut-like overlay size and samples ~1:1 instead of being
             // blown up to canvas height like aspect-fit media.
-            let px = ref_scale * scale;
+            let px_x = ref_scale * scale.x;
+            let px_y = ref_scale * scale.y;
             Some(SceneLayer {
                 clip: None,
                 source: LayerSource::Sticker {
@@ -148,7 +153,7 @@ pub(crate) fn resolve_generator(
                 },
                 center,
                 anchor_point,
-                size: SizeSpec::Fixed([spec.width as f32 * px, spec.height as f32 * px]),
+                size: SizeSpec::Fixed([spec.width as f32 * px_x, spec.height as f32 * px_y]),
                 rotation,
                 opacity,
                 uv,

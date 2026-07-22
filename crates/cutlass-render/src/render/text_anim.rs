@@ -210,14 +210,14 @@ fn bounce_out(t: f32) -> f32 {
 /// Place shaped clusters on the canvas with per-cluster deltas applied.
 ///
 /// `origin` is the top-left of the shaped extent on the canvas (after text
-/// alignment). `scale` is the bitmap scale factor. `layer_rotation` /
+/// alignment). `scale` is the per-axis bitmap scale. `layer_rotation` /
 /// `layer_opacity` are the clip's whole-layer transform (already excluding
 /// per-character look presets).
 pub fn place_clusters(
     shaped: &ShapedText,
     deltas: &[ClusterDelta],
     origin: [f32; 2],
-    scale: f32,
+    scale: [f32; 2],
     layer_rotation: f32,
     layer_opacity: f32,
 ) -> Vec<GlyphInstance> {
@@ -246,28 +246,28 @@ fn instance_for_cluster(
     cluster: &ClusterBox,
     delta: &ClusterDelta,
     origin: [f32; 2],
-    scale: f32,
+    scale: [f32; 2],
     layer_rotation: f32,
     layer_opacity: f32,
 ) -> GlyphInstance {
     let rest_size = [
-        cluster.image.width as f32 * scale,
-        cluster.image.height as f32 * scale,
+        cluster.image.width as f32 * scale[0],
+        cluster.image.height as f32 * scale[1],
     ];
     let size = [rest_size[0] * delta.scale, rest_size[1] * delta.scale];
     // Rest center of the glyph quad.
     let rest_center = [
-        origin[0] + cluster.offset[0] * scale + rest_size[0] * 0.5,
-        origin[1] + cluster.offset[1] * scale + rest_size[1] * 0.5,
+        origin[0] + cluster.offset[0] * scale[0] + rest_size[0] * 0.5,
+        origin[1] + cluster.offset[1] * scale[1] + rest_size[1] * 0.5,
     ];
     // Anchor rise/drop about the baseline for natural motion.
-    let baseline_y = origin[1] + cluster.baseline * scale;
+    let baseline_y = origin[1] + cluster.baseline * scale[1];
     let anchor = [rest_center[0], baseline_y];
     let from_anchor = [rest_center[0] - anchor[0], rest_center[1] - anchor[1]];
     let scaled_from = [from_anchor[0] * delta.scale, from_anchor[1] * delta.scale];
     let center = [
-        anchor[0] + scaled_from[0] + delta.position[0] * scale,
-        anchor[1] + scaled_from[1] + delta.position[1] * scale,
+        anchor[0] + scaled_from[0] + delta.position[0] * scale[0],
+        anchor[1] + scaled_from[1] + delta.position[1] * scale[1],
     ];
     GlyphInstance {
         glyph,
@@ -280,10 +280,14 @@ fn instance_for_cluster(
 
 /// Top-left canvas origin for an ink-tight run given the layer's aligned
 /// quad center (from [`crate::scene::SceneLayer::text_quad_center`]).
-pub(super) fn extent_origin(aligned_center: [f32; 2], extent: (u32, u32), scale: f32) -> [f32; 2] {
+pub(super) fn extent_origin(
+    aligned_center: [f32; 2],
+    extent: (u32, u32),
+    scale: [f32; 2],
+) -> [f32; 2] {
     [
-        aligned_center[0] - extent.0 as f32 * scale * 0.5,
-        aligned_center[1] - extent.1 as f32 * scale * 0.5,
+        aligned_center[0] - extent.0 as f32 * scale[0] * 0.5,
+        aligned_center[1] - extent.1 as f32 * scale[1] * 0.5,
     ]
 }
 

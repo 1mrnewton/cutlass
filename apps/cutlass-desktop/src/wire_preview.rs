@@ -265,7 +265,7 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
                 cutlass_models::ClipTransform {
                     position: [pos_x, pos_y],
                     anchor_point: [anchor_x, anchor_y],
-                    scale,
+                    scale: cutlass_models::Scale2::uniform(scale),
                     rotation,
                     opacity,
                 },
@@ -297,7 +297,7 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
                 cutlass_models::ClipTransform {
                     position: [pos_x, pos_y],
                     anchor_point: [anchor_x, anchor_y],
-                    scale,
+                    scale: cutlass_models::Scale2::uniform(scale),
                     rotation,
                     opacity,
                 },

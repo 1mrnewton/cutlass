@@ -626,7 +626,7 @@ fn transform_merges_with_current_values() {
             ClipId::from_raw(clip),
             ClipTransform {
                 position: [0.25, 0.0],
-                scale: 0.5,
+                scale: 0.5.into(),
                 rotation: 10.0,
                 opacity: 0.8,
                 ..ClipTransform::IDENTITY
@@ -654,7 +654,7 @@ fn transform_merges_with_current_values() {
             clip: ClipId::from_raw(clip),
             transform: ClipTransform {
                 position: [0.25, -0.1],
-                scale: 0.5,
+                scale: 0.5.into(),
                 rotation: 10.0,
                 opacity: 1.0,
                 ..ClipTransform::IDENTITY

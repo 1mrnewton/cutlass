@@ -726,10 +726,12 @@ fn duplicate_clip_preserves_full_property_snapshot() {
             .position
             .set_keyframe(60, [0.7, 0.4], Easing::EaseOut);
         clip.transform.anchor_point = Param::Constant([0.25, 0.75]);
-        clip.transform.scale.set_keyframe(0, 0.8, Easing::EaseIn);
         clip.transform
             .scale
-            .set_keyframe(60, 1.6, Easing::EaseInOut);
+            .set_keyframe(0, 0.8.into(), Easing::EaseIn);
+        clip.transform
+            .scale
+            .set_keyframe(60, 1.6.into(), Easing::EaseInOut);
         clip.transform.rotation = Param::Constant(27.5);
         clip.transform.opacity = Param::Constant(0.65);
 
@@ -1031,10 +1033,12 @@ fn split_clip_preserves_full_property_snapshot_and_rebases_tail_curves() {
             .position
             .set_keyframe(100, [0.7, 0.4], Easing::EaseOut);
         clip.transform.anchor_point = Param::Constant([0.25, 0.75]);
-        clip.transform.scale.set_keyframe(0, 0.8, Easing::EaseIn);
         clip.transform
             .scale
-            .set_keyframe(100, 1.6, Easing::EaseInOut);
+            .set_keyframe(0, 0.8.into(), Easing::EaseIn);
+        clip.transform
+            .scale
+            .set_keyframe(100, 1.6.into(), Easing::EaseInOut);
         clip.transform.rotation = Param::Constant(27.5);
         clip.transform.opacity = Param::Constant(0.65);
 

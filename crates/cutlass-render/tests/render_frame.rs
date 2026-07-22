@@ -587,7 +587,7 @@ fn red_solid_with_white_background_plate_shows_padding() {
         .set_transform(
             clip,
             ClipTransform {
-                scale: 0.5,
+                scale: 0.5.into(),
                 ..ClipTransform::IDENTITY
             },
             None,

@@ -55,10 +55,10 @@ pub(crate) fn generator_layer_placement(
     placement_from_size(transform, content_w as f32, content_h as f32, 1.0, canvas)
 }
 
-/// Shared geometry: place content of size `w × h` at `fit · transform.scale`,
-/// centered on the canvas and offset/rotated by the transform. Non-center
-/// anchors offset the quad so the anchor stays at the transform's position —
-/// the same derivation as the renderer's `SceneLayer::quad_center`.
+/// Shared geometry: place content of size `w × h` at `fit · transform.scale`
+/// (per-axis), centered on the canvas and offset/rotated by the transform.
+/// Non-center anchors offset the quad so the anchor stays at the transform's
+/// position — the same derivation as the renderer's `SceneLayer::quad_center`.
 fn placement_from_size(
     transform: &ClipTransform,
     w: f32,
@@ -67,8 +67,8 @@ fn placement_from_size(
     canvas: &CompositorConfig,
 ) -> LayerPlacement {
     let (cw, ch) = (canvas.width as f32, canvas.height as f32);
-    let scale = fit * transform.scale;
-    let size = [w * scale, h * scale];
+    // Per-axis placement: width × x, height × y.
+    let size = [w * fit * transform.scale.x, h * fit * transform.scale.y];
     let anchor = [
         cw * 0.5 + transform.position[0] * cw,
         ch * 0.5 + transform.position[1] * ch,
@@ -185,7 +185,7 @@ mod tests {
         // Mirrors resolve.rs' transform_offsets_center_and_scales_size.
         let t = ClipTransform {
             position: [0.25, -0.1],
-            scale: 2.0,
+            scale: 2.0.into(),
             opacity: 0.5,
             ..ClipTransform::IDENTITY
         };

@@ -51,12 +51,12 @@ pub use clip::{
     AnimatedTransform, Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator, LookParam,
     MAX_CLIP_PAN, MAX_CLIP_VOLUME, MAX_SHAPE_DIM, MAX_SPEED, MAX_STAR_POINTS, MAX_STROKE_WIDTH,
     MIN_CLIP_PAN, MIN_CROP_FRACTION, MIN_SPEED, ParamValue, Replaceable, SHAPE_DROP_HEIGHT,
-    SHAPE_DROP_WIDTH, SPEED_CURVE_SCALE, Shape, ShapeParam, ShapePath, ShapePathPoint, ShapeStroke,
-    SlotMedia, SpeedPresetSpec, StyleParam, TextAlignH, TextAlignV, TextBackground, TextCase,
-    TextParam, TextShadow, TextStroke, TextStyle, audio_gain_at, look_animation_combo_period_ticks,
-    look_animation_window_ticks, speed_curve_integral, speed_curve_source_fraction, speed_preset,
-    speed_preset_catalog, speed_preset_id, validate_pan, validate_pan_envelope,
-    validate_speed_curve, validate_volume, validate_volume_envelope,
+    SHAPE_DROP_WIDTH, SPEED_CURVE_SCALE, Scale2, Shape, ShapeParam, ShapePath, ShapePathPoint,
+    ShapeStroke, SlotMedia, SpeedPresetSpec, StyleParam, TextAlignH, TextAlignV, TextBackground,
+    TextCase, TextParam, TextShadow, TextStroke, TextStyle, audio_gain_at,
+    look_animation_combo_period_ticks, look_animation_window_ticks, speed_curve_integral,
+    speed_curve_source_fraction, speed_preset, speed_preset_catalog, speed_preset_id, validate_pan,
+    validate_pan_envelope, validate_speed_curve, validate_volume, validate_volume_envelope,
 };
 pub use effects::{
     EffectInstance, EffectParamKind, EffectParamSpec, EffectSpec, effect_catalog, effect_spec,

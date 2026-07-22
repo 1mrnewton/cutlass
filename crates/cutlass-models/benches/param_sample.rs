@@ -41,17 +41,17 @@ fn keyframed_transform() -> AnimatedTransform {
         keyframes: vec![
             Keyframe {
                 tick: 0,
-                value: 0.5,
+                value: 0.5.into(),
                 easing: Easing::EaseOut,
             },
             Keyframe {
                 tick: 60,
-                value: 1.25,
+                value: 1.25.into(),
                 easing: Easing::from_preset_id("overshoot").unwrap(),
             },
             Keyframe {
                 tick: 120,
-                value: 1.0,
+                value: 1.0.into(),
                 easing: Easing::Linear,
             },
         ],

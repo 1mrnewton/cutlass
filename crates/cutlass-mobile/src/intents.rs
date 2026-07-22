@@ -20,7 +20,8 @@ use cutlass_commands::{Command, EditCommand, EditOutcome, ProjectCommand};
 use cutlass_engine::{ApplyOutcome, Engine, EngineError};
 use cutlass_models::{
     AudioRole, Clip, ClipId, ClipParam, ClipSource, ClipTransform, Easing, Generator, MediaId,
-    ModelError, Param, ParamValue, Project, Rational, RationalTime, TimeRange, TrackId, TrackKind,
+    ModelError, Param, ParamValue, Project, Rational, RationalTime, Scale2, TimeRange, TrackId,
+    TrackKind,
 };
 
 /// Which clip edge a trim gesture drags.
@@ -703,7 +704,7 @@ fn add_pip(
         transform: ClipTransform {
             position: [0.0, -0.18],
             anchor_point: [0.5, 0.5],
-            scale: 0.5,
+            scale: 0.5.into(),
             rotation: 0.0,
             opacity: 1.0,
         },
@@ -1402,7 +1403,7 @@ fn set_transform(
             // stores an offset from the center.
             position: [pos[0] - 0.5, pos[1] - 0.5],
             anchor_point: [0.5, 0.5],
-            scale,
+            scale: Scale2::uniform(scale),
             rotation: rotation_degrees,
             opacity,
         },
@@ -1434,12 +1435,13 @@ fn toggle_transform_keyframe(
 
     let has_kf = |param: &Param<f32>| param.keyframes().iter().any(|kf| kf.tick == rel);
     let has_kf2 = |param: &Param<[f32; 2]>| param.keyframes().iter().any(|kf| kf.tick == rel);
+    let has_kf_scale = |param: &Param<Scale2>| param.keyframes().iter().any(|kf| kf.tick == rel);
 
     let existing: Vec<ClipParam> = KEYFRAME_PARAMS
         .into_iter()
         .filter(|param| match param {
             ClipParam::Position => has_kf2(&snapshot.transform.position),
-            ClipParam::Scale => has_kf(&snapshot.transform.scale),
+            ClipParam::Scale => has_kf_scale(&snapshot.transform.scale),
             ClipParam::Rotation => has_kf(&snapshot.transform.rotation),
             ClipParam::Opacity => has_kf(&snapshot.transform.opacity),
             _ => false,
@@ -1450,9 +1452,14 @@ fn toggle_transform_keyframe(
     if existing.is_empty() {
         // Stamp the current pose across all four properties.
         let pose = snapshot.transform.sample(rel);
+        let scale_value = if pose.scale.is_uniform() {
+            ParamValue::Scalar(pose.scale.x)
+        } else {
+            ParamValue::Vec2([pose.scale.x, pose.scale.y])
+        };
         let stamps: [(ClipParam, ParamValue); 4] = [
             (ClipParam::Position, ParamValue::Vec2(pose.position)),
-            (ClipParam::Scale, ParamValue::Scalar(pose.scale)),
+            (ClipParam::Scale, scale_value),
             (ClipParam::Rotation, ParamValue::Scalar(pose.rotation)),
             (ClipParam::Opacity, ParamValue::Scalar(pose.opacity)),
         ];

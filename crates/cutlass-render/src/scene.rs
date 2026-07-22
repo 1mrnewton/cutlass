@@ -89,7 +89,9 @@ impl Scene {
                 SizeSpec::Fixed([w, h]) => SizeSpec::Fixed([w * factor, h * factor]),
                 // Text / path bitmaps rasterize at their reference resolution
                 // and ride the quad; scaling the multiplier scales the quad.
-                SizeSpec::BitmapScaled(s) => SizeSpec::BitmapScaled(s * factor),
+                SizeSpec::BitmapScaled([sx, sy]) => {
+                    SizeSpec::BitmapScaled([sx * factor, sy * factor])
+                }
             };
             match &mut layer.source {
                 // SDF stroke width and AA pad are in canvas pixels.
@@ -343,8 +345,9 @@ impl SceneLayer {
 pub enum SizeSpec {
     /// A known on-canvas size in pixels (scale already folded in).
     Fixed([f32; 2]),
-    /// Multiply the rasterized content's pixel size by this factor (text).
-    BitmapScaled(f32),
+    /// Multiply the rasterized content's pixel size by these per-axis factors
+    /// (text / path shapes). Uniform scales use equal components.
+    BitmapScaled([f32; 2]),
 }
 
 /// The pixel source for a [`SceneLayer`].
@@ -494,7 +497,7 @@ mod tests {
             },
             center: [50.0, 25.0],
             anchor_point: [0.5, 0.5],
-            size: SizeSpec::BitmapScaled(2.0),
+            size: SizeSpec::BitmapScaled([2.0, 2.0]),
             rotation: 0.0,
             opacity: 1.0,
             uv: [0.0, 0.0, 1.0, 1.0],
@@ -559,7 +562,7 @@ mod tests {
         assert_eq!(scene.layers[0].uv, [0.1, 0.2, 0.9, 0.8]);
 
         // Text scales through its bitmap multiplier.
-        assert_eq!(scene.layers[1].size, SizeSpec::BitmapScaled(1.0));
+        assert_eq!(scene.layers[1].size, SizeSpec::BitmapScaled([1.0, 1.0]));
 
         // SDF stroke width and pad are canvas-pixel quantities.
         let LayerSource::Shape { stroke, pad, .. } = &scene.layers[2].source else {

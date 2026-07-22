@@ -23,15 +23,15 @@
 use cutlass_core::{RationalTime, resample};
 use cutlass_models::{
     AnimationSlot, ClipId, ClipSource, ClipTransform, ColorAdjustments, Easing, EffectInstance,
-    Filter, Generator, MediaKind, Project, look_animation_combo_period_ticks,
+    Filter, Generator, LayerStyles, MediaKind, Project, look_animation_combo_period_ticks,
     look_animation_window_ticks,
 };
 
 use crate::animation::{apply_look_animations, is_per_character, scaled_ticks, text_knobs};
 use crate::grade::resolve_color_grade_at;
 use crate::scene::{
-    LayerSource, ResolvedPass, Scene, SceneChromaKey, SceneLayer, SceneLut, SceneMask, SizeSpec,
-    TextAnimation,
+    LayerSource, ResolvedPass, Scene, SceneBackground, SceneChromaKey, SceneGlow, SceneLayer,
+    SceneLut, SceneMask, SceneOutline, SceneShadow, SceneStyles, SizeSpec, TextAnimation,
 };
 
 mod generator;
@@ -258,6 +258,7 @@ fn resolve_track_at(
                 color_grade: None,
                 lut: None,
                 blend_mode: cutlass_models::BlendMode::Normal,
+                styles: None,
             }));
         }
     }
@@ -375,6 +376,9 @@ fn resolve_clip(
         strength: chroma.strength.sample(local_tick),
         shadow: chroma.shadow.sample(local_tick),
     });
+    // Reference px → canvas px (same convention as shape strokes).
+    let px = (ch / REFERENCE_HEIGHT) * xf.scale;
+    let styles = resolve_styles(&clip.styles, local_tick, px);
 
     match &clip.content {
         ClipSource::Media { media, .. } => {
@@ -418,6 +422,7 @@ fn resolve_clip(
                 color_grade,
                 lut,
                 blend_mode: clip.blend_mode,
+                styles,
             }))
         }
         ClipSource::Generated(generator) => {
@@ -445,9 +450,10 @@ fn resolve_clip(
             .map(|mut layer| {
                 layer.clip = Some(clip.id);
                 // Canvas passes grade/effect the whole stack — blend modes
-                // only apply to layer quads, so keep those Normal.
+                // and layer styles only apply to layer quads.
                 if !matches!(layer.source, LayerSource::CanvasPass) {
                     layer.blend_mode = clip.blend_mode;
+                    layer.styles = styles;
                 }
                 if let LayerSource::Text { animation, .. } = &mut layer.source {
                     *animation = sample_text_animation(clip, local_tick, local_tick_f, t.rate);
@@ -456,6 +462,44 @@ fn resolve_clip(
             }))
         }
     }
+}
+
+/// Sample [`LayerStyles`] at a clip-local tick into canvas-pixel scene values.
+///
+/// Lengths (offset, blur, radius, width, padding) scale by `px` (reference →
+/// canvas); colors and glow intensity pass through. `None` overall when the
+/// clip has no style blocks.
+fn resolve_styles(styles: &LayerStyles, local_tick: i64, px: f32) -> Option<SceneStyles> {
+    if styles.is_empty() {
+        return None;
+    }
+    Some(SceneStyles {
+        shadow: styles.shadow.as_ref().map(|shadow| {
+            let offset = shadow.offset.sample(local_tick);
+            SceneShadow {
+                rgba: shadow.rgba.sample(local_tick),
+                offset: [offset[0] * px, offset[1] * px],
+                blur: shadow.blur.sample(local_tick) * px,
+            }
+        }),
+        glow: styles.glow.as_ref().map(|glow| SceneGlow {
+            rgba: glow.rgba.sample(local_tick),
+            radius: glow.radius.sample(local_tick) * px,
+            intensity: glow.intensity.sample(local_tick),
+        }),
+        outline: styles.outline.as_ref().map(|outline| SceneOutline {
+            rgba: outline.rgba.sample(local_tick),
+            width: outline.width.sample(local_tick) * px,
+        }),
+        background: styles
+            .background
+            .as_ref()
+            .map(|background| SceneBackground {
+                rgba: background.rgba.sample(local_tick),
+                padding: background.padding.sample(local_tick) * px,
+                radius: background.radius.sample(local_tick) * px,
+            }),
+    })
 }
 
 /// Sample an active per-character look preset into resolve-time data.

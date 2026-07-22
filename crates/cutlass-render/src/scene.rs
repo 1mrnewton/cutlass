@@ -193,6 +193,11 @@ pub struct SceneLayer {
     /// How this layer composites over the stack below (`Normal` = source-over).
     /// Canvas-wide passes and transition wrappers stay `Normal`.
     pub blend_mode: BlendMode,
+    /// Layer-quad styles (shadow/glow/outline/background) sampled at the
+    /// clip-local tick into canvas pixels. `None` when the clip has no style
+    /// blocks — the compositor fast path. Canvas-wide passes and transition
+    /// wrappers stay `None`.
+    pub styles: Option<SceneStyles>,
 }
 
 /// Mask values sampled at a clip-local tick.
@@ -218,6 +223,56 @@ pub struct SceneLut {
     pub path: String,
     /// Blend of the looked-up result over the original, `0` … `1`.
     pub intensity: f32,
+}
+
+/// Drop shadow drawn from the layer's alpha (offset + blur), in canvas pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneShadow {
+    pub rgba: [u8; 4],
+    pub offset: [f32; 2],
+    pub blur: f32,
+}
+
+/// Soft glow bloom drawn from the layer's alpha, in canvas pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneGlow {
+    pub rgba: [u8; 4],
+    pub radius: f32,
+    pub intensity: f32,
+}
+
+/// Hard outline / stroke around the layer's alpha silhouette, in canvas pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneOutline {
+    pub rgba: [u8; 4],
+    pub width: f32,
+}
+
+/// Solid plate behind the layer (padded AABB of the alpha bounds), in canvas pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneBackground {
+    pub rgba: [u8; 4],
+    pub padding: f32,
+    pub radius: f32,
+}
+
+/// Layer-quad styles sampled at a clip-local tick into canvas pixels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneStyles {
+    pub shadow: Option<SceneShadow>,
+    pub glow: Option<SceneGlow>,
+    pub outline: Option<SceneOutline>,
+    pub background: Option<SceneBackground>,
+}
+
+impl SceneStyles {
+    /// True iff no style block is present.
+    pub fn is_empty(&self) -> bool {
+        self.shadow.is_none()
+            && self.glow.is_none()
+            && self.outline.is_none()
+            && self.background.is_none()
+    }
 }
 
 impl SceneLayer {
@@ -380,6 +435,7 @@ mod tests {
             color_grade: None,
             lut: None,
             blend_mode: BlendMode::Normal,
+            styles: None,
         }
     }
 
@@ -407,6 +463,7 @@ mod tests {
             color_grade: None,
             lut: None,
             blend_mode: BlendMode::Normal,
+            styles: None,
         }
     }
 
@@ -430,6 +487,7 @@ mod tests {
             color_grade: None,
             lut: None,
             blend_mode: BlendMode::Normal,
+            styles: None,
         }
     }
 

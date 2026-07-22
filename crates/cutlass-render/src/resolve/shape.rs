@@ -75,6 +75,7 @@ pub(super) fn resolve_shape(
             color_grade,
             lut: None,
             blend_mode: BlendMode::Normal,
+            styles: None,
         });
     }
 
@@ -102,6 +103,7 @@ pub(super) fn resolve_shape(
             color_grade,
             lut: None,
             blend_mode: BlendMode::Normal,
+            styles: None,
         });
     }
 
@@ -146,6 +148,7 @@ pub(super) fn resolve_shape(
         color_grade,
         lut: None,
         blend_mode: BlendMode::Normal,
+        styles: None,
     })
 }
 

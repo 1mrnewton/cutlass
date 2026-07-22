@@ -306,4 +306,66 @@ pub(crate) fn wire_timeline(
             }
         }
     });
+
+    // --- keyframe graph editor drawer ------------------------------------
+    wire_graph_editor(app);
+}
+
+fn wire_graph_editor(app: &AppWindow) {
+    let graph = app.global::<GraphBackend>();
+    let toggle_app = app.as_weak();
+    graph.on_toggle_visible(move || {
+        if let Some(app) = toggle_app.upgrade() {
+            let g = app.global::<GraphBackend>();
+            g.set_visible(!g.get_visible());
+        }
+    });
+
+    let set_ch_app = app.as_weak();
+    graph.on_set_channel(move |key, channel| {
+        if let Some(app) = set_ch_app.upgrade() {
+            let g = app.global::<GraphBackend>();
+            g.set_selected_key(key);
+            g.set_selected_channel(channel);
+        }
+    });
+
+    let refresh_app = app.as_weak();
+    graph.on_refresh(move |sequence, clip_id, playhead, width, height| {
+        let Some(app) = refresh_app.upgrade() else {
+            return;
+        };
+        let g = app.global::<GraphBackend>();
+        let selected_key = g.get_selected_key();
+        let selected_channel = g.get_selected_channel();
+        let selected_tick = g.get_selected_tick();
+        let result = crate::graph_editor::refresh_graph(crate::graph_editor::GraphRefreshInput {
+            sequence: &sequence,
+            clip_id: clip_id.as_str(),
+            playhead,
+            width,
+            height,
+            selected_key: selected_key.as_str(),
+            selected_channel,
+            selected_tick,
+        });
+        g.set_channels(result.channels);
+        g.set_channel_labels(result.channel_labels);
+        g.set_channel_index(result.channel_index);
+        g.set_selected_key(result.selected_key);
+        g.set_selected_channel(result.selected_channel);
+        let geo = result.geometry;
+        g.set_path_commands(geo.path_commands);
+        g.set_dots(ModelRc::from(Rc::new(VecModel::from(geo.dots))));
+        g.set_y_min_label(geo.y_min_label);
+        g.set_y_mid_label(geo.y_mid_label);
+        g.set_y_max_label(geo.y_max_label);
+        g.set_grid_min_y(geo.grid_min_y);
+        g.set_grid_mid_y(geo.grid_mid_y);
+        g.set_grid_max_y(geo.grid_max_y);
+        g.set_playhead_x(geo.playhead_x);
+        g.set_playhead_visible(geo.playhead_visible);
+        g.set_plot_w(geo.plot_w);
+        g.set_plot_h(geo.plot_h);
+    });
 }

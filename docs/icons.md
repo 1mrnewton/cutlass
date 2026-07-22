@@ -100,6 +100,7 @@ lacks cleanly (`letter-spacing`, `line-height`): **[Tabler](https://tabler.io/ic
 - [x] `scan` — `assets/icon/timeline/scan.svg` — zoom to fit.
 - [x] `zoom-out` — `assets/icon/timeline/zoom-out.svg`.
 - [x] `zoom-in` — `assets/icon/timeline/zoom-in.svg`.
+- [x] `spline` (reuse inspector) — `assets/icon/inspector/spline.svg` — keyframe graph drawer toggle.
 
 ### Track headers — `panels/timeline/track-head.slint`
 

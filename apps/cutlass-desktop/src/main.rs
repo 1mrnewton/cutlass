@@ -15,6 +15,7 @@ mod cloud;
 mod download_safety;
 mod drafts;
 mod external;
+mod graph_editor;
 mod inspector;
 mod interaction;
 mod lottie_stickers;

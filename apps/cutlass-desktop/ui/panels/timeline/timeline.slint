@@ -7,6 +7,7 @@ import {
 } from "../../components/index.slint";
 import { AppStore, EditorStore, TimelineStore, TimelineActions } from "../../store/index.slint";
 import { Toolbar } from "toolbar.slint";
+import { GraphEditor } from "graph-editor.slint";
 import { TrackLane } from "track-lane.slint";
 import { TrackHead } from "track-head.slint";
 import { Ruler } from "ruler.slint";
@@ -567,6 +568,10 @@ export component TimelinePanel inherits PanelBase {
         tb := Toolbar {
             height: AppStore.theme.metrics.layout.toolbar-height;
         }
+
+        // Keyframe graph drawer (fixed 180px when open). Sits between the
+        // toolbar and the ruler so lane/ruler alignment is unchanged.
+        GraphEditor { }
 
         rl := HorizontalLayout {
             height: 30px;

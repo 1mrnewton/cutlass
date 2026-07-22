@@ -3,8 +3,8 @@ use crate::passes::resolve_transition_pass;
 use super::RT_FORMAT;
 use super::blend::build_blend_pipeline;
 use super::blit::{
-    build_additive_blit_pipeline, build_blit_pipeline, build_offset_blit_pipeline,
-    build_replace_pipeline,
+    build_accumulate_blit_pipeline, build_additive_blit_pipeline, build_blit_pipeline,
+    build_offset_blit_pipeline, build_replace_pipeline,
 };
 
 /// GPU pipelines for catalog effect and transition passes.
@@ -39,6 +39,9 @@ pub(crate) struct PassRegistry {
     pub offset_blit_layout: wgpu::BindGroupLayout,
     /// Additive premultiplied blit (glow).
     pub additive_blit_pipeline: wgpu::RenderPipeline,
+    /// Weighted additive blit for motion-blur sample accumulation.
+    pub accumulate_blit_pipeline: wgpu::RenderPipeline,
+    pub accumulate_blit_layout: wgpu::BindGroupLayout,
     /// Harden blurred silhouette into an outside stroke (outline).
     pub harden_pipeline: wgpu::RenderPipeline,
     pub harden_layout: wgpu::BindGroupLayout,
@@ -99,6 +102,12 @@ impl PassRegistry {
         let offset_blit_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("cutlass.offset_blit.bgl"),
+                entries: &[tex_entry(0), sampler_entry(1), uniform_entry(2)],
+            });
+
+        let accumulate_blit_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("cutlass.accumulate_blit.bgl"),
                 entries: &[tex_entry(0), sampler_entry(1), uniform_entry(2)],
             });
 
@@ -193,6 +202,8 @@ impl PassRegistry {
         );
         let offset_blit_pipeline = build_offset_blit_pipeline(device, &offset_blit_layout);
         let additive_blit_pipeline = build_additive_blit_pipeline(device, &blit_layout);
+        let accumulate_blit_pipeline =
+            build_accumulate_blit_pipeline(device, &accumulate_blit_layout);
         let harden_pipeline = build_effect_pipeline(
             device,
             "cutlass.style_harden",
@@ -225,6 +236,8 @@ impl PassRegistry {
             offset_blit_pipeline,
             offset_blit_layout,
             additive_blit_pipeline,
+            accumulate_blit_pipeline,
+            accumulate_blit_layout,
             harden_pipeline,
             harden_layout,
         }

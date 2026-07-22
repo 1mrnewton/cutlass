@@ -5,10 +5,10 @@ use std::path::Path;
 
 use cutlass_compositor::{ColorGrade, GpuContext};
 use cutlass_models::{
-    BlendMode, CanvasAspect, CanvasSettings, ChromaKey, ClipTransform, ColorAdjustments, Filter,
-    Generator, LayerBackground, LayerShadow, LayerStyles, Mask, MaskKind, MediaSource, Param,
-    Project, Rational, RationalTime, Shape, ShapePath, ShapePathPoint, TextStyle, TimeRange,
-    TrackKind,
+    BlendMode, CanvasAspect, CanvasSettings, ChromaKey, ClipParam, ClipTransform, ColorAdjustments,
+    Easing, Filter, Generator, LayerBackground, LayerShadow, LayerStyles, Mask, MaskKind,
+    MediaSource, MotionBlur, Param, ParamValue, Project, Rational, RationalTime, Shape, ShapePath,
+    ShapePathPoint, TextStyle, TimeRange, TrackKind,
 };
 use cutlass_render::Renderer;
 
@@ -664,4 +664,92 @@ fn text_clip_with_layer_shadow_composites() {
         .render_frame(&project, rt(0))
         .expect("text + layer shadow should composite");
     assert_eq!((image.width, image.height), (1920, 1080));
+}
+
+#[test]
+fn motion_blur_export_smears_animated_solid() {
+    // Small solid sweeping left→right over 2 ticks; with blur at the midpoint,
+    // intermediate x positions light up that blur-off leaves dark.
+    let mut project = Project::new("p", FPS_24);
+    project.timeline_mut().set_canvas(CanvasSettings {
+        aspect: CanvasAspect::Square1x1,
+        background: [0, 0, 0],
+    });
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::SolidColor {
+                rgba: [255, 255, 255, 255],
+            },
+            TimeRange::at_rate(0, 24, FPS_24),
+        )
+        .unwrap();
+    // Shrink so the solid is a bar, not full-canvas (1080×1080 → ~108px).
+    project
+        .set_transform(
+            clip,
+            ClipTransform {
+                scale: 0.1.into(),
+                ..ClipTransform::IDENTITY
+            },
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            rt(0),
+            ParamValue::Vec2([-0.35, 0.0]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            rt(2),
+            ParamValue::Vec2([0.35, 0.0]),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_motion_blur(
+            clip,
+            MotionBlur {
+                enabled: true,
+                shutter_deg: 360.0,
+                samples: 8,
+            },
+        )
+        .unwrap();
+
+    let Ok(mut renderer) = Renderer::new_headless() else {
+        eprintln!("skipping: no headless GPU available");
+        return;
+    };
+
+    // Preview path (default): no blur.
+    let off = renderer.render_frame(&project, rt(1)).expect("preview");
+
+    renderer.set_apply_motion_blur(true);
+    let on = renderer.render_frame(&project, rt(1)).expect("export blur");
+
+    assert_ne!(
+        off.pixel(400, 540),
+        on.pixel(400, 540),
+        "blur-on export frame must differ from blur-off preview at smear probe"
+    );
+
+    // At tick 1 the sharp bar sits near canvas center (x≈540). With a full-
+    // frame shutter the smear covers toward the left keyframe — probe there.
+    let left = on.pixel(400, 540);
+    let left_off = off.pixel(400, 540);
+    assert!(
+        left[0] > left_off[0],
+        "blur should leave coverage left of the sharp mid position: on={left:?} off={left_off:?}"
+    );
 }

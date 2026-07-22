@@ -11,6 +11,7 @@ use cutlass_shapes::{PathRaster, ShapeStyle};
 use cutlass_text::TextRenderer;
 
 use crate::error::RenderError;
+use crate::motion_blur::attach_motion_blur_passes;
 use crate::resolve::{ResolveOverrides, resolve, resolve_gesture_partitions, resolve_with};
 use crate::scene::{LayerSource, Scene, SizeSpec};
 
@@ -38,8 +39,15 @@ impl Renderer {
             decode_mode: default_decode_mode(),
             proxies: HashMap::new(),
             use_proxies: true,
+            apply_motion_blur: false,
             last_stats: FrameStats::default(),
         })
+    }
+
+    /// Enable or disable transform motion-blur supersampling on subsequent
+    /// frames. Export turns this on; interactive preview leaves it off.
+    pub fn set_apply_motion_blur(&mut self, on: bool) {
+        self.apply_motion_blur = on;
     }
 
     /// Stage timings of the most recent successful render — how the last
@@ -136,7 +144,8 @@ impl Renderer {
         project: &Project,
         t: RationalTime,
     ) -> Result<RgbaImage, RenderError> {
-        let scene = resolve(project, t)?;
+        let mut scene = resolve(project, t)?;
+        self.prepare_motion_blur(project, &mut scene);
         self.render_scene(project, &scene)
     }
 
@@ -148,7 +157,8 @@ impl Renderer {
         t: RationalTime,
         overrides: ResolveOverrides<'_>,
     ) -> Result<RgbaImage, RenderError> {
-        let scene = resolve_with(project, t, overrides)?;
+        let mut scene = resolve_with(project, t, overrides)?;
+        self.prepare_motion_blur(project, &mut scene);
         self.render_scene(project, &scene)
     }
 
@@ -183,6 +193,7 @@ impl Renderer {
         overrides: ResolveOverrides<'_>,
     ) -> Result<RgbaImage, RenderError> {
         let mut scene = resolve_with(project, t, overrides)?;
+        self.prepare_motion_blur(project, &mut scene);
         scene.fit_within(max_width, max_height);
         self.render_scene(project, &scene)
     }
@@ -243,7 +254,8 @@ impl Renderer {
         policy: SeekPolicy,
         sink: &mut dyn FrameSink,
     ) -> Result<(), RenderError> {
-        let scene = resolve_with(project, t, overrides)?;
+        let mut scene = resolve_with(project, t, overrides)?;
+        self.prepare_motion_blur(project, &mut scene);
         self.render_scene_into_policy(project, &scene, sink, policy)
     }
 
@@ -264,6 +276,7 @@ impl Renderer {
         sink: &mut dyn FrameSink,
     ) -> Result<(), RenderError> {
         let mut scene = resolve_with(project, t, overrides)?;
+        self.prepare_motion_blur(project, &mut scene);
         scene.fit_within(max_width, max_height);
         self.render_scene_into_policy(project, &scene, sink, policy)
     }
@@ -280,8 +293,17 @@ impl Renderer {
         height: u32,
     ) -> Result<RgbaImage, RenderError> {
         let mut scene = resolve(project, t)?;
+        self.prepare_motion_blur(project, &mut scene);
         scene.fit_into(width, height);
         self.render_scene(project, &scene)
+    }
+
+    /// When [`Self::apply_motion_blur`] is on, attach sub-frame transform
+    /// samples before fit/scale so letterbox adjusts them with the scene.
+    fn prepare_motion_blur(&self, project: &Project, scene: &mut Scene) {
+        if self.apply_motion_blur {
+            attach_motion_blur_passes(project, scene);
+        }
     }
 
     /// Composite an already-resolved [`Scene`]. `project` supplies media file

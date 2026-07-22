@@ -9,6 +9,7 @@
 //! while [`Renderer`](crate::Renderer) does the decode + rasterize + composite.
 
 use cutlass_compositor::ColorGrade;
+use cutlass_core::Rational;
 use cutlass_models::{AnimationSlot, BlendMode, ClipId, MaskKind, MediaId};
 use cutlass_shapes::{BezierPath, SdfParams, Stroke};
 use cutlass_text::{TextAlign, TextStyle, TextVerticalAlign};
@@ -55,6 +56,10 @@ pub struct Scene {
     /// Canvas clear color before layers composite. Alpha 0 is supported for
     /// gesture sprite/foreground passes that stack over an opaque backdrop.
     pub background: [u8; 4],
+    /// Timeline instant this scene was resolved at (timeline rate). Used by
+    /// motion-blur supersampling to re-place animated transforms at sub-ticks
+    /// without re-resolving content.
+    pub tick: RationalTime,
     /// Layers in bottom-to-top stacking order (index 0 draws first).
     pub layers: Vec<SceneLayer>,
 }
@@ -66,6 +71,7 @@ impl Scene {
             width,
             height,
             background,
+            tick: RationalTime::new(0, Rational::FPS_30),
             layers: Vec::new(),
         }
     }
@@ -93,6 +99,10 @@ impl Scene {
                     SizeSpec::BitmapScaled([sx * factor, sy * factor])
                 }
             };
+            for pass in &mut layer.blur_passes {
+                pass.center = [pass.center[0] * factor, pass.center[1] * factor];
+                pass.size = [pass.size[0] * factor, pass.size[1] * factor];
+            }
             match &mut layer.source {
                 // SDF stroke width and AA pad are in canvas pixels.
                 LayerSource::Shape { stroke, pad, .. } => {
@@ -146,10 +156,25 @@ impl Scene {
         let dy = (height as f32 - ch * factor) * 0.5;
         for layer in &mut self.layers {
             layer.center = [layer.center[0] + dx, layer.center[1] + dy];
+            for pass in &mut layer.blur_passes {
+                pass.center = [pass.center[0] + dx, pass.center[1] + dy];
+            }
         }
         self.width = width;
         self.height = height;
     }
+}
+
+/// One transform sample for motion-blur supersampling (scene space).
+///
+/// `center` is the **anchor** position (same convention as [`SceneLayer::center`]);
+/// the renderer derives the quad center from `size` + the layer's anchor point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneBlurPass {
+    pub center: [f32; 2],
+    pub size: [f32; 2],
+    pub rotation: f32,
+    pub opacity: f32,
 }
 
 /// A scaled canvas dimension: rounded, never collapsing to zero.
@@ -205,6 +230,11 @@ pub struct SceneLayer {
     /// blocks — the compositor fast path. Canvas-wide passes and transition
     /// wrappers stay `None`.
     pub styles: Option<SceneStyles>,
+    /// Alternate transform samples for motion-blur supersampling. Empty when
+    /// unused. Content (texture / source time) stays at the primary tick —
+    /// transform-only blur. Filled by [`crate::motion_blur::attach_motion_blur_passes`]
+    /// before fit/scale; ignored by interactive preview when motion blur is off.
+    pub blur_passes: Vec<SceneBlurPass>,
 }
 
 /// Mask values sampled at a clip-local tick.
@@ -456,6 +486,7 @@ mod tests {
             lut: None,
             blend_mode: BlendMode::Normal,
             styles: None,
+            blur_passes: Vec::new(),
         }
     }
 
@@ -484,6 +515,7 @@ mod tests {
             lut: None,
             blend_mode: BlendMode::Normal,
             styles: None,
+            blur_passes: Vec::new(),
         }
     }
 
@@ -508,6 +540,7 @@ mod tests {
             lut: None,
             blend_mode: BlendMode::Normal,
             styles: None,
+            blur_passes: Vec::new(),
         }
     }
 

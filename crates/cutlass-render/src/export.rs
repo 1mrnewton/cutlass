@@ -163,6 +163,28 @@ pub fn export_observed(
     let frames = duration.value.max(0) as u64;
     let native = settings.size == canvas_size(project);
 
+    // Export always applies per-clip transform motion blur when enabled.
+    // Interactive preview leaves the flag off for scrub performance.
+    let prev_blur = renderer.apply_motion_blur;
+    renderer.set_apply_motion_blur(true);
+    let result = export_observed_inner(
+        renderer, project, encoder, settings, observer, frames, native, rate,
+    );
+    renderer.set_apply_motion_blur(prev_blur);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_observed_inner(
+    renderer: &mut Renderer,
+    project: &Project,
+    encoder: &mut dyn VideoEncoder,
+    settings: ExportSettings,
+    observer: ExportObserver<'_>,
+    frames: u64,
+    native: bool,
+    rate: Rational,
+) -> Result<u64, RenderError> {
     let mut mixer = ExportAudioMixer::for_project(project);
     let audio_rate = Rational::new(EXPORT_AUDIO_RATE as i32, 1);
     let mut block = Vec::new();

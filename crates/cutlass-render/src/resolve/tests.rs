@@ -797,6 +797,7 @@ fn quad_center_rotates_about_the_anchor() {
         lut: None,
         blend_mode: BlendMode::Normal,
         styles: None,
+        blur_passes: Vec::new(),
     };
     // to_center (960, 540) rotated 90° cw (+y down) → (-540, 960).
     approx2(layer.quad_center([1920.0, 1080.0]), [420.0, 1500.0]);

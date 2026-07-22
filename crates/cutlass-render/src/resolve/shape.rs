@@ -74,6 +74,7 @@ pub(super) fn resolve_shape(
             lut: None,
             blend_mode: BlendMode::Normal,
             styles: None,
+            blur_passes: Vec::new(),
         });
     }
 
@@ -104,6 +105,7 @@ pub(super) fn resolve_shape(
             lut: None,
             blend_mode: BlendMode::Normal,
             styles: None,
+            blur_passes: Vec::new(),
         });
     }
 
@@ -149,6 +151,7 @@ pub(super) fn resolve_shape(
         lut: None,
         blend_mode: BlendMode::Normal,
         styles: None,
+        blur_passes: Vec::new(),
     })
 }
 

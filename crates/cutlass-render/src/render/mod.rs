@@ -150,6 +150,11 @@ pub struct Renderer {
     /// export command) flip it off for the pass. Toggling drops the
     /// proxied media's open decoders so no cursor outlives its file.
     use_proxies: bool,
+    /// When true, export-quality motion blur runs: clips with motion blur
+    /// enabled and an animated transform are supersampled across the shutter.
+    /// Interactive preview leaves this false (N× layer draws is too costly
+    /// for scrub). Flipped on for the duration of [`crate::export_observed`].
+    pub(crate) apply_motion_blur: bool,
     /// Stage timings of the last successful render (see [`FrameStats`]).
     last_stats: FrameStats,
 }

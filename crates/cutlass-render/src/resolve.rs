@@ -126,18 +126,21 @@ pub fn resolve_gesture_partitions(
             width: scene.width,
             height: scene.height,
             background: scene.background,
+            tick: scene.tick,
             layers: scene.layers[..index].to_vec(),
         },
         sprite: Scene {
             width: scene.width,
             height: scene.height,
             background: [0, 0, 0, 0],
+            tick: scene.tick,
             layers: vec![scene.layers[index].clone()],
         },
         above: Scene {
             width: scene.width,
             height: scene.height,
             background: [0, 0, 0, 0],
+            tick: scene.tick,
             layers: scene.layers[index + 1..].to_vec(),
         },
     }))
@@ -164,6 +167,7 @@ pub fn resolve_with(
     let (width, height) = canvas_size(project);
     let bg = timeline.canvas().background;
     let mut scene = Scene::empty(width, height, [bg[0], bg[1], bg[2], 255]);
+    scene.tick = t;
 
     let cw = width as f32;
     let ch = height as f32;
@@ -261,6 +265,7 @@ fn resolve_track_at(
                 lut: None,
                 blend_mode: cutlass_models::BlendMode::Normal,
                 styles: None,
+                blur_passes: Vec::new(),
             }));
         }
     }
@@ -439,6 +444,7 @@ fn resolve_clip(
                 lut,
                 blend_mode: clip.blend_mode,
                 styles,
+                blur_passes: Vec::new(),
             }))
         }
         ClipSource::Generated(generator) => {

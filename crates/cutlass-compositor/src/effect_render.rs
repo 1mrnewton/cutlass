@@ -15,7 +15,7 @@ mod pool;
 mod styles;
 
 pub(crate) use blend::run_blend_composite;
-pub(crate) use blit::{blit_premultiplied_to_canvas, blit_replace};
+pub(crate) use blit::{blit_premultiplied_to_canvas, blit_replace, blit_weighted_additive};
 pub(crate) use lut::run_lut_pass;
 pub(crate) use pipelines::PassRegistry;
 pub(crate) use pool::OffscreenPool;

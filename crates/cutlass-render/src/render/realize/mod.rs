@@ -14,6 +14,7 @@ use cutlass_models::{MediaId, Project};
 use cutlass_shapes::ShapeStyle;
 
 use crate::error::RenderError;
+use crate::motion_blur::{blur_passes_for_placement, layer_placements_from_blur_passes};
 use crate::scene::{LayerSource, Scene, SceneLut, SizeSpec};
 
 use super::effects::{EffectChain, blend_mode, layer_effects, layer_styles, pack_effects};
@@ -39,9 +40,16 @@ impl Renderer {
         // placement. Held in `realized` so the borrowed `CompositeLayer`s built
         // below stay valid through the composite call.
         let mut realized: Vec<Realized> = Vec::with_capacity(scene.layers.len());
+        // Parallel to `realized`: compositor blur placements (may be empty).
+        let mut blur_for_realized: Vec<Vec<LayerPlacement>> =
+            Vec::with_capacity(scene.layers.len());
         let mut effect_store: Vec<EffectChain> = Vec::new();
         let mut occurrence: HashMap<MediaId, u32> = HashMap::new();
         for layer in &scene.layers {
+            blur_for_realized.push(layer_placements_from_blur_passes(
+                &layer.blur_passes,
+                layer.anchor_point,
+            ));
             let fx = layer_effects(layer);
             let color_grade = layer.color_grade;
             let mode = blend_mode(layer.blend_mode);
@@ -302,7 +310,7 @@ impl Renderer {
         }
         let mut jobs: Vec<LayerJob<'_>> = Vec::new();
 
-        for r in &realized {
+        for (layer_idx, r) in realized.iter().enumerate() {
             match r {
                 Realized::CanvasPass {
                     effects,
@@ -400,6 +408,8 @@ impl Renderer {
                         storage_idx: layer_storage.len() - 1,
                     });
                     // Glyphs share the same effect chain reference when present.
+                    // Per-glyph instances own placement; transform motion blur
+                    // is not applied to glyph runs (bitmap text still blurs).
                     let glyph_effects = if effects.is_empty() { &[] } else { bg_effects };
                     layer_storage.push(composite_from_realized(
                         r,
@@ -423,14 +433,33 @@ impl Renderer {
                             chain.as_slice()
                         })
                         .unwrap_or(&[]);
-                    layer_storage.push(composite_from_realized(
+                    let mut cl = composite_from_realized(
                         other,
                         &self.stills,
                         &self.stickers,
                         &self.lottie,
                         &self.luts,
                         effects,
-                    ));
+                    );
+                    let mut blur = blur_for_realized[layer_idx].clone();
+                    // BitmapScaled layers skip attach-time sampling; fill now.
+                    if blur.is_empty()
+                        && self.apply_motion_blur
+                        && !matches!(other, Realized::Glyphs { .. })
+                        && let Some(clip_id) = scene.layers[layer_idx].clip
+                    {
+                        blur = blur_passes_for_placement(
+                            project,
+                            scene,
+                            clip_id,
+                            cl.placement,
+                            scene.layers[layer_idx].anchor_point,
+                        );
+                    }
+                    if !blur.is_empty() {
+                        cl = cl.with_blur_passes(blur);
+                    }
+                    layer_storage.push(cl);
                     jobs.push(LayerJob::Plain {
                         storage_idx: layer_storage.len() - 1,
                     });

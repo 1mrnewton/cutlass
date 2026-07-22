@@ -21,6 +21,7 @@ mod export;
 mod export_audio;
 mod grade;
 mod lut_pack;
+mod motion_blur;
 mod render;
 mod resolve;
 mod scene;

@@ -56,6 +56,7 @@ pub(crate) fn resolve_generator(
                 lut: None,
                 blend_mode: BlendMode::Normal,
                 styles: None,
+                blur_passes: Vec::new(),
             })
         }
         Generator::SolidColor { rgba } => Some(SceneLayer {
@@ -75,6 +76,7 @@ pub(crate) fn resolve_generator(
             lut: None,
             blend_mode: BlendMode::Normal,
             styles: None,
+            blur_passes: Vec::new(),
         }),
         Generator::Shape {
             shape,
@@ -133,6 +135,7 @@ pub(crate) fn resolve_generator(
                 lut: None,
                 blend_mode: BlendMode::Normal,
                 styles: None,
+                blur_passes: Vec::new(),
             })
         }
         Generator::Sticker { asset } => {
@@ -164,6 +167,7 @@ pub(crate) fn resolve_generator(
                 lut: None,
                 blend_mode: BlendMode::Normal,
                 styles: None,
+                blur_passes: Vec::new(),
             })
         }
     }?;
@@ -194,6 +198,7 @@ fn canvas_pass(
         lut: None,
         blend_mode: BlendMode::Normal,
         styles: None,
+        blur_passes: Vec::new(),
     })
 }
 

@@ -1,12 +1,15 @@
 use crate::effect_render::{
     OffscreenPool, background_plate_layer, blit_premultiplied_to_canvas, blit_replace,
-    composite_layer_outline, composite_layer_styles, draw_layer_to_offscreen,
-    effects_need_offscreen, run_blend_composite, run_effect_chain, run_grade_pass, run_lut_pass,
-    run_transition_pass,
+    blit_weighted_additive, composite_layer_outline, composite_layer_styles,
+    draw_layer_to_offscreen, effects_need_offscreen, run_blend_composite, run_effect_chain,
+    run_grade_pass, run_lut_pass, run_transition_pass,
 };
 use crate::error::CompositorError;
 use crate::gpu::GpuContext;
-use crate::layer::{BlendMode, CompositeLayer, CompositorConfig, CompositorLayer, LayerLut};
+use crate::layer::{
+    BlendMode, CompositeLayer, CompositorConfig, CompositorLayer, LayerContent, LayerLut,
+    LayerPlacement,
+};
 use crate::lut::CubeLut;
 
 use super::{
@@ -248,7 +251,8 @@ impl Compositor {
                     if !effects_need_offscreen(layer.effects)
                         && layer.lut.is_none()
                         && layer.blend_mode == BlendMode::Normal
-                        && layer.styles.is_empty() =>
+                        && layer.styles.is_empty()
+                        && layer.blur_passes.is_empty() =>
                 {
                     let built = self.build_layer(gpu, config, layer)?;
                     let pipeline = pipeline_for(&built.pipeline, self);
@@ -271,33 +275,50 @@ impl Compositor {
                     draw_built_layer(&mut pass, pipeline, &built);
                 }
                 CompositorLayer::Layer(layer) => {
-                    let built = self.build_layer(gpu, config, layer)?;
-                    let pipeline = pipeline_for(&built.pipeline, self);
-                    {
-                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("cutlass.offscreen.base"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: offscreen.view(0),
-                                depth_slice: None,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
-                            depth_stencil_attachment: None,
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            multiview_mask: None,
-                        });
-                        draw_built_layer(&mut pass, pipeline, &built);
-                    }
+                    // Motion blur: draw content at each sub-placement into a
+                    // cleared accum target at weight 1/N (additive), then run
+                    // effects/styles/blend on that average. Texture stays at T.
+                    let base_view = if layer.blur_passes.is_empty() {
+                        let built = self.build_layer(gpu, config, layer)?;
+                        let pipeline = pipeline_for(&built.pipeline, self);
+                        {
+                            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("cutlass.offscreen.base"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: offscreen.view(0),
+                                    depth_slice: None,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                                multiview_mask: None,
+                            });
+                            draw_built_layer(&mut pass, pipeline, &built);
+                        }
+                        offscreen.view(0)
+                    } else {
+                        accumulate_motion_blur_samples(
+                            self,
+                            gpu,
+                            device,
+                            &mut encoder,
+                            config,
+                            offscreen,
+                            layer,
+                        )?;
+                        offscreen.view(0)
+                    };
                     let mut result = run_effect_chain(
                         device,
                         &mut encoder,
                         &self.pass_registry,
                         offscreen,
-                        offscreen.view(0),
+                        base_view,
                         layer.effects,
                         config.width,
                         config.height,
@@ -326,6 +347,8 @@ impl Compositor {
                     // outline. Content stays on S. Shadow/glow/outline
                     // silhouette+blur use A=(S+1)%3 and B=(S+2)%3. A/B are
                     // free again before content (and after blend's snapshot).
+                    // Styles derive from the accumulated (motion-blurred)
+                    // result — acceptable vs true shutter integration.
                     let src_slot = offscreen
                         .index_of(result)
                         .expect("effect/lut output is an offscreen pool view");
@@ -616,6 +639,101 @@ fn draw_built_layer(
 ) {
     let instances = built.instances.as_ref().map(|i| (&i.buffer, i.count));
     draw_layer_to_offscreen(pass, pipeline, &built.bind_group, instances);
+}
+
+/// Draw each blur sample into slot 1, then weighted-additive into cleared slot 0.
+fn accumulate_motion_blur_samples(
+    comp: &Compositor,
+    gpu: &GpuContext,
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    config: &CompositorConfig,
+    offscreen: &OffscreenPool,
+    layer: &CompositeLayer<'_>,
+) -> Result<(), CompositorError> {
+    let n = layer.blur_passes.len().max(1) as f32;
+    let weight = 1.0 / n;
+    // Clear accum (slot 0).
+    {
+        let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("cutlass.motion_blur.clear"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: offscreen.view(0),
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    }
+    for placement in &layer.blur_passes {
+        let sample = layer_at_placement(layer, *placement);
+        let built = comp.build_layer(gpu, config, &sample)?;
+        let pipeline = pipeline_for(&built.pipeline, comp);
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cutlass.motion_blur.sample"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: offscreen.view(1),
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            draw_built_layer(&mut pass, pipeline, &built);
+        }
+        blit_weighted_additive(
+            device,
+            encoder,
+            &comp.pass_registry,
+            offscreen.view(1),
+            offscreen.view(0),
+            weight,
+        );
+    }
+    Ok(())
+}
+
+/// Borrow `layer`'s content/fx at a different placement (no styles/blur nested).
+fn layer_at_placement<'a>(
+    layer: &CompositeLayer<'a>,
+    placement: LayerPlacement,
+) -> CompositeLayer<'a> {
+    CompositeLayer {
+        content: match &layer.content {
+            LayerContent::Frame(f) => LayerContent::Frame(f),
+            LayerContent::Rgba(i) => LayerContent::Rgba(i),
+            LayerContent::Solid(c) => LayerContent::Solid(*c),
+            LayerContent::Sdf(s) => LayerContent::Sdf(*s),
+            LayerContent::Glyphs(g) => LayerContent::Glyphs(crate::layer::GlyphsLayer {
+                atlas_key: g.atlas_key,
+                glyphs: g.glyphs,
+                instances: g.instances,
+            }),
+        },
+        placement,
+        uv: layer.uv,
+        effects: &[], // effects run once on the accumulated average
+        fx: layer.fx,
+        color_grade: layer.color_grade,
+        lut: None, // LUT runs once after accum
+        blend_mode: BlendMode::Normal,
+        styles: crate::layer::LayerStyles::default(),
+        blur_passes: Vec::new(),
+    }
 }
 
 fn pipeline_for<'a>(kind: &LayerPipeline, comp: &'a Compositor) -> &'a wgpu::RenderPipeline {

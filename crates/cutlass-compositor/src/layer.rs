@@ -348,6 +348,12 @@ pub struct CompositeLayer<'a> {
     /// Shadow/glow/outline/background styles. Order on canvas: background →
     /// shadow → glow → content → outline. Non-empty styles force the offscreen path.
     pub styles: LayerStyles,
+    /// When non-empty, the compositor draws the layer content once per
+    /// placement into a cleared offscreen at weight `1/N` (additive), then
+    /// composites that average like a normal premultiplied layer. Texture
+    /// content stays shared across passes (transform-only motion blur).
+    /// Styles / blend modes apply to the accumulated result.
+    pub blur_passes: Vec<LayerPlacement>,
 }
 
 /// A layer, a canvas-wide pass, or a dual-source transition submitted to the compositor.
@@ -388,6 +394,7 @@ impl<'a> CompositeLayer<'a> {
             lut: None,
             blend_mode: BlendMode::Normal,
             styles: LayerStyles::default(),
+            blur_passes: Vec::new(),
         }
     }
 
@@ -403,6 +410,7 @@ impl<'a> CompositeLayer<'a> {
             lut: None,
             blend_mode: BlendMode::Normal,
             styles: LayerStyles::default(),
+            blur_passes: Vec::new(),
         }
     }
 
@@ -418,6 +426,7 @@ impl<'a> CompositeLayer<'a> {
             lut: None,
             blend_mode: BlendMode::Normal,
             styles: LayerStyles::default(),
+            blur_passes: Vec::new(),
         }
     }
 
@@ -433,6 +442,7 @@ impl<'a> CompositeLayer<'a> {
             lut: None,
             blend_mode: BlendMode::Normal,
             styles: LayerStyles::default(),
+            blur_passes: Vec::new(),
         }
     }
 
@@ -451,6 +461,7 @@ impl<'a> CompositeLayer<'a> {
             lut: None,
             blend_mode: BlendMode::Normal,
             styles: LayerStyles::default(),
+            blur_passes: Vec::new(),
         }
     }
 
@@ -501,6 +512,13 @@ impl<'a> CompositeLayer<'a> {
     /// direct fast path when blend/effects/LUT also allow it).
     pub fn with_styles(mut self, styles: LayerStyles) -> Self {
         self.styles = styles;
+        self
+    }
+
+    /// Attach motion-blur supersample placements (empty keeps the single-draw
+    /// path). Forces the offscreen accumulate path when non-empty.
+    pub fn with_blur_passes(mut self, blur_passes: Vec<LayerPlacement>) -> Self {
+        self.blur_passes = blur_passes;
         self
     }
 }

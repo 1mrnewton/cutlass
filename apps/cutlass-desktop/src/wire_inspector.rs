@@ -174,6 +174,12 @@ pub(crate) fn wire_inspector(
         },
     );
 
+    let set_blend_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_set_clip_blend_mode(move |clip_id, mode| {
+            set_blend_handle.set_blend_mode(clip_id.to_string(), mode.to_string());
+        });
+
     let set_filter_handle = preview_worker.handle();
     app.global::<InspectorBackend>()
         .on_set_clip_filter(move |clip_id, filter_id, intensity| {
@@ -322,10 +328,22 @@ pub(crate) fn wire_inspector(
             ModelRc::new(VecModel::from(filtered))
         });
 
-    // Filter, effect & transition catalogs are filled once from the model
-    // catalogs, then inspector/timeline edits route to undoable commands.
+    // Blend, filter, effect & transition catalogs are filled once from the
+    // model catalogs, then inspector/timeline edits route to undoable commands.
     {
         let inspector = app.global::<InspectorBackend>();
+        let blend_rows: Vec<CatalogEntry> = cutlass_models::BlendMode::ALL
+            .iter()
+            .map(|mode| CatalogEntry {
+                id: mode.id().into(),
+                label: mode.label().into(),
+                has_speed: false,
+                has_intensity: false,
+                has_stagger: false,
+            })
+            .collect();
+        inspector.set_blend_catalog(ModelRc::new(VecModel::from(blend_rows)));
+
         let filter_rows: Vec<CatalogEntry> = cutlass_models::filter_catalog()
             .iter()
             .map(|s| CatalogEntry {

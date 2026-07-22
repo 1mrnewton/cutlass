@@ -695,6 +695,65 @@ fn look_edits_invalidate_preview() {
         intensity: 1.0,
         stagger: 1.0,
     }));
+    assert!(message_invalidates_preview(&WorkerMsg::SetBlendMode {
+        clip: "1".into(),
+        mode: "multiply".into(),
+    }));
+}
+
+#[test]
+fn set_blend_mode_enqueues_worker_msg() {
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    handle.set_blend_mode("42".into(), "screen".into());
+    let WorkerMsg::SetBlendMode { clip, mode } = rx.try_recv().unwrap() else {
+        panic!("expected SetBlendMode");
+    };
+    assert_eq!(clip, "42");
+    assert_eq!(mode, "screen");
+}
+
+#[test]
+fn set_blend_mode_updates_projected_clip() {
+    use crate::projection::project_to_slint;
+    use cutlass_models::BlendMode;
+    use slint::Model;
+    use std::collections::{HashMap, HashSet};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("blend", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/blend.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+
+    // Same EditCommand the worker's set_blend_mode path applies.
+    engine
+        .apply(Command::Edit(EditCommand::SetClipBlendMode {
+            clip,
+            mode: BlendMode::Multiply,
+        }))
+        .expect("set blend");
+
+    let projected = project_to_slint(engine.project(), &HashMap::new(), &HashSet::new());
+    let track = projected.sequence.tracks.row_data(0).unwrap();
+    let c = track.clips.row_data(0).unwrap();
+    assert_eq!(c.blend_mode.as_str(), "multiply");
+    assert_eq!(c.blend_label.as_str(), "Multiply");
 }
 
 #[test]

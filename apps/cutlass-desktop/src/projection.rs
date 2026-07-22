@@ -261,6 +261,8 @@ fn clip_to_slint(
     let (shape_width, shape_height) = clip_shape_size(clip);
     let (filter_id, filter_label, filter_intensity) = clip_filter(clip);
     let (lut_id, lut_label, lut_path, lut_intensity) = clip_lut(clip);
+    let blend_mode = clip.blend_mode.id().to_string();
+    let blend_label = clip.blend_mode.label().to_string();
     let animation_in = clip_animation(clip.animation_in.as_ref());
     let animation_out = clip_animation(clip.animation_out.as_ref());
     let animation_combo = clip_animation(clip.animation_combo.as_ref());
@@ -318,6 +320,8 @@ fn clip_to_slint(
         crop_h: clip.crop.h,
         flip_h: clip.flip_h,
         flip_v: clip.flip_v,
+        blend_mode: blend_mode.into(),
+        blend_label: blend_label.into(),
         filter_id: filter_id.into(),
         filter_label: filter_label.into(),
         filter_intensity,

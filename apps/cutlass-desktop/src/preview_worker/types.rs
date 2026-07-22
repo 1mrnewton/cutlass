@@ -317,6 +317,13 @@ pub(super) enum WorkerMsg {
         flip_h: bool,
         flip_v: bool,
     },
+    /// Set a visual clip's blend mode (CapCut "Blend"). `mode` is a
+    /// `BlendMode` id (e.g. `"multiply"`); unknown ids are ignored.
+    /// One undoable history entry.
+    SetBlendMode {
+        clip: String,
+        mode: String,
+    },
     /// Set (or clear) a visual clip's filter preset. `filter_id == ""`
     /// clears; intensity is normalized 0..=1. One undoable history entry.
     SetClipFilter {

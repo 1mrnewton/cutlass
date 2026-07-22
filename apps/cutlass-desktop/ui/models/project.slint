@@ -297,6 +297,11 @@ export struct Clip {
     crop-h: float,
     flip-h: bool,
     flip-v: bool,
+    // CapCut "Blend": how the clip composites over layers below. Projected
+    // read-only as the model id (e.g. "multiply"); edits go through
+    // `InspectorBackend.set-clip-blend-mode`.
+    blend-mode: string,
+    blend-label: string,
     // Clip-level color grading (filters + manual adjust), projected read-only.
     // Edits go through `InspectorBackend.set-clip-filter` /
     // `set-clip-adjust`; slider drags use a session-only look override.

@@ -263,6 +263,10 @@ impl WorkerHandle {
         });
     }
 
+    pub fn set_blend_mode(&self, clip: String, mode: String) {
+        let _ = self.tx.send(WorkerMsg::SetBlendMode { clip, mode });
+    }
+
     pub fn set_clip_filter(&self, clip: String, filter_id: String, intensity: f32) {
         let _ = self.tx.send(WorkerMsg::SetClipFilter {
             clip,

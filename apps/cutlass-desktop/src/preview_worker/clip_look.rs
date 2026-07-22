@@ -55,6 +55,28 @@ pub(super) fn set_clip_crop_and_publish(
     publish_projection(engine, ui);
 }
 
+/// Set a visual clip's blend mode (CapCut "Blend"). Unknown mode ids are
+/// ignored (the inspector only offers catalog entries).
+pub(super) fn set_blend_mode_and_publish(engine: &mut Engine, clip: &str, mode: &str, ui: &UiSink) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-blend-mode ignored: unparsable clip id");
+        return;
+    };
+    let Some(mode) = BlendMode::from_id(mode) else {
+        error!(clip, mode, "set-blend-mode ignored: unknown mode");
+        return;
+    };
+    if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipBlendMode {
+        clip: clip_id,
+        mode,
+    })) {
+        error!(%clip_id, ?mode, "set clip blend mode failed: {e}");
+        return;
+    }
+    info!(%clip_id, ?mode, "set clip blend mode");
+    publish_projection(engine, ui);
+}
+
 /// Set or clear a visual clip's filter preset. A live look drag may have left
 /// an override in place; clear it first so the commit becomes authoritative.
 pub(super) fn set_clip_filter_and_publish(

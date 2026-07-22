@@ -5,6 +5,55 @@ fn t(value: i64, num: i32, den: i32) -> EngineTime {
 }
 
 #[test]
+fn projects_clip_blend_mode() {
+    use cutlass_models::{BlendMode, MediaId, MediaSource, RationalTime, TimeRange, TrackKind};
+    use slint::Model;
+    use std::collections::HashMap;
+
+    let mut project = EngineProject::new("blend", EngineRational::FPS_24);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/blend.mp4",
+        1920,
+        1080,
+        EngineRational::FPS_24,
+        480,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            RationalTime::new(0, EngineRational::FPS_24),
+        )
+        .expect("clip");
+    project
+        .set_blend_mode(clip_id, BlendMode::Multiply)
+        .expect("set blend");
+
+    let projected = project_to_slint(&project, &HashMap::new(), &HashSet::new());
+    let clips = projected.sequence.tracks.row_data(0).unwrap().clips;
+    let clip = clips.row_data(0).unwrap();
+    assert_eq!(clip.blend_mode.as_str(), "multiply");
+    assert_eq!(clip.blend_label.as_str(), "Multiply");
+
+    // Default is Normal when unset.
+    let flat = clip_to_slint(
+        &project,
+        &cutlass_models::Clip::from_media(
+            MediaId::from_raw(media.raw()),
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+            TimeRange::at_rate(0, 48, EngineRational::FPS_24),
+        ),
+        EngineKind::Video,
+        &HashMap::new(),
+    );
+    assert_eq!(flat.blend_mode.as_str(), "normal");
+    assert_eq!(flat.blend_label.as_str(), "Normal");
+}
+
+#[test]
 fn sticker_card_gets_catalog_label_and_composited_tag() {
     use cutlass_models::{Clip as MClip, Generator, Rational, TimeRange};
     let span = TimeRange::at_rate(0, 100, Rational::FPS_24);

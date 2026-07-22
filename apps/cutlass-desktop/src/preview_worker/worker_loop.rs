@@ -719,6 +719,7 @@ pub(super) fn message_invalidates_preview(msg: &WorkerMsg) -> bool {
             | WorkerMsg::SetSpeedCurve { .. }
             | WorkerMsg::SetSpeedCurvePoint { .. }
             | WorkerMsg::SetClipCrop { .. }
+            | WorkerMsg::SetBlendMode { .. }
             | WorkerMsg::SetClipFilter { .. }
             | WorkerMsg::SetClipAdjust { .. }
             | WorkerMsg::SetClipLut { .. }

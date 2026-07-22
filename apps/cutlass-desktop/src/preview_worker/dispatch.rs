@@ -172,6 +172,9 @@ pub(super) fn dispatch(
             flip_h,
             flip_v,
         } => set_clip_crop_and_publish(engine, &clip, crop, flip_h, flip_v, ui),
+        WorkerMsg::SetBlendMode { clip, mode } => {
+            set_blend_mode_and_publish(engine, &clip, &mode, ui)
+        }
         WorkerMsg::SetClipFilter {
             clip,
             filter_id,

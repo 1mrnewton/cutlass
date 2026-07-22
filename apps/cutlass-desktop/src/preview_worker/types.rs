@@ -374,6 +374,20 @@ pub(super) enum WorkerMsg {
         adjust: ColorAdjustments,
         tick: i64,
     },
+    /// Live layer-styles preview: replace one clip's styles through the
+    /// engine's session-only styles override. Bursts coalesce to the newest
+    /// like look/transform/generator overrides.
+    PreviewClipStyles {
+        clip: String,
+        styles: LayerStyles,
+        tick: i64,
+    },
+    /// Drop the styles override (control released with no net change) and
+    /// re-render `tick` from committed state. Look clears on commit only;
+    /// styles also clear on SetLayerStyles / style param commits.
+    ClearStylesOverride {
+        tick: i64,
+    },
     /// Append a catalog effect to a clip's chain (M4). One undoable entry.
     AddEffect {
         clip: String,

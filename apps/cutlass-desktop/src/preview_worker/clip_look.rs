@@ -78,12 +78,15 @@ pub(super) fn set_blend_mode_and_publish(engine: &mut Engine, clip: &str, mode: 
 }
 
 /// Replace a visual clip's layer styles (CapCut shadow/glow/outline/background).
+/// A live styles drag may have left an override in place; clear it first so
+/// the commit becomes authoritative (mirrors look filter/adjust commits).
 pub(super) fn set_layer_styles_and_publish(
     engine: &mut Engine,
     clip: &str,
     styles: LayerStyles,
     ui: &UiSink,
 ) {
+    engine.set_styles_override(None);
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-layer-styles ignored: unparsable clip id");
         return;

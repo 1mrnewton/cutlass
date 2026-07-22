@@ -565,6 +565,7 @@ fn resolve_with_substitutes_transform_and_generator_for_one_clip() {
                 ..ColorAdjustments::default()
             },
         )),
+        styles: None,
     };
     let scene = resolve_with(&project, rt(5), overrides).unwrap();
     let layer = &scene.layers[0];
@@ -1618,6 +1619,66 @@ fn clip_without_styles_resolves_styles_none() {
     let scene = resolve(&project, rt(5)).unwrap();
     assert_eq!(scene.layers.len(), 1);
     assert!(scene.layers[0].styles.is_none());
+}
+
+#[test]
+fn resolve_with_substitutes_styles_for_one_clip() {
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow {
+                    blur: Param::Constant(8.0),
+                    ..LayerShadow::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let live = LayerStyles {
+        shadow: Some(LayerShadow {
+            blur: Param::Constant(24.0),
+            ..LayerShadow::default()
+        }),
+        ..Default::default()
+    };
+    let overrides = ResolveOverrides {
+        transform: None,
+        generator: None,
+        look: None,
+        styles: Some((clip, &live)),
+    };
+    let scene = resolve_with(&project, rt(5), overrides).unwrap();
+    approx(
+        scene.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .blur,
+        24.0,
+    );
+
+    // Plain resolve still sees only committed state.
+    let scene = resolve(&project, rt(5)).unwrap();
+    approx(
+        scene.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .blur,
+        8.0,
+    );
 }
 
 #[test]

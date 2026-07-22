@@ -233,6 +233,31 @@ pub(super) fn dispatch(
                 SeekPolicy::Exact,
             );
         }
+        // Same interleave fallback for styles preview bursts.
+        WorkerMsg::PreviewClipStyles { clip, styles, tick } => {
+            apply_styles_override(engine, &clip, styles);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        WorkerMsg::ClearStylesOverride { tick } => {
+            engine.set_styles_override(None);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
         WorkerMsg::AddEffect { clip, effect_id } => {
             add_effect_and_publish(engine, &clip, &effect_id, ui)
         }

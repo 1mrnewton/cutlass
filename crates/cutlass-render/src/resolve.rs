@@ -60,6 +60,7 @@ pub struct ResolveOverrides<'a> {
     pub transform: Option<(ClipId, ClipTransform)>,
     pub generator: Option<(ClipId, &'a Generator)>,
     pub look: Option<(ClipId, Option<&'a Filter>, &'a ColorAdjustments)>,
+    pub styles: Option<(ClipId, &'a LayerStyles)>,
 }
 
 /// Identity transform used when rasterizing the gesture sprite: the clip's
@@ -97,6 +98,7 @@ pub fn resolve_gesture_partitions(
         transform: Some((clip_id, GESTURE_IDENTITY_TRANSFORM)),
         generator: None,
         look: None,
+        styles: None,
     };
     let scene = resolve_with(project, t, overrides)?;
     let index = scene
@@ -378,7 +380,11 @@ fn resolve_clip(
     });
     // Reference px → canvas px (same convention as shape strokes).
     let px = (ch / REFERENCE_HEIGHT) * xf.scale;
-    let styles = resolve_styles(&clip.styles, local_tick, px);
+    let styles_src = match overrides.styles {
+        Some((id, s)) if id == clip.id => s,
+        _ => &clip.styles,
+    };
+    let styles = resolve_styles(styles_src, local_tick, px);
 
     match &clip.content {
         ClipSource::Media { media, .. } => {

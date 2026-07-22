@@ -737,6 +737,133 @@ fn set_layer_styles_enqueues_worker_msg() {
 }
 
 #[test]
+fn preview_clip_styles_enqueues_worker_msg() {
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let styles = LayerStyles {
+        shadow: Some(cutlass_models::LayerShadow {
+            blur: cutlass_models::Param::Constant(24.0),
+            ..cutlass_models::LayerShadow::default()
+        }),
+        ..Default::default()
+    };
+    handle.preview_clip_styles("42".into(), styles.clone(), 12);
+    let WorkerMsg::PreviewClipStyles {
+        clip,
+        styles: got,
+        tick,
+    } = rx.try_recv().unwrap()
+    else {
+        panic!("expected PreviewClipStyles");
+    };
+    assert_eq!(clip, "42");
+    assert_eq!(got, styles);
+    assert_eq!(tick, 12);
+
+    handle.clear_styles_override(7);
+    let WorkerMsg::ClearStylesOverride { tick } = rx.try_recv().unwrap() else {
+        panic!("expected ClearStylesOverride");
+    };
+    assert_eq!(tick, 7);
+}
+
+#[test]
+fn styles_override_previews_then_clears_on_commit() {
+    use cutlass_models::{LayerShadow, Param};
+    use cutlass_render::{ResolveOverrides, resolve, resolve_with};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("styles-preview", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/styles-preview.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow {
+                    blur: Param::Constant(8.0),
+                    ..LayerShadow::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("enable shadow");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+
+    let live = LayerStyles {
+        shadow: Some(LayerShadow {
+            blur: Param::Constant(24.0),
+            ..LayerShadow::default()
+        }),
+        ..Default::default()
+    };
+    // Same path the PreviewClipStyles worker arm uses.
+    apply_styles_override(&mut engine, &clip.raw().to_string(), live.clone());
+    assert!(engine.has_live_overrides());
+
+    let overrides = ResolveOverrides {
+        transform: None,
+        generator: None,
+        look: None,
+        styles: Some((clip, &live)),
+    };
+    let scene = resolve_with(engine.project(), RationalTime::new(0, r), overrides)
+        .expect("resolve with override");
+    assert!(
+        (scene.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .blur
+            - 24.0)
+            .abs()
+            < f32::EPSILON
+    );
+
+    // Commit clears the session override (mirrors look filter/adjust).
+    engine.set_styles_override(None);
+    engine
+        .apply(Command::Edit(EditCommand::SetClipLayerStyles {
+            clip,
+            styles: live,
+        }))
+        .expect("commit styles");
+    assert!(!engine.has_live_overrides());
+    let scene = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+    assert!(
+        (scene.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .blur
+            - 24.0)
+            .abs()
+            < f32::EPSILON
+    );
+}
+
+#[test]
 fn set_blend_mode_updates_projected_clip() {
     use crate::projection::project_to_slint;
     use cutlass_models::BlendMode;

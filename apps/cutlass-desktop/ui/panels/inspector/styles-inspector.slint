@@ -73,6 +73,10 @@ export component StylesInspector inherits VerticalLayout {
         InspectorBackend.set-clip-style-color(model.id, key, c.red, c.green, c.blue, c.alpha);
     }
 
+    function preview-scalar(key: string, value: float) {
+        InspectorBackend.preview-clip-style(model.id, key, value, TimelineStore.playhead-tick);
+    }
+
     SectionHeader {
         title: "Layer styles";
     }
@@ -119,7 +123,9 @@ export component StylesInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.shadow-offset-x-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-scalar("style_shadow_offset_x", clamp(v, -200, 200));
+        }
         commit(v) => {
             root.commit-offset(clamp(v, -200, 200), root.shadow-offset-y-sample.value);
         }
@@ -149,7 +155,9 @@ export component StylesInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.shadow-offset-y-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-scalar("style_shadow_offset_y", clamp(v, -200, 200));
+        }
         commit(v) => {
             root.commit-offset(root.shadow-offset-x-sample.value, clamp(v, -200, 200));
         }
@@ -179,7 +187,9 @@ export component StylesInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.shadow-blur-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-scalar("style_shadow_blur", clamp(v, 0, 100));
+        }
         commit(v) => {
             root.commit-scalar("style_shadow_blur", root.shadow-blur-sample, clamp(v, 0, 100));
         }
@@ -233,7 +243,9 @@ export component StylesInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.glow-radius-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-scalar("style_glow_radius", clamp(v, 0, 100));
+        }
         commit(v) => {
             root.commit-scalar("style_glow_radius", root.glow-radius-sample, clamp(v, 0, 100));
         }
@@ -257,7 +269,9 @@ export component StylesInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.glow-intensity-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-scalar("style_glow_intensity", clamp(v, 0, 4));
+        }
         commit(v) => {
             root.commit-scalar("style_glow_intensity", root.glow-intensity-sample, clamp(v, 0, 4));
         }
@@ -311,7 +325,9 @@ export component StylesInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.outline-width-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-scalar("style_outline_width", clamp(v, 0, 50));
+        }
         commit(v) => {
             root.commit-scalar("style_outline_width", root.outline-width-sample, clamp(v, 0, 50));
         }
@@ -365,7 +381,9 @@ export component StylesInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.background-padding-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-scalar("style_background_padding", clamp(v, 0, 100));
+        }
         commit(v) => {
             root.commit-scalar("style_background_padding", root.background-padding-sample, clamp(v, 0, 100));
         }
@@ -387,7 +405,9 @@ export component StylesInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.background-radius-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-scalar("style_background_radius", clamp(v, 0, 100));
+        }
         commit(v) => {
             root.commit-scalar("style_background_radius", root.background-radius-sample, clamp(v, 0, 100));
         }

@@ -331,6 +331,16 @@ impl WorkerHandle {
         });
     }
 
+    pub fn preview_clip_styles(&self, clip: String, styles: LayerStyles, tick: i64) {
+        let _ = self
+            .tx
+            .send(WorkerMsg::PreviewClipStyles { clip, styles, tick });
+    }
+
+    pub fn clear_styles_override(&self, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::ClearStylesOverride { tick });
+    }
+
     pub fn add_effect(&self, clip: String, effect_id: String) {
         let _ = self.tx.send(WorkerMsg::AddEffect { clip, effect_id });
     }

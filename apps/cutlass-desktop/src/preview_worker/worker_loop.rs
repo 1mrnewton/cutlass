@@ -579,6 +579,63 @@ fn worker_loop(
                     SeekPolicy::Exact,
                 );
             }
+            // Layer-style slider drags carry the whole styles block so preview
+            // frames never mix a new blur with a stale color. Coalesce to the
+            // newest value like look/transform/generator overrides.
+            WorkerMsg::PreviewClipStyles {
+                mut clip,
+                mut styles,
+                mut tick,
+            } => {
+                let mut pending = true;
+                while let Ok(next) = req_rx.try_recv() {
+                    match next {
+                        WorkerMsg::Frame(latest) => tick = latest,
+                        WorkerMsg::PreviewClipStyles {
+                            clip: c,
+                            styles: s,
+                            tick: at,
+                        } => {
+                            clip = c;
+                            styles = s;
+                            tick = at;
+                            pending = true;
+                        }
+                        other => {
+                            if std::mem::take(&mut pending) {
+                                apply_styles_override(engine, &clip, styles.clone());
+                            }
+                            dispatch(
+                                engine,
+                                &mut clipboard,
+                                &mut main_magnet,
+                                &mut linkage,
+                                other,
+                                tl_rate,
+                                &preview_weak,
+                                &fit,
+                                &cache,
+                                &sprite_mode,
+                                &export_state,
+                                &ui,
+                            )
+                        }
+                    }
+                }
+                last_tick = tick;
+                if pending {
+                    apply_styles_override(engine, &clip, styles);
+                }
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+            }
             // The preview panel resized (or first laid out): renders now fit
             // the new bound. Repaint the current frame only when the bucketed
             // size actually changed — live window resizes report every frame.

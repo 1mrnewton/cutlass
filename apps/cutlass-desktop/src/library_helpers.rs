@@ -264,6 +264,104 @@ pub(crate) fn clip_param_value(
     })
 }
 
+/// Apply one layer-style field as a [`Param::Constant`] onto a cloned
+/// [`LayerStyles`] for live preview. Ensures the owning block exists (model
+/// default) then overwrites the named field. Supports axis keys
+/// `style_shadow_offset_x` / `_y` (keeps the other axis from the current
+/// sampled offset). Returns `false` for unknown keys.
+pub(crate) fn apply_style_preview_constant(
+    styles: &mut cutlass_models::LayerStyles,
+    key: &str,
+    value_x: f32,
+    value_y: f32,
+) -> bool {
+    use cutlass_models::{
+        ClipParam, LayerBackground, LayerGlow, LayerOutline, LayerShadow, Param, ParamValue,
+        StyleParam,
+    };
+
+    let (key, value_x, value_y) = match key {
+        "style_shadow_offset_x" => {
+            let y = styles
+                .shadow
+                .as_ref()
+                .map(|s| s.offset.sample(0)[1])
+                .unwrap_or(4.0);
+            ("style_shadow_offset", value_x, y)
+        }
+        "style_shadow_offset_y" => {
+            let x = styles
+                .shadow
+                .as_ref()
+                .map(|s| s.offset.sample(0)[0])
+                .unwrap_or(4.0);
+            ("style_shadow_offset", x, value_x)
+        }
+        other => (other, value_x, value_y),
+    };
+
+    let Some((ClipParam::Style { param }, value)) = clip_param_value(key, value_x, value_y) else {
+        return false;
+    };
+
+    match param {
+        StyleParam::ShadowColor | StyleParam::ShadowOffset | StyleParam::ShadowBlur => {
+            styles.shadow.get_or_insert_with(LayerShadow::default);
+        }
+        StyleParam::GlowColor | StyleParam::GlowRadius | StyleParam::GlowIntensity => {
+            styles.glow.get_or_insert_with(LayerGlow::default);
+        }
+        StyleParam::OutlineColor | StyleParam::OutlineWidth => {
+            styles.outline.get_or_insert_with(LayerOutline::default);
+        }
+        StyleParam::BackgroundColor
+        | StyleParam::BackgroundPadding
+        | StyleParam::BackgroundRadius => {
+            styles
+                .background
+                .get_or_insert_with(LayerBackground::default);
+        }
+    }
+
+    match (param, value) {
+        (StyleParam::ShadowBlur, ParamValue::Scalar(v)) => {
+            styles.shadow.as_mut().unwrap().blur = Param::Constant(v);
+        }
+        (StyleParam::ShadowOffset, ParamValue::Vec2(v)) => {
+            styles.shadow.as_mut().unwrap().offset = Param::Constant(v);
+        }
+        (StyleParam::ShadowColor, ParamValue::Color(v)) => {
+            styles.shadow.as_mut().unwrap().rgba = Param::Constant(v);
+        }
+        (StyleParam::GlowRadius, ParamValue::Scalar(v)) => {
+            styles.glow.as_mut().unwrap().radius = Param::Constant(v);
+        }
+        (StyleParam::GlowIntensity, ParamValue::Scalar(v)) => {
+            styles.glow.as_mut().unwrap().intensity = Param::Constant(v);
+        }
+        (StyleParam::GlowColor, ParamValue::Color(v)) => {
+            styles.glow.as_mut().unwrap().rgba = Param::Constant(v);
+        }
+        (StyleParam::OutlineWidth, ParamValue::Scalar(v)) => {
+            styles.outline.as_mut().unwrap().width = Param::Constant(v);
+        }
+        (StyleParam::OutlineColor, ParamValue::Color(v)) => {
+            styles.outline.as_mut().unwrap().rgba = Param::Constant(v);
+        }
+        (StyleParam::BackgroundPadding, ParamValue::Scalar(v)) => {
+            styles.background.as_mut().unwrap().padding = Param::Constant(v);
+        }
+        (StyleParam::BackgroundRadius, ParamValue::Scalar(v)) => {
+            styles.background.as_mut().unwrap().radius = Param::Constant(v);
+        }
+        (StyleParam::BackgroundColor, ParamValue::Color(v)) => {
+            styles.background.as_mut().unwrap().rgba = Param::Constant(v);
+        }
+        _ => return false,
+    }
+    true
+}
+
 /// Run `f` on the next event-loop turn, outside whatever callback is
 /// currently executing. Used to flip Timer-bound state (see `request-stop`)
 /// without re-entering Slint's timer machinery. Must never run anything that

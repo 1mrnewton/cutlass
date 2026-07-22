@@ -262,6 +262,29 @@ export global InspectorBackend {
         a: int,
     );
 
+    // Live preview of one layer-style scalar (or shadow offset axis) during
+    // a slider drag. `key` is a style_* param id; for offset use
+    // `style_shadow_offset_x` / `_y`. Session-only — release commits via
+    // set-param-constant / set-param-keyframe.
+    callback preview-clip-style(clip-id: string, key: string, value: float, tick: int);
+
+    // Live preview of one layer-style color during a swatch edit. Channels
+    // are 0..=255. Session-only; the matching set-clip-style-color commits.
+    callback preview-clip-style-color(
+        clip-id: string,
+        key: string,
+        r: int,
+        g: int,
+        b: int,
+        a: int,
+        tick: int,
+    );
+
+    // Drop a lingering styles preview override and repaint `tick` from
+    // committed state (release with no net change). Style slider commits
+    // also clear via set-param-constant / set-layer-styles.
+    callback clear-clip-styles(tick: int);
+
     // Set (or clear with an empty id) a visual clip's filter preset. Intensity
     // is normalized 0..=1; the inspector displays it as 0..=100%.
     callback set-clip-filter(clip-id: string, filter-id: string, intensity: float);

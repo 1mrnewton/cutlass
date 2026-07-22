@@ -146,6 +146,16 @@ pub(super) fn apply_look_override(
     }
 }
 
+/// Point the engine's styles override at `clip` (raw id) for the next renders —
+/// the live preview of an uncommitted layer-style edit. Unparsable ids are
+/// dropped (stale projection race), same as the other overrides.
+pub(super) fn apply_styles_override(engine: &mut Engine, clip: &str, styles: LayerStyles) {
+    match parse_raw_id(clip).map(ClipId::from_raw) {
+        Some(id) => engine.set_styles_override(Some((id, styles))),
+        None => error!(clip, "styles override ignored: unparsable clip id"),
+    }
+}
+
 pub(super) fn filter_from_ui(filter_id: &str, intensity: f32) -> Option<Filter> {
     let id = filter_id.trim();
     if id.is_empty() {
@@ -200,6 +210,7 @@ pub(super) fn bump_keyframe_commit_epoch(ui: &UiSink) {
 /// position) as one undoable edit (keyframes roadmap Phase 1: the inspector
 /// diamond / easing picker). Engine-rejected positions (playhead outside the
 /// clip — the UI gates, but a stale projection can race) only log.
+/// Style-param commits clear a live styles override first.
 pub(super) fn set_param_keyframe_and_publish(
     engine: &mut Engine,
     clip: &str,
@@ -209,6 +220,9 @@ pub(super) fn set_param_keyframe_and_publish(
     easing: Easing,
     ui: &UiSink,
 ) {
+    if matches!(param, ClipParam::Style { .. }) {
+        engine.set_styles_override(None);
+    }
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-param-keyframe ignored: unparsable clip id");
         return;
@@ -230,6 +244,8 @@ pub(super) fn set_param_keyframe_and_publish(
 
 /// Replace one animatable property with a constant (inspector slider commit
 /// on a non-animated row). Drops any existing keyframes on that property.
+/// Style-param commits clear a live styles override first (look clears on
+/// filter/adjust commit the same way).
 pub(super) fn set_param_constant_and_publish(
     engine: &mut Engine,
     clip: &str,
@@ -237,6 +253,9 @@ pub(super) fn set_param_constant_and_publish(
     value: ParamValue,
     ui: &UiSink,
 ) {
+    if matches!(param, ClipParam::Style { .. }) {
+        engine.set_styles_override(None);
+    }
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-param-constant ignored: unparsable clip id");
         return;

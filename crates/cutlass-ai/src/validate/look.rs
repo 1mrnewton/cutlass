@@ -173,6 +173,24 @@ pub(super) fn set_clip_adjustments(
     if let Some(v) = args.temperature {
         adjust.temperature = unit_slider(v, "temperature")?.into();
     }
+    if let Some(v) = args.tint {
+        adjust.tint = unit_slider(v, "tint")?.into();
+    }
+    if let Some(v) = args.hue {
+        adjust.hue = unit_slider(v, "hue")?.into();
+    }
+    if let Some(v) = args.highlights {
+        adjust.highlights = unit_slider(v, "highlights")?.into();
+    }
+    if let Some(v) = args.shadows {
+        adjust.shadows = unit_slider(v, "shadows")?.into();
+    }
+    if let Some(v) = args.sharpness {
+        adjust.sharpness = unit_positive_slider(v, "sharpness")?.into();
+    }
+    if let Some(v) = args.vignette {
+        adjust.vignette = unit_positive_slider(v, "vignette")?.into();
+    }
     adjust
         .validate()
         .map_err(|e| Rejection::new(e.to_string()))?;

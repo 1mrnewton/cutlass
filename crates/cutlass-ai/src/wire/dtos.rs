@@ -357,6 +357,12 @@ pub enum WireLookParam {
     AdjustSaturation,
     AdjustExposure,
     AdjustTemperature,
+    AdjustTint,
+    AdjustHue,
+    AdjustHighlights,
+    AdjustShadows,
+    AdjustSharpness,
+    AdjustVignette,
     MaskFeather,
     MaskCenter,
     MaskSize,
@@ -763,6 +769,10 @@ pub struct SetClipLayerStyles {
 
 /// Set manual color adjustments (CapCut adjust) on any visual clip. Omitted
 /// sliders keep their current value; all-neutral clears the grade.
+///
+/// Signed sliders (`brightness` … `shadows`) are `-1..=1`. `sharpness` and
+/// `vignette` are one-directional `0..=1` (softening / inverse vignette are
+/// not supported).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetClipAdjustments {
     pub clip: u64,
@@ -776,6 +786,22 @@ pub struct SetClipAdjustments {
     pub exposure: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    /// Green (−) ↔ magenta (+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tint: Option<f64>,
+    /// Hue rotation; ±1 → ±30°.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hue: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlights: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadows: Option<f64>,
+    /// Unsharp-mask strength (`0..=1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sharpness: Option<f64>,
+    /// Radial darkening (`0..=1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vignette: Option<f64>,
 }
 
 /// Animation slot (CapCut In / Out / Combo tabs).

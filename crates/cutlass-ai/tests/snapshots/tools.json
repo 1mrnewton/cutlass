@@ -971,6 +971,12 @@
                           "adjust_saturation",
                           "adjust_exposure",
                           "adjust_temperature",
+                          "adjust_tint",
+                          "adjust_hue",
+                          "adjust_highlights",
+                          "adjust_shadows",
+                          "adjust_sharpness",
+                          "adjust_vignette",
                           "mask_feather",
                           "mask_center",
                           "mask_size",
@@ -1238,6 +1244,12 @@
                           "adjust_saturation",
                           "adjust_exposure",
                           "adjust_temperature",
+                          "adjust_tint",
+                          "adjust_hue",
+                          "adjust_highlights",
+                          "adjust_shadows",
+                          "adjust_sharpness",
+                          "adjust_vignette",
                           "mask_feather",
                           "mask_center",
                           "mask_size",
@@ -1464,6 +1476,12 @@
                           "adjust_saturation",
                           "adjust_exposure",
                           "adjust_temperature",
+                          "adjust_tint",
+                          "adjust_hue",
+                          "adjust_highlights",
+                          "adjust_shadows",
+                          "adjust_sharpness",
+                          "adjust_vignette",
                           "mask_feather",
                           "mask_center",
                           "mask_size",
@@ -2183,11 +2201,11 @@
       }
     },
     {
-      "description": "Set manual color adjustments (brightness, contrast, saturation, exposure, temperature) on any visual clip. Each slider is -1..1; omitted sliders keep their current value.",
+      "description": "Set manual color adjustments (brightness, contrast, saturation, exposure, temperature, tint, hue, highlights, shadows, sharpness, vignette) on any visual clip. Signed sliders are -1..1; sharpness and vignette are 0..1. Omitted sliders keep their current value.",
       "name": "set_clip_adjustments",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Set manual color adjustments (CapCut adjust) on any visual clip. Omitted\nsliders keep their current value; all-neutral clears the grade.",
+        "description": "Set manual color adjustments (CapCut adjust) on any visual clip. Omitted\nsliders keep their current value; all-neutral clears the grade.\n\nSigned sliders (`brightness` … `shadows`) are `-1..=1`. `sharpness` and\n`vignette` are one-directional `0..=1` (softening / inverse vignette are\nnot supported).",
         "properties": {
           "brightness": {
             "format": "double",
@@ -2215,6 +2233,21 @@
               "null"
             ]
           },
+          "highlights": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "hue": {
+            "description": "Hue rotation; ±1 → ±30°.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
           "saturation": {
             "format": "double",
             "type": [
@@ -2222,7 +2255,38 @@
               "null"
             ]
           },
+          "shadows": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "sharpness": {
+            "description": "Unsharp-mask strength (`0..=1`).",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
           "temperature": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "tint": {
+            "description": "Green (−) ↔ magenta (+).",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "vignette": {
+            "description": "Radial darkening (`0..=1`).",
             "format": "double",
             "type": [
               "number",
@@ -2885,5 +2949,5 @@
       }
     }
   ],
-  "version": 30
+  "version": 31
 }

@@ -78,6 +78,12 @@ pub(super) fn clip_param(
                 WireLookParam::AdjustSaturation => cutlass_models::LookParam::AdjustSaturation,
                 WireLookParam::AdjustExposure => cutlass_models::LookParam::AdjustExposure,
                 WireLookParam::AdjustTemperature => cutlass_models::LookParam::AdjustTemperature,
+                WireLookParam::AdjustTint => cutlass_models::LookParam::AdjustTint,
+                WireLookParam::AdjustHue => cutlass_models::LookParam::AdjustHue,
+                WireLookParam::AdjustHighlights => cutlass_models::LookParam::AdjustHighlights,
+                WireLookParam::AdjustShadows => cutlass_models::LookParam::AdjustShadows,
+                WireLookParam::AdjustSharpness => cutlass_models::LookParam::AdjustSharpness,
+                WireLookParam::AdjustVignette => cutlass_models::LookParam::AdjustVignette,
                 WireLookParam::MaskFeather => cutlass_models::LookParam::MaskFeather,
                 WireLookParam::MaskCenter => cutlass_models::LookParam::MaskCenter,
                 WireLookParam::MaskSize => cutlass_models::LookParam::MaskSize,
@@ -109,6 +115,16 @@ pub(super) fn unit_slider(value: f64, name: &str) -> Result<f32, Rejection> {
     if !value.is_finite() || !(-1.0..=1.0).contains(&value) {
         return Err(Rejection::new(format!(
             "{name} must be between -1 and 1 (got {value})"
+        )));
+    }
+    Ok(value as f32)
+}
+
+/// One-directional adjust sliders (`sharpness` / `vignette`): `0..=1`.
+pub(super) fn unit_positive_slider(value: f64, name: &str) -> Result<f32, Rejection> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(Rejection::new(format!(
+            "{name} must be between 0 and 1 (got {value})"
         )));
     }
     Ok(value as f32)

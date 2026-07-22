@@ -1270,6 +1270,24 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
             if let Some(v) = a.temperature {
                 parts.push(format!("temperature {v:.2}"));
             }
+            if let Some(v) = a.tint {
+                parts.push(format!("tint {v:.2}"));
+            }
+            if let Some(v) = a.hue {
+                parts.push(format!("hue {v:.2}"));
+            }
+            if let Some(v) = a.highlights {
+                parts.push(format!("highlights {v:.2}"));
+            }
+            if let Some(v) = a.shadows {
+                parts.push(format!("shadows {v:.2}"));
+            }
+            if let Some(v) = a.sharpness {
+                parts.push(format!("sharpness {v:.2}"));
+            }
+            if let Some(v) = a.vignette {
+                parts.push(format!("vignette {v:.2}"));
+            }
             if parts.is_empty() {
                 parts.push("adjustments unchanged".into());
             }

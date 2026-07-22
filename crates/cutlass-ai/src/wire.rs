@@ -53,7 +53,9 @@ use serde::{Deserialize, Serialize};
 /// 29: layer styles (`set_layer_styles`) and style params on keyframes.
 /// 30: mask geometry (`center` / `size` / `rotation` / `roundness`) on
 ///     `set_clip_mask`.
-pub const TOOL_SCHEMA_VERSION: u32 = 30;
+/// 31: six new adjust sliders (tint/hue/highlights/shadows/sharpness/vignette)
+///     on `set_clip_adjustments` and look keyframe params.
+pub const TOOL_SCHEMA_VERSION: u32 = 31;
 
 mod dtos;
 mod tools;

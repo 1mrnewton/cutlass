@@ -150,6 +150,10 @@ pub struct ClipSummary {
     /// Filter preset id (set_clip_filter); absent when none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter: Option<String>,
+    /// Non-neutral manual adjust sliders (set_clip_adjustments), e.g.
+    /// "tint=0.25, sharpness=0.50"; absent when every slider is neutral.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjust: Option<String>,
     /// Blend mode id (set_clip_blend_mode); absent when normal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend: Option<String>,
@@ -221,6 +225,34 @@ pub struct MediaSummary {
 
 fn seconds(ticks: i64, rate: Rational) -> f64 {
     ticks as f64 * rate.seconds_per_unit()
+}
+
+fn summarize_adjust(adjust: &cutlass_models::ColorAdjustments) -> Option<String> {
+    if adjust.is_neutral() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let push = |parts: &mut Vec<String>, name: &str, param: &cutlass_models::Param<f32>| {
+        if let Some(v) = param.constant()
+            && v != 0.0
+        {
+            parts.push(format!("{name}={v:.2}"));
+        } else if !matches!(param, cutlass_models::Param::Constant(_)) {
+            parts.push(format!("{name}=kf"));
+        }
+    };
+    push(&mut parts, "brightness", &adjust.brightness);
+    push(&mut parts, "contrast", &adjust.contrast);
+    push(&mut parts, "saturation", &adjust.saturation);
+    push(&mut parts, "exposure", &adjust.exposure);
+    push(&mut parts, "temperature", &adjust.temperature);
+    push(&mut parts, "tint", &adjust.tint);
+    push(&mut parts, "hue", &adjust.hue);
+    push(&mut parts, "highlights", &adjust.highlights);
+    push(&mut parts, "shadows", &adjust.shadows);
+    push(&mut parts, "sharpness", &adjust.sharpness);
+    push(&mut parts, "vignette", &adjust.vignette);
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 fn track_kind_name(track: &Track) -> &'static str {
@@ -410,6 +442,7 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                         parts.join(" ")
                     }),
                     filter: clip.filter.as_ref().map(|f| f.id.clone()),
+                    adjust: summarize_adjust(&clip.adjust),
                     blend: (!clip.blend_mode.is_normal()).then(|| clip.blend_mode.id().to_string()),
                     styles: {
                         let mut blocks = Vec::new();

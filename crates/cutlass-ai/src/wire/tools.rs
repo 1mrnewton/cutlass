@@ -165,7 +165,7 @@ tools! {
     "set_layer_styles" => SetClipLayerStyles(SetClipLayerStyles),
         "Set layer-quad shadow/glow/outline/background styles on any visual clip (distinct from text glyph treatments). Each block is optional constants in reference pixels (1080p baseline); omitted blocks are removed. Empty styles clears every block. Constants only — animate with set_param_keyframe using style params (shadow_blur, glow_color, …).";
     "set_clip_adjustments" => SetClipAdjustments(SetClipAdjustments),
-        "Set manual color adjustments (brightness, contrast, saturation, exposure, temperature) on any visual clip. Each slider is -1..1; omitted sliders keep their current value.";
+        "Set manual color adjustments (brightness, contrast, saturation, exposure, temperature, tint, hue, highlights, shadows, sharpness, vignette) on any visual clip. Signed sliders are -1..1; sharpness and vignette are 0..1. Omitted sliders keep their current value.";
     "set_clip_animation" => SetClipAnimation(SetClipAnimation),
         "Set or clear a look animation preset on any visual clip. Slots: in (entrance), out (exit), combo (looping). Animation ids include fade_in, slide_up, pulse, typewriter, wave, etc. Optional speed (0.25–4), intensity (0–2), and stagger (0–2, text presets). Pass null for animation to clear the slot.";
     "set_audio_role" => SetAudioRole(SetAudioRole),

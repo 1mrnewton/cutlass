@@ -1306,6 +1306,86 @@ fn mask_with_geometry_lowers_to_constants() {
 }
 
 #[test]
+fn set_clip_adjustments_lowers_new_sliders_and_rejects_ranges() {
+    let (project, _, _, _, clip, _) = fixture();
+
+    let edit = lower(
+        &project,
+        WireCommand::SetClipAdjustments(wire::SetClipAdjustments {
+            clip,
+            brightness: None,
+            contrast: None,
+            saturation: None,
+            exposure: None,
+            temperature: None,
+            tint: Some(-0.5),
+            hue: Some(1.0),
+            highlights: Some(0.25),
+            shadows: Some(-0.25),
+            sharpness: Some(0.75),
+            vignette: Some(0.4),
+        }),
+    );
+    match edit {
+        EditCommand::SetClipAdjustments { adjust, .. } => {
+            assert_eq!(adjust.tint, (-0.5f32).into());
+            assert_eq!(adjust.hue, 1.0.into());
+            assert_eq!(adjust.highlights, 0.25.into());
+            assert_eq!(adjust.shadows, (-0.25f32).into());
+            assert_eq!(adjust.sharpness, 0.75.into());
+            assert_eq!(adjust.vignette, 0.4.into());
+        }
+        other => panic!("expected SetClipAdjustments, got {other:?}"),
+    }
+
+    let msg = reject(
+        &project,
+        WireCommand::SetClipAdjustments(wire::SetClipAdjustments {
+            clip,
+            brightness: None,
+            contrast: None,
+            saturation: None,
+            exposure: None,
+            temperature: None,
+            tint: None,
+            hue: None,
+            highlights: None,
+            shadows: None,
+            sharpness: Some(-0.5),
+            vignette: None,
+        }),
+    );
+    assert!(msg.contains("sharpness"), "{msg}");
+
+    let edit = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Look {
+                param: wire::WireLookParam::AdjustHue,
+            },
+            at: 0.0,
+            value: Some(0.5),
+            position: None,
+            rgba: None,
+            easing: None,
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Look {
+                param: cutlass_models::LookParam::AdjustHue,
+            },
+            at: RationalTime::new(0, R24),
+            value: ParamValue::Scalar(0.5),
+            easing: Easing::Linear,
+        }
+    );
+}
+
+#[test]
 fn mask_center_keyframe_uses_position_on_masked_clip() {
     let (mut project, _, _, _, clip, _) = fixture();
     project

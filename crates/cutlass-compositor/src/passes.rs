@@ -8,7 +8,7 @@
 //! | Effect id | Renders |
 //! |-----------|---------|
 //! | `gaussian_blur`, `vignette`, `pixelate` | Yes |
-//! | `sharpen`, `glitch`, `chromatic_aberration`, `grain`, `glow`, `zoom_blur`, `mirror` | Passthrough (no visual change) |
+//! | `sharpen`, `glitch`, `chromatic_aberration`, `grain`, `glow`, `zoom_blur`, `mirror`, `color_overlay` | Passthrough (no visual change) |
 //!
 //! ## Transition coverage
 //!
@@ -82,6 +82,10 @@ const EFFECT_DESCRIPTORS: &[PassDescriptor] = &[
         id: "mirror",
         params: &["mode"],
     },
+    PassDescriptor {
+        id: "color_overlay",
+        params: &["color", "offset", "amount"],
+    },
 ];
 
 const TRANSITION_IDS: &[&str] = &[
@@ -115,7 +119,8 @@ pub fn effect_coverage(id: &str) -> PassCoverage {
         | "grain"
         | "glow"
         | "zoom_blur"
-        | "mirror" => PassCoverage::Passthrough,
+        | "mirror"
+        | "color_overlay" => PassCoverage::Passthrough,
         _ => PassCoverage::Passthrough,
     }
 }

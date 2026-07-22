@@ -133,12 +133,12 @@ pub(super) fn retimed_duration(
     (src_dur_tl as f64 / effective).round().max(1.0) as i64
 }
 
-/// Unwrap a scalar [`ParamValue`] (effect params are always scalar).
+/// Unwrap a scalar [`ParamValue`].
 pub(super) fn scalar_param(value: ParamValue) -> Result<f32, ModelError> {
     match value {
         ParamValue::Scalar(v) => Ok(v),
-        ParamValue::Vec2(_) | ParamValue::Color(_) => Err(ModelError::InvalidParam(
-            "effect parameters take a scalar value".into(),
-        )),
+        ParamValue::Vec2(_) | ParamValue::Color(_) => {
+            Err(ModelError::InvalidParam("expected a scalar value".into()))
+        }
     }
 }

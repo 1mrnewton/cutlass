@@ -103,10 +103,11 @@ pub enum ClipParam {
     /// volume keyframes. Media-backed clips only. Always carries a
     /// [`ParamValue::Scalar`] in `0..=`[`MAX_CLIP_VOLUME`].
     Volume,
-    /// A scalar parameter of one of the clip's effects (M4): `effect` is the
-    /// index into [`Clip::effects`], `param` the catalog slot. Routed to the
-    /// effect's `Param<f32>` instead of the transform, so the same keyframe
-    /// commands drive effect curves. Always carries a [`ParamValue::Scalar`].
+    /// A parameter of one of the clip's effects (M4): `effect` is the index
+    /// into [`Clip::effects`], `param` the catalog slot. Routed to the
+    /// effect's typed param maps instead of the transform. Carries
+    /// [`ParamValue::Scalar`], [`ParamValue::Color`], or [`ParamValue::Vec2`]
+    /// matching the catalog slot's [`crate::EffectParamKind`].
     Effect {
         effect: u32,
         param: u32,

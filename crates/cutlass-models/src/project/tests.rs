@@ -131,6 +131,65 @@ fn style_params_keyframe_through_project_api() {
 }
 
 #[test]
+fn effect_color_param_keyframes_through_project_api() {
+    let (mut project, media_id, track) = project_with_media(100);
+    let clip = project
+        .add_clip(track, media_id, tr(0, 48), rt(100))
+        .unwrap();
+    project.add_effect(clip, "color_overlay").unwrap();
+
+    let color = ClipParam::Effect {
+        effect: 0,
+        param: 0,
+    };
+    assert!(
+        project
+            .set_param_keyframe(
+                clip,
+                color,
+                rt(100),
+                ParamValue::Scalar(0.5),
+                Easing::Linear
+            )
+            .is_err()
+    );
+    project
+        .set_param_keyframe(
+            clip,
+            color,
+            rt(100),
+            ParamValue::Color([0, 0, 0, 255]),
+            Easing::Linear,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            color,
+            rt(140),
+            ParamValue::Color([255, 0, 0, 255]),
+            Easing::Linear,
+        )
+        .unwrap();
+    assert_eq!(
+        project.clip(clip).unwrap().effects[0].sample_color_param("color", 20.0),
+        Some([128, 0, 0, 255])
+    );
+
+    let offset = ClipParam::Effect {
+        effect: 0,
+        param: 1,
+    };
+    project
+        .set_param_constant(clip, offset, ParamValue::Vec2([0.5, -0.25]))
+        .unwrap();
+    assert_eq!(
+        project.clip(clip).unwrap().effects[0].sample_vec2_param("offset", 0.0),
+        Some([0.5, -0.25])
+    );
+}
+
+#[test]
 fn shape_params_keyframe_through_project_api() {
     let mut project = Project::new("p", R24);
     let track = project.add_track(TrackKind::Sticker, "S1");

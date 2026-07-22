@@ -252,15 +252,8 @@ impl Project {
             .clip_mut(clip_id)
             .ok_or(ModelError::UnknownClip(clip_id))?;
         match param {
-            ClipParam::Effect { effect, param } => {
-                let v = super::helpers::scalar_param(value)?;
-                super::helpers::effect_mut(clip, effect)?.set_param_keyframe(
-                    param as usize,
-                    tick,
-                    v,
-                    easing,
-                )
-            }
+            ClipParam::Effect { effect, param } => super::helpers::effect_mut(clip, effect)?
+                .set_param_value_keyframe(param as usize, tick, value, easing),
             ClipParam::Shape { param } => super::helpers::generator_mut(clip)?
                 .set_shape_param_keyframe(param, tick, value, easing),
             ClipParam::Text { param } => super::helpers::generator_mut(clip)?
@@ -366,10 +359,8 @@ impl Project {
             .clip_mut(clip_id)
             .ok_or(ModelError::UnknownClip(clip_id))?;
         match param {
-            ClipParam::Effect { effect, param } => {
-                let v = super::helpers::scalar_param(value)?;
-                super::helpers::effect_mut(clip, effect)?.set_param_constant(param as usize, v)
-            }
+            ClipParam::Effect { effect, param } => super::helpers::effect_mut(clip, effect)?
+                .set_param_value_constant(param as usize, value),
             ClipParam::Shape { param } => {
                 super::helpers::generator_mut(clip)?.set_shape_param_constant(param, value)
             }

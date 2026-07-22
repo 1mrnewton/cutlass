@@ -58,7 +58,9 @@ pub use clip::{
     speed_preset_catalog, speed_preset_id, validate_speed_curve, validate_volume,
     validate_volume_envelope,
 };
-pub use effects::{EffectInstance, EffectParamSpec, EffectSpec, effect_catalog, effect_spec};
+pub use effects::{
+    EffectInstance, EffectParamKind, EffectParamSpec, EffectSpec, effect_catalog, effect_spec,
+};
 pub use error::ModelError;
 pub use ids::{ClipId, LinkId, MarkerId, MediaId, ProjectId, TemplateId, TrackId};
 pub use look::{

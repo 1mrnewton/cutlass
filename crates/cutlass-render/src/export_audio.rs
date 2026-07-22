@@ -3,19 +3,32 @@
 //!
 //! Decodes straight from the original source files (same rule as export video:
 //! no cache, no proxies). The mix policy is the MVP subset of the desktop
-//! mixer — sum overlapping spans, apply per-sample volume + fades, clamp to
-//! `[-1, 1]`, silence where nothing is audible. It is fail-loud: a source that
-//! can't be opened or read aborts the export.
+//! mixer — sum overlapping spans, apply per-sample volume + fades + pan, clamp
+//! to `[-1, 1]`, silence where nothing is audible. It is fail-loud: a source
+//! that can't be opened or read aborts the export.
+//!
+//! Pan uses the industry-standard constant-power law scaled to unity at
+//! center (`0 dB` center, `+3 dB` at the hard-left / hard-right edges):
+//! `angle = (pan + 1) · π/4`, then `left = cos(angle)·√2`,
+//! `right = sin(angle)·√2`. Extreme pan + full volume can therefore exceed
+//! unity before the mixer's final `[-1, 1]` clamp — acceptable clipping at
+//! the edges. For stereo sources this is a *balance* (same L/R multipliers),
+//! not a true stereo pan that redistributes mid/side energy; mono sources
+//! (identical L/R after decode) are distributed across the field.
 //!
 //! Retimed clips (speed / speed-curve ramps) are rendered with varispeed
 //! resampling so pitch follows playback rate; pitch-preserving time-stretch
 //! is deferred. Denoise-flagged clips run through RNNoise before mixing.
 //! Reversed clips still export silent (forward-only decoders).
 //!
+//! Preview (desktop + mobile) and export share this mixer: both open an
+//! [`ExportAudioMixer`] over a project snapshot.
+//!
 //! The export loop drives [`ExportAudioMixer::mix_into`] with monotonically
 //! advancing positions (one block per video frame), so each span's reader seeks
 //! once at its in-point and then streams sequentially.
 
+use std::f32::consts::{FRAC_PI_4, SQRT_2};
 use std::path::PathBuf;
 
 use cutlass_core::{AudioReader, DecodeError};
@@ -44,6 +57,8 @@ struct Span {
     denoise: bool,
     /// Clip gain envelope, ticks rebased to clip-relative output sample frames.
     volume: Param<f32>,
+    /// Clip pan envelope (−1…+1), ticks rebased like `volume`.
+    pan: Param<f32>,
     /// Fade ramp lengths in output sample frames, anchored at the span edges.
     fade_in: i64,
     fade_out: i64,
@@ -130,6 +145,9 @@ impl ExportAudioMixer {
                     denoise: clip.denoise,
                     volume: clip
                         .volume
+                        .map_ticks(|tick| ticks_to_samples(tick, fps.num, fps.den)),
+                    pan: clip
+                        .pan
                         .map_ticks(|tick| ticks_to_samples(tick, fps.num, fps.den)),
                     fade_in: ticks_to_samples(clip.fade_in, fps.num, fps.den),
                     fade_out: ticks_to_samples(clip.fade_out, fps.num, fps.den),
@@ -307,6 +325,13 @@ fn open_span_reader(span: &Span) -> Result<Box<dyn AudioReader>, DecodeError> {
     }
 }
 
+/// Constant-power pan gains scaled to unity at center (`0 dB` center,
+/// `+3 dB` hard edges). See the module docs.
+fn pan_channel_gains(pan: f32) -> (f32, f32) {
+    let angle = (pan + 1.0) * FRAC_PI_4;
+    (angle.cos() * SQRT_2, angle.sin() * SQRT_2)
+}
+
 fn accumulate_span_samples(
     span: &Span,
     span_rel_start: i64,
@@ -317,7 +342,12 @@ fn accumulate_span_samples(
 ) {
     let span_len = span.end - span.start;
     let first = span_rel_start - span.start;
-    let unity = span.volume.constant() == Some(1.0) && span.fade_in == 0 && span.fade_out == 0;
+    // Center pan + unit volume + no fades: bit-exact passthrough of today's
+    // pre-pan mix (no √2 scaling at rest).
+    let unity = span.volume.constant() == Some(1.0)
+        && span.pan.constant() == Some(0.0)
+        && span.fade_in == 0
+        && span.fade_out == 0;
     if unity {
         for (dst, src) in out[out_offset..]
             .iter_mut()
@@ -327,16 +357,12 @@ fn accumulate_span_samples(
         }
     } else {
         for frame in 0..frames {
-            let gain = audio_gain_at(
-                first + frame as i64,
-                span_len,
-                &span.volume,
-                span.fade_in,
-                span.fade_out,
-            );
-            for ch in 0..CHANNELS {
-                out[out_offset + frame * CHANNELS + ch] += samples[frame * CHANNELS + ch] * gain;
-            }
+            let pos = first + frame as i64;
+            let gain = audio_gain_at(pos, span_len, &span.volume, span.fade_in, span.fade_out);
+            let (left, right) = pan_channel_gains(span.pan.sample(pos));
+            let base = out_offset + frame * CHANNELS;
+            out[base] += samples[frame * CHANNELS] * gain * left;
+            out[base + 1] += samples[frame * CHANNELS + 1] * gain * right;
         }
     }
 }
@@ -445,6 +471,7 @@ mod tests {
                 warp: SpanWarp::FlatSpeed { num: 2, den: 1 },
                 denoise: false,
                 volume: Param::Constant(1.0),
+                pan: Param::Constant(0.0),
                 fade_in: 0,
                 fade_out: 0,
                 reader: Some(Box::new(SineReader {
@@ -465,5 +492,167 @@ mod tests {
             reader_pos >= 998,
             "2× speed should advance source ~twice as fast, got {reader_pos}"
         );
+    }
+
+    /// Flat stereo buffer: left = 0.5, right = −0.25 at every frame.
+    struct FlatStereoReader {
+        pos: i64,
+        left: f32,
+        right: f32,
+    }
+
+    impl AudioReader for FlatStereoReader {
+        fn read(&mut self, out: &mut [f32]) -> Result<usize, DecodeError> {
+            let frames = out.len() / CHANNELS;
+            for f in 0..frames {
+                out[f * CHANNELS] = self.left;
+                out[f * CHANNELS + 1] = self.right;
+            }
+            self.pos += frames as i64;
+            Ok(frames)
+        }
+
+        fn seek_to_frame(&mut self, frame: i64) -> Result<(), DecodeError> {
+            self.pos = frame;
+            Ok(())
+        }
+
+        fn position(&self) -> Option<i64> {
+            Some(self.pos)
+        }
+    }
+
+    fn mixer_with_span(span: Span) -> ExportAudioMixer {
+        ExportAudioMixer {
+            spans: vec![span],
+            scratch: Vec::new(),
+            warp_scratch: Vec::new(),
+        }
+    }
+
+    fn flat_span(pan: Param<f32>, left: f32, right: f32) -> Span {
+        Span {
+            path: PathBuf::from("/dev/null"),
+            start: 0,
+            end: 1000,
+            source_start: 0,
+            warp: SpanWarp::Linear,
+            denoise: false,
+            volume: Param::Constant(1.0),
+            pan,
+            fade_in: 0,
+            fade_out: 0,
+            reader: Some(Box::new(FlatStereoReader {
+                pos: 0,
+                left,
+                right,
+            })),
+            exhausted: false,
+        }
+    }
+
+    #[test]
+    fn pan_zero_is_bit_exact_passthrough() {
+        let src_l = 0.5_f32;
+        let src_r = -0.25_f32;
+        let mut mixer = mixer_with_span(flat_span(Param::Constant(0.0), src_l, src_r));
+        let mut out = vec![0.0; 64 * CHANNELS];
+        mixer.mix_into(0, &mut out).unwrap();
+        for frame in 0..64 {
+            assert_eq!(out[frame * CHANNELS], src_l);
+            assert_eq!(out[frame * CHANNELS + 1], src_r);
+        }
+    }
+
+    #[test]
+    fn full_left_pan_zeroes_right_and_boosts_left_by_sqrt2() {
+        let src_l = 0.5_f32;
+        let src_r = -0.25_f32;
+        let mut mixer = mixer_with_span(flat_span(Param::Constant(-1.0), src_l, src_r));
+        let mut out = vec![0.0; 16 * CHANNELS];
+        mixer.mix_into(0, &mut out).unwrap();
+        let expect_l = src_l * SQRT_2;
+        for frame in 0..16 {
+            assert!(
+                (out[frame * CHANNELS] - expect_l).abs() < 1e-6,
+                "left {frame}: got {} want {expect_l}",
+                out[frame * CHANNELS]
+            );
+            assert_eq!(out[frame * CHANNELS + 1], 0.0);
+        }
+    }
+
+    #[test]
+    fn full_right_pan_zeroes_left_and_boosts_right_by_sqrt2() {
+        let src_l = 0.5_f32;
+        let src_r = -0.25_f32;
+        let mut mixer = mixer_with_span(flat_span(Param::Constant(1.0), src_l, src_r));
+        let mut out = vec![0.0; 16 * CHANNELS];
+        mixer.mix_into(0, &mut out).unwrap();
+        let expect_r = src_r * SQRT_2;
+        for frame in 0..16 {
+            // cos(π/2) is a tiny float residue, not exact 0.
+            assert!(out[frame * CHANNELS].abs() < 1e-6);
+            assert!((out[frame * CHANNELS + 1] - expect_r).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn keyframed_pan_sweeps_from_left_to_right() {
+        use cutlass_models::{Easing, Keyframe};
+        let pan = Param::Keyframed {
+            keyframes: vec![
+                Keyframe {
+                    tick: 0,
+                    value: -1.0,
+                    easing: Easing::Linear,
+                },
+                Keyframe {
+                    tick: 100,
+                    value: 1.0,
+                    easing: Easing::Linear,
+                },
+            ],
+        };
+        // Mono-like source (identical L/R) so pan distributes rather than
+        // just balancing unequal channels.
+        let mut mixer = mixer_with_span(flat_span(pan, 0.5, 0.5));
+        let mut t0 = vec![0.0; CHANNELS];
+        mixer.mix_into(0, &mut t0).unwrap();
+        assert!((t0[0] - 0.5 * SQRT_2).abs() < 1e-5, "t0 left");
+        assert!(t0[1].abs() < 1e-6, "t0 right silent");
+
+        let mut t1 = vec![0.0; CHANNELS];
+        mixer.mix_into(100, &mut t1).unwrap();
+        assert!(t1[0].abs() < 1e-6, "t1 left silent");
+        assert!((t1[1] - 0.5 * SQRT_2).abs() < 1e-5, "t1 right");
+    }
+
+    #[test]
+    fn stereo_pan_is_balance_not_true_stereo_pan() {
+        // Unequal L/R: hard-left keeps the left sample (×√2) and drops right;
+        // it does *not* fold right into left (true stereo pan would).
+        let src_l = 0.4_f32;
+        let src_r = 0.8_f32;
+        let mut mixer = mixer_with_span(flat_span(Param::Constant(-1.0), src_l, src_r));
+        let mut out = vec![0.0; 4 * CHANNELS];
+        mixer.mix_into(0, &mut out).unwrap();
+        assert!((out[0] - src_l * SQRT_2).abs() < 1e-6);
+        assert_eq!(out[1], 0.0);
+        // Right energy is gone, not redistributed.
+        assert!((out[0] - src_r * SQRT_2).abs() > 0.1);
+    }
+
+    #[test]
+    fn pan_channel_gains_are_unity_at_center() {
+        let (l, r) = pan_channel_gains(0.0);
+        assert!((l - 1.0).abs() < 1e-6);
+        assert!((r - 1.0).abs() < 1e-6);
+        let (l, r) = pan_channel_gains(-1.0);
+        assert!((l - SQRT_2).abs() < 1e-6);
+        assert!(r.abs() < 1e-6);
+        let (l, r) = pan_channel_gains(1.0);
+        assert!(l.abs() < 1e-6);
+        assert!((r - SQRT_2).abs() < 1e-6);
     }
 }

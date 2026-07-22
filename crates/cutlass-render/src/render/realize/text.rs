@@ -122,6 +122,7 @@ pub(super) fn realize_text_layer(
 /// Realize text for a transition side — bitmap path only.
 ///
 /// Per-character animation on a transition edge is not a supported surface.
+#[allow(clippy::too_many_arguments)] // mirrors former inline match-arm locals
 pub(super) fn realize_text_bitmap(
     text: &mut TextRenderer,
     layer: &SceneLayer,

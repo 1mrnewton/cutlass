@@ -623,38 +623,53 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
             let clip = clip_ref(project, args.clip)?;
             reject_audio_lane(project, clip, "animations need a visual frame", args.clip)?;
             let slot = lower_animation_slot(args.slot);
-            let animation = match &args.animation {
-                None => None,
-                Some(id) => {
-                    let spec = animation_spec(id).ok_or_else(|| {
-                        Rejection::new(format!(
-                            "unknown animation '{id}'; available animations include fade_in, \
+            let animation =
+                match &args.animation {
+                    None => None,
+                    Some(id) => {
+                        let spec = animation_spec(id).ok_or_else(|| {
+                            Rejection::new(format!(
+                                "unknown animation '{id}'; available animations include fade_in, \
                              fade_out, pulse, slide_up, zoom_in, and others from the catalog"
-                        ))
-                    })?;
-                    if spec.slot != slot {
-                        return Err(Rejection::new(format!(
-                            "animation '{id}' does not fit the {} slot",
-                            match args.slot {
-                                WireAnimationSlot::In => "in",
-                                WireAnimationSlot::Out => "out",
-                                WireAnimationSlot::Combo => "combo",
-                            }
-                        )));
+                            ))
+                        })?;
+                        if spec.slot != slot {
+                            return Err(Rejection::new(format!(
+                                "animation '{id}' does not fit the {} slot",
+                                match args.slot {
+                                    WireAnimationSlot::In => "in",
+                                    WireAnimationSlot::Out => "out",
+                                    WireAnimationSlot::Combo => "combo",
+                                }
+                            )));
+                        }
+                        if spec.text_only
+                            && !matches!(
+                                clip.content,
+                                cutlass_models::ClipSource::Generated(Generator::Text { .. })
+                            )
+                        {
+                            return Err(Rejection::new(format!(
+                                "animation '{id}' is a text-only preset"
+                            )));
+                        }
+                        let anim = AnimationRef {
+                            id: id.clone(),
+                            speed: args
+                                .speed
+                                .unwrap_or(cutlass_models::ANIMATION_PARAM_DEFAULT),
+                            intensity: args
+                                .intensity
+                                .unwrap_or(cutlass_models::ANIMATION_PARAM_DEFAULT),
+                            stagger: args
+                                .stagger
+                                .unwrap_or(cutlass_models::ANIMATION_PARAM_DEFAULT),
+                        };
+                        Some(anim.normalized_for(spec).map_err(|e| {
+                            Rejection::new(format!("invalid animation params: {e}"))
+                        })?)
                     }
-                    if spec.text_only
-                        && !matches!(
-                            clip.content,
-                            cutlass_models::ClipSource::Generated(Generator::Text { .. })
-                        )
-                    {
-                        return Err(Rejection::new(format!(
-                            "animation '{id}' is a text-only preset"
-                        )));
-                    }
-                    Some(AnimationRef::new(id.clone()))
-                }
-            };
+                };
             EditCommand::SetClipAnimation {
                 clip: clip.id,
                 slot,

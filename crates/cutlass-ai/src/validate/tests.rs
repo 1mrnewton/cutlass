@@ -695,6 +695,9 @@ fn look_commands_lower_and_guard() {
             clip,
             slot: wire::WireAnimationSlot::In,
             animation: Some("fade_in".to_string()),
+            speed: None,
+            intensity: None,
+            stagger: None,
         }),
     );
     assert_eq!(
@@ -712,6 +715,9 @@ fn look_commands_lower_and_guard() {
             clip,
             slot: wire::WireAnimationSlot::Out,
             animation: Some("fade_in".to_string()),
+            speed: None,
+            intensity: None,
+            stagger: None,
         }),
     );
     assert!(msg.contains("does not fit"), "{msg}");

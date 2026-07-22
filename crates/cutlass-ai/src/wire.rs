@@ -612,6 +612,18 @@ pub struct SetClipAnimation {
     pub slot: WireAnimationSlot,
     /// Catalog animation id (e.g. "fade_in", "pulse"). `null` clears the slot.
     pub animation: Option<String>,
+    /// Playback rate of the entrance/exit window or combo period (`1` = catalog).
+    /// Omit or `null` for the default. Range `0.25..=4`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f32>,
+    /// Magnitude of motion / opacity swing (`1` = catalog, `0` = none).
+    /// Omit or `null` for the default. Range `0..=2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intensity: Option<f32>,
+    /// Per-character stagger stretch (`1` = catalog). Text presets only.
+    /// Omit or `null` for the default. Range `0..=2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stagger: Option<f32>,
 }
 
 /// Audio role tags for clips on audio tracks.
@@ -1159,7 +1171,7 @@ tools! {
     "set_clip_adjustments" => SetClipAdjustments(SetClipAdjustments),
         "Set manual color adjustments (brightness, contrast, saturation, exposure, temperature) on any visual clip. Each slider is -1..1; omitted sliders keep their current value.";
     "set_clip_animation" => SetClipAnimation(SetClipAnimation),
-        "Set or clear a look animation preset on any visual clip. Slots: in (entrance), out (exit), combo (looping). Animation ids include fade_in, slide_up, pulse, etc. Pass null for animation to clear the slot.";
+        "Set or clear a look animation preset on any visual clip. Slots: in (entrance), out (exit), combo (looping). Animation ids include fade_in, slide_up, pulse, typewriter, wave, etc. Optional speed (0.25–4), intensity (0–2), and stagger (0–2, text presets). Pass null for animation to clear the slot.";
     "set_audio_role" => SetAudioRole(SetAudioRole),
         "Tag or untag what an audio-lane clip is: music, sfx, voiceover, or extracted. Pass null for role to clear the tag. Audio-track clips only.";
     "split_clip" => SplitClip(SplitClip),

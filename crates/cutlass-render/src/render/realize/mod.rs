@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+mod text;
+
 use cutlass_compositor::{
     ColorGrade, CompositeLayer, CompositorConfig, CompositorLayer, FrameSink, GlyphInstance,
     GlyphsLayer, LayerEffects, LayerPlacement, PassInstance, RgbaImage, SdfLayer,
@@ -14,7 +16,6 @@ use crate::scene::{LayerSource, ResolvedPass, Scene, SceneLut, SizeSpec};
 
 use super::effects::{EffectChain, layer_effects, pack_effects};
 use super::media_cache::{CubeLutState, LottieState, StickerSequence, layer_lut};
-use super::text_anim::{atlas_key, cluster_deltas, extent_origin, place_clusters};
 use super::{FrameStats, Renderer, SLOW_FRAME_LOG_MS, SeekPolicy};
 
 fn composite_from_realized<'a>(
@@ -164,7 +165,7 @@ fn composite_from_realized<'a>(
 }
 
 /// An owned, decoded/rasterized layer kept alive while the compositor borrows it.
-enum Realized {
+pub(super) enum Realized {
     Transition {
         outgoing: Box<Realized>,
         incoming: Box<Realized>,
@@ -355,106 +356,21 @@ impl Renderer {
                     style,
                     animation,
                 } => {
-                    let scale = match layer.size {
-                        SizeSpec::BitmapScaled(s) => s,
-                        SizeSpec::Fixed(_) => 1.0,
+                    let Some(layer_realized) = text::realize_text_layer(
+                        &mut self.text,
+                        layer,
+                        content,
+                        style,
+                        animation,
+                        [scene.width as f32, scene.height as f32],
+                        layer.effects.clone(),
+                        fx,
+                        color_grade,
+                        scene_lut,
+                    ) else {
+                        continue;
                     };
-                    if let Some(anim) = animation {
-                        let shaped = self.text.shape(content, style);
-                        if !shaped.has_ink() {
-                            continue;
-                        }
-                        let painted = cutlass_text::paint_animated(&shaped, style);
-                        // Deltas use the ink-tight shaped clusters (logical
-                        // order / baselines); placement uses painted images.
-                        let deltas = cluster_deltas(&shaped, anim);
-                        let extent_size = [
-                            painted.extent.0 as f32 * scale,
-                            painted.extent.1 as f32 * scale,
-                        ];
-                        let aligned = layer.text_quad_center(
-                            style,
-                            extent_size,
-                            [scene.width as f32, scene.height as f32],
-                        );
-                        let origin = extent_origin(aligned, painted.extent, scale);
-                        let glyphs: Vec<RgbaImage> =
-                            painted.clusters.iter().map(|c| c.image.clone()).collect();
-                        // place_clusters reads offsets/baselines from ShapedText;
-                        // rebuild a shaped view over the painted clusters.
-                        let painted_shaped = cutlass_text::ShapedText {
-                            extent: painted.extent,
-                            clusters: painted.clusters.clone(),
-                        };
-                        let instances = place_clusters(
-                            &painted_shaped,
-                            &deltas,
-                            origin,
-                            scale,
-                            layer.rotation,
-                            layer.opacity,
-                        );
-                        if instances.is_empty() {
-                            continue;
-                        }
-                        let background = painted.background.map(|bg| {
-                            let size = [bg.width as f32 * scale, bg.height as f32 * scale];
-                            let center = [
-                                origin[0] + painted.background_offset[0] * scale + size[0] * 0.5,
-                                origin[1] + painted.background_offset[1] * scale + size[1] * 0.5,
-                            ];
-                            (
-                                bg,
-                                LayerPlacement {
-                                    center,
-                                    size,
-                                    rotation: layer.rotation,
-                                    opacity: layer.opacity,
-                                },
-                            )
-                        });
-                        realized.push(Realized::Glyphs {
-                            glyphs,
-                            instances,
-                            atlas_key: atlas_key(content, style),
-                            background,
-                            placement: LayerPlacement {
-                                center: aligned,
-                                size: extent_size,
-                                rotation: 0.0,
-                                opacity: 1.0,
-                            },
-                            effects: layer.effects.clone(),
-                            fx,
-                            color_grade,
-                            lut: scene_lut,
-                        });
-                    } else {
-                        let image = self.text.rasterize(content, style);
-                        if image.width == 0 || image.height == 0 {
-                            continue; // nothing rasterized (no fonts / empty run)
-                        }
-                        let size = [image.width as f32 * scale, image.height as f32 * scale];
-                        let placement = LayerPlacement {
-                            center: layer.text_quad_center(
-                                style,
-                                size,
-                                [scene.width as f32, scene.height as f32],
-                            ),
-                            size,
-                            rotation: layer.rotation,
-                            opacity: layer.opacity,
-                        };
-                        realized.push(Realized::Bitmap {
-                            image,
-                            placement,
-                            uv: layer.uv,
-                            effects: layer.effects.clone(),
-                            fx,
-                            color_grade,
-                            lut: scene_lut,
-                        });
-                    }
+                    realized.push(layer_realized);
                 }
                 LayerSource::Media { media, source_time } => {
                     let slot = occurrence.entry(*media).or_insert(0);
@@ -871,34 +787,16 @@ impl Renderer {
                 // Transition sides keep the bitmap path — per-character
                 // animation on a transition edge is not a supported surface.
                 let _ = animation;
-                let image = self.text.rasterize(content, style);
-                if image.width == 0 || image.height == 0 {
-                    return Err(RenderError::unsupported("empty text layer"));
-                }
-                let scale = match layer.size {
-                    SizeSpec::BitmapScaled(s) => s,
-                    SizeSpec::Fixed(_) => 1.0,
-                };
-                let size = [image.width as f32 * scale, image.height as f32 * scale];
-                let placement = LayerPlacement {
-                    center: layer.text_quad_center(
-                        style,
-                        size,
-                        [scene.width as f32, scene.height as f32],
-                    ),
-                    size,
-                    rotation: layer.rotation,
-                    opacity: layer.opacity,
-                };
-                Realized::Bitmap {
-                    image,
-                    placement,
-                    uv: layer.uv,
-                    effects: layer.effects.clone(),
+                text::realize_text_bitmap(
+                    &mut self.text,
+                    layer,
+                    content,
+                    style,
+                    [scene.width as f32, scene.height as f32],
+                    layer.effects.clone(),
                     fx,
                     color_grade,
-                    lut: None,
-                }
+                )?
             }
             LayerSource::Media { media, source_time } => {
                 let frame = self.decode(project, *media, 0, *source_time, policy)?;

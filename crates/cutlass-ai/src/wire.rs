@@ -63,7 +63,9 @@ use serde::{Deserialize, Serialize};
 /// 35: animatable text background radius/color on text keyframe params.
 /// 36: per-axis scale — `set_clip_transform.scale` accepts a number or
 ///     `[x, y]`; scale keyframes accept `value` (uniform) or `position`.
-pub const TOOL_SCHEMA_VERSION: u32 = 36;
+/// 37: spatial motion-path tangents — optional `tangent_out` / `tangent_in`
+///     on `set_param_keyframe` (position only, canvas-fraction handles).
+pub const TOOL_SCHEMA_VERSION: u32 = 37;
 
 mod dtos;
 mod tools;

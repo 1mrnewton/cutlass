@@ -344,13 +344,14 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 args.rgba,
                 args.rect,
             )?;
+            let tangents = spatial_tangents(args.tangent_out, args.tangent_in, &args.param)?;
             EditCommand::SetParamKeyframe {
                 clip: clip.id,
                 param: clip_param(&args.param, clip, args.clip)?,
                 at,
                 value,
                 easing: easing(args.easing)?,
-                tangents: None,
+                tangents,
             }
         }
         WireCommand::RemoveParamKeyframe(args) => {

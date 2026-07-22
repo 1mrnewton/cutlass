@@ -5,7 +5,7 @@ use cutlass_models::{
     AnimationRef, AnimationSlot, BlendMode, CanvasAspect, CanvasSettings, ClipParam, ClipTransform,
     ColorAdjustments, CropRect, Easing, Filter, Generator, LayerGlow, LayerOutline, LayerShadow,
     LayerStyles, MediaSource, Param, ParamValue, Project, Rational, RationalTime, Scale2, Shape,
-    StyleParam, TextStyle as ModelTextStyle, TimeRange, TrackKind,
+    SpatialTangents, StyleParam, TextStyle as ModelTextStyle, TimeRange, TrackKind,
 };
 
 const FPS_24: Rational = Rational::FPS_24;
@@ -512,6 +512,58 @@ fn transform_offsets_center_and_scales_size() {
         other => panic!("expected fixed size, got {other:?}"),
     }
     approx(layer.opacity, 0.5);
+}
+
+#[test]
+fn keyframed_position_with_tangents_resolves_off_the_line() {
+    // Motion-path sampling flows through Param::sample → resolve automatically.
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            rt(0),
+            ParamValue::Vec2([0.0, 0.0]),
+            Easing::Linear,
+            Some(SpatialTangents {
+                out_t: [0.0, 0.55],
+                in_t: [0.0, 0.0],
+            }),
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            ClipParam::Position,
+            rt(10),
+            ParamValue::Vec2([1.0, 1.0]),
+            Easing::Linear,
+            Some(SpatialTangents {
+                out_t: [0.0, 0.0],
+                in_t: [-0.55, 0.0],
+            }),
+        )
+        .unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    let center = scene.layers[0].center;
+    // Straight mid position is [0.5, 0.5] → canvas center [cw, ch].
+    let straight = [1920.0, 1080.0];
+    assert!(
+        (center[1] - straight[1]).abs() > 10.0 || (center[0] - straight[0]).abs() > 10.0,
+        "expected curved mid off the straight line, got {center:?}"
+    );
+    // Quarter-ish bulge: y above the diagonal in position space → center_y > ch
+    // relative to center_x's progress.
+    let pos_x = center[0] / 1920.0 - 0.5;
+    let pos_y = center[1] / 1080.0 - 0.5;
+    assert!(
+        pos_y > pos_x + 0.05,
+        "expected position above diagonal, got ({pos_x}, {pos_y}) from center {center:?}"
+    );
 }
 
 #[test]

@@ -807,7 +807,7 @@
       }
     },
     {
-      "description": "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), crop, volume, pan (−1 left … +1 right), speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, color-look `{look:{param}}`, and style `{style:{param}}` properties. Use `value` for scalars (including uniform scale), `position` for position/anchor_point/per-axis scale and other vec2 params, `rgba` for colors, and `rect` as [x,y,w,h] for crop. Effect names and valid properties are visible in describe_project.",
+      "description": "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), crop, volume, pan (−1 left … +1 right), speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, color-look `{look:{param}}`, and style `{style:{param}}` properties. Use `value` for scalars (including uniform scale), `position` for position/anchor_point/per-axis scale and other vec2 params, `rgba` for colors, and `rect` as [x,y,w,h] for crop. For curved position motion paths, pass optional `tangent_out` / `tangent_in` as canvas-fraction offsets from the keyframe value (After Effects–style bezier handles; position only). Effect names and valid properties are visible in describe_project.",
       "name": "set_param_keyframe",
       "parameters": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1134,6 +1134,32 @@
             },
             "maxItems": 4,
             "minItems": 4,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "tangent_in": {
+            "description": "Incoming spatial bezier handle for a **position** motion path.\nOffset from this keyframe's value, in canvas fractions. Position\nonly; see `tangent_out`.",
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "tangent_out": {
+            "description": "Outgoing spatial bezier handle for a **position** motion path\n(After Effects–style). Offset from this keyframe's value, in canvas\nfractions. Ignored / rejected on non-position params. Pair with\n`tangent_in` on the next keyframe to shape the segment.",
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "maxItems": 2,
+            "minItems": 2,
             "type": [
               "array",
               "null"
@@ -3061,5 +3087,5 @@
       }
     }
   ],
-  "version": 36
+  "version": 37
 }

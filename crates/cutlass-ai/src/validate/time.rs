@@ -27,6 +27,51 @@ fn gcd(mut a: i32, mut b: i32) -> i32 {
     a.max(1)
 }
 
+/// Lower optional wire spatial handles into model [`SpatialTangents`].
+/// Either handle alone is enough to mark a curved segment; omitted sides
+/// default to zero. Rejected on non-position params and out-of-range values.
+pub(super) fn spatial_tangents(
+    tangent_out: Option<[f64; 2]>,
+    tangent_in: Option<[f64; 2]>,
+    param: &WireClipParam,
+) -> Result<Option<cutlass_models::SpatialTangents>, Rejection> {
+    if tangent_out.is_none() && tangent_in.is_none() {
+        return Ok(None);
+    }
+    if *param != WireClipParam::Position {
+        return Err(Rejection::new(
+            "spatial tangents are only supported on position",
+        ));
+    }
+    let to_comp = |v: f64, axis: &str| -> Result<f32, Rejection> {
+        if !v.is_finite() {
+            return Err(Rejection::new(format!(
+                "spatial tangent {axis} must be finite (got {v})"
+            )));
+        }
+        let f = v as f32;
+        if f.abs() > 4.0 {
+            return Err(Rejection::new(format!(
+                "spatial tangent {axis} = {f} is outside ±4.0 canvas fractions"
+            )));
+        }
+        Ok(f)
+    };
+    let out_t = match tangent_out {
+        Some([x, y]) => [to_comp(x, "out.x")?, to_comp(y, "out.y")?],
+        None => [0.0, 0.0],
+    };
+    let in_t = match tangent_in {
+        Some([x, y]) => [to_comp(x, "in.x")?, to_comp(y, "in.y")?],
+        None => [0.0, 0.0],
+    };
+    let tangents = cutlass_models::SpatialTangents { out_t, in_t };
+    tangents
+        .validate()
+        .map_err(|e| Rejection::new(format!("invalid spatial tangents: {e}")))?;
+    Ok(Some(tangents))
+}
+
 pub(super) fn easing(easing: Option<WireEasing>) -> Result<Easing, Rejection> {
     let easing = match easing {
         None | Some(WireEasing::Linear) => Easing::Linear,

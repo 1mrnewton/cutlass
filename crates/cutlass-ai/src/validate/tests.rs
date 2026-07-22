@@ -185,6 +185,9 @@ fn extended_wire_clip_params_lower_to_model_params() {
                 rgba,
                 rect: None,
                 easing: Some(wire::WireEasing::EaseOut),
+
+                tangent_out: None,
+                tangent_in: None,
             }),
         );
         assert_eq!(
@@ -241,6 +244,9 @@ fn named_and_bezier_easings_lower_on_set_param_keyframe() {
                 rgba: None,
                 rect: None,
                 easing: Some(wire_easing),
+
+                tangent_out: None,
+                tangent_in: None,
             }),
         );
         assert_eq!(
@@ -268,6 +274,9 @@ fn named_and_bezier_easings_lower_on_set_param_keyframe() {
             easing: Some(wire::WireEasing::Bezier {
                 points: [1.5, 0.0, 0.5, 1.0],
             }),
+
+            tangent_out: None,
+            tangent_in: None,
         }),
         &project,
     )
@@ -299,6 +308,100 @@ fn hold_easing_lowers_from_wire_json() {
             value: ParamValue::Scalar(0.5),
             easing: Easing::Hold,
             tangents: None,
+        }
+    );
+}
+
+#[test]
+fn position_tangents_lower_on_set_param_keyframe() {
+    let (project, _, _, _, clip, _) = fixture();
+    let edit = lower(
+        &project,
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Position,
+            at: 1.0,
+            value: None,
+            position: Some([0.25, -0.5]),
+            rgba: None,
+            rect: None,
+            easing: Some(wire::WireEasing::Linear),
+            tangent_out: Some([0.0, 0.5]),
+            tangent_in: Some([-0.25, 0.0]),
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Position,
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Vec2([0.25, -0.5]),
+            easing: Easing::Linear,
+            tangents: Some(cutlass_models::SpatialTangents {
+                out_t: [0.0, 0.5],
+                in_t: [-0.25, 0.0],
+            }),
+        }
+    );
+}
+
+#[test]
+fn position_tangents_on_opacity_are_rejected() {
+    let (project, _, _, _, clip, _) = fixture();
+    let err = validate(
+        &WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Opacity,
+            at: 1.0,
+            value: Some(0.5),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: None,
+            tangent_out: Some([0.1, 0.0]),
+            tangent_in: None,
+        }),
+        &project,
+    )
+    .expect_err("tangents on opacity must reject");
+    assert!(
+        err.to_string()
+            .contains("spatial tangents are only supported on position"),
+        "unexpected rejection: {err}"
+    );
+}
+
+#[test]
+fn position_tangents_roundtrip_through_wire_json() {
+    let (project, _, _, _, clip, _) = fixture();
+    let cmd: WireCommand = serde_json::from_value(serde_json::json!({
+        "command": "set_param_keyframe",
+        "clip": clip,
+        "param": "position",
+        "at": 1.0,
+        "position": [0.25, -0.5],
+        "tangent_out": [0.0, 0.5],
+        "tangent_in": [-0.25, 0.0],
+    }))
+    .expect("tangent fields deserialize");
+    let WireCommand::SetParamKeyframe(args) = &cmd else {
+        panic!("expected SetParamKeyframe");
+    };
+    assert_eq!(args.tangent_out, Some([0.0, 0.5]));
+    assert_eq!(args.tangent_in, Some([-0.25, 0.0]));
+    assert_eq!(
+        lower(&project, cmd),
+        EditCommand::SetParamKeyframe {
+            clip: ClipId::from_raw(clip),
+            param: ClipParam::Position,
+            at: RationalTime::new(24, R24),
+            value: ParamValue::Vec2([0.25, -0.5]),
+            easing: Easing::Linear,
+            tangents: Some(cutlass_models::SpatialTangents {
+                out_t: [0.0, 0.5],
+                in_t: [-0.25, 0.0],
+            }),
         }
     );
 }
@@ -739,6 +842,9 @@ fn scale_keyframe_accepts_scalar_and_position_vec2() {
             rgba: None,
             rect: None,
             easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert_eq!(
@@ -764,6 +870,9 @@ fn scale_keyframe_accepts_scalar_and_position_vec2() {
             rgba: None,
             rect: None,
             easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert_eq!(
@@ -897,6 +1006,9 @@ fn pan_keyframe_lowers_and_rejects_out_of_range() {
             rgba: None,
             rect: None,
             easing: Some(wire::WireEasing::Linear),
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert_eq!(
@@ -969,6 +1081,9 @@ fn crop_keyframe_uses_rect_on_wire() {
             rgba: None,
             rect: Some([0.1, 0.2, 0.5, 0.5]),
             easing: Some(wire::WireEasing::Linear),
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert_eq!(
@@ -995,6 +1110,9 @@ fn crop_keyframe_uses_rect_on_wire() {
             rgba: None,
             rect: Some([0.0, 0.0, 0.001, 1.0]),
             easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert!(
@@ -1014,6 +1132,9 @@ fn crop_keyframe_uses_rect_on_wire() {
             rgba: None,
             rect: None,
             easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert!(msg.contains("rect"), "{msg}");
@@ -1326,6 +1447,9 @@ fn style_param_keyframe_lowers_by_value_kind() {
             rgba: None,
             rect: None,
             easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert_eq!(
@@ -1355,6 +1479,9 @@ fn style_param_keyframe_lowers_by_value_kind() {
             rgba: None,
             rect: None,
             easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert!(msg.contains("position"), "{msg}");
@@ -1372,6 +1499,9 @@ fn style_param_keyframe_lowers_by_value_kind() {
             rgba: None,
             rect: None,
             easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert_eq!(
@@ -1401,6 +1531,9 @@ fn style_param_keyframe_lowers_by_value_kind() {
             rgba: None,
             rect: None,
             easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert!(msg.contains("rgba"), "{msg}");
@@ -1418,6 +1551,9 @@ fn style_param_keyframe_lowers_by_value_kind() {
             rgba: Some([255, 200, 0, 255]),
             rect: None,
             easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert_eq!(
@@ -1647,6 +1783,9 @@ fn set_clip_adjustments_lowers_new_sliders_and_rejects_ranges() {
             rgba: None,
             rect: None,
             easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert_eq!(
@@ -1684,6 +1823,9 @@ fn mask_center_keyframe_uses_position_on_masked_clip() {
             rgba: None,
             rect: None,
             easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert!(msg.contains("position"), "{msg}");
@@ -1701,6 +1843,9 @@ fn mask_center_keyframe_uses_position_on_masked_clip() {
             rgba: None,
             rect: None,
             easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert_eq!(
@@ -2572,6 +2717,9 @@ fn typed_effect_params_accept_rgba_and_position_on_wire() {
             rgba: Some([20, 16, 60, 255]),
             rect: None,
             easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert_eq!(
@@ -2603,6 +2751,9 @@ fn typed_effect_params_accept_rgba_and_position_on_wire() {
             rgba: None,
             rect: None,
             easing: None,
+
+            tangent_out: None,
+            tangent_in: None,
         }),
     );
     assert!(msg.contains("color"), "{msg}");

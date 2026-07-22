@@ -487,6 +487,17 @@ pub struct SetParamKeyframe {
     /// Interpolation toward the next keyframe. Defaults to linear.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub easing: Option<WireEasing>,
+    /// Outgoing spatial bezier handle for a **position** motion path
+    /// (After Effects–style). Offset from this keyframe's value, in canvas
+    /// fractions. Ignored / rejected on non-position params. Pair with
+    /// `tangent_in` on the next keyframe to shape the segment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tangent_out: Option<[f64; 2]>,
+    /// Incoming spatial bezier handle for a **position** motion path.
+    /// Offset from this keyframe's value, in canvas fractions. Position
+    /// only; see `tangent_out`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tangent_in: Option<[f64; 2]>,
 }
 
 /// Remove the keyframe at exactly a timeline position on one property.

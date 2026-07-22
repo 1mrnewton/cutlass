@@ -1,7 +1,7 @@
 use crate::effect_render::{
-    OffscreenPool, blit_premultiplied_to_canvas, blit_replace, draw_layer_to_offscreen,
-    effects_need_offscreen, run_blend_composite, run_effect_chain, run_grade_pass, run_lut_pass,
-    run_transition_pass,
+    OffscreenPool, blit_premultiplied_to_canvas, blit_replace, composite_layer_styles,
+    draw_layer_to_offscreen, effects_need_offscreen, run_blend_composite, run_effect_chain,
+    run_grade_pass, run_lut_pass, run_transition_pass,
 };
 use crate::error::CompositorError;
 use crate::gpu::GpuContext;
@@ -246,7 +246,8 @@ impl Compositor {
                 CompositorLayer::Layer(layer)
                     if !effects_need_offscreen(layer.effects)
                         && layer.lut.is_none()
-                        && layer.blend_mode == BlendMode::Normal =>
+                        && layer.blend_mode == BlendMode::Normal
+                        && layer.styles.is_empty() =>
                 {
                     let built = self.build_layer(gpu, config, layer)?;
                     let pipeline = pipeline_for(&built.pipeline, self);
@@ -320,6 +321,30 @@ impl Compositor {
                             lut.intensity,
                         );
                     }
+                    // Style slot lifetimes: content stays on S. Shadow/glow
+                    // silhouette+blur use A=(S+1)%3 and B=(S+2)%3, then blit
+                    // onto the canvas. A and B are free again before the
+                    // content composite, so non-Normal blend may still
+                    // snapshot into (S+1)%3. outline/background: composited
+                    // in a follow-up.
+                    let src_slot = offscreen
+                        .index_of(result)
+                        .expect("effect/lut output is an offscreen pool view");
+                    if !layer.styles.is_empty() {
+                        composite_layer_styles(
+                            device,
+                            &mut encoder,
+                            &self.pass_registry,
+                            offscreen,
+                            result,
+                            src_slot,
+                            &target.view,
+                            layer.styles.shadow,
+                            layer.styles.glow,
+                            config.width,
+                            config.height,
+                        );
+                    }
                     if layer.blend_mode == BlendMode::Normal {
                         blit_premultiplied_to_canvas(
                             device,
@@ -331,9 +356,6 @@ impl Compositor {
                     } else {
                         // See OffscreenPool slot invariant: result on S,
                         // canvas snapshot into (S+1)%3, blend into canvas.
-                        let src_slot = offscreen
-                            .index_of(result)
-                            .expect("effect/lut output is an offscreen pool view");
                         let snap_slot = (src_slot + 1) % OffscreenPool::SLOTS;
                         encoder.copy_texture_to_texture(
                             wgpu::TexelCopyTextureInfo {

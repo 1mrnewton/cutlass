@@ -12,12 +12,14 @@ mod blit;
 mod lut;
 mod pipelines;
 mod pool;
+mod styles;
 
 pub(crate) use blend::run_blend_composite;
 pub(crate) use blit::{blit_premultiplied_to_canvas, blit_replace};
 pub(crate) use lut::run_lut_pass;
 pub(crate) use pipelines::PassRegistry;
 pub(crate) use pool::OffscreenPool;
+pub(crate) use styles::composite_layer_styles;
 
 const RT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -256,7 +258,7 @@ pub(crate) fn run_grade_pass<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_effect_pass(
+pub(super) fn draw_effect_pass(
     device: &wgpu::Device,
     encoder: &mut wgpu::CommandEncoder,
     registry: &PassRegistry,

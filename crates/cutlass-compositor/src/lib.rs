@@ -46,8 +46,8 @@ pub use gpu::GpuContext;
 pub use grade::ColorGrade;
 pub use layer::{
     BlendMode, CompositeLayer, CompositorConfig, CompositorLayer, FULL_UV, GlyphInstance,
-    GlyphsLayer, LayerChromaKey, LayerContent, LayerEffects, LayerLut, LayerMask, LayerPlacement,
-    SdfLayer, mask_kind,
+    GlyphsLayer, LayerBackground, LayerChromaKey, LayerContent, LayerEffects, LayerGlow, LayerLut,
+    LayerMask, LayerOutline, LayerPlacement, LayerShadow, LayerStyles, SdfLayer, mask_kind,
 };
 pub use lut::{CubeLut, LutError, MAX_CUBE_SIZE};
 pub use passes::{

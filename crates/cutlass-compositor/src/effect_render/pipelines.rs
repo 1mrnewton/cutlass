@@ -2,7 +2,10 @@ use crate::passes::resolve_transition_pass;
 
 use super::RT_FORMAT;
 use super::blend::build_blend_pipeline;
-use super::blit::{build_blit_pipeline, build_replace_pipeline};
+use super::blit::{
+    build_additive_blit_pipeline, build_blit_pipeline, build_offset_blit_pipeline,
+    build_replace_pipeline,
+};
 
 /// GPU pipelines for catalog effect and transition passes.
 pub(crate) struct PassRegistry {
@@ -27,6 +30,13 @@ pub(crate) struct PassRegistry {
     /// Dst-sampling blend modes (non-`Normal`).
     pub blend_pipeline: wgpu::RenderPipeline,
     pub blend_layout: wgpu::BindGroupLayout,
+    /// Layer-alpha silhouette tint (shadow/glow seed).
+    pub silhouette_pipeline: wgpu::RenderPipeline,
+    /// Premultiplied blit with UV offset (shadow placement).
+    pub offset_blit_pipeline: wgpu::RenderPipeline,
+    pub offset_blit_layout: wgpu::BindGroupLayout,
+    /// Additive premultiplied blit (glow).
+    pub additive_blit_pipeline: wgpu::RenderPipeline,
 }
 
 impl PassRegistry {
@@ -80,6 +90,12 @@ impl PassRegistry {
                 uniform_entry(3),
             ],
         });
+
+        let offset_blit_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("cutlass.offset_blit.bgl"),
+                entries: &[tex_entry(0), sampler_entry(1), uniform_entry(2)],
+            });
 
         let passthrough = build_effect_pipeline(
             device,
@@ -138,6 +154,14 @@ impl PassRegistry {
         let blit_pipeline = build_blit_pipeline(device, &blit_layout);
         let replace_pipeline = build_replace_pipeline(device, &blit_layout);
         let blend_pipeline = build_blend_pipeline(device, &blend_layout);
+        let silhouette_pipeline = build_effect_pipeline(
+            device,
+            "cutlass.style_silhouette",
+            &effect_layout,
+            include_str!("../../shaders/style_silhouette.wgsl"),
+        );
+        let offset_blit_pipeline = build_offset_blit_pipeline(device, &offset_blit_layout);
+        let additive_blit_pipeline = build_additive_blit_pipeline(device, &blit_layout);
 
         Self {
             passthrough,
@@ -158,6 +182,10 @@ impl PassRegistry {
             blit_layout,
             blend_pipeline,
             blend_layout,
+            silhouette_pipeline,
+            offset_blit_pipeline,
+            offset_blit_layout,
+            additive_blit_pipeline,
         }
     }
 
@@ -226,7 +254,7 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-const PREMULT_OVER: wgpu::BlendState = wgpu::BlendState {
+pub(super) const PREMULT_OVER: wgpu::BlendState = wgpu::BlendState {
     color: wgpu::BlendComponent {
         src_factor: wgpu::BlendFactor::One,
         dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,

@@ -1,7 +1,7 @@
 use super::RT_FORMAT;
 
-/// Reused canvas-sized RGBA textures for effect ping-pong, transitions, and
-/// blend-mode canvas snapshots.
+/// Reused canvas-sized RGBA textures for effect ping-pong, transitions,
+/// style silhouette/blur, and blend-mode canvas snapshots.
 ///
 /// Slot invariant for non-`Normal` blend composite:
 /// - Layer base draws into slot 0; effects/LUT ping-pong and may finish on
@@ -11,6 +11,11 @@ use super::RT_FORMAT;
 /// - `blend_composite` then samples snapshot + `S` and writes the canvas.
 /// - Slot `(S + 2) % SLOTS` is unused for that step. Three slots therefore
 ///   suffice (canvas is a separate texture); the pool does not need a 4th.
+///
+/// Style passes (shadow/glow) run after content lands on `S` and before the
+/// content composite: silhouette + blur ping-pong through `A=(S+1)%3` and
+/// `B=(S+2)%3`, then blit onto the canvas. Both A and B are free again before
+/// the blend snapshot reuses `(S+1)%3`.
 pub(crate) struct OffscreenPool {
     pub(crate) width: u32,
     pub(crate) height: u32,

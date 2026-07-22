@@ -90,6 +90,59 @@ pub struct LayerChromaKey {
     pub shadow: f32,
 }
 
+/// Drop shadow drawn from the layer's alpha (offset + blur), in canvas pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LayerShadow {
+    pub rgba: [u8; 4],
+    pub offset: [f32; 2],
+    pub blur: f32,
+}
+
+/// Soft glow bloom drawn from the layer's alpha, in canvas pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LayerGlow {
+    pub rgba: [u8; 4],
+    pub radius: f32,
+    /// Multiplier on silhouette alpha before blur; typical range `0..=4`.
+    pub intensity: f32,
+}
+
+/// Hard outline / stroke around the layer's alpha silhouette, in canvas pixels.
+/// Composited in a follow-up.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LayerOutline {
+    pub rgba: [u8; 4],
+    pub width: f32,
+}
+
+/// Solid plate behind the layer (padded AABB), in canvas pixels.
+/// Composited in a follow-up.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LayerBackground {
+    pub rgba: [u8; 4],
+    pub padding: f32,
+    pub radius: f32,
+}
+
+/// Resolved layer styles in canvas pixels, rendered from the layer's alpha.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LayerStyles {
+    pub shadow: Option<LayerShadow>,
+    pub glow: Option<LayerGlow>,
+    pub outline: Option<LayerOutline>,
+    pub background: Option<LayerBackground>,
+}
+
+impl LayerStyles {
+    /// True iff no style block is present.
+    pub fn is_empty(&self) -> bool {
+        self.shadow.is_none()
+            && self.glow.is_none()
+            && self.outline.is_none()
+            && self.background.is_none()
+    }
+}
+
 /// How a layer's pixels combine with the accumulated canvas below it.
 /// `Normal` is plain source-over (the fast path); every other mode runs
 /// the dst-sampling blend pass.
@@ -259,6 +312,9 @@ pub struct CompositeLayer<'a> {
     /// How this layer composites over the accumulated canvas. `Normal` keeps
     /// the direct src-over fast path; other modes force the offscreen blend pass.
     pub blend_mode: BlendMode,
+    /// Shadow/glow/outline/background drawn from the layer alpha before content
+    /// composites. Non-empty styles force the offscreen path.
+    pub styles: LayerStyles,
 }
 
 /// A layer, a canvas-wide pass, or a dual-source transition submitted to the compositor.
@@ -298,6 +354,7 @@ impl<'a> CompositeLayer<'a> {
             color_grade: None,
             lut: None,
             blend_mode: BlendMode::Normal,
+            styles: LayerStyles::default(),
         }
     }
 
@@ -312,6 +369,7 @@ impl<'a> CompositeLayer<'a> {
             color_grade: None,
             lut: None,
             blend_mode: BlendMode::Normal,
+            styles: LayerStyles::default(),
         }
     }
 
@@ -326,6 +384,7 @@ impl<'a> CompositeLayer<'a> {
             color_grade: None,
             lut: None,
             blend_mode: BlendMode::Normal,
+            styles: LayerStyles::default(),
         }
     }
 
@@ -340,6 +399,7 @@ impl<'a> CompositeLayer<'a> {
             color_grade: None,
             lut: None,
             blend_mode: BlendMode::Normal,
+            styles: LayerStyles::default(),
         }
     }
 
@@ -357,6 +417,7 @@ impl<'a> CompositeLayer<'a> {
             color_grade: None,
             lut: None,
             blend_mode: BlendMode::Normal,
+            styles: LayerStyles::default(),
         }
     }
 
@@ -400,6 +461,13 @@ impl<'a> CompositeLayer<'a> {
     /// Set the per-layer blend mode (`Normal` keeps the direct fast path).
     pub fn with_blend_mode(mut self, blend_mode: BlendMode) -> Self {
         self.blend_mode = blend_mode;
+        self
+    }
+
+    /// Attach resolved shadow/glow/outline/background styles (empty keeps the
+    /// direct fast path when blend/effects/LUT also allow it).
+    pub fn with_styles(mut self, styles: LayerStyles) -> Self {
+        self.styles = styles;
         self
     }
 }

@@ -334,6 +334,13 @@ fn dispatch_edit(
                 Some(inverse),
             ))
         }
+        EditCommand::SetClipLayerStyles { clip, styles } => {
+            let inverse = edit::set_look::set_layer_styles(ctx, clip, styles)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(clip)),
+                Some(inverse),
+            ))
+        }
         EditCommand::SetClipChroma { clip, chroma } => {
             let inverse = edit::set_look::set_chroma(ctx, clip, chroma)?;
             Ok((

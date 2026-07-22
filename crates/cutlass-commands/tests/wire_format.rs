@@ -12,9 +12,9 @@ use std::path::PathBuf;
 use cutlass_commands::{
     AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
     ClipTransform, ColorAdjustments, Command, CropRect, Easing, EditCommand, EditOutcome, Filter,
-    Generator, Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId, Param, ParamValue,
-    ProjectCommand, Rational, RationalTime, Replaceable, StabilizeLevel, TemplateMeta,
-    TemplatePick, TimeRange, TrackId, TrackKind,
+    Generator, LayerShadow, LayerStyles, Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId,
+    Param, ParamValue, ProjectCommand, Rational, RationalTime, Replaceable, StabilizeLevel,
+    TemplateMeta, TemplatePick, TimeRange, TrackId, TrackKind,
 };
 use serde_json::{Value, json};
 
@@ -212,6 +212,17 @@ fn edit_samples() -> Vec<EditCommand> {
         EditCommand::SetClipBlendMode {
             clip: clip(4),
             mode: BlendMode::Multiply,
+        },
+        EditCommand::SetClipLayerStyles {
+            clip: clip(4),
+            styles: LayerStyles {
+                shadow: Some(LayerShadow {
+                    rgba: Param::Constant([0, 0, 0, 128]),
+                    offset: Param::Constant([4.0, 4.0]),
+                    blur: Param::Constant(8.0),
+                }),
+                ..Default::default()
+            },
         },
         EditCommand::SetClipChroma {
             clip: clip(4),
@@ -417,6 +428,7 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
         EditCommand::SetClipDenoise { .. } => "SetClipDenoise",
         EditCommand::SetClipMask { .. } => "SetClipMask",
         EditCommand::SetClipBlendMode { .. } => "SetClipBlendMode",
+        EditCommand::SetClipLayerStyles { .. } => "SetClipLayerStyles",
         EditCommand::SetClipChroma { .. } => "SetClipChroma",
         EditCommand::SetClipStabilize { .. } => "SetClipStabilize",
         EditCommand::SetClipFilter { .. } => "SetClipFilter",
@@ -463,7 +475,7 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
 #[test]
 fn command_variant_counts_are_locked() {
     assert_eq!(project_samples().len(), 9);
-    assert_eq!(edit_samples().len(), 60);
+    assert_eq!(edit_samples().len(), 61);
 }
 
 #[test]
@@ -751,6 +763,32 @@ fn golden_look_commands() {
     assert_eq!(
         serde_json::to_value(&blend).unwrap(),
         json!({"type": "SetClipBlendMode", "clip": 4, "mode": "multiply"})
+    );
+
+    let styles = Command::Edit(EditCommand::SetClipLayerStyles {
+        clip: clip(4),
+        styles: LayerStyles {
+            shadow: Some(LayerShadow {
+                rgba: Param::Constant([0, 0, 0, 128]),
+                offset: Param::Constant([4.0, 4.0]),
+                blur: Param::Constant(8.0),
+            }),
+            ..Default::default()
+        },
+    });
+    assert_eq!(
+        serde_json::to_value(&styles).unwrap(),
+        json!({
+            "type": "SetClipLayerStyles",
+            "clip": 4,
+            "styles": {
+                "shadow": {
+                    "rgba": [0, 0, 0, 128],
+                    "offset": [4.0, 4.0],
+                    "blur": 8.0
+                }
+            }
+        })
     );
 
     let chroma = Command::Edit(EditCommand::SetClipChroma {

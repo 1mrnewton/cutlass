@@ -16,8 +16,8 @@ use std::path::PathBuf;
 
 use cutlass_models::{
     AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
-    ClipTransform, ColorAdjustments, CropRect, Easing, Filter, Generator, Lut, MarkerColor,
-    MarkerId, Mask, MediaId, Param, ParamValue, Rational, RationalTime, Replaceable,
+    ClipTransform, ColorAdjustments, CropRect, Easing, Filter, Generator, LayerStyles, Lut,
+    MarkerColor, MarkerId, Mask, MediaId, Param, ParamValue, Rational, RationalTime, Replaceable,
     StabilizeLevel, TemplateMeta, TimeRange, TrackId, TrackKind,
 };
 use serde::{Deserialize, Serialize};
@@ -271,6 +271,10 @@ pub enum EditCommand {
     SetClipMask { clip: ClipId, mask: Option<Mask> },
     /// Set how a clip composites over the stack below (visual clips only).
     SetClipBlendMode { clip: ClipId, mode: BlendMode },
+    /// Set layer-quad styles (shadow/glow/outline/background) on a visual
+    /// clip. Empty styles clear every block. The inverse restores the
+    /// previous clip state.
+    SetClipLayerStyles { clip: ClipId, styles: LayerStyles },
     /// Set (or clear) chroma keying (CapCut chroma key, Phase I;
     /// render-neutral). Media-backed visual clips only. The inverse restores
     /// the previous clip state.

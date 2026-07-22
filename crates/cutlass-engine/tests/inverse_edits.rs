@@ -2105,6 +2105,53 @@ fn set_clip_blend_mode_undo_redo_roundtrip() {
 }
 
 #[test]
+fn set_clip_layer_styles_undo_redo_roundtrip() {
+    use cutlass_models::{LayerShadow, LayerStyles, Param};
+
+    let Some(path) = small_video_asset() else {
+        return;
+    };
+    let (_dir, mut engine) = temp_engine();
+    let media_id = import_asset(&mut engine, &path);
+    let track = common::add_track(&mut engine, TrackKind::Video, "V1");
+    let clip_id = created(
+        engine
+            .apply(Command::Edit(EditCommand::AddClip {
+                track,
+                media: media_id,
+                source: tr(0, 48),
+                start: rt(0),
+            }))
+            .expect("add"),
+    );
+    let before = engine.project().clip(clip_id).unwrap().clone();
+    assert!(before.styles.is_empty());
+
+    let styles = LayerStyles {
+        shadow: Some(LayerShadow {
+            rgba: Param::Constant([0, 0, 0, 128]),
+            offset: Param::Constant([4.0, 4.0]),
+            blur: Param::Constant(8.0),
+        }),
+        ..Default::default()
+    };
+    engine
+        .apply(Command::Edit(EditCommand::SetClipLayerStyles {
+            clip: clip_id,
+            styles: styles.clone(),
+        }))
+        .expect("styles");
+    assert_eq!(engine.project().clip(clip_id).unwrap().styles, styles);
+
+    // Inverse (undo) restores the pre-edit clip snapshot (styles cleared).
+    assert!(engine.undo());
+    assert_eq!(engine.project().clip(clip_id).unwrap(), &before);
+    assert!(engine.project().clip(clip_id).unwrap().styles.is_empty());
+    assert!(engine.redo());
+    assert_eq!(engine.project().clip(clip_id).unwrap().styles, styles);
+}
+
+#[test]
 fn look_commands_undo_redo_roundtrip() {
     use cutlass_models::{
         AnimationRef, AnimationSlot, ChromaKey, ColorAdjustments, Filter, Mask, MaskKind,

@@ -480,7 +480,7 @@ fn mask_feather_preview_then_kind_switch_clears_override() {
     assert!(engine.has_live_overrides());
     assert_eq!(
         engine.param_overrides().get(clip, param),
-        Some(&ParamValue::Scalar(0.7))
+        Some(ParamValue::Scalar(0.7))
     );
 
     // Structural SetClipMask (kind switch) clears all look_mask_* overrides —

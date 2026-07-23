@@ -1,0 +1,30 @@
+[package]
+name = "cutlass-mcp"
+description = "Cutlass MCP server: validated project reads and edits for external agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+cutlass-ai = { path = "../cutlass-ai" }
+cutlass-commands = { path = "../cutlass-commands" }
+cutlass-engine = { path = "../cutlass-engine" }
+cutlass-models = { path = "../cutlass-models" }
+# encode_png / decode_png — not re-exported from cutlass-engine.
+cutlass-render = { path = "../cutlass-render" }
+rmcp = { version = "2", features = ["transport-io"] }
+# Same major as rmcp's schemars (re-export alone isn't enough for the derive).
+schemars = "1"
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+rmcp = { version = "2", features = ["client", "transport-async-rw"] }
+tempfile = "3"

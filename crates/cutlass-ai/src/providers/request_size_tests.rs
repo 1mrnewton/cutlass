@@ -139,9 +139,9 @@ fn tools_only_body_stays_under_ceiling() {
     )];
     let bytes = body_bytes(&provider, &messages, &tools);
 
-    // Measured 2026-07-23 (post speed schema drop): 50_918 bytes
+    // Measured 2026-07-23 (tool schema v47 Mirror feather docs): 52_531 bytes
     // (tools dominate). Ceiling = measured + ~3% headroom; ratchet down on shrinks.
-    const TOOLS_ONLY_CEILING: usize = 52_400;
+    const TOOLS_ONLY_CEILING: usize = 54_100;
     assert!(
         bytes < TOOLS_ONLY_CEILING,
         "tools-only request body grew to {bytes} bytes (ceiling {TOOLS_ONLY_CEILING}); \

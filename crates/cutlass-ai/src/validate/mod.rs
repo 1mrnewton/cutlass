@@ -13,6 +13,9 @@ mod command;
 mod look;
 mod lookup;
 mod lower;
+mod motion;
+#[cfg(test)]
+mod motion_tests;
 #[cfg(test)]
 mod tests;
 mod time;
@@ -39,6 +42,7 @@ use audio::*;
 use look::*;
 use lookup::*;
 use lower::*;
+use motion::*;
 use time::*;
 
 /// A wire command the project as it stands cannot accept. The message is

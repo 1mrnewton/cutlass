@@ -782,7 +782,10 @@ fn transform_merges_with_current_values() {
             opacity: None,
         }),
     );
-    assert!(msg.contains("invalid transform"), "{msg}");
+    assert!(
+        msg.contains("scale 0") && msg.contains("must be positive"),
+        "{msg}"
+    );
 }
 
 #[test]

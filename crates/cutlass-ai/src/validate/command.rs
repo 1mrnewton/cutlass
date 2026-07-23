@@ -103,6 +103,21 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
             // Omitted properties keep their current value — sampled at the
             // clip start for animated params (the agent edits whole-clip
             // placement; keyframe-level edits get their own commands).
+            if let Some(x) = args.position_x {
+                check_position_component(x)?;
+            }
+            if let Some(y) = args.position_y {
+                check_position_component(y)?;
+            }
+            if let Some(x) = args.anchor_x {
+                check_anchor_component(x)?;
+            }
+            if let Some(y) = args.anchor_y {
+                check_anchor_component(y)?;
+            }
+            if let Some(scale) = args.scale {
+                check_wire_scale(scale)?;
+            }
             let current = clip.transform.sample(0);
             let transform = ClipTransform {
                 position: [
@@ -335,6 +350,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         WireCommand::SetParamKeyframe(args) => {
             let clip = clip_ref(project, args.clip)?;
             let at = keyframe_position(project, clip, args.at)?;
+            check_motion_param_args(&args.param, args.value, args.position)?;
             let value = param_value(
                 clip,
                 args.clip,
@@ -380,6 +396,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         WireCommand::SetClipAudio(args) => set_clip_audio(project, args)?,
         WireCommand::SetParamConstant(args) => {
             let clip = clip_ref(project, args.clip)?;
+            check_motion_param_args(&args.param, args.value, args.position)?;
             let value = param_value(
                 clip,
                 args.clip,

@@ -43,20 +43,8 @@ pub(super) fn spatial_tangents(
             "spatial tangents are only supported on position",
         ));
     }
-    let to_comp = |v: f64, axis: &str| -> Result<f32, Rejection> {
-        if !v.is_finite() {
-            return Err(Rejection::new(format!(
-                "spatial tangent {axis} must be finite (got {v})"
-            )));
-        }
-        let f = v as f32;
-        if f.abs() > 4.0 {
-            return Err(Rejection::new(format!(
-                "spatial tangent {axis} = {f} is outside ±4.0 canvas fractions"
-            )));
-        }
-        Ok(f)
-    };
+    let to_comp =
+        |v: f64, axis: &str| -> Result<f32, Rejection> { check_tangent_component(v, axis) };
     let out_t = match tangent_out {
         Some([x, y]) => [to_comp(x, "out.x")?, to_comp(y, "out.y")?],
         None => [0.0, 0.0],

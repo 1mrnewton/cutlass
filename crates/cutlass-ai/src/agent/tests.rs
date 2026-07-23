@@ -84,6 +84,61 @@ fn action_lines_read_like_an_edit_log() {
         describe_action(&canvas, Some(&EditOutcome::UpdatedCanvas)),
         "set canvas aspect 9:16, background rgb(20, 20, 28)"
     );
+
+    // Percent-rendered params keep the raw wire multiplier so models do not
+    // echo "150" / "50" into the next tool call.
+    let scale = WireCommand::SetClipTransform(wire::SetClipTransform {
+        clip: 3,
+        position_x: None,
+        position_y: None,
+        anchor_x: None,
+        anchor_y: None,
+        scale: Some(wire::WireScale::Uniform(1.5)),
+        rotation: None,
+        opacity: Some(0.5),
+    });
+    assert_eq!(
+        describe_action(&scale, None),
+        "set clip 3 scale 150% (=1.5), opacity 50% (=0.5)"
+    );
+
+    let volume = WireCommand::SetClipAudio(wire::SetClipAudio {
+        clip: 9,
+        volume: Some(0.5),
+        fade_in: None,
+        fade_out: None,
+    });
+    assert_eq!(
+        describe_action(&volume, None),
+        "set clip 9 volume 50% (=0.5)"
+    );
+
+    let keyframe = WireCommand::SetParamConstant(wire::SetParamConstant {
+        clip: 3,
+        param: wire::WireClipParam::Scale,
+        value: Some(1.5),
+        position: None,
+        rgba: None,
+        rect: None,
+    });
+    assert_eq!(
+        describe_action(&keyframe, None),
+        "set clip 3 scale to 150% (=1.5) (animation cleared)"
+    );
+
+    let crop = WireCommand::SetClipCrop(wire::SetClipCrop {
+        clip: 4,
+        left: Some(0.25),
+        top: None,
+        right: Some(0.25),
+        bottom: None,
+        flip_h: Some(true),
+        flip_v: None,
+    });
+    assert_eq!(
+        describe_action(&crop, None),
+        "set clip 4 cropped left 25% (=0.25), right 25% (=0.25), flipped horizontally"
+    );
 }
 
 #[test]

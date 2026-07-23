@@ -1220,7 +1220,7 @@ fn lower_music_volume_with_fades() {
     assert_eq!(outcome.actions.len(), 1);
     assert_eq!(
         outcome.actions[0].description,
-        format!("set clip {clip} volume 50%, fade in 1.00s, fade out 2.00s")
+        format!("set clip {clip} volume 50% (=0.5), fade in 1.00s, fade out 2.00s")
     );
 
     let clip_id = cutlass_models::ClipId::from_raw(clip);
@@ -1308,7 +1308,7 @@ fn volume_envelope_with_keyframes() {
     assert_eq!(outcome.actions.len(), 3);
     assert_eq!(
         outcome.actions[1].description,
-        format!("keyframed clip {clip} volume = 20% at 3.00s")
+        format!("keyframed clip {clip} volume = 20% (=0.2) at 3.00s")
     );
 
     // The envelope landed: a keyframed volume that dips at 3s (72 ticks).
@@ -1429,11 +1429,11 @@ fn fade_in_with_opacity_keyframes() {
     assert_eq!(outcome.actions.len(), 2);
     assert_eq!(
         outcome.actions[0].description,
-        format!("keyframed clip {clip} opacity = 0% at 0.00s")
+        format!("keyframed clip {clip} opacity = 0% (=0) at 0.00s")
     );
     assert_eq!(
         outcome.actions[1].description,
-        format!("keyframed clip {clip} opacity = 100% at 1.00s")
+        format!("keyframed clip {clip} opacity = 100% (=1) at 1.00s")
     );
 
     // The curve landed: 0 → 1 over the first 24 ticks, eased.
@@ -1635,7 +1635,7 @@ fn crop_to_center_and_mirror_clip() {
     assert_eq!(outcome.actions.len(), 1);
     assert_eq!(
         outcome.actions[0].description,
-        format!("set clip {clip} cropped left 25%, right 25%, flipped horizontally")
+        format!("set clip {clip} cropped left 25% (=0.25), right 25% (=0.25), flipped horizontally")
     );
 
     // The kept region and flip land on the model, and the next describe()

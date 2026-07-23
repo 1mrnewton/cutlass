@@ -10,6 +10,12 @@ fn rgba(c: [u8; 4]) -> String {
     format!("#{:02x}{:02x}{:02x}{:02x}", c[0], c[1], c[2], c[3])
 }
 
+/// Human percent plus the raw wire multiplier the model must send next turn.
+/// e.g. `150% (=1.5)` — percent alone was echoed as `value: 150` and rejected.
+fn percent_with_raw(v: f64) -> String {
+    format!("{:.0}% (={v})", v * 100.0)
+}
+
 fn param_name(param: &wire::WireClipParam) -> String {
     match param {
         wire::WireClipParam::Position => "position".into(),
@@ -29,7 +35,7 @@ fn param_name(param: &wire::WireClipParam) -> String {
     }
 }
 
-/// The keyframed value in editor language: "scale 150%", "rotation 90°",
+/// The keyframed value in editor language: "scale 150% (=1.5)", "rotation 90°",
 /// "[0.25, -0.10]". Falls back to "?" when the call omitted the value (the
 /// validation rejection carries the real message).
 fn param_value_phrase(
@@ -50,13 +56,13 @@ fn param_value_phrase(
             if let Some(p) = position {
                 format!("[{}, {}]", p[0], p[1])
             } else if let Some(v) = value {
-                format!("{:.0}%", v * 100.0)
+                percent_with_raw(v)
             } else {
                 "?".into()
             }
         }
         wire::WireClipParam::Opacity | wire::WireClipParam::Volume => value
-            .map(|v| format!("{:.0}%", v * 100.0))
+            .map(percent_with_raw)
             .unwrap_or_else(|| "?".into()),
         wire::WireClipParam::Pan => value
             .map(|v| format!("{v:.2}"))
@@ -160,7 +166,7 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
             }
             if let Some(s) = a.scale {
                 parts.push(match s {
-                    wire::WireScale::Uniform(u) => format!("scale {:.0}%", u * 100.0),
+                    wire::WireScale::Uniform(u) => format!("scale {}", percent_with_raw(u)),
                     wire::WireScale::Axes([x, y]) => format!("scale: [{x}, {y}]"),
                 });
             }
@@ -168,7 +174,7 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
                 parts.push(format!("rotation {r:.0}°"));
             }
             if let Some(o) = a.opacity {
-                parts.push(format!("opacity {:.0}%", o * 100.0));
+                parts.push(format!("opacity {}", percent_with_raw(o)));
             }
             format!("set clip {} {}", a.clip, parts.join(", "))
         }
@@ -181,7 +187,7 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
                 ("bottom", a.bottom),
             ]
             .iter()
-            .filter_map(|(name, v)| v.map(|v| format!("{name} {:.0}%", v * 100.0)))
+            .filter_map(|(name, v)| v.map(|v| format!("{name} {}", percent_with_raw(v))))
             .collect();
             if !edges.is_empty() {
                 parts.push(format!("cropped {}", edges.join(", ")));
@@ -438,7 +444,7 @@ pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> 
                 parts.push(if v == 0.0 {
                     "muted".to_string()
                 } else {
-                    format!("volume {:.0}%", v * 100.0)
+                    format!("volume {}", percent_with_raw(v))
                 });
             }
             if let Some(f) = a.fade_in {

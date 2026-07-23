@@ -33,7 +33,11 @@ fn hostless_tools() -> Vec<ToolSpec> {
 
 fn body_bytes(provider: &OpenAiCompatProvider, messages: &[Message], tools: &[ToolSpec]) -> usize {
     provider
-        .request_body(&ChatRequest { messages, tools, session_id: None })
+        .request_body(&ChatRequest {
+            messages,
+            tools,
+            session_id: None,
+        })
         .to_string()
         .len()
 }

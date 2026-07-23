@@ -320,7 +320,9 @@ fn prompt_run_reuses_one_session_id_across_turns() {
     assert_eq!(outcome2.status, PromptStatus::Completed);
     let second_ids = second.session_ids();
     assert_eq!(second_ids.len(), 1);
-    let second_id = second_ids[0].as_deref().expect("session id on second prompt");
+    let second_id = second_ids[0]
+        .as_deref()
+        .expect("session id on second prompt");
     assert!(!second_id.is_empty());
     assert_ne!(second_id, first_id);
 }

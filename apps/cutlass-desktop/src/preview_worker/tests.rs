@@ -3642,6 +3642,9 @@ fn inspector_transform_preview_commit_emits_begin_overrides_and_one_commit() {
     let t = sample_override_transform();
 
     preview_transform(&mut session, &handle, "7".into(), t, 12);
+    let (id, mirrored) = session.overlay_mirror().expect("overlay mirrored on preview");
+    assert_eq!(id, "7");
+    assert_eq!(mirrored.position, t.position);
     preview_transform(&mut session, &handle, "7".into(), t, 12);
     commit_transform(&mut session, &handle, "7".into(), t, 12);
 
@@ -3650,6 +3653,10 @@ fn inspector_transform_preview_commit_emits_begin_overrides_and_one_commit() {
         vec!["begin", "override", "override", "commit"]
     );
     assert!(!session.is_active());
+    assert!(
+        session.overlay_mirror().is_none(),
+        "commit clears overlay mirror (UI keeps gesture until projection)"
+    );
 }
 
 /// No-op release (slider released on the playhead sample) must clear the

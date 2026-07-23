@@ -100,7 +100,17 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
     );
 
     app.global::<PreviewBackend>().on_selection_box(
-        |sequence, clip_id, tick, view_w, view_h, zoom, pan_x, pan_y, gesture_active, gesture| {
+        |sequence,
+         clip_id,
+         tick,
+         view_w,
+         view_h,
+         zoom,
+         pan_x,
+         pan_y,
+         gesture_active,
+         gesture,
+         _gesture_epoch| {
             preview_select::selection_box_in_viewport(
                 &sequence,
                 clip_id.as_str(),
@@ -116,7 +126,17 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
     );
 
     app.global::<PreviewBackend>().on_sprite_placement(
-        |sequence, clip_id, tick, view_w, view_h, zoom, pan_x, pan_y, gesture_active, gesture| {
+        |sequence,
+         clip_id,
+         tick,
+         view_w,
+         view_h,
+         zoom,
+         pan_x,
+         pan_y,
+         gesture_active,
+         gesture,
+         _gesture_epoch| {
             preview_select::sprite_placement_in_viewport(
                 &sequence,
                 clip_id.as_str(),
@@ -560,6 +580,7 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
 
     let override_handle = preview_worker.handle();
     let override_session = gesture_session.clone();
+    let override_app = app.as_weak();
     editor.on_on_preview_transform_overridden(
         move |clip_id,
               pos_x,
@@ -571,22 +592,62 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
               rotation,
               opacity,
               tick| {
-            crate::transform_gesture_session::preview_transform(
-                &mut override_session.borrow_mut(),
-                &override_handle,
-                clip_id.to_string(),
-                cutlass_models::ClipTransform {
-                    position: [pos_x, pos_y],
-                    anchor_point: [anchor_x, anchor_y],
-                    scale: cutlass_models::Scale2 {
-                        x: scale_x,
-                        y: scale_y,
-                    },
-                    rotation,
-                    opacity,
+            let transform = cutlass_models::ClipTransform {
+                position: [pos_x, pos_y],
+                anchor_point: [anchor_x, anchor_y],
+                scale: cutlass_models::Scale2 {
+                    x: scale_x,
+                    y: scale_y,
                 },
-                i64::from(tick),
-            );
+                rotation,
+                opacity,
+            };
+            let overlay = {
+                let mut session = override_session.borrow_mut();
+                crate::transform_gesture_session::preview_transform(
+                    &mut session,
+                    &override_handle,
+                    clip_id.to_string(),
+                    transform,
+                    i64::from(tick),
+                );
+                session
+                    .overlay_mirror()
+                    .map(|(id, t)| (id.to_string(), t.clone()))
+            };
+            // Mirror session overlay into PreviewStore so on-canvas
+            // selection/handles follow inspector slider drags the same way
+            // canvas gestures do. Bump gesture-epoch so the pure
+            // selection-box binding re-evaluates. Preserve snap guides when
+            // the canvas path already filled them in.
+            let Some((mirror_clip, mirrored)) = overlay else {
+                return;
+            };
+            let Some(app) = override_app.upgrade() else {
+                return;
+            };
+            let store = app.global::<PreviewStore>();
+            let prev = store.get_gesture();
+            store.set_gesture_clip(SharedString::from(mirror_clip));
+            store.set_gesture(PreviewDragResolution {
+                valid: true,
+                moved: true,
+                position_x: mirrored.position[0],
+                position_y: mirrored.position[1],
+                anchor_x: mirrored.anchor_point[0],
+                anchor_y: mirrored.anchor_point[1],
+                scale: mirrored.scale.x,
+                scale_y: mirrored.scale.y,
+                rotation: mirrored.rotation,
+                opacity: mirrored.opacity,
+                snap_h: prev.snap_h,
+                snap_v: prev.snap_v,
+                guide_x: prev.guide_x,
+                guide_y: prev.guide_y,
+            });
+            store.set_gesture_commit_pending(false);
+            store.set_gesture_active(true);
+            store.set_gesture_epoch(store.get_gesture_epoch().wrapping_add(1));
         },
     );
 

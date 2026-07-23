@@ -214,12 +214,12 @@ export global PreviewBackend {
     // projection still holds the press-time transform, so the panel passes
     // the gesture's resolution (`gesture-active` + `gesture`) to keep the
     // box glued to the moving/scaling/rotating content.
-    pure callback selection-box(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* gesture-active */, PreviewDragResolution /* gesture */, ) -> PreviewSelectionBox;
+    pure callback selection-box(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* gesture-active */, PreviewDragResolution /* gesture */, int    /* gesture-epoch */, ) -> PreviewSelectionBox;
 
     // Sprite image placement for a zero-drift transform gesture: maps the
     // identity-transform raster to the live gesture transform using the same
     // placement math as the selection box.
-    pure callback sprite-placement(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* gesture-active */, PreviewDragResolution /* gesture */, ) -> PreviewSpritePlacement;
+    pure callback sprite-placement(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* gesture-active */, PreviewDragResolution /* gesture */, int    /* gesture-epoch */, ) -> PreviewSpritePlacement;
 
     // Motion-path overlay for a selected clip with keyframed position:
     // sampled polyline (SVG commands) + keyframe diamonds in viewport px.

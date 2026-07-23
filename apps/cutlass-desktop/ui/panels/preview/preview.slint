@@ -176,7 +176,8 @@ export component PreviewPanel inherits PanelBase {
                         PreviewStore.gesture-active
                             && PreviewStore.gesture-clip == TimelineStore.selected-clip-id
                             && PreviewStore.gesture.valid,
-                        PreviewStore.gesture);
+                        PreviewStore.gesture,
+                        PreviewStore.gesture-epoch);
 
                     private property <PreviewSpritePlacement> sprite-placement: PreviewBackend.sprite-placement(
                         EditorStore.project.sequence,
@@ -190,7 +191,8 @@ export component PreviewPanel inherits PanelBase {
                         PreviewStore.gesture-active
                             && PreviewStore.gesture-clip == TimelineStore.selected-clip-id
                             && PreviewStore.gesture.valid,
-                        PreviewStore.gesture);
+                        PreviewStore.gesture,
+                        PreviewStore.gesture-epoch);
 
                     // Motion path for a selected clip with keyframed position.
                     // Same reactive inputs as sel-box (selection, projection

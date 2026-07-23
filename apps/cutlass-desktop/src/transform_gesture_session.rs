@@ -16,6 +16,10 @@ use crate::preview_worker::WorkerHandle;
 #[derive(Debug, Default, Clone)]
 pub struct TransformGestureSession {
     active_clip: Option<String>,
+    /// Last override values mirrored for on-canvas selection/handles.
+    /// Cleared on commit / clear / abandon so Escape restores the pre-drag
+    /// box from the (still frozen) projection.
+    overlay: Option<(String, ClipTransform)>,
 }
 
 impl TransformGestureSession {
@@ -31,6 +35,13 @@ impl TransformGestureSession {
     #[cfg(test)]
     pub fn active_clip(&self) -> Option<&str> {
         self.active_clip.as_deref()
+    }
+
+    /// Live overlay mirror updated on every preview tick (inspector or canvas).
+    pub fn overlay_mirror(&self) -> Option<(&str, &ClipTransform)> {
+        self.overlay
+            .as_ref()
+            .map(|(id, t)| (id.as_str(), t))
     }
 
     /// Explicit begin (canvas press). Returns `true` when the caller should
@@ -50,14 +61,19 @@ impl TransformGestureSession {
         self.begin(clip)
     }
 
+    fn mirror_overlay(&mut self, clip: &str, transform: ClipTransform) {
+        self.overlay = Some((clip.to_string(), transform));
+    }
+
     /// Commit, clear, or abandon — the next drag must begin again.
     pub fn end(&mut self) {
         self.active_clip = None;
+        self.overlay = None;
     }
 }
 
 /// Drive the worker through an inspector-style (or canvas) preview tick:
-/// begin once if needed, then send the transform override.
+/// begin once if needed, mirror into overlay state, then send the override.
 pub fn preview_transform(
     session: &mut TransformGestureSession,
     handle: &WorkerHandle,
@@ -68,6 +84,7 @@ pub fn preview_transform(
     if session.preview(&clip) {
         handle.begin_transform_gesture(clip.clone(), tick);
     }
+    session.mirror_overlay(&clip, transform);
     handle.transform_override(clip, transform, tick);
 }
 
@@ -161,6 +178,21 @@ mod tests {
         assert!(session.is_active());
         session.end();
         assert!(session.preview("7"), "next drag begins again after end");
+    }
+
+    #[test]
+    fn overlay_mirror_clears_on_end() {
+        let mut session = TransformGestureSession::new();
+        session.begin("7");
+        session.mirror_overlay("7", moved_transform());
+        let (id, mirrored) = session.overlay_mirror().expect("mirrored");
+        assert_eq!(id, "7");
+        assert_eq!(mirrored.position, [0.1, -0.2]);
+        session.end();
+        assert!(
+            session.overlay_mirror().is_none(),
+            "cancel/commit clears overlay so handles return to projection"
+        );
     }
 
     #[test]

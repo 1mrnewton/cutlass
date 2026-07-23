@@ -65,6 +65,10 @@ export global PreviewStore {
     in-out property <bool> gesture-commit-pending: false;
     in-out property <string> gesture-clip;
     in-out property <PreviewDragResolution> gesture;
+    // Bumped on every override tick (Rust seam) so selection-box /
+    // sprite-placement bindings re-evaluate when inspector sliders drive
+    // the gesture — passing the struct alone can miss field updates.
+    in-out property <int> gesture-epoch: 0;
 
     // Zero-drift transform gesture: partitioned frames rendered once at press.
     in-out property <image> gesture-frame-below;

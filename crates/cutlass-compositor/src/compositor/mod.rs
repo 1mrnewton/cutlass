@@ -224,8 +224,9 @@ pub struct Compositor {
     lut_cache: HashMap<String, LutTexture>,
     /// Packed glyph atlases keyed by [`crate::layer::GlyphsLayer::atlas_key`].
     /// `RefCell` so [`Self::build_layer`] can stay `&self` while the render
-    /// loop holds an immutable borrow of the canvas target.
-    glyph_atlases: RefCell<HashMap<u64, CachedAtlas>>,
+    /// loop holds an immutable borrow of the canvas target. Byte-budgeted
+    /// LRU — see [`super::glyphs`].
+    glyph_atlases: RefCell<cutlass_core::ByteBudgetLru<u64, CachedAtlas>>,
     /// Maps Apple `CVPixelBuffer` GPU surfaces into `wgpu` textures with no CPU
     /// copy. `None` when the device isn't a Metal device (e.g. a software
     /// adapter) — GPU frames then fall back to [`CompositorError::UnsupportedFormat`]

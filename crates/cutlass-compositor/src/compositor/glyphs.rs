@@ -2,8 +2,10 @@
 //!
 //! Cluster bitmaps (from `cutlass-text::TextRenderer::shape`) are packed into
 //! a shared RGBA atlas once per [`GlyphsLayer::atlas_key`]. Subsequent frames
-//! with the same key only rewrite the instance buffer. Eviction is a wholesale
-//! clear past [`ATLAS_CACHE_MAX`] — the same strategy as the text memo caches.
+//! with the same key only rewrite the instance buffer. Eviction is
+//! **byte-budgeted** ([`RASTER_MEMO_BUDGET_BYTES`]) by atlas RGBA payload —
+//! same soft cap as the CPU text/path memos — so supersampled glyph runs
+//! cannot retain multiple GiB of GPU atlases.
 
 use bytemuck::{Pod, Zeroable};
 use cutlass_core::RgbaImage;
@@ -17,14 +19,12 @@ use crate::layer::{CompositeLayer, CompositorConfig, GlyphInstance, GlyphsLayer}
 use super::upload::pack_grade;
 use super::{Compositor, InstanceDraw, LayerGpu, LayerPipeline};
 
-/// Ceiling on cached atlases; crossing it clears the whole cache.
-pub(super) const ATLAS_CACHE_MAX: usize = 32;
-
 /// Default atlas edge length in pixels. Grows only by rebuilding a larger
 /// texture when a pack fails (rare for title-card text).
 const ATLAS_BASE: u32 = 1024;
 
 /// One packed atlas texture keyed by [`GlyphsLayer::atlas_key`].
+#[derive(Clone)]
 pub(super) struct CachedAtlas {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -33,6 +33,8 @@ pub(super) struct CachedAtlas {
     uvs: Vec<[f32; 4]>,
     /// Number of glyphs the key was packed with — a mismatch forces rebuild.
     glyph_count: usize,
+    /// RGBA payload bytes used for the byte-budget LRU (`edge² × 4`).
+    bytes: usize,
 }
 
 #[repr(C)]
@@ -188,22 +190,23 @@ impl Compositor {
     ) -> Result<CachedAtlasHandles, CompositorError> {
         let key = glyphs.atlas_key;
         let mut cache = self.glyph_atlases.borrow_mut();
-        let needs_build = match cache.get(&key) {
-            Some(cached) => cached.glyph_count != glyphs.glyphs.len(),
+        let cached = cache.get_cloned(&key);
+        let needs_build = match &cached {
+            Some(entry) => entry.glyph_count != glyphs.glyphs.len(),
             None => true,
         };
-        if needs_build {
-            if cache.len() >= ATLAS_CACHE_MAX {
-                cache.clear();
-            }
+        let atlas = if needs_build {
             let packed = pack_atlas(gpu, glyphs.glyphs)?;
-            cache.insert(key, packed);
-        }
-        let atlas = cache.get(&key).expect("atlas inserted above");
+            let cost = packed.bytes;
+            cache.insert(key, packed.clone(), cost);
+            packed
+        } else {
+            cached.expect("atlas present when needs_build is false")
+        };
         Ok(CachedAtlasHandles {
-            view: atlas.view.clone(),
-            texture: atlas.texture.clone(),
-            uvs: atlas.uvs.clone(),
+            view: atlas.view,
+            texture: atlas.texture,
+            uvs: atlas.uvs,
         })
     }
 }
@@ -256,11 +259,13 @@ fn pack_atlas(gpu: &GpuContext, glyphs: &[RgbaImage]) -> Result<CachedAtlas, Com
                     },
                 );
                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let bytes = (size as usize) * (size as usize) * 4;
                 return Ok(CachedAtlas {
                     texture,
                     view,
                     uvs,
                     glyph_count: glyphs.len(),
+                    bytes,
                 });
             }
             Err(PackError::DoesNotFit) if size < max_dim => {

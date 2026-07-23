@@ -34,15 +34,13 @@ mod animated;
 mod effects;
 mod style;
 
-use std::collections::HashMap;
-use std::hash::Hash;
 use std::ops::Range;
 
 use cosmic_text::{
     Align, Attrs, Buffer, CacheKey, Family, FontSystem, LineIter, Metrics, Shaping,
     Style as FontStyle, SwashCache, SwashContent, SwashImage, Weight,
 };
-use cutlass_core::RgbaImage;
+use cutlass_core::{ByteBudgetLru, RASTER_MEMO_BUDGET_BYTES, RgbaImage};
 
 pub use animated::{AnimatedText, paint_animated};
 pub use style::{
@@ -86,6 +84,14 @@ impl ShapedText {
     pub fn has_ink(&self) -> bool {
         self.extent.0 > 0 && self.extent.1 > 0
     }
+
+    /// Payload bytes retained by a memo entry (cluster bitmaps).
+    fn memo_bytes(&self) -> usize {
+        self.clusters
+            .iter()
+            .map(|c| c.image.pixels.len())
+            .sum::<usize>()
+    }
 }
 
 /// One shaping cluster of a [`ShapedText`]: the animation unit.
@@ -118,15 +124,20 @@ pub struct ClusterBox {
 /// repeating a `shape`/`rasterize` call with unchanged input costs a memo
 /// lookup plus a copy-out of the cached bitmap(s) — no re-shaping. That keeps
 /// per-frame callers (preview scrub, export loops) off the shaping path.
+///
+/// Memos are **byte-budgeted** ([`RASTER_MEMO_BUDGET_BYTES`] each): LRU eviction
+/// by payload size, so a scale ramp across supersample steps cannot retain
+/// multiple GiB of 4096² bitmaps. Entries larger than the budget bypass the
+/// cache (painted, never retained).
 pub struct TextRenderer {
     font_system: FontSystem,
     swash_cache: SwashCache,
     /// Memoized [`shape`](Self::shape) results, keyed by (text, style).
     /// Cleared by [`load_font`](Self::load_font) — a new face can change
     /// shaping/fallback for any string.
-    shape_memo: HashMap<ShapeKey, ShapedText>,
+    shape_memo: ByteBudgetLru<ShapeKey, ShapedText>,
     /// Memoized [`rasterize`](Self::rasterize) results (padding folded in).
-    raster_memo: HashMap<RasterKey, RgbaImage>,
+    raster_memo: ByteBudgetLru<RasterKey, RgbaImage>,
 }
 
 impl TextRenderer {
@@ -135,8 +146,8 @@ impl TextRenderer {
         Self {
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
-            shape_memo: HashMap::new(),
-            raster_memo: HashMap::new(),
+            shape_memo: ByteBudgetLru::new(RASTER_MEMO_BUDGET_BYTES),
+            raster_memo: ByteBudgetLru::new(RASTER_MEMO_BUDGET_BYTES),
         }
     }
 
@@ -174,11 +185,12 @@ impl TextRenderer {
     /// per-frame animators can call this unconditionally.
     pub fn shape(&mut self, text: &str, style: &TextStyle) -> ShapedText {
         let key = ShapeKey::new(text, style);
-        if let Some(hit) = self.shape_memo.get(&key) {
-            return hit.clone();
+        if let Some(hit) = self.shape_memo.get_cloned(&key) {
+            return hit;
         }
         let shaped = self.shape_uncached(text, style);
-        Self::memo_insert(&mut self.shape_memo, key, shaped.clone());
+        let cost = shaped.memo_bytes();
+        self.shape_memo.insert(key, shaped.clone(), cost);
         shaped
     }
 
@@ -320,11 +332,12 @@ impl TextRenderer {
     /// bitmap copy, not a re-shape — safe to call every frame.
     pub fn rasterize(&mut self, text: &str, style: &TextStyle) -> RgbaImage {
         let key = RasterKey::new(text, style);
-        if let Some(hit) = self.raster_memo.get(&key) {
-            return hit.clone();
+        if let Some(hit) = self.raster_memo.get_cloned(&key) {
+            return hit;
         }
         let image = self.rasterize_uncached(text, style);
-        Self::memo_insert(&mut self.raster_memo, key, image.clone());
+        let cost = image.pixels.len();
+        self.raster_memo.insert(key, image.clone(), cost);
         image
     }
 
@@ -338,21 +351,16 @@ impl TextRenderer {
         effects::paint(&shaped, style)
     }
 
-    /// Insert into a memo map, bounding memory with a wholesale clear at the
-    /// cap. Frame loops keep a handful of live keys, so an LRU would buy
-    /// nothing; the clear only ever costs one re-shape per entry after it.
-    fn memo_insert<K: Eq + Hash, V>(memo: &mut HashMap<K, V>, key: K, value: V) {
-        const MEMO_CAP: usize = 64;
-        if memo.len() >= MEMO_CAP {
-            memo.clear();
-        }
-        memo.insert(key, value);
-    }
-
     /// Memo entry counts `(shape, rasterize)` — test observability.
     #[cfg(test)]
     fn memo_sizes(&self) -> (usize, usize) {
         (self.shape_memo.len(), self.raster_memo.len())
+    }
+
+    /// Memo byte totals `(shape, rasterize)` — test observability.
+    #[cfg(test)]
+    fn memo_bytes(&self) -> (usize, usize) {
+        (self.shape_memo.bytes(), self.raster_memo.bytes())
     }
 
     /// Build and lay out a buffer for `text` + `style` (the single shaping
@@ -467,7 +475,7 @@ impl ShapeKey {
 }
 
 /// Full bitmap identity: the shaped run plus bitmap padding/treatments.
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct RasterKey {
     shape: ShapeKey,
     underline: bool,
@@ -879,5 +887,39 @@ mod tests {
         // Loading a font can change shaping for any string: memos must drop.
         assert!(r.load_font(TEST_FONT.to_vec()) > 0);
         assert_eq!(r.memo_sizes(), (0, 0));
+    }
+
+    #[test]
+    fn raster_memo_evicts_oldest_when_byte_budget_exceeded() {
+        // Tiny budget so a few modest rasters force eviction.
+        let mut r = TextRenderer::new();
+        r.raster_memo = ByteBudgetLru::new(8 * 1024); // 8 KiB
+        let a = r.rasterize("AAAA", &TextStyle::new(64.0));
+        let b = r.rasterize("BBBB", &TextStyle::new(64.0));
+        assert!(a.pixels.len() + b.pixels.len() > 8 * 1024);
+        // Inserting enough distinct keys must stay under budget.
+        let _ = r.rasterize("CCCC", &TextStyle::new(64.0));
+        let _ = r.rasterize("DDDD", &TextStyle::new(64.0));
+        assert!(
+            r.memo_bytes().1 <= 8 * 1024,
+            "raster memo bytes {} exceeded budget",
+            r.memo_bytes().1
+        );
+        // Oldest ("AAAA") should be gone once budget pressure hits.
+        r.raster_memo.clear();
+        r.raster_memo = ByteBudgetLru::new(a.pixels.len() + b.pixels.len() / 2);
+        let _ = r.rasterize("AAAA", &TextStyle::new(64.0));
+        let _ = r.rasterize("BBBB", &TextStyle::new(64.0)); // evicts AAAA
+        assert!(
+            r.raster_memo
+                .get_cloned(&RasterKey::new("AAAA", &TextStyle::new(64.0)))
+                .is_none(),
+            "oldest raster entry should be evicted"
+        );
+        assert!(
+            r.raster_memo
+                .get_cloned(&RasterKey::new("BBBB", &TextStyle::new(64.0)))
+                .is_some()
+        );
     }
 }

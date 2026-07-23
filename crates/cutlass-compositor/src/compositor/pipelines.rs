@@ -227,7 +227,9 @@ impl Compositor {
             pass_registry: PassRegistry::new(device),
             offscreen: None,
             lut_cache: std::collections::HashMap::new(),
-            glyph_atlases: std::cell::RefCell::new(std::collections::HashMap::new()),
+            glyph_atlases: std::cell::RefCell::new(cutlass_core::ByteBudgetLru::new(
+                cutlass_core::RASTER_MEMO_BUDGET_BYTES,
+            )),
             #[cfg(target_vendor = "apple")]
             metal_import: crate::metal_import::MetalSurfaceImporter::new(gpu),
             #[cfg(target_os = "windows")]

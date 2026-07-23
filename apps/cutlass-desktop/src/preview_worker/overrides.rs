@@ -283,6 +283,7 @@ pub(super) fn set_param_keyframe_and_publish(
     if matches!(param, ClipParam::Style { .. }) {
         engine.set_styles_override(None);
     }
+    clear_param_override(engine, clip, param);
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-param-keyframe ignored: unparsable clip id");
         return;
@@ -367,6 +368,9 @@ pub(super) fn set_param_constant_and_publish(
     if matches!(param, ClipParam::Style { .. }) {
         engine.set_styles_override(None);
     }
+    // Clear the matching live param override so the commit doesn't flicker
+    // against a stale drag value (mirrors SetTransform / styles).
+    clear_param_override(engine, clip, param);
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-param-constant ignored: unparsable clip id");
         return;

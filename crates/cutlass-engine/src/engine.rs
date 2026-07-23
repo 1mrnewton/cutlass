@@ -8,11 +8,11 @@ use std::path::PathBuf;
 
 use cutlass_commands::{Command, ProjectCommand};
 use cutlass_models::{
-    ClipId, ClipTransform, ColorAdjustments, Filter, Generator, LayerStyles, MediaId, Project,
-    Rational, RationalTime, TrackKind,
+    ClipId, ClipParam, ClipTransform, ColorAdjustments, Filter, Generator, LayerStyles, MediaId,
+    ParamValue, Project, Rational, RationalTime, TrackKind,
 };
 use cutlass_render::{
-    FrameSink, Renderer, ResolveOverrides, RgbaImage, SeekPolicy, export_to_file,
+    FrameSink, ParamOverrides, Renderer, ResolveOverrides, RgbaImage, SeekPolicy, export_to_file,
 };
 
 use crate::action::{ApplyContext, ApplyOutcome, EditAction, History, dispatch};
@@ -58,6 +58,10 @@ pub struct Engine {
     /// Live layer styles for one clip (inspector slider preview), same
     /// session-only semantics as `transform_override`.
     styles_override: Option<(ClipId, LayerStyles)>,
+    /// Live per-(clip, param) values (inspector slider preview), same
+    /// session-only semantics as `transform_override`. Multiple params may be
+    /// overridden on one clip at once (e.g. crop x+y during a rect drag).
+    param_overrides: ParamOverrides,
 }
 
 impl Engine {
@@ -82,6 +86,7 @@ impl Engine {
             generator_override: None,
             look_override: None,
             styles_override: None,
+            param_overrides: ParamOverrides::new(),
         })
     }
 
@@ -183,6 +188,7 @@ impl Engine {
         self.generator_override = None;
         self.look_override = None;
         self.styles_override = None;
+        self.param_overrides.clear();
         // Media ids are project-local: the same id can name a different
         // file in the incoming project, so all id-keyed render state is
         // stale (open decoders and still bitmaps, not only proxies).
@@ -282,6 +288,29 @@ impl Engine {
         self.styles_override = value;
     }
 
+    /// Set (or replace) one live param value for `clip` — the generic
+    /// inspector-slider analogue of
+    /// [`set_transform_override`](Self::set_transform_override). Uses the same
+    /// [`ClipParam`] / [`ParamValue`] addressing as `SetParamConstant`.
+    pub fn set_param_override(&mut self, clip: ClipId, param: ClipParam, value: ParamValue) {
+        self.param_overrides.set(clip, param, value);
+    }
+
+    /// Drop every live param override for `clip` (release / abandon).
+    pub fn clear_param_overrides(&mut self, clip: ClipId) {
+        self.param_overrides.clear_clip(clip);
+    }
+
+    /// Drop one live param override after that param is committed.
+    pub fn clear_param_override(&mut self, clip: ClipId, param: ClipParam) {
+        self.param_overrides.clear_param(clip, param);
+    }
+
+    /// Read-only view of the live param-override map (tests / diagnostics).
+    pub fn param_overrides(&self) -> &ParamOverrides {
+        &self.param_overrides
+    }
+
     /// True while a live preview override is set: frames rendered now show
     /// session-only state that no project revision describes.
     pub fn has_live_overrides(&self) -> bool {
@@ -289,6 +318,7 @@ impl Engine {
             || self.generator_override.is_some()
             || self.look_override.is_some()
             || self.styles_override.is_some()
+            || !self.param_overrides.is_empty()
     }
 
     /// Stage timings of the most recent successful preview/export render.
@@ -337,6 +367,7 @@ impl Engine {
                 .as_ref()
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
             styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
+            params: (!self.param_overrides.is_empty()).then_some(&self.param_overrides),
         };
         Ok(self
             .renderer
@@ -361,6 +392,7 @@ impl Engine {
                 .as_ref()
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
             styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
+            params: (!self.param_overrides.is_empty()).then_some(&self.param_overrides),
         };
         Ok(self.renderer.render_frame_fit_with(
             &self.project,
@@ -404,6 +436,7 @@ impl Engine {
                 .as_ref()
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
             styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
+            params: (!self.param_overrides.is_empty()).then_some(&self.param_overrides),
         };
         Ok(self
             .renderer
@@ -427,6 +460,7 @@ impl Engine {
                 .as_ref()
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
             styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
+            params: (!self.param_overrides.is_empty()).then_some(&self.param_overrides),
         };
         Ok(self.renderer.render_frame_fit_into_with(
             &self.project,

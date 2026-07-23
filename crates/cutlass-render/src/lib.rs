@@ -41,7 +41,7 @@ pub use lut_pack::{STARTER_LUT_SIZE, StarterLut, starter_lut_pack};
 pub use render::text_anim_bench;
 pub use render::{FrameStats, GestureFrames, Renderer, SeekPolicy};
 pub use resolve::{
-    GESTURE_IDENTITY_TRANSFORM, GestureScenePartition, ResolveOverrides, canvas_size, resolve,
-    resolve_gesture_partitions, resolve_with,
+    GESTURE_IDENTITY_TRANSFORM, GestureScenePartition, ParamOverrides, ResolveOverrides,
+    canvas_size, resolve, resolve_gesture_partitions, resolve_with,
 };
 pub use scene::{LayerSource, Scene, SceneLayer, SizeSpec, TextAnimation};

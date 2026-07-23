@@ -870,6 +870,7 @@ fn style_delta_builds_merged_override_from_committed_styles() {
         generator: None,
         look: None,
         styles: Some((clip, &merged)),
+        params: None,
     };
     let scene = resolve_with(engine.project(), RationalTime::new(0, r), overrides)
         .expect("resolve with override");
@@ -1091,6 +1092,7 @@ fn styles_override_previews_then_clears_on_commit() {
         generator: None,
         look: None,
         styles: Some((clip, &live)),
+        params: None,
     };
     let scene = resolve_with(engine.project(), RationalTime::new(0, r), overrides)
         .expect("resolve with override");

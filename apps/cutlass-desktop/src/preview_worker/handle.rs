@@ -603,6 +603,23 @@ impl WorkerHandle {
         let _ = self.tx.send(WorkerMsg::ClearGeneratorOverride { tick });
     }
 
+    /// Live inspector param drag (wired by a follow-up commit).
+    #[allow(dead_code)]
+    pub fn param_override(&self, clip: String, param: ClipParam, value: ParamValue, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::ParamOverride {
+            clip,
+            param,
+            value,
+            tick,
+        });
+    }
+
+    /// Drop every live param override for `clip` (wired by a follow-up commit).
+    #[allow(dead_code)]
+    pub fn clear_param_override(&self, clip: String, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::ClearParamOverride { clip, tick });
+    }
+
     pub fn preview_shape_size(&self, clip: String, width: f32, height: f32, tick: i64) {
         let _ = self.tx.send(WorkerMsg::PreviewShapeSize {
             clip,

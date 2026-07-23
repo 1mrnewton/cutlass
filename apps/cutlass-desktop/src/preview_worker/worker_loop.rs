@@ -237,6 +237,15 @@ fn worker_loop(
                             apply_transform_override(engine, &clip, transform);
                             tick = at;
                         }
+                        WorkerMsg::ParamOverride {
+                            clip,
+                            param,
+                            value,
+                            tick: at,
+                        } => {
+                            apply_param_override(engine, &clip, param, value);
+                            tick = at;
+                        }
                         other => dispatch(
                             engine,
                             &mut clipboard,
@@ -644,6 +653,47 @@ fn worker_loop(
                     &cache,
                     SeekPolicy::Exact,
                 );
+            }
+            // Generic inspector param drags (crop, chroma, effect knobs, …)
+            // arrive at pointer-move rate; coalesce to the newest value per
+            // (clip, param) and render once — same queue-pressure rule as
+            // TransformOverride / look / styles.
+            WorkerMsg::ParamOverride {
+                clip,
+                param,
+                value,
+                tick,
+            } => {
+                let tick = coalesce_param_overrides(
+                    engine,
+                    &mut clipboard,
+                    &mut main_magnet,
+                    &mut linkage,
+                    clip,
+                    param,
+                    value,
+                    tick,
+                    &req_rx,
+                    tl_rate,
+                    &preview_weak,
+                    &fit,
+                    &cache,
+                    &sprite_mode,
+                    &export_state,
+                    &ui,
+                );
+                last_tick = tick;
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+                pending_redraw = false;
+                settle_deadline = None;
             }
             // The preview panel resized (or first laid out): renders now fit
             // the new bound. Repaint the current frame only when the bucketed

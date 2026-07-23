@@ -12,6 +12,7 @@ use crate::param::{Easing, Keyframe};
 
 mod crop;
 mod generator;
+mod params;
 mod retiming;
 mod template;
 mod text;

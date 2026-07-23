@@ -327,6 +327,38 @@ pub(super) fn dispatch(
                 SeekPolicy::Exact,
             );
         }
+        WorkerMsg::ClearParamOverride { clip, tick } => {
+            clear_param_overrides(engine, &clip);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        // Only reached if a param-override burst interleaves with another
+        // coalesced gesture's drain. The dedicated loop arm handles the
+        // common case with coalescing.
+        WorkerMsg::ParamOverride {
+            clip,
+            param,
+            value,
+            tick,
+        } => {
+            apply_param_override(engine, &clip, param, value);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
         // Only reached if a generator-override burst interleaves with
         // another coalesced gesture's drain (practically impossible — you
         // can't drag two controls at once). The dedicated loop arm handles

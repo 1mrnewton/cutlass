@@ -6,6 +6,7 @@ mod common;
 
 use common::{import_asset, rt, small_video_asset, temp_engine, tr};
 use cutlass_commands::{Command, EditCommand};
+use cutlass_engine::{Engine, EngineConfig};
 use cutlass_models::{ClipSource, ClipTransform, Generator, TrackKind};
 use cutlass_render::RgbaImage;
 
@@ -276,6 +277,126 @@ fn generator_override_previews_without_touching_state() {
 }
 
 #[test]
+fn param_override_previews_without_touching_state() {
+    use cutlass_commands::{Command, EditCommand};
+    use cutlass_models::{
+        ChromaKey, ClipParam, LookParam, MediaSource, ParamValue, Project, Rational, TrackKind,
+    };
+    use cutlass_render::{ResolveOverrides, resolve, resolve_with};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("param-override", r);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/param-override.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip_id = project
+        .add_clip(track, media, tr(0, 48), rt(0))
+        .expect("clip");
+    project
+        .set_clip_chroma_key(
+            clip_id,
+            Some(ChromaKey {
+                rgb: [0, 255, 0],
+                strength: 0.25.into(),
+                shadow: 0.0.into(),
+            }),
+        )
+        .expect("chroma");
+    let mut engine =
+        Engine::with_project(EngineConfig { undo_limit: 32 }, project).expect("engine");
+    let could_undo_before = engine.can_undo();
+    let revision_before = engine.revision();
+
+    let param = ClipParam::Look {
+        param: LookParam::ChromaStrength,
+    };
+    engine.set_param_override(clip_id, param, ParamValue::Scalar(0.8));
+    assert!(engine.has_live_overrides());
+    assert_eq!(
+        engine.param_overrides().get(clip_id, param),
+        Some(ParamValue::Scalar(0.8))
+    );
+
+    // Resolve path honors the override; project + history stay untouched.
+    let scene = resolve_with(
+        engine.project(),
+        rt(0),
+        ResolveOverrides {
+            params: Some(engine.param_overrides()),
+            ..ResolveOverrides::default()
+        },
+    )
+    .expect("resolve");
+    assert!((scene.layers[0].chroma_key.unwrap().strength - 0.8).abs() < 1e-6);
+    let committed = engine
+        .project()
+        .clip(clip_id)
+        .expect("clip")
+        .chroma_key
+        .as_ref()
+        .expect("chroma")
+        .strength
+        .sample(0);
+    assert!((committed - 0.25).abs() < 1e-6);
+    assert_eq!(engine.can_undo(), could_undo_before);
+    assert_eq!(engine.revision(), revision_before);
+
+    // Latest-wins for the same (clip, param).
+    engine.set_param_override(clip_id, param, ParamValue::Scalar(0.55));
+    assert_eq!(
+        engine.param_overrides().get(clip_id, param),
+        Some(ParamValue::Scalar(0.55))
+    );
+
+    // Multi-param on one clip.
+    engine.set_param_override(
+        clip_id,
+        ClipParam::Crop,
+        ParamValue::Rect([0.2, 0.2, 0.6, 0.6]),
+    );
+    assert!(engine.param_overrides().get(clip_id, param).is_some());
+    assert!(
+        engine
+            .param_overrides()
+            .get(clip_id, ClipParam::Crop)
+            .is_some()
+    );
+
+    // Commit path clears just that param; crop override remains until
+    // clear_param_overrides (mirrors release-then-clear).
+    engine.clear_param_override(clip_id, param);
+    engine
+        .apply(Command::Edit(EditCommand::SetParamConstant {
+            clip: clip_id,
+            param,
+            value: ParamValue::Scalar(0.55),
+        }))
+        .expect("commit");
+    assert!(
+        engine
+            .param_overrides()
+            .get(clip_id, ClipParam::Crop)
+            .is_some()
+    );
+
+    engine.clear_param_overrides(clip_id);
+    assert!(!engine.has_live_overrides());
+    let plain = resolve(engine.project(), rt(0)).expect("plain");
+    assert!((plain.layers[0].chroma_key.unwrap().strength - 0.55).abs() < 1e-6);
+
+    // Fresh session drops leftover overrides (ids can collide).
+    engine.set_param_override(clip_id, param, ParamValue::Scalar(0.1));
+    engine.new_session();
+    assert!(engine.param_overrides().is_empty());
+}
+
+#[test]
 fn new_session_clears_overrides() {
     let (_dir, mut engine) = temp_engine();
     let track = common::add_track(&mut engine, TrackKind::Sticker, "T1");
@@ -300,6 +421,11 @@ fn new_session_clears_overrides() {
             rgba: [10, 200, 40, 255],
         },
     )));
+    engine.set_param_override(
+        clip_id,
+        cutlass_models::ClipParam::Opacity,
+        cutlass_models::ParamValue::Scalar(0.5),
+    );
 
     // A fresh session must not leak the old session's live overrides onto
     // whatever clip is created next (ids restart, so they could collide).

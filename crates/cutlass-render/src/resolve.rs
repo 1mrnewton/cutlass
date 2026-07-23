@@ -35,11 +35,13 @@ use crate::scene::{
 };
 
 mod generator;
+mod param_override;
 mod shape;
 
 #[cfg(test)]
 use generator::map_text_style;
 pub(crate) use generator::resolve_generator;
+pub use param_override::ParamOverrides;
 
 /// Vertical reference height that a generator's reference-pixel sizes (text
 /// `size`, shape `width`/`height`) are authored against. Matches the model's
@@ -53,14 +55,17 @@ const DEFAULT_CANVAS: (u32, u32) = (1920, 1080);
 ///
 /// A drag/scale/rotate gesture overrides one clip's transform; a live
 /// inspector edit (font-size slider, shape color) overrides one clip's
-/// generator. Both are session-side only: the project, history, and export
-/// never see them — release commits one real edit and clears the override.
+/// generator; individual [`ClipParam`] values ride [`ParamOverrides`]. All
+/// are session-side only: the project, history, and export never see them —
+/// release commits one real edit and clears the override.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ResolveOverrides<'a> {
     pub transform: Option<(ClipId, ClipTransform)>,
     pub generator: Option<(ClipId, &'a Generator)>,
     pub look: Option<(ClipId, Option<&'a Filter>, &'a ColorAdjustments)>,
     pub styles: Option<(ClipId, &'a LayerStyles)>,
+    /// Per-(clip, param) live values. `None` or empty → no work on the hot path.
+    pub params: Option<&'a ParamOverrides>,
 }
 
 /// Identity transform used when rasterizing the gesture sprite: the clip's
@@ -99,6 +104,7 @@ pub fn resolve_gesture_partitions(
         generator: None,
         look: None,
         styles: None,
+        params: None,
     };
     let scene = resolve_with(project, t, overrides)?;
     let index = scene
@@ -335,6 +341,21 @@ fn resolve_clip(
     ch: f32,
     overrides: ResolveOverrides<'_>,
 ) -> Result<Option<SceneLayer>, cutlass_models::ModelError> {
+    // Live param overrides win over stored/keyframed samples: clone the clip
+    // once (only when this clip has entries) and write constants, then sample
+    // as usual. Empty maps never allocate.
+    let overridden;
+    let clip = match overrides.params {
+        Some(params) => match params.overlay_clip(clip) {
+            Some(live) => {
+                overridden = live;
+                &overridden
+            }
+            None => clip,
+        },
+        None => clip,
+    };
+
     // Clip-relative tick at the timeline rate (both `t` and the clip start are
     // expressed at it), which is what animated transforms key against.
     let local_tick = clip.animation_tick(t.value);

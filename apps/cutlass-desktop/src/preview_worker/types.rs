@@ -525,6 +525,27 @@ pub(super) enum WorkerMsg {
     ClearGeneratorOverride {
         tick: i64,
     },
+    /// Live inspector param drag: render `tick` with `clip`'s `param` replaced
+    /// by `value` — session state on the engine, no history entry, no
+    /// projection republish. Uses the same [`ClipParam`] / [`ParamValue`]
+    /// addressing as [`SetParamConstant`]. Bursts coalesce to the newest
+    /// value per `(clip, param)` like `TransformOverride`.
+    /// UI senders land in a follow-up commit; the worker arm + tests exercise
+    /// the lane now.
+    #[allow(dead_code)]
+    ParamOverride {
+        clip: String,
+        param: ClipParam,
+        value: ParamValue,
+        tick: i64,
+    },
+    /// Drop every live param override for `clip` (control released with no
+    /// net change, or after commit) and re-render `tick` from committed state.
+    #[allow(dead_code)]
+    ClearParamOverride {
+        clip: String,
+        tick: i64,
+    },
     /// Commit a transform gesture: clear any override and apply one undoable
     /// `SetClipTransform`, then re-render `tick` (a nudge has no preceding
     /// override, so the frame must refresh here).

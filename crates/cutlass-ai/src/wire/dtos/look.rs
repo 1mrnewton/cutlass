@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 /// Mask shape kinds (CapCut mask presets).
 ///
 /// `mirror` is a parallel band (thickness = `size[0]` layer-width fraction)
-/// centered on the mask line at `rotation`, not a half-plane.
+/// centered on the mask line at `rotation`, not a half-plane. Feather softens
+/// both band edges symmetrically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WireMaskKind {
@@ -21,6 +22,7 @@ pub enum WireMaskKind {
 pub struct WireMask {
     pub kind: WireMaskKind,
     /// Edge softness 0 (hard) … 1 (fully feathered). Default 0.
+    /// For `mirror`, feather applies symmetrically to both band edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feather: Option<f64>,
     /// Keep outside instead of inside.
@@ -31,7 +33,8 @@ pub struct WireMask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub center: Option<[f32; 2]>,
     /// Size as layer-size fractions (`[1,1]` covers layer). For `mirror`,
-    /// `size[0]` is band thickness (width fraction). Default `[1,1]`.
+    /// `size[0]` is band thickness (width fraction; model default `0.5` when
+    /// omitted). Default `[1,1]` for other kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<[f32; 2]>,
     /// Rotation degrees CW about mask center. Default 0.

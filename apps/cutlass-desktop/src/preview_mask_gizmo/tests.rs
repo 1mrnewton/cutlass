@@ -382,7 +382,10 @@ fn size_drag_rebuilds_handle_near_cursor_under_letterbox() {
     // the resolved half-width — distance to cursor should be small along
     // the axis (projection), not necessarily zero if cursor left the axis.
     let center = layout1.center_v;
-    let to_handle = [layout1.size_x_v[0] - center[0], layout1.size_x_v[1] - center[1]];
+    let to_handle = [
+        layout1.size_x_v[0] - center[0],
+        layout1.size_x_v[1] - center[1],
+    ];
     let to_cursor = [cursor[0] - center[0], cursor[1] - center[1]];
     let handle_len = (to_handle[0] * to_handle[0] + to_handle[1] * to_handle[1])
         .sqrt()

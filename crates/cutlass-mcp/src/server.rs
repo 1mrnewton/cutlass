@@ -1,5 +1,6 @@
 //! MCP server handler and tool router.
 
+use cutlass_ai::TOOL_SCHEMA_VERSION;
 use rmcp::{
     ServerHandler,
     handler::server::router::tool::ToolRouter,
@@ -12,7 +13,7 @@ use crate::host::EngineHost;
 /// Headless Cutlass MCP service.
 ///
 /// Owns an [`EngineHost`] (engine on a dedicated OS thread) and the combined
-/// rmcp tool router. Edit tools will attach here in later milestones.
+/// rmcp tool router (probe + project lifecycle + validated edits).
 #[derive(Clone)]
 pub struct CutlassMcp {
     pub(crate) host: EngineHost,
@@ -24,18 +25,20 @@ impl CutlassMcp {
     pub fn new() -> Self {
         Self {
             host: EngineHost::spawn(),
-            // Base probe + project lifecycle routers combined with `+`.
-            tool_router: Self::tool_router() + Self::project_router(),
+            tool_router: Self::tool_router() + Self::project_router() + Self::edits_router(),
         }
     }
 
     /// Trivial read-only probe so hosts can confirm the server is alive.
     #[tool(
-        description = "Cutlass MCP server version and schema info",
+        description = "Cutlass MCP server version and wire tool-schema version",
         annotations(read_only_hint = true)
     )]
     fn version(&self) -> String {
-        format!("cutlass-mcp {}", env!("CARGO_PKG_VERSION"))
+        format!(
+            "cutlass-mcp {} (tool schema v{TOOL_SCHEMA_VERSION})",
+            env!("CARGO_PKG_VERSION")
+        )
     }
 }
 
@@ -52,12 +55,14 @@ impl ServerHandler for CutlassMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("cutlass", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Cutlass video-editor project control over MCP. Create or open \
-                 .cutlass projects (project_new / project_open), save them \
-                 (project_save), inspect the compact timeline/media summary \
-                 (project_get), and import media into the pool (media_import). \
-                 Validated edit tools arrive in a later milestone — do not \
-                 invent raw engine mutations.",
+                "Cutlass video-editor project control over MCP. \
+                 Lifecycle: project_new / project_open → project_save → project_get; \
+                 media_import registers pool entries (does not place clips). \
+                 Edits: edit_commands_list → edit_schema_get for argument shapes → \
+                 edit_apply (batch of {\"command\":\"<name>\", ...args}, one undo group, \
+                 all-or-nothing, validated against live project state) → verify with \
+                 project_get. edit_undo / edit_redo reverse one edit_apply batch. \
+                 Never invent raw engine mutations — only the wire vocabulary.",
             )
     }
 }

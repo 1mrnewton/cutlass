@@ -6,6 +6,8 @@
 //! directly. When every [`EngineHost`] clone is dropped, the channel closes
 //! and the host thread exits.
 
+mod edits;
+
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
@@ -15,6 +17,8 @@ use cutlass_engine::{ApplyOutcome, Engine, EngineConfig};
 use cutlass_models::{Project, Rational, TrackKind};
 use serde::Serialize;
 use tokio::sync::oneshot;
+
+pub use edits::{AppliedBatch, AppliedEdit, UndoResult};
 
 /// Readable when a tool needs a project and none has been opened yet.
 ///
@@ -73,6 +77,16 @@ enum HostRequest {
         paths: Vec<PathBuf>,
         reply: oneshot::Sender<Result<Vec<ImportedMedia>, String>>,
     },
+    ApplyEdits {
+        edits: Vec<serde_json::Value>,
+        reply: oneshot::Sender<Result<AppliedBatch, String>>,
+    },
+    Undo {
+        reply: oneshot::Sender<Result<UndoResult, String>>,
+    },
+    Redo {
+        reply: oneshot::Sender<Result<UndoResult, String>>,
+    },
 }
 
 /// Cloneable handle to the engine host thread.
@@ -117,6 +131,20 @@ impl EngineHost {
             .await
     }
 
+    /// Validate and apply a batch of wire edits as one undo group.
+    pub async fn apply_edits(&self, edits: Vec<serde_json::Value>) -> Result<AppliedBatch, String> {
+        self.roundtrip(|reply| HostRequest::ApplyEdits { edits, reply })
+            .await
+    }
+
+    pub async fn undo(&self) -> Result<UndoResult, String> {
+        self.roundtrip(|reply| HostRequest::Undo { reply }).await
+    }
+
+    pub async fn redo(&self) -> Result<UndoResult, String> {
+        self.roundtrip(|reply| HostRequest::Redo { reply }).await
+    }
+
     async fn roundtrip<T>(
         &self,
         make: impl FnOnce(oneshot::Sender<Result<T, String>>) -> HostRequest,
@@ -149,6 +177,15 @@ fn host_loop(rx: mpsc::Receiver<HostRequest>) {
             }
             HostRequest::ImportMedia { paths, reply } => {
                 let _ = reply.send(do_import_media(&mut engine, paths));
+            }
+            HostRequest::ApplyEdits { edits, reply } => {
+                let _ = reply.send(edits::do_apply_edits(&mut engine, edits));
+            }
+            HostRequest::Undo { reply } => {
+                let _ = reply.send(edits::do_undo(&mut engine));
+            }
+            HostRequest::Redo { reply } => {
+                let _ = reply.send(edits::do_redo(&mut engine));
             }
         }
     }
@@ -303,60 +340,4 @@ fn resolve_fps(fps: f64) -> Result<Rational, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn new_project_reports_meta() {
-        let host = EngineHost::spawn();
-        let meta = host
-            .new_project("untitled".into(), 30.0)
-            .await
-            .expect("new_project");
-        assert_eq!(meta.name, "untitled");
-        assert_eq!(meta.revision, 0);
-        assert!(!meta.dirty);
-        assert!(!meta.can_undo);
-        assert!(!meta.can_redo);
-        assert!(meta.path.is_none());
-    }
-
-    #[tokio::test]
-    async fn get_project_before_open_errors() {
-        let host = EngineHost::spawn();
-        let err = host.get_project().await.expect_err("no project");
-        assert_eq!(err, NO_PROJECT);
-    }
-
-    #[tokio::test]
-    async fn save_and_reopen_roundtrip() {
-        let host = EngineHost::spawn();
-        host.new_project("roundtrip".into(), 24.0)
-            .await
-            .expect("new");
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("roundtrip.cutlass");
-        let saved = host.save_project(Some(path.clone())).await.expect("save");
-        assert_eq!(saved, path);
-        assert!(path.is_file());
-
-        let host2 = EngineHost::spawn();
-        let meta = host2.open_project(path).await.expect("open");
-        assert_eq!(meta.name, "roundtrip");
-    }
-
-    #[tokio::test]
-    async fn unsupported_fps_is_readable() {
-        let host = EngineHost::spawn();
-        let err = host
-            .new_project("x".into(), 31.5)
-            .await
-            .expect_err("bad fps");
-        assert!(
-            err.contains("unsupported frame rate"),
-            "unexpected error: {err}"
-        );
-        assert!(err.contains("23.976"), "should list supported rates: {err}");
-    }
-}
+mod tests;

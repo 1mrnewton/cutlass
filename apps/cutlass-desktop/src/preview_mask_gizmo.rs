@@ -470,6 +470,7 @@ fn hit_test_layout(layout: &GizmoLayout, x: f32, y: f32, tolerance: f32) -> i32 
 }
 
 /// Hit-test a published [`MaskGizmo`] (rebuilds layout from its param fields).
+#[allow(clippy::too_many_arguments)]
 pub fn hit_test_mask_gizmo(
     gizmo: &MaskGizmo,
     x: f32,

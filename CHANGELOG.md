@@ -50,6 +50,13 @@ Notes for the latest release. For previous releases, see the
 - **Typed effect parameters.** Effects can take color and vec2 parameters
   (not just scalars), with new duotone and color-overlay effect passes.
 
+### Fixed
+
+- **Scaled text and pen paths stay sharp.** Transform scale > 1 no longer
+  bilinear-upscales a reference bitmap. Resolve supersamples the CPU raster
+  in quantized quarter steps (memo-warm during scale drags) and leaves only
+  the residual on the GPU quad; absurd scales clamp to a sane texture edge.
+
 ### Changed
 
 - **Mirror mask is a parallel band.** CapCut-parity Mirror uses `size[0]` as

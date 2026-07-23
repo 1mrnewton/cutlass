@@ -46,15 +46,14 @@ fn compact_schema_json(value: &mut serde_json::Value) {
             if map.get("description") == Some(&serde_json::json!("")) {
                 map.remove("description");
             }
-            if let Some(serde_json::Value::Array(all_of)) = map.get("allOf") {
-                if all_of.len() == 1 {
-                    if let serde_json::Value::Object(inner) = &all_of[0] {
-                        let inner = inner.clone();
-                        map.remove("allOf");
-                        for (k, v) in inner {
-                            map.entry(k).or_insert(v);
-                        }
-                    }
+            if let Some(serde_json::Value::Array(all_of)) = map.get("allOf")
+                && all_of.len() == 1
+                && let serde_json::Value::Object(inner) = &all_of[0]
+            {
+                let inner = inner.clone();
+                map.remove("allOf");
+                for (k, v) in inner {
+                    map.entry(k).or_insert(v);
                 }
             }
             // Drop default uint bounds that schemars stamps on every u8 / u64.

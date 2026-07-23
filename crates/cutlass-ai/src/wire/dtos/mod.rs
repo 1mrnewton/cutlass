@@ -46,9 +46,7 @@ pub enum WireShape {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireGenerator {
     /// Title/text layer (replacing text keeps styling).
-    Text {
-        content: String,
-    },
+    Text { content: String },
     /// Solid color fill covering the canvas.
     Solid {
         /// `[r, g, b, a]` each 0–255.

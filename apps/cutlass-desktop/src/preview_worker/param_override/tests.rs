@@ -1,7 +1,7 @@
 use super::*;
 use cutlass_models::{
-    ChromaKey, CropRect, LookParam, MediaSource, Project, Rational, RationalTime, TimeRange,
-    TrackKind,
+    ChromaKey, CropRect, LookParam, Mask, MaskKind, MediaSource, Project, Rational, RationalTime,
+    TimeRange, TrackKind,
 };
 use cutlass_render::{ResolveOverrides, resolve, resolve_with};
 
@@ -374,6 +374,74 @@ fn chroma_preview_then_commit_clears_override() {
 
     let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
     assert!((plain.layers[0].chroma_key.unwrap().strength - 0.85).abs() < f32::EPSILON);
+}
+
+#[test]
+fn mask_feather_preview_then_commit_clears_override() {
+    use cutlass_commands::{Command, EditCommand};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("mask-lane", r);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/mask-lane.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_clip_mask(clip, Some(Mask::new(MaskKind::Circle)))
+        .expect("mask");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let param = ClipParam::Look {
+        param: LookParam::MaskFeather,
+    };
+    let rev_before = engine.revision();
+    let could_undo = engine.can_undo();
+
+    apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.25), None);
+    apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.7), None);
+    assert!(engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before);
+    assert_eq!(engine.can_undo(), could_undo);
+
+    let live = resolve_with(
+        engine.project(),
+        RationalTime::new(0, r),
+        ResolveOverrides {
+            params: Some(engine.param_overrides()),
+            ..ResolveOverrides::default()
+        },
+    )
+    .expect("live");
+    assert!((live.layers[0].mask.unwrap().feather - 0.7).abs() < f32::EPSILON);
+
+    // Release: clear then one SetParamConstant (set_param_constant_and_publish).
+    clear_param_override(&mut engine, &clip_s, param, None);
+    engine
+        .apply(Command::Edit(EditCommand::SetParamConstant {
+            clip,
+            param,
+            value: ParamValue::Scalar(0.7),
+        }))
+        .expect("commit mask feather");
+    assert!(!engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before + 1);
+    assert!(engine.can_undo());
+
+    let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+    assert!((plain.layers[0].mask.unwrap().feather - 0.7).abs() < f32::EPSILON);
 }
 
 #[test]

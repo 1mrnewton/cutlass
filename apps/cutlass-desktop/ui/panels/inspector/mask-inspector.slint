@@ -1,7 +1,7 @@
 // CapCut-style mask section for any visual clip. Kind / invert are structural
 // SetClipMask edits; feather / center / size / rotation / roundness ride the
-// generic look_mask_* param callbacks. No live-preview path for mask params
-// (unlike style_* / look filter) — sliders commit on release only.
+// generic look_mask_* param callbacks. Slider drags preview via
+// `preview-param` → `ClipParam::Look` override; release commits then clears.
 
 import { CutlassText, CutlassScrollView } from "../../components/index.slint";
 import { AppState } from "../../state.slint";
@@ -219,6 +219,21 @@ export component MaskInspector inherits VerticalLayout {
         }
     }
 
+    function preview-scalar(param: string, value: float) {
+        InspectorBackend.preview-param(
+            model.id, param, value, 0, TimelineStore.playhead-tick);
+    }
+
+    function preview-center(x: float, y: float) {
+        InspectorBackend.preview-param(
+            model.id, "look_mask_center", x, y, TimelineStore.playhead-tick);
+    }
+
+    function preview-size(w: float, h: float) {
+        InspectorBackend.preview-param(
+            model.id, "look_mask_size", w, h, TimelineStore.playhead-tick);
+    }
+
     function commit-center(x: float, y: float) {
         if (root.center-x-sample.row.animated) {
             root.ease-kf(
@@ -298,7 +313,9 @@ export component MaskInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.feather-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-scalar("look_mask_feather", clamp(v, 0, 1));
+        }
         commit(v) => {
             root.commit-scalar("look_mask_feather", root.feather-sample, clamp(v, 0, 1));
         }
@@ -322,7 +339,9 @@ export component MaskInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.center-x-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-center(clamp(v, -1, 1), root.center-y-sample.value);
+        }
         commit(v) => {
             root.commit-center(clamp(v, -1, 1), root.center-y-sample.value);
         }
@@ -354,7 +373,9 @@ export component MaskInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.center-y-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-center(root.center-x-sample.value, clamp(v, -1, 1));
+        }
         commit(v) => {
             root.commit-center(root.center-x-sample.value, clamp(v, -1, 1));
         }
@@ -386,7 +407,9 @@ export component MaskInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.size-w-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-size(clamp(v, 0.05, 3), root.size-h-sample.value);
+        }
         commit(v) => {
             root.commit-size(clamp(v, 0.05, 3), root.size-h-sample.value);
         }
@@ -418,7 +441,9 @@ export component MaskInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.size-h-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-size(root.size-w-sample.value, clamp(v, 0.05, 3));
+        }
         commit(v) => {
             root.commit-size(root.size-w-sample.value, clamp(v, 0.05, 3));
         }
@@ -450,7 +475,9 @@ export component MaskInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.rotation-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-scalar("look_mask_rotation", clamp(v, -180, 180));
+        }
         commit(v) => {
             root.commit-scalar("look_mask_rotation", root.rotation-sample, clamp(v, -180, 180));
         }
@@ -475,7 +502,9 @@ export component MaskInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.roundness-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-scalar("look_mask_roundness", clamp(v, 0, 1));
+        }
         commit(v) => {
             root.commit-scalar("look_mask_roundness", root.roundness-sample, clamp(v, 0, 1));
         }

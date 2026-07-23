@@ -14,8 +14,8 @@ mod tests;
 pub use channels::{animated_channels, channel_param};
 pub use edit::{
     GraphCommit, HandleId, PlotMapping, SegmentHandles, live_handle_param, live_param,
-    plan_drag_commit, plan_handle_commit, plan_insert, plan_insert_commit, resolve_drag,
-    resolve_handle_drag, segment_handles,
+    live_playhead_override, plan_drag_commit, plan_handle_commit, plan_insert, plan_insert_commit,
+    resolve_drag, resolve_handle_drag, segment_handles,
 };
 
 use cutlass_models::{Easing, Param};

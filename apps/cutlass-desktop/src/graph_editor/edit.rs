@@ -441,6 +441,38 @@ pub fn live_param(
     Some(param)
 }
 
+/// Sample a live-edited scalar curve at `playhead` into a
+/// `(ClipParam, ParamValue)` for [`crate::preview_worker::WorkerMsg::ParamOverride`].
+///
+/// The graph edits one channel; the preview frame needs the full property
+/// value at the playhead. For vec2 keys the undragged axis is sampled from
+/// the committed curve at the same tick (easing/time edits on one axis do
+/// not rewrite the other).
+pub fn live_playhead_override(
+    clip: &Clip,
+    key: &str,
+    channel: i32,
+    live: &Param<f32>,
+    playhead: i32,
+) -> Option<(cutlass_models::ClipParam, ParamValue)> {
+    let ph = i64::from(playhead);
+    let edited = live.sample(ph);
+    let (value_x, value_y) = if is_vec2_key(key) {
+        let other_ch = if channel <= 0 { 1 } else { 0 };
+        let other = channel_param(clip, key, other_ch)
+            .map(|p| p.sample(ph))
+            .unwrap_or(0.0);
+        if channel <= 0 {
+            (edited, other)
+        } else {
+            (other, edited)
+        }
+    } else {
+        (edited, 0.0)
+    };
+    clip_param_value(key, value_x, value_y)
+}
+
 /// Commit bits for an insert at `tick` with `value` (Linear).
 pub fn plan_insert_commit(
     clip: &Clip,

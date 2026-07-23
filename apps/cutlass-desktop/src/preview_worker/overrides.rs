@@ -390,6 +390,8 @@ pub(super) fn set_param_constant_and_publish(
 
 /// Move one property's keyframe to a new absolute tick (graph editor).
 /// `remove` + `set` inside one history group so a single undo restores it.
+/// Clears any live param override for this property first (graph-editor
+/// drag release) so the next frame never flashes a stale playhead sample.
 pub(super) fn move_param_keyframe_and_publish(
     engine: &mut Engine,
     req: &MoveParamKeyframeRequest,
@@ -400,6 +402,7 @@ pub(super) fn move_param_keyframe_and_publish(
     if matches!(param, ClipParam::Style { .. }) {
         engine.set_styles_override(None);
     }
+    clear_param_override(engine, &req.clip, param, Some(&ui.audio));
     let Some(clip_id) = parse_raw_id(&req.clip).map(ClipId::from_raw) else {
         error!(clip = %req.clip, "move-param-keyframe ignored: unparsable clip id");
         return;

@@ -674,4 +674,101 @@ mod tests {
             Some(-0.5)
         );
     }
+
+    /// Graph-editor drag: move ticks send playhead-resampled overrides;
+    /// release clears then writes one SetParamKeyframe (single undo).
+    #[test]
+    fn graph_keyframe_drag_preview_then_commit_clears_override() {
+        use cutlass_commands::{Command, EditCommand};
+        use cutlass_models::{Easing, Keyframe, Param};
+
+        let (mut engine, clip, clip_s, r) = engine_with_chroma();
+        engine
+            .apply(Command::Edit(EditCommand::SetParamKeyframe {
+                clip,
+                param: ClipParam::Opacity,
+                at: RationalTime::new(0, r),
+                value: ParamValue::Scalar(0.0),
+                easing: Easing::Linear,
+                tangents: None,
+            }))
+            .expect("kf0");
+        engine
+            .apply(Command::Edit(EditCommand::SetParamKeyframe {
+                clip,
+                param: ClipParam::Opacity,
+                at: RationalTime::new(40, r),
+                value: ParamValue::Scalar(1.0),
+                easing: Easing::Linear,
+                tangents: None,
+            }))
+            .expect("kf40");
+        let rev_before = engine.revision();
+        let could_undo = engine.can_undo();
+
+        // Hypothetical live curve after dragging start value 0→0.4, then 0.6.
+        // Playhead at 20 ⇒ samples 0.7 then 0.8.
+        let live_a = Param::Keyframed {
+            keyframes: vec![
+                Keyframe::new(0, 0.4, Easing::Linear),
+                Keyframe::new(40, 1.0, Easing::Linear),
+            ],
+        };
+        let live_b = Param::Keyframed {
+            keyframes: vec![
+                Keyframe::new(0, 0.6, Easing::Linear),
+                Keyframe::new(40, 1.0, Easing::Linear),
+            ],
+        };
+        let sample_a = live_a.sample(20);
+        let sample_b = live_b.sample(20);
+        assert!((sample_a - 0.7).abs() < 1e-5);
+        assert!((sample_b - 0.8).abs() < 1e-5);
+
+        apply_param_override(
+            &mut engine,
+            &clip_s,
+            ClipParam::Opacity,
+            ParamValue::Scalar(sample_a),
+            None,
+        );
+        apply_param_override(
+            &mut engine,
+            &clip_s,
+            ClipParam::Opacity,
+            ParamValue::Scalar(sample_b),
+            None,
+        );
+        assert!(engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before);
+        assert_eq!(engine.can_undo(), could_undo);
+        assert_eq!(
+            engine.param_overrides().get(clip, ClipParam::Opacity),
+            Some(ParamValue::Scalar(sample_b))
+        );
+
+        // Release: clear then one SetParamKeyframe (set_param_keyframe_and_publish).
+        clear_param_override(&mut engine, &clip_s, ClipParam::Opacity, None);
+        engine
+            .apply(Command::Edit(EditCommand::SetParamKeyframe {
+                clip,
+                param: ClipParam::Opacity,
+                at: RationalTime::new(0, r),
+                value: ParamValue::Scalar(0.6),
+                easing: Easing::Linear,
+                tangents: None,
+            }))
+            .expect("commit opacity kf");
+        assert!(!engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before + 1);
+        assert!(engine.can_undo());
+        let committed = engine
+            .project()
+            .clip(clip)
+            .unwrap()
+            .transform
+            .opacity
+            .sample(20);
+        assert!((committed - 0.8).abs() < 1e-5);
+    }
 }

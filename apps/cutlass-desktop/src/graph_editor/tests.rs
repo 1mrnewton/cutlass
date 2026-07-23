@@ -1,7 +1,7 @@
 use super::edit::{can_apply_preset, clamp_bezier_points};
 use super::*;
 use crate::{Clip, ParamKeyframe, Rational, RationalTime, TimeRange};
-use cutlass_models::{Easing, Keyframe, Param, ParamValue, SpatialTangents};
+use cutlass_models::{ClipParam, Easing, Keyframe, Param, ParamValue, SpatialTangents};
 use slint::{ModelRc, SharedString, VecModel};
 use std::rc::Rc;
 
@@ -359,4 +359,89 @@ fn resolve_handle_drag_updates_control_point() {
     // Handle B unchanged from Linear display points (0,0)/(1,1).
     assert!((points[2] - 1.0).abs() < 1e-5);
     assert!((points[3] - 1.0).abs() < 1e-5);
+}
+
+#[test]
+fn value_drag_playhead_override_matches_resampled_curve() {
+    // Opacity 0→1 over [0,40]; drag start kf value to 0.5; playhead at 20
+    // ⇒ linear mid = 0.75.
+    let mut clip = media_clip("A");
+    clip.kf_opacity = kfs(vec![kf(0, 0.0, 0.0), kf(40, 1.0, 0.0)]);
+    let live = live_param(&clip, "opacity", 0, 0, 0, 0.5).unwrap();
+    assert!((live.sample(20) - 0.75).abs() < 1e-5);
+    let (param, value) = live_playhead_override(&clip, "opacity", 0, &live, 20).unwrap();
+    assert_eq!(param, ClipParam::Opacity);
+    assert_eq!(value, ParamValue::Scalar(0.75));
+}
+
+#[test]
+fn time_drag_playhead_override_matches_resampled_curve() {
+    // Move the start kf from 0→10 (value stays 0); playhead at 25 on the
+    // new [10,40] segment ⇒ (25-10)/(40-10) = 0.5.
+    let mut clip = media_clip("A");
+    clip.kf_opacity = kfs(vec![kf(0, 0.0, 0.0), kf(40, 1.0, 0.0)]);
+    let live = live_param(&clip, "opacity", 0, 0, 10, 0.0).unwrap();
+    assert!((live.sample(25) - 0.5).abs() < 1e-5);
+    let (_, value) = live_playhead_override(&clip, "opacity", 0, &live, 25).unwrap();
+    assert_eq!(value, ParamValue::Scalar(0.5));
+}
+
+#[test]
+fn handle_drag_playhead_override_uses_live_easing() {
+    let mut clip = media_clip("A");
+    clip.kf_opacity = kfs(vec![kf(0, 0.0, 0.0), kf(40, 1.0, 0.0)]);
+    let base = channel_param(&clip, "opacity", 0).unwrap();
+    let linear_mid = base.sample(20);
+    assert!((linear_mid - 0.5).abs() < 1e-5);
+    // Ease-in-ish bezier: pull A toward (0.42, 0.0) — mid sample drops.
+    let live = live_handle_param(&base, 0, [0.42, 0.0, 1.0, 1.0]).unwrap();
+    let eased_mid = live.sample(20);
+    assert!(
+        eased_mid < linear_mid - 0.05,
+        "eased mid {eased_mid} should undershoot linear {linear_mid}"
+    );
+    let (param, value) = live_playhead_override(&clip, "opacity", 0, &live, 20).unwrap();
+    assert_eq!(param, ClipParam::Opacity);
+    match value {
+        ParamValue::Scalar(v) => assert!((v - eased_mid).abs() < 1e-5),
+        other => panic!("expected scalar, got {other:?}"),
+    }
+}
+
+#[test]
+fn vec2_channel_playhead_override_preserves_other_axis() {
+    let mut clip = media_clip("A");
+    clip.kf_position = kfs(vec![kf(0, -0.25, 0.1), kf(40, 0.25, 0.9)]);
+    // Drag Position X start value to 0.0; Y curve untouched.
+    let live = live_param(&clip, "position", 0, 0, 0, 0.0).unwrap();
+    let playhead = 20;
+    let x = live.sample(i64::from(playhead));
+    let y = channel_param(&clip, "position", 1)
+        .unwrap()
+        .sample(i64::from(playhead));
+    let (param, value) = live_playhead_override(&clip, "position", 0, &live, playhead).unwrap();
+    assert_eq!(param, ClipParam::Position);
+    assert_eq!(value, ParamValue::Vec2([x, y]));
+    // Y mid of 0.1→0.9 is 0.5.
+    assert!((y - 0.5).abs() < 1e-5);
+}
+
+#[test]
+fn drag_move_move_release_override_values_track_playhead_samples() {
+    // Pure helper contract used by wire_graph_editor: each move tick
+    // resamples at the playhead; release commits once (tested via
+    // plan_drag_commit) then clears the override.
+    let mut clip = media_clip("A");
+    clip.kf_volume = kfs(vec![kf(0, 0.2, 0.0), kf(40, 1.0, 0.0)]);
+    let playhead = 20;
+    let live_a = live_param(&clip, "volume", 0, 0, 0, 0.4).unwrap();
+    let live_b = live_param(&clip, "volume", 0, 0, 0, 0.6).unwrap();
+    let (_, v_a) = live_playhead_override(&clip, "volume", 0, &live_a, playhead).unwrap();
+    let (_, v_b) = live_playhead_override(&clip, "volume", 0, &live_b, playhead).unwrap();
+    assert_eq!(v_a, ParamValue::Scalar(live_a.sample(i64::from(playhead))));
+    assert_eq!(v_b, ParamValue::Scalar(live_b.sample(i64::from(playhead))));
+    assert_ne!(v_a, v_b);
+    let plan = plan_drag_commit(&clip, "volume", 0, 0, 0, 0.6).unwrap();
+    assert!(!plan.tick_moved);
+    assert_eq!(plan.value, ParamValue::Scalar(0.6));
 }

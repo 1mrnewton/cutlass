@@ -1,0 +1,163 @@
+// Full-window eyedropper surface. Sits above every panel while armed so
+// sampling takes priority over preview gestures; click outside the
+// preview viewport cancels. Loupe + hex readout follow the cursor.
+
+import { AppStore } from "../store/app-store.slint";
+import { AppState } from "../state.slint";
+import { PreviewStore, EyedropperStore } from "../store/index.slint";
+import { PreviewBackend } from "../lib/preview-backend.slint";
+import { CutlassText } from "text.slint";
+
+export component EyedropperOverlay inherits Rectangle {
+    width: 100%;
+    height: 100%;
+
+    private property <length> loupe-size: 88px;
+    private property <length> loupe-gap: 16px;
+
+    function local-x(mx: length) -> float {
+        return (mx - EyedropperStore.preview-x) / 1px;
+    }
+    function local-y(my: length) -> float {
+        return (my - EyedropperStore.preview-y) / 1px;
+    }
+    function in-preview(mx: length, my: length) -> bool {
+        return mx >= EyedropperStore.preview-x
+            && my >= EyedropperStore.preview-y
+            && mx < EyedropperStore.preview-x + EyedropperStore.preview-w
+            && my < EyedropperStore.preview-y + EyedropperStore.preview-h;
+    }
+
+    function apply-sample(mx: length, my: length) {
+        EyedropperStore.cursor-x = mx;
+        EyedropperStore.cursor-y = my;
+        if (!root.in-preview(mx, my)) {
+            EyedropperStore.over-frame = false;
+            EyedropperStore.label = "";
+            return;
+        }
+        // Fullscreen preview is a plain contain fit (no inspect zoom/pan).
+        let zoom = AppState.preview-maximized ? 1.0 : PreviewStore.viewport-zoom;
+        let pan-x = AppState.preview-maximized ? 0.0 : PreviewStore.viewport-pan-x / 1px;
+        let pan-y = AppState.preview-maximized ? 0.0 : PreviewStore.viewport-pan-y / 1px;
+        let s = PreviewBackend.sample-preview(
+            PreviewStore.frame,
+            root.local-x(mx),
+            root.local-y(my),
+            EyedropperStore.preview-w / 1px,
+            EyedropperStore.preview-h / 1px,
+            zoom,
+            pan-x,
+            pan-y,
+            EyedropperStore.canvas-w,
+            EyedropperStore.canvas-h,
+            EyedropperStore.enable-alpha,
+        );
+        EyedropperStore.over-frame = s.hit;
+        if (s.hit) {
+            EyedropperStore.hover-color = s.color;
+            EyedropperStore.loupe = s.loupe;
+            EyedropperStore.label = s.label;
+            EyedropperStore.preview-epoch += 1;
+        } else {
+            EyedropperStore.label = "";
+        }
+    }
+
+    function commit-sample() {
+        if (!EyedropperStore.over-frame) {
+            return;
+        }
+        EyedropperStore.commit-color = EyedropperStore.hover-color;
+        EyedropperStore.commit-epoch += 1;
+        EyedropperStore.armed = false;
+        EyedropperStore.over-frame = false;
+        EyedropperStore.label = "";
+    }
+
+    function cancel-sample() {
+        EyedropperStore.cancel-epoch += 1;
+        EyedropperStore.armed = false;
+        EyedropperStore.over-frame = false;
+        EyedropperStore.label = "";
+    }
+
+    ta := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: root.in-preview(self.mouse-x, self.mouse-y) && EyedropperStore.over-frame
+            ? MouseCursor.crosshair
+            : MouseCursor.default;
+
+        moved => {
+            root.apply-sample(self.mouse-x, self.mouse-y);
+        }
+
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                root.cancel-sample();
+                return;
+            }
+            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                root.apply-sample(self.mouse-x, self.mouse-y);
+                if (EyedropperStore.over-frame) {
+                    root.commit-sample();
+                } else {
+                    root.cancel-sample();
+                }
+            }
+        }
+    }
+
+    // Zoom loupe — only while the cursor is over real frame pixels.
+    if EyedropperStore.over-frame: Rectangle {
+        width: root.loupe-size;
+        height: root.loupe-size + 22px;
+        x: min(
+            max(8px, EyedropperStore.cursor-x + root.loupe-gap),
+            parent.width - self.width - 8px,
+        );
+        y: min(
+            max(8px, EyedropperStore.cursor-y + root.loupe-gap),
+            parent.height - self.height - 8px,
+        );
+        background: #111111ee;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: #ffffff33;
+        drop-shadow-blur: 10px;
+        drop-shadow-color: #00000066;
+
+        Image {
+            x: 4px;
+            y: 4px;
+            width: root.loupe-size - 8px;
+            height: root.loupe-size - 8px;
+            source: EyedropperStore.loupe;
+            image-fit: ImageFit.fill;
+            image-rendering: pixelated;
+        }
+
+        // Center-pixel outline (11×11 → one cell ≈ loupe inner / 11).
+        Rectangle {
+            x: 4px + (root.loupe-size - 8px) * 5 / 11;
+            y: 4px + (root.loupe-size - 8px) * 5 / 11;
+            width: (root.loupe-size - 8px) / 11;
+            height: (root.loupe-size - 8px) / 11;
+            border-width: 1.5px;
+            border-color: #ffffff;
+            background: transparent;
+        }
+
+        CutlassText {
+            y: root.loupe-size - 2px;
+            width: parent.width;
+            height: 18px;
+            text: EyedropperStore.label;
+            style: AppStore.theme.typography.caption;
+            foreground: #ffffff;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}

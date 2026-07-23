@@ -16,6 +16,7 @@ mod download_safety;
 mod drafts;
 mod drag_preview;
 mod external;
+mod eyedropper;
 mod graph_editor;
 mod inspector;
 mod interaction;

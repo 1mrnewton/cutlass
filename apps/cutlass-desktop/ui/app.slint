@@ -3,6 +3,7 @@ import {
     HSplitGripTrail,
     VSplitGripTimeline,
     CutlassText,
+    EyedropperOverlay,
 } from "components/index.slint";
 import {
     AgentPanel,
@@ -16,6 +17,7 @@ import {
     AppStore,
     EditorStore,
     PreviewStore,
+    EyedropperStore,
     TimelineStore,
     TimelineActions,
 } from "store/index.slint";
@@ -52,6 +54,7 @@ export {
     TimelineStore,
     TimelineActions,
     PreviewStore,
+    EyedropperStore,
 }from "store/index.slint";
 export { TimelineViewState }from "panels/timeline/index.slint";
 export { TimelineLib }from "lib/index.slint";
@@ -73,6 +76,7 @@ export {
     PreviewSelectionBox,
     PreviewDragResolution,
     PreviewView,
+    EyedropperSample,
 }from "lib/preview-backend.slint";
 export { InspectorBackend, SelectedClipInfo }from "lib/inspector-backend.slint";
 export { KeyframeBackend }from "lib/keyframe-backend.slint";
@@ -624,6 +628,13 @@ export component AppWindow inherits Window {
                 return accept;
             }
             if (event.text == Key.Escape) {
+                if (EyedropperStore.armed) {
+                    EyedropperStore.cancel-epoch += 1;
+                    EyedropperStore.armed = false;
+                    EyedropperStore.over-frame = false;
+                    EyedropperStore.label = "";
+                    return accept;
+                }
                 TimelineActions.clear-selection();
                 return accept;
             }
@@ -855,6 +866,13 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
+
+    // Preview eyedropper — above panels so sampling wins over transform
+    // gestures; click outside the preview viewport cancels.
+    if EyedropperStore.armed: EyedropperOverlay {
+        width: root.width;
+        height: root.height;
     }
 
     // Library drag ghost — must live at window scope so it paints above all

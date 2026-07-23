@@ -54,6 +54,8 @@ export component CutlassColorPicker inherits Rectangle {
 
     callback preview(color);
     callback committed(color);
+    // Arms the global preview eyedropper; the hosting popup should close.
+    callback eyedropper-requested();
 
     // HSV(+A) interaction state — not derived from `current` while dragging /
     // editing so blacks and grays keep their prior hue / sat.
@@ -171,7 +173,7 @@ export component CutlassColorPicker inherits Rectangle {
         spacing: AppStore.theme.metrics.spacing.sm;
         padding: 0px;
 
-        // Live well + hex
+        // Live well + hex + eyedropper
         HorizontalLayout {
             spacing: AppStore.theme.metrics.spacing.sm;
             height: 28px;
@@ -225,6 +227,34 @@ export component CutlassColorPicker inherits Rectangle {
                         root.refresh-readouts();
                     }
                     root.interacting = false;
+                }
+            }
+
+            // Eyedropper — placeholder glyph until `pipette` SVG is wired
+            // (see docs/icons.md). Arms preview sampling via the host swatch.
+            dropper := Rectangle {
+                width: 28px;
+                height: 28px;
+                border-radius: AppStore.theme.metrics.radius.sm;
+                background: dropper-ta.has-hover ? #ffffff14 : transparent;
+                border-width: 1px;
+                border-color: #ffffff24;
+
+                CutlassText {
+                    width: 100%;
+                    height: 100%;
+                    text: "⌖";
+                    style: AppStore.theme.typography.body;
+                    foreground: AppStore.theme.text.muted;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                dropper-ta := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        root.eyedropper-requested();
+                    }
                 }
             }
         }

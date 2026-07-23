@@ -1,0 +1,34 @@
+// Global eyedropper session: color wells arm this, the window overlay
+// samples the preview frame, and the arming well routes preview/commit/
+// cancel back through epoch watchers.
+
+export global EyedropperStore {
+    in-out property <bool> armed: false;
+    // Monotonic token identifying which color well armed the session.
+    in-out property <int> consumer-token: 0;
+    in-out property <bool> enable-alpha: true;
+
+    // Docked (or fullscreen) preview viewport in window coordinates —
+    // written by the live preview surface so the overlay can map pointer
+    // events without sitting inside the clipped panel.
+    in-out property <length> preview-x: 0px;
+    in-out property <length> preview-y: 0px;
+    in-out property <length> preview-w: 0px;
+    in-out property <length> preview-h: 0px;
+    in-out property <float> canvas-w: 1;
+    in-out property <float> canvas-h: 1;
+
+    // Live sample while hovering the frame.
+    in-out property <bool> over-frame: false;
+    in-out property <color> hover-color: #00000000;
+    in-out property <image> loupe;
+    in-out property <string> label: "";
+    in-out property <length> cursor-x: 0px;
+    in-out property <length> cursor-y: 0px;
+
+    // Epochs the arming CutlassColorSwatch watches.
+    in-out property <int> preview-epoch: 0;
+    in-out property <int> commit-epoch: 0;
+    in-out property <int> cancel-epoch: 0;
+    in-out property <color> commit-color: #00000000;
+}

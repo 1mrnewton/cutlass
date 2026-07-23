@@ -1,6 +1,6 @@
 import { PanelBase, PanelHeader } from "../../components/index.slint";
 import { AppStore } from "../../store/index.slint";
-import { EditorStore, PreviewStore } from "../../store/index.slint";
+import { EditorStore, PreviewStore, EyedropperStore } from "../../store/index.slint";
 import { TimelineLib } from "../../lib/timeline-lib.slint";
 import { TimelineStore, TimelineActions } from "../../store/index.slint";
 import { RationalTime } from "../../models/index.slint";
@@ -41,9 +41,19 @@ export component PreviewPanel inherits PanelBase {
                     // so renders can stop at view-sized pixels. Fired on mount
                     // and on every panel resize (see the changed-size handlers
                     // below); the worker buckets the values to keep re-renders
-                    // rare.
+                    // rare. Also publish window-space bounds for the eyedropper
+                    // overlay (which lives at app scope above clipped panels).
+                    function sync-eyedropper-geometry() {
+                        EyedropperStore.preview-x = self.absolute-position.x;
+                        EyedropperStore.preview-y = self.absolute-position.y;
+                        EyedropperStore.preview-w = self.width;
+                        EyedropperStore.preview-h = self.height;
+                        EyedropperStore.canvas-w = self.canvas-w;
+                        EyedropperStore.canvas-h = self.canvas-h;
+                    }
                     init => {
                         PreviewStore.viewport-changed(self.width, self.height);
+                        self.sync-eyedropper-geometry();
                     }
 
                     // Transform gestures (preview roadmap Phases 3–4).
@@ -126,10 +136,19 @@ export component PreviewPanel inherits PanelBase {
                     changed width => {
                         self.reclamp();
                         PreviewStore.viewport-changed(self.width, self.height);
+                        self.sync-eyedropper-geometry();
                     }
                     changed height => {
                         self.reclamp();
                         PreviewStore.viewport-changed(self.width, self.height);
+                        self.sync-eyedropper-geometry();
+                    }
+                    // absolute-position can shift when sibling panes resize.
+                    private property <length> eyedropper-geom-watch:
+                        self.absolute-position.x + self.absolute-position.y
+                        + self.width + self.height;
+                    changed eyedropper-geom-watch => {
+                        self.sync-eyedropper-geometry();
                     }
                     private property <bool> sprite-ready: PreviewStore.gesture-sprite-ready;
                     changed sprite-ready => {

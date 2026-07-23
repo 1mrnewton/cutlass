@@ -131,7 +131,21 @@ export struct MotionPathDragResolution {
     opacity: float,
 }
 
+// Eyedropper sample at a viewport point: `hit` is false over letterbox
+// bars or when no frame is available. `loupe` is an 11×11 nearest-neighbor
+// neighborhood (display with `image-rendering: pixelated`).
+export struct EyedropperSample {
+    hit: bool,
+    color: color,
+    loupe: image,
+    label: string,
+}
+
 export global PreviewBackend {
+    // Sample the composited preview frame under the cursor (widget px →
+    // frame pixel via viewport_mapping). Letterbox → hit=false.
+    pure callback sample-preview(image  /* frame */, float  /* x */, float  /* y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, float  /* canvas-w */, float  /* canvas-h */, bool   /* enable-alpha */, ) -> EyedropperSample;
+
     // Topmost hit at (x, y) in viewport-element coordinates, given the
     // viewport's current size and zoom/pan. Locked lanes don't hit-test
     // (same rule as the timeline); hidden lanes aren't composited so they

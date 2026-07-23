@@ -31,6 +31,46 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
 
     // --- preview viewport: click-to-select, gestures, zoom/pan ------------
 
+    app.global::<PreviewBackend>().on_sample_preview(
+        |frame, x, y, view_w, view_h, zoom, pan_x, pan_y, canvas_w, canvas_h, enable_alpha| {
+            let sample = crate::eyedropper::sample_preview(
+                &frame,
+                x,
+                y,
+                view_w,
+                view_h,
+                zoom,
+                pan_x,
+                pan_y,
+                canvas_w,
+                canvas_h,
+                enable_alpha,
+            );
+            if !sample.hit {
+                return EyedropperSample {
+                    hit: false,
+                    color: slint::Color::from_argb_u8(0, 0, 0, 0),
+                    loupe: slint::Image::default(),
+                    label: SharedString::default(),
+                };
+            }
+            let [r, g, b, a] = sample.rgba;
+            let loupe = slint::Image::from_rgba8(
+                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                    &sample.loupe_rgba,
+                    crate::eyedropper::LOUPE_SIZE,
+                    crate::eyedropper::LOUPE_SIZE,
+                ),
+            );
+            EyedropperSample {
+                hit: true,
+                color: slint::Color::from_argb_u8(a, r, g, b),
+                loupe,
+                label: SharedString::from(sample.label),
+            }
+        },
+    );
+
     app.global::<PreviewBackend>().on_hit_test(
         |sequence, tick, x, y, view_w, view_h, zoom, pan_x, pan_y| {
             preview_select::hit_test_in_viewport(

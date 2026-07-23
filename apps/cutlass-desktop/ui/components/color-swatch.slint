@@ -3,9 +3,15 @@
 // optional `preview` fires continuously while interacting; `cancelled`
 // fires when the popup closes without a commit for the open gesture
 // (click-away mid-drag) so callers can clear live overrides.
+//
+// Eyedropper: the picker button closes this popup and arms
+// `EyedropperStore`; hover/commit/cancel epochs route back through this
+// well's preview/changed/cancelled lanes so every consumer keeps working
+// without per-call-site wiring.
 
 import { AppStore } from "../store/app-store.slint";
 import { AppState } from "../state.slint";
+import { EyedropperStore } from "../store/eyedropper-store.slint";
 import { CutlassColorPicker } from "color-picker.slint";
 import { ColorCheckerboard } from "color-picker-parts.slint";
 
@@ -32,21 +38,73 @@ export component CutlassColorSwatch inherits Rectangle {
     private property <bool> popup-open: popup.is-open;
     // True after a preview tick until the matching commit or cancel.
     private property <bool> gesturing: false;
+    // Close-for-eyedropper: skip the popup's cancel path, then arm.
+    private property <bool> arming-eyedropper: false;
+    // Token of the session this well armed (0 = not ours).
+    private property <int> my-token: 0;
+
+    private property <int> eyedropper-preview-watch: EyedropperStore.preview-epoch;
+    private property <int> eyedropper-commit-watch: EyedropperStore.commit-epoch;
+    private property <int> eyedropper-cancel-watch: EyedropperStore.cancel-epoch;
 
     changed value => {
-        if (!root.popup-open) {
+        if (!root.popup-open && root.my-token == 0) {
             root.live = root.value;
         }
     }
 
     changed popup-open => {
         if (!root.popup-open) {
+            if (root.arming-eyedropper) {
+                root.arming-eyedropper = false;
+                root.gesturing = false;
+                root.live = root.value;
+                EyedropperStore.consumer-token += 1;
+                root.my-token = EyedropperStore.consumer-token;
+                EyedropperStore.enable-alpha = root.enable-alpha;
+                EyedropperStore.over-frame = false;
+                EyedropperStore.label = "";
+                EyedropperStore.armed = true;
+                AppState.refocus-shortcuts();
+                return;
+            }
             if (root.gesturing) {
                 root.gesturing = false;
                 root.live = root.value;
                 root.cancelled();
             }
             AppState.refocus-shortcuts();
+        }
+    }
+
+    changed eyedropper-preview-watch => {
+        if (root.my-token != 0
+            && EyedropperStore.consumer-token == root.my-token
+            && EyedropperStore.over-frame) {
+            root.gesturing = true;
+            root.live = EyedropperStore.hover-color;
+            root.preview(EyedropperStore.hover-color);
+        }
+    }
+
+    changed eyedropper-commit-watch => {
+        if (root.my-token != 0 && EyedropperStore.consumer-token == root.my-token) {
+            root.gesturing = false;
+            root.live = EyedropperStore.commit-color;
+            root.my-token = 0;
+            root.changed(EyedropperStore.commit-color);
+        }
+    }
+
+    changed eyedropper-cancel-watch => {
+        if (root.my-token != 0 && EyedropperStore.consumer-token == root.my-token) {
+            let was = root.gesturing;
+            root.gesturing = false;
+            root.live = root.value;
+            root.my-token = 0;
+            if (was) {
+                root.cancelled();
+            }
         }
     }
 
@@ -129,6 +187,17 @@ export component CutlassColorSwatch inherits Rectangle {
                         root.gesturing = false;
                         root.live = c;
                         root.changed(c);
+                    }
+                    eyedropper-requested => {
+                        // Clear any in-flight picker preview, then close and
+                        // arm — the popup-open handler finishes the arm.
+                        if (root.gesturing) {
+                            root.gesturing = false;
+                            root.live = root.value;
+                            root.cancelled();
+                        }
+                        root.arming-eyedropper = true;
+                        popup.close();
                     }
                 }
             }

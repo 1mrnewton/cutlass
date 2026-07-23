@@ -136,6 +136,7 @@ lacks cleanly (`letter-spacing`, `line-height`): **[Tabler](https://tabler.io/ic
 ### Dropdowns & pickers
 
 - [x] `chevron-down` — `assets/icon/ui/chevron-down.svg` — dropdown / color-swatch / look / animation pickers.
+- [ ] `pipette` (Lucide) — placeholder `"⌖"` — `ui/components/color-picker.slint` — preview eyedropper arm button.
 
 ### Library & tiles
 

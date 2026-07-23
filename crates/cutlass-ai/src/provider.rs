@@ -206,6 +206,9 @@ impl ChatTurn {
 pub struct ChatRequest<'a> {
     pub messages: &'a [Message],
     pub tools: &'a [ToolSpec],
+    /// Stable id for OpenRouter sticky routing across turns of one prompt.
+    /// Providers that do not use OpenRouter prompt caching ignore this.
+    pub session_id: Option<&'a str>,
 }
 
 /// Provider failures, kept distinct so the UI can say "Ollama isn't

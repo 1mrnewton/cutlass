@@ -280,6 +280,52 @@ fn host_spec(name: &'static str) -> HostToolSpec {
 }
 
 #[test]
+fn prompt_run_reuses_one_session_id_across_turns() {
+    let (mut host, _, _, clip) = fixture();
+    let first = ScriptedProvider::new(vec![
+        tool_turn(vec![(
+            "call_1",
+            "trim_clip",
+            serde_json::json!({ "clip": clip, "start": 3.0, "duration": 7.0 }),
+        )]),
+        text_turn("Trimmed."),
+    ]);
+    let context = EditorContext {
+        selected_clips: vec![clip],
+        ..Default::default()
+    };
+    let (outcome, _) = run(
+        &first,
+        &mut host,
+        &context,
+        "trim the start",
+        &AgentConfig::default(),
+    );
+    assert_eq!(outcome.status, PromptStatus::Completed);
+
+    let ids = first.session_ids();
+    assert_eq!(ids.len(), 2, "multi-turn prompt should call chat twice");
+    let first_id = ids[0].as_deref().expect("session id on turn 1");
+    assert!(!first_id.is_empty());
+    assert_eq!(ids[1].as_deref(), Some(first_id));
+
+    let second = ScriptedProvider::new(vec![text_turn("Done.")]);
+    let (outcome2, _) = run(
+        &second,
+        &mut host,
+        &context,
+        "confirm",
+        &AgentConfig::default(),
+    );
+    assert_eq!(outcome2.status, PromptStatus::Completed);
+    let second_ids = second.session_ids();
+    assert_eq!(second_ids.len(), 1);
+    let second_id = second_ids[0].as_deref().expect("session id on second prompt");
+    assert!(!second_id.is_empty());
+    assert_ne!(second_id, first_id);
+}
+
+#[test]
 fn cut_the_first_three_seconds() {
     let (mut host, _, _, clip) = fixture();
     let provider = ScriptedProvider::new(vec![

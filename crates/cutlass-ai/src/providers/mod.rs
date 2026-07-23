@@ -46,6 +46,7 @@ pub fn openrouter_compat_extras(model_id: &str) -> OpenAiCompatExtras {
     let mut extras = OpenAiCompatExtras {
         openrouter_headers: true,
         usage_accounting: true,
+        prompt_caching: true,
         ..OpenAiCompatExtras::default()
     };
     if let Some(pin) = crate::catalog::openrouter_model(model_id).and_then(|m| m.pin) {

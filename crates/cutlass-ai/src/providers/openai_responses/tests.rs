@@ -77,6 +77,7 @@ fn request_maps_instructions_multimodal_input_and_native_tools() {
     let body = provider.request_body(&ChatRequest {
         messages: &messages,
         tools: &tools,
+        session_id: None,
     });
 
     assert_eq!(body["model"], "gpt-reasoning");
@@ -113,6 +114,7 @@ fn mixed_history_uses_role_specific_content_parts_and_summary_off() {
     let body = provider.request_body(&ChatRequest {
         messages: &messages,
         tools: &[],
+        session_id: None,
     });
     assert!(body.get("reasoning").is_none());
     assert!(body.get("tools").is_none());
@@ -190,6 +192,7 @@ fn encrypted_reasoning_and_parallel_calls_replay_with_native_outputs() {
     let body = provider.request_body(&ChatRequest {
         messages: &messages,
         tools: &[],
+        session_id: None,
     });
     let input = body["input"].as_array().unwrap();
     assert_eq!(input.len(), 6);
@@ -230,6 +233,7 @@ fn unrelated_request_does_not_replay_stale_output() {
     let body = provider.request_body(&ChatRequest {
         messages: &messages,
         tools: &[],
+        session_id: None,
     });
     assert_eq!(body["input"].as_array().unwrap().len(), 1);
     assert!(!body.to_string().contains("must-not-leak"));
@@ -310,6 +314,7 @@ fn consecutive_tool_rounds_preserve_every_exact_item_since_the_user() {
     let body = provider.request_body(&ChatRequest {
         messages: &messages,
         tools: &[],
+        session_id: None,
     });
     let input = body["input"].as_array().unwrap();
     assert_eq!(input.len(), 7);
@@ -601,6 +606,7 @@ fn initial_transient_status_retries_but_preflight_cancellation_does_not_connect(
     let request = ChatRequest {
         messages: &messages,
         tools: &[],
+        session_id: None,
     };
     let cancel = AtomicBool::new(false);
     let mut streamed = String::new();

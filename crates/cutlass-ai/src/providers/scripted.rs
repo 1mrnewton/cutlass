@@ -16,6 +16,8 @@ pub struct ScriptedProvider {
     requests: Mutex<Vec<Vec<Message>>>,
     /// Tool names offered on each request, recorded for assertions.
     tools: Mutex<Vec<Vec<String>>>,
+    /// `session_id` offered on each request, recorded for assertions.
+    session_ids: Mutex<Vec<Option<String>>>,
 }
 
 impl ScriptedProvider {
@@ -24,6 +26,7 @@ impl ScriptedProvider {
             turns: Mutex::new(turns.into_iter()),
             requests: Mutex::new(Vec::new()),
             tools: Mutex::new(Vec::new()),
+            session_ids: Mutex::new(Vec::new()),
         }
     }
 
@@ -35,6 +38,11 @@ impl ScriptedProvider {
     /// The tool names offered on each request, in order.
     pub fn tool_names(&self) -> Vec<Vec<String>> {
         self.tools.lock().unwrap().clone()
+    }
+
+    /// The `session_id` values offered on each request, in order.
+    pub fn session_ids(&self) -> Vec<Option<String>> {
+        self.session_ids.lock().unwrap().clone()
     }
 }
 
@@ -53,6 +61,10 @@ impl ChatProvider for ScriptedProvider {
             .lock()
             .unwrap()
             .push(request.tools.iter().map(|t| t.name.to_string()).collect());
+        self.session_ids
+            .lock()
+            .unwrap()
+            .push(request.session_id.map(str::to_owned));
         let turn = self.turns.lock().unwrap().next().ok_or_else(|| {
             ProviderError::Protocol("scripted provider ran out of turns".to_string())
         })?;

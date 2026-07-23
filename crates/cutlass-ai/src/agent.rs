@@ -21,7 +21,8 @@
 //! ([`PromptOutcome::phase_breaks`]).
 
 use std::collections::HashSet;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cutlass_commands::EditOutcome;
 
@@ -476,6 +477,11 @@ pub fn run_prompt_with_host(
     // Call ids of `describe_project` results, collapsed in `turn_messages`
     // so the session history never carries a full stale project blob.
     let mut describe_call_ids: Vec<String> = Vec::new();
+    // One OpenRouter sticky-routing id for every `provider.chat` call in this
+    // prompt run. Within one prompt the prefix (tools + system + transcript)
+    // grows monotonically, so sticky routing + automatic breakpoints give
+    // cache reads from turn 2 on.
+    let session_id = new_prompt_session_id();
 
     if !config.dry_run {
         bridge.begin_group();
@@ -521,6 +527,7 @@ pub fn run_prompt_with_host(
                 &ChatRequest {
                     messages: &messages,
                     tools: &tools,
+                    session_id: Some(&session_id),
                 },
                 cancel,
                 &mut forward,
@@ -901,6 +908,20 @@ fn message_images(message: &Message) -> &[ImagePart] {
         Message::User { images, .. } | Message::ToolResult { images, .. } => images,
         _ => &[],
     }
+}
+
+/// Unique sticky-routing id for one `run_prompt` invocation.
+///
+/// Combines process id, a process-local counter, and wall-clock nanos so
+/// consecutive prompts never reuse an id without pulling in an extra crate.
+fn new_prompt_session_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("cutlass-{}-{}-{}", std::process::id(), counter, nanos)
 }
 
 /// Session history is text-only: raw image bytes would bloat every later

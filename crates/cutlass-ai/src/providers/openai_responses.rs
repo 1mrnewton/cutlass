@@ -110,6 +110,8 @@ impl OpenAiResponsesProvider {
     }
 
     fn request_body(&self, request: &ChatRequest<'_>) -> serde_json::Value {
+        // `request.session_id` is OpenRouter Chat Completions sticky-routing;
+        // the Responses API does not use it.
         let instructions = request
             .messages
             .iter()

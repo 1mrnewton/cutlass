@@ -131,6 +131,7 @@ fn request_body_includes_tools_and_messages() {
     let body = provider.request_body(&ChatRequest {
         messages: &messages,
         tools: &tools,
+        session_id: None,
     });
 
     assert_eq!(body["model"], "qwen3");
@@ -159,6 +160,7 @@ fn request_body_includes_openrouter_provider_pin() {
         allow_fallbacks: false,
         openrouter_headers: true,
         usage_accounting: true,
+        prompt_caching: true,
     };
     let provider = OpenAiCompatProvider::with_extras(
         "https://openrouter.ai/api/v1",
@@ -169,11 +171,62 @@ fn request_body_includes_openrouter_provider_pin() {
     let body = provider.request_body(&ChatRequest {
         messages: &[],
         tools: &[],
+        session_id: None,
     });
     assert_eq!(body["provider"]["order"][0], "groq");
     assert_eq!(body["provider"]["allow_fallbacks"], false);
     assert_eq!(body["stream_options"]["include_usage"], true);
     assert_eq!(body["usage"]["include"], true);
+    assert_eq!(body["cache_control"]["type"], "ephemeral");
+}
+
+#[test]
+fn request_body_prompt_caching_shape() {
+    let default_body = OpenAiCompatProvider::new("http://localhost:11434/v1", "qwen3", None)
+        .request_body(&ChatRequest {
+            messages: &[],
+            tools: &[],
+            session_id: Some("unused"),
+        });
+    assert!(
+        default_body.get("cache_control").is_none(),
+        "default extras must not send cache_control"
+    );
+    assert!(
+        default_body.get("session_id").is_none(),
+        "default extras must not send session_id even when requested"
+    );
+
+    let openrouter = OpenAiCompatProvider::with_extras(
+        "https://openrouter.ai/api/v1",
+        "anthropic/claude-sonnet-4",
+        Some("sk-or".into()),
+        crate::providers::openrouter_compat_extras("anthropic/claude-sonnet-4"),
+    );
+    let with_session = openrouter.request_body(&ChatRequest {
+        messages: &[],
+        tools: &[],
+        session_id: Some("cutlass-1-2-3"),
+    });
+    assert_eq!(
+        with_session["cache_control"],
+        serde_json::json!({ "type": "ephemeral" })
+    );
+    assert_eq!(with_session["session_id"], "cutlass-1-2-3");
+
+    let without_session = openrouter.request_body(&ChatRequest {
+        messages: &[],
+        tools: &[],
+        session_id: None,
+    });
+    assert_eq!(
+        without_session["cache_control"],
+        serde_json::json!({ "type": "ephemeral" })
+    );
+    assert!(
+        without_session.get("session_id").is_none(),
+        "session_id omitted when the request carries none"
+    );
 }
 
 #[test]
@@ -182,6 +235,7 @@ fn request_body_usage_accounting_only_for_openrouter_extras() {
         .request_body(&ChatRequest {
             messages: &[],
             tools: &[],
+            session_id: None,
         });
     assert_eq!(default_body["stream_options"]["include_usage"], true);
     assert!(default_body.get("usage").is_none());
@@ -195,6 +249,7 @@ fn request_body_usage_accounting_only_for_openrouter_extras() {
     .request_body(&ChatRequest {
         messages: &[],
         tools: &[],
+        session_id: None,
     });
     assert_eq!(openrouter_body["stream_options"]["include_usage"], true);
     assert_eq!(openrouter_body["usage"]["include"], true);
@@ -392,6 +447,7 @@ fn request_body_can_omit_stream_options() {
         &ChatRequest {
             messages: &[],
             tools: &[],
+            session_id: None,
         },
         true,
     );
@@ -401,6 +457,7 @@ fn request_body_can_omit_stream_options() {
         &ChatRequest {
             messages: &[],
             tools: &[],
+            session_id: None,
         },
         false,
     );

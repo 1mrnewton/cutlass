@@ -30,6 +30,9 @@ pub struct OpenAiCompatExtras {
     /// OpenRouter usage-accounting extension (`usage.include`), which adds
     /// `cost` to the final usage chunk. Leave false for non-OpenRouter hosts.
     pub usage_accounting: bool,
+    /// OpenRouter automatic prompt caching (`cache_control: ephemeral`).
+    /// Harmless on non-Anthropic OpenRouter models; leave false elsewhere.
+    pub prompt_caching: bool,
 }
 
 pub struct OpenAiCompatProvider {
@@ -162,6 +165,12 @@ impl OpenAiCompatProvider {
         }
         if self.extras.usage_accounting {
             body["usage"] = serde_json::json!({ "include": true });
+        }
+        if self.extras.prompt_caching {
+            body["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+            if let Some(session_id) = request.session_id {
+                body["session_id"] = serde_json::Value::String(session_id.to_string());
+            }
         }
         if let Some(order) = &self.extras.provider_order
             && !order.is_empty()

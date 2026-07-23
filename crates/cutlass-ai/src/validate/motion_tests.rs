@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::wire;
-use cutlass_models::{ClipId, ClipParam, Easing, MediaSource, ParamValue};
+use cutlass_models::{ClipId, ClipParam, CropRect, Easing, MediaSource, ParamValue};
 
 const R24: Rational = Rational::FPS_24;
 
@@ -339,6 +339,84 @@ fn set_clip_transform_still_works_on_non_animated_clip() {
         }
         other => panic!("unexpected {other:?}"),
     }
+}
+
+fn animate_crop(project: &mut Project, clip: u64) {
+    let id = ClipId::from_raw(clip);
+    for (tick, crop) in [
+        (
+            0,
+            CropRect {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+            },
+        ),
+        (
+            48,
+            CropRect {
+                x: 0.1,
+                y: 0.1,
+                w: 0.8,
+                h: 0.8,
+            },
+        ),
+    ] {
+        project
+            .set_param_keyframe(
+                id,
+                ClipParam::Crop,
+                RationalTime::new(tick, R24),
+                ParamValue::Rect([crop.x, crop.y, crop.w, crop.h]),
+                Easing::Linear,
+                None,
+            )
+            .unwrap();
+    }
+    assert!(project.clip(id).unwrap().crop.is_animated());
+}
+
+#[test]
+fn set_clip_crop_rejects_animated_crop_and_preserves_keyframes() {
+    let (mut project, clip) = fixture();
+    animate_crop(&mut project, clip);
+    let before = project
+        .clip(ClipId::from_raw(clip))
+        .unwrap()
+        .crop
+        .keyframes()
+        .len();
+    let msg = reject(
+        &project,
+        WireCommand::SetClipCrop(wire::SetClipCrop {
+            clip,
+            left: Some(0.2),
+            top: None,
+            right: None,
+            bottom: None,
+            flip_h: None,
+            flip_v: None,
+        }),
+    );
+    assert!(msg.contains("keyframes on crop"), "{msg}");
+    assert!(msg.contains("set_param_keyframe"), "{msg}");
+    assert!(msg.contains("set_param_constant"), "{msg}");
+    assert!(msg.contains("would erase that animation"), "{msg}");
+    let after = project
+        .clip(ClipId::from_raw(clip))
+        .unwrap()
+        .crop
+        .keyframes()
+        .len();
+    assert_eq!(before, after);
+    assert!(
+        project
+            .clip(ClipId::from_raw(clip))
+            .unwrap()
+            .crop
+            .is_animated()
+    );
 }
 
 #[test]

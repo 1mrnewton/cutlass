@@ -1,6 +1,6 @@
 use super::*;
 use cutlass_models::{
-    ClipTransform, Easing, MediaSource, Param, RationalTime, Scale2, TimeRange, TrackKind,
+    ClipTransform, CropRect, Easing, MediaSource, Param, RationalTime, Scale2, TimeRange, TrackKind,
 };
 
 const R24: Rational = Rational::FPS_24;
@@ -295,6 +295,50 @@ fn scale_keyframes_use_wire_scale_shape() {
     assert_eq!(scale[0].value, serde_json::json!(1.0));
     assert_eq!(scale[1].value, serde_json::json!([1.5, 0.5]));
     assert_eq!(scale[1].easing, Some(serde_json::json!("ease_in")));
+}
+
+#[test]
+fn crop_keyframes_use_wire_rect_and_omit_static_field() {
+    let (mut project, clip_id) = media_clip_project();
+    {
+        let clip = project.timeline_mut().clip_mut(clip_id).unwrap();
+        clip.crop.set_keyframe(
+            0,
+            CropRect {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+            },
+            Easing::Linear,
+        );
+        clip.crop.set_keyframe(
+            24,
+            CropRect {
+                x: 0.1,
+                y: 0.2,
+                w: 0.7,
+                h: 0.6,
+            },
+            Easing::EaseIn,
+        );
+    }
+    let summary = summarize(&project);
+    let clip = &summary.tracks[0].clips[0];
+    assert_eq!(clip.crop, None, "static crop insets omitted when animated");
+    let crop = clip
+        .keyframes
+        .as_ref()
+        .expect("keyframes")
+        .get("crop")
+        .expect("crop keyframes");
+    assert_eq!(crop.len(), 2);
+    // Clip starts at 1.0s; keyframes at clip-relative 0 and 24 → absolute 1.0 / 2.0.
+    assert_eq!(crop[0].at, 1.0);
+    assert_eq!(crop[0].value, serde_json::json!([0.0, 0.0, 1.0, 1.0]));
+    assert_eq!(crop[1].at, 2.0);
+    assert_eq!(crop[1].value, serde_json::json!([0.1, 0.2, 0.7, 0.6]));
+    assert_eq!(crop[1].easing, Some(serde_json::json!("ease_in")));
 }
 
 #[test]

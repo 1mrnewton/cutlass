@@ -169,3 +169,19 @@ pub(super) fn check_set_clip_transform_preserves_keyframes(
          use set_param_keyframe to edit the curve or set_param_constant to remove it first"
     )))
 }
+
+/// `set_clip_crop` lowers with `at: None`, which flattens an animated crop to
+/// a constant. Flip flags are separate non-keyframed bools on the clip — this
+/// guard is about the crop param only.
+pub(super) fn check_set_clip_crop_preserves_keyframes(
+    clip: &Clip,
+    wire_clip: u64,
+) -> Result<(), Rejection> {
+    if !clip.crop.is_animated() {
+        return Ok(());
+    }
+    Err(Rejection::new(format!(
+        "clip {wire_clip} has keyframes on crop; set_clip_crop would erase that animation — \
+         use set_param_keyframe to edit the curve or set_param_constant to remove it first"
+    )))
+}

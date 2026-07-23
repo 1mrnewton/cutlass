@@ -150,7 +150,8 @@ pub struct ClipSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade_out: Option<f64>,
     /// Fractions trimmed off each edge as `[left, top, right, bottom]`
-    /// (set_clip_crop); absent when the full frame shows.
+    /// (set_clip_crop); absent when the full frame shows. Omitted when crop
+    /// is keyframed (see `keyframes.crop` for wire `[x,y,w,h]` rects).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop: Option<[f64; 4]>,
     /// Mirrored left-right (set_clip_crop); absent when not flipped.
@@ -479,6 +480,11 @@ fn summarize_clip_keyframes(
     push_keyframes(&mut map, "pan", &clip.pan, start, rate, |v| {
         serde_json::json!(wire_f64(v))
     });
+    // Wire crop keyframes use kept-region `[x,y,w,h]` (same as `rect` on
+    // set_param_keyframe), not the static-field inset shape.
+    push_keyframes(&mut map, "crop", &clip.crop, start, rate, |c| {
+        serde_json::json!([wire_f64(c.x), wire_f64(c.y), wire_f64(c.w), wire_f64(c.h)])
+    });
     (!map.is_empty()).then_some(map)
 }
 
@@ -633,18 +639,21 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                     fade_in: (clip.fade_in > 0).then(|| seconds(clip.fade_in, rate)),
                     fade_out: (clip.fade_out > 0).then(|| seconds(clip.fade_out, rate)),
                     crop: {
-                        // Constants: describe the stored framing. Keyframed:
-                        // sample at clip-relative 0 (playhead-aware describe
-                        // is a later pass).
-                        let c = clip.crop.sample(0);
-                        (!c.is_full() || clip.crop.is_animated()).then(|| {
-                            [
-                                f64::from(c.x),
-                                f64::from(c.y),
-                                f64::from(1.0 - c.x - c.w),
-                                f64::from(1.0 - c.y - c.h),
-                            ]
-                        })
+                        // Static insets only. Animated crop omits this field
+                        // (keyframe dump carries the wire `[x,y,w,h]` rects).
+                        (!clip.crop.is_animated())
+                            .then(|| {
+                                let c = clip.crop.sample(0);
+                                (!c.is_full()).then(|| {
+                                    [
+                                        wire_f64(c.x),
+                                        wire_f64(c.y),
+                                        wire_f64(1.0 - c.x - c.w),
+                                        wire_f64(1.0 - c.y - c.h),
+                                    ]
+                                })
+                            })
+                            .flatten()
                     },
                     flip_h: clip.flip_h.then_some(true),
                     flip_v: clip.flip_v.then_some(true),

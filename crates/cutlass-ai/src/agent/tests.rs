@@ -1,3 +1,7 @@
+use super::transcript_budget::{
+    DESCRIBE_PROJECT_RESULT_PLACEHOLDER, collapse_describe_project_results, collect_turn_messages,
+    enforce_image_budget, enforce_tool_output_image_budget, image_count,
+};
 use super::*;
 use cutlass_models::ClipId;
 
@@ -283,6 +287,47 @@ fn tool_output_budget_drops_before_transcript_delivery() {
         vec!["middle", "new"]
     );
     assert!(content.contains("request budget: old"), "{content}");
+}
+
+#[test]
+fn collapse_describe_project_results_rewrites_matching_tool_results() {
+    let mut messages = vec![
+        Message::ToolResult {
+            call_id: "desc_1".into(),
+            content: r#"{"project":{"tracks":[]}}"#.into(),
+            images: Vec::new(),
+        },
+        Message::ToolResult {
+            call_id: "other".into(),
+            content: "ok: split".into(),
+            images: Vec::new(),
+        },
+        Message::ToolResult {
+            call_id: "desc_2".into(),
+            content: r#"{"project":{"name":"fresh"}}"#.into(),
+            images: Vec::new(),
+        },
+    ];
+
+    // Collapse only the older dump — the newest stays full-size in-flight.
+    collapse_describe_project_results(&mut messages, &["desc_1".into()]);
+
+    match &messages[0] {
+        Message::ToolResult { content, .. } => {
+            assert_eq!(content, DESCRIBE_PROJECT_RESULT_PLACEHOLDER);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    match &messages[1] {
+        Message::ToolResult { content, .. } => assert_eq!(content, "ok: split"),
+        other => panic!("unexpected {other:?}"),
+    }
+    match &messages[2] {
+        Message::ToolResult { content, .. } => {
+            assert!(content.contains("\"name\":\"fresh\""), "{content}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
 }
 
 #[test]

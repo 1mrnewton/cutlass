@@ -35,6 +35,12 @@ use crate::provider::{
 use crate::tools::{HostToolSpec, ToolHost, is_host_tool_name};
 use crate::wire::{self, WireCommand};
 
+mod transcript_budget;
+use transcript_budget::{
+    collect_turn_messages, collapse_describe_project_results, enforce_image_budget,
+    enforce_tool_output_image_budget,
+};
+
 /// The loop's only view of the engine. The UI implements this over a
 /// sandbox engine whose validated plan replays onto the live one
 /// (`cutlass-ui/src/agent.rs`); tests implement it over a plain `Engine`.
@@ -474,8 +480,10 @@ pub fn run_prompt_with_host(
     // message. Images are surfaced only after the whole request budget has run,
     // immediately before those exact attachments are sent to the provider.
     let mut image_event_cursor = messages.len();
-    // Call ids of `describe_project` results, collapsed in `turn_messages`
-    // so the session history never carries a full stale project blob.
+    // Call ids of `describe_project` results. Older dumps are collapsed
+    // in-flight when a newer one arrives (at most one full dump lives in
+    // `messages`); all of them are collapsed again in `turn_messages` so
+    // session history never carries a full stale project blob.
     let mut describe_call_ids: Vec<String> = Vec::new();
     // One OpenRouter sticky-routing id for every `provider.chat` call in this
     // prompt run. Within one prompt the prefix (tools + system + transcript)
@@ -567,6 +575,13 @@ pub fn run_prompt_with_host(
             // Only host successes attach images; every other path is text.
             let mut images: Vec<ImagePart> = Vec::new();
             let result: String = if call.name == "describe_project" {
+                // Collapse prior dumps already in `messages` before we append
+                // this new full-size one. OpenRouter prompt caching: mutating
+                // an earlier ToolResult invalidates the cached prefix from
+                // that point once — bounded: at most one full dump lives in
+                // the transcript, and the collapse happens as we append a new
+                // dump anyway, so the suffix was going to be written regardless.
+                collapse_describe_project_results(&mut messages, &describe_call_ids);
                 describe_call_ids.push(call.id.clone());
                 let state = serde_json::json!({
                     "project": bridge.summary(),
@@ -820,96 +835,6 @@ fn read_skill_result(skills: &[crate::extend::Skill], arguments: &serde_json::Va
     }
 }
 
-/// Bound a single extensible tool result before it reaches either the
-/// transcript or the request history. Count and encoded-byte limits both keep
-/// the newest attachments, matching the whole-request policy below.
-fn enforce_tool_output_image_budget(
-    content: &mut String,
-    images: &mut Vec<ImagePart>,
-    max_images: usize,
-    max_bytes: usize,
-) {
-    let mut count = images.len();
-    let mut bytes = images
-        .iter()
-        .map(|image| image.data.len())
-        .fold(0usize, usize::saturating_add);
-    let mut drop_count = 0usize;
-    for image in images.iter() {
-        if count <= max_images && bytes <= max_bytes {
-            break;
-        }
-        count = count.saturating_sub(1);
-        bytes = bytes.saturating_sub(image.data.len());
-        drop_count += 1;
-    }
-    for dropped in images.drain(..drop_count) {
-        content.push_str(&format!(
-            "\n[image not attached because it exceeded the request budget: {}]",
-            dropped.label
-        ));
-    }
-}
-
-/// Keep only the newest `max_images` images across the request; older
-/// ones are dropped in place and noted with a text placeholder carrying
-/// the label, so the model knows what it saw and can re-request it.
-/// Newest-wins matches how the agent works with vision: screenshot, look,
-/// act — a stale frame is cheaper to re-take than to carry.
-fn enforce_image_budget(messages: &mut [Message], max_images: usize, max_bytes: usize) {
-    let mut image_total: usize = messages.iter().map(image_count).sum();
-    let mut byte_total: usize = messages
-        .iter()
-        .flat_map(message_images)
-        .map(|image| image.data.len())
-        .fold(0usize, usize::saturating_add);
-    if image_total <= max_images && byte_total <= max_bytes {
-        return;
-    }
-
-    // Oldest first. Count how much of each image vector to drain before
-    // mutating it, keeping this O(number of images) rather than repeatedly
-    // removing index zero.
-    for message in messages.iter_mut() {
-        if image_total <= max_images && byte_total <= max_bytes {
-            break;
-        }
-        let (content, images) = match message {
-            Message::User { content, images } => (content, images),
-            Message::ToolResult {
-                content, images, ..
-            } => (content, images),
-            _ => continue,
-        };
-        let mut drop_count = 0usize;
-        for image in images.iter() {
-            if image_total <= max_images && byte_total <= max_bytes {
-                break;
-            }
-            image_total = image_total.saturating_sub(1);
-            byte_total = byte_total.saturating_sub(image.data.len());
-            drop_count += 1;
-        }
-        for dropped in images.drain(..drop_count) {
-            content.push_str(&format!("\n[image no longer attached: {}]", dropped.label));
-        }
-    }
-}
-
-fn image_count(message: &Message) -> usize {
-    match message {
-        Message::User { images, .. } | Message::ToolResult { images, .. } => images.len(),
-        _ => 0,
-    }
-}
-
-fn message_images(message: &Message) -> &[ImagePart] {
-    match message {
-        Message::User { images, .. } | Message::ToolResult { images, .. } => images,
-        _ => &[],
-    }
-}
-
 /// Unique sticky-routing id for one `run_prompt` invocation.
 ///
 /// Combines process id, a process-local counter, and wall-clock nanos so
@@ -922,56 +847,6 @@ fn new_prompt_session_id() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("cutlass-{}-{}-{}", std::process::id(), counter, nanos)
-}
-
-/// Session history is text-only: raw image bytes would bloat every later
-/// request and the persisted session file for no benefit — the agent can
-/// always re-screenshot the *current* state. A labeled placeholder keeps
-/// the narrative ("looked at the timeline here") without the payload.
-fn strip_images(content: &mut String, images: &mut Vec<ImagePart>) {
-    for image in images.drain(..) {
-        content.push_str(&format!("\n[image: {}]", image.label));
-    }
-}
-
-/// This turn's slice of the conversation (`messages[turn_start..]`: the
-/// user prompt plus every assistant/tool message the loop appended), with
-/// the final text answer added (it isn't pushed during the loop),
-/// `describe_project` results collapsed to a placeholder, and images
-/// stripped to labels (history is text-only). This is what the session
-/// appends to its history so the next prompt remembers the turn.
-fn collect_turn_messages(
-    messages: Vec<Message>,
-    turn_start: usize,
-    describe_call_ids: &[String],
-    final_text: &str,
-) -> Vec<Message> {
-    let mut turn: Vec<Message> = messages.into_iter().skip(turn_start).collect();
-    for message in &mut turn {
-        match message {
-            Message::ToolResult {
-                call_id,
-                content,
-                images,
-            } => {
-                if describe_call_ids.iter().any(|id| id == call_id) {
-                    *content =
-                        "(project state omitted — see the current state in the system message)"
-                            .to_string();
-                }
-                strip_images(content, images);
-            }
-            Message::User { content, images } => strip_images(content, images),
-            _ => {}
-        }
-    }
-    if !final_text.is_empty() {
-        turn.push(Message::Assistant {
-            content: final_text.to_string(),
-            tool_calls: Vec::new(),
-        });
-    }
-    turn
 }
 
 mod action_log;

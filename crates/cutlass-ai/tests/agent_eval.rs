@@ -2176,6 +2176,97 @@ fn read_skill_feeds_the_procedure_then_edits_follow() {
     assert!(host.engine.undo(), "one undo entry for the whole prompt");
 }
 
+/// Within one prompt, only the newest `describe_project` dump stays
+/// full-size in the in-flight message list; older dumps collapse to the
+/// history placeholder so later provider turns don't re-send every dump.
+#[test]
+fn newer_describe_project_collapses_prior_dumps_in_flight() {
+    let (mut host, _, _, clip) = fixture();
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![("call_1", "describe_project", serde_json::json!({}))]),
+        tool_turn(vec![(
+            "call_2",
+            "split_clip",
+            serde_json::json!({ "clip": clip, "at": 5.0 }),
+        )]),
+        tool_turn(vec![("call_3", "describe_project", serde_json::json!({}))]),
+        text_turn("Split and re-inspected."),
+    ]);
+
+    let (outcome, _) = run(
+        &provider,
+        &mut host,
+        &EditorContext::default(),
+        "inspect, split, re-inspect",
+        &AgentConfig::default(),
+    );
+
+    assert_eq!(outcome.status, PromptStatus::Completed);
+    assert_eq!(outcome.actions.len(), 1);
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 4);
+
+    // Turn after the first describe: that dump is still full-size.
+    let first_dump = tool_result_content(&requests[1], "call_1");
+    assert!(
+        first_dump.contains("\"project\""),
+        "first dump is full before a newer one: {first_dump}"
+    );
+    assert!(first_dump.contains("eval.mp4"), "{first_dump}");
+
+    // Turn after the second describe: first is placeholder, second is full.
+    let collapsed = tool_result_content(&requests[3], "call_1");
+    let newest = tool_result_content(&requests[3], "call_3");
+    assert!(
+        collapsed.contains("project state omitted"),
+        "superseded dump collapses in-flight: {collapsed}"
+    );
+    assert!(
+        !collapsed.contains("\"tracks\""),
+        "no full project json in the superseded dump: {collapsed}"
+    );
+    assert!(
+        newest.contains("\"project\""),
+        "newest dump stays full-size: {newest}"
+    );
+    assert!(newest.contains("eval.mp4"), "{newest}");
+
+    // Session history still collapses every describe result.
+    let history_describes: Vec<&str> = outcome
+        .turn_messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult {
+                call_id, content, ..
+            } if call_id == "call_1" || call_id == "call_3" => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(history_describes.len(), 2);
+    for content in history_describes {
+        assert!(
+            content.contains("project state omitted"),
+            "history collapses all describe results: {content}"
+        );
+        assert!(!content.contains("\"tracks\""), "{content}");
+    }
+}
+
+fn tool_result_content<'a>(messages: &'a [Message], call_id: &str) -> &'a str {
+    messages
+        .iter()
+        .find_map(|m| match m {
+            Message::ToolResult {
+                call_id: id,
+                content,
+                ..
+            } if id == call_id => Some(content.as_str()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing tool result for {call_id}"))
+}
+
 /// `describe_project` results are large and the fresh system snapshot
 /// supersedes them, so history keeps only a placeholder — never a full
 /// stale project blob.

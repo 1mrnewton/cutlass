@@ -1,0 +1,406 @@
+// Web / CapCut-style color picker panel (no popup shell — callers own that).
+// Internal HSV(+A) is the source of truth while interacting so hue is not
+// lost when value or saturation collapses to zero.
+
+import { CutlassText } from "text.slint";
+import { CutlassLineInput } from "text-input.slint";
+import { AppStore } from "../store/app-store.slint";
+import { ColorUtil } from "../lib/color-util.slint";
+import { ColorPalette } from "color-palette.slint";
+import {
+    ColorCheckerboard,
+    ColorPickerSvSquare,
+    ColorPickerHueStrip,
+    ColorPickerAlphaStrip,
+} from "color-picker-parts.slint";
+
+component RgbaChannelField inherits VerticalLayout {
+    in property <string> label: "";
+    in-out property <string> text: "0";
+    callback accepted(text: string);
+
+    spacing: 2px;
+    width: 44px;
+
+    CutlassText {
+        text: root.label;
+        style: AppStore.theme.typography.caption;
+        foreground: AppStore.theme.text.muted;
+        horizontal-alignment: center;
+    }
+
+    CutlassLineInput {
+        width: 44px;
+        minimum-field-width: 44px;
+        height: 28px;
+        horizontal-alignment: TextHorizontalAlignment.center;
+        mono: true;
+        commit-on-blur: true;
+        revert-on-escape: true;
+        text <=> root.text;
+        accessibility-label: root.label;
+        accepted(entered) => {
+            root.accepted(entered);
+        }
+    }
+}
+
+export component CutlassColorPicker inherits Rectangle {
+    in-out property <color> current: #ff0000ff;
+    // Persistence comes later; empty hides the row.
+    in property <[color]> recent-colors: [];
+
+    callback preview(color);
+    callback committed(color);
+
+    // HSV(+A) interaction state — not derived from `current` while dragging /
+    // editing so blacks and grays keep their prior hue / sat.
+    private property <float> h: 0.0;
+    private property <float> s: 1.0;
+    private property <float> v: 1.0;
+    private property <float> a: 1.0;
+    private property <bool> interacting: false;
+    private property <bool> syncing-out: false;
+
+    private property <string> hex-text: "#FF0000";
+    private property <string> r-text: "255";
+    private property <string> g-text: "0";
+    private property <string> b-text: "0";
+    private property <string> a-text: "255";
+
+    private property <color> live-color: hsv(root.h, root.s, root.v, root.a);
+
+    width: 244px;
+    background: transparent;
+
+    pure function channel-u8(channel: float) -> int {
+        return round(clamp(channel, 0.0, 255.0));
+    }
+
+    pure function parse-channel(text: string) -> float {
+        if text.is-float() {
+            return clamp(text.to-float(), 0.0, 255.0);
+        }
+        return -1.0;
+    }
+
+    function refresh-readouts() {
+        root.hex-text = "#" + ColorUtil.color-to-hex(root.live-color);
+        root.r-text = "\{root.channel-u8(root.live-color.red)}";
+        root.g-text = "\{root.channel-u8(root.live-color.green)}";
+        root.b-text = "\{root.channel-u8(root.live-color.blue)}";
+        root.a-text = "\{root.channel-u8(root.live-color.alpha)}";
+    }
+
+    function push-preview() {
+        root.syncing-out = true;
+        root.current = root.live-color;
+        root.syncing-out = false;
+        root.refresh-readouts();
+        root.preview(root.live-color);
+    }
+
+    function push-commit() {
+        root.syncing-out = true;
+        root.current = root.live-color;
+        root.syncing-out = false;
+        root.refresh-readouts();
+        root.committed(root.live-color);
+    }
+
+    function sync-from-current() {
+        if root.interacting || root.syncing-out {
+            return;
+        }
+        let comps = ColorUtil.rgb-to-hsv-preserving(
+            root.current.red / 255.0,
+            root.current.green / 255.0,
+            root.current.blue / 255.0,
+            root.h,
+            root.s,
+        );
+        root.h = comps.h;
+        root.s = comps.s;
+        root.v = comps.v;
+        root.a = root.current.alpha / 255.0;
+        root.refresh-readouts();
+    }
+
+    function apply-rgba-channel(which: int, text: string) {
+        let parsed = root.parse-channel(text);
+        if parsed < 0.0 {
+            root.refresh-readouts();
+            return;
+        }
+        let r = which == 0 ? parsed : root.live-color.red;
+        let g = which == 1 ? parsed : root.live-color.green;
+        let b = which == 2 ? parsed : root.live-color.blue;
+        let alpha = which == 3 ? parsed : root.live-color.alpha;
+        root.interacting = true;
+        let comps = ColorUtil.rgb-to-hsv-preserving(
+            r / 255.0,
+            g / 255.0,
+            b / 255.0,
+            root.h,
+            root.s,
+        );
+        root.h = comps.h;
+        root.s = comps.s;
+        root.v = comps.v;
+        root.a = alpha / 255.0;
+        root.push-commit();
+        root.interacting = false;
+    }
+
+    init => {
+        root.sync-from-current();
+    }
+
+    changed current => {
+        root.sync-from-current();
+    }
+
+    VerticalLayout {
+        spacing: AppStore.theme.metrics.spacing.sm;
+        padding: 0px;
+
+        // Live well + hex
+        HorizontalLayout {
+            spacing: AppStore.theme.metrics.spacing.sm;
+            height: 28px;
+
+            Rectangle {
+                width: 28px;
+                height: 28px;
+                border-radius: AppStore.theme.metrics.radius.sm;
+                clip: true;
+                border-width: 1px;
+                border-color: #ffffff24;
+
+                ColorCheckerboard {
+                    width: 100%;
+                    height: 100%;
+                    cell: 4px;
+                }
+
+                Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: root.live-color;
+                }
+            }
+
+            CutlassLineInput {
+                horizontal-stretch: 1;
+                height: 28px;
+                mono: true;
+                commit-on-blur: true;
+                revert-on-escape: true;
+                text <=> root.hex-text;
+                accessibility-label: "Hex color";
+                accepted(entered) => {
+                    root.interacting = true;
+                    if ColorUtil.is-valid-hex(entered) {
+                        let c = ColorUtil.hex-to-color(entered);
+                        let comps = ColorUtil.rgb-to-hsv-preserving(
+                            c.red / 255.0,
+                            c.green / 255.0,
+                            c.blue / 255.0,
+                            root.h,
+                            root.s,
+                        );
+                        root.h = comps.h;
+                        root.s = comps.s;
+                        root.v = comps.v;
+                        root.a = c.alpha / 255.0;
+                        root.push-commit();
+                    } else {
+                        root.refresh-readouts();
+                    }
+                    root.interacting = false;
+                }
+            }
+        }
+
+        ColorPickerSvSquare {
+            hue: root.h;
+            saturation <=> root.s;
+            value <=> root.v;
+            preview(s, v) => {
+                root.interacting = true;
+                root.s = s;
+                root.v = v;
+                root.push-preview();
+            }
+            committed(s, v) => {
+                root.s = s;
+                root.v = v;
+                root.push-commit();
+                root.interacting = false;
+            }
+        }
+
+        ColorPickerHueStrip {
+            hue <=> root.h;
+            preview(h) => {
+                root.interacting = true;
+                root.h = h;
+                root.push-preview();
+            }
+            committed(h) => {
+                root.h = h;
+                root.push-commit();
+                root.interacting = false;
+            }
+        }
+
+        ColorPickerAlphaStrip {
+            hue: root.h;
+            saturation: root.s;
+            value: root.v;
+            alpha <=> root.a;
+            preview(a) => {
+                root.interacting = true;
+                root.a = a;
+                root.push-preview();
+            }
+            committed(a) => {
+                root.a = a;
+                root.push-commit();
+                root.interacting = false;
+            }
+        }
+
+        // RGBA 0–255
+        HorizontalLayout {
+            spacing: AppStore.theme.metrics.spacing.xs;
+            alignment: space-between;
+
+            RgbaChannelField {
+                label: "R";
+                text <=> root.r-text;
+                accepted(t) => {
+                    root.apply-rgba-channel(0, t);
+                }
+            }
+            RgbaChannelField {
+                label: "G";
+                text <=> root.g-text;
+                accepted(t) => {
+                    root.apply-rgba-channel(1, t);
+                }
+            }
+            RgbaChannelField {
+                label: "B";
+                text <=> root.b-text;
+                accepted(t) => {
+                    root.apply-rgba-channel(2, t);
+                }
+            }
+            RgbaChannelField {
+                label: "A";
+                text <=> root.a-text;
+                accepted(t) => {
+                    root.apply-rgba-channel(3, t);
+                }
+            }
+        }
+
+        if root.recent-colors.length > 0: VerticalLayout {
+            spacing: AppStore.theme.metrics.spacing.xs;
+
+            CutlassText {
+                text: "Recent";
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.muted;
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+                for swatch-color in root.recent-colors: Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    clip: true;
+                    border-width: 1px;
+                    border-color: #ffffff24;
+
+                    ColorCheckerboard {
+                        width: 100%;
+                        height: 100%;
+                        cell: 4px;
+                    }
+
+                    Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        background: swatch-color;
+                    }
+
+                    TouchArea {
+                        clicked => {
+                            root.interacting = true;
+                            let comps = ColorUtil.rgb-to-hsv-preserving(
+                                swatch-color.red / 255.0,
+                                swatch-color.green / 255.0,
+                                swatch-color.blue / 255.0,
+                                root.h,
+                                root.s,
+                            );
+                            root.h = comps.h;
+                            root.s = comps.s;
+                            root.v = comps.v;
+                            root.a = swatch-color.alpha / 255.0;
+                            root.push-commit();
+                            root.interacting = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        VerticalLayout {
+            spacing: AppStore.theme.metrics.spacing.xs;
+
+            CutlassText {
+                text: "Presets";
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.muted;
+            }
+
+            for row in ColorPalette.swatches: HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                for swatch-color in row: Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: swatch-color;
+                    border-width: swatch-color == root.live-color ? 2px : 1px;
+                    border-color: swatch-color == root.live-color
+                        ? AppStore.theme.accent.primary
+                        : #ffffff24;
+
+                    TouchArea {
+                        clicked => {
+                            root.interacting = true;
+                            let comps = ColorUtil.rgb-to-hsv-preserving(
+                                swatch-color.red / 255.0,
+                                swatch-color.green / 255.0,
+                                swatch-color.blue / 255.0,
+                                root.h,
+                                root.s,
+                            );
+                            root.h = comps.h;
+                            root.s = comps.s;
+                            root.v = comps.v;
+                            root.a = swatch-color.alpha / 255.0;
+                            root.push-commit();
+                            root.interacting = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

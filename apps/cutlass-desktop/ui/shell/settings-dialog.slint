@@ -15,6 +15,7 @@ import {
     SubtleButton,
     CutlassDropdown,
     CutlassScrollView,
+    CutlassColorPicker,
 } from "../components/index.slint";
 import { AppStore } from "../store/index.slint";
 import { AiModelRow, CacheUsageRow, SettingsBackend } from "../lib/settings-backend.slint";
@@ -235,6 +236,30 @@ component CacheUsageCard inherits Rectangle {
                 clicked => {
                     SettingsBackend.relocate-cache(root.cache.id);
                 }
+            }
+        }
+    }
+}
+
+// Demo host for the panel-only color picker (Settings → Appearance).
+component ColorPickerDemo inherits Rectangle {
+    private property <color> draft: #3bb0ffff;
+    private property <[color]> recent: [#ff3b3bff, #3bff6eff, #3b6eff80];
+
+    border-radius: AppStore.theme.metrics.radius.md;
+    background: AppStore.theme.panel.background;
+    border-width: 1px;
+    border-color: #ffffff1f;
+
+    VerticalLayout {
+        padding: AppStore.theme.metrics.spacing.md;
+
+        CutlassColorPicker {
+            current <=> root.draft;
+            recent-colors: root.recent;
+            preview(_) => { }
+            committed(c) => {
+                root.draft = c;
             }
         }
     }
@@ -691,6 +716,25 @@ export component SettingsDialog inherits Rectangle {
                                     }
                                 }
                             }
+
+                            // Temporary demo host for `CutlassColorPicker`
+                            // (panel only — no consumer swap yet).
+                            Rectangle {
+                                height: 1px;
+                                background: AppStore.theme.surface.divider;
+                            }
+
+                            CutlassText {
+                                text: "Color picker (preview)";
+                                style: AppStore.theme.typography.heading-sm;
+                                foreground: AppStore.theme.text.primary;
+                            }
+
+                            Hint {
+                                text: "Exercise the new picker here. Existing color wells still use the 24-swatch popup.";
+                            }
+
+                            ColorPickerDemo { }
                         }
 
                         // --- Storage & cache ------------------------------

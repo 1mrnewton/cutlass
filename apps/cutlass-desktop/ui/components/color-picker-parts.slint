@@ -1,0 +1,264 @@
+// Building blocks for `CutlassColorPicker`: SV square, hue / alpha strips,
+// and a cheap checkerboard for the alpha rail.
+
+import { AppStore } from "../store/app-store.slint";
+
+// Light/dark tile grid behind translucent color samples.
+export component ColorCheckerboard inherits Rectangle {
+    in property <length> cell: 6px;
+    clip: true;
+    background: #d0d0d0;
+
+    private property <int> cols: max(1, round(self.width / self.cell));
+    private property <int> rows: max(1, round(self.height / self.cell));
+    private property <int> tile-count: root.cols * root.rows;
+
+    for _[idx] in root.tile-count: Rectangle {
+        x: mod(idx, root.cols) * root.cell;
+        y: (idx / root.cols) * root.cell;
+        width: root.cell;
+        height: root.cell;
+        background: mod(mod(idx, root.cols) + (idx / root.cols), 2) == 0
+            ? #d0d0d0
+            : #8a8a8a;
+    }
+}
+
+// Draggable circular thumb shared by SV / hue / alpha controls.
+export component ColorPickerThumb inherits Rectangle {
+    in property <color> fill: #ffffff;
+    width: 14px;
+    height: 14px;
+    border-radius: self.width / 2;
+    background: root.fill;
+    border-width: 2px;
+    border-color: #ffffff;
+    drop-shadow-blur: 2px;
+    drop-shadow-color: #00000066;
+}
+
+// Saturation × value square for the active hue.
+export component ColorPickerSvSquare inherits Rectangle {
+    in-out property <float> saturation: 1.0;
+    in-out property <float> value: 1.0;
+    in property <float> hue: 0.0;
+    in property <bool> enabled: true;
+
+    callback preview(s: float, v: float);
+    callback committed(s: float, v: float);
+
+    private property <bool> dragging: false;
+    private property <length> thumb-size: 14px;
+
+    width: 100%;
+    height: 180px;
+    border-radius: AppStore.theme.metrics.radius.md;
+    clip: true;
+
+    // White → hue horizontally, then transparent → black vertically.
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: @linear-gradient(90deg, #ffffff 0%, hsv(root.hue, 1.0, 1.0) 100%);
+    }
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: @linear-gradient(180deg, #00000000 0%, #000000 100%);
+    }
+
+    ColorPickerThumb {
+        x: clamp(root.saturation, 0.0, 1.0) * (parent.width - self.width);
+        y: (1.0 - clamp(root.value, 0.0, 1.0)) * (parent.height - self.height);
+        fill: hsv(root.hue, root.saturation, root.value);
+    }
+
+    function apply-at(mx: length, my: length) {
+        let nx = root.width <= 0px ? 0.0 : clamp(mx / root.width, 0.0, 1.0);
+        let ny = root.height <= 0px ? 0.0 : clamp(my / root.height, 0.0, 1.0);
+        // Matches `color_math::sv_from_norm`.
+        root.saturation = nx;
+        root.value = 1.0 - ny;
+        root.preview(root.saturation, root.value);
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.crosshair;
+
+        pointer-event(event) => {
+            if event.button != PointerEventButton.left {
+                return;
+            }
+            if event.kind == PointerEventKind.down {
+                root.dragging = true;
+                root.apply-at(self.mouse-x, self.mouse-y);
+            } else if event.kind == PointerEventKind.up && root.dragging {
+                root.dragging = false;
+                root.committed(root.saturation, root.value);
+            } else if event.kind == PointerEventKind.cancel && root.dragging {
+                root.dragging = false;
+                root.committed(root.saturation, root.value);
+            }
+        }
+
+        moved => {
+            if root.dragging {
+                root.apply-at(self.mouse-x, self.mouse-y);
+            }
+        }
+    }
+}
+
+// Horizontal rainbow hue rail.
+export component ColorPickerHueStrip inherits Rectangle {
+    in-out property <float> hue: 0.0;
+    in property <bool> enabled: true;
+
+    callback preview(h: float);
+    callback committed(h: float);
+
+    private property <bool> dragging: false;
+
+    width: 100%;
+    height: 14px;
+    border-radius: self.height / 2;
+    clip: true;
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: parent.border-radius;
+        background: @linear-gradient(
+            90deg,
+            hsv(0, 1, 1) 0%,
+            hsv(60, 1, 1) 16.67%,
+            hsv(120, 1, 1) 33.33%,
+            hsv(180, 1, 1) 50%,
+            hsv(240, 1, 1) 66.67%,
+            hsv(300, 1, 1) 83.33%,
+            hsv(360, 1, 1) 100%
+        );
+    }
+
+    ColorPickerThumb {
+        x: (root.hue / 360.0) * (parent.width - self.width);
+        y: (parent.height - self.height) / 2;
+        fill: hsv(root.hue, 1.0, 1.0);
+    }
+
+    function apply-at(mx: length) {
+        let nx = root.width <= 0px ? 0.0 : clamp(mx / root.width, 0.0, 1.0);
+        // Matches `color_math::hue_from_norm`.
+        root.hue = nx * 360.0;
+        if root.hue >= 360.0 {
+            root.hue = 0.0;
+        }
+        root.preview(root.hue);
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+
+        pointer-event(event) => {
+            if event.button != PointerEventButton.left {
+                return;
+            }
+            if event.kind == PointerEventKind.down {
+                root.dragging = true;
+                root.apply-at(self.mouse-x);
+            } else if event.kind == PointerEventKind.up && root.dragging {
+                root.dragging = false;
+                root.committed(root.hue);
+            } else if event.kind == PointerEventKind.cancel && root.dragging {
+                root.dragging = false;
+                root.committed(root.hue);
+            }
+        }
+
+        moved => {
+            if root.dragging {
+                root.apply-at(self.mouse-x);
+            }
+        }
+    }
+}
+
+// Horizontal alpha rail over a checkerboard.
+export component ColorPickerAlphaStrip inherits Rectangle {
+    in-out property <float> alpha: 1.0;
+    in property <float> hue: 0.0;
+    in property <float> saturation: 1.0;
+    in property <float> value: 1.0;
+    in property <bool> enabled: true;
+
+    callback preview(a: float);
+    callback committed(a: float);
+
+    private property <bool> dragging: false;
+    private property <color> opaque: hsv(root.hue, root.saturation, root.value, 1.0);
+
+    width: 100%;
+    height: 14px;
+    border-radius: self.height / 2;
+    clip: true;
+
+    ColorCheckerboard {
+        width: 100%;
+        height: 100%;
+        cell: 5px;
+    }
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: parent.border-radius;
+        background: @linear-gradient(
+            90deg,
+            hsv(root.hue, root.saturation, root.value, 0.0) 0%,
+            root.opaque 100%
+        );
+    }
+
+    ColorPickerThumb {
+        x: clamp(root.alpha, 0.0, 1.0) * (parent.width - self.width);
+        y: (parent.height - self.height) / 2;
+        fill: hsv(root.hue, root.saturation, root.value, root.alpha);
+    }
+
+    function apply-at(mx: length) {
+        let nx = root.width <= 0px ? 0.0 : clamp(mx / root.width, 0.0, 1.0);
+        // Matches `color_math::alpha_from_norm`.
+        root.alpha = nx;
+        root.preview(root.alpha);
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+
+        pointer-event(event) => {
+            if event.button != PointerEventButton.left {
+                return;
+            }
+            if event.kind == PointerEventKind.down {
+                root.dragging = true;
+                root.apply-at(self.mouse-x);
+            } else if event.kind == PointerEventKind.up && root.dragging {
+                root.dragging = false;
+                root.committed(root.alpha);
+            } else if event.kind == PointerEventKind.cancel && root.dragging {
+                root.dragging = false;
+                root.committed(root.alpha);
+            }
+        }
+
+        moved => {
+            if root.dragging {
+                root.apply-at(self.mouse-x);
+            }
+        }
+    }
+}

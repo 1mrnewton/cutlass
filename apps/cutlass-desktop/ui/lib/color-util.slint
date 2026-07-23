@@ -16,6 +16,11 @@ export global ColorUtil {
     // Canonical `RRGGBB`, or `RRGGBBAA` when alpha < 255. No leading `#`.
     pure callback color-to-hex(c: color) -> string;
 
+    // Push `c` onto the app-wide recent list (dedupe, cap) and persist it
+    // to `~/.cutlass/config.toml`. Called from `CutlassColorSwatch` on every
+    // commit (picker or eyedropper).
+    callback record-recent(c: color);
+
     // RGB channels in `[0, 1]`. Achromatic inputs report `h == 0`.
     pure callback rgb-to-hsv(r: float, g: float, b: float) -> HsvComponents;
     // Same conversion, but keeps `prev-h` / `prev-s` when the RGB is

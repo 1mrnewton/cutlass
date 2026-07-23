@@ -468,6 +468,49 @@ fn save_round_trips_and_preserves_comments_and_unknown_tables() {
 }
 
 #[test]
+fn recent_colors_round_trip_and_tolerate_bad_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+[appearance]
+theme = "ember"
+recent_colors = ["FF0000", "not-a-color", "00FF00", "FF0000", "0000FF80"]
+"#,
+    )
+    .unwrap();
+
+    let s = load(&path).unwrap();
+    assert_eq!(
+        s.appearance.recent_colors,
+        vec![[0xFF, 0, 0, 0xFF], [0, 0xFF, 0, 0xFF], [0, 0, 0xFF, 0x80]]
+    );
+
+    let mut next = s;
+    push_recent(&mut next.appearance.recent_colors, [1, 2, 3, 255]);
+    save(&path, &next).unwrap();
+
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("recent_colors"));
+    assert!(raw.contains("010203"));
+
+    let reloaded = load(&path).unwrap();
+    assert_eq!(reloaded.appearance.recent_colors[0], [1, 2, 3, 255]);
+    assert_eq!(reloaded.appearance.theme, ThemeChoice::Ember);
+
+    // Clearing the list removes the key entirely.
+    let mut cleared = reloaded;
+    cleared.appearance.recent_colors.clear();
+    save(&path, &cleared).unwrap();
+    let cleared_raw = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !cleared_raw.contains("recent_colors"),
+        "empty list should drop the key: {cleared_raw}"
+    );
+}
+
+#[test]
 fn preserves_tables_from_other_builds() {
     // A config written by a build that still had a `[cache]` table (or any
     // future section) must survive a save from this one untouched.

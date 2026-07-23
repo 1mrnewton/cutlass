@@ -31,10 +31,12 @@ pub(crate) fn wire_ui(
     audio_system: &crate::audio::AudioSystem,
     interaction_gate: &Arc<crate::interaction::InteractionGate>,
     strip_worker: &crate::strips::StripWorker,
+    config_path: PathBuf,
+    recent_colors: &[cutlass_settings::Rgba],
 ) {
     // --- pure UI backends (no engine involved) ----------------------------
 
-    crate::wire_color::wire_color(app);
+    crate::wire_color::wire_color(app, config_path, recent_colors);
 
     let timeline_lib = app.global::<TimelineLib>();
     timeline_lib.on_sequence_duration(timeline::sequence_duration);

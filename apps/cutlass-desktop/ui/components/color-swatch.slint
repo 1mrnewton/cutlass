@@ -12,6 +12,7 @@
 import { AppStore } from "../store/app-store.slint";
 import { AppState } from "../state.slint";
 import { EyedropperStore } from "../store/eyedropper-store.slint";
+import { ColorUtil } from "../lib/color-util.slint";
 import { CutlassColorPicker } from "color-picker.slint";
 import { ColorCheckerboard } from "color-picker-parts.slint";
 
@@ -20,12 +21,19 @@ export component CutlassColorSwatch inherits Rectangle {
     in property <bool> enabled: true;
     // When false, the picker hides the alpha strip / A channel (opaque models).
     in property <bool> enable-alpha: true;
-    // Persistence comes later; empty hides the Recent row.
-    in property <[color]> recent-colors: [];
+    // Defaults to the app-wide recent list; empty hides the Recent row.
+    in property <[color]> recent-colors: AppStore.recent-colors;
 
     callback changed(value: color);
     callback preview(value: color);
     callback cancelled();
+
+    function commit-color(c: color) {
+        root.gesturing = false;
+        root.live = c;
+        ColorUtil.record-recent(c);
+        root.changed(c);
+    }
 
     width: 104px;
     height: 28px;
@@ -89,10 +97,8 @@ export component CutlassColorSwatch inherits Rectangle {
 
     changed eyedropper-commit-watch => {
         if (root.my-token != 0 && EyedropperStore.consumer-token == root.my-token) {
-            root.gesturing = false;
-            root.live = EyedropperStore.commit-color;
             root.my-token = 0;
-            root.changed(EyedropperStore.commit-color);
+            root.commit-color(EyedropperStore.commit-color);
         }
     }
 
@@ -184,9 +190,7 @@ export component CutlassColorSwatch inherits Rectangle {
                         root.preview(c);
                     }
                     committed(c) => {
-                        root.gesturing = false;
-                        root.live = c;
-                        root.changed(c);
+                        root.commit-color(c);
                     }
                     eyedropper-requested => {
                         // Clear any in-flight picker preview, then close and

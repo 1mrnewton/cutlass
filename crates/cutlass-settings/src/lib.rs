@@ -32,6 +32,7 @@
 //!
 //! [appearance]
 //! theme = "dark-blue"              # "default" | "ember" | "dark-blue"
+//! # recent_colors = ["FF3B3B", "3BB0FF80"]  # most-recent-first hex swatches
 //!
 //! [storage]
 //! root = "/Volumes/Media/Cutlass"  # optional; absolute paths only
@@ -67,7 +68,11 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{Array, DocumentMut, Item, Table, value};
+
+mod recent_colors;
+
+pub use recent_colors::{MAX_RECENT_COLORS, Rgba, format_hex, parse_hex, push_recent};
 
 /// Which bundled theme the shell renders. The variant order matches the
 /// `index()` the UI dropdown uses; `DarkBlue` is the shipped default.
@@ -308,10 +313,12 @@ impl AiSettings {
 }
 
 /// The `[appearance]` table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AppearanceSettings {
     /// The active bundled theme.
     pub theme: ThemeChoice,
+    /// Most-recent-first picker swatches (capped at [`MAX_RECENT_COLORS`]).
+    pub recent_colors: Vec<Rgba>,
 }
 
 /// One `[providers.<name>]` entry: a BYOK key for a third-party service
@@ -875,12 +882,29 @@ impl Settings {
             }
         }
 
-        if let Some(t) = section(doc, "appearance")
-            && let Some(theme) = string_at(t, "theme")
+        if let Some(t) = section(doc, "appearance") {
+            if let Some(theme) = string_at(t, "theme")
                 .as_deref()
                 .and_then(ThemeChoice::from_key)
-        {
-            s.appearance.theme = theme;
+            {
+                s.appearance.theme = theme;
+            }
+            if let Some(arr) = t.get("recent_colors").and_then(Item::as_array) {
+                // File order is most-recent-first. Skip invalid/dupe entries.
+                let mut colors = Vec::new();
+                for item in arr.iter() {
+                    if let Some(hex) = item.as_str()
+                        && let Some(rgba) = parse_hex(hex)
+                        && !colors.contains(&rgba)
+                    {
+                        colors.push(rgba);
+                    }
+                    if colors.len() >= MAX_RECENT_COLORS {
+                        break;
+                    }
+                }
+                s.appearance.recent_colors = colors;
+            }
         }
 
         if let Some(t) = section(doc, "storage") {
@@ -1010,6 +1034,15 @@ impl Settings {
         {
             let t = ensure_table(doc, "appearance");
             set_str(t, "theme", self.appearance.theme.key());
+            if self.appearance.recent_colors.is_empty() {
+                t.remove("recent_colors");
+            } else {
+                let mut arr = Array::new();
+                for rgba in &self.appearance.recent_colors {
+                    arr.push(format_hex(*rgba));
+                }
+                t["recent_colors"] = Item::Value(arr.into());
+            }
         }
         {
             let has_path_overrides = storage_paths.iter().any(|(_, value)| value.is_some());

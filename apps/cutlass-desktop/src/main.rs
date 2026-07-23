@@ -229,7 +229,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     wire_settings(
         &app,
-        config_path,
+        config_path.clone(),
         &app_settings,
         download_quota_mib,
         &engine.cache_registry,
@@ -242,6 +242,8 @@ fn main() -> Result<(), slint::PlatformError> {
         &engine.audio_system,
         &engine.interaction_gate,
         &engine.strip_worker,
+        config_path,
+        &app_settings.appearance.recent_colors,
     );
 
     wire_preview(&app, &engine.preview_worker);

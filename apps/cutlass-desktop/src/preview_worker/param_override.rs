@@ -64,35 +64,34 @@ pub(super) fn clear_param_override(
     }
 }
 
-/// Coalesce a burst of [`WorkerMsg::ParamOverride`] messages: latest value
-/// per `(clip, param)` wins, then at most one frame build. Mutating messages
-/// drained from the queue are dispatched in order; a pending override is
-/// applied *before* a drained mutation that might clear it (same rule as
-/// [`WorkerMsg::TransformOverride`]).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn coalesce_param_overrides(
-    engine: &mut Engine,
-    clipboard: &mut Option<Vec<ClipboardClip>>,
-    main_magnet: &mut bool,
-    linkage: &mut bool,
-    clip: String,
-    param: ClipParam,
-    value: ParamValue,
+/// One mid-burst non-override: flush this batch (if any) onto the engine,
+/// then dispatch `msg`. Produced by [`drain_param_override_queue`].
+struct ParamOverrideDrainStep {
+    /// Overrides to apply *before* `msg`. Empty when the accumulator was
+    /// already flushed (or never dirtied) since the last step.
+    flush: HashMap<(String, ClipParam), ParamValue>,
+    msg: WorkerMsg,
+}
+
+/// Drain the worker inbox for a param-override coalesce burst.
+///
+/// Returns `(tick, dirty, pending, steps)`. Each step's `flush` map is a
+/// snapshot taken *before* the accumulator is cleared — callers must apply
+/// `flush` then dispatch `msg`. Leaving entries in `pending` across a
+/// clearing dispatch is what resurrects committed overrides
+/// (see `coalesce_does_not_resurrect_committed_override`).
+fn drain_param_override_queue(
+    mut pending: HashMap<(String, ClipParam), ParamValue>,
+    mut dirty: bool,
     mut tick: i64,
     req_rx: &Receiver<WorkerMsg>,
-    tl_rate: Rational,
-    preview_weak: &slint::Weak<PreviewStore<'static>>,
-    fit: &FrameFit,
-    cache: &FrameCache,
-    sprite_mode: &Cell<bool>,
-    export_state: &ExportJobState,
-    ui: &UiSink,
-) -> i64 {
-    // Pending map: latest value per (clip, param). Seeded with the head msg.
-    let mut pending: HashMap<(String, ClipParam), ParamValue> = HashMap::new();
-    pending.insert((clip, param), value);
-    let mut dirty = true;
-
+) -> (
+    i64,
+    bool,
+    HashMap<(String, ClipParam), ParamValue>,
+    Vec<ParamOverrideDrainStep>,
+) {
+    let mut steps = Vec::new();
     while let Ok(next) = req_rx.try_recv() {
         match next {
             WorkerMsg::Frame(latest) => tick = latest,
@@ -107,25 +106,67 @@ pub(super) fn coalesce_param_overrides(
                 dirty = true;
             }
             other => {
-                if std::mem::take(&mut dirty) {
-                    flush_param_overrides(engine, &pending, Some(&ui.audio));
-                }
-                dispatch(
-                    engine,
-                    clipboard,
-                    main_magnet,
-                    linkage,
-                    other,
-                    tl_rate,
-                    preview_weak,
-                    fit,
-                    cache,
-                    sprite_mode,
-                    export_state,
-                    ui,
-                );
+                let flush = if std::mem::take(&mut dirty) {
+                    // Clear so a later final flush cannot resurrect overrides
+                    // that `other` is about to commit+clear.
+                    std::mem::take(&mut pending)
+                } else {
+                    HashMap::new()
+                };
+                steps.push(ParamOverrideDrainStep { flush, msg: other });
             }
         }
+    }
+    (tick, dirty, pending, steps)
+}
+
+/// Coalesce a burst of [`WorkerMsg::ParamOverride`] messages: latest value
+/// per `(clip, param)` wins, then at most one frame build. Mutating messages
+/// drained from the queue are dispatched in order; a pending override is
+/// applied *before* a drained mutation that might clear it (same rule as
+/// [`WorkerMsg::TransformOverride`]).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn coalesce_param_overrides(
+    engine: &mut Engine,
+    clipboard: &mut Option<Vec<ClipboardClip>>,
+    main_magnet: &mut bool,
+    linkage: &mut bool,
+    clip: String,
+    param: ClipParam,
+    value: ParamValue,
+    tick: i64,
+    req_rx: &Receiver<WorkerMsg>,
+    tl_rate: Rational,
+    preview_weak: &slint::Weak<PreviewStore<'static>>,
+    fit: &FrameFit,
+    cache: &FrameCache,
+    sprite_mode: &Cell<bool>,
+    export_state: &ExportJobState,
+    ui: &UiSink,
+) -> i64 {
+    // Pending map: latest value per (clip, param). Seeded with the head msg.
+    let mut pending: HashMap<(String, ClipParam), ParamValue> = HashMap::new();
+    pending.insert((clip, param), value);
+    let (tick, dirty, pending, steps) = drain_param_override_queue(pending, true, tick, req_rx);
+
+    for step in steps {
+        if !step.flush.is_empty() {
+            flush_param_overrides(engine, &step.flush, Some(&ui.audio));
+        }
+        dispatch(
+            engine,
+            clipboard,
+            main_magnet,
+            linkage,
+            step.msg,
+            tl_rate,
+            preview_weak,
+            fit,
+            cache,
+            sprite_mode,
+            export_state,
+            ui,
+        );
     }
 
     if dirty {
@@ -854,5 +895,89 @@ mod tests {
         };
         assert!((style.letter_spacing - 12.0).abs() < 1e-3);
         assert!((style.line_height - 90.0 * 1.8).abs() < 1e-2);
+    }
+
+    /// Regression: mid-loop flush must clear the accumulator. Sequence
+    /// `Override(A) → SetParamConstant(A) → Override(B)` in one drain used
+    /// to re-install stale A on the final flush (preview freeze +
+    /// `has_live_overrides()` stayed true). Drives the shared
+    /// [`drain_param_override_queue`] against a real engine (dispatch stubbed
+    /// to the clear+commit SetParamConstant does — no Slint UiSink required).
+    #[test]
+    fn coalesce_does_not_resurrect_committed_override() {
+        use cutlass_commands::{Command, EditCommand};
+        use crossbeam_channel::unbounded;
+
+        let (mut engine, clip, clip_s, r) = engine_with_chroma();
+        let param_a = ClipParam::Look {
+            param: LookParam::ChromaStrength,
+        };
+        let param_b = ClipParam::Opacity;
+        let committed_a = ParamValue::Scalar(0.55);
+        let override_b = ParamValue::Scalar(0.3);
+
+        let (tx, rx) = unbounded();
+        // Head Override(A) already seeded into `pending` below; queue holds
+        // the mid-burst SetParamConstant(A) then Override(B).
+        tx.send(WorkerMsg::SetParamConstant {
+            clip: clip_s.clone(),
+            param: param_a,
+            value: committed_a,
+        })
+        .unwrap();
+        tx.send(WorkerMsg::ParamOverride {
+            clip: clip_s.clone(),
+            param: param_b,
+            value: override_b,
+            tick: 2,
+        })
+        .unwrap();
+        drop(tx);
+
+        let mut pending = HashMap::new();
+        pending.insert((clip_s, param_a), ParamValue::Scalar(0.9));
+        let (tick, dirty, pending, steps) = drain_param_override_queue(pending, true, 1, &rx);
+
+        for step in steps {
+            if !step.flush.is_empty() {
+                flush_param_overrides(&mut engine, &step.flush, None);
+            }
+            match step.msg {
+                WorkerMsg::SetParamConstant {
+                    clip: c,
+                    param: p,
+                    value: v,
+                } => {
+                    clear_param_override(&mut engine, &c, p, None);
+                    engine
+                        .apply(Command::Edit(EditCommand::SetParamConstant {
+                            clip: parse_raw_id(&c).map(ClipId::from_raw).unwrap(),
+                            param: p,
+                            value: v,
+                        }))
+                        .expect("commit A");
+                }
+                _ => panic!("unexpected drained non-override message"),
+            }
+        }
+        assert_eq!(tick, 2);
+        assert!(dirty, "Override(B) left the accumulator dirty");
+        if dirty {
+            flush_param_overrides(&mut engine, &pending, None);
+        }
+
+        assert_eq!(
+            engine.param_overrides().get(clip, param_a),
+            None,
+            "committed A must not be resurrected"
+        );
+        assert_eq!(
+            engine.param_overrides().get(clip, param_b),
+            Some(override_b),
+            "B override must remain"
+        );
+        assert!(engine.has_live_overrides());
+        let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("plain");
+        assert!((plain.layers[0].chroma_key.unwrap().strength - 0.55).abs() < f32::EPSILON);
     }
 }

@@ -348,9 +348,12 @@ stock machine with local models.
       stdio, secrets, server lifetime) must be resolved and its status line
       flipped before implementation starts; the fenced `mcp__` namespace
       slots into the Phase 0 dispatch rule unchanged.
-- [ ] **MCP server** (Cutlass tools for external agents): expose Workspace-
+- [x] **MCP server** (Cutlass tools for external agents): expose Workspace-
       tier reads and validated-edit submission over MCP so external agents
-      script Cutlass with the same trust model — never a raw engine door.
+      script Cutlass with the same trust model — never a raw engine door
+      (headless stdio v1: crates/cutlass-mcp — reads, validated edit batches,
+      frame grabs, export; desktop-session attach and streamable HTTP still
+      open).
 - [ ] **Push-to-talk voice input**: hold-to-talk in the agent panel,
       transcribed locally by the 3b whisper stack into the prompt box —
       dictation, not a wake word.

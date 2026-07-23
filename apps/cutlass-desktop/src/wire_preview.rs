@@ -611,9 +611,7 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
                     transform,
                     i64::from(tick),
                 );
-                session
-                    .overlay_mirror()
-                    .map(|(id, t)| (id.to_string(), *t))
+                session.overlay_mirror().map(|(id, t)| (id.to_string(), *t))
             };
             // Mirror session overlay into PreviewStore so on-canvas
             // selection/handles follow inspector slider drags the same way

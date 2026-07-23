@@ -2,6 +2,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Mask shape kinds (CapCut mask presets).
+///
+/// `mirror` is a parallel band (thickness = `size[0]` layer-width fraction)
+/// centered on the mask line at `rotation`, not a half-plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WireMaskKind {
@@ -27,7 +30,8 @@ pub struct WireMask {
     /// (`[0,0]` centered, `[0.5,0]` right edge). Default `[0,0]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub center: Option<[f32; 2]>,
-    /// Size as layer-size fractions (`[1,1]` covers layer). Default `[1,1]`.
+    /// Size as layer-size fractions (`[1,1]` covers layer). For `mirror`,
+    /// `size[0]` is band thickness (width fraction). Default `[1,1]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<[f32; 2]>,
     /// Rotation degrees CW about mask center. Default 0.

@@ -9,6 +9,14 @@ use crate::param::{Easing, Param};
 use super::{default_zero_param, is_false, is_zero_param, validate_unit_param};
 
 /// Mask shapes (CapCut mask panel). Serialized by snake_case id.
+///
+/// - [`MaskKind::Linear`]: soft half-plane through the mask center (right
+///   side kept by default; `invert` flips).
+/// - [`MaskKind::Mirror`]: parallel **band** of thickness `size[0]` (layer
+///   width fraction) centered on the mask center line at `rotation`; both
+///   edges feather symmetrically; `invert` keeps outside the band.
+/// - [`MaskKind::Circle`] / [`MaskKind::Rectangle`] / [`MaskKind::Heart`] /
+///   [`MaskKind::Star`]: closed shapes sized by `size`, rotated about center.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaskKind {
@@ -49,7 +57,8 @@ pub struct Mask {
     )]
     pub center: Param<[f32; 2]>,
     /// Mask size as a fraction of the layer's size per axis. `[1,1]` covers the
-    /// layer exactly (legacy behavior).
+    /// layer exactly (legacy behavior). For [`MaskKind::Mirror`], `size[0]` is
+    /// the band thickness (width fraction); `size[1]` is unused by the SDF.
     #[serde(
         default = "default_size_param",
         skip_serializing_if = "is_default_size"

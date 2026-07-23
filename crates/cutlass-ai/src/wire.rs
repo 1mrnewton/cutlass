@@ -80,7 +80,7 @@ use serde::{Deserialize, Serialize};
 /// 44: `WireMarkerColor` gains `rgba: [r,g,b]` for custom opaque marker colors.
 /// 45: `WireMarkerColor` also accepts `#RRGGBB` (describe_project token) so
 ///     custom marker colors round-trip; `rgba` docs clarify RGB (no alpha).
-pub const TOOL_SCHEMA_VERSION: u32 = 45;
+pub const TOOL_SCHEMA_VERSION: u32 = 46;
 
 mod dtos;
 mod tools;

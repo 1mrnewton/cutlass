@@ -77,7 +77,8 @@ pub mod mask_kind {
 /// GPU-ready mask parameters (no `cutlass-models` dependency).
 ///
 /// Geometry uses the same fraction-of-layer units as the model: `center` is an
-/// offset from the layer center, `size` scales the mask (`[1,1]` = full layer),
+/// offset from the layer center, `size` scales the mask (`[1,1]` = full layer;
+/// for Mirror, `size[0]` is band thickness as a width fraction),
 /// `rotation_rad` is about the mask center, and `roundness` rounds rectangle
 /// corners only (`0`…`1`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -88,6 +89,7 @@ pub struct LayerMask {
     /// Offset from layer center, fraction of layer size per axis.
     pub center: [f32; 2],
     /// Mask size as a fraction of layer size (`[1, 1]` = legacy full-quad).
+    /// Mirror uses `size[0]` as band thickness (width fraction).
     pub size: [f32; 2],
     pub rotation_rad: f32,
     /// Rectangle corner rounding, `0` … `1` (ignored for other kinds).

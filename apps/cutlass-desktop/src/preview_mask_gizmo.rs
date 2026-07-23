@@ -259,8 +259,8 @@ fn outline_commands(layout: &GizmoLayout) -> (SharedString, SharedString) {
             (svg_polyline(&[a, b], false), SharedString::default())
         }
         MaskKind::Mirror => {
-            // Band edges at ± half-width ( CapCut band indicator; shader is
-            // still a half-plane — keep that semantics elsewhere).
+            // Band edges at ± half-width in mask space (= size[0] × layer
+            // half-width) — matches `mask.wgsl` Mirror SDF.
             let len = hy.max(1.0) * 2.0;
             let left = svg_polyline(&[p([-hx, -len]), p([-hx, len])], false);
             let right = svg_polyline(&[p([hx, -len]), p([hx, len])], false);
@@ -422,10 +422,14 @@ fn body_contains(layout: &GizmoLayout, view: [f32; 2]) -> bool {
     let hx = layout.half_layer[0].max(1e-3);
     let hy = layout.half_layer[1].max(1e-3);
     match layout.kind {
-        MaskKind::Linear | MaskKind::Mirror => {
-            // Thin strip around the dividing line / band.
+        MaskKind::Linear => {
+            // Thin strip around the dividing line.
             let band = DEFAULT_HIT_TOLERANCE_PX / layout.scale.max(1e-6);
             local[0].abs() <= band.max(hx * 0.15) && local[1].abs() <= hy.max(band) * 1.25
+        }
+        MaskKind::Mirror => {
+            // Full band body (matches rendered Mirror thickness).
+            local[0].abs() <= hx && local[1].abs() <= hy.max(hx) * 1.25
         }
         MaskKind::Circle | MaskKind::Heart | MaskKind::Star => {
             let nx = local[0] / hx;

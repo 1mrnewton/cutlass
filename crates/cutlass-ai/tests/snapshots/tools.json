@@ -1895,7 +1895,7 @@
                 ]
               },
               "kind": {
-                "description": "Mask shape kinds (CapCut mask presets).",
+                "description": "Mask shape kinds (CapCut mask presets).\n\n`mirror` is a parallel band (thickness = `size[0]` layer-width fraction)\ncentered on the mask line at `rotation`, not a half-plane.",
                 "enum": [
                   "linear",
                   "mirror",
@@ -1921,7 +1921,7 @@
                 ]
               },
               "size": {
-                "description": "Size as layer-size fractions (`[1,1]` covers layer). Default `[1,1]`.",
+                "description": "Size as layer-size fractions (`[1,1]` covers layer). For `mirror`,\n`size[0]` is band thickness (width fraction). Default `[1,1]`.",
                 "items": {
                   "type": "number"
                 },
@@ -3036,5 +3036,5 @@
       }
     }
   ],
-  "version": 45
+  "version": 46
 }

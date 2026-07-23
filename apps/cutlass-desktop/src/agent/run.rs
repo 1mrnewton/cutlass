@@ -20,9 +20,10 @@ use crate::{AgentStore, AppWindow};
 
 use super::sandbox::{SandboxBridge, sandbox_engine};
 use super::tool_host::{DesktopToolHandles, DesktopToolHost, abort_status_message};
+use super::token_usage::format_usage_line;
 use super::transcript::{
-    append_assistant_text, append_reasoning_text, persist_session, publish_chat_list, push_entry,
-    push_image_entry, replace_transcript, with_store,
+    append_assistant_text, append_reasoning_text, attach_usage_line, persist_session,
+    publish_chat_list, push_entry, push_image_entry, replace_transcript, with_store,
 };
 use super::types::{
     AgentHandle, AgentPlanStep, AgentRequest, AgentRuntimeHandles, AgentWorker, ApprovalDecision,
@@ -526,7 +527,8 @@ pub(crate) fn run_one_prompt(
             push_entry(&event_store, "action", format!("{name}: {summary}"))
         }
         AgentEvent::Image(image) => push_image_entry(&event_store, image),
-        // UI wiring lands in a follow-up; keep the cumulative total in logs for now.
+        // No live status string on the store; the finished line lands on the
+        // exchange when the prompt completes (success or abort).
         AgentEvent::Usage(usage) => info!(
             input = usage.input_tokens,
             cached = usage.cached_input_tokens,
@@ -581,6 +583,10 @@ pub(crate) fn run_one_prompt(
                 apply_plan_live(worker, store, plan, &outcome.phase_breaks);
             }
         }
+    }
+
+    if let Some(line) = format_usage_line(&outcome.usage) {
+        attach_usage_line(store, line);
     }
 
     let pending = preview.is_pending();

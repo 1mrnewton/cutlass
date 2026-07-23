@@ -16,6 +16,7 @@ pub(crate) fn entry(kind: &str, text: impl Into<SharedString>) -> AgentEntry {
         text: text.into(),
         image: Default::default(),
         image_aspect: 0.0,
+        usage: Default::default(),
     }
 }
 
@@ -68,7 +69,44 @@ pub(crate) fn push_image_entry(
             text: label.into(),
             image: slint::Image::from_rgba8(buffer),
             image_aspect: aspect,
+            usage: Default::default(),
         });
+    });
+}
+
+/// Attach a finished prompt's usage line to the current exchange: prefer the
+/// last assistant row after the latest user prompt; otherwise a status line.
+pub(crate) fn attach_usage_line(store: &slint::Weak<AgentStore<'static>>, usage: String) {
+    with_transcript(store, move |model| {
+        let count = model.row_count();
+        let mut last_user = None;
+        for index in 0..count {
+            if model
+                .row_data(index)
+                .is_some_and(|row| row.kind == "user")
+            {
+                last_user = Some(index);
+            }
+        }
+        let start = last_user.map(|index| index + 1).unwrap_or(0);
+        let mut assistant_idx = None;
+        for index in (start..count).rev() {
+            if model
+                .row_data(index)
+                .is_some_and(|row| row.kind == "assistant")
+            {
+                assistant_idx = Some(index);
+                break;
+            }
+        }
+        if let Some(index) = assistant_idx {
+            if let Some(mut row) = model.row_data(index) {
+                row.usage = usage.into();
+                model.set_row_data(index, row);
+            }
+        } else {
+            model.push(entry("status", usage));
+        }
     });
 }
 
@@ -180,6 +218,7 @@ pub(crate) fn transcript_snapshot(
                     .map(|row| TranscriptEntry {
                         kind: row.kind.to_string(),
                         text: row.text.to_string(),
+                        usage: row.usage.to_string(),
                     })
                     .collect()
             })
@@ -201,6 +240,7 @@ pub(crate) fn replace_transcript(
         transcript.push(TranscriptEntry {
             kind: "error".into(),
             text: "The previous agent conversation could not be restored.".into(),
+            usage: String::new(),
         });
     }
     with_store(store, move |store| {
@@ -217,7 +257,11 @@ pub(crate) fn replace_transcript(
                     };
                     entry("status", caption)
                 } else {
-                    entry(&saved.kind, saved.text)
+                    let mut row = entry(&saved.kind, saved.text);
+                    if !saved.usage.is_empty() {
+                        row.usage = saved.usage.into();
+                    }
+                    row
                 }
             })
             .collect();

@@ -264,6 +264,13 @@ component TranscriptEntry inherits VerticalLayout {
             foreground: AppStore.theme.text.secondary;
         }
 
+        if entry.usage != "": CutlassText {
+            text: entry.usage;
+            wrap: word-wrap;
+            style: AppStore.theme.typography.caption;
+            foreground: AppStore.theme.text.muted;
+        }
+
         if entry.text != "": SubtleButton {
             label: "Copy";
             clicked => {

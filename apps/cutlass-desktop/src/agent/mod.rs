@@ -20,6 +20,7 @@ mod run;
 mod sandbox;
 #[cfg(test)]
 mod tests;
+mod token_usage;
 mod tool_host;
 mod transcript;
 mod types;
@@ -37,6 +38,8 @@ pub(crate) use approval::*;
 pub(crate) use run::*;
 #[allow(unused_imports)]
 pub(crate) use sandbox::*;
+#[allow(unused_imports)]
+pub(crate) use token_usage::*;
 #[allow(unused_imports)]
 pub(crate) use tool_host::*;
 #[allow(unused_imports)]

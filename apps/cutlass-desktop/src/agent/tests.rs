@@ -54,6 +54,23 @@ fn transcript_text_coalesces_only_adjacent_rows_of_the_same_kind() {
 }
 
 #[test]
+fn format_usage_line_matches_product_examples() {
+    use cutlass_ai::TokenUsage;
+
+    assert_eq!(format_usage_line(&TokenUsage::default()), None);
+    assert_eq!(
+        format_usage_line(&TokenUsage {
+            input_tokens: 12_300,
+            cached_input_tokens: 0,
+            output_tokens: 456,
+            cost: Some(0.68),
+        })
+        .as_deref(),
+        Some("12.3k tokens in (0% cached) · 456 out · $0.68")
+    );
+}
+
+#[test]
 fn chat_choices_keep_duplicate_titles_unique_and_include_an_unsaved_active_chat() {
     let choices = chat_choices(
         vec![

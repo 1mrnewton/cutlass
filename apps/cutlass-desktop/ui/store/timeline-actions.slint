@@ -37,6 +37,8 @@ export global TimelineActions {
             InspectorBackend.clear-param-override(
                 TimelineStore.selected-clip-id, TimelineStore.playhead-tick);
         }
+        PreviewStore.mask-live-active = false;
+        PreviewStore.mask-drag-handle = 0;
         TimelineStore.selected-track-id = "";
         TimelineStore.selected-clip-id = "";
         TimelineStore.selected-ids = [];

@@ -19,7 +19,7 @@ use crate::preview_motion_path::find_projected_clip;
 use crate::preview_select::{
     canvas_config, clip_placement, covers_tick, is_composited, viewport_mapping,
 };
-use crate::{Clip, MaskGizmo, Sequence};
+use crate::{Clip, MaskGizmo, MaskGizmoDragResolution, Sequence};
 
 /// Hit-test / drag handle ids published to Slint (`0` = none).
 pub const HANDLE_NONE: i32 = 0;
@@ -616,16 +616,57 @@ pub fn hit_test_mask_gizmo_in_viewport(
     hit_test_mask_gizmo(&gizmo, x, y, tolerance, &placement, scale, ox, oy)
 }
 
+/// Resolve a mask-handle drag for the selected clip in viewport coordinates.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_mask_gizmo_drag_in_viewport(
+    sequence: &Sequence,
+    clip_id: &str,
+    playhead: i32,
+    handle: i32,
+    press: [f32; 2],
+    cursor: [f32; 2],
+    view_w: f32,
+    view_h: f32,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
+    start: MaskGizmoParams,
+) -> MaskGizmoDragResolution {
+    if clip_id.is_empty() || handle == HANDLE_NONE {
+        return MaskGizmoDragResolution::default();
+    }
+    let Some(mut clip) = find_projected_clip(sequence, clip_id) else {
+        return MaskGizmoDragResolution::default();
+    };
+    crate::params::apply_sampled_transform(&mut clip, playhead);
+    let canvas = canvas_config(sequence);
+    let (cw, ch) = (canvas.width as f32, canvas.height as f32);
+    let (scale, ox, oy) = viewport_mapping(cw, ch, view_w, view_h, zoom, pan_x, pan_y);
+    if scale <= 0.0 {
+        return MaskGizmoDragResolution::default();
+    }
+    let placement = clip_placement(&clip, &canvas);
+    let out = resolve_mask_handle_drag(handle, start, &placement, scale, ox, oy, press, cursor);
+    MaskGizmoDragResolution {
+        valid: true,
+        center_fx: out.center[0],
+        center_fy: out.center[1],
+        size_w: out.size[0],
+        size_h: out.size[1],
+        rotation_deg: out.rotation_deg,
+        feather: out.feather,
+        roundness: out.roundness,
+    }
+}
+
 /// Resolve a handle drag into updated mask params (layer fractions / degrees).
 ///
 /// `press` / `cursor` are viewport px. Size handles scale the matching axis
 /// from the mask center; rotation uses the angle about the center; feather /
 /// roundness map radial distance past the size edge into `0…1`.
 ///
-/// Used by on-canvas mask gestures (overlay commit); kept public for that
-/// wiring and for unit tests.
+/// Used by on-canvas mask gestures (overlay commit) and unit tests.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 pub fn resolve_mask_handle_drag(
     handle: i32,
     start: MaskGizmoParams,

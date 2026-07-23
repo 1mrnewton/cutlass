@@ -176,6 +176,18 @@ export struct MaskGizmo {
     roundness: float,
 }
 
+// Resolved mask-handle drag: updated layer-fraction / degree params.
+export struct MaskGizmoDragResolution {
+    valid: bool,
+    center-fx: float,
+    center-fy: float,
+    size-w: float,
+    size-h: float,
+    rotation-deg: float,
+    feather: float,
+    roundness: float,
+}
+
 export global PreviewBackend {
     // Sample the composited preview frame under the cursor (widget px →
     // frame pixel via viewport_mapping). Letterbox → hit=false.
@@ -239,6 +251,10 @@ export global PreviewBackend {
     // Handle under (x, y) in viewport px (see MaskGizmo hit ids). Rebuilds
     // layout from the same inputs as mask-gizmo.
     pure callback hit-test-mask-gizmo(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* x */, float  /* y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* live-active */, float  /* live-center-x */, float  /* live-center-y */, float  /* live-size-w */, float  /* live-size-h */, float  /* live-rotation */, float  /* live-feather */, float  /* live-roundness */, float  /* tolerance */, ) -> int;
+
+    // Cursor drag → updated mask params for the pressed handle. `start-*`
+    // are the params captured at press (before the drag).
+    pure callback resolve-mask-gizmo-drag(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, int    /* handle */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, float  /* start-center-x */, float  /* start-center-y */, float  /* start-size-w */, float  /* start-size-h */, float  /* start-rotation */, float  /* start-feather */, float  /* start-roundness */, string /* kind */, ) -> MaskGizmoDragResolution;
 
     // Move gesture (preview roadmap Phase 3): press point + current cursor
     // (viewport-element px) → new normalized position, center-guide magnet

@@ -5,7 +5,7 @@
 
 import { CutlassText, CutlassScrollView } from "../../components/index.slint";
 import { AppState } from "../../state.slint";
-import { AppStore, TimelineStore } from "../../store/index.slint";
+import { AppStore, PreviewStore, TimelineStore } from "../../store/index.slint";
 import { InspectorBackend, ScalarParamSample } from "../../lib/inspector-backend.slint";
 import { CatalogEntry, Clip } from "../../models/index.slint";
 import { LabelCell, SectionHeader, SliderRow } from "inspector-widgets.slint";
@@ -184,6 +184,11 @@ export component MaskInspector inherits VerticalLayout {
     private property <bool> playhead-inside: TimelineStore.playhead-tick >= model.timeline-start.value
         && TimelineStore.playhead-tick < model.timeline-start.value + model.source-range.duration.value;
 
+    // Projection stays frozen during ParamOverride; when the gizmo (or a
+    // sibling slider) is live, read PreviewStore so rows track mid-drag.
+    private property <bool> live: PreviewStore.mask-live-active
+        && TimelineStore.selected-clip-id == model.id;
+
     private property <ScalarParamSample> feather-sample: InspectorBackend.sample-scalar-param(
         model, "look_mask_feather", TimelineStore.playhead-tick);
     private property <ScalarParamSample> center-x-sample: InspectorBackend.sample-scalar-param(
@@ -198,6 +203,14 @@ export component MaskInspector inherits VerticalLayout {
         model, "look_mask_rotation", TimelineStore.playhead-tick);
     private property <ScalarParamSample> roundness-sample: InspectorBackend.sample-scalar-param(
         model, "look_mask_roundness", TimelineStore.playhead-tick);
+
+    private property <float> feather-v: live ? PreviewStore.mask-live-feather : root.feather-sample.value;
+    private property <float> center-x-v: live ? PreviewStore.mask-live-center-x : root.center-x-sample.value;
+    private property <float> center-y-v: live ? PreviewStore.mask-live-center-y : root.center-y-sample.value;
+    private property <float> size-w-v: live ? PreviewStore.mask-live-size-w : root.size-w-sample.value;
+    private property <float> size-h-v: live ? PreviewStore.mask-live-size-h : root.size-h-sample.value;
+    private property <float> rotation-v: live ? PreviewStore.mask-live-rotation : root.rotation-sample.value;
+    private property <float> roundness-v: live ? PreviewStore.mask-live-roundness : root.roundness-sample.value;
 
     function toggle-kf(param: string, on-keyframe: bool, vx: float, vy: float) {
         if (on-keyframe) {
@@ -217,19 +230,57 @@ export component MaskInspector inherits VerticalLayout {
         } else {
             InspectorBackend.set-param-constant(model.id, param, value, 0);
         }
+        root.clear-live();
+    }
+
+    function seed-live() {
+        if (!PreviewStore.mask-live-active || TimelineStore.selected-clip-id != model.id) {
+            PreviewStore.mask-live-center-x = root.center-x-sample.value;
+            PreviewStore.mask-live-center-y = root.center-y-sample.value;
+            PreviewStore.mask-live-size-w = root.size-w-sample.value;
+            PreviewStore.mask-live-size-h = root.size-h-sample.value;
+            PreviewStore.mask-live-rotation = root.rotation-sample.value;
+            PreviewStore.mask-live-feather = root.feather-sample.value;
+            PreviewStore.mask-live-roundness = root.roundness-sample.value;
+        }
+        PreviewStore.mask-live-active = true;
+    }
+
+    function clear-live() {
+        PreviewStore.mask-live-active = false;
+        PreviewStore.mask-drag-handle = 0;
+    }
+
+    function cancel-preview() {
+        InspectorBackend.clear-param-override(model.id, TimelineStore.playhead-tick);
+        root.clear-live();
     }
 
     function preview-scalar(param: string, value: float) {
+        root.seed-live();
+        if (param == "look_mask_feather") {
+            PreviewStore.mask-live-feather = value;
+        } else if (param == "look_mask_rotation") {
+            PreviewStore.mask-live-rotation = value;
+        } else if (param == "look_mask_roundness") {
+            PreviewStore.mask-live-roundness = value;
+        }
         InspectorBackend.preview-param(
             model.id, param, value, 0, TimelineStore.playhead-tick);
     }
 
     function preview-center(x: float, y: float) {
+        root.seed-live();
+        PreviewStore.mask-live-center-x = x;
+        PreviewStore.mask-live-center-y = y;
         InspectorBackend.preview-param(
             model.id, "look_mask_center", x, y, TimelineStore.playhead-tick);
     }
 
     function preview-size(w: float, h: float) {
+        root.seed-live();
+        PreviewStore.mask-live-size-w = w;
+        PreviewStore.mask-live-size-h = h;
         InspectorBackend.preview-param(
             model.id, "look_mask_size", w, h, TimelineStore.playhead-tick);
     }
@@ -244,6 +295,7 @@ export component MaskInspector inherits VerticalLayout {
         } else {
             InspectorBackend.set-param-constant(model.id, "look_mask_center", x, y);
         }
+        root.clear-live();
     }
 
     function commit-size(w: float, h: float) {
@@ -256,6 +308,7 @@ export component MaskInspector inherits VerticalLayout {
         } else {
             InspectorBackend.set-param-constant(model.id, "look_mask_size", w, h);
         }
+        root.clear-live();
     }
 
     SectionHeader {
@@ -304,7 +357,7 @@ export component MaskInspector inherits VerticalLayout {
     if root.has-mask: SliderRow {
         label: "Feather";
         suffix: "";
-        value: root.feather-sample.value;
+        value: root.feather-v;
         minimum: 0;
         maximum: 1;
         step: 0.01;
@@ -319,6 +372,7 @@ export component MaskInspector inherits VerticalLayout {
         commit(v) => {
             root.commit-scalar("look_mask_feather", root.feather-sample, clamp(v, 0, 1));
         }
+        cancelled => { root.cancel-preview(); }
         kf-toggle => {
             root.toggle-kf("look_mask_feather", root.feather-sample.row.on-keyframe, root.feather-sample.value, 0);
         }
@@ -330,7 +384,7 @@ export component MaskInspector inherits VerticalLayout {
     if root.has-mask: SliderRow {
         label: "Center X";
         suffix: "";
-        value: root.center-x-sample.value;
+        value: root.center-x-v;
         minimum: -1;
         maximum: 1;
         step: 0.01;
@@ -340,11 +394,12 @@ export component MaskInspector inherits VerticalLayout {
         kf: root.center-x-sample.row;
         kf-can-toggle: root.playhead-inside;
         preview(v) => {
-            root.preview-center(clamp(v, -1, 1), root.center-y-sample.value);
+            root.preview-center(clamp(v, -1, 1), root.center-y-v);
         }
         commit(v) => {
-            root.commit-center(clamp(v, -1, 1), root.center-y-sample.value);
+            root.commit-center(clamp(v, -1, 1), root.center-y-v);
         }
+        cancelled => { root.cancel-preview(); }
         kf-toggle => {
             root.toggle-kf(
                 "look_mask_center",
@@ -364,7 +419,7 @@ export component MaskInspector inherits VerticalLayout {
     if root.has-mask: SliderRow {
         label: "Center Y";
         suffix: "";
-        value: root.center-y-sample.value;
+        value: root.center-y-v;
         minimum: -1;
         maximum: 1;
         step: 0.01;
@@ -374,11 +429,12 @@ export component MaskInspector inherits VerticalLayout {
         kf: root.center-y-sample.row;
         kf-can-toggle: root.playhead-inside;
         preview(v) => {
-            root.preview-center(root.center-x-sample.value, clamp(v, -1, 1));
+            root.preview-center(root.center-x-v, clamp(v, -1, 1));
         }
         commit(v) => {
-            root.commit-center(root.center-x-sample.value, clamp(v, -1, 1));
+            root.commit-center(root.center-x-v, clamp(v, -1, 1));
         }
+        cancelled => { root.cancel-preview(); }
         kf-toggle => {
             root.toggle-kf(
                 "look_mask_center",
@@ -398,7 +454,7 @@ export component MaskInspector inherits VerticalLayout {
     if root.has-mask: SliderRow {
         label: "Width";
         suffix: "";
-        value: root.size-w-sample.value;
+        value: root.size-w-v;
         minimum: 0.05;
         maximum: 3;
         step: 0.01;
@@ -408,11 +464,12 @@ export component MaskInspector inherits VerticalLayout {
         kf: root.size-w-sample.row;
         kf-can-toggle: root.playhead-inside;
         preview(v) => {
-            root.preview-size(clamp(v, 0.05, 3), root.size-h-sample.value);
+            root.preview-size(clamp(v, 0.05, 3), root.size-h-v);
         }
         commit(v) => {
-            root.commit-size(clamp(v, 0.05, 3), root.size-h-sample.value);
+            root.commit-size(clamp(v, 0.05, 3), root.size-h-v);
         }
+        cancelled => { root.cancel-preview(); }
         kf-toggle => {
             root.toggle-kf(
                 "look_mask_size",
@@ -432,7 +489,7 @@ export component MaskInspector inherits VerticalLayout {
     if root.has-mask: SliderRow {
         label: "Height";
         suffix: "";
-        value: root.size-h-sample.value;
+        value: root.size-h-v;
         minimum: 0.05;
         maximum: 3;
         step: 0.01;
@@ -442,11 +499,12 @@ export component MaskInspector inherits VerticalLayout {
         kf: root.size-h-sample.row;
         kf-can-toggle: root.playhead-inside;
         preview(v) => {
-            root.preview-size(root.size-w-sample.value, clamp(v, 0.05, 3));
+            root.preview-size(root.size-w-v, clamp(v, 0.05, 3));
         }
         commit(v) => {
-            root.commit-size(root.size-w-sample.value, clamp(v, 0.05, 3));
+            root.commit-size(root.size-w-v, clamp(v, 0.05, 3));
         }
+        cancelled => { root.cancel-preview(); }
         kf-toggle => {
             root.toggle-kf(
                 "look_mask_size",
@@ -466,7 +524,7 @@ export component MaskInspector inherits VerticalLayout {
     if root.has-mask: SliderRow {
         label: "Rotation";
         suffix: "°";
-        value: root.rotation-sample.value;
+        value: root.rotation-v;
         minimum: -180;
         maximum: 180;
         step: 1;
@@ -481,6 +539,7 @@ export component MaskInspector inherits VerticalLayout {
         commit(v) => {
             root.commit-scalar("look_mask_rotation", root.rotation-sample, clamp(v, -180, 180));
         }
+        cancelled => { root.cancel-preview(); }
         kf-toggle => {
             root.toggle-kf("look_mask_rotation", root.rotation-sample.row.on-keyframe, root.rotation-sample.value, 0);
         }
@@ -493,7 +552,7 @@ export component MaskInspector inherits VerticalLayout {
     if root.has-mask && root.model.mask-kind == "rectangle": SliderRow {
         label: "Roundness";
         suffix: "";
-        value: root.roundness-sample.value;
+        value: root.roundness-v;
         minimum: 0;
         maximum: 1;
         step: 0.01;
@@ -508,6 +567,7 @@ export component MaskInspector inherits VerticalLayout {
         commit(v) => {
             root.commit-scalar("look_mask_roundness", root.roundness-sample, clamp(v, 0, 1));
         }
+        cancelled => { root.cancel-preview(); }
         kf-toggle => {
             root.toggle-kf("look_mask_roundness", root.roundness-sample.row.on-keyframe, root.roundness-sample.value, 0);
         }

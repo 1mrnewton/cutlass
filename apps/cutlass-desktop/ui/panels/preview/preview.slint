@@ -5,9 +5,10 @@ import { TimelineLib } from "../../lib/timeline-lib.slint";
 import { TimelineStore, TimelineActions } from "../../store/index.slint";
 import { RationalTime } from "../../models/index.slint";
 import { AppState } from "../../state.slint";
-import { PreviewBackend, PreviewHit, PreviewSelectionBox, PreviewSpritePlacement, PreviewDragResolution, PreviewView, MotionPath } from "../../lib/preview-backend.slint";
+import { PreviewBackend, PreviewHit, PreviewSelectionBox, PreviewSpritePlacement, PreviewDragResolution, PreviewView, MotionPath, MaskGizmo } from "../../lib/preview-backend.slint";
 import { SelectionBackend } from "../../lib/selection-backend.slint";
 import { MotionPathOverlay } from "motion-path.slint";
+import { MaskOverlay } from "mask-overlay.slint";
 
 export component PreviewPanel inherits PanelBase {
     private property <RationalTime> sequence-duration:
@@ -210,12 +211,34 @@ export component PreviewPanel inherits PanelBase {
                         PreviewStore.motion-path-edit-y,
                         PreviewStore.motion-path-mirror);
 
+                    // CapCut mask gizmo: shown whenever the selected clip has
+                    // a mask (MaskInspector has no separate edit-mode tab).
+                    private property <MaskGizmo> mask-gizmo: PreviewBackend.mask-gizmo(
+                        EditorStore.project.sequence,
+                        TimelineStore.selected-clip-id,
+                        TimelineStore.playhead-tick,
+                        self.width / 1px,
+                        self.height / 1px,
+                        PreviewStore.viewport-zoom,
+                        PreviewStore.viewport-pan-x / 1px,
+                        PreviewStore.viewport-pan-y / 1px,
+                        PreviewStore.mask-live-active,
+                        PreviewStore.mask-live-center-x,
+                        PreviewStore.mask-live-center-y,
+                        PreviewStore.mask-live-size-w,
+                        PreviewStore.mask-live-size-h,
+                        PreviewStore.mask-live-rotation,
+                        PreviewStore.mask-live-feather,
+                        PreviewStore.mask-live-roundness);
+
                     // Clear motion-path selection when the timeline selection
                     // changes — selection-only, never touches the project.
                     private property <string> selected-clip-watch: TimelineStore.selected-clip-id;
                     changed selected-clip-watch => {
                         PreviewStore.motion-path-selected-tick = -1;
                         PreviewStore.motion-path-edit-mode = 0;
+                        PreviewStore.mask-live-active = false;
+                        PreviewStore.mask-drag-handle = 0;
                     }
 
                     private property <bool> show-sprite-stack:
@@ -710,6 +733,16 @@ export component PreviewPanel inherits PanelBase {
                             horizontal-alignment: TextHorizontalAlignment.center;
                             vertical-alignment: TextVerticalAlignment.center;
                         }
+                    }
+
+                    // Mask gizmo on top of transform grips so mask handles
+                    // win hit-testing while a mask is set.
+                    MaskOverlay {
+                        width: 100%;
+                        height: 100%;
+                        gizmo: viewport.mask-gizmo;
+                        view-w: viewport.width / 1px;
+                        view-h: viewport.height / 1px;
                     }
 
                     // Trackpad pinch-to-zoom (precision gesture). `scale` is

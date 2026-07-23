@@ -22,6 +22,7 @@ mod inspector;
 mod interaction;
 mod lottie_stickers;
 mod lut_catalog;
+mod mask_gesture_session;
 mod os_drop;
 mod params;
 mod paths;

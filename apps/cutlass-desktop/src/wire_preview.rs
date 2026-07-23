@@ -245,6 +245,61 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
         },
     );
 
+    app.global::<PreviewBackend>().on_resolve_mask_gizmo_drag(
+        |sequence,
+         clip_id,
+         playhead,
+         handle,
+         press_x,
+         press_y,
+         cursor_x,
+         cursor_y,
+         view_w,
+         view_h,
+         zoom,
+         pan_x,
+         pan_y,
+         start_center_x,
+         start_center_y,
+         start_size_w,
+         start_size_h,
+         start_rotation,
+         start_feather,
+         start_roundness,
+         kind| {
+            let kind = match kind.as_str() {
+                "linear" => cutlass_models::MaskKind::Linear,
+                "mirror" => cutlass_models::MaskKind::Mirror,
+                "circle" => cutlass_models::MaskKind::Circle,
+                "rectangle" => cutlass_models::MaskKind::Rectangle,
+                "heart" => cutlass_models::MaskKind::Heart,
+                "star" => cutlass_models::MaskKind::Star,
+                _ => return MaskGizmoDragResolution::default(),
+            };
+            preview_mask_gizmo::resolve_mask_gizmo_drag_in_viewport(
+                &sequence,
+                clip_id.as_str(),
+                playhead,
+                handle,
+                [press_x, press_y],
+                [cursor_x, cursor_y],
+                view_w,
+                view_h,
+                zoom,
+                pan_x,
+                pan_y,
+                preview_mask_gizmo::MaskGizmoParams {
+                    kind,
+                    center: [start_center_x, start_center_y],
+                    size: [start_size_w.max(0.05), start_size_h.max(0.05)],
+                    rotation_deg: start_rotation,
+                    feather: start_feather,
+                    roundness: start_roundness,
+                },
+            )
+        },
+    );
+
     app.global::<PreviewBackend>().on_resolve_motion_path_drag(
         |sequence,
          clip_id,

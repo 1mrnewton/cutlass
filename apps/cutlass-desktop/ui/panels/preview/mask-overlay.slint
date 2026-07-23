@@ -1,0 +1,349 @@
+// On-canvas mask gizmo overlay. Geometry from PreviewBackend.mask-gizmo;
+// drags ride the generic ParamOverride lane (same as mask inspector sliders).
+// Visible whenever the selected clip has a mask (no separate edit mode —
+// MaskInspector is always in the visual inspector scroll).
+
+import { AppStore } from "../../store/index.slint";
+import { EditorStore, PreviewStore, TimelineStore } from "../../store/index.slint";
+import { InspectorBackend } from "../../lib/inspector-backend.slint";
+import {
+    PreviewBackend,
+    MaskGizmo,
+    MaskGizmoDragResolution,
+} from "../../lib/preview-backend.slint";
+import { TimelineActions } from "../../store/index.slint";
+
+component MaskHandle inherits Rectangle {
+    in property <bool> active;
+    in property <MouseCursor> cursor: MouseCursor.grab;
+    callback pressed();
+    callback released(commit: bool);
+    callback dragged(x: float, y: float);
+
+    width: 10px;
+    height: 10px;
+    border-radius: 5px;
+    background: root.active ? AppStore.theme.accent.primary : #FFFFFF;
+    border-width: 1px;
+    border-color: root.active ? #FFFFFF : #00000088;
+
+    TouchArea {
+        width: 18px;
+        height: 18px;
+        x: -4px;
+        y: -4px;
+        mouse-cursor: self.pressed ? MouseCursor.grabbing : root.cursor;
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                root.pressed();
+            }
+            if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
+                root.released(true);
+            }
+            if (ev.kind == PointerEventKind.cancel) {
+                root.released(false);
+            }
+        }
+        moved => {
+            root.dragged(
+                root.x / 1px + 5.0 - 9.0 + self.mouse-x / 1px,
+                root.y / 1px + 5.0 - 9.0 + self.mouse-y / 1px);
+        }
+    }
+}
+
+export component MaskOverlay inherits Rectangle {
+    in property <MaskGizmo> gizmo;
+    in property <float> view-w;
+    in property <float> view-h;
+
+    private property <bool> dragging: false;
+    private property <int> handle: 0;
+    private property <float> press-x: 0;
+    private property <float> press-y: 0;
+    private property <float> start-center-x: 0;
+    private property <float> start-center-y: 0;
+    private property <float> start-size-w: 1;
+    private property <float> start-size-h: 1;
+    private property <float> start-rotation: 0;
+    private property <float> start-feather: 0;
+    private property <float> start-roundness: 0;
+    private property <MaskGizmoDragResolution> drag-res;
+
+    private property <bool> center-animated:
+        TimelineActions.selected-clip().found
+        && TimelineActions.selected-clip().clip.kf-look-mask-center.length > 0;
+    private property <bool> size-animated:
+        TimelineActions.selected-clip().found
+        && TimelineActions.selected-clip().clip.kf-look-mask-size.length > 0;
+    private property <bool> rotation-animated:
+        TimelineActions.selected-clip().found
+        && TimelineActions.selected-clip().clip.kf-look-mask-rotation.length > 0;
+    private property <bool> feather-animated:
+        TimelineActions.selected-clip().found
+        && TimelineActions.selected-clip().clip.kf-look-mask-feather.length > 0;
+    private property <bool> roundness-animated:
+        TimelineActions.selected-clip().found
+        && TimelineActions.selected-clip().clip.kf-look-mask-roundness.length > 0;
+
+    function seed-live-from-gizmo() {
+        PreviewStore.mask-live-center-x = root.gizmo.center-fx;
+        PreviewStore.mask-live-center-y = root.gizmo.center-fy;
+        PreviewStore.mask-live-size-w = root.gizmo.size-w;
+        PreviewStore.mask-live-size-h = root.gizmo.size-h;
+        PreviewStore.mask-live-rotation = root.gizmo.rotation-deg;
+        PreviewStore.mask-live-feather = root.gizmo.feather;
+        PreviewStore.mask-live-roundness = root.gizmo.roundness;
+        PreviewStore.mask-live-active = true;
+    }
+
+    function begin(handle: int, px: float, py: float) {
+        if (handle == 0 || TimelineStore.selected-clip-id == "") {
+            return;
+        }
+        root.handle = handle;
+        root.press-x = px;
+        root.press-y = py;
+        root.start-center-x = root.gizmo.center-fx;
+        root.start-center-y = root.gizmo.center-fy;
+        root.start-size-w = root.gizmo.size-w;
+        root.start-size-h = root.gizmo.size-h;
+        root.start-rotation = root.gizmo.rotation-deg;
+        root.start-feather = root.gizmo.feather;
+        root.start-roundness = root.gizmo.roundness;
+        root.dragging = false;
+        PreviewStore.mask-drag-handle = handle;
+        root.seed-live-from-gizmo();
+    }
+
+    function apply-live(res: MaskGizmoDragResolution) {
+        PreviewStore.mask-live-center-x = res.center-fx;
+        PreviewStore.mask-live-center-y = res.center-fy;
+        PreviewStore.mask-live-size-w = res.size-w;
+        PreviewStore.mask-live-size-h = res.size-h;
+        PreviewStore.mask-live-rotation = res.rotation-deg;
+        PreviewStore.mask-live-feather = res.feather;
+        PreviewStore.mask-live-roundness = res.roundness;
+        PreviewStore.mask-live-active = true;
+
+        if (root.handle == 1 || root.handle == 2) {
+            InspectorBackend.preview-param(
+                TimelineStore.selected-clip-id, "look_mask_center",
+                res.center-fx, res.center-fy, TimelineStore.playhead-tick);
+        } else if (root.handle == 3 || root.handle == 4) {
+            InspectorBackend.preview-param(
+                TimelineStore.selected-clip-id, "look_mask_size",
+                res.size-w, res.size-h, TimelineStore.playhead-tick);
+        } else if (root.handle == 5) {
+            InspectorBackend.preview-param(
+                TimelineStore.selected-clip-id, "look_mask_rotation",
+                res.rotation-deg, 0, TimelineStore.playhead-tick);
+        } else if (root.handle == 6) {
+            InspectorBackend.preview-param(
+                TimelineStore.selected-clip-id, "look_mask_feather",
+                res.feather, 0, TimelineStore.playhead-tick);
+        } else if (root.handle == 7) {
+            InspectorBackend.preview-param(
+                TimelineStore.selected-clip-id, "look_mask_roundness",
+                res.roundness, 0, TimelineStore.playhead-tick);
+        }
+    }
+
+    function move-to(cx: float, cy: float) {
+        if (root.handle == 0) {
+            return;
+        }
+        root.drag-res = PreviewBackend.resolve-mask-gizmo-drag(
+            EditorStore.project.sequence,
+            TimelineStore.selected-clip-id,
+            TimelineStore.playhead-tick,
+            root.handle,
+            root.press-x,
+            root.press-y,
+            cx,
+            cy,
+            root.view-w,
+            root.view-h,
+            PreviewStore.viewport-zoom,
+            PreviewStore.viewport-pan-x / 1px,
+            PreviewStore.viewport-pan-y / 1px,
+            root.start-center-x,
+            root.start-center-y,
+            root.start-size-w,
+            root.start-size-h,
+            root.start-rotation,
+            root.start-feather,
+            root.start-roundness,
+            root.gizmo.kind);
+        if (!root.drag-res.valid) {
+            return;
+        }
+        root.dragging = true;
+        root.apply-live(root.drag-res);
+    }
+
+    function commit-param(param: string, vx: float, vy: float, animated: bool) {
+        if (animated) {
+            InspectorBackend.set-param-keyframe(
+                TimelineStore.selected-clip-id, param,
+                TimelineStore.playhead-tick, vx, vy, 0);
+        } else {
+            InspectorBackend.set-param-constant(
+                TimelineStore.selected-clip-id, param, vx, vy);
+        }
+    }
+
+    function end-drag(commit: bool) {
+        if (root.handle == 0) {
+            return;
+        }
+        if (commit && root.dragging) {
+            if (root.handle == 1 || root.handle == 2) {
+                root.commit-param(
+                    "look_mask_center",
+                    PreviewStore.mask-live-center-x,
+                    PreviewStore.mask-live-center-y,
+                    root.center-animated);
+            } else if (root.handle == 3 || root.handle == 4) {
+                root.commit-param(
+                    "look_mask_size",
+                    PreviewStore.mask-live-size-w,
+                    PreviewStore.mask-live-size-h,
+                    root.size-animated);
+            } else if (root.handle == 5) {
+                root.commit-param(
+                    "look_mask_rotation",
+                    PreviewStore.mask-live-rotation,
+                    0,
+                    root.rotation-animated);
+            } else if (root.handle == 6) {
+                root.commit-param(
+                    "look_mask_feather",
+                    PreviewStore.mask-live-feather,
+                    0,
+                    root.feather-animated);
+            } else if (root.handle == 7) {
+                root.commit-param(
+                    "look_mask_roundness",
+                    PreviewStore.mask-live-roundness,
+                    0,
+                    root.roundness-animated);
+            }
+        } else if (root.dragging) {
+            InspectorBackend.clear-param-override(
+                TimelineStore.selected-clip-id, TimelineStore.playhead-tick);
+        }
+        PreviewStore.mask-live-active = false;
+        PreviewStore.mask-drag-handle = 0;
+        root.handle = 0;
+        root.dragging = false;
+    }
+
+    // Body grab (moves center): large soft hit around the mask center.
+    if root.gizmo.visible: TouchArea {
+        x: root.gizmo.center-x * 1px - 28px;
+        y: root.gizmo.center-y * 1px - 28px;
+        width: 56px;
+        height: 56px;
+        mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                root.begin(2, root.gizmo.center-x, root.gizmo.center-y);
+            }
+            if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
+                root.end-drag(true);
+            }
+            if (ev.kind == PointerEventKind.cancel) {
+                root.end-drag(false);
+            }
+        }
+        moved => {
+            root.move-to(
+                root.gizmo.center-x - 28.0 + self.mouse-x / 1px,
+                root.gizmo.center-y - 28.0 + self.mouse-y / 1px);
+        }
+    }
+
+    if root.gizmo.visible && root.gizmo.outline-commands != "": Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: root.view-w;
+        viewbox-height: root.view-h;
+        commands: root.gizmo.outline-commands;
+        stroke: AppStore.theme.accent.primary.with-alpha(0.9);
+        stroke-width: 1.5px;
+        fill: transparent;
+    }
+
+    if root.gizmo.visible && root.gizmo.outline2-commands != "": Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: root.view-w;
+        viewbox-height: root.view-h;
+        commands: root.gizmo.outline2-commands;
+        stroke: AppStore.theme.accent.primary.with-alpha(0.9);
+        stroke-width: 1.5px;
+        fill: transparent;
+    }
+
+    if root.gizmo.visible: MaskHandle {
+        x: root.gizmo.center-x * 1px - 5px;
+        y: root.gizmo.center-y * 1px - 5px;
+        active: root.handle == 1 || root.handle == 2;
+        cursor: MouseCursor.grab;
+        pressed => { root.begin(1, root.gizmo.center-x, root.gizmo.center-y); }
+        released(commit) => { root.end-drag(commit); }
+        dragged(x, y) => { root.move-to(x, y); }
+    }
+
+    if root.gizmo.visible && root.gizmo.has-size-x: MaskHandle {
+        x: root.gizmo.size-x-x * 1px - 5px;
+        y: root.gizmo.size-x-y * 1px - 5px;
+        active: root.handle == 3;
+        cursor: MouseCursor.ew-resize;
+        pressed => { root.begin(3, root.gizmo.size-x-x, root.gizmo.size-x-y); }
+        released(commit) => { root.end-drag(commit); }
+        dragged(x, y) => { root.move-to(x, y); }
+    }
+
+    if root.gizmo.visible && root.gizmo.has-size-y: MaskHandle {
+        x: root.gizmo.size-y-x * 1px - 5px;
+        y: root.gizmo.size-y-y * 1px - 5px;
+        active: root.handle == 4;
+        cursor: MouseCursor.ns-resize;
+        pressed => { root.begin(4, root.gizmo.size-y-x, root.gizmo.size-y-y); }
+        released(commit) => { root.end-drag(commit); }
+        dragged(x, y) => { root.move-to(x, y); }
+    }
+
+    if root.gizmo.visible: MaskHandle {
+        x: root.gizmo.rotation-x * 1px - 5px;
+        y: root.gizmo.rotation-y * 1px - 5px;
+        active: root.handle == 5;
+        cursor: MouseCursor.crosshair;
+        pressed => { root.begin(5, root.gizmo.rotation-x, root.gizmo.rotation-y); }
+        released(commit) => { root.end-drag(commit); }
+        dragged(x, y) => { root.move-to(x, y); }
+    }
+
+    if root.gizmo.visible: MaskHandle {
+        x: root.gizmo.feather-x * 1px - 5px;
+        y: root.gizmo.feather-y * 1px - 5px;
+        active: root.handle == 6;
+        cursor: MouseCursor.ew-resize;
+        background: root.handle == 6 ? AppStore.theme.accent.primary : #B8D4FF;
+        pressed => { root.begin(6, root.gizmo.feather-x, root.gizmo.feather-y); }
+        released(commit) => { root.end-drag(commit); }
+        dragged(x, y) => { root.move-to(x, y); }
+    }
+
+    if root.gizmo.visible && root.gizmo.has-roundness: MaskHandle {
+        x: root.gizmo.roundness-x * 1px - 5px;
+        y: root.gizmo.roundness-y * 1px - 5px;
+        active: root.handle == 7;
+        cursor: MouseCursor.nwse-resize;
+        pressed => { root.begin(7, root.gizmo.roundness-x, root.gizmo.roundness-y); }
+        released(commit) => { root.end-drag(commit); }
+        dragged(x, y) => { root.move-to(x, y); }
+    }
+}

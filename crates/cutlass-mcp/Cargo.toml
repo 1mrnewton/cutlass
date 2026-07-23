@@ -21,9 +21,10 @@ rmcp = { version = "2", features = ["transport-io"] }
 schemars = "1"
 serde.workspace = true
 serde_json.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
+rmcp = { version = "2", features = ["client", "transport-async-rw"] }
 tempfile = "3"

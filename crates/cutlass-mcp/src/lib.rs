@@ -1,18 +1,12 @@
-//! Cutlass MCP server: project control for external agents over stdio.
+//! Headless Cutlass MCP server (stdio) for external agents.
 //!
-//! Exposes a Model Context Protocol (MCP) surface so Cursor, Claude Code,
-//! and similar hosts can open/create `.cutlass` projects, inspect timelines,
-//! and apply edits without embedding the editor UI.
-//!
-//! **Edits never go through a raw engine door.** Mutation tools lower into
-//! the existing validated wire-command pipeline (`cutlass-ai` validate →
-//! `cutlass-engine` apply), the same path the in-app agent uses. This crate
-//! owns transport, tool routing, and the host-facing contract; the engine
-//! stays behind that gate.
-//!
-//! The engine lives on a dedicated OS thread ([`host::EngineHost`]) because
-//! it is not safely shared across tokio workers. Async tool handlers
-//! round-trip requests over a channel.
+//! v1 exposes project lifecycle, validated wire-edit batches, composited
+//! frame grabs, and timeline export so Cursor / Claude Code and similar hosts
+//! can script Cutlass without the desktop UI. **Edits never go through a raw
+//! engine door** — mutations lower into `cutlass-ai` validate →
+//! `cutlass-engine` apply, the same path as the in-app agent. The engine lives
+//! on a dedicated OS thread ([`host::EngineHost`]); async tool handlers
+//! round-trip over a channel.
 
 pub mod host;
 pub mod server;

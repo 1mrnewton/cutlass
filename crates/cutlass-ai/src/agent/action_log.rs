@@ -61,9 +61,9 @@ fn param_value_phrase(
                 "?".into()
             }
         }
-        wire::WireClipParam::Opacity | wire::WireClipParam::Volume => value
-            .map(percent_with_raw)
-            .unwrap_or_else(|| "?".into()),
+        wire::WireClipParam::Opacity | wire::WireClipParam::Volume => {
+            value.map(percent_with_raw).unwrap_or_else(|| "?".into())
+        }
         wire::WireClipParam::Pan => value
             .map(|v| format!("{v:.2}"))
             .unwrap_or_else(|| "?".into()),

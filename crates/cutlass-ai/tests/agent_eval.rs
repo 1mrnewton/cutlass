@@ -1635,7 +1635,9 @@ fn crop_to_center_and_mirror_clip() {
     assert_eq!(outcome.actions.len(), 1);
     assert_eq!(
         outcome.actions[0].description,
-        format!("set clip {clip} cropped left 25% (=0.25), right 25% (=0.25), flipped horizontally")
+        format!(
+            "set clip {clip} cropped left 25% (=0.25), right 25% (=0.25), flipped horizontally"
+        )
     );
 
     // The kept region and flip land on the model, and the next describe()

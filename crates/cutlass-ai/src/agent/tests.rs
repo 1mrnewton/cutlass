@@ -6,6 +6,17 @@ use super::*;
 use cutlass_models::ClipId;
 
 #[test]
+fn agent_config_defaults_bound_worst_case_spend() {
+    let config = AgentConfig::default();
+    assert_eq!(config.max_tool_calls, 200);
+    assert_eq!(config.max_host_calls, 60);
+    assert_eq!(config.max_turns, 40);
+    assert_eq!(config.max_images, 8);
+    assert_eq!(config.max_image_bytes, 6 * 1024 * 1024);
+    assert!(!config.dry_run);
+}
+
+#[test]
 fn action_lines_read_like_an_edit_log() {
     let split = WireCommand::SplitClip(wire::SplitClip { clip: 7, at: 12.4 });
     assert_eq!(

@@ -109,7 +109,13 @@ pub trait EngineBridge {
     fn rollback_group(&mut self);
 }
 
-/// Guardrail knobs.
+/// Guardrail knobs — a cost fuse for one user prompt.
+///
+/// Every provider turn re-sends the growing transcript (text + tool results +
+/// images), so uncapped loops burn money fast. These defaults bound worst-case
+/// spend per prompt while keeping normal edit sessions usable. Turn and host
+/// caps abort the prompt and roll back its sandbox edit group; the edit-tool
+/// cap refuses further edits but keeps work already applied.
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     /// Hard cap on edit-tool calls per prompt (the runaway-loop fuse).
@@ -117,13 +123,16 @@ pub struct AgentConfig {
     /// and the run completes keeping the edits already applied.
     pub max_tool_calls: usize,
     /// Hard cap on host-tool calls per prompt. A separate fuse: senses
-    /// and app control must not starve editing, nor the reverse.
+    /// and app control must not starve editing, nor the reverse. Exceeding
+    /// this aborts the prompt and rolls back its sandbox edit group.
     pub max_host_calls: usize,
-    /// Hard cap on provider turns per prompt.
+    /// Hard cap on provider turns per prompt. Exceeding this aborts the
+    /// prompt and rolls back its sandbox edit group. Kept well below the
+    /// edit cap because each turn retransmits the full transcript.
     pub max_turns: usize,
     /// Hard cap on images carried by one request, newest kept. Screenshot
     /// tools bound each image's dimensions, so count × bounded size caps
-    /// the whole vision payload.
+    /// the whole vision payload (and its base64 cost on every later turn).
     pub max_images: usize,
     /// Hard cap on total encoded image bytes carried by one request. This
     /// protects the provider boundary even when an extensible host tool does
@@ -136,11 +145,11 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_tool_calls: 1000,
-            max_host_calls: 200,
-            max_turns: 200,
-            max_images: 25,
-            max_image_bytes: 24 * 1024 * 1024,
+            max_tool_calls: 200,
+            max_host_calls: 60,
+            max_turns: 40,
+            max_images: 8,
+            max_image_bytes: 6 * 1024 * 1024,
             dry_run: false,
         }
     }

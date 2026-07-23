@@ -532,6 +532,68 @@ fn worker_loop(
                 pending_redraw = false;
                 settle_deadline = None;
             }
+            // Solid/shape fill color well drags — same coalesce story as size.
+            WorkerMsg::PreviewGeneratorFill {
+                mut clip,
+                mut rgba,
+                mut tick,
+            } => {
+                let mut pending = true;
+                while let Ok(next) = req_rx.try_recv() {
+                    match next {
+                        WorkerMsg::Frame(latest) => tick = latest,
+                        WorkerMsg::PreviewGeneratorFill {
+                            clip: c,
+                            rgba: color,
+                            tick: at,
+                        } => {
+                            clip = c;
+                            rgba = color;
+                            tick = at;
+                            pending = true;
+                        }
+                        other => {
+                            if std::mem::take(&mut pending)
+                                && let Some(generator) =
+                                    generator_fill_from_engine(engine, &clip, rgba)
+                            {
+                                apply_generator_override(engine, &clip, generator);
+                            }
+                            dispatch(
+                                engine,
+                                &mut clipboard,
+                                &mut main_magnet,
+                                &mut linkage,
+                                other,
+                                tl_rate,
+                                &preview_weak,
+                                &fit,
+                                &cache,
+                                &sprite_mode,
+                                &export_state,
+                                &ui,
+                            )
+                        }
+                    }
+                }
+                last_tick = tick;
+                if pending
+                    && let Some(generator) = generator_fill_from_engine(engine, &clip, rgba)
+                {
+                    apply_generator_override(engine, &clip, generator);
+                }
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+                pending_redraw = false;
+                settle_deadline = None;
+            }
             // Look drags (filter intensity / adjust sliders) carry the whole
             // grade so preview frames never mix a new adjustment with a stale
             // filter or vice versa. Coalesce to the newest value like other

@@ -674,6 +674,14 @@ impl WorkerHandle {
         });
     }
 
+    pub fn set_generator_fill(&self, clip: String, rgba: [u8; 4]) {
+        let _ = self.tx.send(WorkerMsg::SetGeneratorFill { clip, rgba });
+    }
+
+    pub fn preview_generator_fill(&self, clip: String, rgba: [u8; 4], tick: i64) {
+        let _ = self.tx.send(WorkerMsg::PreviewGeneratorFill { clip, rgba, tick });
+    }
+
     pub fn undo(&self) {
         let _ = self.tx.send(WorkerMsg::Undo);
     }

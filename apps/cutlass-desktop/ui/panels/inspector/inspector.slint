@@ -5,6 +5,7 @@ import {
     CutlassDropdown,
     CutlassText,
     SubtleButton,
+    CutlassColorSwatch,
 } from "../../components/index.slint";
 import { AppState } from "../../state.slint";
 import { AppStore, EditorStore, TimelineStore } from "../../store/index.slint";
@@ -432,6 +433,7 @@ component VisualClipInspector inherits VerticalLayout {
     spacing: AppStore.theme.metrics.spacing.none;
 
     private property <bool> is-shape: model.generator-kind == "rect" || model.generator-kind == "ellipse";
+    private property <bool> is-solid: model.generator-kind == "solid";
     // Effect/filter/adjustment lane bars resolve as CanvasPass (Normal /
     // no layer styles) — hide no-op style controls (see resolve.rs).
     private property <bool> is-canvas-pass: model.generator-kind == "adjustment"
@@ -482,8 +484,70 @@ component VisualClipInspector inherits VerticalLayout {
                 spacing: AppStore.theme.metrics.spacing.lg;
                 alignment: LayoutAlignment.start;
 
+            if root.is-solid: SectionHeader {
+                title: "Solid";
+            }
+
+            if root.is-solid: HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Color";
+                }
+
+                CutlassColorSwatch {
+                    value: model.fill-color;
+                    preview(c) => {
+                        InspectorBackend.preview-generator-fill(
+                            model.id, c.red, c.green, c.blue, c.alpha,
+                            TimelineStore.playhead-tick);
+                    }
+                    changed(c) => {
+                        InspectorBackend.set-generator-fill(
+                            model.id, c.red, c.green, c.blue, c.alpha);
+                    }
+                    cancelled => {
+                        InspectorBackend.clear-generator-fill(TimelineStore.playhead-tick);
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            if root.is-solid: InspectorDivider { }
+
             if root.is-shape: SectionHeader {
                 title: "Shape";
+            }
+
+            if root.is-shape: HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.md;
+
+                LabelCell {
+                    label: "Fill";
+                }
+
+                CutlassColorSwatch {
+                    value: model.fill-color;
+                    preview(c) => {
+                        InspectorBackend.preview-generator-fill(
+                            model.id, c.red, c.green, c.blue, c.alpha,
+                            TimelineStore.playhead-tick);
+                    }
+                    changed(c) => {
+                        InspectorBackend.set-generator-fill(
+                            model.id, c.red, c.green, c.blue, c.alpha);
+                    }
+                    cancelled => {
+                        InspectorBackend.clear-generator-fill(TimelineStore.playhead-tick);
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
             }
 
             // `value` tracks the committed projection (only moves on commit);

@@ -139,6 +139,25 @@ pub(super) fn dispatch(
                 );
             }
         }
+        WorkerMsg::SetGeneratorFill { clip, rgba } => {
+            if let Some(generator) = generator_fill_from_engine(engine, &clip, rgba) {
+                set_generator_and_publish(engine, &clip, generator, ui);
+            }
+        }
+        WorkerMsg::PreviewGeneratorFill { clip, rgba, tick } => {
+            if let Some(generator) = generator_fill_from_engine(engine, &clip, rgba) {
+                apply_generator_override(engine, &clip, generator);
+                render_frame(
+                    engine,
+                    tl_rate,
+                    preview_weak,
+                    tick,
+                    fit,
+                    cache,
+                    SeekPolicy::Exact,
+                );
+            }
+        }
         WorkerMsg::SetClipSpeed {
             clip,
             num,

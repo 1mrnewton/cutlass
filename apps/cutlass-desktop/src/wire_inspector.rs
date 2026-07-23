@@ -529,6 +529,42 @@ pub(crate) fn wire_inspector(
             clear_shape_handle.clear_generator_override(i64::from(tick));
         });
 
+    let preview_fill_handle = preview_worker.handle();
+    app.global::<InspectorBackend>().on_preview_generator_fill(
+        move |clip_id, r, g, b, a, tick| {
+            preview_fill_handle.preview_generator_fill(
+                clip_id.to_string(),
+                [
+                    r.clamp(0, 255) as u8,
+                    g.clamp(0, 255) as u8,
+                    b.clamp(0, 255) as u8,
+                    a.clamp(0, 255) as u8,
+                ],
+                i64::from(tick),
+            );
+        },
+    );
+
+    let set_fill_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_set_generator_fill(move |clip_id, r, g, b, a| {
+            set_fill_handle.set_generator_fill(
+                clip_id.to_string(),
+                [
+                    r.clamp(0, 255) as u8,
+                    g.clamp(0, 255) as u8,
+                    b.clamp(0, 255) as u8,
+                    a.clamp(0, 255) as u8,
+                ],
+            );
+        });
+
+    let clear_fill_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_clear_generator_fill(move |tick| {
+            clear_fill_handle.clear_generator_override(i64::from(tick));
+        });
+
     app.global::<InspectorBackend>()
         .on_filter_fonts(|query, items| {
             let needle = query.to_lowercase();

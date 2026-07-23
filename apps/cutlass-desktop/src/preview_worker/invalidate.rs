@@ -19,6 +19,7 @@ pub(super) fn message_invalidates_preview(msg: &WorkerMsg) -> bool {
             | WorkerMsg::TrimClip { .. }
             | WorkerMsg::RemoveClips { .. }
             | WorkerMsg::SetGenerator { .. }
+            | WorkerMsg::SetGeneratorFill { .. }
             | WorkerMsg::SetClipSpeed { .. }
             | WorkerMsg::SetClipPitch { .. }
             | WorkerMsg::SetSpeedCurve { .. }

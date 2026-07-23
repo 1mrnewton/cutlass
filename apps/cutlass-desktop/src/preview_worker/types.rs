@@ -237,6 +237,19 @@ pub(super) enum WorkerMsg {
         height: f32,
         tick: i64,
     },
+    /// Commit a solid/shape fill recolor (inspector color well). Rebuilds the
+    /// generator from committed state with the new RGBA.
+    SetGeneratorFill {
+        clip: String,
+        rgba: [u8; 4],
+    },
+    /// Live solid/shape fill drag: generator override, no history until
+    /// [`SetGeneratorFill`] commits. Coalesces to the newest like shape size.
+    PreviewGeneratorFill {
+        clip: String,
+        rgba: [u8; 4],
+        tick: i64,
+    },
     /// Retime a media clip (CapCut speed, M1): positive rational `num/den`
     /// playback rate plus the reverse flag. The engine re-derives the
     /// timeline duration; one undoable history entry.

@@ -1309,6 +1309,98 @@ fn style_color_preview_cancel_clears_override_without_edit() {
 }
 
 #[test]
+fn shape_fill_preview_then_commit_clears_override() {
+    use cutlass_commands::{Command, EditCommand};
+    use cutlass_models::Shape;
+    use cutlass_render::{ResolveOverrides, resolve, resolve_with};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("shape-fill", r);
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::shape(Shape::Rectangle, [255, 255, 255, 255]),
+            TimeRange::at_rate(0, 48, r),
+        )
+        .expect("shape");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let rev_before = engine.revision();
+    let fill = [10, 20, 30, 255];
+
+    let preview = generator_fill_from_engine(&engine, &clip_s, fill).expect("fill preview");
+    apply_generator_override(&mut engine, &clip_s, preview.clone());
+    assert!(engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before);
+
+    let scene = resolve_with(
+        engine.project(),
+        RationalTime::new(0, r),
+        ResolveOverrides {
+            generator: Some((clip, &preview)),
+            ..ResolveOverrides::default()
+        },
+    )
+    .expect("live");
+    let layer_fill = match &scene.layers[0].source {
+        cutlass_render::LayerSource::Solid(rgba) => *rgba,
+        cutlass_render::LayerSource::Shape { fill, .. } => *fill,
+        other => panic!("expected solid/shape layer, got {other:?}"),
+    };
+    assert_eq!(layer_fill, fill);
+
+    engine.set_generator_override(None);
+    engine
+        .apply(Command::Edit(EditCommand::SetGenerator {
+            clip,
+            generator: preview,
+        }))
+        .expect("commit fill");
+    assert!(!engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before + 1);
+    assert!(engine.can_undo());
+
+    let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+    let committed = match &plain.layers[0].source {
+        cutlass_render::LayerSource::Solid(rgba) => *rgba,
+        cutlass_render::LayerSource::Shape { fill, .. } => *fill,
+        other => panic!("expected solid/shape layer, got {other:?}"),
+    };
+    assert_eq!(committed, fill);
+}
+
+#[test]
+fn shape_fill_preview_cancel_clears_override_without_edit() {
+    use cutlass_models::Shape;
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("shape-fill-cancel", r);
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::shape(Shape::Ellipse, [1, 2, 3, 255]),
+            TimeRange::at_rate(0, 48, r),
+        )
+        .expect("shape");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let rev_before = engine.revision();
+    let could_undo = engine.can_undo();
+
+    let preview =
+        generator_fill_from_engine(&engine, &clip_s, [9, 8, 7, 255]).expect("fill preview");
+    apply_generator_override(&mut engine, &clip_s, preview);
+    assert!(engine.has_live_overrides());
+
+    engine.set_generator_override(None);
+    assert!(!engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before);
+    assert_eq!(engine.can_undo(), could_undo);
+}
+
+#[test]
 fn chroma_color_preview_then_commit_clears_override() {
     use cutlass_commands::{Command, EditCommand};
     use cutlass_models::MediaSource;

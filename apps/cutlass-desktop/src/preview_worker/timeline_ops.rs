@@ -43,6 +43,42 @@ pub(super) fn shape_size_from_engine(
     }
 }
 
+/// Rebuild a solid or shape generator with a new fill color, preserving every
+/// other field. `None` when the clip is missing or not a solid/shape.
+///
+/// A color commit collapses an animated shape fill to a constant (same as
+/// width/height sliders); solids are a bare `[u8; 4]`.
+pub(super) fn generator_fill_from_engine(
+    engine: &Engine,
+    clip: &str,
+    rgba: [u8; 4],
+) -> Option<Generator> {
+    let clip_id = parse_raw_id(clip).map(ClipId::from_raw)?;
+    let generator = match &engine.project().timeline().clip(clip_id)?.content {
+        ClipSource::Generated(g) => g,
+        ClipSource::Media { .. } => return None,
+    };
+    match generator {
+        Generator::SolidColor { .. } => Some(Generator::SolidColor { rgba }),
+        Generator::Shape {
+            shape,
+            width,
+            height,
+            corner_radius,
+            stroke,
+            ..
+        } => Some(Generator::Shape {
+            shape: shape.clone(),
+            rgba: Param::Constant(rgba),
+            width: width.clone(),
+            height: height.clone(),
+            corner_radius: corner_radius.clone(),
+            stroke: stroke.clone(),
+        }),
+        _ => None,
+    }
+}
+
 /// Replace a generated clip's content (inspector title edit). One history
 /// entry per committed edit; the engine rejects non-generated clips.
 pub(super) fn set_generator_and_publish(

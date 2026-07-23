@@ -480,6 +480,25 @@ export global InspectorBackend {
     // Drop a lingering shape preview override.
     callback clear-shape-generator(tick: int);
 
+    // Solid / shape fill color well: live generator override on preview,
+    // undoable SetGenerator on commit, clear on cancel.
+    callback preview-generator-fill(
+        clip-id: string,
+        r: int,
+        g: int,
+        b: int,
+        a: int,
+        tick: int,
+    );
+    callback set-generator-fill(
+        clip-id: string,
+        r: int,
+        g: int,
+        b: int,
+        a: int,
+    );
+    callback clear-generator-fill(tick: int);
+
     // Installed font family names for the Font picker, populated once at
     // startup (system font enumeration is slow, so it runs off the UI thread).
     in-out property <[string]> font-families: [];

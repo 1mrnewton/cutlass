@@ -71,6 +71,9 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
         },
     );
 
+    app.global::<PreviewBackend>()
+        .on_empty_frame(|| slint::Image::default());
+
     app.global::<PreviewBackend>().on_hit_test(
         |sequence, tick, x, y, view_w, view_h, zoom, pan_x, pan_y| {
             preview_select::hit_test_in_viewport(

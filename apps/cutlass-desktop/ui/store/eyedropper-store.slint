@@ -18,6 +18,18 @@ export global EyedropperStore {
     in-out property <float> canvas-w: 1;
     in-out property <float> canvas-h: 1;
 
+    // Frame + mapping frozen at arm time. Hover previews re-render the
+    // live PreviewStore.frame (e.g. chroma key), so sampling must read
+    // this snapshot for the whole session — not the mutating live buffer.
+    in-out property <image> source-frame;
+    in-out property <float> frozen-zoom: 1.0;
+    in-out property <float> frozen-pan-x: 0.0;
+    in-out property <float> frozen-pan-y: 0.0;
+    in-out property <float> frozen-view-w: 1.0;
+    in-out property <float> frozen-view-h: 1.0;
+    in-out property <float> frozen-canvas-w: 1.0;
+    in-out property <float> frozen-canvas-h: 1.0;
+
     // Live sample while hovering the frame.
     in-out property <bool> over-frame: false;
     in-out property <color> hover-color: #00000000;

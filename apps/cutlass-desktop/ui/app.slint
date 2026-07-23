@@ -484,6 +484,7 @@ export component AppWindow inherits Window {
             if (EyedropperStore.armed) {
                 if (event.text == Key.Escape) {
                     EyedropperStore.cancel-epoch += 1;
+                    EyedropperStore.source-frame = PreviewBackend.empty-frame();
                     EyedropperStore.armed = false;
                     EyedropperStore.over-frame = false;
                     EyedropperStore.label = "";

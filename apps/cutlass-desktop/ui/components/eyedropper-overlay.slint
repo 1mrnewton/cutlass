@@ -1,6 +1,10 @@
 // Full-window eyedropper surface. Sits above every panel while armed so
 // sampling takes priority over preview gestures; click outside the
 // preview viewport cancels. Loupe + hex readout follow the cursor.
+//
+// The source frame (and viewport mapping) are frozen at arm / init so a
+// consumer's live hover-preview cannot change the pixels under the loupe
+// mid-session (chroma key, fill wells, etc.).
 
 import { AppStore } from "../store/app-store.slint";
 import { AppState } from "../state.slint";
@@ -28,6 +32,24 @@ export component EyedropperOverlay inherits Rectangle {
             && my < EyedropperStore.preview-y + EyedropperStore.preview-h;
     }
 
+    function freeze-source() {
+        // Retain the Image handle so SharedPixelBuffer stays alive even when
+        // PreviewStore.frame is replaced by a hover re-render.
+        EyedropperStore.source-frame = PreviewStore.frame;
+        EyedropperStore.frozen-zoom = AppState.preview-maximized ? 1.0 : PreviewStore.viewport-zoom;
+        EyedropperStore.frozen-pan-x = AppState.preview-maximized ? 0.0 : PreviewStore.viewport-pan-x / 1px;
+        EyedropperStore.frozen-pan-y = AppState.preview-maximized ? 0.0 : PreviewStore.viewport-pan-y / 1px;
+        EyedropperStore.frozen-view-w = EyedropperStore.preview-w / 1px;
+        EyedropperStore.frozen-view-h = EyedropperStore.preview-h / 1px;
+        EyedropperStore.frozen-canvas-w = EyedropperStore.canvas-w;
+        EyedropperStore.frozen-canvas-h = EyedropperStore.canvas-h;
+    }
+
+    function drop-source() {
+        // Release the frozen buffer; next arm re-snapshots.
+        EyedropperStore.source-frame = PreviewBackend.empty-frame();
+    }
+
     function apply-sample(mx: length, my: length) {
         EyedropperStore.cursor-x = mx;
         EyedropperStore.cursor-y = my;
@@ -36,21 +58,17 @@ export component EyedropperOverlay inherits Rectangle {
             EyedropperStore.label = "";
             return;
         }
-        // Fullscreen preview is a plain contain fit (no inspect zoom/pan).
-        let zoom = AppState.preview-maximized ? 1.0 : PreviewStore.viewport-zoom;
-        let pan-x = AppState.preview-maximized ? 0.0 : PreviewStore.viewport-pan-x / 1px;
-        let pan-y = AppState.preview-maximized ? 0.0 : PreviewStore.viewport-pan-y / 1px;
         let s = PreviewBackend.sample-preview(
-            PreviewStore.frame,
+            EyedropperStore.source-frame,
             root.local-x(mx),
             root.local-y(my),
-            EyedropperStore.preview-w / 1px,
-            EyedropperStore.preview-h / 1px,
-            zoom,
-            pan-x,
-            pan-y,
-            EyedropperStore.canvas-w,
-            EyedropperStore.canvas-h,
+            EyedropperStore.frozen-view-w,
+            EyedropperStore.frozen-view-h,
+            EyedropperStore.frozen-zoom,
+            EyedropperStore.frozen-pan-x,
+            EyedropperStore.frozen-pan-y,
+            EyedropperStore.frozen-canvas-w,
+            EyedropperStore.frozen-canvas-h,
             EyedropperStore.enable-alpha,
         );
         EyedropperStore.over-frame = s.hit;
@@ -70,6 +88,7 @@ export component EyedropperOverlay inherits Rectangle {
         }
         EyedropperStore.commit-color = EyedropperStore.hover-color;
         EyedropperStore.commit-epoch += 1;
+        root.drop-source();
         EyedropperStore.armed = false;
         EyedropperStore.over-frame = false;
         EyedropperStore.label = "";
@@ -77,9 +96,14 @@ export component EyedropperOverlay inherits Rectangle {
 
     function cancel-sample() {
         EyedropperStore.cancel-epoch += 1;
+        root.drop-source();
         EyedropperStore.armed = false;
         EyedropperStore.over-frame = false;
         EyedropperStore.label = "";
+    }
+
+    init => {
+        root.freeze-source();
     }
 
     ta := TouchArea {

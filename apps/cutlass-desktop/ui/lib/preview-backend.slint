@@ -146,6 +146,10 @@ export global PreviewBackend {
     // frame pixel via viewport_mapping). Letterbox → hit=false.
     pure callback sample-preview(image  /* frame */, float  /* x */, float  /* y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, float  /* canvas-w */, float  /* canvas-h */, bool   /* enable-alpha */, ) -> EyedropperSample;
 
+    // Zero-size placeholder used to drop the eyedropper's frozen source
+    // frame on disarm (releases the SharedPixelBuffer retain).
+    pure callback empty-frame() -> image;
+
     // Topmost hit at (x, y) in viewport-element coordinates, given the
     // viewport's current size and zoom/pan. Locked lanes don't hit-test
     // (same rule as the timeline); hidden lanes aren't composited so they

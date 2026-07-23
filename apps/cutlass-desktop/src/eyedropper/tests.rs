@@ -167,3 +167,22 @@ fn rearm_cancels_prior_preview() {
     assert_eq!(s.arm(2, true), Some(EyedropperAction::Cancel));
     assert_eq!(s.consumer(), 2);
 }
+
+#[test]
+fn sampling_held_frame_is_stable_while_live_mutates() {
+    // Mirrors the Slint arm-time freeze: keep an Image handle, then replace
+    // the "live" buffer with a different color and confirm the held copy
+    // still samples the original pixel (SharedPixelBuffer retain).
+    let red = solid_frame(4, 4, [0xFF, 0x00, 0x00, 0xFF]);
+    let frozen = Image::from_rgba8(slint::SharedPixelBuffer::clone_from_slice(&red, 4, 4));
+    let first = sample_preview(&frozen, 2.0, 2.0, 4.0, 4.0, 1.0, 0.0, 0.0, 4.0, 4.0, true);
+    assert!(first.hit);
+    assert_eq!(first.rgba, [0xFF, 0x00, 0x00, 0xFF]);
+
+    let blue = solid_frame(4, 4, [0x00, 0x00, 0xFF, 0xFF]);
+    let _live = Image::from_rgba8(slint::SharedPixelBuffer::clone_from_slice(&blue, 4, 4));
+    let second = sample_preview(&frozen, 2.0, 2.0, 4.0, 4.0, 1.0, 0.0, 0.0, 4.0, 4.0, true);
+    assert!(second.hit);
+    assert_eq!(second.rgba, [0xFF, 0x00, 0x00, 0xFF]);
+    assert_eq!(second.loupe_rgba[0..4], [0xFF, 0x00, 0x00, 0xFF]);
+}

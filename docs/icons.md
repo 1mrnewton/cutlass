@@ -84,6 +84,12 @@ lacks cleanly (`letter-spacing`, `line-height`): **[Tabler](https://tabler.io/ic
 - [x] `clapperboard` — `assets/icon/launch/clapperboard.svg` — recent-project thumb chip.
 - [x] window controls — reuse `assets/icon/shell/{minus,square,copy,x}.svg`.
 
+### Preview transport — `panels/preview/preview.slint`
+
+- [x] `play` / `pause` — `assets/icon/play.svg` · `pause.svg`.
+- [x] `fullscreen` — `assets/icon/fullscreen.svg`.
+- [ ] `box-select` (Lucide) — placeholder `"⬚"` — `panels/preview/preview.slint` — toggle on-canvas transform/mask/motion-path gizmos (left of zoom %).
+
 ### Timeline toolbar — `panels/timeline/toolbar.slint`
 
 - [x] `undo-2` — `assets/icon/timeline/undo-2.svg`.

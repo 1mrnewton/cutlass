@@ -8,6 +8,9 @@ export global PreviewStore {
     in-out property <float> viewport-zoom: 1.0;
     in-out property <length> viewport-pan-x: 0px;
     in-out property <length> viewport-pan-y: 0px;
+    // Session-only: hide on-canvas transform/mask/motion-path gizmos (CapCut
+    // "show controls"). Clip hit-test selection and body-drag still work.
+    in-out property <bool> show-transform-controls: true;
 
     // The preview area's on-screen size (logical px), reported by whichever
     // preview surface is live (docked panel or fullscreen). The engine worker

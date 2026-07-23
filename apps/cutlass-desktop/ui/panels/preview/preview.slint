@@ -249,6 +249,9 @@ export component PreviewPanel inherits PanelBase {
 
                     private property <bool> show-sprite-stack:
                         self.sprite-ready && self.sprite-hold;
+                    // Selection box / handles / mask / motion-path chrome.
+                    private property <bool> show-gizmos:
+                        PreviewStore.show-transform-controls && self.sel-box.visible;
 
                     private property <length> frame-x:
                         (self.width - self.fitted-width * PreviewStore.viewport-zoom) / 2
@@ -267,7 +270,7 @@ export component PreviewPanel inherits PanelBase {
                         return (px - qx) * (px - qx) + (py - qy) * (py - qy) <= 100;
                     }
                     function zone-at(px: float, py: float) -> int {
-                        if (!self.sel-box.visible) {
+                        if (!self.show-gizmos) {
                             return 0;
                         }
                         if (self.near(px, py, self.sel-box.hx, self.sel-box.hy)) {
@@ -597,7 +600,7 @@ export component PreviewPanel inherits PanelBase {
 
                     // Motion path: under the selection outline so gizmos stay
                     // grab-able on top. Empty when position isn't animated.
-                    MotionPathOverlay {
+                    if PreviewStore.show-transform-controls: MotionPathOverlay {
                         width: 100%;
                         height: 100%;
                         path: viewport.motion-path;
@@ -624,7 +627,7 @@ export component PreviewPanel inherits PanelBase {
 
                     // Selection outline: a stroked quad (corners arrive
                     // pre-rotated from Rust — Slint can't rotate rectangles).
-                    if viewport.sel-box.visible: Path {
+                    if viewport.show-gizmos: Path {
                         width: 100%;
                         height: 100%;
                         viewbox-width: viewport.width / 1px;
@@ -642,7 +645,7 @@ export component PreviewPanel inherits PanelBase {
 
                     // Corner scale handles: constant UI size, riding the
                     // (pre-rotated) quad corners.
-                    if viewport.sel-box.visible: Rectangle {
+                    if viewport.show-gizmos: Rectangle {
                         x: viewport.sel-box.x0 * 1px - 5px;
                         y: viewport.sel-box.y0 * 1px - 5px;
                         width: 10px;
@@ -652,7 +655,7 @@ export component PreviewPanel inherits PanelBase {
                         border-width: 1px;
                         border-color: #00000066;
                     }
-                    if viewport.sel-box.visible: Rectangle {
+                    if viewport.show-gizmos: Rectangle {
                         x: viewport.sel-box.x1 * 1px - 5px;
                         y: viewport.sel-box.y1 * 1px - 5px;
                         width: 10px;
@@ -662,7 +665,7 @@ export component PreviewPanel inherits PanelBase {
                         border-width: 1px;
                         border-color: #00000066;
                     }
-                    if viewport.sel-box.visible: Rectangle {
+                    if viewport.show-gizmos: Rectangle {
                         x: viewport.sel-box.x2 * 1px - 5px;
                         y: viewport.sel-box.y2 * 1px - 5px;
                         width: 10px;
@@ -672,7 +675,7 @@ export component PreviewPanel inherits PanelBase {
                         border-width: 1px;
                         border-color: #00000066;
                     }
-                    if viewport.sel-box.visible: Rectangle {
+                    if viewport.show-gizmos: Rectangle {
                         x: viewport.sel-box.x3 * 1px - 5px;
                         y: viewport.sel-box.y3 * 1px - 5px;
                         width: 10px;
@@ -684,7 +687,7 @@ export component PreviewPanel inherits PanelBase {
                     }
 
                     // Anchor pivot: crosshair riding the anchor point.
-                    if viewport.sel-box.visible: Path {
+                    if viewport.show-gizmos: Path {
                         width: 100%;
                         height: 100%;
                         viewbox-width: viewport.width / 1px;
@@ -698,7 +701,7 @@ export component PreviewPanel inherits PanelBase {
                         MoveTo { x: viewport.sel-box.ax; y: viewport.sel-box.ay - 8; }
                         LineTo { x: viewport.sel-box.ax; y: viewport.sel-box.ay + 8; }
                     }
-                    if viewport.sel-box.visible: Rectangle {
+                    if viewport.show-gizmos: Rectangle {
                         x: viewport.sel-box.ax * 1px - 4px;
                         y: viewport.sel-box.ay * 1px - 4px;
                         width: 8px;
@@ -711,7 +714,7 @@ export component PreviewPanel inherits PanelBase {
 
                     // Rotate affordance: a hollow ring floating below the
                     // content's bottom edge (follows the box's rotation).
-                    if viewport.sel-box.visible: Rectangle {
+                    if viewport.show-gizmos: Rectangle {
                         x: viewport.sel-box.hx * 1px - 6px;
                         y: viewport.sel-box.hy * 1px - 6px;
                         width: 12px;
@@ -743,7 +746,7 @@ export component PreviewPanel inherits PanelBase {
 
                     // Mask gizmo on top of transform grips so mask handles
                     // win hit-testing while a mask is set.
-                    MaskOverlay {
+                    if PreviewStore.show-transform-controls: MaskOverlay {
                         width: 100%;
                         height: 100%;
                         gizmo: viewport.mask-gizmo;
@@ -871,6 +874,43 @@ export component PreviewPanel inherits PanelBase {
                     HorizontalLayout {
                         alignment: LayoutAlignment.end;
                         spacing: AppStore.theme.metrics.spacing.sm;
+
+                        // Toggle on-canvas transform/mask/motion-path gizmos.
+                        // Placeholder until `box-select` SVG is wired (docs/icons.md).
+                        Rectangle {
+                            width: 24px;
+                            vertical-stretch: 1;
+
+                            Rectangle {
+                                width: 24px;
+                                height: 24px;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: 4px;
+                                background: PreviewStore.show-transform-controls ? #2A2A2A : transparent;
+                                border-width: 1px;
+                                border-color: #FFFFFF24;
+
+                                Text {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: "⬚";
+                                    color: PreviewStore.show-transform-controls ? #FFFFFF : #FFFFFF66;
+                                    font-size: 14px;
+                                    horizontal-alignment: TextHorizontalAlignment.center;
+                                    vertical-alignment: TextVerticalAlignment.center;
+                                }
+
+                                TouchArea {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => {
+                                        PreviewStore.show-transform-controls =
+                                            !PreviewStore.show-transform-controls;
+                                    }
+                                }
+                            }
+                        }
 
                         Rectangle {
                             width: 52px;

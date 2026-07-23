@@ -115,6 +115,16 @@ fn main() {
             AgentEvent::Action(a) => println!("  ⚙ {}", a.description),
             AgentEvent::HostAction { name, summary } => println!("  ⚙ {name}: {summary}"),
             AgentEvent::Image(image) => println!("  ◫ {}", image.label),
+            AgentEvent::Usage(u) => {
+                let cost = u
+                    .cost
+                    .map(|c| format!("${c:.4}"))
+                    .unwrap_or_else(|| "n/a".into());
+                println!(
+                    "  tokens: in={} (cached {}) out={} cost={}",
+                    u.input_tokens, u.cached_input_tokens, u.output_tokens, cost
+                );
+            }
         },
     );
 

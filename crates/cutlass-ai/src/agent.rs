@@ -29,6 +29,7 @@ use crate::describe::{EditorContext, ProjectSummary};
 use crate::extend::AgentExtensions;
 use crate::provider::{
     ChatProvider, ChatRequest, FinishReason, ImagePart, Message, ProviderError, ProviderStreamEvent,
+    TokenUsage,
 };
 use crate::tools::{HostToolSpec, ToolHost, is_host_tool_name};
 use crate::wire::{self, WireCommand};
@@ -162,6 +163,9 @@ pub enum AgentEvent {
     /// payload limits. Embedders can render it inline while the same encoded
     /// bytes continue to the model.
     Image(ImagePart),
+    /// Cumulative token usage for this prompt so far (sum of every provider
+    /// turn that reported usage). Emitted after each such turn.
+    Usage(TokenUsage),
 }
 
 /// How the prompt ended.
@@ -197,6 +201,9 @@ pub struct PromptOutcome {
     /// `describe_project` results are collapsed to a short placeholder —
     /// they're large and the fresh system snapshot supersedes them.
     pub turn_messages: Vec<Message>,
+    /// Cumulative provider-reported token usage across every turn of this
+    /// prompt (including turns before an abort — tokens already spent stay).
+    pub usage: TokenUsage,
 }
 
 /// House rules + user/project rules + the skill index + the send-time
@@ -461,6 +468,7 @@ pub fn run_prompt_with_host(
     // rather than burning turns until the turn cap rolls the prompt back.
     let mut edit_cap_tripped = false;
     let mut final_text = String::new();
+    let mut usage = TokenUsage::default();
     // The first image-bearing tool result is appended after the current user
     // message. Images are surfaced only after the whole request budget has run,
     // immediately before those exact attachments are sent to the provider.
@@ -472,19 +480,21 @@ pub fn run_prompt_with_host(
     if !config.dry_run {
         bridge.begin_group();
     }
-    let abort = |bridge: &mut dyn EngineBridge, actions: Vec<ActionLogEntry>, reason: String| {
-        if !config.dry_run {
-            bridge.rollback_group();
-        }
-        PromptOutcome {
-            text: String::new(),
-            actions,
-            // Rolled back ⇒ no phases survive to group.
-            phase_breaks: Vec::new(),
-            status: PromptStatus::Aborted(reason),
-            turn_messages: Vec::new(),
-        }
-    };
+    let abort =
+        |bridge: &mut dyn EngineBridge, actions: Vec<ActionLogEntry>, usage: TokenUsage, reason: String| {
+            if !config.dry_run {
+                bridge.rollback_group();
+            }
+            PromptOutcome {
+                text: String::new(),
+                actions,
+                // Rolled back ⇒ no phases survive to group.
+                phase_breaks: Vec::new(),
+                status: PromptStatus::Aborted(reason),
+                turn_messages: Vec::new(),
+                usage,
+            }
+        };
 
     for _turn in 0..config.max_turns {
         enforce_image_budget(&mut messages, config.max_images, config.max_image_bytes);
@@ -515,11 +525,15 @@ pub fn run_prompt_with_host(
             ) {
                 Ok(turn) => turn,
                 Err(ProviderError::Cancelled) => {
-                    return abort(bridge, actions, "cancelled".to_string());
+                    return abort(bridge, actions, usage, "cancelled".to_string());
                 }
-                Err(e) => return abort(bridge, actions, e.to_string()),
+                Err(e) => return abort(bridge, actions, usage, e.to_string()),
             }
         };
+        if let Some(turn_usage) = &turn.usage {
+            usage.add(turn_usage);
+            on_event(AgentEvent::Usage(usage));
+        }
 
         if turn.tool_calls.is_empty() {
             final_text = turn.text;
@@ -527,6 +541,7 @@ pub fn run_prompt_with_host(
                 return abort(
                     bridge,
                     actions,
+                    usage,
                     "the model ran out of tokens mid-answer".to_string(),
                 );
             }
@@ -575,6 +590,7 @@ pub fn run_prompt_with_host(
                     return abort(
                         bridge,
                         actions,
+                        usage,
                         format!(
                             "exceeded the {}-host-call cap for one prompt",
                             config.max_host_calls
@@ -609,6 +625,7 @@ pub fn run_prompt_with_host(
                     return abort(
                         bridge,
                         actions,
+                        usage,
                         format!(
                             "exceeded the {}-host-call cap for one prompt",
                             config.max_host_calls
@@ -634,6 +651,7 @@ pub fn run_prompt_with_host(
                                     return abort(
                                         bridge,
                                         actions,
+                                        usage,
                                         format!(
                                             "host tool '{}' was dispatched, but reconciliation \
                                              failed: {reason}; host effects may already have \
@@ -735,6 +753,7 @@ pub fn run_prompt_with_host(
             return abort(
                 bridge,
                 actions,
+                usage,
                 format!("exceeded the {}-turn cap for one prompt", config.max_turns),
             );
         }
@@ -749,6 +768,7 @@ pub fn run_prompt_with_host(
             phase_breaks,
             status: PromptStatus::DryRun,
             turn_messages,
+            usage,
         };
     }
     bridge.end_group();
@@ -758,6 +778,7 @@ pub fn run_prompt_with_host(
         phase_breaks,
         status: PromptStatus::Completed,
         turn_messages,
+        usage,
     }
 }
 

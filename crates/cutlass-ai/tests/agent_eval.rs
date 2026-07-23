@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicBool;
 use cutlass_ai::agent::{
     AgentConfig, AgentEvent, EngineBridge, PromptStatus, run_prompt_with_host,
 };
-use cutlass_ai::provider::{ChatTurn, FinishReason, ImagePart, Message, ToolCall};
+use cutlass_ai::provider::{ChatTurn, FinishReason, ImagePart, Message, TokenUsage, ToolCall};
 use cutlass_ai::providers::ScriptedProvider;
 use cutlass_ai::tools::{HostToolSpec, NullToolHost, ToolHost, ToolOutput, ToolTier};
 use cutlass_ai::{EditorContext, ProjectSummary, WireCommand, summarize, validate};
@@ -1881,6 +1881,90 @@ fn provider_failure_mid_prompt_rolls_back() {
         "the applied split must be rolled back"
     );
     assert!(!host.engine.undo());
+}
+
+#[test]
+fn token_usage_accumulates_across_turns_with_cumulative_events() {
+    let (mut host, _, _, clip) = fixture();
+    let first = TokenUsage {
+        input_tokens: 100,
+        cached_input_tokens: 40,
+        output_tokens: 10,
+        cost: Some(0.01),
+    };
+    let second = TokenUsage {
+        input_tokens: 50,
+        cached_input_tokens: 20,
+        output_tokens: 5,
+        cost: Some(0.02),
+    };
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![(
+            "call_1",
+            "split_clip",
+            serde_json::json!({ "clip": clip, "at": 5.0 }),
+        )])
+        .with_usage(first),
+        text_turn("Split at 5s.").with_usage(second),
+    ]);
+
+    let (outcome, events) = run(
+        &provider,
+        &mut host,
+        &EditorContext::default(),
+        "split the clip",
+        &AgentConfig::default(),
+    );
+
+    assert_eq!(outcome.status, PromptStatus::Completed);
+    assert_eq!(outcome.usage.input_tokens, 150);
+    assert_eq!(outcome.usage.cached_input_tokens, 60);
+    assert_eq!(outcome.usage.output_tokens, 15);
+    assert_eq!(outcome.usage.cost, Some(0.03));
+    let usage_events: Vec<TokenUsage> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Usage(usage) => Some(*usage),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(usage_events, [first, outcome.usage]);
+}
+
+#[test]
+fn aborted_prompt_keeps_usage_spent_before_abort() {
+    let (mut host, _, _, clip) = fixture();
+    let spent = TokenUsage {
+        input_tokens: 80,
+        cached_input_tokens: 10,
+        output_tokens: 4,
+        cost: Some(0.005),
+    };
+    // One successful turn with usage, then the script runs dry → abort.
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![(
+            "call_1",
+            "split_clip",
+            serde_json::json!({ "clip": clip, "at": 5.0 }),
+        )])
+        .with_usage(spent),
+    ]);
+
+    let (outcome, events) = run(
+        &provider,
+        &mut host,
+        &EditorContext::default(),
+        "split the clip",
+        &AgentConfig::default(),
+    );
+
+    assert!(matches!(outcome.status, PromptStatus::Aborted(_)));
+    assert_eq!(outcome.usage, spent);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Usage(usage) if *usage == spent))
+    );
 }
 
 fn message_kind(m: &Message) -> &'static str {

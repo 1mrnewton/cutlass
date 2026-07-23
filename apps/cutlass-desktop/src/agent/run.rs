@@ -526,6 +526,14 @@ pub(crate) fn run_one_prompt(
             push_entry(&event_store, "action", format!("{name}: {summary}"))
         }
         AgentEvent::Image(image) => push_image_entry(&event_store, image),
+        // UI wiring lands in a follow-up; keep the cumulative total in logs for now.
+        AgentEvent::Usage(usage) => info!(
+            input = usage.input_tokens,
+            cached = usage.cached_input_tokens,
+            output = usage.output_tokens,
+            cost = ?usage.cost,
+            "agent token usage"
+        ),
     };
 
     info!(prompt, dry_run, "agent prompt started");

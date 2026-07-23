@@ -33,6 +33,20 @@ export global PreviewStore {
     // a toggle rather than a modifier.
     in-out property <bool> motion-path-mirror: true;
 
+    // Live mask gizmo / inspector ParamOverride. When `mask-live-active` the
+    // mask-gizmo callback uses these instead of playhead samples so handles
+    // track mid-drag (projection stays frozen until commit).
+    in-out property <bool> mask-live-active: false;
+    in-out property <float> mask-live-center-x: 0;
+    in-out property <float> mask-live-center-y: 0;
+    in-out property <float> mask-live-size-w: 1;
+    in-out property <float> mask-live-size-h: 1;
+    in-out property <float> mask-live-rotation: 0;
+    in-out property <float> mask-live-feather: 0;
+    in-out property <float> mask-live-roundness: 0;
+    // Active mask-handle drag id (0=idle; see MaskGizmo hit ids).
+    in-out property <int> mask-drag-handle: 0;
+
     // Live transform gesture (preview roadmap Phases 3–5): the uncommitted
     // resolution of whatever gesture is in flight — a preview move/scale/
     // rotate drag or an inspector slider — mirrored UI-wide. The projection

@@ -141,6 +141,41 @@ export struct EyedropperSample {
     label: string,
 }
 
+// On-canvas mask gizmo (viewport-element logical px). Geometry from
+// `src/preview_mask_gizmo.rs`. Handle hit ids: 0=none, 1=center, 2=body,
+// 3=size-x, 4=size-y, 5=rotation, 6=feather, 7=roundness. `outline2` is the
+// second Mirror band edge (empty for other kinds). Param fields are the
+// sampled/live model values used to build the overlay (layer fractions /
+// degrees) so drag commits don't re-sample a stale projection.
+export struct MaskGizmo {
+    visible: bool,
+    kind: string,
+    outline-commands: string,
+    outline2-commands: string,
+    center-x: float,
+    center-y: float,
+    has-size-x: bool,
+    size-x-x: float,
+    size-x-y: float,
+    has-size-y: bool,
+    size-y-x: float,
+    size-y-y: float,
+    rotation-x: float,
+    rotation-y: float,
+    feather-x: float,
+    feather-y: float,
+    has-roundness: bool,
+    roundness-x: float,
+    roundness-y: float,
+    center-fx: float,
+    center-fy: float,
+    size-w: float,
+    size-h: float,
+    rotation-deg: float,
+    feather: float,
+    roundness: float,
+}
+
 export global PreviewBackend {
     // Sample the composited preview frame under the cursor (widget px →
     // frame pixel via viewport_mapping). Letterbox → hit=false.
@@ -195,6 +230,15 @@ export global PreviewBackend {
 
     // Commit spatial tangents on the position keyframe at `tick`.
     callback motion-path-commit-tangents(clip-id: string, tick: int, out-x: float, out-y: float, in-x: float, in-y: float);
+
+    // Mask gizmo overlay for a selected clip that has a mask. When
+    // `live-active` is true the live-* fields replace playhead samples so
+    // the handles track ParamOverride / on-canvas drags.
+    pure callback mask-gizmo(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* live-active */, float  /* live-center-x */, float  /* live-center-y */, float  /* live-size-w */, float  /* live-size-h */, float  /* live-rotation */, float  /* live-feather */, float  /* live-roundness */, ) -> MaskGizmo;
+
+    // Handle under (x, y) in viewport px (see MaskGizmo hit ids). Rebuilds
+    // layout from the same inputs as mask-gizmo.
+    pure callback hit-test-mask-gizmo(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* x */, float  /* y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* live-active */, float  /* live-center-x */, float  /* live-center-y */, float  /* live-size-w */, float  /* live-size-h */, float  /* live-rotation */, float  /* live-feather */, float  /* live-roundness */, float  /* tolerance */, ) -> int;
 
     // Move gesture (preview roadmap Phase 3): press point + current cursor
     // (viewport-element px) → new normalized position, center-guide magnet

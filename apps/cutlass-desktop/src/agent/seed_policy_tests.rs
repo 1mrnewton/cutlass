@@ -74,7 +74,7 @@ fn sandbox_seed_policy_discards_parked_plan_when_live_revision_moves() {
 
 #[test]
 fn continue_pending_keeps_sandbox_when_live_revision_matches() {
-    let mut sandbox = temp_engine(Project::new("parked-keep", Rational::FPS_24));
+    let sandbox = temp_engine(Project::new("parked-keep", Rational::FPS_24));
     let revision_before = sandbox.revision();
     let name_before = sandbox.project().name.clone();
     let preview = Preview {

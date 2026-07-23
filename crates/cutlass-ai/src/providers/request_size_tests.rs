@@ -130,7 +130,9 @@ fn describe_project_dump(project: &Project, context: &EditorContext) -> String {
 fn tools_only_body_stays_under_ceiling() {
     let provider = OpenAiCompatProvider::new("http://localhost:11434/v1", "bench-model", None);
     let tools = hostless_tools();
-    let messages = vec![Message::user("cut the first 3 seconds of the selected clip")];
+    let messages = vec![Message::user(
+        "cut the first 3 seconds of the selected clip",
+    )];
     let bytes = body_bytes(&provider, &messages, &tools);
 
     // Measured 2026-07-23: 76_790 bytes (tools dominate). Ceiling = measured + ~15%.

@@ -315,3 +315,132 @@ fn describe_round_trips_non_dyadic_scale_through_f32() {
         .expect("keyframes")["scale"];
     assert_eq!(scale[0].value, serde_json::json!(1.3));
 }
+
+/// Motion fields only — pins presence/absence plus `t`/`v`/`e` shape.
+fn motion_json_subtree(clip: &serde_json::Value) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for key in [
+        "position",
+        "anchor",
+        "scale",
+        "rotation",
+        "opacity",
+        "keyframes",
+    ] {
+        if let Some(v) = clip.get(key) {
+            map.insert(key.to_string(), v.clone());
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+#[test]
+fn motion_state_json_subtree_is_pinned() {
+    // One keyframed clip + one static transformed clip on a 1920×1080 canvas.
+    // Exact JSON pin so future describe edits cannot silently drop motion.
+    let mut project = Project::new("motion-pin", R24);
+    project
+        .timeline_mut()
+        .set_canvas(cutlass_models::CanvasSettings {
+            aspect: cutlass_models::CanvasAspect::Wide16x9,
+            background: [0, 0, 0],
+        });
+    let media = project.add_media(MediaSource::new(
+        "/footage/pin.mp4",
+        1920,
+        1080,
+        R24,
+        24 * 30,
+        true,
+    ));
+    let video = project.add_track(TrackKind::Video, "V1");
+    let animated = project
+        .add_clip(
+            video,
+            media,
+            TimeRange::at_rate(0, 72, R24),
+            RationalTime::new(0, R24),
+        )
+        .unwrap();
+    let placed = project
+        .add_clip(
+            video,
+            media,
+            TimeRange::at_rate(0, 48, R24),
+            RationalTime::new(96, R24),
+        )
+        .unwrap();
+
+    {
+        let clip = project.timeline_mut().clip_mut(animated).unwrap();
+        clip.transform
+            .position
+            .set_keyframe(0, [-1.0, 0.0], Easing::Linear);
+        clip.transform
+            .position
+            .set_keyframe(24, [0.0, 0.0], Easing::EaseOut);
+        clip.transform
+            .scale
+            .set_keyframe(0, Scale2::uniform(1.0), Easing::Linear);
+        clip.transform
+            .scale
+            .set_keyframe(24, Scale2::uniform(1.3), Easing::EaseIn);
+    }
+    project
+        .set_transform(
+            placed,
+            ClipTransform {
+                position: [0.25, -0.125],
+                anchor_point: [0.0, 1.0],
+                scale: Scale2::uniform(1.5),
+                rotation: 45.0,
+                opacity: 0.75,
+            },
+            None,
+        )
+        .unwrap();
+
+    let summary = serde_json::to_value(summarize(&project)).unwrap();
+    assert_eq!(
+        summary["canvas"],
+        serde_json::json!({
+            "width": 1920,
+            "height": 1080,
+            "aspect": "16:9",
+            "background": [0, 0, 0],
+        })
+    );
+
+    let clips = &summary["tracks"][0]["clips"];
+    assert_eq!(clips[0]["id"], animated.raw());
+    assert_eq!(clips[1]["id"], placed.raw());
+
+    // Animated: static position/scale omitted; keyframes carry absolute `t`.
+    assert_eq!(
+        motion_json_subtree(&clips[0]),
+        serde_json::json!({
+            "keyframes": {
+                "position": [
+                    { "t": 0.0, "v": [-1.0, 0.0] },
+                    { "t": 1.0, "v": [0.0, 0.0], "e": "ease_out" },
+                ],
+                "scale": [
+                    { "t": 0.0, "v": 1.0 },
+                    { "t": 1.0, "v": 1.3, "e": "ease_in" },
+                ],
+            }
+        })
+    );
+
+    // Static: full placement fields, no keyframes map.
+    assert_eq!(
+        motion_json_subtree(&clips[1]),
+        serde_json::json!({
+            "position": [0.25, -0.125],
+            "anchor": [0.0, 1.0],
+            "scale": 1.5,
+            "rotation": 45.0,
+            "opacity": 0.75,
+        })
+    );
+}

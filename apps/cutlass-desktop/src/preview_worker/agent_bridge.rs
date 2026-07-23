@@ -132,10 +132,33 @@ pub(super) fn agent_cleanup_source_lane(
     engine.project().timeline().track_of(ClipId::from_raw(clip))
 }
 
+/// Distinct error token when Apply's expected seed revision no longer
+/// matches [`Engine::revision`]. Matched by the agent worker — not shown
+/// verbatim in the transcript.
+pub(crate) const STALE_PLAN_SEED_ERROR: &str = "__stale_plan_seed_revision__";
+
+/// Apply a rehearsed plan when `expected_seed_revision` still matches the
+/// live engine. Compared inside the worker on the same ordered channel as
+/// mutations so a concurrent user edit cannot sneak past the check.
+pub(crate) fn agent_apply_with_seed(
+    engine: &mut Engine,
+    phases: Vec<Vec<AgentPlanStep>>,
+    expected_seed_revision: u64,
+    after_step: impl FnMut(&mut Engine),
+) -> Result<(), String> {
+    if engine.revision() != expected_seed_revision {
+        return Err(STALE_PLAN_SEED_ERROR.to_string());
+    }
+    agent_replay(engine, phases, after_step)
+}
+
 pub(super) fn agent_apply_and_publish(
     engine: &mut Engine,
     phases: Vec<Vec<AgentPlanStep>>,
+    expected_seed_revision: u64,
     ui: &UiSink,
 ) -> Result<(), String> {
-    agent_replay(engine, phases, |engine| publish_projection(engine, ui))
+    agent_apply_with_seed(engine, phases, expected_seed_revision, |engine| {
+        publish_projection(engine, ui)
+    })
 }

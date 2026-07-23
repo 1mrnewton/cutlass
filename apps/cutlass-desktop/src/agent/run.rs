@@ -84,6 +84,11 @@ impl AgentWorker {
 pub(crate) const STALE_PLAN_NOTICE: &str = "Project changed since this plan was rehearsed — \
     discarded the stale plan and re-read the current state.";
 
+/// Transcript status when Apply is refused because the live engine revision
+/// no longer matches the revision the plan was rehearsed against.
+pub(crate) const STALE_APPLY_NOTICE: &str =
+    "Project changed since this plan was rehearsed — the plan was not applied.";
+
 #[derive(Default)]
 pub(crate) struct Preview {
     pub(crate) plan: Vec<AgentPlanStep>,
@@ -161,6 +166,20 @@ pub(crate) fn reseed_sandbox_from_live<W: super::sandbox::ProjectSnapshotSource 
     preview.descriptions.clear();
     preview.seed_revision = Some(revision);
     Ok(())
+}
+
+/// After auto-discarding a stale parked plan, rewind provider history to the
+/// dry-run checkpoint and capture a fresh checkpoint for the replacement
+/// rehearsal. The just-arrived user prompt is passed separately to
+/// [`run_prompt_with_host`] and is not part of `history` yet.
+pub(crate) fn restore_history_after_stale_plan_discard(
+    history: &mut Vec<Message>,
+    preview: &mut Preview,
+) {
+    if let Some(saved) = preview.history_restore.take() {
+        *history = saved;
+    }
+    preview.history_restore = Some(history.clone());
 }
 
 pub(crate) fn agent_main(
@@ -283,12 +302,28 @@ pub(crate) fn agent_main(
             AgentRequest::ApplyPlan => {
                 let plan = std::mem::take(&mut preview.plan);
                 let phase_breaks = std::mem::take(&mut preview.phase_breaks);
-                preview.clear();
+                let expected_seed = preview.seed_revision;
                 with_store(&store, |s| s.set_plan_pending(false));
                 if plan.is_empty() {
+                    preview.clear();
                     continue;
                 }
-                apply_plan_live(&worker, &store, plan, &phase_breaks);
+                let apply = apply_plan_live(&worker, &store, plan, &phase_breaks, expected_seed);
+                match apply {
+                    ApplyLiveOutcome::Applied | ApplyLiveOutcome::Failed => {
+                        preview.clear();
+                    }
+                    ApplyLiveOutcome::Stale => {
+                        if let Some(saved) = preview.history_restore.take() {
+                            history = saved;
+                        }
+                        preview.clear();
+                        push_entry(&store, "status", STALE_APPLY_NOTICE.into());
+                    }
+                    ApplyLiveOutcome::EngineGone => {
+                        preview.clear();
+                    }
+                }
                 persist_session(
                     current_project.as_deref(),
                     current_chat_id.as_deref(),
@@ -541,6 +576,9 @@ pub(crate) fn run_one_prompt(
             return;
         }
         if discarded_stale_plan {
+            // Drop rehearsal turns that describe edits no longer in the
+            // reseeded sandbox; refresh the checkpoint for this new run.
+            restore_history_after_stale_plan_discard(history, preview);
             push_entry(store, "status", STALE_PLAN_NOTICE.into());
         }
     }
@@ -652,7 +690,13 @@ pub(crate) fn run_one_prompt(
             } else if !plan.is_empty() {
                 // Auto-apply never extends a parked preview (any pending one
                 // was discarded above), so the breaks are plan-relative.
-                apply_plan_live(worker, store, plan, &outcome.phase_breaks);
+                let _ = apply_plan_live(
+                    worker,
+                    store,
+                    plan,
+                    &outcome.phase_breaks,
+                    preview.seed_revision,
+                );
             }
         }
     }
@@ -691,16 +735,36 @@ pub(crate) fn split_plan_phases(
     phases
 }
 
+/// Outcome of replaying a rehearsed plan onto the live engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApplyLiveOutcome {
+    Applied,
+    /// Live revision no longer matches the plan's seed — nothing replayed.
+    Stale,
+    Failed,
+    EngineGone,
+}
+
 pub(crate) fn apply_plan_live(
     worker: &WorkerHandle,
     store: &slint::Weak<AgentStore<'static>>,
     plan: Vec<AgentPlanStep>,
     phase_breaks: &[usize],
-) {
+    expected_seed_revision: Option<u64>,
+) -> ApplyLiveOutcome {
     let count = plan.len();
     let phases = split_plan_phases(plan, phase_breaks);
     let phase_count = phases.len();
-    match worker.agent_apply_plan(phases) {
+    let Some(expected) = expected_seed_revision else {
+        error!("agent plan apply missing seed revision");
+        push_entry(
+            store,
+            "error",
+            "Could not apply the plan: missing rehearsal seed revision.".into(),
+        );
+        return ApplyLiveOutcome::Failed;
+    };
+    match worker.agent_apply_plan(phases, expected) {
         Some(Ok(())) => {
             push_entry(
                 store,
@@ -715,17 +779,25 @@ pub(crate) fn apply_plan_live(
                 },
             );
             with_store(store, |s| s.set_undo_offered(true));
+            ApplyLiveOutcome::Applied
+        }
+        Some(Err(e)) if e == crate::preview_worker::STALE_PLAN_SEED_ERROR => {
+            ApplyLiveOutcome::Stale
         }
         Some(Err(e)) => {
             error!(error = e, "agent plan replay failed");
             // The replay error already says how much (if anything) landed.
             push_entry(store, "error", format!("Could not apply the plan: {e}."));
+            ApplyLiveOutcome::Failed
         }
-        None => push_entry(
-            store,
-            "error",
-            "The editor engine is not responding.".into(),
-        ),
+        None => {
+            push_entry(
+                store,
+                "error",
+                "The editor engine is not responding.".into(),
+            );
+            ApplyLiveOutcome::EngineGone
+        }
     }
 }
 

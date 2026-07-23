@@ -577,8 +577,17 @@ pub(super) fn dispatch(
         WorkerMsg::ProjectRevision { reply } => {
             let _ = reply.send(engine.revision());
         }
-        WorkerMsg::AgentApplyPlan { phases, reply } => {
-            let _ = reply.send(agent_apply_and_publish(engine, phases, ui));
+        WorkerMsg::AgentApplyPlan {
+            phases,
+            expected_seed_revision,
+            reply,
+        } => {
+            let _ = reply.send(agent_apply_and_publish(
+                engine,
+                phases,
+                expected_seed_revision,
+                ui,
+            ));
         }
         WorkerMsg::Frame(_) => unreachable!("frames are handled by the drain below"),
         WorkerMsg::TransformOverride { .. } => {

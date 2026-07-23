@@ -2,8 +2,10 @@
 
 use super::*;
 use crate::agent_senses::AgentSenses;
+use crate::preview_worker::{STALE_PLAN_SEED_ERROR, agent_apply_with_seed};
 use cutlass_ai::wire;
-use cutlass_ai::{EngineBridge, ToolOutput, WireCommand};
+use cutlass_ai::{EngineBridge, Message, ToolOutput, WireCommand};
+use cutlass_commands::{Command, EditCommand};
 use cutlass_engine::{Engine, EngineConfig};
 use cutlass_models::{Project, Rational};
 use std::cell::{Cell, RefCell};
@@ -140,6 +142,94 @@ fn continue_pending_reseeds_and_clears_plan_when_live_diverges() {
         "Project changed since this plan was rehearsed — discarded the stale plan and re-read the current state."
     );
     assert_eq!(worker.calls.get(), 1, "one live snapshot for the reseed");
+}
+
+#[test]
+fn stale_plan_discard_restores_history_and_refreshes_checkpoint() {
+    let checkpoint = vec![Message::user("earlier chat")];
+    let mut history = checkpoint.clone();
+    history.push(Message::Assistant {
+        content: "I'll add a marker".into(),
+        tool_calls: vec![],
+    });
+    history.push(Message::user("and another edit"));
+    let mut preview = Preview {
+        history_restore: Some(checkpoint.clone()),
+        seed_revision: Some(4),
+        plan: vec![AgentPlanStep {
+            command: WireCommand::AddMarker(wire::AddMarker {
+                at: 1.0,
+                name: Some("stale".into()),
+                color: None,
+            }),
+            created: None,
+        }],
+        ..Default::default()
+    };
+
+    restore_history_after_stale_plan_discard(&mut history, &mut preview);
+
+    assert_eq!(history, checkpoint);
+    assert_eq!(
+        preview.history_restore.as_ref(),
+        Some(&checkpoint),
+        "fresh checkpoint must match restored history so a later DiscardPlan \
+         cannot rewind past turns completed after the stale-plan notice"
+    );
+    // The replacement user prompt is not in history yet — run_prompt adds it.
+    assert_eq!(history.len(), 1);
+}
+
+#[test]
+fn apply_with_matching_seed_revision_succeeds() {
+    let mut live = temp_engine(Project::new("apply-ok", Rational::FPS_24));
+    let seed = live.revision();
+    let plan = vec![vec![AgentPlanStep {
+        command: WireCommand::AddMarker(wire::AddMarker {
+            at: 1.0,
+            name: Some("rehearsed".into()),
+            color: Some(wire::WireMarkerColor::Red),
+        }),
+        created: None,
+    }]];
+    agent_apply_with_seed(&mut live, plan, seed, |_| {}).expect("matching seed applies");
+    assert_eq!(live.project().timeline().markers().len(), 1);
+}
+
+#[test]
+fn apply_after_live_mutation_is_refused_and_leaves_project_untouched() {
+    let mut live = temp_engine(Project::new("apply-stale", Rational::FPS_24));
+    let seed = live.revision();
+    // User edit bumps the live revision under the parked plan.
+    live.apply(Command::Edit(EditCommand::SetProjectName {
+        name: "user-renamed".into(),
+    }))
+    .expect("user edit");
+    let revision_after_user = live.revision();
+    assert_ne!(seed, revision_after_user);
+    let name_before = live.project().name.clone();
+
+    let plan = vec![vec![AgentPlanStep {
+        command: WireCommand::AddMarker(wire::AddMarker {
+            at: 2.0,
+            name: Some("stale-plan".into()),
+            color: None,
+        }),
+        created: None,
+    }]];
+    let err = agent_apply_with_seed(&mut live, plan, seed, |_| {})
+        .expect_err("mismatched seed must refuse replay");
+    assert_eq!(err, STALE_PLAN_SEED_ERROR);
+    assert_eq!(live.revision(), revision_after_user);
+    assert_eq!(live.project().name, name_before);
+    assert!(
+        live.project().timeline().markers().is_empty(),
+        "stale apply must not replay onto the live project"
+    );
+    assert_eq!(
+        STALE_APPLY_NOTICE,
+        "Project changed since this plan was rehearsed — the plan was not applied."
+    );
 }
 
 #[test]

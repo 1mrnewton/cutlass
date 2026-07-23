@@ -38,11 +38,21 @@ impl WorkerHandle {
     }
 
     /// Synchronous round-trip: replay a rehearsed agent plan, one undo
-    /// entry per phase. `None` only if the worker thread is gone.
-    pub fn agent_apply_plan(&self, phases: Vec<Vec<AgentPlanStep>>) -> Option<Result<(), String>> {
+    /// entry per phase. `expected_seed_revision` is checked against the live
+    /// engine revision inside the worker immediately before replay. `None`
+    /// only if the worker thread is gone.
+    pub fn agent_apply_plan(
+        &self,
+        phases: Vec<Vec<AgentPlanStep>>,
+        expected_seed_revision: u64,
+    ) -> Option<Result<(), String>> {
         let (reply, rx) = bounded(1);
         self.tx
-            .send(WorkerMsg::AgentApplyPlan { phases, reply })
+            .send(WorkerMsg::AgentApplyPlan {
+                phases,
+                expected_seed_revision,
+                reply,
+            })
             .ok()?;
         rx.recv().ok()
     }

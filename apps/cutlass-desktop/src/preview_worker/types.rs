@@ -800,8 +800,11 @@ pub(super) enum WorkerMsg {
     /// re-validating every step against the live project and remapping ids
     /// the sandbox allocated. A failure rolls back the failing phase only
     /// and stops; phases already committed stay, each its own undo step.
+    /// `expected_seed_revision` must match [`Engine::revision`] immediately
+    /// before replay (TOCTOU guard against live edits under a parked plan).
     AgentApplyPlan {
         phases: Vec<Vec<AgentPlanStep>>,
+        expected_seed_revision: u64,
         reply: Sender<Result<(), String>>,
     },
 }

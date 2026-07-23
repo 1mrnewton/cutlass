@@ -6,6 +6,7 @@
 
 import { CutlassText, AccentButton, CutlassColorSwatch } from "../components/index.slint";
 import { AppStore, EditorStore } from "../store/index.slint";
+import { EyedropperStore } from "../store/eyedropper-store.slint";
 import { CanvasBackend } from "../lib/canvas-backend.slint";
 import { AppState } from "../state.slint";
 import { ComboBox } from "std-widgets.slint";
@@ -19,6 +20,10 @@ component FieldLabel inherits CutlassText {
 
 export component CanvasDialog inherits Rectangle {
     background: #000000A0;
+    // Yield the stage while the background well's eyedropper is armed so
+    // the preview stays visible/clickable under EyedropperOverlay. The
+    // dialog stays "open" (`canvas-dialog-open`) and reappears on commit/cancel.
+    visible: !EyedropperStore.armed;
 
     function close() {
         AppState.canvas-dialog-open = false;
@@ -118,7 +123,10 @@ export component CanvasDialog inherits Rectangle {
                 }
 
                 CutlassColorSwatch {
-                    // Canvas background is opaque RGB — no live override lane.
+                    // Canvas background is opaque RGB — commit-only (no live
+                    // override lane). Recents come from AppStore via the
+                    // swatch default; eyedropper yields this dialog (see
+                    // `visible` above) so the preview can be sampled.
                     value: EditorStore.project.sequence.background;
                     enable-alpha: false;
                     changed(value) => {

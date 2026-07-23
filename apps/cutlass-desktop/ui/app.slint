@@ -868,13 +868,6 @@ export component AppWindow inherits Window {
         }
     }
 
-    // Preview eyedropper — above panels so sampling wins over transform
-    // gestures; click outside the preview viewport cancels.
-    if EyedropperStore.armed: EyedropperOverlay {
-        width: root.width;
-        height: root.height;
-    }
-
     // Library drag ghost — must live at window scope so it paints above all
     // panels. `z` on a nested element only stacks within its parent; PanelBase
     // also clips children to the panel bounds. Once the cursor enters the
@@ -958,6 +951,14 @@ export component AppWindow inherits Window {
     // Session-error dialog (save/open failures) — above even the export
     // dialog: an error must never hide behind another modal.
     if EditorStore.session-error != "": MessageDialog {
+        width: root.width;
+        height: root.height;
+    }
+
+    // Preview eyedropper — declared last so sampling wins over transform
+    // gestures *and* modals (canvas dialog hides itself while armed).
+    // Click outside the preview viewport cancels.
+    if EyedropperStore.armed: EyedropperOverlay {
         width: root.width;
         height: root.height;
     }

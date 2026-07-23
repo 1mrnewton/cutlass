@@ -2794,22 +2794,50 @@
             "type": "number"
           },
           "color": {
-            "description": "Flag color. Omit to cycle the palette automatically.",
-            "enum": [
-              "teal",
-              "blue",
-              "purple",
-              "pink",
-              "red",
-              "orange",
-              "yellow",
-              "green",
-              null
+            "anyOf": [
+              {
+                "description": "Marker flag colors: the editor's fixed palette, or a custom opaque RGB.",
+                "oneOf": [
+                  {
+                    "enum": [
+                      "teal",
+                      "blue",
+                      "purple",
+                      "pink",
+                      "red",
+                      "orange",
+                      "yellow",
+                      "green"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "description": "Custom opaque RGB (`[r, g, b]`, each 0–255). Markers are UI chrome —\nalpha is not accepted on the wire.",
+                    "properties": {
+                      "rgba": {
+                        "items": {
+                          "maximum": 255,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "maxItems": 3,
+                        "minItems": 3,
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "rgba"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
             ],
-            "type": [
-              "string",
-              "null"
-            ]
+            "description": "Flag color. Omit to cycle the palette automatically."
           },
           "name": {
             "description": "Short label shown beside the flag (e.g. \"Drop\", \"Beat 1\"). Omit for\nan unnamed marker.",
@@ -2857,22 +2885,50 @@
             ]
           },
           "color": {
-            "description": "New flag color. Omit to keep the color.",
-            "enum": [
-              "teal",
-              "blue",
-              "purple",
-              "pink",
-              "red",
-              "orange",
-              "yellow",
-              "green",
-              null
+            "anyOf": [
+              {
+                "description": "Marker flag colors: the editor's fixed palette, or a custom opaque RGB.",
+                "oneOf": [
+                  {
+                    "enum": [
+                      "teal",
+                      "blue",
+                      "purple",
+                      "pink",
+                      "red",
+                      "orange",
+                      "yellow",
+                      "green"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "description": "Custom opaque RGB (`[r, g, b]`, each 0–255). Markers are UI chrome —\nalpha is not accepted on the wire.",
+                    "properties": {
+                      "rgba": {
+                        "items": {
+                          "maximum": 255,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "maxItems": 3,
+                        "minItems": 3,
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "rgba"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
             ],
-            "type": [
-              "string",
-              "null"
-            ]
+            "description": "New flag color. Omit to keep the color."
           },
           "marker": {
             "description": "The marker to change.",
@@ -2970,5 +3026,5 @@
       }
     }
   ],
-  "version": 43
+  "version": 44
 }

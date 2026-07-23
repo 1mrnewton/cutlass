@@ -824,7 +824,7 @@ pub fn summarize(project: &Project) -> ProjectSummary {
             at_seconds: seconds(m.tick.value, rate),
             at_frames: m.tick.value,
             name: m.name.clone(),
-            color: m.color.name().to_string(),
+            color: m.color.token(),
         })
         .collect();
 

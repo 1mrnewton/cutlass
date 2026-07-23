@@ -77,7 +77,8 @@ use serde::{Deserialize, Serialize};
 ///     set_clip_speed); rotation about anchor; keyframe `at` = timeline secs.
 /// 43: drop `speed` from keyframe-tool WireClipParam schema enum (serde still
 ///     accepts it so validate can teach set_clip_speed / set_speed_curve).
-pub const TOOL_SCHEMA_VERSION: u32 = 43;
+/// 44: `WireMarkerColor` gains `rgba: [r,g,b]` for custom opaque marker colors.
+pub const TOOL_SCHEMA_VERSION: u32 = 44;
 
 mod dtos;
 mod tools;

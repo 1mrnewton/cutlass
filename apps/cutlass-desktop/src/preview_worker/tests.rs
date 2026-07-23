@@ -1371,6 +1371,21 @@ fn shape_fill_preview_then_commit_clears_override() {
 }
 
 #[test]
+fn parse_marker_color_accepts_palette_and_hex_tokens() {
+    assert_eq!(parse_marker_color("red"), Some(MarkerColor::Red));
+    assert_eq!(
+        parse_marker_color("#123456"),
+        Some(MarkerColor::custom(0x12, 0x34, 0x56))
+    );
+    assert_eq!(
+        parse_marker_color("aabbcc"),
+        Some(MarkerColor::custom(0xAA, 0xBB, 0xCC))
+    );
+    assert_eq!(MarkerColor::custom(1, 2, 3).token(), "#010203");
+    assert!(parse_marker_color("not-a-color").is_none());
+}
+
+#[test]
 fn shape_fill_preview_cancel_clears_override_without_edit() {
     use cutlass_models::Shape;
 

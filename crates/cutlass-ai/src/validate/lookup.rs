@@ -236,6 +236,7 @@ pub(super) fn marker_color(color: WireMarkerColor) -> MarkerColor {
         WireMarkerColor::Orange => MarkerColor::Orange,
         WireMarkerColor::Yellow => MarkerColor::Yellow,
         WireMarkerColor::Green => MarkerColor::Green,
+        WireMarkerColor::Rgba([r, g, b]) => MarkerColor::custom(r, g, b),
     }
 }
 

@@ -2716,6 +2716,26 @@ fn marker_commands_lower_to_engine() {
     );
     assert!(msg.contains("marker 404 does not exist"), "{msg}");
     assert!(msg.contains(&id.raw().to_string()), "{msg}");
+
+    // Custom opaque RGB is accepted and forced opaque in the model.
+    let edit = lower(
+        &project,
+        WireCommand::SetMarker(wire::SetMarker {
+            marker: id.raw(),
+            at: None,
+            name: None,
+            color: Some(WireMarkerColor::Rgba([0x12, 0x34, 0x56])),
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetMarker {
+            marker: id,
+            at: RationalTime::new(48, R24),
+            name: "mid".into(),
+            color: MarkerColor::custom(0x12, 0x34, 0x56),
+        }
+    );
 }
 
 #[test]

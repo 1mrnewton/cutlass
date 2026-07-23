@@ -121,7 +121,7 @@ pub struct UnlinkClips {
     pub clips: Vec<u64>,
 }
 
-/// Marker flag colors (the editor's fixed palette).
+/// Marker flag colors: the editor's fixed palette, or a custom opaque RGB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WireMarkerColor {
@@ -133,6 +133,9 @@ pub enum WireMarkerColor {
     Orange,
     Yellow,
     Green,
+    /// Custom opaque RGB (`[r, g, b]`, each 0–255). Markers are UI chrome —
+    /// alpha is not accepted on the wire.
+    Rgba([u8; 3]),
 }
 
 /// Drop a named, colored marker on the timeline ruler — an anchor for

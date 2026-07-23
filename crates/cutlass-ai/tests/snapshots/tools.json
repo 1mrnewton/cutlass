@@ -59,6 +59,7 @@
         "properties": {
           "media": {
             "description": "Media pool id of the source file.",
+            "minimum": 0,
             "type": "integer"
           },
           "source_duration": {
@@ -75,6 +76,7 @@
           },
           "track": {
             "description": "Target track id.",
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -96,10 +98,12 @@
         "properties": {
           "clip": {
             "description": "Source media clip on a video track.",
+            "minimum": 0,
             "type": "integer"
           },
           "track": {
             "description": "Target unlocked audio track. This is required: call `add_track` first\nwhen no suitable audio lane exists, then use its returned id.",
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -119,6 +123,7 @@
         "properties": {
           "clip": {
             "description": "Source clip to copy.",
+            "minimum": 0,
             "type": "integer"
           },
           "start": {
@@ -127,6 +132,7 @@
           },
           "to_track": {
             "description": "Explicit destination track id.",
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -174,6 +180,8 @@
                   "rgba": {
                     "description": "`[r, g, b, a]` each 0–255.",
                     "items": {
+                      "maximum": 255,
+                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -204,6 +212,8 @@
                   "rgba": {
                     "description": "`[r, g, b, a]` each 0–255.",
                     "items": {
+                      "maximum": 255,
+                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -245,6 +255,7 @@
           },
           "track": {
             "description": "Target track id. Text goes on text tracks; solids and shapes go on\nsticker (overlay) tracks.",
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -265,6 +276,7 @@
         "properties": {
           "clip": {
             "description": "The generated clip to modify.",
+            "minimum": 0,
             "type": "integer"
           },
           "generator": {
@@ -293,6 +305,8 @@
                   "rgba": {
                     "description": "`[r, g, b, a]` each 0–255.",
                     "items": {
+                      "maximum": 255,
+                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -323,6 +337,8 @@
                   "rgba": {
                     "description": "`[r, g, b, a]` each 0–255.",
                     "items": {
+                      "maximum": 255,
+                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -387,6 +403,7 @@
             ]
           },
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "opacity": {
@@ -464,6 +481,7 @@
             ]
           },
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "flip_h": {
@@ -515,6 +533,7 @@
         "description": "Append a visual effect to a clip's chain (catalog id, e.g. gaussian_blur).",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "effect": {
@@ -536,10 +555,12 @@
         "description": "Remove an effect by chain index (0 = first).",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "index": {
             "description": "Effect chain index (0 = first).",
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -557,14 +578,17 @@
         "description": "Reorder an effect; both indices address the pre-move chain.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "from_index": {
             "description": "Current index (0 = first).",
+            "minimum": 0,
             "type": "integer"
           },
           "to_index": {
             "description": "Final index after the move (0 = first).",
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -583,10 +607,12 @@
         "description": "Set one effect parameter (catalog-range-checked).",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "index": {
             "description": "Effect chain index (0 = first).",
+            "minimum": 0,
             "type": "integer"
           },
           "param": {
@@ -608,6 +634,8 @@
           "rgba": {
             "description": "`[r, g, b, a]` 0–255 for color effect params.",
             "items": {
+              "maximum": 255,
+              "minimum": 0,
               "type": "integer"
             },
             "maxItems": 4,
@@ -640,6 +668,7 @@
         "description": "Add a transition where `clip` abuts the next clip on its track.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "transition": {
@@ -661,6 +690,7 @@
         "description": "Remove the transition at `clip`'s right cut.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -677,6 +707,7 @@
         "description": "Set transition duration (seconds, positive); window centered on the cut.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "seconds": {
@@ -701,6 +732,7 @@
             "type": "number"
           },
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "easing": {
@@ -722,8 +754,10 @@
                     "type": "string"
                   },
                   {
+                    "additionalProperties": false,
                     "properties": {
                       "bezier": {
+                        "additionalProperties": false,
                         "properties": {
                           "points": {
                             "items": {
@@ -753,7 +787,7 @@
             ]
           },
           "param": {
-            "description": "Clip property. Strings: position, anchor_point, scale, rotation, opacity, crop, volume, pan, speed. Tagged: {\"effect\":{\"index\":N,\"param\":name}}, {\"shape|text|look|style\":{\"param\":name}} — shape: width|height|corner_radius|inner_ratio|fill|stroke_*; text: size|fill|*_spacing|stroke_*|shadow_*|background_*; look: *_intensity|adjust_*|mask_*|chroma_*; style: shadow_*|glow_*|outline_*|background_*. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
+            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
             "oneOf": [
               {
                 "enum": [
@@ -770,10 +804,13 @@
                 "type": "string"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "effect": {
+                    "additionalProperties": false,
                     "properties": {
                       "index": {
+                        "minimum": 0,
                         "type": "integer"
                       },
                       "param": {
@@ -793,10 +830,21 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "shape": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "width",
+                          "height",
+                          "corner_radius",
+                          "inner_ratio",
+                          "fill",
+                          "stroke_color",
+                          "stroke_width"
+                        ],
                         "type": "string"
                       }
                     },
@@ -812,10 +860,25 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "text": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "size",
+                          "fill",
+                          "letter_spacing",
+                          "line_spacing",
+                          "stroke_width",
+                          "stroke_color",
+                          "shadow_blur",
+                          "shadow_distance",
+                          "shadow_color",
+                          "background_color",
+                          "background_radius"
+                        ],
                         "type": "string"
                       }
                     },
@@ -831,10 +894,34 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "look": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "filter_intensity",
+                          "lut_intensity",
+                          "adjust_brightness",
+                          "adjust_contrast",
+                          "adjust_saturation",
+                          "adjust_exposure",
+                          "adjust_temperature",
+                          "adjust_tint",
+                          "adjust_hue",
+                          "adjust_highlights",
+                          "adjust_shadows",
+                          "adjust_sharpness",
+                          "adjust_vignette",
+                          "mask_feather",
+                          "mask_center",
+                          "mask_size",
+                          "mask_rotation",
+                          "mask_roundness",
+                          "chroma_strength",
+                          "chroma_shadow"
+                        ],
                         "type": "string"
                       }
                     },
@@ -850,10 +937,25 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "style": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "shadow_color",
+                          "shadow_offset",
+                          "shadow_blur",
+                          "glow_color",
+                          "glow_radius",
+                          "glow_intensity",
+                          "outline_color",
+                          "outline_width",
+                          "background_color",
+                          "background_padding",
+                          "background_radius"
+                        ],
                         "type": "string"
                       }
                     },
@@ -897,6 +999,8 @@
           "rgba": {
             "description": "`[r,g,b,a]` 0–255.",
             "items": {
+              "maximum": 255,
+              "minimum": 0,
               "type": "integer"
             },
             "maxItems": 4,
@@ -955,10 +1059,11 @@
             "type": "number"
           },
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "param": {
-            "description": "Clip property. Strings: position, anchor_point, scale, rotation, opacity, crop, volume, pan, speed. Tagged: {\"effect\":{\"index\":N,\"param\":name}}, {\"shape|text|look|style\":{\"param\":name}} — shape: width|height|corner_radius|inner_ratio|fill|stroke_*; text: size|fill|*_spacing|stroke_*|shadow_*|background_*; look: *_intensity|adjust_*|mask_*|chroma_*; style: shadow_*|glow_*|outline_*|background_*. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
+            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
             "oneOf": [
               {
                 "enum": [
@@ -975,10 +1080,13 @@
                 "type": "string"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "effect": {
+                    "additionalProperties": false,
                     "properties": {
                       "index": {
+                        "minimum": 0,
                         "type": "integer"
                       },
                       "param": {
@@ -998,10 +1106,21 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "shape": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "width",
+                          "height",
+                          "corner_radius",
+                          "inner_ratio",
+                          "fill",
+                          "stroke_color",
+                          "stroke_width"
+                        ],
                         "type": "string"
                       }
                     },
@@ -1017,10 +1136,25 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "text": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "size",
+                          "fill",
+                          "letter_spacing",
+                          "line_spacing",
+                          "stroke_width",
+                          "stroke_color",
+                          "shadow_blur",
+                          "shadow_distance",
+                          "shadow_color",
+                          "background_color",
+                          "background_radius"
+                        ],
                         "type": "string"
                       }
                     },
@@ -1036,10 +1170,34 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "look": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "filter_intensity",
+                          "lut_intensity",
+                          "adjust_brightness",
+                          "adjust_contrast",
+                          "adjust_saturation",
+                          "adjust_exposure",
+                          "adjust_temperature",
+                          "adjust_tint",
+                          "adjust_hue",
+                          "adjust_highlights",
+                          "adjust_shadows",
+                          "adjust_sharpness",
+                          "adjust_vignette",
+                          "mask_feather",
+                          "mask_center",
+                          "mask_size",
+                          "mask_rotation",
+                          "mask_roundness",
+                          "chroma_strength",
+                          "chroma_shadow"
+                        ],
                         "type": "string"
                       }
                     },
@@ -1055,10 +1213,25 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "style": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "shadow_color",
+                          "shadow_offset",
+                          "shadow_blur",
+                          "glow_color",
+                          "glow_radius",
+                          "glow_intensity",
+                          "outline_color",
+                          "outline_width",
+                          "background_color",
+                          "background_padding",
+                          "background_radius"
+                        ],
                         "type": "string"
                       }
                     },
@@ -1090,10 +1263,11 @@
       "parameters": {
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "param": {
-            "description": "Clip property. Strings: position, anchor_point, scale, rotation, opacity, crop, volume, pan, speed. Tagged: {\"effect\":{\"index\":N,\"param\":name}}, {\"shape|text|look|style\":{\"param\":name}} — shape: width|height|corner_radius|inner_ratio|fill|stroke_*; text: size|fill|*_spacing|stroke_*|shadow_*|background_*; look: *_intensity|adjust_*|mask_*|chroma_*; style: shadow_*|glow_*|outline_*|background_*. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
+            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
             "oneOf": [
               {
                 "enum": [
@@ -1110,10 +1284,13 @@
                 "type": "string"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "effect": {
+                    "additionalProperties": false,
                     "properties": {
                       "index": {
+                        "minimum": 0,
                         "type": "integer"
                       },
                       "param": {
@@ -1133,10 +1310,21 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "shape": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "width",
+                          "height",
+                          "corner_radius",
+                          "inner_ratio",
+                          "fill",
+                          "stroke_color",
+                          "stroke_width"
+                        ],
                         "type": "string"
                       }
                     },
@@ -1152,10 +1340,25 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "text": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "size",
+                          "fill",
+                          "letter_spacing",
+                          "line_spacing",
+                          "stroke_width",
+                          "stroke_color",
+                          "shadow_blur",
+                          "shadow_distance",
+                          "shadow_color",
+                          "background_color",
+                          "background_radius"
+                        ],
                         "type": "string"
                       }
                     },
@@ -1171,10 +1374,34 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "look": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "filter_intensity",
+                          "lut_intensity",
+                          "adjust_brightness",
+                          "adjust_contrast",
+                          "adjust_saturation",
+                          "adjust_exposure",
+                          "adjust_temperature",
+                          "adjust_tint",
+                          "adjust_hue",
+                          "adjust_highlights",
+                          "adjust_shadows",
+                          "adjust_sharpness",
+                          "adjust_vignette",
+                          "mask_feather",
+                          "mask_center",
+                          "mask_size",
+                          "mask_rotation",
+                          "mask_roundness",
+                          "chroma_strength",
+                          "chroma_shadow"
+                        ],
                         "type": "string"
                       }
                     },
@@ -1190,10 +1417,25 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "style": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "shadow_color",
+                          "shadow_offset",
+                          "shadow_blur",
+                          "glow_color",
+                          "glow_radius",
+                          "glow_intensity",
+                          "outline_color",
+                          "outline_width",
+                          "background_color",
+                          "background_padding",
+                          "background_radius"
+                        ],
                         "type": "string"
                       }
                     },
@@ -1237,6 +1479,8 @@
           "rgba": {
             "description": "`[r,g,b,a]` 0–255.",
             "items": {
+              "maximum": 255,
+              "minimum": 0,
               "type": "integer"
             },
             "maxItems": 4,
@@ -1266,6 +1510,7 @@
       "parameters": {
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "from_tick": {
@@ -1273,7 +1518,7 @@
             "type": "number"
           },
           "param": {
-            "description": "Clip property. Strings: position, anchor_point, scale, rotation, opacity, crop, volume, pan, speed. Tagged: {\"effect\":{\"index\":N,\"param\":name}}, {\"shape|text|look|style\":{\"param\":name}} — shape: width|height|corner_radius|inner_ratio|fill|stroke_*; text: size|fill|*_spacing|stroke_*|shadow_*|background_*; look: *_intensity|adjust_*|mask_*|chroma_*; style: shadow_*|glow_*|outline_*|background_*. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
+            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
             "oneOf": [
               {
                 "enum": [
@@ -1290,10 +1535,13 @@
                 "type": "string"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "effect": {
+                    "additionalProperties": false,
                     "properties": {
                       "index": {
+                        "minimum": 0,
                         "type": "integer"
                       },
                       "param": {
@@ -1313,10 +1561,21 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "shape": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "width",
+                          "height",
+                          "corner_radius",
+                          "inner_ratio",
+                          "fill",
+                          "stroke_color",
+                          "stroke_width"
+                        ],
                         "type": "string"
                       }
                     },
@@ -1332,10 +1591,25 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "text": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "size",
+                          "fill",
+                          "letter_spacing",
+                          "line_spacing",
+                          "stroke_width",
+                          "stroke_color",
+                          "shadow_blur",
+                          "shadow_distance",
+                          "shadow_color",
+                          "background_color",
+                          "background_radius"
+                        ],
                         "type": "string"
                       }
                     },
@@ -1351,10 +1625,34 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "look": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "filter_intensity",
+                          "lut_intensity",
+                          "adjust_brightness",
+                          "adjust_contrast",
+                          "adjust_saturation",
+                          "adjust_exposure",
+                          "adjust_temperature",
+                          "adjust_tint",
+                          "adjust_hue",
+                          "adjust_highlights",
+                          "adjust_shadows",
+                          "adjust_sharpness",
+                          "adjust_vignette",
+                          "mask_feather",
+                          "mask_center",
+                          "mask_size",
+                          "mask_rotation",
+                          "mask_roundness",
+                          "chroma_strength",
+                          "chroma_shadow"
+                        ],
                         "type": "string"
                       }
                     },
@@ -1370,10 +1668,25 @@
                 "type": "object"
               },
               {
+                "additionalProperties": false,
                 "properties": {
                   "style": {
+                    "additionalProperties": false,
                     "properties": {
                       "param": {
+                        "enum": [
+                          "shadow_color",
+                          "shadow_offset",
+                          "shadow_blur",
+                          "glow_color",
+                          "glow_radius",
+                          "glow_intensity",
+                          "outline_color",
+                          "outline_width",
+                          "background_color",
+                          "background_padding",
+                          "background_radius"
+                        ],
                         "type": "string"
                       }
                     },
@@ -1416,6 +1729,7 @@
         "description": "Change a media clip's constant playback speed and/or direction.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "reversed": {
@@ -1446,6 +1760,7 @@
         "description": "Apply or clear a CapCut-style speed ramp on a media clip.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "preset": {
@@ -1469,6 +1784,7 @@
         "description": "Lock or unlock pitch on a retimed media clip.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "preserve_pitch": {
@@ -1491,6 +1807,7 @@
         "properties": {
           "clip": {
             "description": "Video clip with sound, or an audio clip.",
+            "minimum": 0,
             "type": "integer"
           },
           "fade_in": {
@@ -1528,6 +1845,7 @@
         "description": "Enable/disable speech-preserving noise reduction on a media clip.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "denoise": {
@@ -1548,6 +1866,7 @@
         "description": "Set (or clear) a per-clip mask on a media-backed visual clip.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "mask": {
@@ -1645,6 +1964,8 @@
               "rgb": {
                 "description": "Key color as `[red, green, blue]`, each 0-255.",
                 "items": {
+                  "maximum": 255,
+                  "minimum": 0,
                   "type": "integer"
                 },
                 "maxItems": 3,
@@ -1675,6 +1996,7 @@
             ]
           },
           "clip": {
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -1691,6 +2013,7 @@
         "description": "Set (or clear) video stabilization on a media-backed video clip (not stills).",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "level": {
@@ -1720,6 +2043,7 @@
         "description": "Set (or clear) a color-grade filter preset on any visual clip.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "filter": {
@@ -1761,6 +2085,7 @@
         "properties": {
           "clip": {
             "description": "Target clip id.",
+            "minimum": 0,
             "type": "integer"
           },
           "mode": {
@@ -1798,6 +2123,7 @@
         "description": "Transform motion blur (not animatable). Omitted fields keep current values.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "enabled": {
@@ -1835,6 +2161,7 @@
         "description": "Replace layer styles; empty `styles` clears every block.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "styles": {
@@ -1855,6 +2182,8 @@
                   },
                   "rgba": {
                     "items": {
+                      "maximum": 255,
+                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -1886,6 +2215,8 @@
                   },
                   "rgba": {
                     "items": {
+                      "maximum": 255,
+                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -1909,6 +2240,8 @@
                 "properties": {
                   "rgba": {
                     "items": {
+                      "maximum": 255,
+                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -1948,6 +2281,8 @@
                   },
                   "rgba": {
                     "items": {
+                      "maximum": 255,
+                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -1989,6 +2324,7 @@
             ]
           },
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "contrast": {
@@ -2076,6 +2412,7 @@
             ]
           },
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "intensity": {
@@ -2123,6 +2460,7 @@
         "description": "Tag (or untag) what an audio-lane clip is (music / sfx / voiceover / extracted).",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "role": {
@@ -2157,6 +2495,7 @@
             "type": "number"
           },
           "clip": {
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -2174,6 +2513,7 @@
         "description": "Re-place / trim a clip to a new timeline range. Trimming the head of a\nmedia clip advances its source in-point to match (like dragging a trim\nhandle).",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "duration": {
@@ -2200,6 +2540,7 @@
         "description": "Move a clip to a track at a new start time, keeping its duration.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           },
           "start": {
@@ -2208,6 +2549,7 @@
           },
           "to_track": {
             "description": "Destination track id (may be the clip's current track).",
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -2226,6 +2568,7 @@
         "description": "Remove a clip, leaving a gap where it sat.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -2242,6 +2585,7 @@
         "description": "Remove a track and any clips still on it.",
         "properties": {
           "track": {
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -2261,6 +2605,7 @@
             "type": "boolean"
           },
           "track": {
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -2281,6 +2626,7 @@
             "type": "boolean"
           },
           "track": {
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -2301,6 +2647,7 @@
             "type": "boolean"
           },
           "track": {
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -2318,6 +2665,7 @@
         "description": "Remove a clip and slide later clips on its track left to close the gap.",
         "properties": {
           "clip": {
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -2342,6 +2690,7 @@
             "type": "number"
           },
           "track": {
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -2365,6 +2714,7 @@
           },
           "media": {
             "description": "Media pool id of the source file.",
+            "minimum": 0,
             "type": "integer"
           },
           "source_duration": {
@@ -2377,6 +2727,7 @@
           },
           "track": {
             "description": "Target track id (video or audio).",
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -2399,6 +2750,7 @@
           "clips": {
             "description": "Ids of the clips to link (at least two).",
             "items": {
+              "minimum": 0,
               "type": "integer"
             },
             "maxItems": 64,
@@ -2421,6 +2773,7 @@
           "clips": {
             "description": "Ids of linked clips whose complete groups should be dissolved. List\neach clip id once; callers do not need to enumerate every group member.",
             "items": {
+              "minimum": 0,
               "type": "integer"
             },
             "maxItems": 64,
@@ -2484,6 +2837,7 @@
         "properties": {
           "marker": {
             "description": "The marker to remove.",
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -2526,6 +2880,7 @@
           },
           "marker": {
             "description": "The marker to change.",
+            "minimum": 0,
             "type": "integer"
           },
           "name": {
@@ -2579,6 +2934,8 @@
           "background": {
             "description": "Canvas background color as `[red, green, blue]`, each 0-255. Omit\nto keep the current background.",
             "items": {
+              "maximum": 255,
+              "minimum": 0,
               "type": "integer"
             },
             "maxItems": 3,
@@ -2617,5 +2974,5 @@
       }
     }
   ],
-  "version": 40
+  "version": 41
 }

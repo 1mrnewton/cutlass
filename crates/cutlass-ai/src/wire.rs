@@ -70,7 +70,9 @@ use serde::{Deserialize, Serialize};
 /// 39: per-clip transform motion blur (`set_motion_blur`).
 /// 40: compact `WireClipParam` / `WireEasing` schemas + trimmed descriptions
 ///     (tool payload shrink; wire serde unchanged).
-pub const TOOL_SCHEMA_VERSION: u32 = 40;
+/// 41: exact nested param enums on `WireClipParam` tagged branches +
+///     `additionalProperties: false`; schema cleaner keeps numeric bounds.
+pub const TOOL_SCHEMA_VERSION: u32 = 41;
 
 mod dtos;
 mod tools;

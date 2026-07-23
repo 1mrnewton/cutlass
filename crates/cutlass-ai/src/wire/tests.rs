@@ -1,3 +1,7 @@
+use super::dtos::{
+    WIRE_CLIP_PARAM_UNIT_TOKENS, WIRE_LOOK_PARAM_TOKENS, WIRE_SHAPE_PARAM_TOKENS,
+    WIRE_STYLE_PARAM_TOKENS, WIRE_TEXT_PARAM_TOKENS,
+};
 use super::*;
 
 #[test]
@@ -124,7 +128,7 @@ fn set_param_keyframe_schema_uses_compact_wire_clip_param() {
         .expect("set_param_keyframe tool");
     let compact = serde_json::to_string(&spec.parameters).expect("serialize");
     assert!(
-        compact.len() < 3_000,
+        compact.len() < 4_500,
         "set_param_keyframe schema is {} bytes; WireClipParam should be a \
          compact string enum + tagged branches, not per-variant oneOf prose",
         compact.len()
@@ -145,6 +149,127 @@ fn set_param_keyframe_schema_uses_compact_wire_clip_param() {
     assert!(
         !one_of.iter().any(|b| b.get("const").is_some()),
         "param schema still uses per-variant const oneOf branches"
+    );
+}
+
+fn schema_enum_tokens(branch: &serde_json::Value, tag: &str) -> Vec<String> {
+    assert_eq!(
+        branch.get("additionalProperties"),
+        Some(&serde_json::json!(false)),
+        "{tag} branch must close additionalProperties"
+    );
+    let inner = &branch["properties"][tag];
+    assert_eq!(
+        inner.get("additionalProperties"),
+        Some(&serde_json::json!(false)),
+        "{tag}.param object must close additionalProperties"
+    );
+    inner["properties"]["param"]["enum"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{tag}.param enum missing: {branch}"))
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .unwrap_or_else(|| panic!("non-string enum entry in {tag}: {v}"))
+                .to_string()
+        })
+        .collect()
+}
+
+fn assert_token_set_eq(label: &str, schema: &[String], source: &[&str]) {
+    let mut left = schema.to_vec();
+    left.sort();
+    let mut right: Vec<String> = source.iter().map(|s| (*s).to_string()).collect();
+    right.sort();
+    assert_eq!(
+        left, right,
+        "{label} schema enum diverged from source tokens"
+    );
+}
+
+#[test]
+fn wire_clip_param_schema_enums_match_serde_tokens() {
+    let spec = tool_specs()
+        .into_iter()
+        .find(|s| s.name == "set_param_keyframe")
+        .expect("set_param_keyframe tool");
+    let one_of = spec.parameters["properties"]["param"]["oneOf"]
+        .as_array()
+        .expect("param oneOf");
+
+    let unit: Vec<String> = one_of
+        .iter()
+        .find(|b| b.get("type") == Some(&serde_json::json!("string")))
+        .expect("unit string branch")["enum"]
+        .as_array()
+        .expect("unit enum")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_token_set_eq("unit", &unit, WIRE_CLIP_PARAM_UNIT_TOKENS);
+    for token in WIRE_CLIP_PARAM_UNIT_TOKENS {
+        let value = serde_json::Value::String((*token).into());
+        serde_json::from_value::<WireClipParam>(value)
+            .unwrap_or_else(|e| panic!("unit token {token:?} rejected by serde: {e}"));
+    }
+
+    for (tag, tokens) in [
+        ("shape", WIRE_SHAPE_PARAM_TOKENS),
+        ("text", WIRE_TEXT_PARAM_TOKENS),
+        ("look", WIRE_LOOK_PARAM_TOKENS),
+        ("style", WIRE_STYLE_PARAM_TOKENS),
+    ] {
+        let branch = one_of
+            .iter()
+            .find(|b| b["properties"].get(tag).is_some())
+            .unwrap_or_else(|| panic!("missing {tag} branch"));
+        let schema_tokens = schema_enum_tokens(branch, tag);
+        assert_token_set_eq(tag, &schema_tokens, tokens);
+        for token in tokens {
+            let value = serde_json::json!({ tag: { "param": token } });
+            serde_json::from_value::<WireClipParam>(value)
+                .unwrap_or_else(|e| panic!("{tag}.{token} rejected by serde: {e}"));
+        }
+    }
+
+    // Every nested enum variant also round-trips through its own type, so the
+    // token tables stay aligned with serde's rename_all = "snake_case".
+    for token in WIRE_SHAPE_PARAM_TOKENS {
+        let p: WireShapeParam = serde_json::from_value(serde_json::json!(token)).unwrap();
+        assert_eq!(serde_json::to_value(p).unwrap(), serde_json::json!(token));
+    }
+    for token in WIRE_TEXT_PARAM_TOKENS {
+        let p: WireTextParam = serde_json::from_value(serde_json::json!(token)).unwrap();
+        assert_eq!(serde_json::to_value(p).unwrap(), serde_json::json!(token));
+    }
+    for token in WIRE_LOOK_PARAM_TOKENS {
+        let p: WireLookParam = serde_json::from_value(serde_json::json!(token)).unwrap();
+        assert_eq!(serde_json::to_value(p).unwrap(), serde_json::json!(token));
+    }
+    for token in WIRE_STYLE_PARAM_TOKENS {
+        let p: WireStyleParam = serde_json::from_value(serde_json::json!(token)).unwrap();
+        assert_eq!(serde_json::to_value(p).unwrap(), serde_json::json!(token));
+    }
+
+    let easing = &spec.parameters["properties"]["easing"];
+    let easing_json = easing.to_string();
+    assert!(
+        easing_json.contains("\"additionalProperties\":false")
+            && easing_json.contains("\"bezier\""),
+        "WireEasing object branch must set additionalProperties false: {easing}"
+    );
+}
+
+#[test]
+fn tool_schemas_keep_u8_rgba_bounds() {
+    let spec = tool_specs()
+        .into_iter()
+        .find(|s| s.name == "add_generated")
+        .expect("add_generated tool");
+    let rendered = spec.parameters.to_string();
+    assert!(
+        rendered.contains("\"maximum\":255") && rendered.contains("\"minimum\":0"),
+        "schema cleaner must not strip u8 RGBA bounds: {rendered}"
     );
 }
 

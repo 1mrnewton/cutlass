@@ -35,8 +35,8 @@ fn spec<T: JsonSchema>(name: &'static str, description: &'static str) -> ToolSpe
 
 /// Strip schemars noise that costs tokens without helping the model:
 /// `format`, `title`, `$schema`, and single-element `allOf` wrappers.
-/// Also drops redundant uint8 `minimum`/`maximum` on array items (0/255)
-/// and collapses `{"type":["T","null"]}` wrappers where safe.
+/// Numeric `minimum`/`maximum` are kept — they are load-bearing for `u8`
+/// RGBA components and unsigned ids that serde rejects outside range.
 fn compact_schema_json(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
@@ -46,6 +46,8 @@ fn compact_schema_json(value: &mut serde_json::Value) {
             if map.get("description") == Some(&serde_json::json!("")) {
                 map.remove("description");
             }
+            // Collapse `allOf: [inner]` into the wrapper, keeping any
+            // description / keywords already on the wrapper.
             if let Some(serde_json::Value::Array(all_of)) = map.get("allOf")
                 && all_of.len() == 1
                 && let serde_json::Value::Object(inner) = &all_of[0]
@@ -54,20 +56,6 @@ fn compact_schema_json(value: &mut serde_json::Value) {
                 map.remove("allOf");
                 for (k, v) in inner {
                     map.entry(k).or_insert(v);
-                }
-            }
-            // Drop default uint bounds that schemars stamps on every u8 / u64.
-            if map.get("type") == Some(&serde_json::json!("integer")) {
-                if map.get("minimum") == Some(&serde_json::json!(0))
-                    && map.get("maximum") == Some(&serde_json::json!(255))
-                {
-                    map.remove("minimum");
-                    map.remove("maximum");
-                } else if map.get("minimum") == Some(&serde_json::json!(0))
-                    && map.get("maximum").is_none()
-                {
-                    // unsigned ids / indices — `type: integer` is enough
-                    map.remove("minimum");
                 }
             }
             for child in map.values_mut() {

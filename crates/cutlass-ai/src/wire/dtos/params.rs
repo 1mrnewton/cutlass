@@ -147,6 +147,84 @@ pub struct SetTransition {
     pub seconds: f64,
 }
 
+/// Unit (string) variants of [`WireClipParam`] — serde `rename_all = "snake_case"`.
+pub(crate) const WIRE_CLIP_PARAM_UNIT_TOKENS: &[&str] = &[
+    "position",
+    "anchor_point",
+    "scale",
+    "rotation",
+    "opacity",
+    "crop",
+    "volume",
+    "pan",
+    "speed",
+];
+
+/// Snake_case wire tokens for [`WireShapeParam`].
+pub(crate) const WIRE_SHAPE_PARAM_TOKENS: &[&str] = &[
+    "width",
+    "height",
+    "corner_radius",
+    "inner_ratio",
+    "fill",
+    "stroke_color",
+    "stroke_width",
+];
+
+/// Snake_case wire tokens for [`WireTextParam`].
+pub(crate) const WIRE_TEXT_PARAM_TOKENS: &[&str] = &[
+    "size",
+    "fill",
+    "letter_spacing",
+    "line_spacing",
+    "stroke_width",
+    "stroke_color",
+    "shadow_blur",
+    "shadow_distance",
+    "shadow_color",
+    "background_color",
+    "background_radius",
+];
+
+/// Snake_case wire tokens for [`WireLookParam`].
+pub(crate) const WIRE_LOOK_PARAM_TOKENS: &[&str] = &[
+    "filter_intensity",
+    "lut_intensity",
+    "adjust_brightness",
+    "adjust_contrast",
+    "adjust_saturation",
+    "adjust_exposure",
+    "adjust_temperature",
+    "adjust_tint",
+    "adjust_hue",
+    "adjust_highlights",
+    "adjust_shadows",
+    "adjust_sharpness",
+    "adjust_vignette",
+    "mask_feather",
+    "mask_center",
+    "mask_size",
+    "mask_rotation",
+    "mask_roundness",
+    "chroma_strength",
+    "chroma_shadow",
+];
+
+/// Snake_case wire tokens for [`WireStyleParam`].
+pub(crate) const WIRE_STYLE_PARAM_TOKENS: &[&str] = &[
+    "shadow_color",
+    "shadow_offset",
+    "shadow_blur",
+    "glow_color",
+    "glow_radius",
+    "glow_intensity",
+    "outline_color",
+    "outline_width",
+    "background_color",
+    "background_padding",
+    "background_radius",
+];
+
 /// An animatable clip property the keyframe commands can address.
 ///
 /// Wire serde stays externally tagged (`"position"` / `{"effect":{…}}`).
@@ -171,6 +249,32 @@ pub enum WireClipParam {
     Style { param: WireStyleParam },
 }
 
+fn schema_string_enum(tokens: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "type": "string",
+        "enum": tokens,
+    })
+}
+
+/// Externally-tagged `{"tag":{"param":…}}` object branch with closed shapes.
+fn schema_tagged_param_branch(tag: &str, tokens: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [tag],
+        "properties": {
+            tag: {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["param"],
+                "properties": {
+                    "param": schema_string_enum(tokens),
+                }
+            }
+        }
+    })
+}
+
 impl JsonSchema for WireClipParam {
     fn inline_schema() -> bool {
         true
@@ -181,33 +285,20 @@ impl JsonSchema for WireClipParam {
     }
 
     fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
-        // One shared description + compact enum / tagged-object branches.
-        // Nested shape/text/look/style param names live in the description
-        // (once) so they are not re-emitted as four large string enums;
-        // object shapes stay accurate for serde's externally-tagged form.
-        json_schema!({
-            "description": "Clip property. Strings: position, anchor_point, scale, rotation, opacity, crop, volume, pan, speed. Tagged: {\"effect\":{\"index\":N,\"param\":name}}, {\"shape|text|look|style\":{\"param\":name}} — shape: width|height|corner_radius|inner_ratio|fill|stroke_*; text: size|fill|*_spacing|stroke_*|shadow_*|background_*; look: *_intensity|adjust_*|mask_*|chroma_*; style: shadow_*|glow_*|outline_*|background_*. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
+        // Compact shared description; nested param names are exact enums in
+        // each tagged branch (same tokens serde accepts).
+        let schema = serde_json::json!({
+            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
             "oneOf": [
-                {
-                    "type": "string",
-                    "enum": [
-                        "position",
-                        "anchor_point",
-                        "scale",
-                        "rotation",
-                        "opacity",
-                        "crop",
-                        "volume",
-                        "pan",
-                        "speed"
-                    ]
-                },
+                schema_string_enum(WIRE_CLIP_PARAM_UNIT_TOKENS),
                 {
                     "type": "object",
+                    "additionalProperties": false,
                     "required": ["effect"],
                     "properties": {
                         "effect": {
                             "type": "object",
+                            "additionalProperties": false,
                             "required": ["index", "param"],
                             "properties": {
                                 "index": { "type": "integer", "minimum": 0 },
@@ -216,52 +307,13 @@ impl JsonSchema for WireClipParam {
                         }
                     }
                 },
-                {
-                    "type": "object",
-                    "required": ["shape"],
-                    "properties": {
-                        "shape": {
-                            "type": "object",
-                            "required": ["param"],
-                            "properties": { "param": { "type": "string" } }
-                        }
-                    }
-                },
-                {
-                    "type": "object",
-                    "required": ["text"],
-                    "properties": {
-                        "text": {
-                            "type": "object",
-                            "required": ["param"],
-                            "properties": { "param": { "type": "string" } }
-                        }
-                    }
-                },
-                {
-                    "type": "object",
-                    "required": ["look"],
-                    "properties": {
-                        "look": {
-                            "type": "object",
-                            "required": ["param"],
-                            "properties": { "param": { "type": "string" } }
-                        }
-                    }
-                },
-                {
-                    "type": "object",
-                    "required": ["style"],
-                    "properties": {
-                        "style": {
-                            "type": "object",
-                            "required": ["param"],
-                            "properties": { "param": { "type": "string" } }
-                        }
-                    }
-                }
+                schema_tagged_param_branch("shape", WIRE_SHAPE_PARAM_TOKENS),
+                schema_tagged_param_branch("text", WIRE_TEXT_PARAM_TOKENS),
+                schema_tagged_param_branch("look", WIRE_LOOK_PARAM_TOKENS),
+                schema_tagged_param_branch("style", WIRE_STYLE_PARAM_TOKENS),
             ]
-        })
+        });
+        Schema::try_from(schema).expect("WireClipParam schema is plain JSON data")
     }
 }
 
@@ -387,10 +439,12 @@ impl JsonSchema for WireEasing {
                 },
                 {
                     "type": "object",
+                    "additionalProperties": false,
                     "required": ["bezier"],
                     "properties": {
                         "bezier": {
                             "type": "object",
+                            "additionalProperties": false,
                             "required": ["points"],
                             "properties": {
                                 "points": {

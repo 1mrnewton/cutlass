@@ -22,15 +22,27 @@ pub(crate) fn format_usage_line(usage: &TokenUsage) -> Option<String> {
         format_token_count(usage.output_tokens),
     );
     if let Some(cost) = usage.cost {
-        line.push_str(&format!(" · ${cost:.2}"));
+        line.push_str(&format!(" · {}", format_cost(cost)));
     }
     Some(line)
 }
 
+fn format_cost(cost: f64) -> String {
+    if cost >= 0.01 {
+        format!("${cost:.2}")
+    } else if cost > 0.0 {
+        format!("${cost:.4}")
+    } else {
+        "$0.00".to_string()
+    }
+}
+
 fn format_token_count(n: u64) -> String {
     if n >= 10_000 {
-        let whole = n / 1_000;
-        let frac = (n % 1_000) / 100;
+        // Round to one decimal place in thousands (12_960 → 13k).
+        let tenths = ((n as f64) / 100.0).round() as u64;
+        let whole = tenths / 10;
+        let frac = tenths % 10;
         if frac == 0 {
             format!("{whole}k")
         } else {
@@ -75,6 +87,13 @@ mod tests {
     }
 
     #[test]
+    fn rounds_thousands_suffix_instead_of_truncating() {
+        assert_eq!(format_token_count(12_960), "13k");
+        assert_eq!(format_token_count(12_949), "12.9k");
+        assert_eq!(format_token_count(12_950), "13k");
+    }
+
+    #[test]
     fn rounds_cache_percent_from_cached_over_input() {
         let line = format_usage_line(&TokenUsage {
             input_tokens: 1_000,
@@ -106,6 +125,24 @@ mod tests {
         .expect("line");
         assert_eq!(without_cost, "100 tokens in (50% cached) · 20 out");
         assert!(!without_cost.contains('$'));
+    }
+
+    #[test]
+    fn cost_precision_adapts_for_sub_cent_amounts() {
+        assert_eq!(format_cost(0.68), "$0.68");
+        assert_eq!(format_cost(0.01), "$0.01");
+        assert_eq!(format_cost(0.0042), "$0.0042");
+        assert_eq!(format_cost(0.0099), "$0.0099");
+        assert_eq!(format_cost(0.0), "$0.00");
+
+        let line = format_usage_line(&TokenUsage {
+            input_tokens: 100,
+            cached_input_tokens: 0,
+            output_tokens: 20,
+            cost: Some(0.0042),
+        })
+        .expect("line");
+        assert_eq!(line, "100 tokens in (0% cached) · 20 out · $0.0042");
     }
 
     #[test]

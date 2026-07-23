@@ -37,7 +37,7 @@ use crate::wire::{self, WireCommand};
 
 mod transcript_budget;
 use transcript_budget::{
-    collect_turn_messages, collapse_describe_project_results, enforce_image_budget,
+    collapse_describe_project_results, collect_turn_messages, enforce_image_budget,
     enforce_tool_output_image_budget,
 };
 

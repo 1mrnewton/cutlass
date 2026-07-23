@@ -23,10 +23,9 @@ pub(super) fn collapse_describe_project_results(
         if let Message::ToolResult {
             call_id, content, ..
         } = message
+            && describe_call_ids.iter().any(|id| id == call_id)
         {
-            if describe_call_ids.iter().any(|id| id == call_id) {
-                *content = DESCRIBE_PROJECT_RESULT_PLACEHOLDER.to_string();
-            }
+            *content = DESCRIBE_PROJECT_RESULT_PLACEHOLDER.to_string();
         }
     }
 }

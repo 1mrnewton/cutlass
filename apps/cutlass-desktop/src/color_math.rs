@@ -39,6 +39,11 @@ pub fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 }
 
 /// HSV → RGB. Hue in degrees (wrapped); saturation and value in `[0, 1]`.
+///
+/// Slint builds live colors with `hsv()`; this inverse is kept for unit
+/// round-trip tests (no production caller after ColorUtil.hsv-to-color
+/// was removed).
+#[cfg(test)]
 pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
     let s = s.clamp(0.0, 1.0);
     let v = v.clamp(0.0, 1.0);

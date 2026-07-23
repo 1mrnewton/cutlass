@@ -96,10 +96,10 @@ where
     }
 
     fn touch(&mut self, key: &K) {
-        if let Some(i) = self.order.iter().position(|k| k == key) {
-            if let Some(k) = self.order.remove(i) {
-                self.order.push_back(k);
-            }
+        if let Some(i) = self.order.iter().position(|k| k == key)
+            && let Some(k) = self.order.remove(i)
+        {
+            self.order.push_back(k);
         }
     }
 

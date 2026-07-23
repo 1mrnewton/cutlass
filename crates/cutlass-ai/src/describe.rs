@@ -140,10 +140,28 @@ pub struct ClipSummary {
     /// Mirrored top-bottom (set_clip_crop); absent when not flipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flip_v: Option<bool>,
+    /// Anchor offset from the canvas CENTER in canvas-width/height fractions
+    /// (+x right, +y down); `[0,0]` = centered (set_clip_transform). Absent
+    /// when centered. Omitted entirely when the position param is keyframed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<[f64; 2]>,
+    /// Pivot within content bounds (0 = left/top, 0.5 = center). Absent at
+    /// `[0.5, 0.5]`. Omitted when the anchor_point param is keyframed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<[f64; 2]>,
     /// Placement scale (set_clip_transform): a bare number when uniform, or
-    /// `[x, y]` when split. Absent at the default identity (1).
+    /// `[x, y]` when split. Absent at the default identity (1). Omitted when
+    /// the scale param is keyframed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<WireScale>,
+    /// Clockwise rotation in degrees about the anchor (set_clip_transform).
+    /// Absent at 0. Omitted when the rotation param is keyframed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f64>,
+    /// Layer opacity 0.0–1.0 (set_clip_transform). Absent at 1.0. Omitted
+    /// when the opacity param is keyframed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<f64>,
     /// Visual effects in chain order (add_effect); the index of each entry is
     /// what remove_effect / move_effect / set_effect_param address. Absent
     /// when empty.
@@ -406,17 +424,53 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                     },
                     flip_h: clip.flip_h.then_some(true),
                     flip_v: clip.flip_v.then_some(true),
+                    position: {
+                        // Static sample at clip-relative 0. Animated params
+                        // omit the static field (keyframe dump is the truth).
+                        (!clip.transform.position.is_animated())
+                            .then(|| {
+                                let p = clip.transform.position.sample(0);
+                                (p != [0.0, 0.0]).then_some([f64::from(p[0]), f64::from(p[1])])
+                            })
+                            .flatten()
+                    },
+                    anchor: {
+                        (!clip.transform.anchor_point.is_animated())
+                            .then(|| {
+                                let a = clip.transform.anchor_point.sample(0);
+                                (a != [0.5, 0.5]).then_some([f64::from(a[0]), f64::from(a[1])])
+                            })
+                            .flatten()
+                    },
                     scale: {
-                        let s = clip.transform.scale.sample(0);
-                        let interesting =
-                            s != Scale2::uniform(1.0) || clip.transform.scale.is_animated();
-                        interesting.then(|| {
-                            if s.is_uniform() {
-                                WireScale::Uniform(f64::from(s.x))
-                            } else {
-                                WireScale::Axes([f64::from(s.x), f64::from(s.y)])
-                            }
-                        })
+                        (!clip.transform.scale.is_animated())
+                            .then(|| {
+                                let s = clip.transform.scale.sample(0);
+                                (s != Scale2::uniform(1.0)).then(|| {
+                                    if s.is_uniform() {
+                                        WireScale::Uniform(f64::from(s.x))
+                                    } else {
+                                        WireScale::Axes([f64::from(s.x), f64::from(s.y)])
+                                    }
+                                })
+                            })
+                            .flatten()
+                    },
+                    rotation: {
+                        (!clip.transform.rotation.is_animated())
+                            .then(|| {
+                                let r = clip.transform.rotation.sample(0);
+                                (r != 0.0).then_some(f64::from(r))
+                            })
+                            .flatten()
+                    },
+                    opacity: {
+                        (!clip.transform.opacity.is_animated())
+                            .then(|| {
+                                let o = clip.transform.opacity.sample(0);
+                                (o != 1.0).then_some(f64::from(o))
+                            })
+                            .flatten()
                     },
                     effects: clip
                         .effects

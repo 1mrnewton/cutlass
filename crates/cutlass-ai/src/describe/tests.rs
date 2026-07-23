@@ -1,7 +1,31 @@
 use super::*;
-use cutlass_models::{MediaSource, RationalTime, TimeRange, TrackKind};
+use cutlass_models::{
+    ClipTransform, Easing, MediaSource, Param, RationalTime, Scale2, TimeRange, TrackKind,
+};
 
 const R24: Rational = Rational::FPS_24;
+
+fn media_clip_project() -> (Project, cutlass_models::ClipId) {
+    let mut project = Project::new("xform", R24);
+    let media = project.add_media(MediaSource::new(
+        "/footage/clip.mp4",
+        1920,
+        1080,
+        R24,
+        24 * 10,
+        true,
+    ));
+    let video = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            video,
+            media,
+            TimeRange::at_rate(0, 48, R24),
+            RationalTime::new(24, R24),
+        )
+        .unwrap();
+    (project, clip)
+}
 
 #[test]
 fn summary_is_deterministic_and_complete() {
@@ -145,4 +169,62 @@ fn summary_and_context_serialize_to_stable_json() {
         ctx_json,
         serde_json::json!({ "selected_clips": [12], "playhead_seconds": 3.5 })
     );
+}
+
+#[test]
+fn identity_transform_omits_placement_fields() {
+    let (project, _) = media_clip_project();
+    let clip = &summarize(&project).tracks[0].clips[0];
+    assert_eq!(clip.position, None);
+    assert_eq!(clip.anchor, None);
+    assert_eq!(clip.scale, None);
+    assert_eq!(clip.rotation, None);
+    assert_eq!(clip.opacity, None);
+}
+
+#[test]
+fn static_transform_surfaces_exact_values() {
+    let (mut project, clip_id) = media_clip_project();
+    project
+        .set_transform(
+            clip_id,
+            ClipTransform {
+                position: [0.25, -0.125],
+                anchor_point: [0.0, 1.0],
+                scale: Scale2::uniform(1.5),
+                rotation: 45.0,
+                opacity: 0.75,
+            },
+            None,
+        )
+        .unwrap();
+
+    let clip = &summarize(&project).tracks[0].clips[0];
+    assert_eq!(clip.position, Some([0.25, -0.125]));
+    assert_eq!(clip.anchor, Some([0.0, 1.0]));
+    assert_eq!(clip.scale, Some(WireScale::Uniform(1.5)));
+    assert_eq!(clip.rotation, Some(45.0));
+    assert_eq!(clip.opacity, Some(0.75));
+}
+
+#[test]
+fn animated_position_omits_static_field() {
+    let (mut project, clip_id) = media_clip_project();
+    {
+        let clip = project.timeline_mut().clip_mut(clip_id).unwrap();
+        clip.transform.position = Param::Constant([0.5, 0.0]);
+        clip.transform
+            .position
+            .set_keyframe(0, [-1.0, 0.0], Easing::Linear);
+        clip.transform
+            .position
+            .set_keyframe(24, [0.0, 0.0], Easing::EaseOut);
+    }
+
+    let clip = &summarize(&project).tracks[0].clips[0];
+    assert_eq!(clip.position, None);
+    // Other static transform fields still surface at identity / defaults.
+    assert_eq!(clip.anchor, None);
+    assert_eq!(clip.rotation, None);
+    assert_eq!(clip.opacity, None);
 }

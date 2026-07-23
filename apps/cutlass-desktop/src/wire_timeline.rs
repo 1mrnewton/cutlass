@@ -321,7 +321,6 @@ struct GraphDragSession {
     value: f32,
     moved: bool,
     mapping: crate::graph_editor::PlotMapping,
-    playhead: i32,
 }
 
 #[derive(Clone)]
@@ -335,7 +334,6 @@ struct GraphHandleSession {
     moved: bool,
     handles: crate::graph_editor::SegmentHandles,
     mapping: crate::graph_editor::PlotMapping,
-    playhead: i32,
 }
 
 fn apply_graph_geometry(g: &GraphBackend, geo: crate::graph_editor::GraphGeometry) {
@@ -523,7 +521,6 @@ fn wire_graph_editor(app: &AppWindow, preview_worker: &crate::preview_worker::Pr
         let clip_id = app.global::<TimelineStore>().get_selected_clip_id();
         let key = g.get_selected_key();
         let channel = g.get_selected_channel();
-        let playhead = app.global::<TimelineStore>().get_playhead_tick();
         let seq = app.global::<EditorStore>().get_project().sequence;
         let Some(clip) = crate::preview_motion_path::find_projected_clip(&seq, clip_id.as_str())
         else {
@@ -548,7 +545,6 @@ fn wire_graph_editor(app: &AppWindow, preview_worker: &crate::preview_worker::Pr
             value,
             moved: false,
             mapping: map,
-            playhead,
         });
     });
 
@@ -595,6 +591,9 @@ fn wire_graph_editor(app: &AppWindow, preview_worker: &crate::preview_worker::Pr
         ) else {
             return;
         };
+        // Read the live playhead each tick — playback/seek during drag must
+        // not keep sampling the press-time tick.
+        let playhead = app.global::<TimelineStore>().get_playhead_tick();
         graph_preview_at_playhead(
             &move_preview,
             &clip,
@@ -602,11 +601,11 @@ fn wire_graph_editor(app: &AppWindow, preview_worker: &crate::preview_worker::Pr
             &session.key,
             session.channel,
             &param,
-            session.playhead,
+            playhead,
         );
         let geo = crate::graph_editor::build_geometry(
             &param,
-            session.playhead,
+            playhead,
             session.mapping.width,
             session.mapping.height,
             tick,
@@ -624,16 +623,17 @@ fn wire_graph_editor(app: &AppWindow, preview_worker: &crate::preview_worker::Pr
         let Some(session) = end_drag.borrow_mut().take() else {
             return;
         };
+        let playhead = app.global::<TimelineStore>().get_playhead_tick();
         if !commit || !session.moved {
             // Drop any live override, then restore committed geometry.
-            end_handle.clear_param_override(session.clip_id.clone(), i64::from(session.playhead));
+            end_handle.clear_param_override(session.clip_id.clone(), i64::from(playhead));
             let g = app.global::<GraphBackend>();
             let seq = app.global::<EditorStore>().get_project().sequence;
             let result =
                 crate::graph_editor::refresh_graph(crate::graph_editor::GraphRefreshInput {
                     sequence: &seq,
                     clip_id: session.clip_id.as_str(),
-                    playhead: session.playhead,
+                    playhead,
                     width: session.mapping.width,
                     height: session.mapping.height,
                     selected_key: session.key.as_str(),
@@ -661,7 +661,7 @@ fn wire_graph_editor(app: &AppWindow, preview_worker: &crate::preview_worker::Pr
         };
         // Commit then clear (worker also clears on Set/MoveParamKeyframe).
         commit_graph_edit(&end_handle, &session.clip_id, plan);
-        end_handle.clear_param_override(session.clip_id.clone(), i64::from(session.playhead));
+        end_handle.clear_param_override(session.clip_id.clone(), i64::from(playhead));
         app.global::<GraphBackend>().set_selected_tick(session.tick);
     });
 
@@ -739,7 +739,6 @@ fn wire_graph_editor(app: &AppWindow, preview_worker: &crate::preview_worker::Pr
         let clip_id = app.global::<TimelineStore>().get_selected_clip_id();
         let key = g.get_selected_key();
         let channel = g.get_selected_channel();
-        let playhead = app.global::<TimelineStore>().get_playhead_tick();
         let seq = app.global::<EditorStore>().get_project().sequence;
         let Some(clip) = crate::preview_motion_path::find_projected_clip(&seq, clip_id.as_str())
         else {
@@ -768,7 +767,6 @@ fn wire_graph_editor(app: &AppWindow, preview_worker: &crate::preview_worker::Pr
             moved: false,
             handles,
             mapping: map,
-            playhead,
         });
     });
 
@@ -810,6 +808,7 @@ fn wire_graph_editor(app: &AppWindow, preview_worker: &crate::preview_worker::Pr
         else {
             return;
         };
+        let playhead = app.global::<TimelineStore>().get_playhead_tick();
         graph_preview_at_playhead(
             &h_move_preview,
             &clip,
@@ -817,11 +816,11 @@ fn wire_graph_editor(app: &AppWindow, preview_worker: &crate::preview_worker::Pr
             &session.key,
             session.channel,
             &param,
-            session.playhead,
+            playhead,
         );
         let geo = crate::graph_editor::build_geometry(
             &param,
-            session.playhead,
+            playhead,
             session.mapping.width,
             session.mapping.height,
             session.from_tick,
@@ -863,15 +862,16 @@ fn wire_graph_editor(app: &AppWindow, preview_worker: &crate::preview_worker::Pr
         let Some(session) = h_end_drag.borrow_mut().take() else {
             return;
         };
+        let playhead = app.global::<TimelineStore>().get_playhead_tick();
         if !commit || !session.moved {
-            h_end_handle.clear_param_override(session.clip_id.clone(), i64::from(session.playhead));
+            h_end_handle.clear_param_override(session.clip_id.clone(), i64::from(playhead));
             let g = app.global::<GraphBackend>();
             let seq = app.global::<EditorStore>().get_project().sequence;
             let result =
                 crate::graph_editor::refresh_graph(crate::graph_editor::GraphRefreshInput {
                     sequence: &seq,
                     clip_id: session.clip_id.as_str(),
-                    playhead: session.playhead,
+                    playhead,
                     width: session.mapping.width,
                     height: session.mapping.height,
                     selected_key: session.key.as_str(),
@@ -898,6 +898,6 @@ fn wire_graph_editor(app: &AppWindow, preview_worker: &crate::preview_worker::Pr
         };
         // Commit then clear (SetParamKeyframe clears the live override too).
         commit_graph_edit(&h_end_handle, &session.clip_id, plan);
-        h_end_handle.clear_param_override(session.clip_id.clone(), i64::from(session.playhead));
+        h_end_handle.clear_param_override(session.clip_id.clone(), i64::from(playhead));
     });
 }

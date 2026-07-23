@@ -5,6 +5,7 @@ use cutlass_ai::{
 };
 use cutlass_commands::EditOutcome;
 use cutlass_engine::{ApplyOutcome, Engine, EngineConfig};
+use cutlass_models::Project;
 
 use crate::agent_senses::AgentSenses;
 use crate::preview_worker::WorkerHandle;
@@ -17,12 +18,13 @@ pub(crate) fn sandbox_engine() -> Result<Engine, String> {
 }
 
 pub(crate) trait ProjectSnapshotSource {
-    fn snapshot_project(&self) -> Option<cutlass_models::Project>;
+    /// Live project clone plus the engine revision at the same instant.
+    fn snapshot_project_with_revision(&self) -> Option<(Project, u64)>;
 }
 
 impl ProjectSnapshotSource for WorkerHandle {
-    fn snapshot_project(&self) -> Option<cutlass_models::Project> {
-        WorkerHandle::snapshot_project(self)
+    fn snapshot_project_with_revision(&self) -> Option<(Project, u64)> {
+        WorkerHandle::snapshot_project_with_revision(self)
     }
 }
 
@@ -32,6 +34,8 @@ pub(crate) struct SandboxBridge<'a, W: ProjectSnapshotSource + ?Sized> {
     pub(crate) plan: &'a mut Vec<AgentPlanStep>,
     pub(crate) senses: &'a mut AgentSenses,
     pub(crate) default_playhead_seconds: f64,
+    /// When set, refreshed whenever a project host call re-seeds the sandbox.
+    pub(crate) seed_revision: Option<&'a mut Option<u64>>,
 }
 
 impl<W: ProjectSnapshotSource + ?Sized> EngineBridge for SandboxBridge<'_, W> {
@@ -89,14 +93,20 @@ impl<W: ProjectSnapshotSource + ?Sized> EngineBridge for SandboxBridge<'_, W> {
             return Ok(());
         }
 
-        let snapshot = self.worker.snapshot_project().ok_or_else(|| {
-            format!(
-                "could not reconcile the agent sandbox after project host call '{name}': \
+        let (snapshot, revision) =
+            self.worker
+                .snapshot_project_with_revision()
+                .ok_or_else(|| {
+                    format!(
+                        "could not reconcile the agent sandbox after project host call '{name}': \
                  the editor engine did not reply with a live project snapshot"
-            )
-        })?;
+                    )
+                })?;
         self.plan.clear();
         self.engine.reset_project(snapshot);
+        if let Some(slot) = self.seed_revision.as_mut() {
+            **slot = Some(revision);
+        }
         // `reset_project` clears history, including the prompt's pending
         // group. Reopen it immediately so any later staged edit is still
         // covered by the core loop's normal abort rollback.

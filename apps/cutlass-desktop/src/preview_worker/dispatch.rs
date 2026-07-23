@@ -572,7 +572,10 @@ pub(super) fn dispatch(
             }
         }
         WorkerMsg::SnapshotProject { reply } => {
-            let _ = reply.send(engine.project().clone());
+            let _ = reply.send((engine.project().clone(), engine.revision()));
+        }
+        WorkerMsg::ProjectRevision { reply } => {
+            let _ = reply.send(engine.revision());
         }
         WorkerMsg::AgentApplyPlan { phases, reply } => {
             let _ = reply.send(agent_apply_and_publish(engine, phases, ui));

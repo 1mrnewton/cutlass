@@ -19,6 +19,8 @@ mod approval;
 mod run;
 mod sandbox;
 #[cfg(test)]
+mod seed_policy_tests;
+#[cfg(test)]
 mod tests;
 mod token_usage;
 mod tool_host;

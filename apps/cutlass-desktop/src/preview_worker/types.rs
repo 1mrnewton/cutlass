@@ -787,9 +787,14 @@ pub(super) enum WorkerMsg {
     },
     /// Clone the live project for the AI agent's sandbox rehearsal
     /// (`src/agent.rs`). Ordered with mutations, so the snapshot always
-    /// reflects every edit sent before it.
+    /// reflects every edit sent before it. Carries the engine revision so
+    /// the agent can detect live edits under a parked dry-run plan.
     SnapshotProject {
-        reply: Sender<Project>,
+        reply: Sender<(Project, u64)>,
+    },
+    /// Cheap live-engine revision probe (no project clone).
+    ProjectRevision {
+        reply: Sender<u64>,
     },
     /// Replay a rehearsed agent plan, one history group per phase,
     /// re-validating every step against the live project and remapping ids

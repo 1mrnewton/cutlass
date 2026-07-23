@@ -79,6 +79,11 @@ impl AgentWorker {
     }
 }
 
+/// Transcript status line when a parked dry-run plan is thrown away because
+/// the user edited the live timeline while it sat pending.
+pub(crate) const STALE_PLAN_NOTICE: &str = "Project changed since this plan was rehearsed — \
+    discarded the stale plan and re-read the current state.";
+
 #[derive(Default)]
 pub(crate) struct Preview {
     pub(crate) plan: Vec<AgentPlanStep>,
@@ -87,6 +92,9 @@ pub(crate) struct Preview {
     pub(crate) phase_breaks: Vec<usize>,
     pub(crate) descriptions: Vec<SharedString>,
     pub(crate) history_restore: Option<Vec<Message>>,
+    /// Live engine revision captured when the sandbox was last seeded from
+    /// the editor. Detects user edits under a parked dry-run plan.
+    pub(crate) seed_revision: Option<u64>,
 }
 
 impl Preview {
@@ -99,7 +107,60 @@ impl Preview {
         self.phase_breaks.clear();
         self.descriptions.clear();
         self.history_restore = None;
+        self.seed_revision = None;
     }
+}
+
+/// Whether to keep a parked sandbox or re-seed from the live project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SandboxSeedPolicy {
+    /// Continue rehearsing against the existing sandbox / parked plan.
+    KeepPending,
+    /// Replace the sandbox from a fresh live snapshot.
+    Reseed {
+        /// True when a parked plan was discarded because the live project
+        /// moved on under it.
+        discarded_stale_plan: bool,
+    },
+}
+
+/// Pure seed decision for the start of a prompt. `live_revision` is only
+/// consulted when `continue_pending` — a cheap `Engine::revision` probe.
+pub(crate) fn sandbox_seed_policy(
+    continue_pending: bool,
+    seed_revision: Option<u64>,
+    live_revision: Option<u64>,
+) -> Result<SandboxSeedPolicy, &'static str> {
+    if !continue_pending {
+        return Ok(SandboxSeedPolicy::Reseed {
+            discarded_stale_plan: false,
+        });
+    }
+    let live = live_revision.ok_or("The editor engine is not responding.")?;
+    if seed_revision == Some(live) {
+        Ok(SandboxSeedPolicy::KeepPending)
+    } else {
+        Ok(SandboxSeedPolicy::Reseed {
+            discarded_stale_plan: true,
+        })
+    }
+}
+
+/// Replace the sandbox project from a live snapshot and clear the parked plan.
+pub(crate) fn reseed_sandbox_from_live<W: super::sandbox::ProjectSnapshotSource + ?Sized>(
+    worker: &W,
+    engine: &mut Engine,
+    preview: &mut Preview,
+) -> Result<(), &'static str> {
+    let (snapshot, revision) = worker
+        .snapshot_project_with_revision()
+        .ok_or("The editor engine is not responding.")?;
+    engine.reset_project(snapshot);
+    preview.plan.clear();
+    preview.phase_breaks.clear();
+    preview.descriptions.clear();
+    preview.seed_revision = Some(revision);
+    Ok(())
 }
 
 pub(crate) fn agent_main(
@@ -459,19 +520,29 @@ pub(crate) fn run_one_prompt(
     };
 
     let continue_pending = preview.is_pending() && sandbox_existed;
-    if !continue_pending {
-        let Some(snapshot) = worker.snapshot_project() else {
-            push_entry(
-                store,
-                "error",
-                "The editor engine is not responding.".into(),
-            );
+    let live_revision = if continue_pending {
+        worker.project_revision()
+    } else {
+        None
+    };
+    let policy = match sandbox_seed_policy(continue_pending, preview.seed_revision, live_revision) {
+        Ok(policy) => policy,
+        Err(msg) => {
+            push_entry(store, "error", msg.into());
             return;
-        };
-        engine.reset_project(snapshot);
-        preview.plan.clear();
-        preview.phase_breaks.clear();
-        preview.descriptions.clear();
+        }
+    };
+    if let SandboxSeedPolicy::Reseed {
+        discarded_stale_plan,
+    } = policy
+    {
+        if let Err(msg) = reseed_sandbox_from_live(worker, engine, preview) {
+            push_entry(store, "error", msg.into());
+            return;
+        }
+        if discarded_stale_plan {
+            push_entry(store, "status", STALE_PLAN_NOTICE.into());
+        }
     }
 
     // Compose rules after the snapshot reset so per-project rules read
@@ -510,6 +581,7 @@ pub(crate) fn run_one_prompt(
         plan: &mut plan,
         senses,
         default_playhead_seconds: context.playhead_seconds,
+        seed_revision: Some(&mut preview.seed_revision),
     };
     let mut tool_host = DesktopToolHost::new(
         section.autonomy,

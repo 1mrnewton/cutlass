@@ -779,7 +779,7 @@ fn temp_engine(project: Project) -> Engine {
 struct UnexpectedProjectSnapshot;
 
 impl ProjectSnapshotSource for UnexpectedProjectSnapshot {
-    fn snapshot_project(&self) -> Option<Project> {
+    fn snapshot_project_with_revision(&self) -> Option<(Project, u64)> {
         panic!("this test must not request a live project snapshot")
     }
 }
@@ -787,21 +787,26 @@ impl ProjectSnapshotSource for UnexpectedProjectSnapshot {
 static UNEXPECTED_PROJECT_SNAPSHOT: UnexpectedProjectSnapshot = UnexpectedProjectSnapshot;
 
 struct ScriptedProjectSnapshots {
-    snapshots: RefCell<VecDeque<Option<Project>>>,
+    snapshots: RefCell<VecDeque<Option<(Project, u64)>>>,
     calls: Cell<usize>,
 }
 
 impl ScriptedProjectSnapshots {
     fn new(snapshots: impl IntoIterator<Item = Option<Project>>) -> Self {
         Self {
-            snapshots: RefCell::new(snapshots.into_iter().collect()),
+            snapshots: RefCell::new(
+                snapshots
+                    .into_iter()
+                    .map(|p| p.map(|project| (project, 1)))
+                    .collect(),
+            ),
             calls: Cell::new(0),
         }
     }
 }
 
 impl ProjectSnapshotSource for ScriptedProjectSnapshots {
-    fn snapshot_project(&self) -> Option<Project> {
+    fn snapshot_project_with_revision(&self) -> Option<(Project, u64)> {
         self.calls.set(self.calls.get() + 1);
         self.snapshots
             .borrow_mut()
@@ -824,6 +829,7 @@ fn sandbox_bridge_exposes_read_only_senses_of_its_project() {
             plan: &mut plan,
             senses: &mut senses,
             default_playhead_seconds: 1.25,
+            seed_revision: None,
         };
         assert_eq!(bridge.sense_tools().len(), AgentSenses::specs().len());
         bridge
@@ -861,6 +867,7 @@ fn project_host_pre_hook_rejects_an_existing_staged_plan() {
         plan: &mut plan,
         senses: &mut senses,
         default_playhead_seconds: 0.0,
+        seed_revision: None,
     };
 
     let error = bridge
@@ -908,6 +915,7 @@ fn project_post_hook_refreshes_after_host_success_and_failure_and_reopens_group(
             plan: &mut success_plan,
             senses: &mut success_senses,
             default_playhead_seconds: 0.0,
+            seed_revision: None,
         };
         bridge.begin_group();
         let output = ToolOutput::text(r#"{"media_id":42}"#);
@@ -948,6 +956,7 @@ fn project_post_hook_refreshes_after_host_success_and_failure_and_reopens_group(
             plan: &mut failure_plan,
             senses: &mut failure_senses,
             default_playhead_seconds: 0.0,
+            seed_revision: None,
         };
         bridge.begin_group();
         bridge
@@ -986,6 +995,7 @@ fn project_post_hook_fails_hard_when_the_worker_cannot_reply() {
         plan: &mut plan,
         senses: &mut senses,
         default_playhead_seconds: 0.0,
+        seed_revision: None,
     };
     bridge.begin_group();
 
@@ -1022,6 +1032,7 @@ fn read_only_project_and_non_project_hooks_do_not_snapshot_or_reset_the_sandbox(
         plan: &mut plan,
         senses: &mut senses,
         default_playhead_seconds: 0.0,
+        seed_revision: None,
     };
     let output = ToolOutput::text("ok");
 
@@ -1065,6 +1076,7 @@ fn rehearsed_plan_replays_with_id_remapping_and_single_undo() {
         plan: &mut plan,
         senses: &mut senses,
         default_playhead_seconds: 0.0,
+        seed_revision: None,
     };
     bridge.begin_group();
     let track = match bridge
@@ -1233,6 +1245,7 @@ fn phased_plan_replays_as_separate_undo_steps_with_remapping() {
         plan: &mut plan,
         senses: &mut senses,
         default_playhead_seconds: 0.0,
+        seed_revision: None,
     };
     bridge.begin_group();
     let track = match bridge
@@ -1339,6 +1352,7 @@ fn mid_phase_failure_keeps_earlier_phases_and_names_the_boundary() {
         plan: &mut plan,
         senses: &mut senses,
         default_playhead_seconds: 0.0,
+        seed_revision: None,
     };
     bridge.begin_group();
     let track = match bridge

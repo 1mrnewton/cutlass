@@ -17,8 +17,23 @@ impl WorkerHandle {
     /// Synchronous round-trip: clone of the live project as of every edit
     /// sent before this call. `None` only if the worker thread is gone.
     pub fn snapshot_project(&self) -> Option<Project> {
+        self.snapshot_project_with_revision()
+            .map(|(project, _)| project)
+    }
+
+    /// Like [`Self::snapshot_project`], plus the live engine revision at the
+    /// same instant (for parked-plan divergence checks).
+    pub fn snapshot_project_with_revision(&self) -> Option<(Project, u64)> {
         let (reply, rx) = bounded(1);
         self.tx.send(WorkerMsg::SnapshotProject { reply }).ok()?;
+        rx.recv().ok()
+    }
+
+    /// Synchronous round-trip: monotonic live-engine revision. Cheap — no
+    /// project clone. `None` only if the worker thread is gone.
+    pub fn project_revision(&self) -> Option<u64> {
+        let (reply, rx) = bounded(1);
+        self.tx.send(WorkerMsg::ProjectRevision { reply }).ok()?;
         rx.recv().ok()
     }
 

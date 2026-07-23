@@ -409,21 +409,64 @@ fn handle_drag_playhead_override_uses_live_easing() {
 }
 
 #[test]
-fn vec2_channel_playhead_override_preserves_other_axis() {
+fn vec2_channel_playhead_override_preserves_other_axis_value() {
     let mut clip = media_clip("A");
     clip.kf_position = kfs(vec![kf(0, -0.25, 0.1), kf(40, 0.25, 0.9)]);
-    // Drag Position X start value to 0.0; Y curve untouched.
+    // Value-only drag on Position X: Y keyframe values stay; both axes share
+    // the (unchanged) timing so the mid Y sample is still 0.5.
     let live = live_param(&clip, "position", 0, 0, 0, 0.0).unwrap();
     let playhead = 20;
     let x = live.sample(i64::from(playhead));
-    let y = channel_param(&clip, "position", 1)
-        .unwrap()
-        .sample(i64::from(playhead));
     let (param, value) = live_playhead_override(&clip, "position", 0, &live, playhead).unwrap();
     assert_eq!(param, ClipParam::Position);
-    assert_eq!(value, ParamValue::Vec2([x, y]));
-    // Y mid of 0.1→0.9 is 0.5.
-    assert!((y - 0.5).abs() < 1e-5);
+    let ParamValue::Vec2([got_x, got_y]) = value else {
+        panic!("expected vec2");
+    };
+    assert!((got_x - x).abs() < 1e-5);
+    assert!((got_y - 0.5).abs() < 1e-5);
+}
+
+#[test]
+fn vec2_tick_drag_playhead_override_moves_both_axes() {
+    // Model stores one keyframe for both axes — plan_drag_commit moves the
+    // whole keyframe. Preview must sample Y from the same relocated timing,
+    // not the committed curve (which still has the keyframe at tick 0).
+    let mut clip = media_clip("A");
+    clip.kf_position = kfs(vec![kf(0, -0.25, 0.1), kf(40, 0.25, 0.9)]);
+    // Move the start keyframe 0 → 10 on the X channel (X value unchanged).
+    let live = live_param(&clip, "position", 0, 0, 10, -0.25).unwrap();
+    let playhead = 25;
+    let plan = plan_drag_commit(&clip, "position", 0, 0, 10, -0.25).unwrap();
+    assert!(plan.tick_moved);
+    assert_eq!(plan.value, ParamValue::Vec2([-0.25, 0.1]));
+
+    // Committed result after the move: X/Y both interpolate 10→40.
+    let committed_live = Param::Keyframed {
+        keyframes: vec![
+            Keyframe::new(10, -0.25, Easing::Linear),
+            Keyframe::new(40, 0.25, Easing::Linear),
+        ],
+    };
+    let committed_y = Param::Keyframed {
+        keyframes: vec![
+            Keyframe::new(10, 0.1, Easing::Linear),
+            Keyframe::new(40, 0.9, Easing::Linear),
+        ],
+    };
+    let expect_x = committed_live.sample(i64::from(playhead));
+    let expect_y = committed_y.sample(i64::from(playhead));
+    // Old (buggy) Y sample from the unmoved curve would still be 0.5 at t=20
+    // and ~0.6 at t=25 — not expect_y.
+    let stale_y = channel_param(&clip, "position", 1)
+        .unwrap()
+        .sample(i64::from(playhead));
+    assert!(
+        (stale_y - expect_y).abs() > 1e-3,
+        "fixture must distinguish stale vs relocated Y"
+    );
+
+    let (_, value) = live_playhead_override(&clip, "position", 0, &live, playhead).unwrap();
+    assert_eq!(value, ParamValue::Vec2([expect_x, expect_y]));
 }
 
 #[test]

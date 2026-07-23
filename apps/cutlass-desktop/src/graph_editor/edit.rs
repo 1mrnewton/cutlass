@@ -445,9 +445,11 @@ pub fn live_param(
 /// `(ClipParam, ParamValue)` for [`crate::preview_worker::WorkerMsg::ParamOverride`].
 ///
 /// The graph edits one channel; the preview frame needs the full property
-/// value at the playhead. For vec2 keys the undragged axis is sampled from
-/// the committed curve at the same tick (easing/time edits on one axis do
-/// not rewrite the other).
+/// value at the playhead. Vec2 params store **one** keyframe for both axes, so
+/// a tick/easing edit on the dragged channel must be mirrored onto the other
+/// axis before sampling — matching [`plan_drag_commit`] /
+/// [`plan_handle_commit`]. A value-only drag still changes only the dragged
+/// axis's value; both axes are sampled from that shared live timing/easing.
 pub fn live_playhead_override(
     clip: &Clip,
     key: &str,
@@ -459,7 +461,7 @@ pub fn live_playhead_override(
     let edited = live.sample(ph);
     let (value_x, value_y) = if is_vec2_key(key) {
         let other_ch = if channel <= 0 { 1 } else { 0 };
-        let other = channel_param(clip, key, other_ch)
+        let other = live_other_vec2_axis(clip, key, channel, live, other_ch)
             .map(|p| p.sample(ph))
             .unwrap_or(0.0);
         if channel <= 0 {
@@ -471,6 +473,65 @@ pub fn live_playhead_override(
         (edited, 0.0)
     };
     clip_param_value(key, value_x, value_y)
+}
+
+/// Rebuild the undragged vec2 axis so it shares the live channel's tick/easing
+/// edit (values on this axis stay at their committed keyframe amounts).
+fn live_other_vec2_axis(
+    clip: &Clip,
+    key: &str,
+    channel: i32,
+    live_dragged: &Param<f32>,
+    other_ch: i32,
+) -> Option<Param<f32>> {
+    let committed_dragged = channel_param(clip, key, channel)?;
+    let mut other = channel_param(clip, key, other_ch)?;
+    mirror_vec2_live_edit(&committed_dragged, live_dragged, &mut other);
+    Some(other)
+}
+
+/// Apply the structural diff between `committed` and `live` (tick move and/or
+/// easing change) onto `other`, keeping `other`'s per-keyframe values.
+fn mirror_vec2_live_edit(committed: &Param<f32>, live: &Param<f32>, other: &mut Param<f32>) {
+    let c_ticks: std::collections::HashSet<i64> =
+        committed.keyframes().iter().map(|kf| kf.tick).collect();
+    let l_ticks: std::collections::HashSet<i64> =
+        live.keyframes().iter().map(|kf| kf.tick).collect();
+    let removed: Vec<i64> = c_ticks.difference(&l_ticks).copied().collect();
+    let added: Vec<i64> = l_ticks.difference(&c_ticks).copied().collect();
+
+    if removed.len() == 1 && added.len() == 1 {
+        let from = removed[0];
+        let to = added[0];
+        let Some(live_kf) = live.keyframes().iter().find(|kf| kf.tick == to) else {
+            return;
+        };
+        let Some(other_value) = other
+            .keyframes()
+            .iter()
+            .find(|kf| kf.tick == from)
+            .map(|kf| kf.value)
+        else {
+            return;
+        };
+        let _ = other.remove_keyframe(from);
+        other.set_keyframe(to, other_value, live_kf.easing);
+        return;
+    }
+
+    // Same tick set: value and/or easing changed on the dragged channel.
+    // Sync easing onto `other`; leave its values alone.
+    for live_kf in live.keyframes() {
+        let Some(other_value) = other
+            .keyframes()
+            .iter()
+            .find(|kf| kf.tick == live_kf.tick)
+            .map(|kf| kf.value)
+        else {
+            continue;
+        };
+        other.set_keyframe(live_kf.tick, other_value, live_kf.easing);
+    }
 }
 
 /// Commit bits for an insert at `tick` with `value` (Linear).

@@ -477,6 +477,19 @@ export component AppWindow inherits Window {
 
     shortcuts := FocusScope {
         key-pressed(event) => {
+            // Eyedropper owns the keyboard while armed: Escape cancels the
+            // session; every other shortcut is swallowed so Delete / undo /
+            // new-project / dialog dismissals cannot orphan the consumer or
+            // mutate the project under a live hover-preview.
+            if (EyedropperStore.armed) {
+                if (event.text == Key.Escape) {
+                    EyedropperStore.cancel-epoch += 1;
+                    EyedropperStore.armed = false;
+                    EyedropperStore.over-frame = false;
+                    EyedropperStore.label = "";
+                }
+                return accept;
+            }
             // Settings screen is modal and can sit over the launch screen or
             // the editor, so it's checked first: Escape dismisses, everything
             // else is swallowed.
@@ -628,13 +641,6 @@ export component AppWindow inherits Window {
                 return accept;
             }
             if (event.text == Key.Escape) {
-                if (EyedropperStore.armed) {
-                    EyedropperStore.cancel-epoch += 1;
-                    EyedropperStore.armed = false;
-                    EyedropperStore.over-frame = false;
-                    EyedropperStore.label = "";
-                    return accept;
-                }
                 TimelineActions.clear-selection();
                 return accept;
             }

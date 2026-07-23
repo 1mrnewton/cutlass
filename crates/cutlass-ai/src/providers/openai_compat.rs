@@ -120,7 +120,11 @@ impl OpenAiCompatProvider {
         }
     }
 
-    fn request_body(&self, request: &ChatRequest<'_>) -> serde_json::Value {
+    /// Build the Chat Completions wire body for `request`.
+    ///
+    /// `pub(crate)` so offline request-size harnesses can measure the exact
+    /// payload without opening a network connection.
+    pub(crate) fn request_body(&self, request: &ChatRequest<'_>) -> serde_json::Value {
         let messages = to_openai_messages(request.messages);
         let mut body = serde_json::json!({
             "model": self.model,

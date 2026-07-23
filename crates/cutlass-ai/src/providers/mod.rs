@@ -8,6 +8,9 @@ pub mod openai_compat;
 pub mod openai_responses;
 pub mod scripted;
 
+#[cfg(test)]
+mod request_size_tests;
+
 pub use openai_compat::{OpenAiCompatExtras, OpenAiCompatProvider};
 pub use openai_responses::OpenAiResponsesProvider;
 pub use scripted::ScriptedProvider;

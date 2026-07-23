@@ -284,6 +284,7 @@ impl ExportAudioMixer {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // span + scratch pair + block window + overrides
     fn mix_warped_span(
         span: &mut Span,
         scratch: &mut Vec<f32>,

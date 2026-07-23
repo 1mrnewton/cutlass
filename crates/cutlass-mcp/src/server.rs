@@ -13,7 +13,7 @@ use crate::host::EngineHost;
 /// Headless Cutlass MCP service.
 ///
 /// Owns an [`EngineHost`] (engine on a dedicated OS thread) and the combined
-/// rmcp tool router (probe + project lifecycle + validated edits).
+/// rmcp tool router (probe + project lifecycle + validated edits + render).
 #[derive(Clone)]
 pub struct CutlassMcp {
     pub(crate) host: EngineHost,
@@ -25,7 +25,10 @@ impl CutlassMcp {
     pub fn new() -> Self {
         Self {
             host: EngineHost::spawn(),
-            tool_router: Self::tool_router() + Self::project_router() + Self::edits_router(),
+            tool_router: Self::tool_router()
+                + Self::project_router()
+                + Self::edits_router()
+                + Self::render_router(),
         }
     }
 
@@ -61,8 +64,11 @@ impl ServerHandler for CutlassMcp {
                  Edits: edit_commands_list → edit_schema_get for argument shapes → \
                  edit_apply (batch of {\"command\":\"<name>\", ...args}, one undo group, \
                  all-or-nothing, validated against live project state) → verify with \
-                 project_get. edit_undo / edit_redo reverse one edit_apply batch. \
-                 Never invent raw engine mutations — only the wire vocabulary.",
+                 project_get (and frame_get for visual checks). edit_undo / edit_redo \
+                 reverse one edit_apply batch. Render: frame_get returns a composited \
+                 PNG at a timeline time; export_video muxes the whole timeline to \
+                 H.264/AAC MP4 (sync, can take minutes). Never invent raw engine \
+                 mutations — only the wire vocabulary.",
             )
     }
 }

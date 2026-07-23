@@ -2,3 +2,4 @@
 
 pub(crate) mod edits;
 pub(crate) mod project;
+pub(crate) mod render;

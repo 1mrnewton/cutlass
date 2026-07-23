@@ -7,6 +7,7 @@
 //! and the host thread exits.
 
 mod edits;
+mod render;
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -19,6 +20,7 @@ use serde::Serialize;
 use tokio::sync::oneshot;
 
 pub use edits::{AppliedBatch, AppliedEdit, UndoResult};
+pub use render::{ExportDone, FrameGrab};
 
 /// Readable when a tool needs a project and none has been opened yet.
 ///
@@ -87,6 +89,15 @@ enum HostRequest {
     Redo {
         reply: oneshot::Sender<Result<UndoResult, String>>,
     },
+    GetFrame {
+        seconds: f64,
+        max_dim: u32,
+        reply: oneshot::Sender<Result<FrameGrab, String>>,
+    },
+    ExportVideo {
+        path: PathBuf,
+        reply: oneshot::Sender<Result<ExportDone, String>>,
+    },
 }
 
 /// Cloneable handle to the engine host thread.
@@ -145,6 +156,22 @@ impl EngineHost {
         self.roundtrip(|reply| HostRequest::Redo { reply }).await
     }
 
+    /// Composite the timeline at `seconds`, fit-scaled to `max_dim`, as PNG.
+    pub async fn get_frame(&self, seconds: f64, max_dim: u32) -> Result<FrameGrab, String> {
+        self.roundtrip(|reply| HostRequest::GetFrame {
+            seconds,
+            max_dim,
+            reply,
+        })
+        .await
+    }
+
+    /// Mux the whole timeline to an H.264/AAC MP4 at `path` (sync on host).
+    pub async fn export_video(&self, path: PathBuf) -> Result<ExportDone, String> {
+        self.roundtrip(|reply| HostRequest::ExportVideo { path, reply })
+            .await
+    }
+
     async fn roundtrip<T>(
         &self,
         make: impl FnOnce(oneshot::Sender<Result<T, String>>) -> HostRequest,
@@ -186,6 +213,16 @@ fn host_loop(rx: mpsc::Receiver<HostRequest>) {
             }
             HostRequest::Redo { reply } => {
                 let _ = reply.send(edits::do_redo(&mut engine));
+            }
+            HostRequest::GetFrame {
+                seconds,
+                max_dim,
+                reply,
+            } => {
+                let _ = reply.send(render::do_get_frame(&mut engine, seconds, max_dim));
+            }
+            HostRequest::ExportVideo { path, reply } => {
+                let _ = reply.send(render::do_export_video(&mut engine, path));
             }
         }
     }

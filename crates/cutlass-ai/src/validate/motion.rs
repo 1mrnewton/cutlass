@@ -4,6 +4,8 @@
 //! desktop UI can stay permissive for manual gestures while the agent gets
 //! clear "you meant X" feedback instead of flying rects.
 
+use cutlass_models::Clip;
+
 use crate::wire::{WireClipParam, WireScale};
 
 use super::Rejection;
@@ -116,4 +118,42 @@ pub(super) fn check_motion_param_args(
         _ => {}
     }
     Ok(())
+}
+
+/// `set_clip_transform` lowers with `at: None`, which flattens *every*
+/// transform param to a constant. Reject whenever any param is animated so
+/// the agent cannot silently destroy keyframe curves.
+pub(super) fn check_set_clip_transform_preserves_keyframes(
+    clip: &Clip,
+    wire_clip: u64,
+) -> Result<(), Rejection> {
+    let t = &clip.transform;
+    let mut animated = Vec::new();
+    if t.position.is_animated() {
+        animated.push("position");
+    }
+    if t.anchor_point.is_animated() {
+        animated.push("anchor_point");
+    }
+    if t.scale.is_animated() {
+        animated.push("scale");
+    }
+    if t.rotation.is_animated() {
+        animated.push("rotation");
+    }
+    if t.opacity.is_animated() {
+        animated.push("opacity");
+    }
+    if animated.is_empty() {
+        return Ok(());
+    }
+    let detail = if animated.len() == 1 {
+        format!("has keyframes on {}", animated[0])
+    } else {
+        format!("has keyframed transform params ({})", animated.join(", "))
+    };
+    Err(Rejection::new(format!(
+        "clip {wire_clip} {detail}; set_clip_transform would erase that animation — \
+         use set_param_keyframe to edit the curve or set_param_constant to remove it first"
+    )))
 }

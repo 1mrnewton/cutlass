@@ -100,9 +100,10 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         }
         WireCommand::SetClipTransform(args) => {
             let clip = clip_ref(project, args.clip)?;
-            // Omitted properties keep their current value — sampled at the
-            // clip start for animated params (the agent edits whole-clip
-            // placement; keyframe-level edits get their own commands).
+            // Lowering uses `at: None`, which flattens every transform param
+            // to a constant — refuse when any param is already keyframed.
+            check_set_clip_transform_preserves_keyframes(clip, args.clip)?;
+            // Omitted properties keep their current constant value.
             if let Some(x) = args.position_x {
                 check_position_component(x)?;
             }

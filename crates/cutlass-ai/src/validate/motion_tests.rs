@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::wire;
-use cutlass_models::MediaSource;
+use cutlass_models::{ClipId, ClipParam, Easing, MediaSource, ParamValue};
 
 const R24: Rational = Rational::FPS_24;
 
@@ -237,6 +237,105 @@ fn tangent_boundary_2_passes() {
         } => {
             assert_eq!(t.out_t, [2.0, -2.0]);
             assert_eq!(t.in_t, [-2.0, 2.0]);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+fn animate_position(project: &mut Project, clip: u64) {
+    let id = ClipId::from_raw(clip);
+    for (tick, xy) in [(0, [0.0, 0.0]), (48, [0.25, 0.0])] {
+        project
+            .set_param_keyframe(
+                id,
+                ClipParam::Position,
+                RationalTime::new(tick, R24),
+                ParamValue::Vec2(xy),
+                Easing::Linear,
+                None,
+            )
+            .unwrap();
+    }
+    assert!(project.clip(id).unwrap().transform.position.is_animated());
+}
+
+#[test]
+fn set_clip_transform_rejects_animated_position() {
+    let (mut project, clip) = fixture();
+    animate_position(&mut project, clip);
+    let msg = reject(&project, transform(clip, Some(0.1), None, None, None, None));
+    assert!(msg.contains("keyframes on position"), "{msg}");
+    assert!(msg.contains("set_param_keyframe"), "{msg}");
+    assert!(msg.contains("set_param_constant"), "{msg}");
+}
+
+#[test]
+fn set_clip_transform_rejects_scale_only_when_position_animated() {
+    // Lowering uses `at: None` → set_constant on ALL params, so a scale-only
+    // edit would also flatten position keyframes. Reject (fallback branch).
+    let (mut project, clip) = fixture();
+    animate_position(&mut project, clip);
+    let before = project
+        .clip(ClipId::from_raw(clip))
+        .unwrap()
+        .transform
+        .position
+        .keyframes()
+        .len();
+    let msg = reject(
+        &project,
+        transform(
+            clip,
+            None,
+            None,
+            None,
+            None,
+            Some(wire::WireScale::Uniform(1.2)),
+        ),
+    );
+    assert!(
+        msg.contains("keyframes on position") || msg.contains("keyframed transform params"),
+        "{msg}"
+    );
+    assert!(msg.contains("would erase that animation"), "{msg}");
+    // Project unchanged — rejection is validate-only.
+    let after = project
+        .clip(ClipId::from_raw(clip))
+        .unwrap()
+        .transform
+        .position
+        .keyframes()
+        .len();
+    assert_eq!(before, after);
+    assert!(
+        project
+            .clip(ClipId::from_raw(clip))
+            .unwrap()
+            .transform
+            .position
+            .is_animated()
+    );
+}
+
+#[test]
+fn set_clip_transform_still_works_on_non_animated_clip() {
+    let (project, clip) = fixture();
+    let edit = lower(
+        &project,
+        transform(
+            clip,
+            Some(0.1),
+            Some(-0.05),
+            None,
+            None,
+            Some(wire::WireScale::Uniform(1.2)),
+        ),
+    );
+    match edit {
+        EditCommand::SetClipTransform { transform, at, .. } => {
+            assert_eq!(transform.position, [0.1, -0.05]);
+            assert_eq!(transform.scale, cutlass_models::Scale2::uniform(1.2));
+            assert_eq!(at, None);
         }
         other => panic!("unexpected {other:?}"),
     }

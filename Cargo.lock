@@ -1649,6 +1649,7 @@ dependencies = [
  "cutlass-models",
  "cutlass-shapes",
  "cutlass-text",
+ "image",
  "nnnoiseless",
  "png 0.17.16",
  "serde_json",

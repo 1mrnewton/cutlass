@@ -151,13 +151,13 @@ impl AgentSenses {
                 playhead_seconds: request.playhead_seconds,
             },
         )?;
-        let png = cutlass_render::encode_png(&image)
-            .map_err(|error| format!("could not encode timeline map as PNG: {error}"))?;
+        let jpeg = cutlass_render::encode_jpeg(&image)
+            .map_err(|error| format!("could not encode timeline map as JPEG: {error}"))?;
         let label = format!(
             "timeline map {:.2}s-{:.2}s",
             request.start_seconds, request.end_seconds
         );
-        let image = ImagePart::png(png, label);
+        let image = ImagePart::jpeg(jpeg, label);
         let playhead = request.playhead_seconds.map_or_else(
             || "no playhead requested".to_string(),
             |seconds| format!("playhead {seconds:.2}s"),
@@ -214,8 +214,8 @@ impl AgentSenses {
             page.total_pages,
             request.max_width,
         )?;
-        let png = cutlass_render::encode_png(&sheet.image)
-            .map_err(|error| format!("could not encode media-pool sheet as PNG: {error}"))?;
+        let jpeg = cutlass_render::encode_jpeg(&sheet.image)
+            .map_err(|error| format!("could not encode media-pool sheet as JPEG: {error}"))?;
         let label = format!(
             "media pool sheet page {} of {}",
             page.number, page.total_pages
@@ -231,7 +231,7 @@ impl AgentSenses {
 
         Ok(ToolOutput {
             text,
-            images: vec![ImagePart::png(png, label)],
+            images: vec![ImagePart::jpeg(jpeg, label)],
         })
     }
 

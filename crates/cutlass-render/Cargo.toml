@@ -18,6 +18,8 @@ cutlass-text = { path = "../cutlass-text" }
 thiserror.workspace = true
 tracing.workspace = true
 png = "0.17"
+# JPEG encode for agent vision frames (opaque RGB; alpha discarded).
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 nnnoiseless = "0.5"
 tempfile = "3"
 # The `lut-pack` baker bin writes the starter-pack `luts.json` catalog.

@@ -31,7 +31,7 @@ pub use cutlass_compositor::FrameSink;
 pub use cutlass_core::RgbaImage;
 pub use error::RenderError;
 pub use export::{
-    ExportObserver, ExportSettings, PngSequenceEncoder, decode_png, encode_png, export,
+    ExportObserver, ExportSettings, PngSequenceEncoder, decode_png, encode_jpeg, encode_png, export,
     export_config, export_config_with, export_observed, export_to_file, export_to_file_observed,
 };
 pub use export_audio::{EXPORT_AUDIO_CHANNELS, EXPORT_AUDIO_RATE, ExportAudioMixer};

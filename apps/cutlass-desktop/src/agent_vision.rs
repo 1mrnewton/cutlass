@@ -94,11 +94,11 @@ impl AgentVision {
                     frame_time.seconds()
                 )
             })?;
-        let png = cutlass_render::encode_png(&image)
-            .map_err(|error| format!("could not encode project frame as PNG: {error}"))?;
+        let jpeg = cutlass_render::encode_jpeg(&image)
+            .map_err(|error| format!("could not encode project frame as JPEG: {error}"))?;
 
-        Ok(ImagePart::png(
-            png,
+        Ok(ImagePart::jpeg(
+            jpeg,
             format!("{label_prefix} at {:.2}s", frame_time.seconds()),
         ))
     }
@@ -114,10 +114,10 @@ impl AgentVision {
     ) -> Result<ImagePart, String> {
         let (max_width, max_height) = vision_dimensions(max_width, max_height)?;
         let (image, frame_time) = self.render_asset_image(path, seconds, max_width, max_height)?;
-        let png = cutlass_render::encode_png(&image)
-            .map_err(|error| format!("could not encode asset frame as PNG: {error}"))?;
+        let jpeg = cutlass_render::encode_jpeg(&image)
+            .map_err(|error| format!("could not encode asset frame as JPEG: {error}"))?;
 
-        Ok(ImagePart::png(png, asset_label(path, frame_time)))
+        Ok(ImagePart::jpeg(jpeg, asset_label(path, frame_time)))
     }
 
     /// Render one midpoint thumbnail per visual source and compose them into a
@@ -739,5 +739,20 @@ mod tests {
 
         assert!((sheet_sample_seconds(&video) - 5.0).abs() < f64::EPSILON);
         assert_eq!(sheet_sample_seconds(&still), 0.0);
+    }
+
+    #[test]
+    fn opaque_sheet_encodes_as_jpeg_smaller_than_png() {
+        let layout = MediaPoolSheetLayout::new(768, 0).unwrap();
+        let sheet = compose_media_pool_sheet(&[], 1, 1, layout).unwrap();
+        let jpeg = cutlass_render::encode_jpeg(&sheet.image).expect("jpeg");
+        let png = cutlass_render::encode_png(&sheet.image).expect("png");
+        assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
+        assert!(
+            jpeg.len() < png.len(),
+            "jpeg {} bytes should beat png {} bytes for an opaque sheet",
+            jpeg.len(),
+            png.len()
+        );
     }
 }

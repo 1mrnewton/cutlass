@@ -314,9 +314,10 @@ impl VideoEncoder for PngSequenceEncoder {
 
 /// Encode one tightly packed RGBA8 image as an in-memory PNG.
 ///
-/// Agent vision tools use this boundary rather than depending on `png`
-/// themselves: rendered frames stay [`RgbaImage`] until the provider needs
-/// encoded bytes, and every caller gets the same well-formedness check.
+/// Agent vision tools that need alpha use this boundary rather than depending
+/// on `png` themselves: rendered frames stay [`RgbaImage`] until the provider
+/// needs encoded bytes, and every caller gets the same well-formedness check.
+/// Opaque agent frames should prefer [`encode_jpeg`].
 pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, RenderError> {
     if !image.is_well_formed() {
         return Err(RenderError::unsupported(format!(
@@ -337,6 +338,43 @@ pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, RenderError> {
         writer
             .write_image_data(&image.pixels)
             .map_err(|e| RenderError::Encode(EncodeError::Encode(e.to_string())))?;
+    }
+    Ok(bytes)
+}
+
+/// Encode one tightly packed RGBA8 image as an in-memory JPEG (quality 80).
+///
+/// Alpha is discarded: pixels are flattened to RGB. Agent vision frames
+/// (project previews, asset frames, contact sheets, timeline maps) are drawn
+/// over opaque backgrounds, so JPEG shrinks the base64 payload without losing
+/// useful transparency.
+pub fn encode_jpeg(image: &RgbaImage) -> Result<Vec<u8>, RenderError> {
+    const QUALITY: u8 = 80;
+    if !image.is_well_formed() {
+        return Err(RenderError::unsupported(format!(
+            "RGBA image is {}x{} but carries {} bytes",
+            image.width,
+            image.height,
+            image.pixels.len()
+        )));
+    }
+    let rgb: Vec<u8> = image
+        .pixels
+        .chunks_exact(4)
+        .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
+        .collect();
+    let mut bytes = Vec::new();
+    {
+        use image::ImageEncoder;
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, QUALITY);
+        encoder
+            .write_image(
+                &rgb,
+                image.width,
+                image.height,
+                image::ExtendedColorType::Rgb8,
+            )
+            .map_err(|error| RenderError::Encode(EncodeError::Encode(error.to_string())))?;
     }
     Ok(bytes)
 }
@@ -452,6 +490,39 @@ mod tests {
         assert_eq!(&encoded[..8], b"\x89PNG\r\n\x1a\n");
 
         assert_eq!(decode_png(&encoded).expect("decode"), image);
+    }
+
+    #[test]
+    fn in_memory_jpeg_encodes_opaque_rgb_and_beats_png_size() {
+        let mut pixels = Vec::with_capacity(64 * 64 * 4);
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                pixels.extend_from_slice(&[
+                    (x.wrapping_mul(3) % 256) as u8,
+                    (y.wrapping_mul(5) % 256) as u8,
+                    160,
+                    255,
+                ]);
+            }
+        }
+        let image = RgbaImage::new(64, 64, pixels);
+
+        let jpeg = encode_jpeg(&image).expect("encode jpeg");
+        let png = encode_png(&image).expect("encode png");
+        assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
+        assert!(
+            jpeg.len() < png.len(),
+            "jpeg {} bytes should beat png {} bytes for an opaque frame",
+            jpeg.len(),
+            png.len()
+        );
+
+        let malformed = RgbaImage::new(2, 2, vec![0; 3]);
+        let error = encode_jpeg(&malformed).expect_err("bad buffer");
+        assert!(
+            error.to_string().contains("carries 3 bytes"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

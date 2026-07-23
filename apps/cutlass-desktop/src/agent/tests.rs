@@ -837,7 +837,8 @@ fn sandbox_bridge_exposes_read_only_senses_of_its_project() {
 
     assert!(plan.is_empty(), "a sense never adds an edit step");
     assert_eq!(output.images.len(), 1);
-    assert_eq!(output.images[0].media_type, "image/png");
+    assert_eq!(output.images[0].media_type, "image/jpeg");
+    assert_eq!(&output.images[0].data[..2], &[0xFF, 0xD8]);
     assert!(output.text.contains("playhead 1.25s"));
 }
 

@@ -94,7 +94,7 @@ fn registry_has_exact_unique_read_only_object_specs() {
 }
 
 #[test]
-fn empty_project_timeline_map_dispatches_a_labeled_valid_png() {
+fn empty_project_timeline_map_dispatches_a_labeled_valid_jpeg() {
     let project = Project::new("empty", FPS);
     let output = AgentSenses::default()
         .call(&project, 7.5, "media_timeline_map", &json!({}))
@@ -102,10 +102,10 @@ fn empty_project_timeline_map_dispatches_a_labeled_valid_png() {
 
     assert_eq!(output.images.len(), 1);
     let image = &output.images[0];
-    assert_eq!(image.media_type, "image/png");
-    assert_eq!(&image.data[..8], b"\x89PNG\r\n\x1a\n");
+    assert_eq!(image.media_type, "image/jpeg");
+    assert_eq!(&image.data[..2], &[0xFF, 0xD8]);
     assert_eq!(image.label, "timeline map 0.00s-1.00s");
-    let decoded = cutlass_render::decode_png(image.data.as_slice()).expect("valid PNG");
+    let decoded = cutlass_decoder::decode_image_bytes(image.data.as_slice()).expect("valid JPEG");
     assert_eq!(decoded.width, 768);
     assert!(decoded.is_well_formed());
     assert!(output.text.contains(&image.label));
@@ -124,9 +124,10 @@ fn empty_media_pool_sheet_is_cpu_only_labeled_and_valid() {
 
     assert_eq!(output.images.len(), 1);
     let image = &output.images[0];
-    assert_eq!(image.media_type, "image/png");
+    assert_eq!(image.media_type, "image/jpeg");
+    assert_eq!(&image.data[..2], &[0xFF, 0xD8]);
     assert_eq!(image.label, "media pool sheet page 1 of 1");
-    let decoded = cutlass_render::decode_png(image.data.as_slice()).expect("valid PNG");
+    let decoded = cutlass_decoder::decode_image_bytes(image.data.as_slice()).expect("valid JPEG");
     assert_eq!(decoded.width, 1024);
     assert!(decoded.is_well_formed());
     assert!(output.text.contains("page 1 of 1"));

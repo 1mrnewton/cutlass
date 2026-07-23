@@ -228,3 +228,60 @@ fn animated_position_omits_static_field() {
     assert_eq!(clip.rotation, None);
     assert_eq!(clip.opacity, None);
 }
+
+#[test]
+fn keyframes_absent_when_nothing_animated() {
+    let (project, _) = media_clip_project();
+    assert_eq!(summarize(&project).tracks[0].clips[0].keyframes, None);
+}
+
+#[test]
+fn position_keyframes_use_absolute_timeline_seconds() {
+    // Clip starts at 1.0s (24 ticks @ 24fps); keyframes at clip-relative 0 and 24.
+    let (mut project, clip_id) = media_clip_project();
+    {
+        let clip = project.timeline_mut().clip_mut(clip_id).unwrap();
+        clip.transform
+            .position
+            .set_keyframe(0, [-1.0, 0.0], Easing::Linear);
+        clip.transform
+            .position
+            .set_keyframe(24, [0.0, 0.0], Easing::EaseOut);
+    }
+
+    let clip = &summarize(&project).tracks[0].clips[0];
+    let kfs = clip.keyframes.as_ref().expect("keyframes present");
+    let position = kfs.get("position").expect("position keyframes");
+    assert_eq!(position.len(), 2);
+    assert_eq!(position[0].at, 1.0);
+    assert_eq!(position[0].value, serde_json::json!([-1.0, 0.0]));
+    assert_eq!(position[0].easing, None);
+    assert_eq!(position[1].at, 2.0);
+    assert_eq!(position[1].value, serde_json::json!([0.0, 0.0]));
+    assert_eq!(position[1].easing.as_deref(), Some("ease_out"));
+    assert_eq!(clip.position, None);
+}
+
+#[test]
+fn scale_keyframes_use_wire_scale_shape() {
+    let (mut project, clip_id) = media_clip_project();
+    {
+        let clip = project.timeline_mut().clip_mut(clip_id).unwrap();
+        clip.transform
+            .scale
+            .set_keyframe(0, Scale2::uniform(1.0), Easing::Linear);
+        clip.transform
+            .scale
+            .set_keyframe(24, Scale2 { x: 1.5, y: 0.5 }, Easing::EaseIn);
+    }
+
+    let summary = summarize(&project);
+    let kfs = summary.tracks[0].clips[0]
+        .keyframes
+        .as_ref()
+        .expect("keyframes present");
+    let scale = kfs.get("scale").expect("scale keyframes");
+    assert_eq!(scale[0].value, serde_json::json!(1.0));
+    assert_eq!(scale[1].value, serde_json::json!([1.5, 0.5]));
+    assert_eq!(scale[1].easing.as_deref(), Some("ease_in"));
+}

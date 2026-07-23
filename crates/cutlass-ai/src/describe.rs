@@ -6,8 +6,18 @@
 //! tool results after edits, so the model always sees the world it is
 //! editing. Output order is deterministic (stack order for tracks, start
 //! order for clips, id order for media) so eval tests can assert verbatim.
+//!
+//! Keyframed clip params appear under [`ClipSummary::keyframes`] as compact
+//! `{t,v,e}` points: `t` is absolute timeline seconds (same as
+//! `set_param_keyframe.at`), `v` is the wire value shape, and `e` is the wire
+//! easing name (omitted when linear). A param with keyframes omits its static
+//! field on the clip summary.
 
-use cutlass_models::{ClipSource, Generator, Project, Rational, Scale2, Shape, Track};
+use std::collections::BTreeMap;
+
+use cutlass_models::{
+    Clip, ClipSource, Easing, Generator, Param, Project, Rational, Scale2, Shape, Track,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::wire::WireScale;
@@ -162,6 +172,12 @@ pub struct ClipSummary {
     /// when the opacity param is keyframed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opacity: Option<f64>,
+    /// Keyframed clip params, keyed by wire name (`position`, `anchor_point`,
+    /// `scale`, `rotation`, `opacity`, `volume`, `pan`). Absent when nothing
+    /// is animated. Each point uses `t`/`v`/`e` (absolute timeline seconds,
+    /// wire-shaped value, wire easing name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyframes: Option<BTreeMap<String, Vec<KeyframeSummary>>>,
     /// Visual effects in chain order (add_effect); the index of each entry is
     /// what remove_effect / move_effect / set_effect_param address. Absent
     /// when empty.
@@ -206,13 +222,30 @@ pub struct ClipSummary {
     pub audio_role: Option<String>,
 }
 
+/// One keyframe on a clip param, in the same units the model writes with
+/// `set_param_keyframe` / `remove_param_keyframe`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyframeSummary {
+    /// Absolute timeline seconds (clip start + clip-relative tick). Matches
+    /// `set_param_keyframe.at` so existing keyframes can be addressed directly.
+    #[serde(rename = "t")]
+    pub at: f64,
+    /// Wire-shaped value: `[x,y]` for vec2, bare number for scalars, uniform
+    /// number or `[x,y]` for scale ([`WireScale`]).
+    #[serde(rename = "v")]
+    pub value: serde_json::Value,
+    /// Wire easing name (`ease_out`, `snappy`, `hold`, …). Omitted when linear.
+    #[serde(rename = "e", default, skip_serializing_if = "Option::is_none")]
+    pub easing: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectSummary {
     /// Catalog id, e.g. "gaussian_blur".
     pub effect: String,
     /// Current parameter values, sampled at the clip start, by name.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub params: std::collections::BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -256,6 +289,108 @@ pub struct MediaSummary {
 
 fn seconds(ticks: i64, rate: Rational) -> f64 {
     ticks as f64 * rate.seconds_per_unit()
+}
+
+fn wire_easing_name(easing: Easing) -> Option<String> {
+    match easing {
+        Easing::Linear => None,
+        Easing::EaseIn => Some("ease_in".into()),
+        Easing::EaseOut => Some("ease_out".into()),
+        Easing::EaseInOut => Some("ease_in_out".into()),
+        Easing::Hold => Some("hold".into()),
+        Easing::Bezier { .. } => Some(easing.preset_id().unwrap_or("bezier").into()),
+    }
+}
+
+fn scale_wire_value(s: Scale2) -> serde_json::Value {
+    if s.is_uniform() {
+        serde_json::json!(f64::from(s.x))
+    } else {
+        serde_json::json!([f64::from(s.x), f64::from(s.y)])
+    }
+}
+
+fn push_keyframes<T, F>(
+    out: &mut BTreeMap<String, Vec<KeyframeSummary>>,
+    name: &str,
+    param: &Param<T>,
+    clip_start_ticks: i64,
+    rate: Rational,
+    mut value_json: F,
+) where
+    T: Copy,
+    F: FnMut(T) -> serde_json::Value,
+{
+    if !param.is_animated() {
+        return;
+    }
+    let points: Vec<KeyframeSummary> = param
+        .keyframes()
+        .iter()
+        .map(|kf| KeyframeSummary {
+            at: seconds(clip_start_ticks + kf.tick, rate),
+            value: value_json(kf.value),
+            easing: wire_easing_name(kf.easing),
+        })
+        .collect();
+    if !points.is_empty() {
+        out.insert(name.to_string(), points);
+    }
+}
+
+fn summarize_clip_keyframes(
+    clip: &Clip,
+    rate: Rational,
+) -> Option<BTreeMap<String, Vec<KeyframeSummary>>> {
+    let start = clip.timeline.start.value;
+    let mut map = BTreeMap::new();
+    push_keyframes(
+        &mut map,
+        "position",
+        &clip.transform.position,
+        start,
+        rate,
+        |v| serde_json::json!([f64::from(v[0]), f64::from(v[1])]),
+    );
+    push_keyframes(
+        &mut map,
+        "anchor_point",
+        &clip.transform.anchor_point,
+        start,
+        rate,
+        |v| serde_json::json!([f64::from(v[0]), f64::from(v[1])]),
+    );
+    push_keyframes(
+        &mut map,
+        "scale",
+        &clip.transform.scale,
+        start,
+        rate,
+        scale_wire_value,
+    );
+    push_keyframes(
+        &mut map,
+        "rotation",
+        &clip.transform.rotation,
+        start,
+        rate,
+        |v| serde_json::json!(f64::from(v)),
+    );
+    push_keyframes(
+        &mut map,
+        "opacity",
+        &clip.transform.opacity,
+        start,
+        rate,
+        |v| serde_json::json!(f64::from(v)),
+    );
+    push_keyframes(&mut map, "volume", &clip.volume, start, rate, |v| {
+        serde_json::json!(f64::from(v))
+    });
+    push_keyframes(&mut map, "pan", &clip.pan, start, rate, |v| {
+        serde_json::json!(f64::from(v))
+    });
+    (!map.is_empty()).then_some(map)
 }
 
 fn summarize_adjust(adjust: &cutlass_models::ColorAdjustments) -> Option<String> {
@@ -472,6 +607,7 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                             })
                             .flatten()
                     },
+                    keyframes: summarize_clip_keyframes(clip, rate),
                     effects: clip
                         .effects
                         .iter()

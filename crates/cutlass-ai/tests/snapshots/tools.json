@@ -2796,7 +2796,7 @@
           "color": {
             "anyOf": [
               {
-                "description": "Marker flag colors: the editor's fixed palette, or a custom opaque RGB.",
+                "description": "Marker flag colors: palette name, #RRGGBB hex (same token describe_project emits), or custom opaque RGB.",
                 "oneOf": [
                   {
                     "enum": [
@@ -2812,8 +2812,13 @@
                     "type": "string"
                   },
                   {
+                    "description": "Custom opaque color as #RRGGBB (leading # optional; #RGB / #RRGGBBAA also accepted).",
+                    "pattern": "^#?[0-9A-Fa-f]{3}([0-9A-Fa-f]{3}([0-9A-Fa-f]{2})?)?$",
+                    "type": "string"
+                  },
+                  {
                     "additionalProperties": false,
-                    "description": "Custom opaque RGB (`[r, g, b]`, each 0–255). Markers are UI chrome —\nalpha is not accepted on the wire.",
+                    "description": "Custom opaque RGB. Field name `rgba` is historical; value is `[r, g, b]` (0–255), no alpha.",
                     "properties": {
                       "rgba": {
                         "items": {
@@ -2887,7 +2892,7 @@
           "color": {
             "anyOf": [
               {
-                "description": "Marker flag colors: the editor's fixed palette, or a custom opaque RGB.",
+                "description": "Marker flag colors: palette name, #RRGGBB hex (same token describe_project emits), or custom opaque RGB.",
                 "oneOf": [
                   {
                     "enum": [
@@ -2903,8 +2908,13 @@
                     "type": "string"
                   },
                   {
+                    "description": "Custom opaque color as #RRGGBB (leading # optional; #RGB / #RRGGBBAA also accepted).",
+                    "pattern": "^#?[0-9A-Fa-f]{3}([0-9A-Fa-f]{3}([0-9A-Fa-f]{2})?)?$",
+                    "type": "string"
+                  },
+                  {
                     "additionalProperties": false,
-                    "description": "Custom opaque RGB (`[r, g, b]`, each 0–255). Markers are UI chrome —\nalpha is not accepted on the wire.",
+                    "description": "Custom opaque RGB. Field name `rgba` is historical; value is `[r, g, b]` (0–255), no alpha.",
                     "properties": {
                       "rgba": {
                         "items": {
@@ -3026,5 +3036,5 @@
       }
     }
   ],
-  "version": 44
+  "version": 45
 }

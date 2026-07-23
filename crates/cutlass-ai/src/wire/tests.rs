@@ -5,6 +5,24 @@ use super::dtos::{
 use super::*;
 
 #[test]
+fn wire_marker_color_accepts_hex_token_and_rgba_object() {
+    let hex: WireMarkerColor = serde_json::from_value(serde_json::json!("#123456")).unwrap();
+    assert_eq!(hex, WireMarkerColor::Rgba([0x12, 0x34, 0x56]));
+    let bare: WireMarkerColor = serde_json::from_value(serde_json::json!("aabbcc")).unwrap();
+    assert_eq!(bare, WireMarkerColor::Rgba([0xaa, 0xbb, 0xcc]));
+    let obj: WireMarkerColor =
+        serde_json::from_value(serde_json::json!({ "rgba": [1, 2, 3] })).unwrap();
+    assert_eq!(obj, WireMarkerColor::Rgba([1, 2, 3]));
+    let teal: WireMarkerColor = serde_json::from_value(serde_json::json!("teal")).unwrap();
+    assert_eq!(teal, WireMarkerColor::Teal);
+    // Serialize still uses the rgba object (hex is input-only).
+    assert_eq!(
+        serde_json::to_value(WireMarkerColor::Rgba([0x12, 0x34, 0x56])).unwrap(),
+        serde_json::json!({ "rgba": [0x12, 0x34, 0x56] })
+    );
+}
+
+#[test]
 fn tagged_json_round_trips() {
     let cmd = WireCommand::TrimClip(TrimClip {
         clip: 12,

@@ -1,5 +1,8 @@
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+
+use cutlass_models::MarkerColor;
+use schemars::{JsonSchema, Schema, SchemaGenerator};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::MAX_MULTI_CLIP_REFS;
 
@@ -122,7 +125,12 @@ pub struct UnlinkClips {
 }
 
 /// Marker flag colors: the editor's fixed palette, or a custom opaque RGB.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// Deserialization accepts palette names (`"teal"`, …), the `#RRGGBB` token
+/// that [`MarkerColor::token`](cutlass_models::MarkerColor::token) /
+/// `describe_project` emits, or `{"rgba":[r,g,b]}`. Serialization keeps the
+/// palette-name / `rgba` object shapes (hex is input-only for round-trip).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WireMarkerColor {
     Teal,
@@ -133,9 +141,109 @@ pub enum WireMarkerColor {
     Orange,
     Yellow,
     Green,
-    /// Custom opaque RGB (`[r, g, b]`, each 0–255). Markers are UI chrome —
-    /// alpha is not accepted on the wire.
+    /// Custom opaque RGB. Field name stays `rgba` for wire compat; the value
+    /// is `[r, g, b]` (0–255) — markers are UI chrome, no alpha.
     Rgba([u8; 3]),
+}
+
+impl<'de> Deserialize<'de> for WireMarkerColor {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(s) => wire_marker_color_from_token(&s).ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "unknown marker color {s:?}; expected a palette name \
+                     (teal|blue|purple|pink|red|orange|yellow|green), \
+                     #RRGGBB, or {{\"rgba\":[r,g,b]}}"
+                ))
+            }),
+            serde_json::Value::Object(map) => {
+                let Some(rgba_val) = map.get("rgba") else {
+                    return Err(serde::de::Error::custom(
+                        "marker color object must be {\"rgba\":[r,g,b]}",
+                    ));
+                };
+                if map.len() != 1 {
+                    return Err(serde::de::Error::custom(
+                        "marker color object only accepts \"rgba\"",
+                    ));
+                }
+                let rgb: [u8; 3] =
+                    serde_json::from_value(rgba_val.clone()).map_err(serde::de::Error::custom)?;
+                Ok(WireMarkerColor::Rgba(rgb))
+            }
+            other => Err(serde::de::Error::custom(format!(
+                "marker color must be a string or {{\"rgba\":[r,g,b]}}, got {other}"
+            ))),
+        }
+    }
+}
+
+fn wire_marker_color_from_token(s: &str) -> Option<WireMarkerColor> {
+    let color = MarkerColor::parse_token(s)?;
+    Some(match color {
+        MarkerColor::Teal => WireMarkerColor::Teal,
+        MarkerColor::Blue => WireMarkerColor::Blue,
+        MarkerColor::Purple => WireMarkerColor::Purple,
+        MarkerColor::Pink => WireMarkerColor::Pink,
+        MarkerColor::Red => WireMarkerColor::Red,
+        MarkerColor::Orange => WireMarkerColor::Orange,
+        MarkerColor::Yellow => WireMarkerColor::Yellow,
+        MarkerColor::Green => WireMarkerColor::Green,
+        MarkerColor::Rgba([r, g, b, _]) => WireMarkerColor::Rgba([r, g, b]),
+    })
+}
+
+impl JsonSchema for WireMarkerColor {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "WireMarkerColor".into()
+    }
+
+    fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
+        let schema = serde_json::json!({
+            "description": "Marker flag colors: palette name, #RRGGBB hex \
+                (same token describe_project emits), or custom opaque RGB.",
+            "oneOf": [
+                {
+                    "enum": [
+                        "teal", "blue", "purple", "pink",
+                        "red", "orange", "yellow", "green"
+                    ],
+                    "type": "string"
+                },
+                {
+                    "type": "string",
+                    "description": "Custom opaque color as #RRGGBB (leading # \
+                        optional; #RGB / #RRGGBBAA also accepted).",
+                    "pattern": "^#?[0-9A-Fa-f]{3}([0-9A-Fa-f]{3}([0-9A-Fa-f]{2})?)?$"
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Custom opaque RGB. Field name `rgba` is \
+                        historical; value is `[r, g, b]` (0–255), no alpha.",
+                    "properties": {
+                        "rgba": {
+                            "type": "array",
+                            "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255
+                            },
+                            "minItems": 3,
+                            "maxItems": 3
+                        }
+                    },
+                    "required": ["rgba"]
+                }
+            ]
+        });
+        Schema::try_from(schema).expect("WireMarkerColor schema is plain JSON data")
+    }
 }
 
 /// Drop a named, colored marker on the timeline ruler — an anchor for

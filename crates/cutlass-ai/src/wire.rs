@@ -78,7 +78,9 @@ use serde::{Deserialize, Serialize};
 /// 43: drop `speed` from keyframe-tool WireClipParam schema enum (serde still
 ///     accepts it so validate can teach set_clip_speed / set_speed_curve).
 /// 44: `WireMarkerColor` gains `rgba: [r,g,b]` for custom opaque marker colors.
-pub const TOOL_SCHEMA_VERSION: u32 = 44;
+/// 45: `WireMarkerColor` also accepts `#RRGGBB` (describe_project token) so
+///     custom marker colors round-trip; `rgba` docs clarify RGB (no alpha).
+pub const TOOL_SCHEMA_VERSION: u32 = 45;
 
 mod dtos;
 mod tools;

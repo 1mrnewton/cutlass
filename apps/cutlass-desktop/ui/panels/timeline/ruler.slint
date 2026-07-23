@@ -61,11 +61,12 @@ component MarkerColorSwatch inherits Rectangle {
     }
 }
 
-// Ninth chip: opens the full opaque picker for a custom marker color.
+// Ninth chip: selects custom-color mode. The full picker is embedded
+// inline in the marker editor (Slint 1.17 allows only one PopupWindow).
 component MarkerCustomColorChip inherits Rectangle {
     in-out property <color> value: #ff3b3b;
     in property <bool> selected;
-    callback picked(color);
+    callback picked();
 
     width: 18px;
     height: 18px;
@@ -86,47 +87,7 @@ component MarkerCustomColorChip inherits Rectangle {
 
     TouchArea {
         clicked => {
-            picker.show();
-        }
-    }
-
-    picker := PopupWindow {
-        x: 0;
-        y: root.height + 4px;
-        width: 268px;
-        height: shell.preferred-height;
-        close-policy: PopupClosePolicy.close-on-click-outside;
-
-        shell := Rectangle {
-            width: 100%;
-            height: 100%;
-            background: AppStore.theme.panel.background;
-            border-radius: AppStore.theme.metrics.radius.md;
-            border-width: 1px;
-            border-color: #ffffff1f;
-            drop-shadow-blur: 12px;
-            drop-shadow-color: #00000040;
-            drop-shadow-offset-y: 3px;
-
-            VerticalLayout {
-                padding: AppStore.theme.metrics.spacing.md;
-
-                CutlassColorPicker {
-                    current: root.value;
-                    recent-colors: AppStore.recent-colors;
-                    enable-alpha: false;
-                    committed(c) => {
-                        root.value = c;
-                        root.picked(c);
-                        picker.close();
-                    }
-                    eyedropper-requested => {
-                        // Markers are chrome — skip eyedropper for this chip;
-                        // dismiss so the user can pick a preset/swatch instead.
-                        picker.close();
-                    }
-                }
-            }
+            root.picked();
         }
     }
 }
@@ -438,7 +399,8 @@ export component Ruler inherits Rectangle {
         forward-focus: marker-name-input;
 
         Rectangle {
-            width: 248px;
+            // Widen when the inline custom picker is visible (244px panel).
+            width: root.marker-edit-is-custom ? 268px : 248px;
             background: AppStore.theme.panel.background;
             border-radius: 4px;
             drop-shadow-blur: 12px;
@@ -446,105 +408,120 @@ export component Ruler inherits Rectangle {
             drop-shadow-offset-y: 3px;
 
             VerticalLayout {
-            padding: 8px;
-            spacing: 6px;
+                padding: 8px;
+                spacing: 6px;
 
-            CutlassText {
-                text: "Marker";
-                style: AppStore.theme.typography.label;
-            }
+                CutlassText {
+                    text: "Marker";
+                    style: AppStore.theme.typography.label;
+                }
 
-            marker-name-input := CutlassLineInput {
-                text <=> marker-edit-name;
-                accessibility-label: "Marker name";
-                revert-on-escape: true;
-                select-all-on-focus: true;
-                accepted(_) => {
-                    root.submit-marker-edit();
-                }
-                cancelled => {
-                    marker-editor.close();
-                    AppState.refocus-shortcuts();
-                }
-            }
-
-            HorizontalLayout {
-                spacing: 4px;
-                MarkerColorSwatch {
-                    color-name: "teal";
-                    swatch-color: #3DB8A8;
-                    selected: marker-edit-color == "teal";
-                    picked => { marker-edit-color = "teal"; }
-                }
-                MarkerColorSwatch {
-                    color-name: "blue";
-                    swatch-color: #4A7FD4;
-                    selected: marker-edit-color == "blue";
-                    picked => { marker-edit-color = "blue"; }
-                }
-                MarkerColorSwatch {
-                    color-name: "purple";
-                    swatch-color: #8B5FD4;
-                    selected: marker-edit-color == "purple";
-                    picked => { marker-edit-color = "purple"; }
-                }
-                MarkerColorSwatch {
-                    color-name: "pink";
-                    swatch-color: #D45FA0;
-                    selected: marker-edit-color == "pink";
-                    picked => { marker-edit-color = "pink"; }
-                }
-                MarkerColorSwatch {
-                    color-name: "red";
-                    swatch-color: #D44A4A;
-                    selected: marker-edit-color == "red";
-                    picked => { marker-edit-color = "red"; }
-                }
-                MarkerColorSwatch {
-                    color-name: "orange";
-                    swatch-color: #D48A3A;
-                    selected: marker-edit-color == "orange";
-                    picked => { marker-edit-color = "orange"; }
-                }
-                MarkerColorSwatch {
-                    color-name: "yellow";
-                    swatch-color: #D4B83A;
-                    selected: marker-edit-color == "yellow";
-                    picked => { marker-edit-color = "yellow"; }
-                }
-                MarkerColorSwatch {
-                    color-name: "green";
-                    swatch-color: #4AB85A;
-                    selected: marker-edit-color == "green";
-                    picked => { marker-edit-color = "green"; }
-                }
-                MarkerCustomColorChip {
-                    value <=> marker-edit-custom-color;
-                    selected: root.marker-edit-is-custom;
-                    picked(c) => {
-                        root.marker-edit-custom-color = c;
-                        root.marker-edit-color = "#" + ColorUtil.color-to-hex(c);
-                    }
-                }
-            }
-
-            Rectangle {
-                height: 28px;
-                background: AppStore.theme.accent.primary;
-                border-radius: 4px;
-                Text {
-                    text: "Apply";
-                    color: #ffffff;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-                TouchArea {
-                    clicked => {
+                marker-name-input := CutlassLineInput {
+                    text <=> marker-edit-name;
+                    accessibility-label: "Marker name";
+                    revert-on-escape: true;
+                    select-all-on-focus: true;
+                    accepted(_) => {
                         root.submit-marker-edit();
                     }
+                    cancelled => {
+                        marker-editor.close();
+                        AppState.refocus-shortcuts();
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    MarkerColorSwatch {
+                        color-name: "teal";
+                        swatch-color: #3DB8A8;
+                        selected: marker-edit-color == "teal";
+                        picked => { marker-edit-color = "teal"; }
+                    }
+                    MarkerColorSwatch {
+                        color-name: "blue";
+                        swatch-color: #4A7FD4;
+                        selected: marker-edit-color == "blue";
+                        picked => { marker-edit-color = "blue"; }
+                    }
+                    MarkerColorSwatch {
+                        color-name: "purple";
+                        swatch-color: #8B5FD4;
+                        selected: marker-edit-color == "purple";
+                        picked => { marker-edit-color = "purple"; }
+                    }
+                    MarkerColorSwatch {
+                        color-name: "pink";
+                        swatch-color: #D45FA0;
+                        selected: marker-edit-color == "pink";
+                        picked => { marker-edit-color = "pink"; }
+                    }
+                    MarkerColorSwatch {
+                        color-name: "red";
+                        swatch-color: #D44A4A;
+                        selected: marker-edit-color == "red";
+                        picked => { marker-edit-color = "red"; }
+                    }
+                    MarkerColorSwatch {
+                        color-name: "orange";
+                        swatch-color: #D48A3A;
+                        selected: marker-edit-color == "orange";
+                        picked => { marker-edit-color = "orange"; }
+                    }
+                    MarkerColorSwatch {
+                        color-name: "yellow";
+                        swatch-color: #D4B83A;
+                        selected: marker-edit-color == "yellow";
+                        picked => { marker-edit-color = "yellow"; }
+                    }
+                    MarkerColorSwatch {
+                        color-name: "green";
+                        swatch-color: #4AB85A;
+                        selected: marker-edit-color == "green";
+                        picked => { marker-edit-color = "green"; }
+                    }
+                    MarkerCustomColorChip {
+                        value: marker-edit-custom-color;
+                        selected: root.marker-edit-is-custom;
+                        picked => {
+                            // Select custom mode with the last custom color;
+                            // the inline picker below edits it.
+                            root.marker-edit-color = "#" + ColorUtil.color-to-hex(
+                                root.marker-edit-custom-color);
+                        }
+                    }
+                }
+
+                // Inline (not nested PopupWindow) — Slint keeps one popup.
+                if root.marker-edit-is-custom: CutlassColorPicker {
+                    current: root.marker-edit-custom-color;
+                    recent-colors: AppStore.recent-colors;
+                    enable-alpha: false;
+                    show-eyedropper: false;
+                    committed(c) => {
+                        root.marker-edit-custom-color = c;
+                        root.marker-edit-color = "#" + ColorUtil.color-to-hex(c);
+                        ColorUtil.record-recent(c);
+                    }
+                }
+
+                Rectangle {
+                    height: 28px;
+                    background: AppStore.theme.accent.primary;
+                    border-radius: 4px;
+                    Text {
+                        text: "Apply";
+                        color: #ffffff;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        clicked => {
+                            root.submit-marker-edit();
+                        }
+                    }
                 }
             }
-        }
         }
     }
 

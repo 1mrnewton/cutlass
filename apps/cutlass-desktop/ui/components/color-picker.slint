@@ -51,6 +51,9 @@ export component CutlassColorPicker inherits Rectangle {
     in property <[color]> recent-colors: [];
     // Opaque-only consumers (chroma key, canvas background) hide the alpha rail.
     in property <bool> enable-alpha: true;
+    // Marker chrome (and similar) hide the pipette — they cannot sample the
+    // preview via EyedropperStore without nesting under another popup.
+    in property <bool> show-eyedropper: true;
 
     callback preview(color);
     callback committed(color);
@@ -230,7 +233,7 @@ export component CutlassColorPicker inherits Rectangle {
 
             // Eyedropper — placeholder glyph until `pipette` SVG is wired
             // (see docs/icons.md). Arms preview sampling via the host swatch.
-            dropper := Rectangle {
+            if root.show-eyedropper: Rectangle {
                 width: 28px;
                 height: 28px;
                 border-radius: AppStore.theme.metrics.radius.sm;

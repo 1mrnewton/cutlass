@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 use crate::provider::{
     ChatProvider, ChatRequest, ChatTurn, FinishReason, ImagePart, Message, ProviderError,
-    ProviderStreamEvent, ToolCall,
+    ProviderStreamEvent, TokenUsage, ToolCall,
 };
 
 use super::openai_compat::{retry_delay, retryable_status, sleep_unless_cancelled, truncate};
@@ -449,6 +449,8 @@ struct ResponseEnvelope {
     error: Option<ResponseApiError>,
     #[serde(default)]
     incomplete_details: Option<IncompleteDetails>,
+    #[serde(default)]
+    usage: Option<ResponsesUsage>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -461,6 +463,22 @@ struct ResponseApiError {
 struct IncompleteDetails {
     #[serde(default)]
     reason: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ResponsesUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    input_tokens_details: Option<InputTokensDetails>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct InputTokensDetails {
+    #[serde(default)]
+    cached_tokens: u64,
 }
 
 enum Terminal {
@@ -555,8 +573,20 @@ fn consume_responses_sse(
             "Responses stream ended without a terminal event".to_string(),
         ));
     };
-    let (envelope, finish) = match terminal {
-        Terminal::Completed(response) => (response, FinishReason::Stop),
+    let (envelope, finish, usage) = match terminal {
+        Terminal::Completed(response) => {
+            let usage = response.usage.as_ref().map(|u| TokenUsage {
+                input_tokens: u.input_tokens,
+                cached_input_tokens: u
+                    .input_tokens_details
+                    .as_ref()
+                    .map(|d| d.cached_tokens)
+                    .unwrap_or(0),
+                output_tokens: u.output_tokens,
+                cost: None,
+            });
+            (response, FinishReason::Stop, usage)
+        }
         Terminal::Incomplete(response) => {
             let reason = response
                 .incomplete_details
@@ -568,7 +598,7 @@ fn consume_responses_sse(
                     "Responses request was incomplete: {reason}"
                 )));
             }
-            (response, FinishReason::Length)
+            (response, FinishReason::Length, None)
         }
     };
 
@@ -612,6 +642,7 @@ fn consume_responses_sse(
             reasoning_summary,
             tool_calls,
             finish,
+            usage,
         },
         output,
     })

@@ -169,6 +169,7 @@ fn encrypted_reasoning_and_parallel_calls_replay_with_native_outputs() {
             },
         ],
         finish: FinishReason::ToolCalls,
+        usage: None,
     };
     let base_messages = vec![Message::system("system"), Message::user("make a montage")];
     provider.update_replay(&base_messages, &turn, output);
@@ -215,6 +216,7 @@ fn unrelated_request_does_not_replay_stale_output() {
             arguments: serde_json::json!({}),
         }],
         finish: FinishReason::ToolCalls,
+        usage: None,
     };
     provider.update_replay(
         &[Message::system("old"), Message::user("old prompt")],
@@ -246,6 +248,7 @@ fn consecutive_tool_rounds_preserve_every_exact_item_since_the_user() {
             arguments: serde_json::json!({}),
         }],
         finish: FinishReason::ToolCalls,
+        usage: None,
     };
     provider.update_replay(
         &messages,
@@ -279,6 +282,7 @@ fn consecutive_tool_rounds_preserve_every_exact_item_since_the_user() {
             arguments: serde_json::json!({"clip": 7}),
         }],
         finish: FinishReason::ToolCalls,
+        usage: None,
     };
     provider.update_replay(
         &messages,
@@ -339,7 +343,29 @@ fn text_and_reasoning_summary_streams_stay_separate() {
     assert_eq!(parsed.turn.reasoning_summary, "I checked the cuts.");
     assert_eq!(parsed.turn.finish, FinishReason::Stop);
     assert!(parsed.turn.tool_calls.is_empty());
+    assert!(parsed.turn.usage.is_none());
     assert_eq!(parsed.output[0]["encrypted_content"], "enc");
+}
+
+#[test]
+fn completed_event_parses_token_usage() {
+    let fixture = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n",
+        "data: {\"type\":\"response.completed\",\"response\":{",
+        "\"usage\":{\"input_tokens\":200,\"output_tokens\":12,\"input_tokens_details\":{\"cached_tokens\":50}},",
+        "\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]",
+        "}}\n",
+    );
+    let (parsed, _, _) = run(fixture);
+    assert_eq!(
+        parsed.turn.usage,
+        Some(crate::provider::TokenUsage {
+            input_tokens: 200,
+            cached_input_tokens: 50,
+            output_tokens: 12,
+            cost: None,
+        })
+    );
 }
 
 #[test]

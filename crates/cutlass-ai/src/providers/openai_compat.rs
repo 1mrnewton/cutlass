@@ -15,7 +15,7 @@ use base64::Engine as _;
 
 use crate::provider::{
     ChatProvider, ChatRequest, ChatTurn, FinishReason, ImagePart, Message, ProviderError,
-    ProviderStreamEvent, ToolCall,
+    ProviderStreamEvent, TokenUsage, ToolCall,
 };
 
 /// Optional OpenRouter-only request extras (provider pinning + app headers).
@@ -27,6 +27,9 @@ pub struct OpenAiCompatExtras {
     pub allow_fallbacks: bool,
     /// Send `HTTP-Referer` / `X-Title` attribution headers.
     pub openrouter_headers: bool,
+    /// OpenRouter usage-accounting extension (`usage.include`), which adds
+    /// `cost` to the final usage chunk. Leave false for non-OpenRouter hosts.
+    pub usage_accounting: bool,
 }
 
 pub struct OpenAiCompatProvider {
@@ -122,6 +125,7 @@ impl OpenAiCompatProvider {
         let mut body = serde_json::json!({
             "model": self.model,
             "stream": true,
+            "stream_options": { "include_usage": true },
             "messages": messages,
         });
         if !request.tools.is_empty() {
@@ -139,6 +143,9 @@ impl OpenAiCompatProvider {
                     })
                 })
                 .collect();
+        }
+        if self.extras.usage_accounting {
+            body["usage"] = serde_json::json!({ "include": true });
         }
         if let Some(order) = &self.extras.provider_order
             && !order.is_empty()
@@ -410,6 +417,7 @@ pub(crate) fn consume_sse(
     let mut text = String::new();
     let mut calls: Vec<PartialCall> = Vec::new();
     let mut finish = FinishReason::Other;
+    let mut usage: Option<TokenUsage> = None;
 
     for line in BufReader::new(reader).lines() {
         if cancel.load(Ordering::Relaxed) {
@@ -424,6 +432,10 @@ pub(crate) fn consume_sse(
         }
         let chunk: serde_json::Value = serde_json::from_str(data)
             .map_err(|e| ProviderError::Protocol(format!("bad SSE chunk: {e}: {data}")))?;
+        // Usage can arrive on a usage-only chunk or beside choices — keep last.
+        if let Some(parsed) = parse_compat_usage(&chunk["usage"]) {
+            usage = Some(parsed);
+        }
         let Some(choice) = chunk["choices"].get(0) else {
             continue; // e.g. usage-only chunks
         };
@@ -493,6 +505,21 @@ pub(crate) fn consume_sse(
         reasoning_summary: String::new(),
         tool_calls,
         finish,
+        usage,
+    })
+}
+
+fn parse_compat_usage(usage: &serde_json::Value) -> Option<TokenUsage> {
+    if !usage.is_object() {
+        return None;
+    }
+    Some(TokenUsage {
+        input_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
+        cached_input_tokens: usage["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap_or(0),
+        output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
+        cost: usage["cost"].as_f64(),
     })
 }
 
@@ -550,6 +577,27 @@ mod tests {
         assert_eq!(streamed, turn.text);
         assert_eq!(turn.finish, FinishReason::Stop);
         assert!(turn.tool_calls.is_empty());
+        assert!(turn.usage.is_none());
+    }
+
+    #[test]
+    fn usage_only_final_chunk_is_parsed() {
+        let fixture = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":8,\"prompt_tokens_details\":{\"cached_tokens\":100},\"cost\":0.0042}}\n",
+            "data: [DONE]\n",
+        );
+        let (turn, _) = run(fixture);
+        assert_eq!(
+            turn.usage,
+            Some(TokenUsage {
+                input_tokens: 120,
+                cached_input_tokens: 100,
+                output_tokens: 8,
+                cost: Some(0.0042),
+            })
+        );
     }
 
     #[test]
@@ -651,6 +699,11 @@ mod tests {
         assert_eq!(body["tools"].as_array().unwrap().len(), 51);
         assert_eq!(body["tools"][0]["function"]["name"], "add_track");
         assert!(body.get("provider").is_none());
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert!(
+            body.get("usage").is_none(),
+            "usage.include is OpenRouter-only"
+        );
     }
 
     #[test]
@@ -659,6 +712,7 @@ mod tests {
             provider_order: Some(vec!["groq".into()]),
             allow_fallbacks: false,
             openrouter_headers: true,
+            usage_accounting: true,
         };
         let provider = OpenAiCompatProvider::with_extras(
             "https://openrouter.ai/api/v1",
@@ -672,6 +726,32 @@ mod tests {
         });
         assert_eq!(body["provider"]["order"][0], "groq");
         assert_eq!(body["provider"]["allow_fallbacks"], false);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert_eq!(body["usage"]["include"], true);
+    }
+
+    #[test]
+    fn request_body_usage_accounting_only_for_openrouter_extras() {
+        let default_body = OpenAiCompatProvider::new("http://localhost:11434/v1", "qwen3", None)
+            .request_body(&ChatRequest {
+                messages: &[],
+                tools: &[],
+            });
+        assert_eq!(default_body["stream_options"]["include_usage"], true);
+        assert!(default_body.get("usage").is_none());
+
+        let openrouter_body = OpenAiCompatProvider::with_extras(
+            "https://openrouter.ai/api/v1",
+            "openai/gpt-oss-120b",
+            Some("sk-or".into()),
+            crate::providers::openrouter_compat_extras("openai/gpt-oss-120b"),
+        )
+        .request_body(&ChatRequest {
+            messages: &[],
+            tools: &[],
+        });
+        assert_eq!(openrouter_body["stream_options"]["include_usage"], true);
+        assert_eq!(openrouter_body["usage"]["include"], true);
     }
 
     #[test]

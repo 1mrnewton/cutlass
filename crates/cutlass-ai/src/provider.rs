@@ -115,6 +115,40 @@ pub enum FinishReason {
     Other,
 }
 
+/// Token usage for one completed provider turn, as reported by the API.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    /// Portion of input_tokens served from the provider's prompt cache.
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+    /// Provider-reported cost in USD (OpenRouter usage accounting), when available.
+    pub cost: Option<f64>,
+}
+
+impl TokenUsage {
+    /// Saturating sum of token counts. Costs treat a missing side as 0, but
+    /// stay `None` when both sides are `None`.
+    pub fn add(&mut self, other: &TokenUsage) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.cached_input_tokens = self
+            .cached_input_tokens
+            .saturating_add(other.cached_input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cost = match (self.cost, other.cost) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+        };
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens == 0
+            && self.cached_input_tokens == 0
+            && self.output_tokens == 0
+            && self.cost.is_none()
+    }
+}
+
 /// One completed model turn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatTurn {
@@ -124,6 +158,16 @@ pub struct ChatTurn {
     pub reasoning_summary: String,
     pub tool_calls: Vec<ToolCall>,
     pub finish: FinishReason,
+    /// Token usage for this turn, when the provider reported it.
+    pub usage: Option<TokenUsage>,
+}
+
+impl ChatTurn {
+    /// Attach provider-reported usage (for scripted tests and fixtures).
+    pub fn with_usage(mut self, usage: TokenUsage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
 }
 
 /// Everything a provider needs for one completion.
@@ -183,4 +227,46 @@ pub trait ChatProvider {
         cancel: &AtomicBool,
         on_event: &mut dyn FnMut(ProviderStreamEvent<'_>),
     ) -> Result<ChatTurn, ProviderError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_usage_add_and_is_empty() {
+        let mut total = TokenUsage::default();
+        assert!(total.is_empty());
+
+        total.add(&TokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 4,
+            output_tokens: 2,
+            cost: None,
+        });
+        assert!(!total.is_empty());
+        assert_eq!(total.input_tokens, 10);
+        assert_eq!(total.cached_input_tokens, 4);
+        assert_eq!(total.output_tokens, 2);
+        assert_eq!(total.cost, None);
+
+        total.add(&TokenUsage {
+            input_tokens: 5,
+            cached_input_tokens: 1,
+            output_tokens: 3,
+            cost: Some(0.01),
+        });
+        assert_eq!(total.input_tokens, 15);
+        assert_eq!(total.cached_input_tokens, 5);
+        assert_eq!(total.output_tokens, 5);
+        assert_eq!(total.cost, Some(0.01));
+
+        total.add(&TokenUsage {
+            input_tokens: 1,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            cost: Some(0.02),
+        });
+        assert_eq!(total.cost, Some(0.03));
+    }
 }

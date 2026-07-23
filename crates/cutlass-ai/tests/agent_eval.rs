@@ -166,6 +166,7 @@ fn tool_turn(calls: Vec<(&str, &str, serde_json::Value)>) -> ChatTurn {
             })
             .collect(),
         finish: FinishReason::ToolCalls,
+        usage: None,
     }
 }
 
@@ -175,6 +176,7 @@ fn text_turn(text: &str) -> ChatTurn {
         reasoning_summary: String::new(),
         tool_calls: Vec::new(),
         finish: FinishReason::Stop,
+        usage: None,
     }
 }
 
@@ -750,6 +752,7 @@ fn reasoning_summaries_stream_across_tool_rounds_without_entering_history() {
                 arguments: serde_json::json!({}),
             }],
             finish: FinishReason::ToolCalls,
+            usage: None,
         },
         ChatTurn {
             text: String::new(),
@@ -760,12 +763,14 @@ fn reasoning_summaries_stream_across_tool_rounds_without_entering_history() {
                 arguments: serde_json::json!({"clip": clip, "at": 5.0}),
             }],
             finish: FinishReason::ToolCalls,
+            usage: None,
         },
         ChatTurn {
             text: "Split the clip at 5 seconds.".into(),
             reasoning_summary: final_summary.into(),
             tool_calls: Vec::new(),
             finish: FinishReason::Stop,
+            usage: None,
         },
     ]);
 

@@ -197,9 +197,12 @@ impl ChatProvider for OpenAiCompatProvider {
             if cancel.load(Ordering::Relaxed) {
                 return Err(ProviderError::Cancelled);
             }
-            let body = self
-                .request_body_with_stream_options(request, include_stream_options)
-                .to_string();
+            let body = if include_stream_options {
+                self.request_body(request)
+            } else {
+                self.request_body_with_stream_options(request, false)
+            }
+            .to_string();
             let http = self.apply_auth_headers(
                 self.agent
                     .post(&url)

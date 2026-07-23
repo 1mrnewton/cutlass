@@ -158,6 +158,9 @@ pub(super) fn set_mask_and_publish(
         error!(clip, "set-mask ignored: unparsable clip id");
         return;
     };
+    // Structural mask edits (kind / invert / clear) must drop live look_mask_*
+    // overrides — same order as SetClipAudio / SetClipLut commits.
+    clear_mask_param_overrides(engine, clip, Some(&ui.audio));
     let kind = mask.as_ref().map(|m| m.kind.id());
     if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipMask {
         clip: clip_id,

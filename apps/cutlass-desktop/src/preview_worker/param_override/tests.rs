@@ -445,6 +445,64 @@ fn mask_feather_preview_then_commit_clears_override() {
 }
 
 #[test]
+fn mask_feather_preview_then_kind_switch_clears_override() {
+    use cutlass_commands::{Command, EditCommand};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("mask-kind-clear", r);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/mask-kind-clear.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_clip_mask(clip, Some(Mask::new(MaskKind::Circle)))
+        .expect("mask");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let param = ClipParam::Look {
+        param: LookParam::MaskFeather,
+    };
+
+    apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.7), None);
+    assert!(engine.has_live_overrides());
+    assert_eq!(
+        engine.param_overrides().get(clip, param),
+        Some(&ParamValue::Scalar(0.7))
+    );
+
+    // Structural SetClipMask (kind switch) clears all look_mask_* overrides —
+    // mirrors set_mask_and_publish / set_mask_kind_and_publish.
+    clear_mask_param_overrides(&mut engine, &clip_s, None);
+    engine
+        .apply(Command::Edit(EditCommand::SetClipMask {
+            clip,
+            mask: Some(Mask::new(MaskKind::Rectangle)),
+        }))
+        .expect("kind switch");
+    assert!(
+        !engine.has_live_overrides(),
+        "mask kind switch must not leave a feather preview override alive"
+    );
+    assert_eq!(
+        engine.project().clip(clip).unwrap().mask.as_ref().unwrap().kind,
+        MaskKind::Rectangle
+    );
+}
+
+#[test]
 fn crop_preview_then_commit_clears_override() {
     use cutlass_commands::{Command, EditCommand};
 

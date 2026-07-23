@@ -64,6 +64,25 @@ pub(super) fn clear_param_override(
     }
 }
 
+/// Drop every live `look_mask_*` override before a structural mask commit
+/// (kind switch, invert, clear) so gizmo/inspector drags cannot stick.
+pub(super) fn clear_mask_param_overrides(
+    engine: &mut Engine,
+    clip: &str,
+    audio: Option<&crate::audio::AudioHandle>,
+) {
+    use cutlass_models::LookParam;
+    for param in [
+        LookParam::MaskFeather,
+        LookParam::MaskCenter,
+        LookParam::MaskSize,
+        LookParam::MaskRotation,
+        LookParam::MaskRoundness,
+    ] {
+        clear_param_override(engine, clip, ClipParam::Look { param }, audio);
+    }
+}
+
 /// Pending `(clip, param) → value` accumulator for a coalesce burst.
 type PendingParamOverrides = HashMap<(String, ClipParam), ParamValue>;
 

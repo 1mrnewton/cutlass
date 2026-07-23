@@ -7,6 +7,9 @@ use cutlass_text::{
 };
 
 use super::REFERENCE_HEIGHT;
+use super::raster_supersample::{
+    apply_text_supersample, bitmap_supersample, estimate_text_ref_long_edge,
+};
 use super::shape::resolve_shape;
 use crate::scene::{LayerSource, ResolvedPass, SceneLayer, SceneLut, SizeSpec};
 
@@ -35,17 +38,23 @@ pub(crate) fn resolve_generator(
             if text.trim().is_empty() {
                 return None;
             }
+            // Reference-resolution style, then fold quantized supersample `S`
+            // into raster-px metrics so scale > 1 stays sharp. Residual
+            // `scale / S` rides the quad (memo-warm between quarter steps).
+            let style_ref = map_text_style(style, cw, ch, tick);
+            let est = estimate_text_ref_long_edge(&style_ref, &text);
+            let (s, size) = bitmap_supersample(scale, est, cw.max(ch));
+            let style = apply_text_supersample(style_ref, s);
             Some(SceneLayer {
                 clip: None,
                 source: LayerSource::Text {
                     content: text,
-                    style: map_text_style(style, cw, ch, tick),
+                    style,
                     animation: None,
                 },
                 center,
                 anchor_point,
-                // Per-axis placement of the text bitmap quad.
-                size: SizeSpec::BitmapScaled([scale.x, scale.y]),
+                size,
                 rotation,
                 opacity,
                 uv,
@@ -95,6 +104,7 @@ pub(crate) fn resolve_generator(
             tick,
             ref_scale,
             scale,
+            cw.max(ch),
             center,
             anchor_point,
             rotation,

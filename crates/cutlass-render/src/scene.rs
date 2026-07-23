@@ -93,8 +93,10 @@ impl Scene {
             layer.center = [layer.center[0] * factor, layer.center[1] * factor];
             layer.size = match layer.size {
                 SizeSpec::Fixed([w, h]) => SizeSpec::Fixed([w * factor, h * factor]),
-                // Text / path bitmaps rasterize at their reference resolution
-                // and ride the quad; scaling the multiplier scales the quad.
+                // Text / path bitmaps: resolve already folds transform-scale
+                // supersample `S` into the raster (style / `raster_scale`) and
+                // leaves residual `scale/S` here. Scene fit only multiplies
+                // that residual (and path `raster_scale` below) — no second `S`.
                 SizeSpec::BitmapScaled([sx, sy]) => {
                     SizeSpec::BitmapScaled([sx * factor, sy * factor])
                 }

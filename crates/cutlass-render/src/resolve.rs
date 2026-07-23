@@ -36,6 +36,7 @@ use crate::scene::{
 
 mod generator;
 mod param_override;
+mod raster_supersample;
 mod shape;
 
 #[cfg(test)]

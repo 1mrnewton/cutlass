@@ -10,6 +10,8 @@
 //! Live ParamOverride values are passed in explicitly (projection does not
 //! republish during an override) so the gizmo tracks slider/gizmo drags.
 
+use std::cell::RefCell;
+
 use cutlass_compositor::LayerPlacement;
 use cutlass_models::MaskKind;
 use slint::SharedString;
@@ -20,6 +22,23 @@ use crate::preview_select::{
     canvas_config, clip_placement, covers_tick, is_composited, viewport_mapping,
 };
 use crate::{Clip, MaskGizmo, MaskGizmoDragResolution, Sequence};
+
+/// Memo key for [`mask_gizmo_in_viewport`]: when playhead ticks but sampled
+/// mask params + placement + viewport are unchanged, skip outline rebuild.
+#[derive(Clone, PartialEq)]
+struct MaskGizmoMemoKey {
+    clip_id: String,
+    params: MaskGizmoParams,
+    placement: LayerPlacement,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+}
+
+thread_local! {
+    static MASK_GIZMO_MEMO: RefCell<Option<(MaskGizmoMemoKey, MaskGizmo)>> =
+        const { RefCell::new(None) };
+}
 
 /// Hit-test / drag handle ids published to Slint (`0` = none).
 pub const HANDLE_NONE: i32 = 0;
@@ -528,17 +547,21 @@ pub fn mask_gizmo_in_viewport(
     live_roundness: f32,
 ) -> MaskGizmo {
     if clip_id.is_empty() {
+        MASK_GIZMO_MEMO.with(|m| *m.borrow_mut() = None);
         return MaskGizmo::default();
     }
     let Some(mut clip) = find_projected_clip(sequence, clip_id) else {
+        MASK_GIZMO_MEMO.with(|m| *m.borrow_mut() = None);
         return MaskGizmo::default();
     };
     if !covers_tick(&clip, playhead) || !is_composited(&clip) {
+        MASK_GIZMO_MEMO.with(|m| *m.borrow_mut() = None);
         return MaskGizmo::default();
     }
     // Placement follows the rendered transform at the playhead.
     crate::params::apply_sampled_transform(&mut clip, playhead);
     let Some(base) = sample_mask_params(&clip, playhead) else {
+        MASK_GIZMO_MEMO.with(|m| *m.borrow_mut() = None);
         return MaskGizmo::default();
     };
     let params = apply_live(
@@ -555,14 +578,34 @@ pub fn mask_gizmo_in_viewport(
     let (cw, ch) = (canvas.width as f32, canvas.height as f32);
     let (scale, ox, oy) = viewport_mapping(cw, ch, view_w, view_h, zoom, pan_x, pan_y);
     if scale <= 0.0 {
+        MASK_GIZMO_MEMO.with(|m| *m.borrow_mut() = None);
         return MaskGizmo::default();
     }
     let placement = clip_placement(&clip, &canvas);
     if placement.size[0] <= 0.0 || placement.size[1] <= 0.0 {
+        MASK_GIZMO_MEMO.with(|m| *m.borrow_mut() = None);
         return MaskGizmo::default();
     }
+    let key = MaskGizmoMemoKey {
+        clip_id: clip_id.to_string(),
+        params,
+        placement,
+        scale,
+        ox,
+        oy,
+    };
+    if let Some(cached) = MASK_GIZMO_MEMO.with(|m| {
+        m.borrow()
+            .as_ref()
+            .filter(|(k, _)| k == &key)
+            .map(|(_, g)| g.clone())
+    }) {
+        return cached;
+    }
     let layout = build_layout(params, placement, scale, ox, oy);
-    layout_to_gizmo(&layout)
+    let gizmo = layout_to_gizmo(&layout);
+    MASK_GIZMO_MEMO.with(|m| *m.borrow_mut() = Some((key, gizmo.clone())));
+    gizmo
 }
 
 /// Convenience hit-test that rebuilds layout from sequence + live params.

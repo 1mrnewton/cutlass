@@ -230,7 +230,7 @@ export component MaskInspector inherits VerticalLayout {
         } else {
             InspectorBackend.set-param-constant(model.id, param, value, 0);
         }
-        root.clear-live();
+        root.finish-commit();
     }
 
     function seed-live() {
@@ -248,6 +248,14 @@ export component MaskInspector inherits VerticalLayout {
 
     function clear-live() {
         PreviewStore.mask-live-active = false;
+        PreviewStore.mask-commit-pending = false;
+        PreviewStore.mask-drag-handle = 0;
+    }
+
+    // After a commit: keep live values until the projection republishes.
+    function finish-commit() {
+        PreviewStore.mask-commit-pending = true;
+        PreviewStore.mask-live-active = true;
         PreviewStore.mask-drag-handle = 0;
     }
 
@@ -295,7 +303,7 @@ export component MaskInspector inherits VerticalLayout {
         } else {
             InspectorBackend.set-param-constant(model.id, "look_mask_center", x, y);
         }
-        root.clear-live();
+        root.finish-commit();
     }
 
     function commit-size(w: float, h: float) {
@@ -308,7 +316,7 @@ export component MaskInspector inherits VerticalLayout {
         } else {
             InspectorBackend.set-param-constant(model.id, "look_mask_size", w, h);
         }
-        root.clear-live();
+        root.finish-commit();
     }
 
     SectionHeader {

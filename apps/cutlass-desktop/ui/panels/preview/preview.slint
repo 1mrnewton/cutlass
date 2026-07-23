@@ -241,6 +241,7 @@ export component PreviewPanel inherits PanelBase {
                         // gizmo drag against its press-time clip before these
                         // flags clear. Inspector slider live state just drops.
                         PreviewStore.mask-live-active = false;
+                        PreviewStore.mask-commit-pending = false;
                         PreviewStore.mask-drag-handle = 0;
                     }
 

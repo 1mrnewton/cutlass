@@ -37,6 +37,11 @@ export global PreviewStore {
     // mask-gizmo callback uses these instead of playhead samples so handles
     // track mid-drag (projection stays frozen until commit).
     in-out property <bool> mask-live-active: false;
+    // A mask commit was sent while the projection still contains the
+    // press-time values. Keep live mask geometry visible until the next
+    // projection publish swaps in the committed params (mirrors
+    // gesture-commit-pending for transforms).
+    in-out property <bool> mask-commit-pending: false;
     in-out property <float> mask-live-center-x: 0;
     in-out property <float> mask-live-center-y: 0;
     in-out property <float> mask-live-size-w: 1;

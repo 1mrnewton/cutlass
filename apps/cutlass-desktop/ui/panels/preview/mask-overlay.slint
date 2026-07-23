@@ -261,8 +261,11 @@ export component MaskOverlay inherits Rectangle {
         }
     }
 
-    function clear-drag-ui() {
-        PreviewStore.mask-live-active = false;
+    function clear-drag-ui(keep-live: bool) {
+        if (!keep-live) {
+            PreviewStore.mask-live-active = false;
+            PreviewStore.mask-commit-pending = false;
+        }
         PreviewStore.mask-drag-handle = 0;
         root.handle = 0;
         root.dragging = false;
@@ -306,10 +309,17 @@ export component MaskOverlay inherits Rectangle {
                     0,
                     root.drag-roundness-animated);
             }
+            // Keep live geometry until the worker publishes the commit —
+            // otherwise the gizmo snaps back for one frame.
+            PreviewStore.mask-commit-pending = true;
+            PreviewStore.mask-live-active = true;
+            root.clear-drag-ui(true);
         } else if (root.dragging) {
             InspectorBackend.clear-param-override(root.drag-clip, root.drag-tick);
+            root.clear-drag-ui(false);
+        } else {
+            root.clear-drag-ui(false);
         }
-        root.clear-drag-ui();
     }
 
     // Double-click a handle → Mask::new defaults for that param (one commit).
@@ -367,7 +377,9 @@ export component MaskOverlay inherits Rectangle {
             PreviewStore.mask-live-roundness = 0;
             root.commit-param("look_mask_roundness", 0, 0, root.drag-roundness-animated);
         }
-        root.clear-drag-ui();
+        PreviewStore.mask-commit-pending = true;
+        PreviewStore.mask-live-active = true;
+        root.clear-drag-ui(true);
     }
 
     // Body grab (moves center): large soft hit around the mask center.

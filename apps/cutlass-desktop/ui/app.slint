@@ -426,6 +426,10 @@ export component AppWindow inherits Window {
             PreviewStore.gesture-active = false;
             PreviewStore.gesture-commit-pending = false;
         }
+        if (PreviewStore.mask-commit-pending) {
+            PreviewStore.mask-live-active = false;
+            PreviewStore.mask-commit-pending = false;
+        }
     }
 
     // Arrow keys nudge the selected visual clip by whole canvas pixels

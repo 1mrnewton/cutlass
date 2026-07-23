@@ -383,20 +383,20 @@
       }
     },
     {
-      "description": "Set canvas placement: position (canvas fractions from center), scale (number or [x,y]; 1.0=fit), rotation (deg CW), opacity. Omitted fields keep. Not for audio.",
+      "description": "Set canvas placement: position = anchor offset from canvas center (canvas fractions; [0,0]=centered), scale (number or [x,y]; 1.0=fit), rotation (deg CW about anchor), opacity. Omitted fields keep. Not for audio.",
       "name": "set_clip_transform",
       "parameters": {
         "description": "Change a clip's canvas placement. Omitted fields keep their value.",
         "properties": {
           "anchor_x": {
-            "description": "Anchor within content bounds (0 = left, 0.5 = center).",
+            "description": "Pivot in content bounds (0 = left, 0.5 = content center).",
             "type": [
               "number",
               "null"
             ]
           },
           "anchor_y": {
-            "description": "Anchor within content bounds (0 = top, 0.5 = center).",
+            "description": "Pivot in content bounds (0 = top, 0.5 = content center).",
             "type": [
               "number",
               "null"
@@ -414,21 +414,21 @@
             ]
           },
           "position_x": {
-            "description": "Content-center X from canvas center, as a fraction of canvas width\n(+ right; 0.5 = right edge).",
+            "description": "Anchor offset from canvas center, canvas-width fraction (+x right);\n0 = centered, 0.5 = right edge.",
             "type": [
               "number",
               "null"
             ]
           },
           "position_y": {
-            "description": "Content-center Y from canvas center, as a fraction of canvas height\n(+ down).",
+            "description": "Anchor offset from canvas center, canvas-height fraction (+y down);\n0 = centered.",
             "type": [
               "number",
               "null"
             ]
           },
           "rotation": {
-            "description": "Clockwise degrees about the content center.",
+            "description": "Clockwise degrees about the anchor.",
             "type": [
               "number",
               "null"
@@ -728,7 +728,7 @@
       "parameters": {
         "properties": {
           "at": {
-            "description": "Timeline seconds in clip.",
+            "description": "Absolute timeline seconds (must lie inside the clip).",
             "type": "number"
           },
           "clip": {
@@ -787,7 +787,7 @@
             ]
           },
           "param": {
-            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
+            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] = anchor offset from canvas center in canvas fractions (vec2 also: anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW about anchor, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). speed is not keyframable here — use set_clip_speed / set_speed_curve. volume/pan=media; crop=visual. Keyframe `at` = absolute timeline seconds inside the clip.",
             "oneOf": [
               {
                 "enum": [
@@ -973,7 +973,7 @@
             ]
           },
           "position": {
-            "description": "Vec2 `[x,y]` canvas fractions from center.",
+            "description": "Vec2 `[x,y]`. For position: anchor offset from canvas center\n(canvas fractions; [0,0]=centered). Also per-axis scale / other vec2s.",
             "items": {
               "type": "number"
             },
@@ -1011,7 +1011,7 @@
             ]
           },
           "tangent_in": {
-            "description": "Position in-handle (canvas-fraction offset).",
+            "description": "Position motion-path in-handle (canvas-fraction offset from value).",
             "items": {
               "type": "number"
             },
@@ -1023,7 +1023,7 @@
             ]
           },
           "tangent_out": {
-            "description": "Position out-handle (canvas-fraction offset).",
+            "description": "Position motion-path out-handle (canvas-fraction offset from value).",
             "items": {
               "type": "number"
             },
@@ -1063,7 +1063,7 @@
             "type": "integer"
           },
           "param": {
-            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
+            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] = anchor offset from canvas center in canvas fractions (vec2 also: anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW about anchor, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). speed is not keyframable here — use set_clip_speed / set_speed_curve. volume/pan=media; crop=visual. Keyframe `at` = absolute timeline seconds inside the clip.",
             "oneOf": [
               {
                 "enum": [
@@ -1267,7 +1267,7 @@
             "type": "integer"
           },
           "param": {
-            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
+            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] = anchor offset from canvas center in canvas fractions (vec2 also: anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW about anchor, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). speed is not keyframable here — use set_clip_speed / set_speed_curve. volume/pan=media; crop=visual. Keyframe `at` = absolute timeline seconds inside the clip.",
             "oneOf": [
               {
                 "enum": [
@@ -1453,7 +1453,7 @@
             ]
           },
           "position": {
-            "description": "Vec2 `[x,y]` canvas fractions from center.",
+            "description": "Vec2 `[x,y]`. For position: anchor offset from canvas center\n(canvas fractions; [0,0]=centered).",
             "items": {
               "type": "number"
             },
@@ -1518,7 +1518,7 @@
             "type": "number"
           },
           "param": {
-            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
+            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] = anchor offset from canvas center in canvas fractions (vec2 also: anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW about anchor, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). speed is not keyframable here — use set_clip_speed / set_speed_curve. volume/pan=media; crop=visual. Keyframe `at` = absolute timeline seconds inside the clip.",
             "oneOf": [
               {
                 "enum": [
@@ -2974,5 +2974,5 @@
       }
     }
   ],
-  "version": 41
+  "version": 42
 }

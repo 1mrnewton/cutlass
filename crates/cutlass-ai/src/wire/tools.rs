@@ -159,7 +159,7 @@ tools! {
     "set_generator" => SetGenerator(SetGenerator),
         "Replace generated clip content (text keeps styling). Not valid for media clips.";
     "set_clip_transform" => SetClipTransform(SetClipTransform),
-        "Set canvas placement: position (canvas fractions from center), scale (number or [x,y]; 1.0=fit), rotation (deg CW), opacity. Omitted fields keep. Not for audio.";
+        "Set canvas placement: position = anchor offset from canvas center (canvas fractions; [0,0]=centered), scale (number or [x,y]; 1.0=fit), rotation (deg CW about anchor), opacity. Omitted fields keep. Not for audio.";
     "set_clip_crop" => SetClipCrop(SetClipCrop),
         "Crop by edge-trim fractions (0 restores) and/or flip_h/flip_v. Kept region still aspect-fits (crop does not move the layer). Not for audio.";
     "add_effect" => AddEffect(AddEffect),

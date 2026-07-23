@@ -30,24 +30,24 @@ impl WireScale {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetClipTransform {
     pub clip: u64,
-    /// Content-center X from canvas center, as a fraction of canvas width
-    /// (+ right; 0.5 = right edge).
+    /// Anchor offset from canvas center, canvas-width fraction (+x right);
+    /// 0 = centered, 0.5 = right edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_x: Option<f64>,
-    /// Content-center Y from canvas center, as a fraction of canvas height
-    /// (+ down).
+    /// Anchor offset from canvas center, canvas-height fraction (+y down);
+    /// 0 = centered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_y: Option<f64>,
-    /// Anchor within content bounds (0 = left, 0.5 = center).
+    /// Pivot in content bounds (0 = left, 0.5 = content center).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_x: Option<f64>,
-    /// Anchor within content bounds (0 = top, 0.5 = center).
+    /// Pivot in content bounds (0 = top, 0.5 = content center).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_y: Option<f64>,
     /// Uniform number (1.0 = fit) or `[x, y]` per-axis.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<WireScale>,
-    /// Clockwise degrees about the content center.
+    /// Clockwise degrees about the anchor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation: Option<f64>,
     /// Layer opacity 0.0–1.0.
@@ -288,7 +288,7 @@ impl JsonSchema for WireClipParam {
         // Compact shared description; nested param names are exact enums in
         // each tagged branch (same tokens serde accepts).
         let schema = serde_json::json!({
-            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
+            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] = anchor offset from canvas center in canvas fractions (vec2 also: anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW about anchor, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). speed is not keyframable here — use set_clip_speed / set_speed_curve. volume/pan=media; crop=visual. Keyframe `at` = absolute timeline seconds inside the clip.",
             "oneOf": [
                 schema_string_enum(WIRE_CLIP_PARAM_UNIT_TOKENS),
                 {
@@ -468,11 +468,12 @@ impl JsonSchema for WireEasing {
 pub struct SetParamKeyframe {
     pub clip: u64,
     pub param: WireClipParam,
-    /// Timeline seconds in clip.
+    /// Absolute timeline seconds (must lie inside the clip).
     pub at: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// Vec2 `[x,y]` canvas fractions from center.
+    /// Vec2 `[x,y]`. For position: anchor offset from canvas center
+    /// (canvas fractions; [0,0]=centered). Also per-axis scale / other vec2s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f64; 2]>,
     /// `[r,g,b,a]` 0–255.
@@ -483,10 +484,10 @@ pub struct SetParamKeyframe {
     pub rect: Option<[f64; 4]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub easing: Option<WireEasing>,
-    /// Position out-handle (canvas-fraction offset).
+    /// Position motion-path out-handle (canvas-fraction offset from value).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tangent_out: Option<[f64; 2]>,
-    /// Position in-handle (canvas-fraction offset).
+    /// Position motion-path in-handle (canvas-fraction offset from value).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tangent_in: Option<[f64; 2]>,
 }
@@ -529,7 +530,8 @@ pub struct SetParamConstant {
     pub param: WireClipParam,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// Vec2 `[x,y]` canvas fractions from center.
+    /// Vec2 `[x,y]`. For position: anchor offset from canvas center
+    /// (canvas fractions; [0,0]=centered).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f64; 2]>,
     /// `[r,g,b,a]` 0–255.

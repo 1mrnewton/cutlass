@@ -72,7 +72,10 @@ use serde::{Deserialize, Serialize};
 ///     (tool payload shrink; wire serde unchanged).
 /// 41: exact nested param enums on `WireClipParam` tagged branches +
 ///     `additionalProperties: false`; schema cleaner keeps numeric bounds.
-pub const TOOL_SCHEMA_VERSION: u32 = 41;
+/// 42: motion convention docs — position = anchor offset from canvas center;
+///     speed not keyframable via set_param_keyframe (use set_speed_curve /
+///     set_clip_speed); rotation about anchor; keyframe `at` = timeline secs.
+pub const TOOL_SCHEMA_VERSION: u32 = 42;
 
 mod dtos;
 mod tools;

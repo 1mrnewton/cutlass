@@ -620,13 +620,19 @@ fn marker_color_rgba_serde_keeps_named_presets_and_round_trips() {
     );
     let custom = MarkerColor::custom(0x12, 0x34, 0x56);
     let json = serde_json::to_value(custom).unwrap();
-    assert_eq!(json, serde_json::json!({ "rgba": [0x12, 0x34, 0x56, 0xFF] }));
+    assert_eq!(
+        json,
+        serde_json::json!({ "rgba": [0x12, 0x34, 0x56, 0xFF] })
+    );
     let back: MarkerColor = serde_json::from_value(json).unwrap();
     assert_eq!(back, custom);
     // Old project files with named colors still load.
     let legacy: MarkerColor = serde_json::from_value(serde_json::json!("teal")).unwrap();
     assert_eq!(legacy, MarkerColor::Teal);
-    assert_eq!(MarkerColor::parse_token("#abc"), Some(MarkerColor::custom(0xAA, 0xBB, 0xCC)));
+    assert_eq!(
+        MarkerColor::parse_token("#abc"),
+        Some(MarkerColor::custom(0xAA, 0xBB, 0xCC))
+    );
     assert_eq!(custom.token(), "#123456");
 }
 

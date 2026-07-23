@@ -521,17 +521,36 @@ pub(crate) fn wire_engine(
         }
     });
 
-    // Preview axis: hover-scrub frames without moving the playhead (no audio).
+    // Preview axis / scrub-style drag previews (speed-ramp handle, transition
+    // pill, timeline hover): request frames without moving the playhead (no
+    // audio). Pause transport for the gesture so playback Frame msgs can't
+    // race the scrub request in the worker queue (timeline hover already
+    // gates on `!playing` in Slint; inspector/pill paths call this while
+    // playing).
     let hover_frame_handle = preview_worker.handle();
-    let hover_playhead_weak = app.as_weak();
+    let hover_begin_weak = app.as_weak();
+    let hover_paused = Rc::new(Cell::new(false));
+    let hover_paused_begin = hover_paused.clone();
     editor.on_on_hover_preview(move |tick| {
+        if let Some(app) = hover_begin_weak.upgrade() {
+            let timeline = app.global::<TimelineStore>();
+            if timeline.get_playing() && !hover_paused_begin.get() {
+                app.global::<TimelineActions>().invoke_pause();
+                hover_paused_begin.set(true);
+            }
+        }
         hover_frame_handle.request_frame(i64::from(tick));
     });
     let hover_restore_handle = preview_worker.handle();
+    let hover_end_weak = app.as_weak();
     editor.on_on_hover_preview_ended(move || {
-        if let Some(app) = hover_playhead_weak.upgrade() {
+        if let Some(app) = hover_end_weak.upgrade() {
             let tick = app.global::<TimelineStore>().get_playhead_tick();
             hover_restore_handle.request_frame(i64::from(tick));
+            if hover_paused.get() {
+                hover_paused.set(false);
+                app.global::<TimelineActions>().invoke_play();
+            }
         }
     });
 

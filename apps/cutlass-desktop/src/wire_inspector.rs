@@ -232,10 +232,8 @@ pub(crate) fn wire_inspector(
     );
 
     let clear_param_handle = preview_worker.handle();
-    let clear_mask_session = mask_session;
     app.global::<InspectorBackend>()
         .on_clear_param_override(move |clip_id, tick| {
-            clear_mask_session.borrow_mut().end();
             clear_param_handle.clear_param_override(clip_id.to_string(), i64::from(tick));
         });
 

@@ -418,6 +418,12 @@ export component TextInspector inherits VerticalLayout {
                 PreviewStore.gesture-commit-pending = true;
             }
         } else {
+            // Same begin-then-override pairing as the canvas / transform
+            // inspector — without it every slider tick pays a full re-render.
+            if (!PreviewStore.gesture-active || PreviewStore.gesture-commit-pending
+                || PreviewStore.gesture-clip != model.id) {
+                EditorStore.on-preview-gesture-started(model.id, TimelineStore.playhead-tick);
+            }
             PreviewStore.gesture-clip = model.id;
             PreviewStore.gesture = {
                 valid: true,

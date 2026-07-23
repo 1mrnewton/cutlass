@@ -29,6 +29,7 @@ mod preview_motion_path;
 mod preview_select;
 mod preview_view;
 mod preview_worker;
+mod transform_gesture_session;
 mod projection;
 mod proxy;
 mod ruler;

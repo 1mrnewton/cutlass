@@ -2924,3 +2924,128 @@ fn motion_path_selection_does_not_touch_the_model() {
         &engine.project().clip(clip).unwrap().transform.position
     );
 }
+
+fn transform_msg_tag(msg: &WorkerMsg) -> &'static str {
+    match msg {
+        WorkerMsg::BeginTransformGesture { .. } => "begin",
+        WorkerMsg::TransformOverride { .. } => "override",
+        WorkerMsg::SetTransform { .. } => "commit",
+        WorkerMsg::ClearTransformOverride { .. } => "clear",
+        WorkerMsg::EndTransformGesture => "abandon",
+        _ => "other",
+    }
+}
+
+fn drain_transform_tags(rx: &Receiver<WorkerMsg>) -> Vec<&'static str> {
+    let mut tags = Vec::new();
+    while let Ok(msg) = rx.try_recv() {
+        tags.push(transform_msg_tag(&msg));
+    }
+    tags
+}
+
+fn sample_override_transform() -> ClipTransform {
+    ClipTransform {
+        position: [0.1, -0.2],
+        anchor_point: [0.5, 0.5],
+        scale: cutlass_models::Scale2 { x: 1.0, y: 1.0 },
+        rotation: 15.0,
+        opacity: 0.8,
+    }
+}
+
+/// Inspector sliders call override-first; the session must emit begin before
+/// the first override, then exactly one SetTransform on commit.
+#[test]
+fn inspector_transform_preview_commit_emits_begin_overrides_and_one_commit() {
+    use crate::transform_gesture_session::{
+        TransformGestureSession, commit_transform, preview_transform,
+    };
+
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let mut session = TransformGestureSession::new();
+    let t = sample_override_transform();
+
+    preview_transform(&mut session, &handle, "7".into(), t, 12);
+    preview_transform(&mut session, &handle, "7".into(), t, 12);
+    commit_transform(&mut session, &handle, "7".into(), t, 12);
+
+    assert_eq!(
+        drain_transform_tags(&rx),
+        vec!["begin", "override", "override", "commit"]
+    );
+    assert!(!session.is_active());
+}
+
+/// No-op release (slider released on the playhead sample) must clear the
+/// override without enqueueing a SetTransform / undoable edit.
+#[test]
+fn inspector_transform_preview_unchanged_commit_clears_without_commit() {
+    use crate::transform_gesture_session::{
+        TransformGestureSession, clear_transform_override, preview_transform,
+    };
+
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let mut session = TransformGestureSession::new();
+
+    preview_transform(
+        &mut session,
+        &handle,
+        "7".into(),
+        sample_override_transform(),
+        3,
+    );
+    clear_transform_override(&mut session, &handle, 3);
+
+    assert_eq!(
+        drain_transform_tags(&rx),
+        vec!["begin", "override", "clear"]
+    );
+    assert!(!session.is_active());
+}
+
+#[test]
+fn canvas_begin_then_override_does_not_double_begin() {
+    use crate::transform_gesture_session::{
+        TransformGestureSession, begin_transform_gesture, preview_transform,
+    };
+
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let mut session = TransformGestureSession::new();
+
+    begin_transform_gesture(&mut session, &handle, "7".into(), 1);
+    preview_transform(
+        &mut session,
+        &handle,
+        "7".into(),
+        sample_override_transform(),
+        1,
+    );
+
+    assert_eq!(drain_transform_tags(&rx), vec!["begin", "override"]);
+}
+
+#[test]
+fn sequential_inspector_drags_each_begin_again() {
+    use crate::transform_gesture_session::{
+        TransformGestureSession, clear_transform_override, commit_transform, preview_transform,
+    };
+
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let mut session = TransformGestureSession::new();
+    let t = sample_override_transform();
+
+    preview_transform(&mut session, &handle, "7".into(), t, 1);
+    commit_transform(&mut session, &handle, "7".into(), t, 1);
+    preview_transform(&mut session, &handle, "7".into(), t, 1);
+    clear_transform_override(&mut session, &handle, 1);
+
+    assert_eq!(
+        drain_transform_tags(&rx),
+        vec!["begin", "override", "commit", "begin", "override", "clear"]
+    );
+}

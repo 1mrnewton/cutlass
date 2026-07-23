@@ -369,7 +369,15 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
         },
     );
 
+    // Shared across begin / override / commit / clear / abandon so
+    // override-first callers (inspector sliders) still get a paired
+    // BeginTransformGesture, and sequential drags re-begin after end.
+    let gesture_session = Rc::new(RefCell::new(
+        crate::transform_gesture_session::TransformGestureSession::new(),
+    ));
+
     let override_handle = preview_worker.handle();
+    let override_session = gesture_session.clone();
     editor.on_on_preview_transform_overridden(
         move |clip_id,
               pos_x,
@@ -381,7 +389,9 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
               rotation,
               opacity,
               tick| {
-            override_handle.transform_override(
+            crate::transform_gesture_session::preview_transform(
+                &mut override_session.borrow_mut(),
+                &override_handle,
                 clip_id.to_string(),
                 cutlass_models::ClipTransform {
                     position: [pos_x, pos_y],
@@ -399,21 +409,37 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
     );
 
     let gesture_start_handle = preview_worker.handle();
+    let begin_session = gesture_session.clone();
     editor.on_on_preview_gesture_started(move |clip_id, tick| {
-        gesture_start_handle.begin_transform_gesture(clip_id.to_string(), i64::from(tick));
+        crate::transform_gesture_session::begin_transform_gesture(
+            &mut begin_session.borrow_mut(),
+            &gesture_start_handle,
+            clip_id.to_string(),
+            i64::from(tick),
+        );
     });
 
     let gesture_abandon_handle = preview_worker.handle();
+    let abandon_session = gesture_session.clone();
     editor.on_on_preview_gesture_abandoned(move || {
-        gesture_abandon_handle.end_transform_gesture();
+        crate::transform_gesture_session::abandon_transform_gesture(
+            &mut abandon_session.borrow_mut(),
+            &gesture_abandon_handle,
+        );
     });
 
     let override_clear_handle = preview_worker.handle();
+    let clear_session = gesture_session.clone();
     editor.on_on_preview_override_cleared(move |tick| {
-        override_clear_handle.clear_transform_override(i64::from(tick));
+        crate::transform_gesture_session::clear_transform_override(
+            &mut clear_session.borrow_mut(),
+            &override_clear_handle,
+            i64::from(tick),
+        );
     });
 
     let transform_commit_handle = preview_worker.handle();
+    let commit_session = gesture_session;
     editor.on_on_clip_transform_committed(
         move |clip_id,
               pos_x,
@@ -425,7 +451,9 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
               rotation,
               opacity,
               tick| {
-            transform_commit_handle.set_transform(
+            crate::transform_gesture_session::commit_transform(
+                &mut commit_session.borrow_mut(),
+                &transform_commit_handle,
                 clip_id.to_string(),
                 cutlass_models::ClipTransform {
                     position: [pos_x, pos_y],

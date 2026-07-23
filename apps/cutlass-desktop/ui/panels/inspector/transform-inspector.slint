@@ -131,6 +131,14 @@ export component TransformInspector inherits VerticalLayout {
                 PreviewStore.gesture-commit-pending = true;
             }
         } else {
+            // Pair with the canvas press path so the worker builds partitioned
+            // sprite frames before override ticks. Re-begin when a prior commit
+            // is still mirrored (`gesture-commit-pending`) — that flag keeps
+            // gesture-active true until the projection lands.
+            if (!PreviewStore.gesture-active || PreviewStore.gesture-commit-pending
+                || PreviewStore.gesture-clip != model.id) {
+                EditorStore.on-preview-gesture-started(model.id, TimelineStore.playhead-tick);
+            }
             PreviewStore.gesture-clip = model.id;
             PreviewStore.gesture = {
                 valid: true,

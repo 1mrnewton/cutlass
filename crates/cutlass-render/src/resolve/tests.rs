@@ -1318,6 +1318,43 @@ fn mask_rotation_degrees_resolve_to_radians() {
 }
 
 #[test]
+fn mirror_mask_resolves_band_size_and_kind() {
+    use cutlass_models::{LookParam, Mask, MaskKind};
+
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_clip_mask(clip, Some(Mask::new(MaskKind::Mirror)))
+        .unwrap();
+    project
+        .set_param_constant(
+            clip,
+            ClipParam::Look {
+                param: LookParam::MaskSize,
+            },
+            ParamValue::Vec2([0.5, 1.0]),
+        )
+        .unwrap();
+    project
+        .set_param_constant(
+            clip,
+            ClipParam::Look {
+                param: LookParam::MaskRotation,
+            },
+            ParamValue::Scalar(45.0),
+        )
+        .unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    let mask = scene.layers[0].mask.unwrap();
+    assert_eq!(mask.kind, MaskKind::Mirror);
+    approx2(mask.size, [0.5, 1.0]);
+    approx(mask.rotation_rad, std::f32::consts::FRAC_PI_4);
+}
+
+#[test]
 fn generated_clip_has_no_look_fields() {
     let mut project = Project::new("p", FPS_24);
     let track = project.add_track(TrackKind::Sticker, "S1");

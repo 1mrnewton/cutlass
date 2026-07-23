@@ -323,6 +323,95 @@ fn mirror_outline_has_two_band_edges() {
     assert!(!a.is_empty() && !b.is_empty());
 }
 
+#[test]
+fn mirror_band_edge_handle_matches_half_thickness() {
+    // Mirror thickness uses size[0] × layer half-width; the size-X handle
+    // sits on that edge so gizmo outlines match the shader band.
+    let placement = identity_placement(800.0, 600.0);
+    let (scale, ox, oy) = viewport_mapping(1920.0, 1080.0, 960.0, 540.0, 1.25, 12.0, -8.0);
+    let mut p = params(MaskKind::Mirror);
+    p.size = [0.6, 1.0];
+    p.rotation_deg = 25.0;
+    p.center = [0.1, -0.05];
+    let layout = build_layout(p, placement, scale, ox, oy);
+    let half_w = placement.size[0] * 0.5;
+    let expected_dist = p.size[0] * half_w * scale;
+    let dx = layout.size_x_v[0] - layout.center_v[0];
+    let dy = layout.size_x_v[1] - layout.center_v[1];
+    let dist = (dx * dx + dy * dy).sqrt();
+    assert!(
+        (dist - expected_dist).abs() < 0.5,
+        "band edge handle dist {dist} vs expected {expected_dist}"
+    );
+}
+
+#[test]
+fn size_drag_rebuilds_handle_near_cursor_under_letterbox() {
+    // widget → resolve drag → rebuild layout → size handle ≈ cursor
+    let placement = LayerPlacement {
+        center: [960.0, 540.0],
+        size: [1280.0, 720.0],
+        rotation: 15f32.to_radians(),
+        opacity: 1.0,
+    };
+    let (scale, ox, oy) = viewport_mapping(1920.0, 1080.0, 800.0, 600.0, 1.0, 0.0, 0.0);
+    let start = {
+        let mut p = params(MaskKind::Rectangle);
+        p.size = [0.7, 0.5];
+        p.rotation_deg = 15.0;
+        p
+    };
+    let layout0 = build_layout(start, placement, scale, ox, oy);
+    let press = layout0.size_x_v;
+    let cursor = [press[0] + 40.0, press[1] - 10.0];
+    let out = resolve_mask_handle_drag(
+        HANDLE_SIZE_X,
+        start,
+        &placement,
+        scale,
+        ox,
+        oy,
+        press,
+        cursor,
+        false,
+    );
+    let layout1 = build_layout(out, placement, scale, ox, oy);
+    let dx = layout1.size_x_v[0] - cursor[0];
+    let dy = layout1.size_x_v[1] - cursor[1];
+    // Radial size: handle lands on the ray from center through cursor at
+    // the resolved half-width — distance to cursor should be small along
+    // the axis (projection), not necessarily zero if cursor left the axis.
+    let center = layout1.center_v;
+    let to_handle = [layout1.size_x_v[0] - center[0], layout1.size_x_v[1] - center[1]];
+    let to_cursor = [cursor[0] - center[0], cursor[1] - center[1]];
+    let handle_len = (to_handle[0] * to_handle[0] + to_handle[1] * to_handle[1])
+        .sqrt()
+        .max(1e-3);
+    let proj = (to_cursor[0] * to_handle[0] + to_cursor[1] * to_handle[1]) / handle_len;
+    assert!(
+        (proj - handle_len).abs() < 1.5,
+        "projected cursor radius {proj} vs handle {handle_len} (dx={dx}, dy={dy})"
+    );
+}
+
+#[test]
+fn widget_layer_widget_round_trip_letterbox_rotated() {
+    let placement = LayerPlacement {
+        center: [400.0, 300.0],
+        size: [640.0, 360.0],
+        rotation: 40f32.to_radians(),
+        opacity: 1.0,
+    };
+    let (scale, ox, oy) = viewport_mapping(1920.0, 1080.0, 640.0, 480.0, 1.8, -30.0, 20.0);
+    for local in [[0.0, 0.0], [80.0, -40.0], [-60.0, 90.0], [120.0, 10.0]] {
+        let canvas = layer_to_canvas(local, &placement);
+        let view = canvas_to_viewport(canvas, scale, ox, oy);
+        let back = canvas_to_layer(viewport_to_canvas(view, scale, ox, oy), &placement);
+        assert!((back[0] - local[0]).abs() < 1e-2, "x {local:?} → {back:?}");
+        assert!((back[1] - local[1]).abs() < 1e-2, "y {local:?} → {back:?}");
+    }
+}
+
 #[allow(dead_code)]
 fn _canvas_config_smoke() {
     let _ = CompositorConfig::new(16, 9);

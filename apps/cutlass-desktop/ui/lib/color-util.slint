@@ -1,0 +1,31 @@
+// Pure color helpers implemented in Rust (`src/color_math.rs` /
+// `src/wire_color.rs`). Slint can build colors with `hsv()` but cannot
+// parse or format hex strings at runtime.
+
+export struct HsvComponents {
+    h: float,
+    s: float,
+    v: float,
+}
+
+export global ColorUtil {
+    // Invalid input yields transparent black; callers should gate with
+    // `is-valid-hex` first when they need to reject bad edits.
+    pure callback hex-to-color(hex: string) -> color;
+    pure callback is-valid-hex(hex: string) -> bool;
+    // Canonical `RRGGBB`, or `RRGGBBAA` when alpha < 255. No leading `#`.
+    pure callback color-to-hex(c: color) -> string;
+
+    // RGB channels in `[0, 1]`. Achromatic inputs report `h == 0`.
+    pure callback rgb-to-hsv(r: float, g: float, b: float) -> HsvComponents;
+    // Same conversion, but keeps `prev-h` / `prev-s` when the RGB is
+    // black or gray so the color picker does not lose hue on drag-to-black.
+    pure callback rgb-to-hsv-preserving(
+        r: float,
+        g: float,
+        b: float,
+        prev-h: float,
+        prev-s: float,
+    ) -> HsvComponents;
+    pure callback hsv-to-color(h: float, s: float, v: float, a: float) -> color;
+}

@@ -69,8 +69,10 @@ use cache_ui::*;
 
 mod bootstrap;
 mod cache_ui;
+mod color_math;
 mod library_helpers;
 mod session;
+mod wire_color;
 mod wire_engine;
 mod wire_inspector;
 mod wire_preview;

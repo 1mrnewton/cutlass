@@ -34,6 +34,8 @@ pub(crate) fn wire_ui(
 ) {
     // --- pure UI backends (no engine involved) ----------------------------
 
+    crate::wire_color::wire_color(app);
+
     let timeline_lib = app.global::<TimelineLib>();
     timeline_lib.on_sequence_duration(timeline::sequence_duration);
     timeline_lib.on_format_timecode(|frame, fps_num, fps_den, drop_frame| {

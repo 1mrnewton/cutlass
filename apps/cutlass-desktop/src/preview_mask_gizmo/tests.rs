@@ -192,6 +192,7 @@ fn resolve_center_drag_updates_fractions() {
         0.0,
         press,
         cursor,
+        false,
     );
     assert!((out.center[0] - 0.05).abs() < 1e-4);
     assert!(out.center[1].abs() < 1e-4);
@@ -218,8 +219,38 @@ fn resolve_size_x_drag_sets_width_fraction() {
         0.0,
         press,
         cursor,
+        false,
     );
     assert!((out.size[0] - 0.4).abs() < 1e-4);
+    assert!((out.size[1] - 1.0).abs() < 1e-4);
+}
+
+#[test]
+fn resolve_size_x_drag_keeps_aspect_when_requested() {
+    let placement = identity_placement(1000.0, 1000.0);
+    let mut start = params(MaskKind::Rectangle);
+    start.size = [0.8, 0.4];
+    let press = [0.0, 0.0];
+    // Cursor at +200 px from center on X → size_w = 0.4; aspect 0.4/0.8 → h = 0.2
+    let cursor = canvas_to_viewport(
+        [placement.center[0] + 200.0, placement.center[1]],
+        1.0,
+        0.0,
+        0.0,
+    );
+    let out = resolve_mask_handle_drag(
+        HANDLE_SIZE_X,
+        start,
+        &placement,
+        1.0,
+        0.0,
+        0.0,
+        press,
+        cursor,
+        true,
+    );
+    assert!((out.size[0] - 0.4).abs() < 1e-4);
+    assert!((out.size[1] - 0.2).abs() < 1e-4);
 }
 
 #[test]
@@ -248,6 +279,7 @@ fn resolve_rotation_drag_about_center() {
         0.0,
         press,
         cursor,
+        false,
     );
     assert!((out.rotation_deg - (-90.0)).abs() < 1.0);
 }

@@ -266,7 +266,8 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
          start_rotation,
          start_feather,
          start_roundness,
-         kind| {
+         kind,
+         keep_aspect| {
             let kind = match kind.as_str() {
                 "linear" => cutlass_models::MaskKind::Linear,
                 "mirror" => cutlass_models::MaskKind::Mirror,
@@ -296,6 +297,7 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
                     feather: start_feather,
                     roundness: start_roundness,
                 },
+                keep_aspect,
             )
         },
     );

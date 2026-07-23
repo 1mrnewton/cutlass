@@ -32,7 +32,7 @@ pub const HANDLE_FEATHER: i32 = 6;
 pub const HANDLE_ROUNDNESS: i32 = 7;
 
 /// Default hit radius in viewport px.
-pub const DEFAULT_HIT_TOLERANCE_PX: f32 = 12.0;
+pub const DEFAULT_HIT_TOLERANCE_PX: f32 = 14.0;
 /// Rotation handle floats this many viewport px past the size-Y edge.
 const ROTATION_HANDLE_GAP_PX: f32 = 28.0;
 /// Feather handle sits past the size-X edge by this base + feather×range.
@@ -635,6 +635,7 @@ pub fn resolve_mask_gizmo_drag_in_viewport(
     pan_x: f32,
     pan_y: f32,
     start: MaskGizmoParams,
+    keep_aspect: bool,
 ) -> MaskGizmoDragResolution {
     if clip_id.is_empty() || handle == HANDLE_NONE {
         return MaskGizmoDragResolution::default();
@@ -650,7 +651,17 @@ pub fn resolve_mask_gizmo_drag_in_viewport(
         return MaskGizmoDragResolution::default();
     }
     let placement = clip_placement(&clip, &canvas);
-    let out = resolve_mask_handle_drag(handle, start, &placement, scale, ox, oy, press, cursor);
+    let out = resolve_mask_handle_drag(
+        handle,
+        start,
+        &placement,
+        scale,
+        ox,
+        oy,
+        press,
+        cursor,
+        keep_aspect,
+    );
     MaskGizmoDragResolution {
         valid: true,
         center_fx: out.center[0],
@@ -680,6 +691,7 @@ pub fn resolve_mask_handle_drag(
     oy: f32,
     press: [f32; 2],
     cursor: [f32; 2],
+    keep_aspect: bool,
 ) -> MaskGizmoParams {
     let mut out = start;
     let layer_size = placement.size;
@@ -714,9 +726,9 @@ pub fn resolve_mask_handle_drag(
             let local = inv_rotate(d, rot);
             let half_w = (layer_size[0] * 0.5).max(1e-3);
             out.size[0] = (local[0].abs() / half_w).clamp(0.05, 3.0);
-            if matches!(start.kind, MaskKind::Circle) {
-                // Keep circle uniform when only the X handle exists in UI;
-                // both handles still publish independently for ellipses.
+            if keep_aspect {
+                let ratio = start.size[1] / start.size[0].max(1e-6);
+                out.size[1] = (out.size[0] * ratio).clamp(0.05, 3.0);
             }
         }
         HANDLE_SIZE_Y => {
@@ -727,6 +739,10 @@ pub fn resolve_mask_handle_drag(
             let local = inv_rotate(d, rot);
             let half_h = (layer_size[1] * 0.5).max(1e-3);
             out.size[1] = (local[1].abs() / half_h).clamp(0.05, 3.0);
+            if keep_aspect {
+                let ratio = start.size[0] / start.size[1].max(1e-6);
+                out.size[0] = (out.size[1] * ratio).clamp(0.05, 3.0);
+            }
         }
         HANDLE_ROTATION => {
             let d = [

@@ -18,7 +18,8 @@ component MaskHandle inherits Rectangle {
     in property <MouseCursor> cursor: MouseCursor.grab;
     callback pressed();
     callback released(commit: bool);
-    callback dragged(x: float, y: float);
+    callback dragged(x: float, y: float, shift: bool);
+    callback reset();
 
     width: 10px;
     height: 10px;
@@ -27,13 +28,17 @@ component MaskHandle inherits Rectangle {
     border-width: 1px;
     border-color: root.active ? #FFFFFF : #00000088;
 
+    private property <bool> shift-held: false;
+
     TouchArea {
-        width: 18px;
-        height: 18px;
-        x: -4px;
-        y: -4px;
+        // Slightly generous hit target (visual knob stays 10×10).
+        width: 22px;
+        height: 22px;
+        x: -6px;
+        y: -6px;
         mouse-cursor: self.pressed ? MouseCursor.grabbing : root.cursor;
         pointer-event(ev) => {
+            root.shift-held = ev.modifiers.shift;
             if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
                 root.pressed();
             }
@@ -46,8 +51,12 @@ component MaskHandle inherits Rectangle {
         }
         moved => {
             root.dragged(
-                root.x / 1px + 5.0 - 9.0 + self.mouse-x / 1px,
-                root.y / 1px + 5.0 - 9.0 + self.mouse-y / 1px);
+                root.x / 1px + 5.0 - 11.0 + self.mouse-x / 1px,
+                root.y / 1px + 5.0 - 11.0 + self.mouse-y / 1px,
+                root.shift-held);
+        }
+        double-clicked => {
+            root.reset();
         }
     }
 }
@@ -69,6 +78,7 @@ export component MaskOverlay inherits Rectangle {
     private property <float> start-feather: 0;
     private property <float> start-roundness: 0;
     private property <MaskGizmoDragResolution> drag-res;
+    private property <bool> shift-held: false;
 
     private property <bool> center-animated:
         TimelineActions.selected-clip().found
@@ -149,7 +159,7 @@ export component MaskOverlay inherits Rectangle {
         }
     }
 
-    function move-to(cx: float, cy: float) {
+    function move-to(cx: float, cy: float, keep-aspect: bool) {
         if (root.handle == 0) {
             return;
         }
@@ -174,7 +184,8 @@ export component MaskOverlay inherits Rectangle {
             root.start-rotation,
             root.start-feather,
             root.start-roundness,
-            root.gizmo.kind);
+            root.gizmo.kind,
+            keep-aspect);
         if (!root.drag-res.valid) {
             return;
         }
@@ -239,14 +250,51 @@ export component MaskOverlay inherits Rectangle {
         root.dragging = false;
     }
 
+    // Double-click a handle → Mask::new defaults for that param (one commit).
+    function reset-handle(handle: int) {
+        if (handle == 0 || TimelineStore.selected-clip-id == "") {
+            return;
+        }
+        if (root.dragging) {
+            InspectorBackend.clear-param-override(
+                TimelineStore.selected-clip-id, TimelineStore.playhead-tick);
+            root.dragging = false;
+        }
+        root.handle = handle;
+        root.seed-live-from-gizmo();
+        if (handle == 1 || handle == 2) {
+            PreviewStore.mask-live-center-x = 0;
+            PreviewStore.mask-live-center-y = 0;
+            root.commit-param("look_mask_center", 0, 0, root.center-animated);
+        } else if (handle == 3 || handle == 4) {
+            PreviewStore.mask-live-size-w = 1;
+            PreviewStore.mask-live-size-h = 1;
+            root.commit-param("look_mask_size", 1, 1, root.size-animated);
+        } else if (handle == 5) {
+            PreviewStore.mask-live-rotation = 0;
+            root.commit-param("look_mask_rotation", 0, 0, root.rotation-animated);
+        } else if (handle == 6) {
+            PreviewStore.mask-live-feather = 0;
+            root.commit-param("look_mask_feather", 0, 0, root.feather-animated);
+        } else if (handle == 7) {
+            PreviewStore.mask-live-roundness = 0;
+            root.commit-param("look_mask_roundness", 0, 0, root.roundness-animated);
+        }
+        PreviewStore.mask-live-active = false;
+        PreviewStore.mask-drag-handle = 0;
+        root.handle = 0;
+        root.dragging = false;
+    }
+
     // Body grab (moves center): large soft hit around the mask center.
     if root.gizmo.visible: TouchArea {
-        x: root.gizmo.center-x * 1px - 28px;
-        y: root.gizmo.center-y * 1px - 28px;
-        width: 56px;
-        height: 56px;
+        x: root.gizmo.center-x * 1px - 32px;
+        y: root.gizmo.center-y * 1px - 32px;
+        width: 64px;
+        height: 64px;
         mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
         pointer-event(ev) => {
+            root.shift-held = ev.modifiers.shift;
             if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
                 root.begin(2, root.gizmo.center-x, root.gizmo.center-y);
             }
@@ -259,8 +307,12 @@ export component MaskOverlay inherits Rectangle {
         }
         moved => {
             root.move-to(
-                root.gizmo.center-x - 28.0 + self.mouse-x / 1px,
-                root.gizmo.center-y - 28.0 + self.mouse-y / 1px);
+                root.gizmo.center-x - 32.0 + self.mouse-x / 1px,
+                root.gizmo.center-y - 32.0 + self.mouse-y / 1px,
+                false);
+        }
+        double-clicked => {
+            root.reset-handle(2);
         }
     }
 
@@ -293,7 +345,8 @@ export component MaskOverlay inherits Rectangle {
         cursor: MouseCursor.grab;
         pressed => { root.begin(1, root.gizmo.center-x, root.gizmo.center-y); }
         released(commit) => { root.end-drag(commit); }
-        dragged(x, y) => { root.move-to(x, y); }
+        dragged(x, y, shift) => { root.move-to(x, y, shift); }
+        reset => { root.reset-handle(1); }
     }
 
     if root.gizmo.visible && root.gizmo.has-size-x: MaskHandle {
@@ -303,7 +356,8 @@ export component MaskOverlay inherits Rectangle {
         cursor: MouseCursor.ew-resize;
         pressed => { root.begin(3, root.gizmo.size-x-x, root.gizmo.size-x-y); }
         released(commit) => { root.end-drag(commit); }
-        dragged(x, y) => { root.move-to(x, y); }
+        dragged(x, y, shift) => { root.move-to(x, y, shift); }
+        reset => { root.reset-handle(3); }
     }
 
     if root.gizmo.visible && root.gizmo.has-size-y: MaskHandle {
@@ -313,7 +367,8 @@ export component MaskOverlay inherits Rectangle {
         cursor: MouseCursor.ns-resize;
         pressed => { root.begin(4, root.gizmo.size-y-x, root.gizmo.size-y-y); }
         released(commit) => { root.end-drag(commit); }
-        dragged(x, y) => { root.move-to(x, y); }
+        dragged(x, y, shift) => { root.move-to(x, y, shift); }
+        reset => { root.reset-handle(4); }
     }
 
     if root.gizmo.visible: MaskHandle {
@@ -323,7 +378,8 @@ export component MaskOverlay inherits Rectangle {
         cursor: MouseCursor.crosshair;
         pressed => { root.begin(5, root.gizmo.rotation-x, root.gizmo.rotation-y); }
         released(commit) => { root.end-drag(commit); }
-        dragged(x, y) => { root.move-to(x, y); }
+        dragged(x, y, shift) => { root.move-to(x, y, shift); }
+        reset => { root.reset-handle(5); }
     }
 
     if root.gizmo.visible: MaskHandle {
@@ -334,7 +390,8 @@ export component MaskOverlay inherits Rectangle {
         background: root.handle == 6 ? AppStore.theme.accent.primary : #B8D4FF;
         pressed => { root.begin(6, root.gizmo.feather-x, root.gizmo.feather-y); }
         released(commit) => { root.end-drag(commit); }
-        dragged(x, y) => { root.move-to(x, y); }
+        dragged(x, y, shift) => { root.move-to(x, y, shift); }
+        reset => { root.reset-handle(6); }
     }
 
     if root.gizmo.visible && root.gizmo.has-roundness: MaskHandle {
@@ -344,6 +401,7 @@ export component MaskOverlay inherits Rectangle {
         cursor: MouseCursor.nwse-resize;
         pressed => { root.begin(7, root.gizmo.roundness-x, root.gizmo.roundness-y); }
         released(commit) => { root.end-drag(commit); }
-        dragged(x, y) => { root.move-to(x, y); }
+        dragged(x, y, shift) => { root.move-to(x, y, shift); }
+        reset => { root.reset-handle(7); }
     }
 }

@@ -78,6 +78,17 @@ pub fn handle_value(
     }
 }
 
+/// Fresh [`Mask::new`] defaults for a double-click handle reset.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn default_value_for_handle(handle: i32) -> Option<ParamValue> {
+    match handle {
+        HANDLE_CENTER | HANDLE_BODY => Some(ParamValue::Vec2([0.0, 0.0])),
+        HANDLE_SIZE_X | HANDLE_SIZE_Y => Some(ParamValue::Vec2([1.0, 1.0])),
+        HANDLE_ROTATION | HANDLE_FEATHER | HANDLE_ROUNDNESS => Some(ParamValue::Scalar(0.0)),
+        _ => None,
+    }
+}
+
 /// Whether a mask-handle drag is paired with the worker override lane.
 #[derive(Debug, Default, Clone)]
 pub struct MaskGestureSession {
@@ -255,5 +266,57 @@ mod tests {
             Some(ParamValue::Vec2([0.8, 0.4]))
         );
         assert_eq!(handle_param(HANDLE_NONE), None);
+    }
+
+    #[test]
+    fn default_value_for_handle_matches_mask_new() {
+        let fresh = Mask::new(MaskKind::Rectangle);
+        assert_eq!(
+            default_value_for_handle(HANDLE_CENTER),
+            Some(ParamValue::Vec2([0.0, 0.0]))
+        );
+        assert_eq!(
+            default_value_for_handle(HANDLE_SIZE_X),
+            Some(ParamValue::Vec2([1.0, 1.0]))
+        );
+        assert_eq!(
+            default_value_for_handle(HANDLE_FEATHER),
+            Some(ParamValue::Scalar(0.0))
+        );
+        assert_eq!(fresh.center.constant(), Some([0.0, 0.0]));
+        assert_eq!(fresh.size.constant(), Some([1.0, 1.0]));
+        assert_eq!(fresh.feather.constant(), Some(0.0));
+    }
+
+    #[test]
+    fn double_click_reset_commits_once() {
+        let (mut engine, clip, clip_s, r) = engine_with_mask();
+        let param = handle_param(HANDLE_FEATHER).unwrap();
+        engine
+            .apply(Command::Edit(EditCommand::SetParamConstant {
+                clip,
+                param,
+                value: ParamValue::Scalar(0.7),
+            }))
+            .expect("seed");
+        let rev_before = engine.revision();
+        let mut session = MaskGestureSession::new();
+        assert!(session.begin(&clip_s, HANDLE_FEATHER));
+        // Simulate a prior drag override, then double-click reset path:
+        // clear override + one constant commit to default.
+        engine.set_param_override(clip, param, ParamValue::Scalar(0.4));
+        engine.clear_param_override(clip, param);
+        let default = default_value_for_handle(HANDLE_FEATHER).unwrap();
+        engine
+            .apply(Command::Edit(EditCommand::SetParamConstant {
+                clip,
+                param,
+                value: default,
+            }))
+            .expect("reset");
+        session.end();
+        assert_eq!(engine.revision(), rev_before + 1);
+        let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("plain");
+        assert!((plain.layers[0].mask.unwrap().feather - 0.0).abs() < f32::EPSILON);
     }
 }

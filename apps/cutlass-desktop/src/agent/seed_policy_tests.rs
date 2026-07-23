@@ -267,6 +267,36 @@ fn explicit_stale_apply_truncates_transcript_to_checkpoint() {
 }
 
 #[test]
+fn auto_apply_stale_truncates_rehearsal_keeps_user_prompt() {
+    // Non-dry-run checkpoint is captured *after* the user (+ setup status)
+    // rows, so truncate drops only action/assistant rehearsal.
+    let kinds = vec![
+        "status",    // earlier chat
+        "user",      // this prompt
+        "status",    // slash-expand / warnings
+        "action",    // sandbox rehearsal
+        "assistant", // sandbox rehearsal
+    ];
+    assert_eq!(
+        truncate_rows_to_checkpoint(kinds, 3),
+        vec!["status", "user", "status"],
+        "stale auto-apply must keep the user prompt and drop rehearsal rows"
+    );
+}
+
+#[test]
+fn stale_trim_skipped_notice_is_distinct_from_stale_apply_notice() {
+    // When checkpoint capture failed, the user still needs a clear signal
+    // that chat may diverge from rewound provider history.
+    assert_ne!(TRANSCRIPT_TRIM_SKIPPED_NOTICE, STALE_APPLY_NOTICE);
+    assert_ne!(TRANSCRIPT_TRIM_SKIPPED_NOTICE, STALE_PLAN_NOTICE);
+    assert!(
+        TRANSCRIPT_TRIM_SKIPPED_NOTICE.contains("may still show"),
+        "skip notice must warn that rehearsal rows may remain visible"
+    );
+}
+
+#[test]
 fn continue_pending_seed_error_restores_plan_pending_flag() {
     // When project_revision is unreachable, sandbox_seed_policy errs after the
     // Prompt handler cleared plan_pending — restore it iff a parked plan remains.

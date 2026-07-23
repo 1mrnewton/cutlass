@@ -23,8 +23,9 @@ use super::token_usage::format_usage_line;
 use super::tool_host::{DesktopToolHandles, DesktopToolHost, abort_status_message};
 use super::transcript::{
     append_assistant_text, append_reasoning_text, attach_usage_line, persist_session,
-    publish_chat_list, push_entry, push_image_entry, replace_transcript, transcript_row_count,
-    trim_transcript_after_stale_plan_discard, truncate_transcript_to_checkpoint, with_store,
+    publish_chat_list, push_entry, push_entry_with_prior_count, push_image_entry,
+    replace_transcript, transcript_row_count, trim_transcript_after_stale_plan_discard,
+    truncate_transcript_to_checkpoint, with_store,
 };
 use super::types::{
     AgentHandle, AgentPlanStep, AgentRequest, AgentRuntimeHandles, AgentWorker, ApprovalDecision,
@@ -89,6 +90,11 @@ pub(crate) const STALE_PLAN_NOTICE: &str = "Project changed since this plan was 
 /// no longer matches the revision the plan was rehearsed against.
 pub(crate) const STALE_APPLY_NOTICE: &str =
     "Project changed since this plan was rehearsed — the plan was not applied.";
+
+/// Posted when provider history was rewound for a stale plan/apply but the
+/// chat transcript could not be trimmed (checkpoint capture failed).
+pub(crate) const TRANSCRIPT_TRIM_SKIPPED_NOTICE: &str = "Chat may still show the discarded \
+    rehearsal — provider history was rewound to match the current project.";
 
 /// Provider-history corrective notice when non-dry-run auto-apply fails to
 /// replay (transcript already carries the detailed error from
@@ -249,14 +255,13 @@ pub(crate) fn agent_main(
                     );
                 }
                 cancel.store(false, Ordering::Relaxed);
-                if dry_run {
-                    if !preview.is_pending() {
-                        preview.history_restore = Some(history.clone());
-                        // Capture before this prompt's user/status rows land
-                        // so a later stale discard can drop only the rehearsal.
-                        preview.transcript_restore_len = transcript_row_count(&store);
-                    }
-                } else if preview.is_pending() {
+                // First dry-run in a park: remember history + capture the
+                // transcript length *with* the user-row push (same event-loop
+                // turn) so stale discard/Apply have a reliable restore anchor.
+                let starting_dry_run = dry_run && !preview.is_pending();
+                if starting_dry_run {
+                    preview.history_restore = Some(history.clone());
+                } else if !dry_run && preview.is_pending() {
                     if let Some(saved) = preview.history_restore.take() {
                         history = saved;
                     }
@@ -268,7 +273,14 @@ pub(crate) fn agent_main(
                     s.set_plan_pending(false);
                     s.set_undo_offered(false);
                 });
-                push_entry(&store, "user", prompt.clone());
+                if starting_dry_run {
+                    match push_entry_with_prior_count(&store, "user", prompt.clone()) {
+                        Some(prior) => preview.transcript_restore_len = Some(prior),
+                        None => push_entry(&store, "user", prompt.clone()),
+                    }
+                } else {
+                    push_entry(&store, "user", prompt.clone());
+                }
 
                 // Reload ~/.cutlass/agent every prompt (tiny files) so
                 // rule/skill/command edits apply without a restart.
@@ -287,6 +299,13 @@ pub(crate) fn agent_main(
                     }
                     None => prompt.clone(),
                 };
+
+                // Non-dry-run: checkpoint after this prompt's setup rows so a
+                // stale auto-apply can drop action/assistant rehearsal without
+                // removing the user prompt.
+                if !dry_run {
+                    preview.transcript_restore_len = transcript_row_count(&store);
+                }
 
                 run_one_prompt(
                     &worker,
@@ -336,12 +355,19 @@ pub(crate) fn agent_main(
                         // Match auto-discard: rewind provider history AND drop
                         // rehearsal transcript rows so saved chat agrees.
                         let transcript_checkpoint = preview.transcript_restore_len.take();
+                        let expected_trim = preview.history_restore.is_some();
                         if let Some(saved) = preview.history_restore.take() {
                             history = saved;
                         }
                         preview.clear();
-                        if let Some(checkpoint_len) = transcript_checkpoint {
-                            truncate_transcript_to_checkpoint(&store, checkpoint_len);
+                        match transcript_checkpoint {
+                            Some(checkpoint_len) => {
+                                truncate_transcript_to_checkpoint(&store, checkpoint_len);
+                            }
+                            None if expected_trim => {
+                                push_entry(&store, "status", TRANSCRIPT_TRIM_SKIPPED_NOTICE.into());
+                            }
+                            None => {}
                         }
                         push_entry(&store, "status", STALE_APPLY_NOTICE.into());
                     }
@@ -612,9 +638,16 @@ pub(crate) fn run_one_prompt(
             // Drop rehearsal turns that describe edits no longer in the
             // reseeded sandbox; refresh the checkpoint for this new run.
             let transcript_checkpoint = preview.transcript_restore_len.take();
+            let expected_trim = preview.history_restore.is_some();
             restore_history_after_stale_plan_discard(history, preview);
-            if let Some(checkpoint_len) = transcript_checkpoint {
-                trim_transcript_after_stale_plan_discard(store, checkpoint_len);
+            match transcript_checkpoint {
+                Some(checkpoint_len) => {
+                    trim_transcript_after_stale_plan_discard(store, checkpoint_len);
+                }
+                None if expected_trim => {
+                    push_entry(store, "status", TRANSCRIPT_TRIM_SKIPPED_NOTICE.into());
+                }
+                None => {}
             }
             push_entry(store, "status", STALE_PLAN_NOTICE.into());
             // Next parked rehearsal's Discard/stale trim starts after this
@@ -737,6 +770,19 @@ pub(crate) fn run_one_prompt(
                     &outcome.phase_breaks,
                     preview.seed_revision,
                 );
+                // Stale auto-apply: drop this prompt's action/assistant rows
+                // (checkpoint captured after user/status setup) so the chat
+                // does not claim sandbox edits landed on the live project.
+                if matches!(apply, ApplyLiveOutcome::Stale) {
+                    match preview.transcript_restore_len.take() {
+                        Some(checkpoint_len) => {
+                            truncate_transcript_to_checkpoint(store, checkpoint_len);
+                        }
+                        None => {
+                            push_entry(store, "status", TRANSCRIPT_TRIM_SKIPPED_NOTICE.into());
+                        }
+                    }
+                }
                 // Keep provider history aligned with reality: turn_messages
                 // already describe sandbox edits, so a failed/stale replay
                 // must also post a corrective notice (transcript + history).

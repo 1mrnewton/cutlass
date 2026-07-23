@@ -44,7 +44,22 @@ pub(crate) fn push_entry(
 }
 
 /// Current transcript row count, observed on the Slint thread.
+///
+/// Retries a few times when the event loop is briefly busy so park-time
+/// checkpoints are not lost to a single scheduling miss.
 pub(crate) fn transcript_row_count(store: &slint::Weak<AgentStore<'static>>) -> Option<usize> {
+    for attempt in 0..3 {
+        if let Some(n) = transcript_row_count_once(store) {
+            return Some(n);
+        }
+        if attempt + 1 < 3 {
+            std::thread::sleep(Duration::from_millis(20 * (attempt as u64 + 1)));
+        }
+    }
+    None
+}
+
+fn transcript_row_count_once(store: &slint::Weak<AgentStore<'static>>) -> Option<usize> {
     let (tx, rx) = bounded(1);
     let store = store.clone();
     slint::invoke_from_event_loop(move || {
@@ -53,6 +68,34 @@ pub(crate) fn transcript_row_count(store: &slint::Weak<AgentStore<'static>>) -> 
             .map(|store| store.get_transcript().row_count())
             .unwrap_or(0);
         let _ = tx.send(n);
+    })
+    .ok()?;
+    rx.recv_timeout(Duration::from_secs(2)).ok()
+}
+
+/// Push a transcript row and return the pre-push row count from the same
+/// event-loop turn — a reliable restore anchor when a separate count call
+/// would race or time out.
+pub(crate) fn push_entry_with_prior_count(
+    store: &slint::Weak<AgentStore<'static>>,
+    kind: &'static str,
+    text: String,
+) -> Option<usize> {
+    let (tx, rx) = bounded(1);
+    let store = store.clone();
+    slint::invoke_from_event_loop(move || {
+        let prior = match store.upgrade() {
+            Some(store) => {
+                let transcript = store.get_transcript();
+                let prior = transcript.row_count();
+                if let Some(model) = transcript.as_any().downcast_ref::<VecModel<AgentEntry>>() {
+                    model.push(entry(kind, text));
+                }
+                prior
+            }
+            None => 0,
+        };
+        let _ = tx.send(prior);
     })
     .ok()?;
     rx.recv_timeout(Duration::from_secs(2)).ok()

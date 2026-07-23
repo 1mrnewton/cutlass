@@ -451,15 +451,24 @@ export component MaskInspector inherits VerticalLayout {
         }
     }
 
+    // Linear / Mirror SDFs ignore size[1] (Linear is a size-independent
+    // half-plane; Mirror band thickness is size[0] only). Hide Height for
+    // those kinds so keyframes / overrides cannot silently do nothing.
+    private property <bool> show-size-height:
+        root.has-mask
+        && root.model.mask-kind != "linear"
+        && root.model.mask-kind != "mirror";
+    private property <bool> size-is-mirror-thickness: root.model.mask-kind == "mirror";
+
     if root.has-mask: SliderRow {
-        label: "Width";
+        label: root.size-is-mirror-thickness ? "Thickness" : "Width";
         suffix: "";
         value: root.size-w-v;
         minimum: 0.05;
         maximum: 3;
         step: 0.01;
         decimals: 2;
-        reset-value: 1;
+        reset-value: root.size-is-mirror-thickness ? 0.5 : 1;
         kf-visible: true;
         kf: root.size-w-sample.row;
         kf-can-toggle: root.playhead-inside;
@@ -486,7 +495,7 @@ export component MaskInspector inherits VerticalLayout {
         }
     }
 
-    if root.has-mask: SliderRow {
+    if root.show-size-height: SliderRow {
         label: "Height";
         suffix: "";
         value: root.size-h-v;

@@ -495,6 +495,7 @@ pub(crate) fn migrate_document(doc: &mut serde_json::Value, from: u32) {
     for step in from..PROJECT_SCHEMA_VERSION {
         match step {
             1 => migrate_v1_to_v2(doc),
+            2 => migrate_v2_to_v3(doc),
             // `validate_schema` bounds `from` to supported versions, so a
             // missing arm is a bug: a version bump landed without its step.
             _ => unreachable!("no migration step for schema v{step} -> v{}", step + 1),
@@ -507,6 +508,74 @@ pub(crate) fn migrate_document(doc: &mut serde_json::Value, from: u32) {
 /// so every v1 document is already a valid v2 document — nothing to
 /// rewrite. The step exists to anchor the chain.
 fn migrate_v1_to_v2(_doc: &mut serde_json::Value) {}
+
+/// v2 → v3 (Mirror band): legacy Mirror was a half-plane that ignored
+/// `size`. CapCut-parity Mirror is a parallel band of thickness `size[0]`;
+/// the historical default `[1,1]` (often omitted on the wire via
+/// skip-if-default) now covers the full layer width and looks like a
+/// no-op. Rewrite omitted / constant `size[0] == 1` (and matching
+/// keyframe values) to `0.5` so old projects keep a visible band.
+fn migrate_v2_to_v3(doc: &mut serde_json::Value) {
+    let Some(tracks) = doc
+        .pointer_mut("/timeline/tracks")
+        .and_then(|v| v.as_array_mut())
+    else {
+        return;
+    };
+    for track_entry in tracks {
+        let Some(track) = track_entry.get_mut(1) else {
+            continue;
+        };
+        let Some(clips) = track.get_mut("clips").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for clip_entry in clips {
+            let Some(clip) = clip_entry.get_mut(1) else {
+                continue;
+            };
+            let Some(mask) = clip.get_mut("mask").and_then(|v| v.as_object_mut()) else {
+                continue;
+            };
+            if mask.get("kind").and_then(|k| k.as_str()) != Some("mirror") {
+                continue;
+            }
+            migrate_mirror_band_size(mask);
+        }
+    }
+}
+
+fn migrate_mirror_band_size(mask: &mut serde_json::Map<String, serde_json::Value>) {
+    match mask.get_mut("size") {
+        None => {
+            mask.insert("size".into(), serde_json::json!([0.5, 1.0]));
+        }
+        Some(serde_json::Value::Array(arr)) if arr.len() == 2 => {
+            if size_axis_is_one(&arr[0]) {
+                arr[0] = serde_json::json!(0.5);
+            }
+        }
+        Some(serde_json::Value::Object(obj)) => {
+            if let Some(serde_json::Value::Array(kfs)) = obj.get_mut("kf") {
+                for kf in kfs {
+                    let Some(v) = kf.get_mut("v").and_then(|v| v.as_array_mut()) else {
+                        continue;
+                    };
+                    if v.len() == 2 && size_axis_is_one(&v[0]) {
+                        v[0] = serde_json::json!(0.5);
+                    }
+                }
+            }
+        }
+        Some(_) => {}
+    }
+}
+
+fn size_axis_is_one(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64().is_some_and(|x| (x - 1.0).abs() < 1e-6),
+        _ => false,
+    }
+}
 
 fn normalize_legacy_schema(schema: &mut ProjectSchema) {
     if schema.kind.is_empty() {

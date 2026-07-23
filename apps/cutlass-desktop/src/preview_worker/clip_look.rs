@@ -207,6 +207,15 @@ pub(super) fn mask_with_kind(engine: &Engine, clip: &str, kind: &str) -> Option<
         .clone()
         .unwrap_or_else(|| Mask::new(spec.kind));
     mask.kind = spec.kind;
+    // Switching onto Mirror with the historical full-layer size[0]=1 yields
+    // a no-op band — seed CapCut-parity half-width thickness instead.
+    if spec.kind == MaskKind::Mirror {
+        if let Some([w, h]) = mask.size.constant() {
+            if (w - 1.0).abs() < f32::EPSILON {
+                mask.size = Param::Constant([0.5, h]);
+            }
+        }
+    }
     Some(Some(mask))
 }
 

@@ -15,6 +15,10 @@ use super::{default_zero_param, is_false, is_zero_param, validate_unit_param};
 /// - [`MaskKind::Mirror`]: parallel **band** of thickness `size[0]` (layer
 ///   width fraction) centered on the mask center line at `rotation`; both
 ///   edges feather symmetrically; `invert` keeps outside the band.
+///   **Schema v3+:** fresh Mirror masks default to `size[0] = 0.5` (a visible
+///   half-width band). Pre-v3 files that stored the unused default `[1,1]`
+///   (legacy half-plane Mirror ignored size) are rewritten on load — see
+///   `migrate_v2_to_v3` in `persist.rs`.
 /// - [`MaskKind::Circle`] / [`MaskKind::Rectangle`] / [`MaskKind::Heart`] /
 ///   [`MaskKind::Star`]: closed shapes sized by `size`, rotated about center.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,7 +62,8 @@ pub struct Mask {
     pub center: Param<[f32; 2]>,
     /// Mask size as a fraction of the layer's size per axis. `[1,1]` covers the
     /// layer exactly (legacy behavior). For [`MaskKind::Mirror`], `size[0]` is
-    /// the band thickness (width fraction); `size[1]` is unused by the SDF.
+    /// the band thickness (width fraction; default `0.5` on [`Mask::new`]);
+    /// `size[1]` is unused by the SDF.
     #[serde(
         default = "default_size_param",
         skip_serializing_if = "is_default_size"
@@ -130,12 +135,20 @@ fn validate_rotation_value(value: f32) -> Result<(), ModelError> {
 
 impl Mask {
     /// A hard, non-inverted mask of `kind`.
+    ///
+    /// [`MaskKind::Mirror`] seeds `size[0] = 0.5` so a fresh band is visible
+    /// (thickness `1.0` covers the full layer width and looks like a no-op).
+    /// Other kinds keep the historical `[1, 1]` full-layer default.
     pub fn new(kind: MaskKind) -> Self {
+        let size = match kind {
+            MaskKind::Mirror => [0.5, 1.0],
+            _ => [1.0, 1.0],
+        };
         Self {
             kind,
             feather: Param::Constant(0.0),
             center: Param::Constant([0.0, 0.0]),
-            size: Param::Constant([1.0, 1.0]),
+            size: Param::Constant(size),
             rotation: Param::Constant(0.0),
             roundness: Param::Constant(0.0),
             invert: false,

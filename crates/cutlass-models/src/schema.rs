@@ -13,6 +13,9 @@ pub const PROJECT_SCHEMA_KIND: &str = "cutlass.project";
 ///   `{"kf": [...]}` keyframe curves instead of bare values. v2 readers
 ///   accept v1 files unchanged (constant params share the v1 shape); v1
 ///   builds refuse v2 files rather than half-parse keyframes.
+/// - **3** — Mirror mask is a parallel band (`size[0]` = thickness). v2
+///   files that stored the unused default `[1,1]` (legacy half-plane
+///   ignored size) are rewritten to `size[0] = 0.5` so they stay visible.
 ///
 /// Versioning policy (v1 roadmap M0 — the rules for changing the format):
 ///
@@ -27,7 +30,7 @@ pub const PROJECT_SCHEMA_KIND: &str = "cutlass.project";
 /// - **Files newer than this build are refused** on load with
 ///   [`ModelError::UnsupportedProjectSchema`](crate::ModelError) — never
 ///   guessed at.
-pub const PROJECT_SCHEMA_VERSION: u32 = 2;
+pub const PROJECT_SCHEMA_VERSION: u32 = 3;
 
 /// Identifies the serialized shape of a [`Project`](crate::Project).
 ///

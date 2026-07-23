@@ -52,6 +52,11 @@ Notes for the latest release. For previous releases, see the
 
 ### Changed
 
+- **Mirror mask is a parallel band.** CapCut-parity Mirror uses `size[0]` as
+  band thickness (default `0.5`) instead of a size-independent half-plane.
+  Project schema **v3** migrates older Mirror masks that still carried the
+  unused default `[1,1]` to a half-width band so they stay visible.
+
 - **Almost everything is keyframable.** Text style metrics, filter / LUT /
   adjust intensities, mask and chroma settings, and layer styles all route
   through the same keyframe system, with keyframe controls in every

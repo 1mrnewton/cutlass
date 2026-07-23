@@ -714,4 +714,6 @@ fn fit_scale(nw: f32, nh: f32, cw: f32, ch: f32) -> f32 {
 #[cfg(test)]
 mod per_char_tests;
 #[cfg(test)]
+mod raster_scale_tests;
+#[cfg(test)]
 mod tests;

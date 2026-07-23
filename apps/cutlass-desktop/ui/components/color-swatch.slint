@@ -168,11 +168,14 @@ export component CutlassColorSwatch inherits Rectangle {
 
     // Slint clamps PopupWindow into the window via place_popup — size the
     // shell for the full picker and prefer below the well.
+    // Height must bind the content layout's preferred-height (not the shell
+    // Rectangle's): a `height: 100%` shell reports a stale preferred size, so
+    // recent rows / presets / RGBA strips spill past the panel chrome.
     popup := PopupWindow {
         x: 0;
         y: root.height + 4px;
         width: 268px;
-        height: shell.preferred-height;
+        height: picker-col.preferred-height;
         close-policy: PopupClosePolicy.close-on-click-outside;
         forward-focus: popup-keys;
 
@@ -198,7 +201,7 @@ export component CutlassColorSwatch inherits Rectangle {
                     return reject;
                 }
 
-                VerticalLayout {
+                picker-col := VerticalLayout {
                     padding: AppStore.theme.metrics.spacing.md;
 
                     CutlassColorPicker {

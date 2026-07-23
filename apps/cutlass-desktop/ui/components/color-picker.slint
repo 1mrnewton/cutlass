@@ -85,6 +85,10 @@ export component CutlassColorPicker inherits Rectangle {
     );
 
     width: 244px;
+    // Preferred height tracks the column (SV square, strips, RGBA, optional
+    // Recent 0–2 rows, Presets) so hosting PopupWindows size their chrome
+    // to the real content instead of a stale shell preferred-height.
+    height: picker-body.preferred-height;
     background: transparent;
 
     pure function channel-u8(channel: float) -> int {
@@ -190,7 +194,7 @@ export component CutlassColorPicker inherits Rectangle {
         root.sync-from-current();
     }
 
-    VerticalLayout {
+    picker-body := VerticalLayout {
         spacing: AppStore.theme.metrics.spacing.sm;
         padding: 0px;
 

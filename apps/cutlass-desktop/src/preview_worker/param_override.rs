@@ -334,9 +334,7 @@ mod tests {
                 RationalTime::new(0, r),
             )
             .expect("clip");
-        project
-            .add_effect(clip, "gaussian_blur")
-            .expect("add blur");
+        project.add_effect(clip, "gaussian_blur").expect("add blur");
         let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
         let clip_s = clip.raw().to_string();
         let param = ClipParam::Effect {

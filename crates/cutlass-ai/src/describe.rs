@@ -365,11 +365,19 @@ fn wire_easing_name(easing: Easing) -> Option<String> {
     }
 }
 
+/// Stored params are `f32`; wire / describe JSON is `f64`. A raw
+/// `f64::from(1.3f32)` expands to `1.2999999523162842`, which the model
+/// would echo back. Prefer the shortest decimal that round-trips through
+/// `f32` Display so `1.3` stays `1.3`.
+fn wire_f64(v: f32) -> f64 {
+    format!("{v}").parse().unwrap_or(f64::from(v))
+}
+
 fn scale_wire_value(s: Scale2) -> serde_json::Value {
     if s.is_uniform() {
-        serde_json::json!(f64::from(s.x))
+        serde_json::json!(wire_f64(s.x))
     } else {
-        serde_json::json!([f64::from(s.x), f64::from(s.y)])
+        serde_json::json!([wire_f64(s.x), wire_f64(s.y)])
     }
 }
 
@@ -413,7 +421,7 @@ fn summarize_clip_keyframes(
         &clip.transform.position,
         start,
         rate,
-        |v| serde_json::json!([f64::from(v[0]), f64::from(v[1])]),
+        |v| serde_json::json!([wire_f64(v[0]), wire_f64(v[1])]),
     );
     push_keyframes(
         &mut map,
@@ -421,7 +429,7 @@ fn summarize_clip_keyframes(
         &clip.transform.anchor_point,
         start,
         rate,
-        |v| serde_json::json!([f64::from(v[0]), f64::from(v[1])]),
+        |v| serde_json::json!([wire_f64(v[0]), wire_f64(v[1])]),
     );
     push_keyframes(
         &mut map,
@@ -437,7 +445,7 @@ fn summarize_clip_keyframes(
         &clip.transform.rotation,
         start,
         rate,
-        |v| serde_json::json!(f64::from(v)),
+        |v| serde_json::json!(wire_f64(v)),
     );
     push_keyframes(
         &mut map,
@@ -445,13 +453,13 @@ fn summarize_clip_keyframes(
         &clip.transform.opacity,
         start,
         rate,
-        |v| serde_json::json!(f64::from(v)),
+        |v| serde_json::json!(wire_f64(v)),
     );
     push_keyframes(&mut map, "volume", &clip.volume, start, rate, |v| {
-        serde_json::json!(f64::from(v))
+        serde_json::json!(wire_f64(v))
     });
     push_keyframes(&mut map, "pan", &clip.pan, start, rate, |v| {
-        serde_json::json!(f64::from(v))
+        serde_json::json!(wire_f64(v))
     });
     (!map.is_empty()).then_some(map)
 }
@@ -628,7 +636,7 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                         (!clip.transform.position.is_animated())
                             .then(|| {
                                 let p = clip.transform.position.sample(0);
-                                (p != [0.0, 0.0]).then_some([f64::from(p[0]), f64::from(p[1])])
+                                (p != [0.0, 0.0]).then_some([wire_f64(p[0]), wire_f64(p[1])])
                             })
                             .flatten()
                     },
@@ -636,7 +644,7 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                         (!clip.transform.anchor_point.is_animated())
                             .then(|| {
                                 let a = clip.transform.anchor_point.sample(0);
-                                (a != [0.5, 0.5]).then_some([f64::from(a[0]), f64::from(a[1])])
+                                (a != [0.5, 0.5]).then_some([wire_f64(a[0]), wire_f64(a[1])])
                             })
                             .flatten()
                     },
@@ -646,9 +654,9 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                                 let s = clip.transform.scale.sample(0);
                                 (s != Scale2::uniform(1.0)).then(|| {
                                     if s.is_uniform() {
-                                        WireScale::Uniform(f64::from(s.x))
+                                        WireScale::Uniform(wire_f64(s.x))
                                     } else {
-                                        WireScale::Axes([f64::from(s.x), f64::from(s.y)])
+                                        WireScale::Axes([wire_f64(s.x), wire_f64(s.y)])
                                     }
                                 })
                             })
@@ -658,7 +666,7 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                         (!clip.transform.rotation.is_animated())
                             .then(|| {
                                 let r = clip.transform.rotation.sample(0);
-                                (r != 0.0).then_some(f64::from(r))
+                                (r != 0.0).then_some(wire_f64(r))
                             })
                             .flatten()
                     },
@@ -666,7 +674,7 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                         (!clip.transform.opacity.is_animated())
                             .then(|| {
                                 let o = clip.transform.opacity.sample(0);
-                                (o != 1.0).then_some(f64::from(o))
+                                (o != 1.0).then_some(wire_f64(o))
                             })
                             .flatten()
                     },

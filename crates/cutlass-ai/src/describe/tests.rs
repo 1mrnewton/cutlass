@@ -296,3 +296,22 @@ fn scale_keyframes_use_wire_scale_shape() {
     assert_eq!(scale[1].value, serde_json::json!([1.5, 0.5]));
     assert_eq!(scale[1].easing.as_deref(), Some("ease_in"));
 }
+
+#[test]
+fn describe_round_trips_non_dyadic_scale_through_f32() {
+    // 1.3 is not exact in f32; raw f64::from would expand to 1.2999… and
+    // teach the model the wrong wire value. Describe must keep 1.3.
+    let (mut project, clip_id) = media_clip_project();
+    {
+        let clip = project.timeline_mut().clip_mut(clip_id).unwrap();
+        clip.transform
+            .scale
+            .set_keyframe(0, Scale2::uniform(1.3), Easing::Linear);
+    }
+    let summary = summarize(&project);
+    let scale = &summary.tracks[0].clips[0]
+        .keyframes
+        .as_ref()
+        .expect("keyframes")["scale"];
+    assert_eq!(scale[0].value, serde_json::json!(1.3));
+}

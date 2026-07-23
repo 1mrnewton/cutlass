@@ -28,8 +28,8 @@ use cutlass_commands::EditOutcome;
 use crate::describe::{EditorContext, ProjectSummary};
 use crate::extend::AgentExtensions;
 use crate::provider::{
-    ChatProvider, ChatRequest, FinishReason, ImagePart, Message, ProviderError, ProviderStreamEvent,
-    TokenUsage,
+    ChatProvider, ChatRequest, FinishReason, ImagePart, Message, ProviderError,
+    ProviderStreamEvent, TokenUsage,
 };
 use crate::tools::{HostToolSpec, ToolHost, is_host_tool_name};
 use crate::wire::{self, WireCommand};
@@ -480,21 +480,23 @@ pub fn run_prompt_with_host(
     if !config.dry_run {
         bridge.begin_group();
     }
-    let abort =
-        |bridge: &mut dyn EngineBridge, actions: Vec<ActionLogEntry>, usage: TokenUsage, reason: String| {
-            if !config.dry_run {
-                bridge.rollback_group();
-            }
-            PromptOutcome {
-                text: String::new(),
-                actions,
-                // Rolled back ⇒ no phases survive to group.
-                phase_breaks: Vec::new(),
-                status: PromptStatus::Aborted(reason),
-                turn_messages: Vec::new(),
-                usage,
-            }
-        };
+    let abort = |bridge: &mut dyn EngineBridge,
+                 actions: Vec<ActionLogEntry>,
+                 usage: TokenUsage,
+                 reason: String| {
+        if !config.dry_run {
+            bridge.rollback_group();
+        }
+        PromptOutcome {
+            text: String::new(),
+            actions,
+            // Rolled back ⇒ no phases survive to group.
+            phase_breaks: Vec::new(),
+            status: PromptStatus::Aborted(reason),
+            turn_messages: Vec::new(),
+            usage,
+        }
+    };
 
     for _turn in 0..config.max_turns {
         enforce_image_budget(&mut messages, config.max_images, config.max_image_bytes);

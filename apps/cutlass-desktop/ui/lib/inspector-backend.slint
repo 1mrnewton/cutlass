@@ -204,6 +204,15 @@ export global InspectorBackend {
     // `index`'s value, and re-commits. One undoable edit.
     callback set-speed-curve-point(clip-id: string, index: int, value: float);
 
+    // Scrub-style preview tick for a speed-ramp handle drag: maps the
+    // handle's normalized `0..=1000` tick onto the clip's timeline span.
+    // No project mutation — callers feed this to `EditorStore.on-hover-preview`.
+    pure callback speed-ramp-preview-tick(
+        clip-start: int,
+        clip-duration: int,
+        handle-norm-tick: int,
+    ) -> int;
+
     // Set a clip's audio mix (CapCut volume + fades, M1): gain multiplier
     // (0 mutes, 1 unchanged) plus fade in/out durations in seconds. A video
     // clip carries its own sound, so the edit lands on it directly — unless its

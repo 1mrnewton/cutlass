@@ -15,7 +15,7 @@ import {
 import { InspectorBackend, ScalarParamSample } from "../../lib/inspector-backend.slint";
 import { Clip, TextClipStyle } from "../../models/index.slint";
 import { AppState } from "../../state.slint";
-import { LabelCell } from "inspector-widgets.slint";
+import { LabelCell, SliderRow } from "inspector-widgets.slint";
 import { KeyframeControl } from "keyframe-control.slint";
 
 export component IconButton inherits Rectangle {
@@ -420,65 +420,85 @@ export component TextStyleRows inherits VerticalLayout {
             }
         }
 
-        HorizontalLayout {
-            spacing: AppStore.theme.metrics.spacing.md;
-
-            LabelCell {
-                label: "Spacing";
+        // Letter / line spacing: live SliderRows through the generic
+        // ClipParam override lane (preview-param → ParamOverride). Release
+        // commits one edit (constant or playhead keyframe) then clears —
+        // same ordering as volume/pan.
+        SliderRow {
+            label: "Letter";
+            suffix: "px";
+            value: root.letter-spacing-sample.value;
+            minimum: -100;
+            maximum: 200;
+            reset-value: 0;
+            kf-visible: true;
+            kf: root.letter-spacing-sample.row;
+            kf-can-toggle: root.playhead-inside;
+            preview(v) => {
+                InspectorBackend.preview-param(
+                    model.id, "text_letter_spacing", v, 0, TimelineStore.playhead-tick);
             }
-
-            NumberBox {
-                prefix: "C";
-                show-prefix-icon: true;
-                prefix-icon: @image-url("../../../../../assets/icon/text/letter-spacing.svg");
-                accessibility-label: "Character spacing";
-                value: root.letter-spacing-sample.value;
-                commit(v) => {
-                    root.begin-edit();
-                    root.style.letter-spacing = v;
-                    root.commit-style();
-                }
-            }
-
-            KeyframeControl {
-                state: root.letter-spacing-sample.row;
-                can-toggle: root.playhead-inside;
-                toggle => {
-                    root.toggle-kf("text_letter_spacing", root.letter-spacing-sample.row.on-keyframe, root.letter-spacing-sample.value);
-                }
-                jump(tick) => { TimelineStore.playhead-tick = tick; }
-                set-easing(easing) => {
-                    root.ease-kf("text_letter_spacing", easing, root.letter-spacing-sample.value);
-                }
-            }
-
-            NumberBox {
-                prefix: "L";
-                show-prefix-icon: true;
-                prefix-icon: @image-url("../../../../../assets/icon/text/line-height.svg");
-                accessibility-label: "Line spacing percent";
-                value: root.line-spacing-sample.value * 100;
-                commit(v) => {
-                    root.begin-edit();
-                    root.style.line-spacing = max(v, 10) / 100;
-                    root.commit-style();
+            commit(v) => {
+                if (root.letter-spacing-sample.row.animated) {
+                    if (root.playhead-inside) {
+                        InspectorBackend.set-param-keyframe(
+                            model.id, "text_letter_spacing", TimelineStore.playhead-tick, v, 0, 0);
+                    } else {
+                        InspectorBackend.clear-param-override(
+                            model.id, TimelineStore.playhead-tick);
+                    }
+                } else {
+                    InspectorBackend.set-param-constant(model.id, "text_letter_spacing", v, 0);
                 }
             }
+            kf-toggle => {
+                root.toggle-kf(
+                    "text_letter_spacing",
+                    root.letter-spacing-sample.row.on-keyframe,
+                    root.letter-spacing-sample.value);
+            }
+            kf-set-easing(easing) => {
+                root.ease-kf("text_letter_spacing", easing, root.letter-spacing-sample.value);
+            }
+        }
 
-            KeyframeControl {
-                state: root.line-spacing-sample.row;
-                can-toggle: root.playhead-inside;
-                toggle => {
-                    root.toggle-kf("text_line_spacing", root.line-spacing-sample.row.on-keyframe, root.line-spacing-sample.value);
-                }
-                jump(tick) => { TimelineStore.playhead-tick = tick; }
-                set-easing(easing) => {
-                    root.ease-kf("text_line_spacing", easing, root.line-spacing-sample.value);
+        SliderRow {
+            label: "Line";
+            suffix: "%";
+            value: root.line-spacing-sample.value * 100;
+            minimum: 50;
+            maximum: 300;
+            reset-value: 120;
+            kf-visible: true;
+            kf: root.line-spacing-sample.row;
+            kf-can-toggle: root.playhead-inside;
+            preview(v) => {
+                InspectorBackend.preview-param(
+                    model.id, "text_line_spacing", max(v, 10) / 100, 0, TimelineStore.playhead-tick);
+            }
+            commit(v) => {
+                if (root.line-spacing-sample.row.animated) {
+                    if (root.playhead-inside) {
+                        InspectorBackend.set-param-keyframe(
+                            model.id, "text_line_spacing", TimelineStore.playhead-tick,
+                            max(v, 10) / 100, 0, 0);
+                    } else {
+                        InspectorBackend.clear-param-override(
+                            model.id, TimelineStore.playhead-tick);
+                    }
+                } else {
+                    InspectorBackend.set-param-constant(
+                        model.id, "text_line_spacing", max(v, 10) / 100, 0);
                 }
             }
-
-            Rectangle {
-                horizontal-stretch: 1;
+            kf-toggle => {
+                root.toggle-kf(
+                    "text_line_spacing",
+                    root.line-spacing-sample.row.on-keyframe,
+                    root.line-spacing-sample.value);
+            }
+            kf-set-easing(easing) => {
+                root.ease-kf("text_line_spacing", easing, root.line-spacing-sample.value);
             }
         }
 

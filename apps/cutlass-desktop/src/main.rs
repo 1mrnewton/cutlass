@@ -14,6 +14,7 @@ mod cache_registry;
 mod cloud;
 mod download_safety;
 mod drafts;
+mod drag_preview;
 mod external;
 mod graph_editor;
 mod inspector;

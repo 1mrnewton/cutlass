@@ -355,6 +355,8 @@ component SpeedRampInspector inherits VerticalLayout {
 
         // Draggable control-point handles. `tick` is 0..=1000 across the span;
         // dragging vertically retunes that point's multiplier on release.
+        // While dragging, scrub-preview the frame under the handle (tentative
+        // speed would re-derive clip duration — out of scope mid-drag).
         for kf[i] in root.model.kf-speed-curve: Rectangle {
             property <bool> dragging: false;
             // Multiplier captured off the pointer while dragging.
@@ -382,13 +384,23 @@ component SpeedRampInspector inherits VerticalLayout {
                             root.disp-max * (1 - (parent.y + self.mouse-y) / graph.height),
                             root.drag-min,
                             root.disp-max);
+                        EditorStore.on-hover-preview(
+                            InspectorBackend.speed-ramp-preview-tick(
+                                root.model.timeline-start.value,
+                                root.model.source-range.duration.value,
+                                kf.tick));
                     }
                 }
                 pointer-event(ev) => {
                     if (ev.kind == PointerEventKind.up && parent.dragging) {
                         parent.dragging = false;
+                        EditorStore.on-hover-preview-ended();
                         InspectorBackend.set-speed-curve-point(root.model.id, i, parent.drag-value);
                         AppState.refocus-shortcuts();
+                    }
+                    if (ev.kind == PointerEventKind.cancel && parent.dragging) {
+                        parent.dragging = false;
+                        EditorStore.on-hover-preview-ended();
                     }
                 }
             }

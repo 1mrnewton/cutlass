@@ -74,4 +74,9 @@ export global EffectsBackend {
     // Set the window length (timeline ticks) of the transition after
     // `clip-id`.
     callback set-transition(clip-id: string, duration: int);
+
+    // Scrub-style preview tick while resizing a transition pill: the cut
+    // (window midpoint). No project mutation — callers feed this to
+    // `EditorStore.on-hover-preview` during the drag.
+    pure callback transition-preview-tick(cut-tick: int) -> int;
 }

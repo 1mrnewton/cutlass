@@ -151,6 +151,16 @@ pub(crate) fn wire_inspector(
         .on_set_speed_curve_point(move |clip_id, index, value| {
             set_curve_point_handle.set_speed_curve_point(clip_id.to_string(), index, value);
         });
+    app.global::<InspectorBackend>().on_speed_ramp_preview_tick(
+        |clip_start, clip_duration, handle_norm_tick| {
+            crate::drag_preview::speed_ramp_handle_preview_tick(
+                i64::from(clip_start),
+                i64::from(clip_duration),
+                i64::from(handle_norm_tick),
+            )
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+        },
+    );
     let set_audio_handle = preview_worker.handle();
     app.global::<InspectorBackend>().on_set_clip_audio(
         move |clip_id, volume, fade_in_s, fade_out_s| {
@@ -727,6 +737,11 @@ pub(crate) fn wire_inspector(
     app.global::<EffectsBackend>()
         .on_set_transition(move |clip_id, duration| {
             set_transition_handle.set_transition(clip_id.to_string(), i64::from(duration));
+        });
+    app.global::<EffectsBackend>()
+        .on_transition_preview_tick(|cut_tick| {
+            crate::drag_preview::transition_midpoint_preview_tick(i64::from(cut_tick))
+                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
         });
 
     // Enumerate system fonts off the UI thread (the scan is slow) and feed

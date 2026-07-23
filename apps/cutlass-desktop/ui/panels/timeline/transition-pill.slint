@@ -1,5 +1,5 @@
 import { CutlassText } from "../../components/index.slint";
-import { AppStore } from "../../store/index.slint";
+import { AppStore, EditorStore } from "../../store/index.slint";
 import { TimelineStore } from "../../store/timeline-store.slint";
 import { EffectsBackend } from "../../lib/index.slint";
 import { TransitionView } from "../../models/index.slint";
@@ -9,7 +9,9 @@ import { TransitionView } from "../../models/index.slint";
 // and the right edge drags to resize the window symmetrically (the cut stays
 // put; both clips give/take equally). The drag is ephemeral local state and
 // commits one undoable `SetTransition` on release; while dragging, the pill
-// previews the new width. Reads `zoom` from the store so it tracks the ruler.
+// previews the new width and scrub-previews the cut (transition midpoint) —
+// a faithful tentative-duration override is not wired (would need resolve
+// support mid-drag). Reads `zoom` from the store so it tracks the ruler.
 export component TransitionPill inherits Rectangle {
     in property <TransitionView> model;
     // Vertical span of the lane row this pill sits on.
@@ -72,11 +74,15 @@ export component TransitionPill inherits Rectangle {
                     root.press-duration = root.model.duration-ticks;
                     root.preview-duration = root.model.duration-ticks;
                     root.press-x = self.absolute-position.x + self.mouse-x;
+                    EditorStore.on-hover-preview(
+                        EffectsBackend.transition-preview-tick(root.model.cut-tick));
                 }
                 if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
                     if root.drag-active {
                         root.drag-active = false;
-                        if root.preview-duration != root.model.duration-ticks {
+                        EditorStore.on-hover-preview-ended();
+                        if event.kind == PointerEventKind.up
+                            && root.preview-duration != root.model.duration-ticks {
                             EffectsBackend.set-transition(root.model.left-clip-id, root.preview-duration);
                         }
                     }
@@ -89,6 +95,10 @@ export component TransitionPill inherits Rectangle {
                 }
                 root.preview-duration = max(1, root.press-duration + round(
                     2 * (self.absolute-position.x + self.mouse-x - root.press-x) / root.zoom / 1px));
+                // Scrub-refresh the cut each move so the preview stays on the
+                // transition midpoint while the pill width tracks the drag.
+                EditorStore.on-hover-preview(
+                    EffectsBackend.transition-preview-tick(root.model.cut-tick));
             }
         }
     }

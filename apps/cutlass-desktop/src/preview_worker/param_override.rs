@@ -771,4 +771,88 @@ mod tests {
             .sample(20);
         assert!((committed - 0.8).abs() < 1e-5);
     }
+
+    #[test]
+    fn text_spacing_preview_then_commit_clears_override() {
+        use cutlass_commands::{Command, EditCommand};
+        use cutlass_models::{Generator, TextParam, TextStyle, TrackKind};
+        use cutlass_render::LayerSource;
+
+        let r = Rational::FPS_24;
+        let mut project = Project::new("spacing-lane", r);
+        let track = project.add_track(TrackKind::Text, "T1");
+        let clip = project
+            .add_generated(
+                track,
+                Generator::Text {
+                    content: "Hi".into(),
+                    style: TextStyle::default(),
+                },
+                TimeRange::at_rate(0, 48, r),
+            )
+            .expect("text");
+        let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+        let clip_s = clip.raw().to_string();
+        let letter = ClipParam::Text {
+            param: TextParam::LetterSpacing,
+        };
+        let line = ClipParam::Text {
+            param: TextParam::LineSpacing,
+        };
+        let rev_before = engine.revision();
+        let could_undo = engine.can_undo();
+
+        // Drag ticks: session overrides only (letter then line, latest wins
+        // per param — same coalesce semantics as volume/crop).
+        apply_param_override(&mut engine, &clip_s, letter, ParamValue::Scalar(4.0), None);
+        apply_param_override(&mut engine, &clip_s, letter, ParamValue::Scalar(12.0), None);
+        apply_param_override(&mut engine, &clip_s, line, ParamValue::Scalar(1.8), None);
+        assert!(engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before);
+        assert_eq!(engine.can_undo(), could_undo);
+
+        let live = resolve_with(
+            engine.project(),
+            RationalTime::new(0, r),
+            ResolveOverrides {
+                params: Some(engine.param_overrides()),
+                ..ResolveOverrides::default()
+            },
+        )
+        .expect("live");
+        let LayerSource::Text { style, .. } = &live.layers[0].source else {
+            panic!("expected text layer");
+        };
+        assert!((style.letter_spacing - 12.0).abs() < 1e-3);
+        // line_height = font_size * line_spacing; default size 90 → 162.
+        assert!((style.line_height - 90.0 * 1.8).abs() < 1e-2);
+
+        // Release: clear then one SetParamConstant per field.
+        clear_param_override(&mut engine, &clip_s, letter, None);
+        clear_param_override(&mut engine, &clip_s, line, None);
+        engine
+            .apply(Command::Edit(EditCommand::SetParamConstant {
+                clip,
+                param: letter,
+                value: ParamValue::Scalar(12.0),
+            }))
+            .expect("commit letter");
+        engine
+            .apply(Command::Edit(EditCommand::SetParamConstant {
+                clip,
+                param: line,
+                value: ParamValue::Scalar(1.8),
+            }))
+            .expect("commit line");
+        assert!(!engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before + 2);
+        assert!(engine.can_undo());
+
+        let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+        let LayerSource::Text { style, .. } = &plain.layers[0].source else {
+            panic!("expected text layer");
+        };
+        assert!((style.letter_spacing - 12.0).abs() < 1e-3);
+        assert!((style.line_height - 90.0 * 1.8).abs() < 1e-2);
+    }
 }

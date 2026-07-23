@@ -77,6 +77,15 @@ export component StylesInspector inherits VerticalLayout {
         InspectorBackend.preview-clip-style(model.id, key, value, TimelineStore.playhead-tick);
     }
 
+    function preview-color(key: string, c: color) {
+        InspectorBackend.preview-clip-style-color(
+            model.id, key, c.red, c.green, c.blue, c.alpha, TimelineStore.playhead-tick);
+    }
+
+    function cancel-color-preview() {
+        InspectorBackend.clear-clip-styles(TimelineStore.playhead-tick);
+    }
+
     SectionHeader {
         title: "Layer styles";
     }
@@ -103,8 +112,14 @@ export component StylesInspector inherits VerticalLayout {
 
         CutlassColorSwatch {
             value: model.style-shadow-color;
+            preview(c) => {
+                root.preview-color("style_shadow_color", c);
+            }
             changed(c) => {
                 root.set-color("style_shadow_color", c);
+            }
+            cancelled => {
+                root.cancel-color-preview();
             }
         }
 
@@ -223,8 +238,14 @@ export component StylesInspector inherits VerticalLayout {
 
         CutlassColorSwatch {
             value: model.style-glow-color;
+            preview(c) => {
+                root.preview-color("style_glow_color", c);
+            }
             changed(c) => {
                 root.set-color("style_glow_color", c);
+            }
+            cancelled => {
+                root.cancel-color-preview();
             }
         }
 
@@ -305,8 +326,14 @@ export component StylesInspector inherits VerticalLayout {
 
         CutlassColorSwatch {
             value: model.style-outline-color;
+            preview(c) => {
+                root.preview-color("style_outline_color", c);
+            }
             changed(c) => {
                 root.set-color("style_outline_color", c);
+            }
+            cancelled => {
+                root.cancel-color-preview();
             }
         }
 
@@ -361,8 +388,14 @@ export component StylesInspector inherits VerticalLayout {
 
         CutlassColorSwatch {
             value: model.style-background-color;
+            preview(c) => {
+                root.preview-color("style_background_color", c);
+            }
             changed(c) => {
                 root.set-color("style_background_color", c);
+            }
+            cancelled => {
+                root.cancel-color-preview();
             }
         }
 

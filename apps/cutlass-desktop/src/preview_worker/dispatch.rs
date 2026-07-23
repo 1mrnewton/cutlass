@@ -201,6 +201,31 @@ pub(super) fn dispatch(
         WorkerMsg::SetChromaColor { clip, rgb } => {
             set_chroma_color_and_publish(engine, &clip, rgb, ui)
         }
+        // Interleave fallback — the dedicated loop arm coalesces the common case.
+        WorkerMsg::PreviewChromaColor { clip, rgb, tick } => {
+            apply_chroma_color_override(engine, &clip, rgb);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        WorkerMsg::ClearChromaColorOverride { tick } => {
+            engine.set_chroma_color_override(None);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
         WorkerMsg::SetClipFilter {
             clip,
             filter_id,

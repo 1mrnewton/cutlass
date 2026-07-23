@@ -244,6 +244,8 @@ pub(super) fn set_chroma_and_publish(
         error!(clip, "set-chroma ignored: unparsable clip id");
         return;
     };
+    // Drop a live chroma-color override so enable/disable never flashes it.
+    engine.set_chroma_color_override(None);
     let enabled = chroma.is_some();
     if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipChroma {
         clip: clip_id,
@@ -275,8 +277,29 @@ pub(super) fn set_chroma_color_and_publish(
         error!(clip, "set-chroma-color ignored: chroma off");
         return;
     };
+    // Clear a live chroma-color override before the commit so the next frame
+    // never flashes the stale drag value.
+    engine.set_chroma_color_override(None);
     chroma.rgb = rgb;
     set_chroma_and_publish(engine, clip, Some(chroma), ui);
+}
+
+/// Install a session-only chroma RGB override for live color-well preview.
+pub(super) fn apply_chroma_color_override(engine: &mut Engine, clip: &str, rgb: [u8; 3]) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "chroma-color preview ignored: unparsable clip id");
+        return;
+    };
+    if engine
+        .project()
+        .clip(clip_id)
+        .and_then(|c| c.chroma_key.as_ref())
+        .is_none()
+    {
+        error!(clip, "chroma-color preview ignored: chroma off");
+        return;
+    }
+    engine.set_chroma_color_override(Some((clip_id, rgb)));
 }
 
 /// Enable/disable one layer-style block, merging against committed styles.

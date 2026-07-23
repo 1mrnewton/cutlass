@@ -35,6 +35,7 @@ export global EffectsBackend {
     );
 
     // Set a color effect parameter (`rgba` channels 0..=255).
+    // Also clears any live override for that effect param.
     callback set-effect-param-color(
         clip-id: string,
         index: int,
@@ -43,6 +44,21 @@ export global EffectsBackend {
         g: int,
         b: int,
         a: int,
+    );
+
+    // Live color effect-param preview during a swatch edit. `param-index` is
+    // the catalog slot (same order as the projected `EffectParamView` list).
+    // Session-only `ClipParam::Effect` override; release commits via
+    // `set-effect-param-color`.
+    callback preview-effect-param-color(
+        clip-id: string,
+        index: int,
+        param-index: int,
+        r: int,
+        g: int,
+        b: int,
+        a: int,
+        tick: int,
     );
 
     // Set a vec2 effect parameter (`[x, y]`).

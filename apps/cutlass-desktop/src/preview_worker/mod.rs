@@ -88,9 +88,6 @@ use render::*;
 use rpc::*;
 use timeline_ops::*;
 use types::*;
-// Testable seam exercised directly by `preview_worker::tests`.
-#[allow(unused_imports)]
-use invalidate::message_invalidates_preview;
 
 // Re-exported for `agent::tests`, which replays plans directly against a live
 // engine; unused outside `#[cfg(test)]` builds since `agent_bridge` itself

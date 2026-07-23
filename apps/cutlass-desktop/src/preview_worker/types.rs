@@ -375,10 +375,22 @@ pub(super) enum WorkerMsg {
         chroma: Option<ChromaKey>,
     },
     /// Set chroma-key RGB on an already-enabled chroma clip. Worker merges
-    /// against committed chroma. One undoable history entry.
+    /// against committed chroma. One undoable history entry. Clears any live
+    /// chroma-color override first.
     SetChromaColor {
         clip: String,
         rgb: [u8; 3],
+    },
+    /// Live chroma-key RGB preview during a color-well edit. Session-only;
+    /// bursts coalesce to the newest RGB per clip.
+    PreviewChromaColor {
+        clip: String,
+        rgb: [u8; 3],
+        tick: i64,
+    },
+    /// Drop the chroma-color override and re-render `tick` from committed state.
+    ClearChromaColorOverride {
+        tick: i64,
     },
     /// Set (or clear) a visual clip's filter preset. `filter_id == ""`
     /// clears; intensity is normalized 0..=1. One undoable history entry.

@@ -67,6 +67,8 @@ pub struct Engine {
     motion_blur_override: Option<(ClipId, MotionBlur)>,
     /// Live look-animation knobs for one clip/slot (speed/intensity/stagger).
     animation_override: Option<(ClipId, AnimationSlot, AnimationRef)>,
+    /// Live chroma-key RGB for one clip (inspector color-well preview).
+    chroma_color_override: Option<(ClipId, [u8; 3])>,
 }
 
 impl Engine {
@@ -94,6 +96,7 @@ impl Engine {
             param_overrides: ParamOverrides::new(),
             motion_blur_override: None,
             animation_override: None,
+            chroma_color_override: None,
         })
     }
 
@@ -198,6 +201,7 @@ impl Engine {
         self.param_overrides.clear();
         self.motion_blur_override = None;
         self.animation_override = None;
+        self.chroma_color_override = None;
     }
 
     /// Replace the session with `project` (e.g. the AI-agent sandbox replaying
@@ -322,6 +326,18 @@ impl Engine {
         self.animation_override = value;
     }
 
+    /// Set (or clear with `None`) the live chroma-key RGB for one clip —
+    /// the color-well analogue of
+    /// [`set_transform_override`](Self::set_transform_override).
+    pub fn set_chroma_color_override(&mut self, value: Option<(ClipId, [u8; 3])>) {
+        self.chroma_color_override = value;
+    }
+
+    /// Read-only view of the live chroma-color override (tests / diagnostics).
+    pub fn chroma_color_override(&self) -> Option<(ClipId, [u8; 3])> {
+        self.chroma_color_override
+    }
+
     /// Set (or replace) one live param value for `clip` — the generic
     /// inspector-slider analogue of
     /// [`set_transform_override`](Self::set_transform_override). Uses the same
@@ -355,6 +371,7 @@ impl Engine {
             || !self.param_overrides.is_empty()
             || self.motion_blur_override.is_some()
             || self.animation_override.is_some()
+            || self.chroma_color_override.is_some()
     }
 
     /// Stage timings of the most recent successful preview/export render.
@@ -411,6 +428,7 @@ impl Engine {
                 .animation_override
                 .as_ref()
                 .map(|(id, slot, anim)| (*id, *slot, anim)),
+            chroma_color: self.chroma_color_override,
         };
         Ok(self
             .renderer
@@ -441,6 +459,7 @@ impl Engine {
                 .animation_override
                 .as_ref()
                 .map(|(id, slot, anim)| (*id, *slot, anim)),
+            chroma_color: self.chroma_color_override,
         };
         Ok(self.renderer.render_frame_fit_with(
             &self.project,
@@ -490,6 +509,7 @@ impl Engine {
                 .animation_override
                 .as_ref()
                 .map(|(id, slot, anim)| (*id, *slot, anim)),
+            chroma_color: self.chroma_color_override,
         };
         Ok(self
             .renderer
@@ -519,6 +539,7 @@ impl Engine {
                 .animation_override
                 .as_ref()
                 .map(|(id, slot, anim)| (*id, *slot, anim)),
+            chroma_color: self.chroma_color_override,
         };
         Ok(self.renderer.render_frame_fit_into_with(
             &self.project,

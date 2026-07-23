@@ -70,8 +70,16 @@ export component ChromaInspector inherits VerticalLayout {
 
         CutlassColorSwatch {
             value: model.chroma-color;
+            enable-alpha: false;
+            preview(c) => {
+                InspectorBackend.preview-clip-chroma-color(
+                    model.id, c.red, c.green, c.blue, TimelineStore.playhead-tick);
+            }
             changed(c) => {
                 InspectorBackend.set-clip-chroma-color(model.id, c.red, c.green, c.blue);
+            }
+            cancelled => {
+                InspectorBackend.clear-clip-chroma-color(TimelineStore.playhead-tick);
             }
         }
 

@@ -354,6 +354,17 @@ impl WorkerHandle {
         let _ = self.tx.send(WorkerMsg::SetChromaColor { clip, rgb });
     }
 
+    /// Live chroma-key RGB preview (color-well drag).
+    pub fn preview_chroma_color(&self, clip: String, rgb: [u8; 3], tick: i64) {
+        let _ = self
+            .tx
+            .send(WorkerMsg::PreviewChromaColor { clip, rgb, tick });
+    }
+
+    pub fn clear_chroma_color_override(&self, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::ClearChromaColorOverride { tick });
+    }
+
     pub fn set_clip_filter(&self, clip: String, filter_id: String, intensity: f32) {
         let _ = self.tx.send(WorkerMsg::SetClipFilter {
             clip,

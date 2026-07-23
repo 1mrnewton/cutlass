@@ -70,6 +70,9 @@ pub struct ResolveOverrides<'a> {
     pub motion_blur: Option<(ClipId, MotionBlur)>,
     /// Live look-animation knobs for one clip/slot (speed/intensity/stagger).
     pub animation: Option<(ClipId, AnimationSlot, &'a AnimationRef)>,
+    /// Live chroma-key RGB for one clip (color-well drag). Strength/shadow
+    /// still sample from the (possibly param-overlaid) clip.
+    pub chroma_color: Option<(ClipId, [u8; 3])>,
 }
 
 /// Identity transform used when rasterizing the gesture sprite: the clip's
@@ -428,10 +431,16 @@ fn resolve_clip(
             invert: mask.invert,
         }
     });
-    let chroma_key = clip.chroma_key.as_ref().map(|chroma| SceneChromaKey {
-        rgb: chroma.rgb,
-        strength: chroma.strength.sample(local_tick),
-        shadow: chroma.shadow.sample(local_tick),
+    let chroma_key = clip.chroma_key.as_ref().map(|chroma| {
+        let rgb = match overrides.chroma_color {
+            Some((id, rgb)) if id == clip.id => rgb,
+            _ => chroma.rgb,
+        };
+        SceneChromaKey {
+            rgb,
+            strength: chroma.strength.sample(local_tick),
+            shadow: chroma.shadow.sample(local_tick),
+        }
     });
     // Isotropic: stroke / blur / style ref-px → canvas px. Geometric mean
     // keeps widths stable under uniform scale and splits the difference

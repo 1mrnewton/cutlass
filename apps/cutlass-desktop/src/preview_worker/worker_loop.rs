@@ -246,6 +246,14 @@ fn worker_loop(
                             apply_param_override(engine, &clip, param, value, Some(&ui.audio));
                             tick = at;
                         }
+                        WorkerMsg::PreviewChromaColor {
+                            clip,
+                            rgb,
+                            tick: at,
+                        } => {
+                            apply_chroma_color_override(engine, &clip, rgb);
+                            tick = at;
+                        }
                         other => dispatch(
                             engine,
                             &mut clipboard,
@@ -644,6 +652,74 @@ fn worker_loop(
                 if pending {
                     apply_styles_preview_delta(engine, &clip, &key, value_x, value_y, tick);
                 }
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+            }
+            // Chroma-key color-well drags: coalesce to the newest RGB.
+            WorkerMsg::PreviewChromaColor {
+                mut clip,
+                mut rgb,
+                mut tick,
+            } => {
+                let mut pending = true;
+                while let Ok(next) = req_rx.try_recv() {
+                    match next {
+                        WorkerMsg::Frame(latest) => tick = latest,
+                        WorkerMsg::PreviewChromaColor {
+                            clip: c,
+                            rgb: r,
+                            tick: at,
+                        } => {
+                            clip = c;
+                            rgb = r;
+                            tick = at;
+                            pending = true;
+                        }
+                        other => {
+                            if std::mem::take(&mut pending) {
+                                apply_chroma_color_override(engine, &clip, rgb);
+                            }
+                            dispatch(
+                                engine,
+                                &mut clipboard,
+                                &mut main_magnet,
+                                &mut linkage,
+                                other,
+                                tl_rate,
+                                &preview_weak,
+                                &fit,
+                                &cache,
+                                &sprite_mode,
+                                &export_state,
+                                &ui,
+                            )
+                        }
+                    }
+                }
+                last_tick = tick;
+                if pending {
+                    apply_chroma_color_override(engine, &clip, rgb);
+                }
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+            }
+            WorkerMsg::ClearChromaColorOverride { tick } => {
+                engine.set_chroma_color_override(None);
+                last_tick = tick;
                 render_frame(
                     engine,
                     tl_rate,

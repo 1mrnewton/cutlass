@@ -313,6 +313,26 @@ pub(crate) fn wire_inspector(
             );
         });
 
+    let preview_chroma_color_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_preview_clip_chroma_color(move |clip_id, r, g, b, tick| {
+            preview_chroma_color_handle.preview_chroma_color(
+                clip_id.to_string(),
+                [
+                    r.clamp(0, 255) as u8,
+                    g.clamp(0, 255) as u8,
+                    b.clamp(0, 255) as u8,
+                ],
+                i64::from(tick),
+            );
+        });
+
+    let clear_chroma_color_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_clear_clip_chroma_color(move |tick| {
+            clear_chroma_color_handle.clear_chroma_color_override(i64::from(tick));
+        });
+
     let toggle_style_handle = preview_worker.handle();
     app.global::<InspectorBackend>()
         .on_toggle_clip_style(move |clip_id, block, enabled| {
@@ -699,6 +719,25 @@ pub(crate) fn wire_inspector(
             );
         },
     );
+    let preview_effect_param_color_handle = preview_worker.handle();
+    app.global::<EffectsBackend>()
+        .on_preview_effect_param_color(move |clip_id, index, param_index, r, g, b, a, tick| {
+            let rgba = [
+                r.clamp(0, 255) as u8,
+                g.clamp(0, 255) as u8,
+                b.clamp(0, 255) as u8,
+                a.clamp(0, 255) as u8,
+            ];
+            preview_effect_param_color_handle.param_override(
+                clip_id.to_string(),
+                cutlass_models::ClipParam::Effect {
+                    effect: index.max(0) as u32,
+                    param: param_index.max(0) as u32,
+                },
+                cutlass_models::ParamValue::Color(rgba),
+                i64::from(tick),
+            );
+        });
     let set_effect_param_vec2_handle = preview_worker.handle();
     app.global::<EffectsBackend>()
         .on_set_effect_param_vec2(move |clip_id, index, param, x, y| {

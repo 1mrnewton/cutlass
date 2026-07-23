@@ -818,6 +818,25 @@ fn preview_clip_style_delta_enqueues_worker_msg() {
 }
 
 #[test]
+fn preview_chroma_color_enqueues_worker_msg() {
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    handle.preview_chroma_color("9".into(), [10, 20, 30], 4);
+    let WorkerMsg::PreviewChromaColor { clip, rgb, tick } = rx.try_recv().unwrap() else {
+        panic!("expected PreviewChromaColor");
+    };
+    assert_eq!(clip, "9");
+    assert_eq!(rgb, [10, 20, 30]);
+    assert_eq!(tick, 4);
+
+    handle.clear_chroma_color_override(5);
+    let WorkerMsg::ClearChromaColorOverride { tick } = rx.try_recv().unwrap() else {
+        panic!("expected ClearChromaColorOverride");
+    };
+    assert_eq!(tick, 5);
+}
+
+#[test]
 fn style_delta_builds_merged_override_from_committed_styles() {
     use cutlass_models::{LayerShadow, Param};
     use cutlass_render::{ResolveOverrides, resolve_with};
@@ -1127,6 +1146,289 @@ fn styles_override_previews_then_clears_on_commit() {
             .abs()
             < f32::EPSILON
     );
+}
+
+#[test]
+fn style_color_preview_then_commit_clears_override() {
+    use cutlass_commands::{Command, EditCommand};
+    use cutlass_models::{LayerShadow, LayerStyles, MediaSource, StyleParam};
+    use cutlass_render::{ResolveOverrides, resolve, resolve_with};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("style-color", r);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/style-color.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow::default()),
+                ..Default::default()
+            },
+        )
+        .expect("enable shadow");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let rev_before = engine.revision();
+    // Pack RGBA as u16 lanes (same as preview-clip-style-color wire).
+    let value_x = ((10u16 << 8) | 20) as f32;
+    let value_y = ((30u16 << 8) | 40) as f32;
+
+    apply_styles_preview_delta(
+        &mut engine,
+        &clip_s,
+        "style_shadow_color",
+        value_x,
+        value_y,
+        0,
+    );
+    assert!(engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before);
+
+    let live =
+        styles_from_preview_delta(&engine, &clip_s, "style_shadow_color", value_x, value_y, 0)
+            .expect("delta");
+    let scene = resolve_with(
+        engine.project(),
+        RationalTime::new(0, r),
+        ResolveOverrides {
+            styles: Some((clip, &live)),
+            ..ResolveOverrides::default()
+        },
+    )
+    .expect("live");
+    assert_eq!(
+        scene.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .rgba,
+        [10, 20, 30, 40]
+    );
+
+    engine.set_styles_override(None);
+    engine
+        .apply(Command::Edit(EditCommand::SetParamConstant {
+            clip,
+            param: ClipParam::Style {
+                param: StyleParam::ShadowColor,
+            },
+            value: ParamValue::Color([10, 20, 30, 40]),
+        }))
+        .expect("commit style color");
+    assert!(!engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before + 1);
+    assert!(engine.can_undo());
+
+    let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+    assert_eq!(
+        plain.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .rgba,
+        [10, 20, 30, 40]
+    );
+}
+
+#[test]
+fn style_color_preview_cancel_clears_override_without_edit() {
+    use cutlass_models::{LayerShadow, LayerStyles, MediaSource};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("style-color-cancel", r);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/style-color-cancel.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow::default()),
+                ..Default::default()
+            },
+        )
+        .expect("enable shadow");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let rev_before = engine.revision();
+    let could_undo = engine.can_undo();
+    let value_x = ((1u16 << 8) | 2) as f32;
+    let value_y = ((3u16 << 8) | 4) as f32;
+
+    apply_styles_preview_delta(
+        &mut engine,
+        &clip_s,
+        "style_shadow_color",
+        value_x,
+        value_y,
+        0,
+    );
+    assert!(engine.has_live_overrides());
+
+    // Popup dismiss without commit — clear override only.
+    engine.set_styles_override(None);
+    assert!(!engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before);
+    assert_eq!(engine.can_undo(), could_undo);
+}
+
+#[test]
+fn chroma_color_preview_then_commit_clears_override() {
+    use cutlass_commands::{Command, EditCommand};
+    use cutlass_models::MediaSource;
+    use cutlass_render::{ResolveOverrides, resolve, resolve_with};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("chroma-color", r);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/chroma-color.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_clip_chroma_key(
+            clip,
+            Some(ChromaKey {
+                rgb: [0, 255, 0],
+                strength: 0.5.into(),
+                shadow: 0.0.into(),
+            }),
+        )
+        .expect("chroma");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let rev_before = engine.revision();
+
+    apply_chroma_color_override(&mut engine, &clip_s, [10, 20, 30]);
+    apply_chroma_color_override(&mut engine, &clip_s, [40, 50, 60]);
+    assert!(engine.has_live_overrides());
+    assert_eq!(engine.chroma_color_override(), Some((clip, [40, 50, 60])));
+    assert_eq!(engine.revision(), rev_before);
+
+    let scene = resolve_with(
+        engine.project(),
+        RationalTime::new(0, r),
+        ResolveOverrides {
+            chroma_color: Some((clip, [40, 50, 60])),
+            ..ResolveOverrides::default()
+        },
+    )
+    .expect("live");
+    assert_eq!(scene.layers[0].chroma_key.unwrap().rgb, [40, 50, 60]);
+
+    // Commit ordering: clear override then one SetClipChroma merge.
+    engine.set_chroma_color_override(None);
+    engine
+        .apply(Command::Edit(EditCommand::SetClipChroma {
+            clip,
+            chroma: Some(ChromaKey {
+                rgb: [40, 50, 60],
+                strength: 0.5.into(),
+                shadow: 0.0.into(),
+            }),
+        }))
+        .expect("commit chroma color");
+    assert!(!engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before + 1);
+    assert!(engine.can_undo());
+
+    let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+    assert_eq!(plain.layers[0].chroma_key.unwrap().rgb, [40, 50, 60]);
+}
+
+#[test]
+fn chroma_color_preview_cancel_clears_override_without_edit() {
+    use cutlass_models::MediaSource;
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("chroma-color-cancel", r);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/chroma-color-cancel.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_clip_chroma_key(
+            clip,
+            Some(ChromaKey {
+                rgb: [0, 255, 0],
+                strength: 0.5.into(),
+                shadow: 0.0.into(),
+            }),
+        )
+        .expect("chroma");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let rev_before = engine.revision();
+    let could_undo = engine.can_undo();
+
+    apply_chroma_color_override(&mut engine, &clip_s, [1, 2, 3]);
+    assert!(engine.has_live_overrides());
+
+    engine.set_chroma_color_override(None);
+    assert!(!engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before);
+    assert_eq!(engine.can_undo(), could_undo);
 }
 
 #[test]

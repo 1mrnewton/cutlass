@@ -408,10 +408,18 @@ export component TextStyleRows inherits VerticalLayout {
 
             CutlassColorSwatch {
                 value: model.text-style.fill;
+                preview(c) => {
+                    root.begin-edit();
+                    root.style.fill = c;
+                    root.preview-style();
+                }
                 changed(c) => {
                     root.begin-edit();
                     root.style.fill = c;
-                    root.commit-style();
+                    root.commit-or-clear-style();
+                }
+                cancelled => {
+                    InspectorBackend.clear-text-generator(TimelineStore.playhead-tick);
                 }
             }
 

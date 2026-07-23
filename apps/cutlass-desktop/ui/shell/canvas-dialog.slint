@@ -118,7 +118,9 @@ export component CanvasDialog inherits Rectangle {
                 }
 
                 CutlassColorSwatch {
+                    // Canvas background is opaque RGB — no live override lane.
                     value: EditorStore.project.sequence.background;
+                    enable-alpha: false;
                     changed(value) => {
                         CanvasBackend.set-canvas(
                             EditorStore.project.sequence.aspect-index,

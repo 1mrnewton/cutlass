@@ -13,7 +13,7 @@
 import { CutlassText, SubtleButton, CutlassColorSwatch } from "../../components/index.slint";
 import { AppStore, TimelineStore } from "../../store/index.slint";
 import { Clip } from "../../models/index.slint";
-import { EffectsBackend } from "../../lib/index.slint";
+import { EffectsBackend, InspectorBackend } from "../../lib/index.slint";
 import { SectionHeader, SliderRow, LabelCell } from "inspector-widgets.slint";
 
 export component EffectsInspector inherits VerticalLayout {
@@ -93,9 +93,19 @@ export component EffectsInspector inherits VerticalLayout {
 
                 CutlassColorSwatch {
                     value: p.color;
+                    preview(c) => {
+                        EffectsBackend.preview-effect-param-color(
+                            root.model.id, i, pi,
+                            c.red, c.green, c.blue, c.alpha,
+                            TimelineStore.playhead-tick);
+                    }
                     changed(c) => {
                         EffectsBackend.set-effect-param-color(
                             root.model.id, i, p.name, c.red, c.green, c.blue, c.alpha);
+                    }
+                    cancelled => {
+                        InspectorBackend.clear-param-override(
+                            root.model.id, TimelineStore.playhead-tick);
                     }
                 }
 

@@ -321,7 +321,22 @@ export global InspectorBackend {
     callback toggle-clip-chroma(clip-id: string, enabled: bool);
 
     // Set the chroma key color (RGB 0..=255) on a keyed clip. One undoable edit.
+    // Clears any live chroma-color override first.
     callback set-clip-chroma-color(clip-id: string, r: int, g: int, b: int);
+
+    // Live preview of chroma key RGB during a color-well edit. Session-only;
+    // the matching set-clip-chroma-color commits.
+    callback preview-clip-chroma-color(
+        clip-id: string,
+        r: int,
+        g: int,
+        b: int,
+        tick: int,
+    );
+
+    // Drop a lingering chroma-color preview override and repaint `tick`
+    // from committed state (popup dismissed without commit).
+    callback clear-clip-chroma-color(tick: int);
 
     // Enable or clear one layer-style block on a visual clip. `block` is
     // "shadow" | "glow" | "outline" | "background". Enabling installs the

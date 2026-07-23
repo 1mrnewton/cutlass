@@ -81,10 +81,7 @@ pub(crate) fn attach_usage_line(store: &slint::Weak<AgentStore<'static>>, usage:
         let count = model.row_count();
         let mut last_user = None;
         for index in 0..count {
-            if model
-                .row_data(index)
-                .is_some_and(|row| row.kind == "user")
-            {
+            if model.row_data(index).is_some_and(|row| row.kind == "user") {
                 last_user = Some(index);
             }
         }

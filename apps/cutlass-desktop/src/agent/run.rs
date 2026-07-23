@@ -19,8 +19,8 @@ use crate::preview_worker::WorkerHandle;
 use crate::{AgentStore, AppWindow};
 
 use super::sandbox::{SandboxBridge, sandbox_engine};
-use super::tool_host::{DesktopToolHandles, DesktopToolHost, abort_status_message};
 use super::token_usage::format_usage_line;
+use super::tool_host::{DesktopToolHandles, DesktopToolHost, abort_status_message};
 use super::transcript::{
     append_assistant_text, append_reasoning_text, attach_usage_line, persist_session,
     publish_chat_list, push_entry, push_image_entry, replace_transcript, with_store,

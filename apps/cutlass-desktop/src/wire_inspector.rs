@@ -104,12 +104,7 @@ pub(crate) fn wire_inspector(
                 tracing::error!(param = param.as_str(), "ignoring preview on unknown param");
                 return;
             };
-            preview_param_handle.param_override(
-                clip_id.to_string(),
-                param,
-                value,
-                i64::from(tick),
-            );
+            preview_param_handle.param_override(clip_id.to_string(), param, value, i64::from(tick));
         },
     );
 

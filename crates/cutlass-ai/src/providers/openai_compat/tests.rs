@@ -364,3 +364,90 @@ fn reasoning_tool_compatibility_errors_point_to_responses_setting() {
     let unrelated = chat_error_message(400, "invalid JSON schema");
     assert!(!unrelated.contains("Responses API protocol"), "{unrelated}");
 }
+
+#[test]
+fn is_stream_options_rejection_requires_400_and_field_mention() {
+    assert!(is_stream_options_rejection(
+        400,
+        r#"{"error":{"message":"Unknown field: stream_options"}}"#
+    ));
+    assert!(is_stream_options_rejection(
+        400,
+        "Body schema validation failed for property Stream_Options"
+    ));
+    assert!(
+        !is_stream_options_rejection(400, "invalid JSON schema"),
+        "400 without mentioning stream_options must not trigger the fallback"
+    );
+    assert!(!is_stream_options_rejection(
+        429,
+        "rate limited: stream_options not relevant"
+    ));
+}
+
+#[test]
+fn request_body_can_omit_stream_options() {
+    let provider = OpenAiCompatProvider::new("http://localhost:11434/v1", "qwen3", None);
+    let with = provider.request_body_with_stream_options(
+        &ChatRequest {
+            messages: &[],
+            tools: &[],
+        },
+        true,
+    );
+    assert_eq!(with["stream_options"]["include_usage"], true);
+
+    let without = provider.request_body_with_stream_options(
+        &ChatRequest {
+            messages: &[],
+            tools: &[],
+        },
+        false,
+    );
+    assert!(
+        without.get("stream_options").is_none(),
+        "fallback body must lack stream_options entirely: {without}"
+    );
+    assert_eq!(without["stream"], true);
+    assert_eq!(without["model"], "qwen3");
+}
+
+#[test]
+fn empty_usage_chunk_does_not_clobber_prior_usage() {
+    let fixture = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":8,\"cost\":0.0042}}\n",
+        "data: {\"choices\":[],\"usage\":{}}\n",
+        "data: [DONE]\n",
+    );
+    let (turn, _) = run(fixture);
+    assert_eq!(
+        turn.usage,
+        Some(TokenUsage {
+            input_tokens: 120,
+            cached_input_tokens: 0,
+            output_tokens: 8,
+            cost: Some(0.0042),
+        })
+    );
+}
+
+#[test]
+fn usage_parses_float_encoded_token_counts() {
+    let fixture = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120.0,\"completion_tokens\":8.4,\"prompt_tokens_details\":{\"cached_tokens\":100.6}}}\n",
+        "data: [DONE]\n",
+    );
+    let (turn, _) = run(fixture);
+    assert_eq!(
+        turn.usage,
+        Some(TokenUsage {
+            input_tokens: 120,
+            cached_input_tokens: 101,
+            output_tokens: 8,
+            cost: None,
+        })
+    );
+}

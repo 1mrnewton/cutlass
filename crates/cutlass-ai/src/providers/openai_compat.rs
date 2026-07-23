@@ -15,7 +15,7 @@ use base64::Engine as _;
 
 use crate::provider::{
     ChatProvider, ChatRequest, ChatTurn, FinishReason, ImagePart, Message, ProviderError,
-    ProviderStreamEvent, TokenUsage, ToolCall,
+    ProviderStreamEvent, TokenUsage, ToolCall, json_u64,
 };
 
 /// Optional OpenRouter-only request extras (provider pinning + app headers).
@@ -125,13 +125,25 @@ impl OpenAiCompatProvider {
     /// `pub(crate)` so offline request-size harnesses can measure the exact
     /// payload without opening a network connection.
     pub(crate) fn request_body(&self, request: &ChatRequest<'_>) -> serde_json::Value {
+        self.request_body_with_stream_options(request, true)
+    }
+
+    /// Like [`Self::request_body`], optionally omitting `stream_options` for
+    /// older OpenAI-compatible servers that reject the field with HTTP 400.
+    pub(crate) fn request_body_with_stream_options(
+        &self,
+        request: &ChatRequest<'_>,
+        include_stream_options: bool,
+    ) -> serde_json::Value {
         let messages = to_openai_messages(request.messages);
         let mut body = serde_json::json!({
             "model": self.model,
             "stream": true,
-            "stream_options": { "include_usage": true },
             "messages": messages,
         });
+        if include_stream_options {
+            body["stream_options"] = serde_json::json!({ "include_usage": true });
+        }
         if !request.tools.is_empty() {
             body["tools"] = request
                 .tools
@@ -171,16 +183,23 @@ impl ChatProvider for OpenAiCompatProvider {
         on_event: &mut dyn FnMut(ProviderStreamEvent<'_>),
     ) -> Result<ChatTurn, ProviderError> {
         let url = format!("{}/chat/completions", self.base_url);
-        let body = self.request_body(request).to_string();
 
         // Only the initial send retries: no stream bytes have been
         // consumed yet, so a retry can't duplicate text in the UI.
         // Mid-stream failures (in consume_sse) always surface.
+        // A one-shot stream_options fallback is separate from the transport
+        // retry budget — strict servers that reject the field get one retry
+        // without it, without burning a backoff attempt.
         let mut attempt = 0usize;
+        let mut include_stream_options = true;
+        let mut stream_options_retried = false;
         let response = loop {
             if cancel.load(Ordering::Relaxed) {
                 return Err(ProviderError::Cancelled);
             }
+            let body = self
+                .request_body_with_stream_options(request, include_stream_options)
+                .to_string();
             let http = self.apply_auth_headers(
                 self.agent
                     .post(&url)
@@ -189,6 +208,14 @@ impl ChatProvider for OpenAiCompatProvider {
             match http.send_string(&body) {
                 Ok(response) => break response,
                 Err(ureq::Error::Status(status, response)) => {
+                    let message = response
+                        .into_string()
+                        .unwrap_or_else(|_| "<unreadable error body>".to_string());
+                    if !stream_options_retried && is_stream_options_rejection(status, &message) {
+                        stream_options_retried = true;
+                        include_stream_options = false;
+                        continue;
+                    }
                     if retryable_status(status) {
                         match retry_delay(attempt) {
                             Some(delay) if sleep_unless_cancelled(delay, cancel) => {
@@ -199,9 +226,6 @@ impl ChatProvider for OpenAiCompatProvider {
                             None => {}
                         }
                     }
-                    let message = response
-                        .into_string()
-                        .unwrap_or_else(|_| "<unreadable error body>".to_string());
                     return Err(ProviderError::Provider {
                         status,
                         message: chat_error_message(status, &message),
@@ -219,6 +243,12 @@ impl ChatProvider for OpenAiCompatProvider {
             on_event(ProviderStreamEvent::TextDelta(delta));
         })
     }
+}
+
+/// True when a Chat Completions server rejected `stream_options` (strict /
+/// older OpenAI-compatible endpoints that treat unknown fields as errors).
+pub(crate) fn is_stream_options_rejection(status: u16, body: &str) -> bool {
+    status == 400 && body.to_ascii_lowercase().contains("stream_options")
 }
 
 /// Convert a complete history while preserving OpenAI's parallel-tool-call
@@ -436,8 +466,11 @@ pub(crate) fn consume_sse(
         }
         let chunk: serde_json::Value = serde_json::from_str(data)
             .map_err(|e| ProviderError::Protocol(format!("bad SSE chunk: {e}: {data}")))?;
-        // Usage can arrive on a usage-only chunk or beside choices — keep last.
-        if let Some(parsed) = parse_compat_usage(&chunk["usage"]) {
+        // Usage can arrive on a usage-only chunk or beside choices — keep the
+        // last non-empty value so a trailing `"usage": {}` cannot clobber it.
+        if let Some(parsed) = parse_compat_usage(&chunk["usage"])
+            && !parsed.is_empty()
+        {
             usage = Some(parsed);
         }
         let Some(choice) = chunk["choices"].get(0) else {
@@ -518,11 +551,9 @@ fn parse_compat_usage(usage: &serde_json::Value) -> Option<TokenUsage> {
         return None;
     }
     Some(TokenUsage {
-        input_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
-        cached_input_tokens: usage["prompt_tokens_details"]["cached_tokens"]
-            .as_u64()
-            .unwrap_or(0),
-        output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
+        input_tokens: json_u64(&usage["prompt_tokens"]),
+        cached_input_tokens: json_u64(&usage["prompt_tokens_details"]["cached_tokens"]),
+        output_tokens: json_u64(&usage["completion_tokens"]),
         cost: usage["cost"].as_f64(),
     })
 }

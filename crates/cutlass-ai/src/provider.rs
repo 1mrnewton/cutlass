@@ -127,17 +127,26 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
-    /// Saturating sum of token counts. Costs treat a missing side as 0, but
-    /// stay `None` when both sides are `None`.
+    /// Saturating sum of token counts.
+    ///
+    /// Cost is `Some` only when every accumulated non-empty turn reported a
+    /// cost. The accumulator starts empty, so the first added turn's cost
+    /// carries through; a later usage-bearing turn without cost poisons the
+    /// total to `None` permanently.
     pub fn add(&mut self, other: &TokenUsage) {
+        let self_was_empty = self.is_empty();
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.cached_input_tokens = self
             .cached_input_tokens
             .saturating_add(other.cached_input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
-        self.cost = match (self.cost, other.cost) {
-            (None, None) => None,
-            (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+        self.cost = if self_was_empty {
+            other.cost
+        } else {
+            match (self.cost, other.cost) {
+                (Some(a), Some(b)) => Some(a + b),
+                _ => None,
+            }
         };
     }
 
@@ -146,6 +155,29 @@ impl TokenUsage {
             && self.cached_input_tokens == 0
             && self.output_tokens == 0
             && self.cost.is_none()
+    }
+}
+
+/// Parse a JSON number as a token count. Accepts integers and floats
+/// (rounded to nearest); anything else yields 0.
+pub(crate) fn json_u64(value: &serde_json::Value) -> u64 {
+    match value {
+        serde_json::Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                u
+            } else if let Some(i) = n.as_i64() {
+                u64::try_from(i).unwrap_or(0)
+            } else if let Some(f) = n.as_f64() {
+                if f.is_finite() && f >= 0.0 {
+                    f.round() as u64
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        }
+        _ => 0,
     }
 }
 
@@ -250,6 +282,7 @@ mod tests {
         assert_eq!(total.output_tokens, 2);
         assert_eq!(total.cost, None);
 
+        // A later turn with cost cannot resurrect a poisoned total.
         total.add(&TokenUsage {
             input_tokens: 5,
             cached_input_tokens: 1,
@@ -259,14 +292,79 @@ mod tests {
         assert_eq!(total.input_tokens, 15);
         assert_eq!(total.cached_input_tokens, 5);
         assert_eq!(total.output_tokens, 5);
-        assert_eq!(total.cost, Some(0.01));
+        assert_eq!(total.cost, None);
+    }
 
+    #[test]
+    fn token_usage_cost_empty_plus_some_carries_through() {
+        let mut total = TokenUsage::default();
         total.add(&TokenUsage {
-            input_tokens: 1,
+            input_tokens: 10,
             cached_input_tokens: 0,
-            output_tokens: 0,
+            output_tokens: 2,
+            cost: Some(0.01),
+        });
+        assert_eq!(total.cost, Some(0.01));
+    }
+
+    #[test]
+    fn token_usage_cost_some_plus_some_sums() {
+        let mut total = TokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 2,
+            cost: Some(0.01),
+        };
+        total.add(&TokenUsage {
+            input_tokens: 5,
+            cached_input_tokens: 0,
+            output_tokens: 1,
             cost: Some(0.02),
         });
         assert_eq!(total.cost, Some(0.03));
+    }
+
+    #[test]
+    fn token_usage_cost_some_plus_none_poisons_total() {
+        let mut total = TokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 2,
+            cost: Some(0.01),
+        };
+        total.add(&TokenUsage {
+            input_tokens: 5,
+            cached_input_tokens: 0,
+            output_tokens: 1,
+            cost: None,
+        });
+        assert_eq!(total.cost, None);
+    }
+
+    #[test]
+    fn token_usage_cost_none_stays_none_when_later_turns_have_cost() {
+        let mut total = TokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 2,
+            cost: None,
+        };
+        total.add(&TokenUsage {
+            input_tokens: 5,
+            cached_input_tokens: 0,
+            output_tokens: 1,
+            cost: Some(0.02),
+        });
+        assert_eq!(total.cost, None);
+    }
+
+    #[test]
+    fn json_u64_accepts_integers_and_rounded_floats() {
+        assert_eq!(json_u64(&serde_json::json!(123)), 123);
+        assert_eq!(json_u64(&serde_json::json!(123.0)), 123);
+        assert_eq!(json_u64(&serde_json::json!(123.4)), 123);
+        assert_eq!(json_u64(&serde_json::json!(123.6)), 124);
+        assert_eq!(json_u64(&serde_json::json!("nope")), 0);
+        assert_eq!(json_u64(&serde_json::Value::Null), 0);
     }
 }

@@ -369,6 +369,51 @@ fn completed_event_parses_token_usage() {
 }
 
 #[test]
+fn incomplete_event_parses_token_usage() {
+    let fixture = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n",
+        "data: {\"type\":\"response.incomplete\",\"response\":{",
+        "\"incomplete_details\":{\"reason\":\"max_output_tokens\"},",
+        "\"usage\":{\"input_tokens\":200,\"output_tokens\":64,\"input_tokens_details\":{\"cached_tokens\":50}},",
+        "\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"partial\"}]}]",
+        "}}\n",
+    );
+    let (parsed, _, _) = run(fixture);
+    assert_eq!(parsed.turn.finish, FinishReason::Length);
+    assert_eq!(parsed.turn.text, "partial");
+    assert_eq!(
+        parsed.turn.usage,
+        Some(crate::provider::TokenUsage {
+            input_tokens: 200,
+            cached_input_tokens: 50,
+            output_tokens: 64,
+            cost: None,
+        })
+    );
+}
+
+#[test]
+fn usage_parses_float_encoded_token_counts() {
+    let fixture = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n",
+        "data: {\"type\":\"response.completed\",\"response\":{",
+        "\"usage\":{\"input_tokens\":200.0,\"output_tokens\":12.4,\"input_tokens_details\":{\"cached_tokens\":50.6}},",
+        "\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]",
+        "}}\n",
+    );
+    let (parsed, _, _) = run(fixture);
+    assert_eq!(
+        parsed.turn.usage,
+        Some(crate::provider::TokenUsage {
+            input_tokens: 200,
+            cached_input_tokens: 51,
+            output_tokens: 12,
+            cost: None,
+        })
+    );
+}
+
+#[test]
 fn completed_output_parses_parallel_function_calls() {
     let fixture = concat!(
         "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"clip\\\":\"}\n",

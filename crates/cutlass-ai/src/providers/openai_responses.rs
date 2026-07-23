@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 use crate::provider::{
     ChatProvider, ChatRequest, ChatTurn, FinishReason, ImagePart, Message, ProviderError,
-    ProviderStreamEvent, TokenUsage, ToolCall,
+    ProviderStreamEvent, TokenUsage, ToolCall, json_u64,
 };
 
 use super::openai_compat::{retry_delay, retryable_status, sleep_unless_cancelled, truncate};
@@ -467,9 +467,9 @@ struct IncompleteDetails {
 
 #[derive(Debug, Default, Deserialize)]
 struct ResponsesUsage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_token_count")]
     input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_token_count")]
     output_tokens: u64,
     #[serde(default)]
     input_tokens_details: Option<InputTokensDetails>,
@@ -477,8 +477,30 @@ struct ResponsesUsage {
 
 #[derive(Debug, Default, Deserialize)]
 struct InputTokensDetails {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_token_count")]
     cached_tokens: u64,
+}
+
+fn deserialize_token_count<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(json_u64(&value))
+}
+
+/// Shared by `response.completed` and `response.incomplete` terminals.
+fn token_usage_from_responses(usage: Option<&ResponsesUsage>) -> Option<TokenUsage> {
+    usage.map(|u| TokenUsage {
+        input_tokens: u.input_tokens,
+        cached_input_tokens: u
+            .input_tokens_details
+            .as_ref()
+            .map(|d| d.cached_tokens)
+            .unwrap_or(0),
+        output_tokens: u.output_tokens,
+        cost: None,
+    })
 }
 
 enum Terminal {
@@ -575,16 +597,7 @@ fn consume_responses_sse(
     };
     let (envelope, finish, usage) = match terminal {
         Terminal::Completed(response) => {
-            let usage = response.usage.as_ref().map(|u| TokenUsage {
-                input_tokens: u.input_tokens,
-                cached_input_tokens: u
-                    .input_tokens_details
-                    .as_ref()
-                    .map(|d| d.cached_tokens)
-                    .unwrap_or(0),
-                output_tokens: u.output_tokens,
-                cost: None,
-            });
+            let usage = token_usage_from_responses(response.usage.as_ref());
             (response, FinishReason::Stop, usage)
         }
         Terminal::Incomplete(response) => {
@@ -598,7 +611,8 @@ fn consume_responses_sse(
                     "Responses request was incomplete: {reason}"
                 )));
             }
-            (response, FinishReason::Length, None)
+            let usage = token_usage_from_responses(response.usage.as_ref());
+            (response, FinishReason::Length, usage)
         }
     };
 

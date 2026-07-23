@@ -287,8 +287,17 @@ export global InspectorBackend {
     callback set-clip-blend-mode(clip-id: string, mode: string);
 
     // Set per-clip transform motion blur. `shutter` is degrees (0..=720);
-    // `samples` is quality (2..=16 in the UI). One undoable edit.
+    // `samples` is quality (2..=16 in the UI). One undoable edit. Also clears
+    // any live motion-blur override for the clip.
     callback set-clip-motion-blur(clip-id: string, enabled: bool, shutter: float, samples: int);
+
+    // Live motion-blur field preview during a shutter/samples drag. `key` is
+    // `"shutter"` or `"samples"`. Session-only; release commits via
+    // `set-clip-motion-blur` or clears with `clear-clip-motion-blur`.
+    callback preview-clip-motion-blur(clip-id: string, key: string, value: float, tick: int);
+
+    // Drop a lingering motion-blur preview override and repaint `tick`.
+    callback clear-clip-motion-blur(tick: int);
 
     // Set (or clear with an empty id) a visual clip's mask kind. Switching
     // kind preserves feather / invert / geometry; enabling from none uses
@@ -365,7 +374,8 @@ export global InspectorBackend {
 
     // Set (or clear with an empty id) one look-animation slot: "in", "out",
     // or "combo". Knobs are speed / intensity / stagger (defaults 1.0).
-    // One undoable edit; combo exclusivity is enforced by the model.
+    // One undoable edit; combo exclusivity is enforced by the model. Also
+    // clears any live animation override for the clip.
     callback set-clip-animation(
         clip-id: string,
         slot: string,
@@ -374,6 +384,20 @@ export global InspectorBackend {
         intensity: float,
         stagger: float,
     );
+
+    // Live animation-knob preview during a speed/intensity/stagger drag.
+    // `key` is `"speed"` / `"intensity"` / `"stagger"`. Session-only; release
+    // commits via `set-clip-animation` or clears with `clear-clip-animation`.
+    callback preview-clip-animation(
+        clip-id: string,
+        slot: string,
+        key: string,
+        value: float,
+        tick: int,
+    );
+
+    // Drop a lingering animation preview override and repaint `tick`.
+    callback clear-clip-animation(tick: int);
 
     // Set all manual color adjustment sliders in one undoable edit.
     // Signed values are normalized -1..=1; sharpness/vignette are 0..=1.

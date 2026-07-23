@@ -516,7 +516,10 @@ export component TransformInspector inherits VerticalLayout {
         maximum: 360;
         reset-value: 180;
         kf-visible: false;
-        preview(v) => { }
+        preview(v) => {
+            InspectorBackend.preview-clip-motion-blur(
+                root.model.id, "shutter", clamp(v, 0, 360), TimelineStore.playhead-tick);
+        }
         commit(v) => {
             // Step 10° for a CapCut-like shutter angle picker.
             InspectorBackend.set-clip-motion-blur(
@@ -535,7 +538,10 @@ export component TransformInspector inherits VerticalLayout {
         maximum: 16;
         reset-value: 8;
         kf-visible: false;
-        preview(v) => { }
+        preview(v) => {
+            InspectorBackend.preview-clip-motion-blur(
+                root.model.id, "samples", clamp(v, 2, 16), TimelineStore.playhead-tick);
+        }
         commit(v) => {
             InspectorBackend.set-clip-motion-blur(
                 root.model.id,

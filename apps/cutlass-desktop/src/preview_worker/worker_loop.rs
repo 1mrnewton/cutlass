@@ -654,6 +654,81 @@ fn worker_loop(
                     SeekPolicy::Exact,
                 );
             }
+            // Motion-blur shutter/samples drags: coalesce latest field delta
+            // per clip (worker merges against committed blur).
+            WorkerMsg::PreviewMotionBlurDelta {
+                clip,
+                key,
+                value,
+                tick,
+            } => {
+                let tick = coalesce_motion_blur_deltas(
+                    engine,
+                    &mut clipboard,
+                    &mut main_magnet,
+                    &mut linkage,
+                    clip,
+                    key,
+                    value,
+                    tick,
+                    &req_rx,
+                    tl_rate,
+                    &preview_weak,
+                    &fit,
+                    &cache,
+                    &sprite_mode,
+                    &export_state,
+                    &ui,
+                );
+                last_tick = tick;
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+            }
+            // Animation speed/intensity/stagger drags: same coalesce rule.
+            WorkerMsg::PreviewClipAnimationDelta {
+                clip,
+                slot,
+                key,
+                value,
+                tick,
+            } => {
+                let tick = coalesce_animation_deltas(
+                    engine,
+                    &mut clipboard,
+                    &mut main_magnet,
+                    &mut linkage,
+                    clip,
+                    slot,
+                    key,
+                    value,
+                    tick,
+                    &req_rx,
+                    tl_rate,
+                    &preview_weak,
+                    &fit,
+                    &cache,
+                    &sprite_mode,
+                    &export_state,
+                    &ui,
+                );
+                last_tick = tick;
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+            }
             // Generic inspector param drags (crop, chroma, effect knobs, …)
             // arrive at pointer-move rate; coalesce to the newest value per
             // (clip, param) and render once — same queue-pressure rule as

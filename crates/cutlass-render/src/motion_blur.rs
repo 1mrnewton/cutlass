@@ -26,7 +26,7 @@
 
 use cutlass_compositor::LayerPlacement;
 use cutlass_core::RationalTime;
-use cutlass_models::{Clip, Project};
+use cutlass_models::{Clip, ClipId, MotionBlur, Project};
 
 use crate::animation::apply_look_animations;
 use crate::scene::{LayerSource, Scene, SceneBlurPass, SizeSpec};
@@ -38,7 +38,14 @@ use crate::scene::{LayerSource, Scene, SceneBlurPass, SizeSpec};
 /// letterbox adjust the sample placements with the rest of the scene.
 /// [`SizeSpec::BitmapScaled`] layers are skipped here (bitmap size is unknown
 /// until realize) and filled later via [`blur_passes_for_placement`].
-pub fn attach_motion_blur_passes(project: &Project, scene: &mut Scene) {
+///
+/// `motion_blur_override` (inspector shutter/samples drag) wins for its clip
+/// over the committed [`Clip::motion_blur`] — session-only, like styles/look.
+pub fn attach_motion_blur_passes(
+    project: &Project,
+    scene: &mut Scene,
+    motion_blur_override: Option<(ClipId, MotionBlur)>,
+) {
     let tick = scene.tick;
     let cw = scene.width as f32;
     let ch = scene.height as f32;
@@ -58,7 +65,11 @@ pub fn attach_motion_blur_passes(project: &Project, scene: &mut Scene) {
         let Some(clip) = project.clip(clip_id) else {
             continue;
         };
-        layer.blur_passes = sample_blur_passes(clip, tick, cw, ch, base_size);
+        let mb = match motion_blur_override {
+            Some((id, blur)) if id == clip_id => blur,
+            _ => clip.motion_blur,
+        };
+        layer.blur_passes = sample_blur_passes(clip, mb, tick, cw, ch, base_size);
     }
 }
 
@@ -76,7 +87,7 @@ pub fn blur_passes_for_placement(
     };
     let cw = scene.width as f32;
     let ch = scene.height as f32;
-    let passes = sample_blur_passes(clip, scene.tick, cw, ch, base.size);
+    let passes = sample_blur_passes(clip, clip.motion_blur, scene.tick, cw, ch, base.size);
     passes
         .into_iter()
         .map(|p| placement_from_blur_pass(&p, anchor_point))
@@ -97,12 +108,12 @@ pub fn layer_placements_from_blur_passes(
 
 fn sample_blur_passes(
     clip: &Clip,
+    mb: MotionBlur,
     t: RationalTime,
     cw: f32,
     ch: f32,
     base_size: [f32; 2],
 ) -> Vec<SceneBlurPass> {
-    let mb = clip.motion_blur;
     if !mb.enabled || mb.shutter_deg <= 0.0 || !clip.transform.is_animated() {
         return Vec::new();
     }
@@ -222,7 +233,7 @@ mod tests {
             .unwrap();
 
         let mut scene = crate::resolve::resolve(&project, RationalTime::new(15, FPS)).unwrap();
-        attach_motion_blur_passes(&project, &mut scene);
+        attach_motion_blur_passes(&project, &mut scene, None);
         let layer = scene.layers.iter().find(|l| l.clip == Some(clip)).unwrap();
         assert_eq!(layer.blur_passes.len(), 4);
         // Horizontal sweep: first sample left of last.
@@ -253,7 +264,7 @@ mod tests {
             )
             .unwrap();
         let mut scene = crate::resolve::resolve(&project, RationalTime::new(10, FPS)).unwrap();
-        attach_motion_blur_passes(&project, &mut scene);
+        attach_motion_blur_passes(&project, &mut scene, None);
         let layer = scene.layers.iter().find(|l| l.clip == Some(clip)).unwrap();
         assert!(layer.blur_passes.is_empty());
     }

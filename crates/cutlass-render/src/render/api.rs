@@ -145,7 +145,7 @@ impl Renderer {
         t: RationalTime,
     ) -> Result<RgbaImage, RenderError> {
         let mut scene = resolve(project, t)?;
-        self.prepare_motion_blur(project, &mut scene);
+        self.prepare_motion_blur(project, &mut scene, None);
         self.render_scene(project, &scene)
     }
 
@@ -157,8 +157,9 @@ impl Renderer {
         t: RationalTime,
         overrides: ResolveOverrides<'_>,
     ) -> Result<RgbaImage, RenderError> {
+        let motion_blur = overrides.motion_blur;
         let mut scene = resolve_with(project, t, overrides)?;
-        self.prepare_motion_blur(project, &mut scene);
+        self.prepare_motion_blur(project, &mut scene, motion_blur);
         self.render_scene(project, &scene)
     }
 
@@ -192,8 +193,9 @@ impl Renderer {
         max_height: u32,
         overrides: ResolveOverrides<'_>,
     ) -> Result<RgbaImage, RenderError> {
+        let motion_blur = overrides.motion_blur;
         let mut scene = resolve_with(project, t, overrides)?;
-        self.prepare_motion_blur(project, &mut scene);
+        self.prepare_motion_blur(project, &mut scene, motion_blur);
         scene.fit_within(max_width, max_height);
         self.render_scene(project, &scene)
     }
@@ -254,8 +256,9 @@ impl Renderer {
         policy: SeekPolicy,
         sink: &mut dyn FrameSink,
     ) -> Result<(), RenderError> {
+        let motion_blur = overrides.motion_blur;
         let mut scene = resolve_with(project, t, overrides)?;
-        self.prepare_motion_blur(project, &mut scene);
+        self.prepare_motion_blur(project, &mut scene, motion_blur);
         self.render_scene_into_policy(project, &scene, sink, policy)
     }
 
@@ -275,8 +278,9 @@ impl Renderer {
         policy: SeekPolicy,
         sink: &mut dyn FrameSink,
     ) -> Result<(), RenderError> {
+        let motion_blur = overrides.motion_blur;
         let mut scene = resolve_with(project, t, overrides)?;
-        self.prepare_motion_blur(project, &mut scene);
+        self.prepare_motion_blur(project, &mut scene, motion_blur);
         scene.fit_within(max_width, max_height);
         self.render_scene_into_policy(project, &scene, sink, policy)
     }
@@ -293,16 +297,22 @@ impl Renderer {
         height: u32,
     ) -> Result<RgbaImage, RenderError> {
         let mut scene = resolve(project, t)?;
-        self.prepare_motion_blur(project, &mut scene);
+        self.prepare_motion_blur(project, &mut scene, None);
         scene.fit_into(width, height);
         self.render_scene(project, &scene)
     }
 
-    /// When [`Self::apply_motion_blur`] is on, attach sub-frame transform
-    /// samples before fit/scale so letterbox adjusts them with the scene.
-    fn prepare_motion_blur(&self, project: &Project, scene: &mut Scene) {
-        if self.apply_motion_blur {
-            attach_motion_blur_passes(project, scene);
+    /// When [`Self::apply_motion_blur`] is on (export) or a live motion-blur
+    /// override is set (inspector drag), attach sub-frame transform samples
+    /// before fit/scale so letterbox adjusts them with the scene.
+    fn prepare_motion_blur(
+        &self,
+        project: &Project,
+        scene: &mut Scene,
+        motion_blur_override: Option<(ClipId, cutlass_models::MotionBlur)>,
+    ) {
+        if self.apply_motion_blur || motion_blur_override.is_some() {
+            attach_motion_blur_passes(project, scene, motion_blur_override);
         }
     }
 

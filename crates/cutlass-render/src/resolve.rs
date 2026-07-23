@@ -22,9 +22,9 @@
 
 use cutlass_core::{RationalTime, resample};
 use cutlass_models::{
-    AnimationSlot, ClipId, ClipSource, ClipTransform, ColorAdjustments, Easing, EffectInstance,
-    Filter, Generator, LayerStyles, MediaKind, Project, look_animation_combo_period_ticks,
-    look_animation_window_ticks,
+    AnimationRef, AnimationSlot, ClipId, ClipSource, ClipTransform, ColorAdjustments, Easing,
+    EffectInstance, Filter, Generator, LayerStyles, MediaKind, MotionBlur, Project,
+    look_animation_combo_period_ticks, look_animation_window_ticks,
 };
 
 use crate::animation::{apply_look_animations, is_per_character, scaled_ticks, text_knobs};
@@ -66,6 +66,10 @@ pub struct ResolveOverrides<'a> {
     pub styles: Option<(ClipId, &'a LayerStyles)>,
     /// Per-(clip, param) live values. `None` or empty → no work on the hot path.
     pub params: Option<&'a ParamOverrides>,
+    /// Live motion-blur settings for one clip (inspector shutter/samples drag).
+    pub motion_blur: Option<(ClipId, MotionBlur)>,
+    /// Live look-animation knobs for one clip/slot (speed/intensity/stagger).
+    pub animation: Option<(ClipId, AnimationSlot, &'a AnimationRef)>,
 }
 
 /// Identity transform used when rasterizing the gesture sprite: the clip's
@@ -101,10 +105,7 @@ pub fn resolve_gesture_partitions(
 ) -> Result<Option<GestureScenePartition>, cutlass_models::ModelError> {
     let overrides = ResolveOverrides {
         transform: Some((clip_id, GESTURE_IDENTITY_TRANSFORM)),
-        generator: None,
-        look: None,
-        styles: None,
-        params: None,
+        ..ResolveOverrides::default()
     };
     let scene = resolve_with(project, t, overrides)?;
     let index = scene
@@ -344,16 +345,37 @@ fn resolve_clip(
     // Live param overrides win over stored/keyframed samples: clone the clip
     // once (only when this clip has entries) and write constants, then sample
     // as usual. Empty maps never allocate.
-    let overridden;
+    let param_overridden;
     let clip = match overrides.params {
         Some(params) => match params.overlay_clip(clip) {
             Some(live) => {
-                overridden = live;
-                &overridden
+                param_overridden = live;
+                &param_overridden
             }
             None => clip,
         },
         None => clip,
+    };
+
+    // Live animation-knob override: clone once and replace the matching slot
+    // so look-animation sampling (whole-layer + per-character) sees the drag.
+    let anim_overridden;
+    let clip = match overrides.animation {
+        Some((id, slot, anim)) if id == clip.id => {
+            let mut live = clip.clone();
+            match slot {
+                AnimationSlot::In => live.animation_in = Some(anim.clone()),
+                AnimationSlot::Out => live.animation_out = Some(anim.clone()),
+                AnimationSlot::Combo => {
+                    live.animation_combo = Some(anim.clone());
+                    live.animation_in = None;
+                    live.animation_out = None;
+                }
+            }
+            anim_overridden = live;
+            &anim_overridden
+        }
+        _ => clip,
     };
 
     // Clip-relative tick at the timeline rate (both `t` and the clip start are

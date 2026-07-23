@@ -304,6 +304,20 @@ impl WorkerHandle {
         let _ = self.tx.send(WorkerMsg::SetMotionBlur { clip, motion_blur });
     }
 
+    /// Live motion-blur field preview (`"shutter"` / `"samples"`).
+    pub fn preview_motion_blur_delta(&self, clip: String, key: String, value: f32, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::PreviewMotionBlurDelta {
+            clip,
+            key,
+            value,
+            tick,
+        });
+    }
+
+    pub fn clear_motion_blur_override(&self, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::ClearMotionBlurOverride { tick });
+    }
+
     /// Full styles replace. Inspector toggles use [`Self::toggle_layer_style`].
     #[allow(dead_code)] // Retained for tests / direct full-replace commits.
     pub fn set_layer_styles(&self, clip: String, styles: LayerStyles) {
@@ -381,6 +395,28 @@ impl WorkerHandle {
             intensity,
             stagger,
         });
+    }
+
+    /// Live animation-knob preview (`"speed"` / `"intensity"` / `"stagger"`).
+    pub fn preview_clip_animation_delta(
+        &self,
+        clip: String,
+        slot: String,
+        key: String,
+        value: f32,
+        tick: i64,
+    ) {
+        let _ = self.tx.send(WorkerMsg::PreviewClipAnimationDelta {
+            clip,
+            slot,
+            key,
+            value,
+            tick,
+        });
+    }
+
+    pub fn clear_animation_override(&self, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::ClearAnimationOverride { tick });
     }
 
     pub fn preview_clip_look(

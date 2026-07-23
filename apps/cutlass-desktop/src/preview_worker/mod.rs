@@ -19,6 +19,7 @@ mod frame_cache;
 mod frame_fit;
 mod handle;
 mod import_drop;
+mod look_preview;
 mod markers_tracks;
 mod overrides;
 mod param_override;
@@ -45,11 +46,11 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounde
 use cutlass_commands::{Command, EditCommand, EditOutcome, ProjectCommand, TemplatePick};
 use cutlass_engine::{ApplyOutcome, Engine, EngineConfig, SeekPolicy};
 use cutlass_models::{
-    AnimatedTransform, BlendMode, ChromaKey, ClipId, ClipParam, ClipSource, ClipTransform,
-    ColorAdjustments, CropRect, Easing, Filter, Generator, LayerStyles, LinkId, Lut, MAX_SPEED,
-    MIN_SPEED, MarkerColor, MarkerId, Mask, MediaId, MotionBlur, Param, ParamValue,
-    PiecewiseEasingPreset, Project, Rational, RationalTime, TimeRange, Track, TrackId, TrackKind,
-    resample,
+    AnimatedTransform, AnimationRef, AnimationSlot, BlendMode, ChromaKey, ClipId, ClipParam,
+    ClipSource, ClipTransform, ColorAdjustments, CropRect, Easing, Filter, Generator, LayerStyles,
+    LinkId, Lut, MAX_SPEED, MIN_SPEED, MarkerColor, MarkerId, Mask, MediaId, MotionBlur, Param,
+    ParamValue, PiecewiseEasingPreset, Project, Rational, RationalTime, TimeRange, Track, TrackId,
+    TrackKind, resample,
 };
 use cutlass_render::{ExportSettings, RenderError, Renderer};
 use slint::{Rgba8Pixel, SharedPixelBuffer};
@@ -74,6 +75,7 @@ use export::*;
 use frame_cache::*;
 use frame_fit::*;
 use import_drop::*;
+use look_preview::*;
 use markers_tracks::*;
 use overrides::*;
 use param_override::*;

@@ -27,6 +27,10 @@ mod resolve;
 mod scene;
 mod transactional_file;
 
+// Re-export for desktop look-preview tests (session override attach path).
+#[doc(hidden)]
+pub use motion_blur::attach_motion_blur_passes;
+
 pub use cutlass_compositor::FrameSink;
 pub use cutlass_core::RgbaImage;
 pub use error::RenderError;

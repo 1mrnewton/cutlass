@@ -866,11 +866,8 @@ fn style_delta_builds_merged_override_from_committed_styles() {
     apply_styles_preview_delta(&mut engine, &clip_s, "style_shadow_blur", 24.0, 0.0, 0);
     assert!(engine.has_live_overrides());
     let overrides = ResolveOverrides {
-        transform: None,
-        generator: None,
-        look: None,
         styles: Some((clip, &merged)),
-        params: None,
+        ..ResolveOverrides::default()
     };
     let scene = resolve_with(engine.project(), RationalTime::new(0, r), overrides)
         .expect("resolve with override");
@@ -1088,11 +1085,8 @@ fn styles_override_previews_then_clears_on_commit() {
         .expect("delta");
 
     let overrides = ResolveOverrides {
-        transform: None,
-        generator: None,
-        look: None,
         styles: Some((clip, &live)),
-        params: None,
+        ..ResolveOverrides::default()
     };
     let scene = resolve_with(engine.project(), RationalTime::new(0, r), overrides)
         .expect("resolve with override");

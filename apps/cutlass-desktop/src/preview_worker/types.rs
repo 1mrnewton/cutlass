@@ -442,6 +442,31 @@ pub(super) enum WorkerMsg {
     ClearStylesOverride {
         tick: i64,
     },
+    /// Live motion-blur preview: one field delta (`"shutter"` / `"samples"`).
+    /// Worker merges against committed blur and sets the session override.
+    PreviewMotionBlurDelta {
+        clip: String,
+        key: String,
+        value: f32,
+        tick: i64,
+    },
+    /// Drop the motion-blur override and re-render `tick` from committed state.
+    ClearMotionBlurOverride {
+        tick: i64,
+    },
+    /// Live look-animation knob preview: one field delta
+    /// (`"speed"` / `"intensity"` / `"stagger"`) for slot `"in"`/`"out"`/`"combo"`.
+    PreviewClipAnimationDelta {
+        clip: String,
+        slot: String,
+        key: String,
+        value: f32,
+        tick: i64,
+    },
+    /// Drop the animation override and re-render `tick` from committed state.
+    ClearAnimationOverride {
+        tick: i64,
+    },
     /// Append a catalog effect to a clip's chain (M4). One undoable entry.
     AddEffect {
         clip: String,

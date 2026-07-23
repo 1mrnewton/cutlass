@@ -3,7 +3,7 @@
 
 import { CutlassScrollView, CutlassText, CutlassSlider } from "../../components/index.slint";
 import { AppState } from "../../state.slint";
-import { AppStore } from "../../store/index.slint";
+import { AppStore, TimelineStore } from "../../store/index.slint";
 import { InspectorBackend } from "../../lib/inspector-backend.slint";
 import { Clip, CatalogEntry } from "../../models/index.slint";
 import { LabelCell, SectionHeader, SliderRow } from "inspector-widgets.slint";
@@ -172,6 +172,11 @@ component AnimationParamSliders inherits VerticalLayout {
         );
     }
 
+    function preview(key: string, value: float) {
+        InspectorBackend.preview-clip-animation(
+            root.clip-id, root.slot, key, value, TimelineStore.playhead-tick);
+    }
+
     if root.has-speed: SliderRow {
         label: "Speed";
         suffix: "×";
@@ -179,7 +184,9 @@ component AnimationParamSliders inherits VerticalLayout {
         minimum: 0.25;
         maximum: 4;
         reset-value: 1;
-        preview(v) => { }
+        preview(v) => {
+            root.preview("speed", clamp(v, 0.25, 4));
+        }
         commit(v) => {
             root.commit(clamp(v, 0.25, 4), root.intensity, root.stagger);
         }
@@ -192,7 +199,9 @@ component AnimationParamSliders inherits VerticalLayout {
         minimum: 0;
         maximum: 2;
         reset-value: 1;
-        preview(v) => { }
+        preview(v) => {
+            root.preview("intensity", clamp(v, 0, 2));
+        }
         commit(v) => {
             root.commit(root.speed, clamp(v, 0, 2), root.stagger);
         }
@@ -205,7 +214,9 @@ component AnimationParamSliders inherits VerticalLayout {
         minimum: 0;
         maximum: 2;
         reset-value: 1;
-        preview(v) => { }
+        preview(v) => {
+            root.preview("stagger", clamp(v, 0, 2));
+        }
         commit(v) => {
             root.commit(root.speed, root.intensity, clamp(v, 0, 2));
         }

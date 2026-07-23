@@ -842,6 +842,7 @@ fn resolve_with_substitutes_transform_and_generator_for_one_clip() {
         )),
         styles: None,
         params: None,
+        ..ResolveOverrides::default()
     };
     let scene = resolve_with(&project, rt(5), overrides).unwrap();
     let layer = &scene.layers[0];
@@ -2057,11 +2058,8 @@ fn resolve_with_substitutes_styles_for_one_clip() {
         ..Default::default()
     };
     let overrides = ResolveOverrides {
-        transform: None,
-        generator: None,
-        look: None,
         styles: Some((clip, &live)),
-        params: None,
+        ..ResolveOverrides::default()
     };
     let scene = resolve_with(&project, rt(5), overrides).unwrap();
     approx(

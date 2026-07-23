@@ -248,6 +248,24 @@ pub(crate) fn wire_inspector(
         },
     );
 
+    let preview_motion_blur_handle = preview_worker.handle();
+    app.global::<InspectorBackend>().on_preview_clip_motion_blur(
+        move |clip_id, key, value, tick| {
+            preview_motion_blur_handle.preview_motion_blur_delta(
+                clip_id.to_string(),
+                key.to_string(),
+                value,
+                i64::from(tick),
+            );
+        },
+    );
+
+    let clear_motion_blur_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_clear_clip_motion_blur(move |tick| {
+            clear_motion_blur_handle.clear_motion_blur_override(i64::from(tick));
+        });
+
     let set_mask_kind_handle = preview_worker.handle();
     app.global::<InspectorBackend>()
         .on_set_clip_mask_kind(move |clip_id, kind| {
@@ -373,6 +391,25 @@ pub(crate) fn wire_inspector(
             );
         },
     );
+
+    let preview_animation_handle = preview_worker.handle();
+    app.global::<InspectorBackend>().on_preview_clip_animation(
+        move |clip_id, slot, key, value, tick| {
+            preview_animation_handle.preview_clip_animation_delta(
+                clip_id.to_string(),
+                slot.to_string(),
+                key.to_string(),
+                value,
+                i64::from(tick),
+            );
+        },
+    );
+
+    let clear_animation_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_clear_clip_animation(move |tick| {
+            clear_animation_handle.clear_animation_override(i64::from(tick));
+        });
 
     let set_adjust_handle = preview_worker.handle();
     app.global::<InspectorBackend>()

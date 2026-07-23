@@ -8,8 +8,9 @@ use std::path::PathBuf;
 
 use cutlass_commands::{Command, ProjectCommand};
 use cutlass_models::{
-    ClipId, ClipParam, ClipTransform, ColorAdjustments, Filter, Generator, LayerStyles, MediaId,
-    ParamValue, Project, Rational, RationalTime, TrackKind,
+    AnimationRef, AnimationSlot, ClipId, ClipParam, ClipTransform, ColorAdjustments, Filter,
+    Generator, LayerStyles, MediaId, MotionBlur, ParamValue, Project, Rational, RationalTime,
+    TrackKind,
 };
 use cutlass_render::{
     FrameSink, ParamOverrides, Renderer, ResolveOverrides, RgbaImage, SeekPolicy, export_to_file,
@@ -62,6 +63,10 @@ pub struct Engine {
     /// session-only semantics as `transform_override`. Multiple params may be
     /// overridden on one clip at once (e.g. crop x+y during a rect drag).
     param_overrides: ParamOverrides,
+    /// Live motion-blur settings for one clip (inspector shutter/samples drag).
+    motion_blur_override: Option<(ClipId, MotionBlur)>,
+    /// Live look-animation knobs for one clip/slot (speed/intensity/stagger).
+    animation_override: Option<(ClipId, AnimationSlot, AnimationRef)>,
 }
 
 impl Engine {
@@ -87,6 +92,8 @@ impl Engine {
             look_override: None,
             styles_override: None,
             param_overrides: ParamOverrides::new(),
+            motion_blur_override: None,
+            animation_override: None,
         })
     }
 
@@ -189,6 +196,8 @@ impl Engine {
         self.look_override = None;
         self.styles_override = None;
         self.param_overrides.clear();
+        self.motion_blur_override = None;
+        self.animation_override = None;
         // Media ids are project-local: the same id can name a different
         // file in the incoming project, so all id-keyed render state is
         // stale (open decoders and still bitmaps, not only proxies).
@@ -288,6 +297,23 @@ impl Engine {
         self.styles_override = value;
     }
 
+    /// Set (or clear with `None`) the live motion-blur settings for one clip —
+    /// the shutter/samples analogue of
+    /// [`set_transform_override`](Self::set_transform_override).
+    pub fn set_motion_blur_override(&mut self, value: Option<(ClipId, MotionBlur)>) {
+        self.motion_blur_override = value;
+    }
+
+    /// Set (or clear with `None`) the live look-animation knobs for one
+    /// clip/slot — the speed/intensity/stagger analogue of
+    /// [`set_transform_override`](Self::set_transform_override).
+    pub fn set_animation_override(
+        &mut self,
+        value: Option<(ClipId, AnimationSlot, AnimationRef)>,
+    ) {
+        self.animation_override = value;
+    }
+
     /// Set (or replace) one live param value for `clip` — the generic
     /// inspector-slider analogue of
     /// [`set_transform_override`](Self::set_transform_override). Uses the same
@@ -319,6 +345,8 @@ impl Engine {
             || self.look_override.is_some()
             || self.styles_override.is_some()
             || !self.param_overrides.is_empty()
+            || self.motion_blur_override.is_some()
+            || self.animation_override.is_some()
     }
 
     /// Stage timings of the most recent successful preview/export render.
@@ -359,6 +387,8 @@ impl Engine {
 
     /// Composite enabled visual layers at `time` into an RGBA preview frame.
     pub fn get_frame(&mut self, time: RationalTime) -> Result<RgbaImage, EngineError> {
+        // Field-wise construction (not a `&self` helper) so `renderer` stays
+        // disjoint from the override borrows under NLL.
         let overrides = ResolveOverrides {
             transform: self.transform_override,
             generator: self.generator_override.as_ref().map(|(id, g)| (*id, g)),
@@ -368,6 +398,11 @@ impl Engine {
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
             styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
             params: (!self.param_overrides.is_empty()).then_some(&self.param_overrides),
+            motion_blur: self.motion_blur_override,
+            animation: self
+                .animation_override
+                .as_ref()
+                .map(|(id, slot, anim)| (*id, *slot, anim)),
         };
         Ok(self
             .renderer
@@ -393,6 +428,11 @@ impl Engine {
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
             styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
             params: (!self.param_overrides.is_empty()).then_some(&self.param_overrides),
+            motion_blur: self.motion_blur_override,
+            animation: self
+                .animation_override
+                .as_ref()
+                .map(|(id, slot, anim)| (*id, *slot, anim)),
         };
         Ok(self.renderer.render_frame_fit_with(
             &self.project,
@@ -437,6 +477,11 @@ impl Engine {
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
             styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
             params: (!self.param_overrides.is_empty()).then_some(&self.param_overrides),
+            motion_blur: self.motion_blur_override,
+            animation: self
+                .animation_override
+                .as_ref()
+                .map(|(id, slot, anim)| (*id, *slot, anim)),
         };
         Ok(self
             .renderer
@@ -461,6 +506,11 @@ impl Engine {
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
             styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
             params: (!self.param_overrides.is_empty()).then_some(&self.param_overrides),
+            motion_blur: self.motion_blur_override,
+            animation: self
+                .animation_override
+                .as_ref()
+                .map(|(id, slot, anim)| (*id, *slot, anim)),
         };
         Ok(self.renderer.render_frame_fit_into_with(
             &self.project,

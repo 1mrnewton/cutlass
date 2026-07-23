@@ -287,6 +287,65 @@ pub(super) fn dispatch(
                 SeekPolicy::Exact,
             );
         }
+        WorkerMsg::PreviewMotionBlurDelta {
+            clip,
+            key,
+            value,
+            tick,
+        } => {
+            apply_motion_blur_preview_delta(engine, &clip, &key, value);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        WorkerMsg::ClearMotionBlurOverride { tick } => {
+            engine.set_motion_blur_override(None);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        WorkerMsg::PreviewClipAnimationDelta {
+            clip,
+            slot,
+            key,
+            value,
+            tick,
+        } => {
+            apply_animation_preview_delta(engine, &clip, &slot, &key, value);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        WorkerMsg::ClearAnimationOverride { tick } => {
+            engine.set_animation_override(None);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
         WorkerMsg::AddEffect { clip, effect_id } => {
             add_effect_and_publish(engine, &clip, &effect_id, ui)
         }

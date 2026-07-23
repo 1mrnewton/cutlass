@@ -101,6 +101,9 @@ pub(super) fn set_motion_blur_and_publish(
     motion_blur: MotionBlur,
     ui: &UiSink,
 ) {
+    // Clear a live shutter/samples override before the commit so the next
+    // frame never flashes the stale drag value.
+    engine.set_motion_blur_override(None);
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-motion-blur ignored: unparsable clip id");
         return;
@@ -423,6 +426,8 @@ pub(super) fn set_clip_animation_and_publish(
     animation: Option<cutlass_models::AnimationRef>,
     ui: &UiSink,
 ) {
+    // Clear a live speed/intensity/stagger override before the commit.
+    engine.set_animation_override(None);
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-clip-animation ignored: unparsable clip id");
         return;

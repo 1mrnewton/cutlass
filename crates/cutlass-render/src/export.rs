@@ -344,10 +344,8 @@ pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, RenderError> {
 
 /// Encode one tightly packed RGBA8 image as an in-memory JPEG (quality 80).
 ///
-/// Alpha is discarded: pixels are flattened to RGB. Agent vision frames
-/// (project previews, asset frames, contact sheets, timeline maps) are drawn
-/// over opaque backgrounds, so JPEG shrinks the base64 payload without losing
-/// useful transparency.
+/// Pixels are alpha-blended over opaque black (`out = rgb * a / 255`) before
+/// encoding so transparent padding cannot leak garbage RGB into the payload.
 pub fn encode_jpeg(image: &RgbaImage) -> Result<Vec<u8>, RenderError> {
     const QUALITY: u8 = 80;
     if !image.is_well_formed() {
@@ -361,7 +359,14 @@ pub fn encode_jpeg(image: &RgbaImage) -> Result<Vec<u8>, RenderError> {
     let rgb: Vec<u8> = image
         .pixels
         .chunks_exact(4)
-        .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
+        .flat_map(|pixel| {
+            let a = u16::from(pixel[3]);
+            [
+                ((u16::from(pixel[0]) * a) / 255) as u8,
+                ((u16::from(pixel[1]) * a) / 255) as u8,
+                ((u16::from(pixel[2]) * a) / 255) as u8,
+            ]
+        })
         .collect();
     let mut bytes = Vec::new();
     {
@@ -522,6 +527,27 @@ mod tests {
         assert!(
             error.to_string().contains("carries 3 bytes"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn encode_jpeg_blends_transparent_pixels_over_black() {
+        // 2×1: opaque red stays red; fully transparent green garbage → black.
+        let image = RgbaImage::new(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 0]);
+        let jpeg = encode_jpeg(&image).expect("encode jpeg");
+        let decoded = image::load_from_memory(&jpeg)
+            .expect("decode jpeg")
+            .to_rgb8();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        let opaque = decoded.get_pixel(0, 0).0;
+        let clear = decoded.get_pixel(1, 0).0;
+        assert!(
+            opaque[0] > 240 && opaque[1] < 20 && opaque[2] < 20,
+            "opaque red should survive encode: {opaque:?}"
+        );
+        assert!(
+            clear[0] < 16 && clear[1] < 16 && clear[2] < 16,
+            "transparent pixel must blend to black, not green garbage: {clear:?}"
         );
     }
 

@@ -32,6 +32,9 @@ pub struct OpenAiCompatExtras {
     pub usage_accounting: bool,
     /// OpenRouter automatic prompt caching (`cache_control: ephemeral`).
     /// Harmless on non-Anthropic OpenRouter models; leave false elsewhere.
+    /// For Anthropic-family models OpenRouter narrows routing to
+    /// caching-capable endpoints (excludes Bedrock/Vertex) — a routing
+    /// trade-off, not purely free.
     pub prompt_caching: bool,
 }
 

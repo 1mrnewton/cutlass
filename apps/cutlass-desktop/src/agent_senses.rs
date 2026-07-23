@@ -151,13 +151,14 @@ impl AgentSenses {
                 playhead_seconds: request.playhead_seconds,
             },
         )?;
-        let jpeg = cutlass_render::encode_jpeg(&image)
-            .map_err(|error| format!("could not encode timeline map as JPEG: {error}"))?;
+        // Schematic (thin lines / small text) is JPEG's worst case — keep PNG.
+        let png = cutlass_render::encode_png(&image)
+            .map_err(|error| format!("could not encode timeline map as PNG: {error}"))?;
         let label = format!(
             "timeline map {:.2}s-{:.2}s",
             request.start_seconds, request.end_seconds
         );
-        let image = ImagePart::jpeg(jpeg, label);
+        let image = ImagePart::png(png, label);
         let playhead = request.playhead_seconds.map_or_else(
             || "no playhead requested".to_string(),
             |seconds| format!("playhead {seconds:.2}s"),

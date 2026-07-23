@@ -18,7 +18,7 @@ cutlass-text = { path = "../cutlass-text" }
 thiserror.workspace = true
 tracing.workspace = true
 png = "0.17"
-# JPEG encode for agent vision frames (opaque RGB; alpha discarded).
+# JPEG encode for agent vision frames (RGBA blended over black → RGB).
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 nnnoiseless = "0.5"
 tempfile = "3"

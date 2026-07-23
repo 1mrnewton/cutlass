@@ -13,6 +13,10 @@ use serde_json::{Map, Value, json};
 use crate::server::CutlassMcp;
 
 /// Names offered to in-app assistants but not to external MCP agents.
+///
+/// Defense-in-depth: `describe_project` / `read_skill` are separate specs in
+/// cutlass-ai today (not in [`tool_specs`]), so this filter currently removes
+/// nothing. Kept so a future fold-in stays excluded without MCP churn.
 const EXCLUDED_COMMANDS: &[&str] = &["describe_project", "read_skill"];
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -167,6 +171,19 @@ mod tests {
         assert!(names.contains(&"add_generated".into()), "{names:?}");
         assert!(!names.iter().any(|n| n == "read_skill"), "{names:?}");
         assert!(!names.iter().any(|n| n == "describe_project"), "{names:?}");
+
+        // Today the filter is a no-op; if cutlass-ai folds these into
+        // `tool_specs()`, this assert flags the change instead of silently
+        // relying on EXCLUDED_COMMANDS.
+        let all: Vec<String> = tool_specs().into_iter().map(|s| s.name).collect();
+        assert!(
+            !all.iter().any(|n| n == "read_skill"),
+            "tool_specs() gained read_skill — update EXCLUDED_COMMANDS comment: {all:?}"
+        );
+        assert!(
+            !all.iter().any(|n| n == "describe_project"),
+            "tool_specs() gained describe_project — update EXCLUDED_COMMANDS comment: {all:?}"
+        );
     }
 
     #[test]

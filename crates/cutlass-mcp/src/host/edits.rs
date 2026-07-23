@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::{Meta, eng_err, meta_of, require_engine_mut};
 
 /// One successfully applied wire edit inside a batch.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct AppliedEdit {
     /// Wire tool name (`split_clip`, `add_generated`, …).
     pub command: String,
@@ -25,7 +25,7 @@ pub struct AppliedEdit {
 }
 
 /// Result of an all-or-nothing `apply_edits` batch.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct AppliedBatch {
     pub applied: Vec<AppliedEdit>,
     pub meta: Meta,
@@ -33,7 +33,7 @@ pub struct AppliedBatch {
 
 /// Result of `undo` / `redo`. `changed: false` means the stack was empty —
 /// that is success, not an error.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct UndoResult {
     pub changed: bool,
     pub meta: Meta,
@@ -43,6 +43,9 @@ pub(super) fn do_apply_edits(
     slot: &mut Option<Engine>,
     edits: Vec<Value>,
 ) -> Result<AppliedBatch, String> {
+    if edits.is_empty() {
+        return Err("empty edits batch — nothing to apply".into());
+    }
     let engine = require_engine_mut(slot)?;
     engine.begin_group();
 

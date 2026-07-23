@@ -64,14 +64,26 @@ pub(super) fn clear_param_override(
     }
 }
 
+/// Pending `(clip, param) → value` accumulator for a coalesce burst.
+type PendingParamOverrides = HashMap<(String, ClipParam), ParamValue>;
+
 /// One mid-burst non-override: flush this batch (if any) onto the engine,
 /// then dispatch `msg`. Produced by [`drain_param_override_queue`].
 struct ParamOverrideDrainStep {
     /// Overrides to apply *before* `msg`. Empty when the accumulator was
     /// already flushed (or never dirtied) since the last step.
-    flush: HashMap<(String, ClipParam), ParamValue>,
+    flush: PendingParamOverrides,
     msg: WorkerMsg,
 }
+
+/// Result of [`drain_param_override_queue`]: playhead tick, whether `pending`
+/// still needs a final flush, the leftover accumulator, and mid-burst steps.
+type ParamOverrideDrain = (
+    i64,
+    bool,
+    PendingParamOverrides,
+    Vec<ParamOverrideDrainStep>,
+);
 
 /// Drain the worker inbox for a param-override coalesce burst.
 ///
@@ -81,16 +93,11 @@ struct ParamOverrideDrainStep {
 /// clearing dispatch is what resurrects committed overrides
 /// (see `coalesce_does_not_resurrect_committed_override`).
 fn drain_param_override_queue(
-    mut pending: HashMap<(String, ClipParam), ParamValue>,
+    mut pending: PendingParamOverrides,
     mut dirty: bool,
     mut tick: i64,
     req_rx: &Receiver<WorkerMsg>,
-) -> (
-    i64,
-    bool,
-    HashMap<(String, ClipParam), ParamValue>,
-    Vec<ParamOverrideDrainStep>,
-) {
+) -> ParamOverrideDrain {
     let mut steps = Vec::new();
     while let Ok(next) = req_rx.try_recv() {
         match next {
@@ -145,7 +152,7 @@ pub(super) fn coalesce_param_overrides(
     ui: &UiSink,
 ) -> i64 {
     // Pending map: latest value per (clip, param). Seeded with the head msg.
-    let mut pending: HashMap<(String, ClipParam), ParamValue> = HashMap::new();
+    let mut pending = PendingParamOverrides::new();
     pending.insert((clip, param), value);
     let (tick, dirty, pending, steps) = drain_param_override_queue(pending, true, tick, req_rx);
 
@@ -905,8 +912,8 @@ mod tests {
     /// to the clear+commit SetParamConstant does — no Slint UiSink required).
     #[test]
     fn coalesce_does_not_resurrect_committed_override() {
-        use cutlass_commands::{Command, EditCommand};
         use crossbeam_channel::unbounded;
+        use cutlass_commands::{Command, EditCommand};
 
         let (mut engine, clip, clip_s, r) = engine_with_chroma();
         let param_a = ClipParam::Look {

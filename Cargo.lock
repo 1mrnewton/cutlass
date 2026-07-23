@@ -1609,9 +1609,15 @@ name = "cutlass-mcp"
 version = "0.7.0-alpha.0"
 dependencies = [
  "anyhow",
+ "cutlass-ai",
+ "cutlass-commands",
+ "cutlass-engine",
+ "cutlass-models",
  "rmcp",
+ "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

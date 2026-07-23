@@ -10,8 +10,12 @@
 //! crate owns transport, tool routing, and the host-facing contract; the
 //! engine stays behind that gate.
 //!
-//! This milestone is the transport/server scaffold only — an rmcp stdio
-//! server that starts, reports server info, and hosts a minimal tool
-//! router. Project I/O and edit tools land in later milestones.
+//! The engine lives on a dedicated OS thread ([`host::EngineHost`]) because
+//! it is not safely shared across tokio workers. Async tool handlers
+//! round-trip requests over a channel. This milestone covers project
+//! lifecycle + media import; edit tools land next.
 
+pub mod host;
 pub mod server;
+
+mod tools;

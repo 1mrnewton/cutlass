@@ -103,8 +103,7 @@ pub(super) fn apply_animation_preview_delta(
     key: &str,
     value: f32,
 ) {
-    let Some((animation_slot, anim)) =
-        animation_from_preview_delta(engine, clip, slot, key, value)
+    let Some((animation_slot, anim)) = animation_from_preview_delta(engine, clip, slot, key, value)
     else {
         error!(clip, slot, key, "animation preview delta ignored");
         return;

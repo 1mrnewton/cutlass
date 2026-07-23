@@ -249,16 +249,15 @@ pub(crate) fn wire_inspector(
     );
 
     let preview_motion_blur_handle = preview_worker.handle();
-    app.global::<InspectorBackend>().on_preview_clip_motion_blur(
-        move |clip_id, key, value, tick| {
+    app.global::<InspectorBackend>()
+        .on_preview_clip_motion_blur(move |clip_id, key, value, tick| {
             preview_motion_blur_handle.preview_motion_blur_delta(
                 clip_id.to_string(),
                 key.to_string(),
                 value,
                 i64::from(tick),
             );
-        },
-    );
+        });
 
     let clear_motion_blur_handle = preview_worker.handle();
     app.global::<InspectorBackend>()

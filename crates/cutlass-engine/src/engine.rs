@@ -307,10 +307,7 @@ impl Engine {
     /// Set (or clear with `None`) the live look-animation knobs for one
     /// clip/slot — the speed/intensity/stagger analogue of
     /// [`set_transform_override`](Self::set_transform_override).
-    pub fn set_animation_override(
-        &mut self,
-        value: Option<(ClipId, AnimationSlot, AnimationRef)>,
-    ) {
+    pub fn set_animation_override(&mut self, value: Option<(ClipId, AnimationSlot, AnimationRef)>) {
         self.animation_override = value;
     }
 

@@ -64,7 +64,6 @@ export component CutlassColorPicker inherits Rectangle {
     private property <float> v: 1.0;
     private property <float> a: 1.0;
     private property <bool> interacting: false;
-    private property <bool> syncing-out: false;
 
     private property <string> hex-text: "#FF0000";
     private property <string> r-text: "255";
@@ -102,23 +101,22 @@ export component CutlassColorPicker inherits Rectangle {
     }
 
     function push-preview() {
-        root.syncing-out = true;
         root.current = root.live-color;
-        root.syncing-out = false;
         root.refresh-readouts();
         root.preview(root.live-color);
     }
 
     function push-commit() {
-        root.syncing-out = true;
         root.current = root.live-color;
-        root.syncing-out = false;
         root.refresh-readouts();
         root.committed(root.live-color);
     }
 
     function sync-from-current() {
-        if root.interacting || root.syncing-out {
+        // `interacting` covers the whole drag / field edit; commit-time
+        // re-derivation of HSV from the just-written `current` (±1/255) is
+        // harmless because `rgb-to-hsv-preserving` keeps hue/sat on near-black.
+        if root.interacting {
             return;
         }
         let comps = ColorUtil.rgb-to-hsv-preserving(
@@ -275,6 +273,12 @@ export component CutlassColorPicker inherits Rectangle {
                 root.push-commit();
                 root.interacting = false;
             }
+            cancelled(s, v) => {
+                root.s = s;
+                root.v = v;
+                root.push-preview();
+                root.interacting = false;
+            }
         }
 
         ColorPickerHueStrip {
@@ -287,6 +291,11 @@ export component CutlassColorPicker inherits Rectangle {
             committed(h) => {
                 root.h = h;
                 root.push-commit();
+                root.interacting = false;
+            }
+            cancelled(h) => {
+                root.h = h;
+                root.push-preview();
                 root.interacting = false;
             }
         }
@@ -304,6 +313,11 @@ export component CutlassColorPicker inherits Rectangle {
             committed(a) => {
                 root.a = a;
                 root.push-commit();
+                root.interacting = false;
+            }
+            cancelled(a) => {
+                root.a = a;
+                root.push-preview();
                 root.interacting = false;
             }
         }

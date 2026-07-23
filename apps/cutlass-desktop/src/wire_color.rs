@@ -33,24 +33,9 @@ pub(crate) fn wire_color(
         ))
     });
 
-    util.on_rgb_to_hsv(|r, g, b| {
-        let (h, s, v) = color_math::rgb_to_hsv(r, g, b);
-        HsvComponents { h, s, v }
-    });
-
     util.on_rgb_to_hsv_preserving(|r, g, b, prev_h, prev_s| {
         let (h, s, v) = color_math::rgb_to_hsv_preserving(r, g, b, prev_h, prev_s);
         HsvComponents { h, s, v }
-    });
-
-    util.on_hsv_to_color(|h, s, v, a| {
-        let (r, g, b) = color_math::hsv_to_rgb(h, s, v);
-        Color::from_argb_u8(
-            (a.clamp(0.0, 1.0) * 255.0).round() as u8,
-            (r.clamp(0.0, 1.0) * 255.0).round() as u8,
-            (g.clamp(0.0, 1.0) * 255.0).round() as u8,
-            (b.clamp(0.0, 1.0) * 255.0).round() as u8,
-        )
     });
 
     // Seed the shell model from settings (most-recent-first).

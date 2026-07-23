@@ -46,8 +46,12 @@ export component ColorPickerSvSquare inherits Rectangle {
 
     callback preview(s: float, v: float);
     callback committed(s: float, v: float);
+    // Pointer cancel / interrupted drag — value restored to pre-drag.
+    callback cancelled(s: float, v: float);
 
     private property <bool> dragging: false;
+    private property <float> pre-s: 1.0;
+    private property <float> pre-v: 1.0;
     private property <length> thumb-size: 14px;
 
     width: 100%;
@@ -74,9 +78,13 @@ export component ColorPickerSvSquare inherits Rectangle {
         fill: hsv(root.hue, root.saturation, root.value);
     }
 
+    // Map pointer through the same inset the thumb uses so the cursor sits
+    // on the thumb center at the strip edges (thumb/2 … width − thumb/2).
     function apply-at(mx: length, my: length) {
-        let nx = root.width <= 0px ? 0.0 : clamp(mx / root.width, 0.0, 1.0);
-        let ny = root.height <= 0px ? 0.0 : clamp(my / root.height, 0.0, 1.0);
+        let span-x = root.width - root.thumb-size;
+        let span-y = root.height - root.thumb-size;
+        let nx = span-x <= 0px ? 0.0 : clamp((mx - root.thumb-size / 2) / span-x, 0.0, 1.0);
+        let ny = span-y <= 0px ? 0.0 : clamp((my - root.thumb-size / 2) / span-y, 0.0, 1.0);
         // Matches `color_math::sv_from_norm`.
         root.saturation = nx;
         root.value = 1.0 - ny;
@@ -88,16 +96,23 @@ export component ColorPickerSvSquare inherits Rectangle {
         mouse-cursor: MouseCursor.crosshair;
 
         pointer-event(event) => {
+            // Cancel can arrive with a non-left button — handle before filter.
+            if event.kind == PointerEventKind.cancel && root.dragging {
+                root.dragging = false;
+                root.saturation = root.pre-s;
+                root.value = root.pre-v;
+                root.cancelled(root.saturation, root.value);
+                return;
+            }
             if event.button != PointerEventButton.left {
                 return;
             }
             if event.kind == PointerEventKind.down {
+                root.pre-s = root.saturation;
+                root.pre-v = root.value;
                 root.dragging = true;
                 root.apply-at(self.mouse-x, self.mouse-y);
             } else if event.kind == PointerEventKind.up && root.dragging {
-                root.dragging = false;
-                root.committed(root.saturation, root.value);
-            } else if event.kind == PointerEventKind.cancel && root.dragging {
                 root.dragging = false;
                 root.committed(root.saturation, root.value);
             }
@@ -118,8 +133,11 @@ export component ColorPickerHueStrip inherits Rectangle {
 
     callback preview(h: float);
     callback committed(h: float);
+    callback cancelled(h: float);
 
     private property <bool> dragging: false;
+    private property <float> pre-h: 0.0;
+    private property <length> thumb-size: 14px;
 
     width: 100%;
     height: 14px;
@@ -149,7 +167,8 @@ export component ColorPickerHueStrip inherits Rectangle {
     }
 
     function apply-at(mx: length) {
-        let nx = root.width <= 0px ? 0.0 : clamp(mx / root.width, 0.0, 1.0);
+        let span = root.width - root.thumb-size;
+        let nx = span <= 0px ? 0.0 : clamp((mx - root.thumb-size / 2) / span, 0.0, 1.0);
         // Matches `color_math::hue_from_norm`.
         root.hue = nx * 360.0;
         if root.hue >= 360.0 {
@@ -163,16 +182,20 @@ export component ColorPickerHueStrip inherits Rectangle {
         mouse-cursor: MouseCursor.pointer;
 
         pointer-event(event) => {
+            if event.kind == PointerEventKind.cancel && root.dragging {
+                root.dragging = false;
+                root.hue = root.pre-h;
+                root.cancelled(root.hue);
+                return;
+            }
             if event.button != PointerEventButton.left {
                 return;
             }
             if event.kind == PointerEventKind.down {
+                root.pre-h = root.hue;
                 root.dragging = true;
                 root.apply-at(self.mouse-x);
             } else if event.kind == PointerEventKind.up && root.dragging {
-                root.dragging = false;
-                root.committed(root.hue);
-            } else if event.kind == PointerEventKind.cancel && root.dragging {
                 root.dragging = false;
                 root.committed(root.hue);
             }
@@ -196,8 +219,11 @@ export component ColorPickerAlphaStrip inherits Rectangle {
 
     callback preview(a: float);
     callback committed(a: float);
+    callback cancelled(a: float);
 
     private property <bool> dragging: false;
+    private property <float> pre-a: 1.0;
+    private property <length> thumb-size: 14px;
     private property <color> opaque: hsv(root.hue, root.saturation, root.value, 1.0);
 
     width: 100%;
@@ -229,7 +255,8 @@ export component ColorPickerAlphaStrip inherits Rectangle {
     }
 
     function apply-at(mx: length) {
-        let nx = root.width <= 0px ? 0.0 : clamp(mx / root.width, 0.0, 1.0);
+        let span = root.width - root.thumb-size;
+        let nx = span <= 0px ? 0.0 : clamp((mx - root.thumb-size / 2) / span, 0.0, 1.0);
         // Matches `color_math::alpha_from_norm`.
         root.alpha = nx;
         root.preview(root.alpha);
@@ -240,16 +267,20 @@ export component ColorPickerAlphaStrip inherits Rectangle {
         mouse-cursor: MouseCursor.pointer;
 
         pointer-event(event) => {
+            if event.kind == PointerEventKind.cancel && root.dragging {
+                root.dragging = false;
+                root.alpha = root.pre-a;
+                root.cancelled(root.alpha);
+                return;
+            }
             if event.button != PointerEventButton.left {
                 return;
             }
             if event.kind == PointerEventKind.down {
+                root.pre-a = root.alpha;
                 root.dragging = true;
                 root.apply-at(self.mouse-x);
             } else if event.kind == PointerEventKind.up && root.dragging {
-                root.dragging = false;
-                root.committed(root.alpha);
-            } else if event.kind == PointerEventKind.cancel && root.dragging {
                 root.dragging = false;
                 root.committed(root.alpha);
             }

@@ -21,9 +21,7 @@ export global ColorUtil {
     // commit (picker or eyedropper).
     callback record-recent(c: color);
 
-    // RGB channels in `[0, 1]`. Achromatic inputs report `h == 0`.
-    pure callback rgb-to-hsv(r: float, g: float, b: float) -> HsvComponents;
-    // Same conversion, but keeps `prev-h` / `prev-s` when the RGB is
+    // RGB channels in `[0, 1]`. Keeps `prev-h` / `prev-s` when the RGB is
     // black or gray so the color picker does not lose hue on drag-to-black.
     pure callback rgb-to-hsv-preserving(
         r: float,
@@ -32,5 +30,4 @@ export global ColorUtil {
         prev-h: float,
         prev-s: float,
     ) -> HsvComponents;
-    pure callback hsv-to-color(h: float, s: float, v: float, a: float) -> color;
 }

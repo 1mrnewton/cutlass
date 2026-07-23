@@ -117,6 +117,38 @@ fn tool_schemas_are_fully_inlined() {
 }
 
 #[test]
+fn set_param_keyframe_schema_uses_compact_wire_clip_param() {
+    let spec = tool_specs()
+        .into_iter()
+        .find(|s| s.name == "set_param_keyframe")
+        .expect("set_param_keyframe tool");
+    let compact = serde_json::to_string(&spec.parameters).expect("serialize");
+    assert!(
+        compact.len() < 3_000,
+        "set_param_keyframe schema is {} bytes; WireClipParam should be a \
+         compact string enum + tagged branches, not per-variant oneOf prose",
+        compact.len()
+    );
+    let param = &spec.parameters["properties"]["param"];
+    let one_of = param["oneOf"].as_array().expect("param oneOf");
+    let string_branch = one_of
+        .iter()
+        .find(|b| b.get("type") == Some(&serde_json::json!("string")))
+        .expect("string enum branch");
+    let variants = string_branch["enum"].as_array().expect("enum");
+    assert!(
+        variants.iter().any(|v| v == "position")
+            && variants.iter().any(|v| v == "anchor_point")
+            && variants.iter().any(|v| v == "crop"),
+        "compact enum missing unit variants: {string_branch}"
+    );
+    assert!(
+        !one_of.iter().any(|b| b.get("const").is_some()),
+        "param schema still uses per-variant const oneOf branches"
+    );
+}
+
+#[test]
 fn generator_wire_format_is_tagged_lowercase() {
     let shape = WireGenerator::Shape {
         shape: WireShape::Ellipse,
@@ -318,11 +350,8 @@ fn extract_audio_schema_requires_explicit_clip_and_track() {
         extract.parameters["required"],
         serde_json::json!(["clip", "track"])
     );
-    assert!(
-        extract
-            .description
-            .contains("planned track ids remap correctly")
-    );
+    assert!(extract.description.contains("Track id required"));
+    assert!(extract.description.contains("add_track"));
     assert!(
         WireCommand::from_tool_call("extract_audio", serde_json::json!({"clip": 7}))
             .unwrap_err()
@@ -342,22 +371,10 @@ fn duplicate_clip_schema_requires_only_explicit_placement_fields() {
         serde_json::json!(["clip", "to_track", "start"])
     );
     assert_eq!(duplicate.parameters["additionalProperties"], false);
-    assert!(
-        duplicate
-            .description
-            .contains("deep property-preserving copy")
-    );
-    assert!(duplicate.description.contains("fresh unlinked clip id"));
-    assert!(
-        duplicate
-            .description
-            .contains("explicit target track and start")
-    );
-    assert!(
-        duplicate
-            .description
-            .contains("does not ripple clips or search for space")
-    );
+    assert!(duplicate.description.contains("Deep-copy"));
+    assert!(duplicate.description.contains("Fresh unlinked id"));
+    assert!(duplicate.description.contains("explicit track and start"));
+    assert!(duplicate.description.contains("does not ripple"));
 }
 
 #[test]
@@ -373,9 +390,10 @@ fn move_effect_schema_uses_u32_indices() {
     );
     for field in ["from_index", "to_index"] {
         let index = &move_effect.parameters["properties"][field];
+        // Schema cleaner strips schemars `format` / default `minimum: 0`
+        // noise; the wire type remains a non-negative integer index.
         assert_eq!(index["type"], "integer");
-        assert_eq!(index["format"], "uint32");
-        assert_eq!(index["minimum"], 0);
+        assert!(index.get("format").is_none());
     }
 }
 

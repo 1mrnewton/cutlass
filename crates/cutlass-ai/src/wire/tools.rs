@@ -22,12 +22,65 @@ fn spec<T: JsonSchema>(name: &'static str, description: &'static str) -> ToolSpe
     // `WireGenerator` object is required).
     let mut settings = schemars::generate::SchemaSettings::draft2020_12();
     settings.inline_subschemas = true;
-    let parameters = serde_json::to_value(settings.into_generator().into_root_schema_for::<T>())
-        .expect("tool argument schemas are plain data and always serialize");
+    let mut parameters =
+        serde_json::to_value(settings.into_generator().into_root_schema_for::<T>())
+            .expect("tool argument schemas are plain data and always serialize");
+    compact_schema_json(&mut parameters);
     ToolSpec {
         name: name.to_string(),
         description: description.to_string(),
         parameters,
+    }
+}
+
+/// Strip schemars noise that costs tokens without helping the model:
+/// `format`, `title`, `$schema`, and single-element `allOf` wrappers.
+/// Also drops redundant uint8 `minimum`/`maximum` on array items (0/255)
+/// and collapses `{"type":["T","null"]}` wrappers where safe.
+fn compact_schema_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.remove("format");
+            map.remove("title");
+            map.remove("$schema");
+            if map.get("description") == Some(&serde_json::json!("")) {
+                map.remove("description");
+            }
+            if let Some(serde_json::Value::Array(all_of)) = map.get("allOf") {
+                if all_of.len() == 1 {
+                    if let serde_json::Value::Object(inner) = &all_of[0] {
+                        let inner = inner.clone();
+                        map.remove("allOf");
+                        for (k, v) in inner {
+                            map.entry(k).or_insert(v);
+                        }
+                    }
+                }
+            }
+            // Drop default uint bounds that schemars stamps on every u8 / u64.
+            if map.get("type") == Some(&serde_json::json!("integer")) {
+                if map.get("minimum") == Some(&serde_json::json!(0))
+                    && map.get("maximum") == Some(&serde_json::json!(255))
+                {
+                    map.remove("minimum");
+                    map.remove("maximum");
+                } else if map.get("minimum") == Some(&serde_json::json!(0))
+                    && map.get("maximum").is_none()
+                {
+                    // unsigned ids / indices — `type: integer` is enough
+                    map.remove("minimum");
+                }
+            }
+            for child in map.values_mut() {
+                compact_schema_json(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                compact_schema_json(child);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -107,105 +160,105 @@ macro_rules! tools {
 
 tools! {
     "add_track" => AddTrack(AddTrack),
-        "Add a track to the timeline stack (video, audio, text, or sticker overlay lane). Lanes keep CapCut zones: audio at the bottom, then the main video track, overlays above it, text on top — the index only orders a lane within its zone.";
+        "Add a timeline track (video, audio, text, sticker). CapCut zones: audio bottom, then main video, overlays, text top — index only orders within a zone.";
     "add_clip" => AddClip(AddClip),
-        "Place a trimmed range of an imported media file on a video or audio track. Times are in seconds.";
+        "Place a trimmed range of imported media on a video or audio track. Times in seconds.";
     "extract_audio" => ExtractAudio(ExtractAudio),
-        "Detach a video clip's embedded sound onto an existing unlocked audio track, preserving its exact placement and audio/retime settings. The track id is required: call add_track with kind audio first when needed, then pass the returned id. Keeping the target explicit lets planned track ids remap correctly during replay.";
+        "Detach a video clip's embedded sound onto an unlocked audio track (placement and audio/retime preserved). Track id required: add_track(kind=audio) first if needed.";
     "duplicate_clip" => DuplicateClip(DuplicateClip),
-        "Make a deep property-preserving copy of one clip at an explicit target track and start (timeline seconds). The copy gets a fresh unlinked clip id. This tool does not ripple clips or search for space; choose a non-overlapping destination explicitly.";
+        "Deep-copy a clip to an explicit track and start (timeline seconds). Fresh unlinked id; does not ripple or find space.";
     "add_generated" => AddGenerated(AddGenerated),
-        "Place a generated clip (text title, solid color, or shape) on a matching track. Times are in seconds.";
+        "Place a generated clip (text, solid, or shape) on a matching track. Times in seconds.";
     "set_generator" => SetGenerator(SetGenerator),
-        "Replace a generated clip's content: change a title's text (styling preserved) or recolor a solid/shape. Not valid for media clips.";
+        "Replace generated clip content (text keeps styling). Not valid for media clips.";
     "set_clip_transform" => SetClipTransform(SetClipTransform),
-        "Change a clip's placement on the canvas: position, scale (number for uniform or [x, y] for per-axis), rotation, opacity. Omitted fields keep their current value. Not valid on audio tracks.";
+        "Set canvas placement: position (canvas fractions from center), scale (number or [x,y]; 1.0=fit), rotation (deg CW), opacity. Omitted fields keep. Not for audio.";
     "set_clip_crop" => SetClipCrop(SetClipCrop),
-        "Crop a clip to a sub-region of its frame (fractions trimmed off each edge; 0 restores an edge) and/or mirror it with flip_h / flip_v. Omitted fields keep their current value. Not valid on audio tracks.";
+        "Crop by edge-trim fractions (0 restores) and/or flip_h/flip_v. Kept region still aspect-fits (crop does not move the layer). Not for audio.";
     "add_effect" => AddEffect(AddEffect),
-        "Add a visual effect to a clip's effect chain. Available effects: gaussian_blur (param 'radius'), vignette (param 'amount'). Effects render on the placed layer, in chain order. Not valid on audio tracks.";
+        "Append a visual effect (e.g. gaussian_blur/radius, vignette/amount). Chain order; not for audio.";
     "remove_effect" => RemoveEffect(RemoveEffect),
-        "Remove an effect from a clip's chain by its index (0 = first). See describe_project for a clip's current effects.";
+        "Remove an effect by chain index (0 = first). See describe_project.";
     "move_effect" => MoveEffect(MoveEffect),
-        "Reorder a clip's effect chain. Both from_index and to_index address the current pre-move chain; to_index is the effect's final index. See describe_project for the current order.";
+        "Reorder effects; from_index/to_index address the pre-move chain. See describe_project.";
     "set_effect_param" => SetEffectParam(SetEffectParam),
-        "Set a parameter of an effect on a clip. Use `value` for scalars (e.g. gaussian_blur 'radius'), `position` for vec2 params (e.g. color_overlay 'offset'), and `rgba` for color params (e.g. duotone 'shadow_color'). Use describe_project to see effect indices and current params.";
+        "Set an effect param: `value` scalars, `position` vec2, `rgba` colors. See describe_project for indices.";
     "add_transition" => AddTransition(AddTransition),
-        "Add a transition at the cut where a clip meets the next clip on its track. Available transitions: crossfade, dip_to_black, dip_to_white, wipe_left, wipe_right, wipe_up, wipe_down, slide. The clip must butt directly against a following clip. Not valid on audio tracks.";
+        "Add a transition at the cut to the next abutting clip: crossfade, dip_to_black/white, wipe_*, slide. Not for audio.";
     "remove_transition" => RemoveTransition(RemoveTransition),
-        "Remove the transition at a clip's right cut. See describe_project for which clips carry one.";
+        "Remove the transition at a clip's right cut.";
     "set_transition" => SetTransition(SetTransition),
-        "Set the duration in seconds of the transition at a clip's right cut (centered on the cut).";
+        "Set transition duration in seconds (window centered on the cut).";
     "set_param_keyframe" => SetParamKeyframe(SetParamKeyframe),
-        "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), crop, volume, pan (−1 left … +1 right), speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, color-look `{look:{param}}`, and style `{style:{param}}` properties. Use `value` for scalars (including uniform scale), `position` for position/anchor_point/per-axis scale and other vec2 params, `rgba` for colors, and `rect` as [x,y,w,h] for crop. For curved position motion paths, pass optional `tangent_out` / `tangent_in` as canvas-fraction offsets from the keyframe value (After Effects–style bezier handles; position only). Effect names and valid properties are visible in describe_project.";
+        "Add/replace a keyframe at timeline seconds. See `param` schema for selectors and value args (`value`/`position`/`rgba`/`rect`). Optional tangent_out/tangent_in are canvas-fraction handles for position motion paths only.";
     "remove_param_keyframe" => RemoveParamKeyframe(RemoveParamKeyframe),
-        "Remove the keyframe at a timeline position (seconds) on any animatable clip property. Use the same `param` selector as set_param_keyframe. Removing the last keyframe freezes the property at that value.";
+        "Remove a keyframe at timeline seconds (same `param` as set_param_keyframe). Last keyframe freezes the value.";
     "set_param_constant" => SetParamConstant(SetParamConstant),
-        "Set any animatable clip property to a fixed value and remove all its keyframes (stops its animation). Use the same `param` selector as set_param_keyframe, with `value` for scalars (including uniform scale), `position` for position/anchor_point/per-axis scale and other vec2 params, `rgba` for colors, or `rect` as [x,y,w,h] for crop.";
+        "Set an animatable property to a fixed value and clear its keyframes (same `param`/value args as set_param_keyframe).";
     "apply_easing_preset" => ApplyEasingPreset(ApplyEasingPreset),
-        "Replace the outgoing keyframe segment at from_tick with a multi-keyframe bounce_out / elastic_out / back_out approximation. Requires a keyframe at from_tick and a following keyframe. Scalar and vec2 params only (not colors or crop). One undoable edit.";
+        "Replace the outgoing KF segment at from_tick with bounce_out/elastic_out/back_out. Needs a following keyframe; scalar/vec2 only.";
     "set_clip_speed" => SetClipSpeed(SetClipSpeed),
-        "Change a media clip's playback speed (2.0 = double speed, 0.5 = slow motion) and/or play it in reverse. The clip's timeline length re-derives from the speed; its audio time-stretches to match (pitch preserved by default). Not valid for generated clips.";
+        "Set media playback speed (2.0=double, 0.5=slow-mo) and/or reverse. Length re-derives; audio time-stretches. Not for generated clips.";
     "set_speed_curve" => SetSpeedCurve(SetSpeedCurve),
-        "Apply a CapCut-style speed ramp to a media clip so its speed varies across its length: preset 'ramp_up' (slow to fast), 'ramp_down' (fast to slow), 'montage' (fast/slow/fast), 'hero' (slow-mo on the action), or 'bullet' (fast/hard-slow/fast). Omit preset to clear the ramp. The clip's length re-derives from the ramp's average speed; its audio time-stretches along the ramp. Not valid for generated clips.";
+        "Apply/clear a speed ramp preset (ramp_up, ramp_down, montage, hero, bullet). Length re-derives from average speed. Not for generated clips.";
     "set_clip_pitch" => SetClipPitch(SetClipPitch),
-        "Lock or unlock a retimed media clip's pitch. preserve_pitch true (default) keeps the original pitch while time-stretching; false lets pitch follow speed (the chipmunk effect when sped up). Only affects a clip that is retimed (speed change, reverse, or ramp). Not valid for generated clips.";
+        "preserve_pitch true keeps pitch while time-stretching; false lets pitch follow speed. Retimed media only.";
     "set_clip_audio" => SetClipAudio(SetClipAudio),
-        "Set a clip's volume (0.0 mutes, 1.0 unchanged, 2.0 doubles) and/or fade-in/fade-out durations in seconds. Omitted fields keep their current value. A video clip keeps its own sound, so target it directly.";
+        "Set volume (0=mute, 1=unchanged, max 10) and/or fade-in/out seconds. Target video-with-sound or audio clips directly.";
     "set_denoise" => SetDenoise(SetDenoise),
-        "Turn noise reduction on or off for a media clip: runs its audio through a speech-preserving denoiser that suppresses steady background noise (hum, hiss, air-conditioning, room tone) while keeping voice. Use on clips with a constant background drone. A video clip keeps its own sound, so target it directly. Not valid for generated clips.";
+        "Toggle speech-preserving denoise (steady hum/hiss/room tone). Media clips only; target video-with-sound directly.";
     "set_clip_mask" => SetClipMask(SetClipMask),
-        "Set or clear a shaped alpha mask on a media-backed visual clip. Mask kinds: linear, mirror, circle, rectangle, heart, star. Optional constants: feather (0..1), invert, center/size as fractions of the layer, rotation in degrees clockwise, roundness (0..1, rectangle only). Omitted geometry uses defaults. Constants only — animate with set_param_keyframe using look params (mask_feather, mask_center, mask_size, mask_rotation, mask_roundness). Pass null for mask to clear.";
+        "Set/clear a mask (linear/mirror/circle/rectangle/heart/star). feather 0..1; center/size = layer fractions; rotation deg CW; roundness 0..1 (rectangle). Animate via look params. null clears.";
     "set_clip_chroma" => SetClipChroma(SetClipChroma),
-        "Set or clear chroma keying (green screen) on a media-backed visual clip. Pass null for chroma to clear.";
+        "Set/clear chroma key on a media visual clip. null clears.";
     "set_clip_stabilize" => SetClipStabilize(SetClipStabilize),
-        "Set or clear video stabilization on a media-backed video clip (not still images). Levels: recommended, smooth, max_smooth. Pass null for level to clear.";
+        "Set/clear stabilize on a media video clip: recommended, smooth, max_smooth. null clears.";
     "set_clip_filter" => SetClipFilter(SetClipFilter),
-        "Set or clear a color-grade filter preset on any visual clip. Filter ids include vivid, warm, cool, noir, sunset, and others from the catalog. Pass null for filter to clear.";
+        "Set/clear a color-grade filter (vivid, warm, cool, noir, …). null clears.";
     "set_clip_blend_mode" => SetClipBlendMode(SetClipBlendMode),
-        "Set how a visual clip composites over the layers below it (CapCut Blend). Modes: normal, darken, multiply, color_burn, lighten, screen, color_dodge, add, overlay, soft_light, hard_light, difference, exclusion. Visual clips only; normal resets to plain source-over.";
+        "Set blend mode over layers below: normal, darken, multiply, color_burn, lighten, screen, color_dodge, add, overlay, soft_light, hard_light, difference, exclusion.";
     "set_motion_blur" => SetMotionBlur(SetMotionBlur),
-        "Enable or configure transform motion blur on a visual clip: when the clip's transform is animated, export supersamples its placement across the shutter and averages the samples (texture stays at the frame time — transform-only, like After Effects). Fields: enabled (bool), optional shutter_deg (0..720, default 180), optional samples (2..32, default 8; render clamps to 16). Plain values — not animatable. Visual clips only; requires an animated transform to have any visible effect.";
+        "Transform motion blur on a visual clip (not animatable): enabled, shutter_deg 0..720 (default 180), samples 2..32 (clamped to 16). Needs an animated transform.";
     "set_layer_styles" => SetClipLayerStyles(SetClipLayerStyles),
-        "Set layer-quad shadow/glow/outline/background styles on any visual clip (distinct from text glyph treatments). Each block is optional constants in reference pixels (1080p baseline); omitted blocks are removed. Empty styles clears every block. Constants only — animate with set_param_keyframe using style params (shadow_blur, glow_color, …).";
+        "Set layer shadow/glow/outline/background (reference px @1080p; not text glyph styles). Omitted blocks removed; empty styles clears all. Animate via style params.";
     "set_clip_adjustments" => SetClipAdjustments(SetClipAdjustments),
-        "Set manual color adjustments (brightness, contrast, saturation, exposure, temperature, tint, hue, highlights, shadows, sharpness, vignette) on any visual clip. Signed sliders are -1..1; sharpness and vignette are 0..1. Omitted sliders keep their current value.";
+        "Manual color adjust: brightness/contrast/saturation/exposure/temperature/tint/hue/highlights/shadows (−1..1); sharpness/vignette (0..1). Omitted keep.";
     "set_clip_animation" => SetClipAnimation(SetClipAnimation),
-        "Set or clear a look animation preset on any visual clip. Slots: in (entrance), out (exit), combo (looping). Animation ids include fade_in, slide_up, pulse, typewriter, wave, etc. Optional speed (0.25–4), intensity (0–2), and stagger (0–2, text presets). Pass null for animation to clear the slot.";
+        "Set/clear look animation. Slots: in/out/combo. Optional speed 0.25–4, intensity 0–2, stagger 0–2 (text). null animation clears.";
     "set_audio_role" => SetAudioRole(SetAudioRole),
-        "Tag or untag what an audio-lane clip is: music, sfx, voiceover, or extracted. Pass null for role to clear the tag. Audio-track clips only.";
+        "Tag an audio-lane clip: music, sfx, voiceover, extracted. null clears.";
     "split_clip" => SplitClip(SplitClip),
-        "Split a clip at a timeline position (seconds) into two abutting clips.";
+        "Split a clip at timeline seconds into two abutting clips.";
     "trim_clip" => TrimClip(TrimClip),
-        "Re-place / trim a clip to a new timeline start and duration in seconds. Trimming a media clip's head advances its source in-point.";
+        "Re-place/trim to new start and duration (seconds). Media head trim advances source in-point.";
     "move_clip" => MoveClip(MoveClip),
-        "Move a clip to a track at a new start time (seconds), keeping its duration.";
+        "Move a clip to a track at a new start (seconds), keeping duration.";
     "remove_clip" => RemoveClip(RemoveClip),
-        "Remove a clip, leaving a gap where it sat.";
+        "Remove a clip, leaving a gap.";
     "remove_track" => RemoveTrack(RemoveTrack),
-        "Remove a track and any clips still on it. The main track (marked in describe_project) is permanent and cannot be removed.";
+        "Remove a track and its clips. Main track (see describe_project) cannot be removed.";
     "set_track_enabled" => SetTrackEnabled(SetTrackEnabled),
         "Show or hide a visual track in the composite.";
     "set_track_muted" => SetTrackMuted(SetTrackMuted),
         "Mute or unmute an audio track.";
     "set_track_locked" => SetTrackLocked(SetTrackLocked),
-        "Lock or unlock a track's clips against editing.";
+        "Lock or unlock a track against editing.";
     "ripple_delete" => RippleDelete(RippleDelete),
-        "Remove a clip and slide later clips on its track left to close the gap.";
+        "Remove a clip and slide later clips left to close the gap.";
     "shift_clips" => ShiftClips(ShiftClips),
-        "Shift every clip on a track starting at/after a position by a signed number of seconds.";
+        "Shift clips on a track at/after a position by signed seconds.";
     "ripple_insert" => RippleInsert(RippleInsert),
-        "Insert a trimmed range of media at a timeline position, shifting later clips right to make room. Times are in seconds.";
+        "Insert trimmed media at timeline seconds, shifting later clips right.";
     "link_clips" => LinkClips(LinkClips),
-        "Link two or more clips so they select, move, and trim together (replaces their previous links).";
+        "Link two or more clips to select/move/trim together (replaces prior links).";
     "unlink_clips" => UnlinkClips(UnlinkClips),
-        "Dissolve every link group touched by one or more clip ids. Naming any member clears the complete group; distinct members of the same group are coalesced.";
+        "Dissolve every link group touched by the given clip ids.";
     "add_marker" => AddMarker(AddMarker),
-        "Drop a named, colored marker on the timeline ruler at a position in seconds. Omit color to cycle the palette.";
+        "Drop a named, colored ruler marker at timeline seconds. Omit color to cycle palette.";
     "remove_marker" => RemoveMarker(RemoveMarker),
         "Remove a ruler marker by id.";
     "set_marker" => SetMarker(SetMarker),
-        "Move, rename, or recolor a ruler marker. Omitted fields keep their current value.";
+        "Move, rename, or recolor a ruler marker. Omitted fields keep.";
     "set_canvas" => SetCanvas(SetCanvas),
-        "Set the project canvas: aspect ratio preset ('auto' follows the footage; '16:9', '9:16', '1:1', '4:5', '21:9' reshape it) and/or the background color shown where no clip covers the canvas. Omitted fields keep their current value.";
+        "Set canvas aspect ('auto'|'16:9'|'9:16'|'1:1'|'4:5'|'21:9') and/or background color. Omitted keep.";
 }

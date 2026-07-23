@@ -13,31 +13,27 @@ pub enum WireMaskKind {
     Star,
 }
 
-/// A shaped alpha mask on a media-backed visual clip.
+/// Shaped alpha mask on a media-backed visual clip.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct WireMask {
     pub kind: WireMaskKind,
-    /// Edge softness, 0 (hard) … 1 (fully feathered). Defaults to 0.
+    /// Edge softness 0 (hard) … 1 (fully feathered). Default 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feather: Option<f64>,
-    /// Keep the outside instead of the inside.
+    /// Keep outside instead of inside.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invert: Option<bool>,
-    /// Mask center offset from the layer center, as fractions of the layer
-    /// size per axis (`[0,0]` = centered, `[0.5,0]` = right edge). Omitted
-    /// uses the default (`[0,0]`).
+    /// Center offset from layer center as layer-size fractions
+    /// (`[0,0]` centered, `[0.5,0]` right edge). Default `[0,0]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub center: Option<[f32; 2]>,
-    /// Mask size as fractions of the layer size per axis (`[1,1]` covers the
-    /// layer). Omitted uses the default (`[1,1]`).
+    /// Size as layer-size fractions (`[1,1]` covers layer). Default `[1,1]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<[f32; 2]>,
-    /// Mask rotation in degrees, clockwise about the mask center. Omitted
-    /// uses the default (`0`).
+    /// Rotation degrees CW about mask center. Default 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation: Option<f32>,
-    /// Rectangle corner rounding, `0` (sharp) … `1` (fully round). Ignored
-    /// by other kinds. Omitted uses the default (`0`).
+    /// Rectangle corner roundness 0…1 (other kinds ignore). Default 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roundness: Option<f32>,
 }
@@ -137,74 +133,65 @@ pub struct SetClipBlendMode {
     pub mode: WireBlendMode,
 }
 
-/// Set per-clip transform motion blur (temporal supersampling). Plain values
-/// — not animatable. Omitted `shutter_deg` / `samples` keep the clip's
-/// current values (or model defaults when first enabling).
+/// Transform motion blur (not animatable). Omitted fields keep current values.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetMotionBlur {
-    /// Target clip id.
     pub clip: u64,
-    /// When false, supersampling is skipped entirely.
+    /// false skips supersampling entirely.
     pub enabled: bool,
-    /// Shutter angle in degrees (`0..=720`). `360` = full frame interval.
-    /// `0` disables even when enabled. Omit to keep the current value.
+    /// Shutter angle degrees (`0..=720`; 360 = full frame; 0 disables).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shutter_deg: Option<f32>,
-    /// Sub-frame sample count (`2..=32`; render clamps to `2..=16`). Omit to
-    /// keep the current value.
+    /// Sub-frame samples (`2..=32`; render clamps to 16).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub samples: Option<u32>,
 }
 
-/// Drop shadow drawn from the layer's alpha. Lengths are reference pixels
-/// (1080p baseline); color is RGBA 0–255.
+/// Drop shadow from layer alpha. Lengths = reference px (1080p); rgba 0–255.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WireLayerShadow {
     pub rgba: [u8; 4],
-    /// Offset in reference pixels (`+x` right, `+y` down).
+    /// Offset in reference px (`+x` right, `+y` down).
     pub offset: [f32; 2],
-    /// Blur radius in reference pixels (`>= 0`).
+    /// Blur radius in reference px (`>= 0`).
     pub blur: f32,
 }
 
-/// Soft glow bloom drawn from the layer's alpha.
+/// Soft glow from layer alpha. Lengths = reference px (1080p); rgba 0–255.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WireLayerGlow {
     pub rgba: [u8; 4],
-    /// Glow radius in reference pixels (`>= 0`).
+    /// Radius in reference px (`>= 0`).
     pub radius: f32,
-    /// Strength multiplier, `0` … `4`.
+    /// Strength `0`…`4`.
     pub intensity: f32,
 }
 
-/// Hard outline / stroke around the layer's alpha silhouette.
+/// Hard outline around layer alpha. Width = reference px (1080p); rgba 0–255.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WireLayerOutline {
     pub rgba: [u8; 4],
-    /// Outline width in reference pixels (`>= 0`).
+    /// Width in reference px (`>= 0`).
     pub width: f32,
 }
 
-/// Solid plate behind the layer (padded AABB of the alpha bounds).
+/// Solid plate behind layer alpha AABB. Lengths = reference px (1080p).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WireLayerBackground {
     pub rgba: [u8; 4],
-    /// Padding around the alpha bounds in reference pixels (`>= 0`).
+    /// Padding in reference px (`>= 0`).
     pub padding: f32,
-    /// Corner radius in reference pixels (`>= 0`).
+    /// Corner radius in reference px (`>= 0`).
     pub radius: f32,
 }
 
-/// Layer-quad styles (CapCut shadow/glow/outline/background) for any visual
-/// clip — distinct from text glyph treatments. Lengths are reference pixels
-/// (1080p baseline). Omitted blocks are removed; included blocks replace the
-/// previous block with the given constant values. Animate individual fields
-/// afterward with `set_param_keyframe` and style params.
+/// Layer-quad styles (shadow/glow/outline/background). Lengths = reference px
+/// (1080p). Omitted blocks are removed.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WireLayerStyles {
@@ -218,23 +205,17 @@ pub struct WireLayerStyles {
     pub background: Option<WireLayerBackground>,
 }
 
-/// Replace a visual clip's layer styles (shadow/glow/outline/background).
-/// Pass an empty `styles` object to clear every block.
+/// Replace layer styles; empty `styles` clears every block.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetClipLayerStyles {
-    /// Target clip id.
     pub clip: u64,
-    /// Style blocks to install. Omitted blocks are removed.
+    /// Style blocks to install; omitted blocks are removed.
     pub styles: WireLayerStyles,
 }
 
-/// Set manual color adjustments (CapCut adjust) on any visual clip. Omitted
-/// sliders keep their current value; all-neutral clears the grade.
-///
-/// Signed sliders (`brightness` … `shadows`) are `-1..=1`. `sharpness` and
-/// `vignette` are one-directional `0..=1` (softening / inverse vignette are
-/// not supported).
+/// Manual color adjust. Signed sliders `-1..=1`; sharpness/vignette `0..=1`.
+/// Omitted sliders keep their value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetClipAdjustments {
     pub clip: u64,
@@ -248,7 +229,7 @@ pub struct SetClipAdjustments {
     pub exposure: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
-    /// Green (−) ↔ magenta (+).
+    /// Green (−) ↔ magenta (+), `-1..=1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tint: Option<f64>,
     /// Hue rotation; ±1 → ±30°.
@@ -258,10 +239,10 @@ pub struct SetClipAdjustments {
     pub highlights: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadows: Option<f64>,
-    /// Unsharp-mask strength (`0..=1`).
+    /// Unsharp-mask strength `0..=1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sharpness: Option<f64>,
-    /// Radial darkening (`0..=1`).
+    /// Radial darkening `0..=1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vignette: Option<f64>,
 }
@@ -275,24 +256,20 @@ pub enum WireAnimationSlot {
     Combo,
 }
 
-/// Set (or clear) a look animation preset on any visual clip.
+/// Set or clear a look animation preset on a visual clip.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetClipAnimation {
     pub clip: u64,
-    /// Which animation slot to set.
     pub slot: WireAnimationSlot,
-    /// Catalog animation id (e.g. "fade_in", "pulse"). `null` clears the slot.
+    /// Catalog id (e.g. fade_in, pulse). `null` clears the slot.
     pub animation: Option<String>,
-    /// Playback rate of the entrance/exit window or combo period (`1` = catalog).
-    /// Omit or `null` for the default. Range `0.25..=4`.
+    /// Playback rate `0.25..=4` (`1` = catalog). Omit for default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<f32>,
-    /// Magnitude of motion / opacity swing (`1` = catalog, `0` = none).
-    /// Omit or `null` for the default. Range `0..=2`.
+    /// Motion/opacity magnitude `0..=2` (`1` = catalog). Omit for default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intensity: Option<f32>,
-    /// Per-character stagger stretch (`1` = catalog). Text presets only.
-    /// Omit or `null` for the default. Range `0..=2`.
+    /// Per-character stagger `0..=2` (text presets only). Omit for default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stagger: Option<f32>,
 }

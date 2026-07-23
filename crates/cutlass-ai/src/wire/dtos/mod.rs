@@ -45,27 +45,24 @@ pub enum WireShape {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireGenerator {
-    /// A title / text layer (rendered with the default style; styling is
-    /// preserved when replacing the text of an existing text clip).
+    /// Title/text layer (replacing text keeps styling).
     Text {
-        /// The text to display.
         content: String,
     },
-    /// A solid color fill covering the canvas.
+    /// Solid color fill covering the canvas.
     Solid {
-        /// Fill color as `[red, green, blue, alpha]`, each 0-255.
+        /// `[r, g, b, a]` each 0–255.
         rgba: [u8; 4],
     },
-    /// A filled vector shape centered on the canvas.
+    /// Filled vector shape centered on the canvas.
     Shape {
         shape: WireShape,
-        /// Fill color as `[red, green, blue, alpha]`, each 0-255.
+        /// `[r, g, b, a]` each 0–255.
         rgba: [u8; 4],
-        /// Width in reference pixels (1080px-tall canvas). Omit to keep the
-        /// clip's current size when editing an existing shape.
+        /// Width in reference px (1080p-tall). Omit to keep when editing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         width: Option<f32>,
-        /// Height in reference pixels. Omit to keep the clip's current size.
+        /// Height in reference px. Omit to keep when editing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         height: Option<f32>,
     },

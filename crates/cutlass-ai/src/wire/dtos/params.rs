@@ -1,4 +1,6 @@
-use schemars::JsonSchema;
+use std::borrow::Cow;
+
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 
 /// Per-axis clip scale on the wire: a bare number (uniform, legacy agents)
@@ -24,196 +26,243 @@ impl WireScale {
     }
 }
 
-/// Change a clip's placement on the canvas. Omitted fields keep their
-/// current value. Rejected for clips on audio tracks.
+/// Change a clip's canvas placement. Omitted fields keep their value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetClipTransform {
     pub clip: u64,
-    /// Horizontal offset of the content center from the canvas center, as a
-    /// fraction of canvas width (+ is right; 0.5 puts the center on the
-    /// right edge).
+    /// Content-center X from canvas center, as a fraction of canvas width
+    /// (+ right; 0.5 = right edge).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_x: Option<f64>,
-    /// Vertical offset of the content center from the canvas center, as a
-    /// fraction of canvas height (+ is down).
+    /// Content-center Y from canvas center, as a fraction of canvas height
+    /// (+ down).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_y: Option<f64>,
-    /// Horizontal anchor within the content bounds (0 = left, 0.5 = center).
+    /// Anchor within content bounds (0 = left, 0.5 = center).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_x: Option<f64>,
-    /// Vertical anchor within the content bounds (0 = top, 0.5 = center).
+    /// Anchor within content bounds (0 = top, 0.5 = center).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_y: Option<f64>,
-    /// Scale: a number for uniform (1.0 = fit inside the canvas) or `[x, y]`
-    /// for per-axis stretch.
+    /// Uniform number (1.0 = fit) or `[x, y]` per-axis.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<WireScale>,
-    /// Clockwise rotation in degrees about the content center.
+    /// Clockwise degrees about the content center.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation: Option<f64>,
-    /// Layer opacity, 0.0 (transparent) to 1.0 (opaque).
+    /// Layer opacity 0.0–1.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opacity: Option<f64>,
 }
 
-/// Crop a clip to a sub-region of its frame and/or mirror it. Crop values
-/// are the fractions trimmed off each edge (left 0.25 removes the left
-/// quarter); the kept region aspect-fits the canvas exactly like the full
-/// frame did, so cropping never moves the layer. Omitted fields keep
-/// their current value. Rejected for clips on audio tracks.
+/// Crop (edge trim fractions 0–1) and/or flip. Kept region still aspect-fits;
+/// crop does not move the layer. Omitted fields keep their value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetClipCrop {
     pub clip: u64,
-    /// Fraction of the frame width trimmed off the left edge (0–1). Omit
-    /// to keep the current value; 0 restores the edge.
+    /// Fraction trimmed from the left edge (0 restores).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub left: Option<f64>,
-    /// Fraction of the frame height trimmed off the top edge (0–1).
+    /// Fraction trimmed from the top edge (0–1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top: Option<f64>,
-    /// Fraction of the frame width trimmed off the right edge (0–1).
+    /// Fraction trimmed from the right edge (0–1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub right: Option<f64>,
-    /// Fraction of the frame height trimmed off the bottom edge (0–1).
+    /// Fraction trimmed from the bottom edge (0–1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bottom: Option<f64>,
-    /// Mirror the content left-right. Omit to keep the current state.
+    /// Mirror left-right.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flip_h: Option<bool>,
-    /// Mirror the content top-bottom. Omit to keep the current state.
+    /// Mirror top-bottom.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flip_v: Option<bool>,
 }
 
-/// Add a visual effect to the end of a clip's effect chain. Effects run on
-/// the placed layer before it composites, in chain order. Use
-/// `describe_project` to see a clip's current effects and their indices.
-/// Rejected for clips on audio tracks.
+/// Append a visual effect to a clip's chain (catalog id, e.g. gaussian_blur).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AddEffect {
     pub clip: u64,
-    /// Effect id from the catalog, e.g. `gaussian_blur` or `vignette`.
+    /// Effect catalog id (e.g. `gaussian_blur`, `vignette`).
     pub effect: String,
 }
 
-/// Remove an effect from a clip's chain by its position (0 = the first
-/// effect). See `describe_project` for the current chain order.
+/// Remove an effect by chain index (0 = first).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoveEffect {
     pub clip: u64,
-    /// Index of the effect in the clip's chain (0 = first).
+    /// Effect chain index (0 = first).
     pub index: u32,
 }
 
-/// Reorder one effect within a clip's chain. Both indices address the current
-/// pre-move chain; `to_index` is the moved effect's final index after removal
-/// and insertion. Use `describe_project` to inspect the current order.
+/// Reorder an effect; both indices address the pre-move chain.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MoveEffect {
     pub clip: u64,
-    /// Current index of the effect to move (0 = first).
+    /// Current index (0 = first).
     pub from_index: u32,
-    /// Final index for the moved effect (0 = first).
+    /// Final index after the move (0 = first).
     pub to_index: u32,
 }
 
-/// Set one parameter of an effect already on a clip to a fixed value. The
-/// value is range-checked against the catalog. Use `value` for scalars,
-/// `position` for vec2 params (e.g. color_overlay `offset`), and `rgba` for
-/// color params (e.g. duotone `shadow_color`). Use `set_param_keyframe`
-/// with an effect param to animate it instead.
+/// Set one effect parameter (catalog-range-checked).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetEffectParam {
     pub clip: u64,
-    /// Index of the effect in the clip's chain (0 = first).
+    /// Effect chain index (0 = first).
     pub index: u32,
-    /// Parameter name, e.g. `radius` (gaussian_blur) or `shadow_color` (duotone).
+    /// Param name (e.g. `radius`, `shadow_color`).
     pub param: String,
-    /// New scalar value. Required for scalar params; ignored for color/vec2.
+    /// Scalar value (ignored for color/vec2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// New `[x, y]` for vec2 effect params. Ignored for scalar and color.
+    /// `[x, y]` for vec2 effect params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f64; 2]>,
-    /// New `[red, green, blue, alpha]` for color effect params. Ignored for
-    /// scalar and vec2.
+    /// `[r, g, b, a]` 0–255 for color effect params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rgba: Option<[u8; 4]>,
 }
 
-/// Add a transition at the junction where `clip` abuts the next clip on its
-/// track. `clip` must butt directly against a following clip (same track, the
-/// next clip starts exactly where this one ends). Rejected for clips on audio
-/// tracks and clips with no abutting neighbor.
+/// Add a transition where `clip` abuts the next clip on its track.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AddTransition {
     pub clip: u64,
-    /// Transition id from the catalog, e.g. `crossfade` or `dip_to_black`.
+    /// Transition catalog id (e.g. `crossfade`, `dip_to_black`).
     pub transition: String,
 }
 
-/// Remove the transition at `clip`'s right junction. See `describe_project`
-/// for which clips currently carry one.
+/// Remove the transition at `clip`'s right cut.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RemoveTransition {
     pub clip: u64,
 }
 
-/// Set the duration (in seconds) of the transition at `clip`'s right junction.
-/// The window is centered on the cut.
+/// Set transition duration (seconds, positive); window centered on the cut.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetTransition {
     pub clip: u64,
-    /// New window length in seconds (must be positive).
+    /// Window length in seconds (must be positive).
     pub seconds: f64,
 }
 
 /// An animatable clip property the keyframe commands can address.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// Wire serde stays externally tagged (`"position"` / `{"effect":{…}}`).
+/// JSON Schema is hand-written so the four keyframe tools do not each
+/// re-inline a long `oneOf` of per-variant descriptions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WireClipParam {
-    /// Canvas placement of the content center (vec2: use the `position`
-    /// argument, not `value`).
     Position,
-    /// Canvas point around which the clip scales and rotates (vec2: use the
-    /// `position` argument, not `value`).
     AnchorPoint,
-    /// Scale (1.0 = fit inside the canvas). Use `value` for a uniform number
-    /// or `position` as `[x, y]` for per-axis.
     Scale,
-    /// Clockwise rotation in degrees.
     Rotation,
-    /// Layer opacity 0.0–1.0.
     Opacity,
-    /// Kept-region crop window as content fractions (rect: use the `rect`
-    /// argument `[x, y, w, h]`, not `value`). Visual clips only.
     Crop,
-    /// Audio gain envelope (0.0 = mute, 1.0 = unchanged, up to 10.0 boost).
-    /// Keyframing it draws volume automation; this is how you fade audio in
-    /// or out over time or duck music under a voice. Media-backed clips only.
     Volume,
-    /// Stereo pan envelope (−1.0 = full left, 0.0 = center, +1.0 = full
-    /// right). Keyframing it draws balance automation. Media-backed clips
-    /// only (including video clips with sound — same target rule as volume).
     Pan,
-    /// Playback-rate ramp (scalar: 1.0 = normal speed). Media-backed clips
-    /// only; keyframes use normalized positions within the clip.
     Speed,
-    /// A parameter of an effect already on the clip. `index` is the
-    /// effect-chain position and `param` is its catalog name, as in
-    /// `set_effect_param`. Use `value` for scalars, `position` for vec2
-    /// params, and `rgba` for color params.
     Effect { index: u32, param: String },
-    /// A visual property of a generated shape clip.
     Shape { param: WireShapeParam },
-    /// A visual style property of a generated text clip.
     Text { param: WireTextParam },
-    /// A scalar property of the clip's color look.
     Look { param: WireLookParam },
-    /// A property of the clip's layer-quad styles (shadow/glow/outline/
-    /// background). Color params use `rgba`; `shadow_offset` uses
-    /// `position`; the rest use scalar `value`.
     Style { param: WireStyleParam },
+}
+
+impl JsonSchema for WireClipParam {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "WireClipParam".into()
+    }
+
+    fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
+        // One shared description + compact enum / tagged-object branches.
+        // Nested shape/text/look/style param names live in the description
+        // (once) so they are not re-emitted as four large string enums;
+        // object shapes stay accurate for serde's externally-tagged form.
+        json_schema!({
+            "description": "Clip property. Strings: position, anchor_point, scale, rotation, opacity, crop, volume, pan, speed. Tagged: {\"effect\":{\"index\":N,\"param\":name}}, {\"shape|text|look|style\":{\"param\":name}} — shape: width|height|corner_radius|inner_ratio|fill|stroke_*; text: size|fill|*_spacing|stroke_*|shadow_*|background_*; look: *_intensity|adjust_*|mask_*|chroma_*; style: shadow_*|glow_*|outline_*|background_*. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
+            "oneOf": [
+                {
+                    "type": "string",
+                    "enum": [
+                        "position",
+                        "anchor_point",
+                        "scale",
+                        "rotation",
+                        "opacity",
+                        "crop",
+                        "volume",
+                        "pan",
+                        "speed"
+                    ]
+                },
+                {
+                    "type": "object",
+                    "required": ["effect"],
+                    "properties": {
+                        "effect": {
+                            "type": "object",
+                            "required": ["index", "param"],
+                            "properties": {
+                                "index": { "type": "integer", "minimum": 0 },
+                                "param": { "type": "string" }
+                            }
+                        }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["shape"],
+                    "properties": {
+                        "shape": {
+                            "type": "object",
+                            "required": ["param"],
+                            "properties": { "param": { "type": "string" } }
+                        }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["text"],
+                    "properties": {
+                        "text": {
+                            "type": "object",
+                            "required": ["param"],
+                            "properties": { "param": { "type": "string" } }
+                        }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["look"],
+                    "properties": {
+                        "look": {
+                            "type": "object",
+                            "required": ["param"],
+                            "properties": { "param": { "type": "string" } }
+                        }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["style"],
+                    "properties": {
+                        "style": {
+                            "type": "object",
+                            "required": ["param"],
+                            "properties": { "param": { "type": "string" } }
+                        }
+                    }
+                }
+            ]
+        })
+    }
 }
 
 /// Animatable properties of a generated shape clip.
@@ -246,9 +295,7 @@ pub enum WireTextParam {
     BackgroundRadius,
 }
 
-/// Animatable properties of a clip's color look / mask.
-///
-/// `mask_center` / `mask_size` carry vec2 values; the rest are scalars.
+/// Animatable look/mask params (`mask_center`/`mask_size` = vec2; else scalar).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WireLookParam {
@@ -293,11 +340,9 @@ pub enum WireStyleParam {
 
 /// Interpolation toward the next keyframe.
 ///
-/// Named presets (`snappy` / `overshoot` / `anticipate`) encode as cubic
-/// beziers in the engine. `hold` is step interpolation — the value stays at
-/// this keyframe until the next one. `bezier` accepts raw CSS-style control
-/// points `(x1, y1, x2, y2)` with `x` in `0..=1` (y may overshoot).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+/// Named presets encode as cubic beziers; `hold` is step; `bezier` takes
+/// CSS-style `[x1,y1,x2,y2]` with `x` in `0..=1` (y may overshoot).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WireEasing {
     Linear,
@@ -314,56 +359,91 @@ pub enum WireEasing {
     },
 }
 
-/// Add or replace a keyframe on one animatable clip property, making the
-/// property animate over time. The first keyframe on a property turns its
-/// fixed value into a curve.
+impl JsonSchema for WireEasing {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "WireEasing".into()
+    }
+
+    fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "linear|ease_*|snappy|overshoot|anticipate|hold|{bezier:{points:[x1,y1,x2,y2]}}",
+            "oneOf": [
+                {
+                    "type": "string",
+                    "enum": [
+                        "linear",
+                        "ease_in",
+                        "ease_out",
+                        "ease_in_out",
+                        "snappy",
+                        "overshoot",
+                        "anticipate",
+                        "hold"
+                    ]
+                },
+                {
+                    "type": "object",
+                    "required": ["bezier"],
+                    "properties": {
+                        "bezier": {
+                            "type": "object",
+                            "required": ["points"],
+                            "properties": {
+                                "points": {
+                                    "type": "array",
+                                    "items": { "type": "number" },
+                                    "minItems": 4,
+                                    "maxItems": 4
+                                }
+                            }
+                        }
+                    }
+                }
+            ]
+        })
+    }
+}
+
+/// Add or replace a keyframe on one animatable clip property.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "")]
 pub struct SetParamKeyframe {
     pub clip: u64,
     pub param: WireClipParam,
-    /// Timeline position of the keyframe, in seconds. Must fall inside the
-    /// clip.
+    /// Timeline seconds in clip.
     pub at: f64,
-    /// New value for scalar parameters. Ignored for position/vec2, color,
-    /// and rect parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`,
-    /// look `mask_center` / `mask_size`, or vec2 effect params. Ignored for
-    /// scalar, color, and rect params.
+    /// Vec2 `[x,y]` canvas fractions from center.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f64; 2]>,
-    /// New `[red, green, blue, alpha]` for shape, text, style, or effect
-    /// color parameters. Ignored for scalar, vec2, and rect params.
+    /// `[r,g,b,a]` 0–255.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rgba: Option<[u8; 4]>,
-    /// New `[x, y, w, h]` kept-region for `crop` (content fractions).
-    /// Ignored for scalar, vec2, and color params.
+    /// Crop `[x,y,w,h]` content fractions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rect: Option<[f64; 4]>,
-    /// Interpolation toward the next keyframe. Defaults to linear.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub easing: Option<WireEasing>,
-    /// Outgoing spatial bezier handle for a **position** motion path
-    /// (After Effects–style). Offset from this keyframe's value, in canvas
-    /// fractions. Ignored / rejected on non-position params. Pair with
-    /// `tangent_in` on the next keyframe to shape the segment.
+    /// Position out-handle (canvas-fraction offset).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tangent_out: Option<[f64; 2]>,
-    /// Incoming spatial bezier handle for a **position** motion path.
-    /// Offset from this keyframe's value, in canvas fractions. Position
-    /// only; see `tangent_out`.
+    /// Position in-handle (canvas-fraction offset).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tangent_in: Option<[f64; 2]>,
 }
 
-/// Remove the keyframe at exactly a timeline position on one property.
-/// Removing the last keyframe freezes the property at that value.
+/// Remove the keyframe at a timeline position on one property.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "")]
 pub struct RemoveParamKeyframe {
     pub clip: u64,
     pub param: WireClipParam,
-    /// Timeline position of the keyframe to remove, in seconds.
+    /// Timeline seconds of the keyframe to remove.
     pub at: f64,
 }
 
@@ -376,129 +456,86 @@ pub enum WireEasingPreset {
     BackOut,
 }
 
-/// Expand the keyframe segment leaving `from_tick` into a bounce / elastic /
-/// back approximation (multiple keyframes). Scalar and vec2 params only.
+/// Expand the outgoing keyframe segment into a bounce/elastic/back curve.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "")]
 pub struct ApplyEasingPreset {
     pub clip: u64,
     pub param: WireClipParam,
-    /// Timeline position of the departing keyframe, in seconds. Must have a
-    /// following keyframe on the same param.
+    /// Timeline seconds of the departing keyframe (needs a following KF).
     pub from_tick: f64,
     pub preset: WireEasingPreset,
 }
 
-/// Set one animatable property to a fixed value, removing all its
-/// keyframes (stops the animation).
+/// Set one animatable property to a fixed value and clear its keyframes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "")]
 pub struct SetParamConstant {
     pub clip: u64,
     pub param: WireClipParam,
-    /// New value for scalar parameters. Ignored for position/vec2, color,
-    /// and rect parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`,
-    /// look `mask_center` / `mask_size`, or vec2 effect params. Ignored for
-    /// scalar, color, and rect params.
+    /// Vec2 `[x,y]` canvas fractions from center.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f64; 2]>,
-    /// New `[red, green, blue, alpha]` for shape, text, style, or effect
-    /// color parameters. Ignored for scalar, vec2, and rect params.
+    /// `[r,g,b,a]` 0–255.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rgba: Option<[u8; 4]>,
-    /// New `[x, y, w, h]` kept-region for `crop` (content fractions).
-    /// Ignored for scalar, vec2, and color params.
+    /// Crop `[x,y,w,h]` content fractions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rect: Option<[f64; 4]>,
 }
 
-/// Change a media clip's constant playback speed and/or direction. The clip
-/// keeps its timeline start and source footage; its timeline length
-/// re-derives from the speed (a 2x clip takes half the time). Audio
-/// time-stretches to match (pitch preserved by default; see set_clip_pitch).
-/// Not valid for generated clips (text/solid/shape).
+/// Change a media clip's constant playback speed and/or direction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetClipSpeed {
-    /// The media clip to retime.
     pub clip: u64,
-    /// Playback rate multiplier: 2.0 plays at double speed (half as long on
-    /// the timeline), 0.5 is half-speed slow motion. Allowed range 0.05 to
-    /// 100. Omit to keep the current speed.
+    /// Playback rate: 2.0 = double speed, 0.5 = slow-mo; range 0.05..100.
+    /// Timeline length re-derives; audio time-stretches. Omit to keep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<f64>,
-    /// Play the clip's footage backwards. Omit to keep the current
-    /// direction.
+    /// Play footage backwards. Omit to keep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reversed: Option<bool>,
 }
 
-/// Apply (or clear) a CapCut-style speed ramp on a media clip: its playback
-/// speed varies across its length following a named preset, instead of a
-/// single constant speed. The clip keeps its source footage; its timeline
-/// length re-derives from the ramp's average speed. The audio time-stretches
-/// along the ramp. Not valid for generated clips.
+/// Apply or clear a CapCut-style speed ramp on a media clip.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetSpeedCurve {
-    /// The media clip to ramp.
     pub clip: u64,
-    /// Named ramp preset: "ramp_up" (slow→fast), "ramp_down" (fast→slow),
-    /// "montage" (fast/slow/fast), "hero" (dip to slow-mo on the action),
-    /// "bullet" (fast / hard slow / fast). Omit or set null to clear the ramp
-    /// back to a constant speed.
+    /// Preset: ramp_up, ramp_down, montage, hero, bullet. Null clears to
+    /// constant speed. Length re-derives from average speed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
 }
 
-/// Lock or unlock a retimed media clip's pitch (CapCut "pitch" switch). When
-/// preserved (the default), the audio time-stretches and keeps its original
-/// pitch; when not, pitch rides the playback speed — the "chipmunk" effect on
-/// a sped-up clip, a deep growl on a slowed one. Only affects sound on a
-/// retimed clip (a speed change, reverse, or ramp). Not valid for generated
-/// clips.
+/// Lock or unlock pitch on a retimed media clip.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetClipPitch {
-    /// The media clip whose pitch handling to set.
     pub clip: u64,
-    /// True keeps the original pitch (time-stretch); false lets the pitch
-    /// follow the playback speed.
+    /// true = keep pitch while time-stretching; false = pitch follows speed.
     pub preserve_pitch: bool,
 }
 
-/// Set a clip's audio mix: a constant volume gain plus linear fade-in/out
-/// ramps. Volume 1.0 is unchanged, 0.0 mutes, 2.0 doubles (max 10). Fades
-/// are seconds of ramp at the clip's head/tail. A video clip keeps its own
-/// sound, so target it directly; only when a clip's audio was separated onto a
-/// linked audio lane do you target that clip instead.
+/// Set a clip's volume gain and/or fade-in/out (seconds).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetClipAudio {
-    /// The media clip to adjust — a video clip with sound, or an audio clip.
+    /// Video clip with sound, or an audio clip.
     pub clip: u64,
-    /// Gain multiplier: 0.0 mutes, 1.0 keeps the recorded level, up to a
-    /// maximum of 10. Omit to keep the current volume.
+    /// Gain: 0.0 mute, 1.0 unchanged, max 10. Omit to keep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<f64>,
-    /// Fade-in duration in seconds from the clip's start (0 removes the
-    /// fade). Omit to keep the current fade-in.
+    /// Fade-in seconds from clip start (0 clears). Omit to keep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade_in: Option<f64>,
-    /// Fade-out duration in seconds ending at the clip's end (0 removes the
-    /// fade). Omit to keep the current fade-out.
+    /// Fade-out seconds ending at clip end (0 clears). Omit to keep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade_out: Option<f64>,
 }
 
-/// Turn noise reduction on or off for a media clip (CapCut "Reduce noise").
-/// Runs the clip's audio through a speech-preserving denoiser that suppresses
-/// steady background noise — fan hum, hiss, air-conditioning, room tone — while
-/// keeping voice. Best on clips with a constant background drone. A video clip
-/// keeps its own sound, so target it directly; only when its audio was
-/// separated onto a linked audio lane do you target that clip instead. Not
-/// valid for generated clips.
+/// Enable/disable speech-preserving noise reduction on a media clip.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SetDenoise {
-    /// The media clip to clean.
     pub clip: u64,
-    /// True turns noise reduction on, false off.
     pub denoise: bool,
 }

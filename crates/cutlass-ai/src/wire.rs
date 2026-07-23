@@ -68,7 +68,9 @@ use serde::{Deserialize, Serialize};
 /// 38: multi-keyframe easing presets — `apply_easing_preset` (bounce_out /
 ///     elastic_out / back_out) on scalar/vec2 animated params.
 /// 39: per-clip transform motion blur (`set_motion_blur`).
-pub const TOOL_SCHEMA_VERSION: u32 = 39;
+/// 40: compact `WireClipParam` / `WireEasing` schemas + trimmed descriptions
+///     (tool payload shrink; wire serde unchanged).
+pub const TOOL_SCHEMA_VERSION: u32 = 40;
 
 mod dtos;
 mod tools;

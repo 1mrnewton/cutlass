@@ -139,9 +139,9 @@ fn tools_only_body_stays_under_ceiling() {
     )];
     let bytes = body_bytes(&provider, &messages, &tools);
 
-    // Measured 2026-07-23: 76_790 bytes (tools dominate). Ceiling = measured + ~15%.
-    // Later schema-shrink work should RATCHET this ceiling down.
-    const TOOLS_ONLY_CEILING: usize = 89_000;
+    // Measured 2026-07-23 (post schema-shrink): 45_413 bytes (tools dominate).
+    // Ceiling = measured + ~15%.
+    const TOOLS_ONLY_CEILING: usize = 52_500;
     assert!(
         bytes < TOOLS_ONLY_CEILING,
         "tools-only request body grew to {bytes} bytes (ceiling {TOOLS_ONLY_CEILING}); \
@@ -222,9 +222,9 @@ fn transcript_growth_last_turn_stays_under_ceiling() {
     let tools_bytes = body_bytes(&provider, &[], &tools);
     let messages_bytes = body_bytes(&provider, &messages, &[]);
 
-    // Measured 2026-07-23: total=90_607, tools≈76_718, messages≈13_980.
-    // Ceiling = measured total + ~15% headroom. Ratchet down when transcripts shrink.
-    const TRANSCRIPT_CEILING: usize = 105_000;
+    // Measured 2026-07-23 (post schema-shrink): total=59_230, tools≈45_341,
+    // messages≈13_980. Ceiling = measured total + ~15% headroom.
+    const TRANSCRIPT_CEILING: usize = 68_500;
     assert!(
         total < TRANSCRIPT_CEILING,
         "last-turn request body grew to {total} bytes \

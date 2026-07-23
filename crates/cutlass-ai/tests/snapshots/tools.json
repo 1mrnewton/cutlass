@@ -1,15 +1,13 @@
 {
   "tools": [
     {
-      "description": "Add a track to the timeline stack (video, audio, text, or sticker overlay lane). Lanes keep CapCut zones: audio at the bottom, then the main video track, overlays above it, text on top — the index only orders a lane within its zone.",
+      "description": "Add a timeline track (video, audio, text, sticker). CapCut zones: audio bottom, then main video, overlays, text top — index only orders within a zone.",
       "name": "add_track",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Add a track to the timeline stack.",
         "properties": {
           "index": {
             "description": "Stack position (0 = bottom layer, composited first). Omit to add on\ntop of the stack.",
-            "format": "uint32",
             "minimum": 0,
             "type": [
               "integer",
@@ -50,42 +48,33 @@
           "kind",
           "name"
         ],
-        "title": "AddTrack",
         "type": "object"
       }
     },
     {
-      "description": "Place a trimmed range of an imported media file on a video or audio track. Times are in seconds.",
+      "description": "Place a trimmed range of imported media on a video or audio track. Times in seconds.",
       "name": "add_clip",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Place a trimmed range of imported media on a video or audio track.",
         "properties": {
           "media": {
             "description": "Media pool id of the source file.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "source_duration": {
             "description": "Length of the source range to use, in seconds.",
-            "format": "double",
             "type": "number"
           },
           "source_start": {
             "description": "In-point within the source media, in seconds.",
-            "format": "double",
             "type": "number"
           },
           "start": {
             "description": "Where the clip begins on the timeline, in seconds.",
-            "format": "double",
             "type": "number"
           },
           "track": {
             "description": "Target track id.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
@@ -96,27 +85,21 @@
           "source_duration",
           "start"
         ],
-        "title": "AddClip",
         "type": "object"
       }
     },
     {
-      "description": "Detach a video clip's embedded sound onto an existing unlocked audio track, preserving its exact placement and audio/retime settings. The track id is required: call add_track with kind audio first when needed, then pass the returned id. Keeping the target explicit lets planned track ids remap correctly during replay.",
+      "description": "Detach a video clip's embedded sound onto an unlocked audio track (placement and audio/retime preserved). Track id required: add_track(kind=audio) first if needed.",
       "name": "extract_audio",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Detach a video clip's embedded sound onto an explicit audio track.",
         "properties": {
           "clip": {
             "description": "Source media clip on a video track.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "track": {
             "description": "Target unlocked audio track. This is required: call `add_track` first\nwhen no suitable audio lane exists, then use its returned id.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
@@ -124,33 +107,26 @@
           "clip",
           "track"
         ],
-        "title": "ExtractAudio",
         "type": "object"
       }
     },
     {
-      "description": "Make a deep property-preserving copy of one clip at an explicit target track and start (timeline seconds). The copy gets a fresh unlinked clip id. This tool does not ripple clips or search for space; choose a non-overlapping destination explicitly.",
+      "description": "Deep-copy a clip to an explicit track and start (timeline seconds). Fresh unlinked id; does not ripple or find space.",
       "name": "duplicate_clip",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
         "description": "Make a deep property-preserving copy of one clip at an explicit target\ntrack and timeline start. The copy receives a fresh unlinked clip id.",
         "properties": {
           "clip": {
             "description": "Source clip to copy.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "start": {
             "description": "Explicit destination start in timeline seconds.",
-            "format": "double",
             "type": "number"
           },
           "to_track": {
             "description": "Explicit destination track id.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
@@ -159,30 +135,26 @@
           "to_track",
           "start"
         ],
-        "title": "DuplicateClip",
         "type": "object"
       }
     },
     {
-      "description": "Place a generated clip (text title, solid color, or shape) on a matching track. Times are in seconds.",
+      "description": "Place a generated clip (text, solid, or shape) on a matching track. Times in seconds.",
       "name": "add_generated",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Place a generated clip (text, solid color, shape) on a matching track.",
         "properties": {
           "duration": {
             "description": "Clip length on the timeline, in seconds.",
-            "format": "double",
             "type": "number"
           },
           "generator": {
             "description": "The content to generate, as a tagged object — e.g.\n`{\"type\": \"text\", \"content\": \"Hello\"}`,\n`{\"type\": \"solid\", \"rgba\": [0, 0, 0, 255]}`, or\n`{\"type\": \"shape\", \"shape\": \"ellipse\", \"rgba\": [255, 0, 0, 255]}`.",
             "oneOf": [
               {
-                "description": "A title / text layer (rendered with the default style; styling is\npreserved when replacing the text of an existing text clip).",
+                "description": "Title/text layer (replacing text keeps styling).",
                 "properties": {
                   "content": {
-                    "description": "The text to display.",
                     "type": "string"
                   },
                   "type": {
@@ -197,14 +169,11 @@
                 "type": "object"
               },
               {
-                "description": "A solid color fill covering the canvas.",
+                "description": "Solid color fill covering the canvas.",
                 "properties": {
                   "rgba": {
-                    "description": "Fill color as `[red, green, blue, alpha]`, each 0-255.",
+                    "description": "`[r, g, b, a]` each 0–255.",
                     "items": {
-                      "format": "uint8",
-                      "maximum": 255,
-                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -223,22 +192,18 @@
                 "type": "object"
               },
               {
-                "description": "A filled vector shape centered on the canvas.",
+                "description": "Filled vector shape centered on the canvas.",
                 "properties": {
                   "height": {
-                    "description": "Height in reference pixels. Omit to keep the clip's current size.",
-                    "format": "float",
+                    "description": "Height in reference px. Omit to keep when editing.",
                     "type": [
                       "number",
                       "null"
                     ]
                   },
                   "rgba": {
-                    "description": "Fill color as `[red, green, blue, alpha]`, each 0-255.",
+                    "description": "`[r, g, b, a]` each 0–255.",
                     "items": {
-                      "format": "uint8",
-                      "maximum": 255,
-                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -258,8 +223,7 @@
                     "type": "string"
                   },
                   "width": {
-                    "description": "Width in reference pixels (1080px-tall canvas). Omit to keep the\nclip's current size when editing an existing shape.",
-                    "format": "float",
+                    "description": "Width in reference px (1080p-tall). Omit to keep when editing.",
                     "type": [
                       "number",
                       "null"
@@ -277,13 +241,10 @@
           },
           "start": {
             "description": "Where the clip begins on the timeline, in seconds.",
-            "format": "double",
             "type": "number"
           },
           "track": {
             "description": "Target track id. Text goes on text tracks; solids and shapes go on\nsticker (overlay) tracks.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
@@ -293,31 +254,26 @@
           "start",
           "duration"
         ],
-        "title": "AddGenerated",
         "type": "object"
       }
     },
     {
-      "description": "Replace a generated clip's content: change a title's text (styling preserved) or recolor a solid/shape. Not valid for media clips.",
+      "description": "Replace generated clip content (text keeps styling). Not valid for media clips.",
       "name": "set_generator",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Replace a generated clip's content (edit a title's text, recolor a\nshape). Rejected for media-backed clips. Replacing the text of a text\nclip keeps its current styling.",
         "properties": {
           "clip": {
             "description": "The generated clip to modify.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "generator": {
             "description": "The replacement content, as a tagged object — e.g.\n`{\"type\": \"text\", \"content\": \"Hello\"}`,\n`{\"type\": \"solid\", \"rgba\": [0, 0, 0, 255]}`, or\n`{\"type\": \"shape\", \"shape\": \"ellipse\", \"rgba\": [255, 0, 0, 255]}`.",
             "oneOf": [
               {
-                "description": "A title / text layer (rendered with the default style; styling is\npreserved when replacing the text of an existing text clip).",
+                "description": "Title/text layer (replacing text keeps styling).",
                 "properties": {
                   "content": {
-                    "description": "The text to display.",
                     "type": "string"
                   },
                   "type": {
@@ -332,14 +288,11 @@
                 "type": "object"
               },
               {
-                "description": "A solid color fill covering the canvas.",
+                "description": "Solid color fill covering the canvas.",
                 "properties": {
                   "rgba": {
-                    "description": "Fill color as `[red, green, blue, alpha]`, each 0-255.",
+                    "description": "`[r, g, b, a]` each 0–255.",
                     "items": {
-                      "format": "uint8",
-                      "maximum": 255,
-                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -358,22 +311,18 @@
                 "type": "object"
               },
               {
-                "description": "A filled vector shape centered on the canvas.",
+                "description": "Filled vector shape centered on the canvas.",
                 "properties": {
                   "height": {
-                    "description": "Height in reference pixels. Omit to keep the clip's current size.",
-                    "format": "float",
+                    "description": "Height in reference px. Omit to keep when editing.",
                     "type": [
                       "number",
                       "null"
                     ]
                   },
                   "rgba": {
-                    "description": "Fill color as `[red, green, blue, alpha]`, each 0-255.",
+                    "description": "`[r, g, b, a]` each 0–255.",
                     "items": {
-                      "format": "uint8",
-                      "maximum": 255,
-                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -393,8 +342,7 @@
                     "type": "string"
                   },
                   "width": {
-                    "description": "Width in reference pixels (1080px-tall canvas). Omit to keep the\nclip's current size when editing an existing shape.",
-                    "format": "float",
+                    "description": "Width in reference px (1080p-tall). Omit to keep when editing.",
                     "type": [
                       "number",
                       "null"
@@ -415,65 +363,55 @@
           "clip",
           "generator"
         ],
-        "title": "SetGenerator",
         "type": "object"
       }
     },
     {
-      "description": "Change a clip's placement on the canvas: position, scale (number for uniform or [x, y] for per-axis), rotation, opacity. Omitted fields keep their current value. Not valid on audio tracks.",
+      "description": "Set canvas placement: position (canvas fractions from center), scale (number or [x,y]; 1.0=fit), rotation (deg CW), opacity. Omitted fields keep. Not for audio.",
       "name": "set_clip_transform",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Change a clip's placement on the canvas. Omitted fields keep their\ncurrent value. Rejected for clips on audio tracks.",
+        "description": "Change a clip's canvas placement. Omitted fields keep their value.",
         "properties": {
           "anchor_x": {
-            "description": "Horizontal anchor within the content bounds (0 = left, 0.5 = center).",
-            "format": "double",
+            "description": "Anchor within content bounds (0 = left, 0.5 = center).",
             "type": [
               "number",
               "null"
             ]
           },
           "anchor_y": {
-            "description": "Vertical anchor within the content bounds (0 = top, 0.5 = center).",
-            "format": "double",
+            "description": "Anchor within content bounds (0 = top, 0.5 = center).",
             "type": [
               "number",
               "null"
             ]
           },
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "opacity": {
-            "description": "Layer opacity, 0.0 (transparent) to 1.0 (opaque).",
-            "format": "double",
+            "description": "Layer opacity 0.0–1.0.",
             "type": [
               "number",
               "null"
             ]
           },
           "position_x": {
-            "description": "Horizontal offset of the content center from the canvas center, as a\nfraction of canvas width (+ is right; 0.5 puts the center on the\nright edge).",
-            "format": "double",
+            "description": "Content-center X from canvas center, as a fraction of canvas width\n(+ right; 0.5 = right edge).",
             "type": [
               "number",
               "null"
             ]
           },
           "position_y": {
-            "description": "Vertical offset of the content center from the canvas center, as a\nfraction of canvas height (+ is down).",
-            "format": "double",
+            "description": "Content-center Y from canvas center, as a fraction of canvas height\n(+ down).",
             "type": [
               "number",
               "null"
             ]
           },
           "rotation": {
-            "description": "Clockwise rotation in degrees about the content center.",
-            "format": "double",
+            "description": "Clockwise degrees about the content center.",
             "type": [
               "number",
               "null"
@@ -485,13 +423,11 @@
                 "anyOf": [
                   {
                     "description": "Uniform scale on both axes (1.0 = aspect-fit / CapCut 100%).",
-                    "format": "double",
                     "type": "number"
                   },
                   {
                     "description": "Per-axis scale `[x, y]`.",
                     "items": {
-                      "format": "double",
                       "type": "number"
                     },
                     "maxItems": 2,
@@ -505,69 +441,61 @@
                 "type": "null"
               }
             ],
-            "description": "Scale: a number for uniform (1.0 = fit inside the canvas) or `[x, y]`\nfor per-axis stretch."
+            "description": "Uniform number (1.0 = fit) or `[x, y]` per-axis."
           }
         },
         "required": [
           "clip"
         ],
-        "title": "SetClipTransform",
         "type": "object"
       }
     },
     {
-      "description": "Crop a clip to a sub-region of its frame (fractions trimmed off each edge; 0 restores an edge) and/or mirror it with flip_h / flip_v. Omitted fields keep their current value. Not valid on audio tracks.",
+      "description": "Crop by edge-trim fractions (0 restores) and/or flip_h/flip_v. Kept region still aspect-fits (crop does not move the layer). Not for audio.",
       "name": "set_clip_crop",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Crop a clip to a sub-region of its frame and/or mirror it. Crop values\nare the fractions trimmed off each edge (left 0.25 removes the left\nquarter); the kept region aspect-fits the canvas exactly like the full\nframe did, so cropping never moves the layer. Omitted fields keep\ntheir current value. Rejected for clips on audio tracks.",
+        "description": "Crop (edge trim fractions 0–1) and/or flip. Kept region still aspect-fits;\ncrop does not move the layer. Omitted fields keep their value.",
         "properties": {
           "bottom": {
-            "description": "Fraction of the frame height trimmed off the bottom edge (0–1).",
-            "format": "double",
+            "description": "Fraction trimmed from the bottom edge (0–1).",
             "type": [
               "number",
               "null"
             ]
           },
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "flip_h": {
-            "description": "Mirror the content left-right. Omit to keep the current state.",
+            "description": "Mirror left-right.",
             "type": [
               "boolean",
               "null"
             ]
           },
           "flip_v": {
-            "description": "Mirror the content top-bottom. Omit to keep the current state.",
+            "description": "Mirror top-bottom.",
             "type": [
               "boolean",
               "null"
             ]
           },
           "left": {
-            "description": "Fraction of the frame width trimmed off the left edge (0–1). Omit\nto keep the current value; 0 restores the edge.",
-            "format": "double",
+            "description": "Fraction trimmed from the left edge (0 restores).",
             "type": [
               "number",
               "null"
             ]
           },
           "right": {
-            "description": "Fraction of the frame width trimmed off the right edge (0–1).",
-            "format": "double",
+            "description": "Fraction trimmed from the right edge (0–1).",
             "type": [
               "number",
               "null"
             ]
           },
           "top": {
-            "description": "Fraction of the frame height trimmed off the top edge (0–1).",
-            "format": "double",
+            "description": "Fraction trimmed from the top edge (0–1).",
             "type": [
               "number",
               "null"
@@ -577,24 +505,20 @@
         "required": [
           "clip"
         ],
-        "title": "SetClipCrop",
         "type": "object"
       }
     },
     {
-      "description": "Add a visual effect to a clip's effect chain. Available effects: gaussian_blur (param 'radius'), vignette (param 'amount'). Effects render on the placed layer, in chain order. Not valid on audio tracks.",
+      "description": "Append a visual effect (e.g. gaussian_blur/radius, vignette/amount). Chain order; not for audio.",
       "name": "add_effect",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Add a visual effect to the end of a clip's effect chain. Effects run on\nthe placed layer before it composites, in chain order. Use\n`describe_project` to see a clip's current effects and their indices.\nRejected for clips on audio tracks.",
+        "description": "Append a visual effect to a clip's chain (catalog id, e.g. gaussian_blur).",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "effect": {
-            "description": "Effect id from the catalog, e.g. `gaussian_blur` or `vignette`.",
+            "description": "Effect catalog id (e.g. `gaussian_blur`, `vignette`).",
             "type": "string"
           }
         },
@@ -602,26 +526,20 @@
           "clip",
           "effect"
         ],
-        "title": "AddEffect",
         "type": "object"
       }
     },
     {
-      "description": "Remove an effect from a clip's chain by its index (0 = first). See describe_project for a clip's current effects.",
+      "description": "Remove an effect by chain index (0 = first). See describe_project.",
       "name": "remove_effect",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Remove an effect from a clip's chain by its position (0 = the first\neffect). See `describe_project` for the current chain order.",
+        "description": "Remove an effect by chain index (0 = first).",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "index": {
-            "description": "Index of the effect in the clip's chain (0 = first).",
-            "format": "uint32",
-            "minimum": 0,
+            "description": "Effect chain index (0 = first).",
             "type": "integer"
           }
         },
@@ -629,32 +547,24 @@
           "clip",
           "index"
         ],
-        "title": "RemoveEffect",
         "type": "object"
       }
     },
     {
-      "description": "Reorder a clip's effect chain. Both from_index and to_index address the current pre-move chain; to_index is the effect's final index. See describe_project for the current order.",
+      "description": "Reorder effects; from_index/to_index address the pre-move chain. See describe_project.",
       "name": "move_effect",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Reorder one effect within a clip's chain. Both indices address the current\npre-move chain; `to_index` is the moved effect's final index after removal\nand insertion. Use `describe_project` to inspect the current order.",
+        "description": "Reorder an effect; both indices address the pre-move chain.",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "from_index": {
-            "description": "Current index of the effect to move (0 = first).",
-            "format": "uint32",
-            "minimum": 0,
+            "description": "Current index (0 = first).",
             "type": "integer"
           },
           "to_index": {
-            "description": "Final index for the moved effect (0 = first).",
-            "format": "uint32",
-            "minimum": 0,
+            "description": "Final index after the move (0 = first).",
             "type": "integer"
           }
         },
@@ -663,36 +573,29 @@
           "from_index",
           "to_index"
         ],
-        "title": "MoveEffect",
         "type": "object"
       }
     },
     {
-      "description": "Set a parameter of an effect on a clip. Use `value` for scalars (e.g. gaussian_blur 'radius'), `position` for vec2 params (e.g. color_overlay 'offset'), and `rgba` for color params (e.g. duotone 'shadow_color'). Use describe_project to see effect indices and current params.",
+      "description": "Set an effect param: `value` scalars, `position` vec2, `rgba` colors. See describe_project for indices.",
       "name": "set_effect_param",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Set one parameter of an effect already on a clip to a fixed value. The\nvalue is range-checked against the catalog. Use `value` for scalars,\n`position` for vec2 params (e.g. color_overlay `offset`), and `rgba` for\ncolor params (e.g. duotone `shadow_color`). Use `set_param_keyframe`\nwith an effect param to animate it instead.",
+        "description": "Set one effect parameter (catalog-range-checked).",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "index": {
-            "description": "Index of the effect in the clip's chain (0 = first).",
-            "format": "uint32",
-            "minimum": 0,
+            "description": "Effect chain index (0 = first).",
             "type": "integer"
           },
           "param": {
-            "description": "Parameter name, e.g. `radius` (gaussian_blur) or `shadow_color` (duotone).",
+            "description": "Param name (e.g. `radius`, `shadow_color`).",
             "type": "string"
           },
           "position": {
-            "description": "New `[x, y]` for vec2 effect params. Ignored for scalar and color.",
+            "description": "`[x, y]` for vec2 effect params.",
             "items": {
-              "format": "double",
               "type": "number"
             },
             "maxItems": 2,
@@ -703,11 +606,8 @@
             ]
           },
           "rgba": {
-            "description": "New `[red, green, blue, alpha]` for color effect params. Ignored for\nscalar and vec2.",
+            "description": "`[r, g, b, a]` 0–255 for color effect params.",
             "items": {
-              "format": "uint8",
-              "maximum": 255,
-              "minimum": 0,
               "type": "integer"
             },
             "maxItems": 4,
@@ -718,8 +618,7 @@
             ]
           },
           "value": {
-            "description": "New scalar value. Required for scalar params; ignored for color/vec2.",
-            "format": "double",
+            "description": "Scalar value (ignored for color/vec2).",
             "type": [
               "number",
               "null"
@@ -731,24 +630,20 @@
           "index",
           "param"
         ],
-        "title": "SetEffectParam",
         "type": "object"
       }
     },
     {
-      "description": "Add a transition at the cut where a clip meets the next clip on its track. Available transitions: crossfade, dip_to_black, dip_to_white, wipe_left, wipe_right, wipe_up, wipe_down, slide. The clip must butt directly against a following clip. Not valid on audio tracks.",
+      "description": "Add a transition at the cut to the next abutting clip: crossfade, dip_to_black/white, wipe_*, slide. Not for audio.",
       "name": "add_transition",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Add a transition at the junction where `clip` abuts the next clip on its\ntrack. `clip` must butt directly against a following clip (same track, the\nnext clip starts exactly where this one ends). Rejected for clips on audio\ntracks and clips with no abutting neighbor.",
+        "description": "Add a transition where `clip` abuts the next clip on its track.",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "transition": {
-            "description": "Transition id from the catalog, e.g. `crossfade` or `dip_to_black`.",
+            "description": "Transition catalog id (e.g. `crossfade`, `dip_to_black`).",
             "type": "string"
           }
         },
@@ -756,45 +651,36 @@
           "clip",
           "transition"
         ],
-        "title": "AddTransition",
         "type": "object"
       }
     },
     {
-      "description": "Remove the transition at a clip's right cut. See describe_project for which clips carry one.",
+      "description": "Remove the transition at a clip's right cut.",
       "name": "remove_transition",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Remove the transition at `clip`'s right junction. See `describe_project`\nfor which clips currently carry one.",
+        "description": "Remove the transition at `clip`'s right cut.",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
         "required": [
           "clip"
         ],
-        "title": "RemoveTransition",
         "type": "object"
       }
     },
     {
-      "description": "Set the duration in seconds of the transition at a clip's right cut (centered on the cut).",
+      "description": "Set transition duration in seconds (window centered on the cut).",
       "name": "set_transition",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Set the duration (in seconds) of the transition at `clip`'s right junction.\nThe window is centered on the cut.",
+        "description": "Set transition duration (seconds, positive); window centered on the cut.",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "seconds": {
-            "description": "New window length in seconds (must be positive).",
-            "format": "double",
+            "description": "Window length in seconds (must be positive).",
             "type": "number"
           }
         },
@@ -802,31 +688,25 @@
           "clip",
           "seconds"
         ],
-        "title": "SetTransition",
         "type": "object"
       }
     },
     {
-      "description": "Add or replace a keyframe on any animatable clip property at a timeline position in seconds. The `param` selector supports transform properties (position, anchor_point, scale, rotation, opacity), crop, volume, pan (−1 left … +1 right), speed, an effect `{effect:{index,param}}`, generated-shape `{shape:{param}}`, generated-text `{text:{param}}`, color-look `{look:{param}}`, and style `{style:{param}}` properties. Use `value` for scalars (including uniform scale), `position` for position/anchor_point/per-axis scale and other vec2 params, `rgba` for colors, and `rect` as [x,y,w,h] for crop. For curved position motion paths, pass optional `tangent_out` / `tangent_in` as canvas-fraction offsets from the keyframe value (After Effects–style bezier handles; position only). Effect names and valid properties are visible in describe_project.",
+      "description": "Add/replace a keyframe at timeline seconds. See `param` schema for selectors and value args (`value`/`position`/`rgba`/`rect`). Optional tangent_out/tangent_in are canvas-fraction handles for position motion paths only.",
       "name": "set_param_keyframe",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Add or replace a keyframe on one animatable clip property, making the\nproperty animate over time. The first keyframe on a property turns its\nfixed value into a curve.",
         "properties": {
           "at": {
-            "description": "Timeline position of the keyframe, in seconds. Must fall inside the\nclip.",
-            "format": "double",
+            "description": "Timeline seconds in clip.",
             "type": "number"
           },
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "easing": {
             "anyOf": [
               {
-                "description": "Interpolation toward the next keyframe.\n\nNamed presets (`snappy` / `overshoot` / `anticipate`) encode as cubic\nbeziers in the engine. `hold` is step interpolation — the value stays at\nthis keyframe until the next one. `bezier` accepts raw CSS-style control\npoints `(x1, y1, x2, y2)` with `x` in `0..=1` (y may overshoot).",
+                "description": "linear|ease_*|snappy|overshoot|anticipate|hold|{bezier:{points:[x1,y1,x2,y2]}}",
                 "oneOf": [
                   {
                     "enum": [
@@ -842,14 +722,11 @@
                     "type": "string"
                   },
                   {
-                    "additionalProperties": false,
                     "properties": {
                       "bezier": {
                         "properties": {
                           "points": {
-                            "description": "Control points `[x1, y1, x2, y2]`.",
                             "items": {
-                              "format": "float",
                               "type": "number"
                             },
                             "maxItems": 4,
@@ -873,66 +750,30 @@
               {
                 "type": "null"
               }
-            ],
-            "description": "Interpolation toward the next keyframe. Defaults to linear."
+            ]
           },
           "param": {
-            "description": "An animatable clip property the keyframe commands can address.",
+            "description": "Clip property. Strings: position, anchor_point, scale, rotation, opacity, crop, volume, pan, speed. Tagged: {\"effect\":{\"index\":N,\"param\":name}}, {\"shape|text|look|style\":{\"param\":name}} — shape: width|height|corner_radius|inner_ratio|fill|stroke_*; text: size|fill|*_spacing|stroke_*|shadow_*|background_*; look: *_intensity|adjust_*|mask_*|chroma_*; style: shadow_*|glow_*|outline_*|background_*. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
             "oneOf": [
               {
-                "const": "position",
-                "description": "Canvas placement of the content center (vec2: use the `position`\nargument, not `value`).",
+                "enum": [
+                  "position",
+                  "anchor_point",
+                  "scale",
+                  "rotation",
+                  "opacity",
+                  "crop",
+                  "volume",
+                  "pan",
+                  "speed"
+                ],
                 "type": "string"
               },
               {
-                "const": "anchor_point",
-                "description": "Canvas point around which the clip scales and rotates (vec2: use the\n`position` argument, not `value`).",
-                "type": "string"
-              },
-              {
-                "const": "scale",
-                "description": "Scale (1.0 = fit inside the canvas). Use `value` for a uniform number\nor `position` as `[x, y]` for per-axis.",
-                "type": "string"
-              },
-              {
-                "const": "rotation",
-                "description": "Clockwise rotation in degrees.",
-                "type": "string"
-              },
-              {
-                "const": "opacity",
-                "description": "Layer opacity 0.0–1.0.",
-                "type": "string"
-              },
-              {
-                "const": "crop",
-                "description": "Kept-region crop window as content fractions (rect: use the `rect`\nargument `[x, y, w, h]`, not `value`). Visual clips only.",
-                "type": "string"
-              },
-              {
-                "const": "volume",
-                "description": "Audio gain envelope (0.0 = mute, 1.0 = unchanged, up to 10.0 boost).\nKeyframing it draws volume automation; this is how you fade audio in\nor out over time or duck music under a voice. Media-backed clips only.",
-                "type": "string"
-              },
-              {
-                "const": "pan",
-                "description": "Stereo pan envelope (−1.0 = full left, 0.0 = center, +1.0 = full\nright). Keyframing it draws balance automation. Media-backed clips\nonly (including video clips with sound — same target rule as volume).",
-                "type": "string"
-              },
-              {
-                "const": "speed",
-                "description": "Playback-rate ramp (scalar: 1.0 = normal speed). Media-backed clips\nonly; keyframes use normalized positions within the clip.",
-                "type": "string"
-              },
-              {
-                "additionalProperties": false,
-                "description": "A parameter of an effect already on the clip. `index` is the\neffect-chain position and `param` is its catalog name, as in\n`set_effect_param`. Use `value` for scalars, `position` for vec2\nparams, and `rgba` for color params.",
                 "properties": {
                   "effect": {
                     "properties": {
                       "index": {
-                        "format": "uint32",
-                        "minimum": 0,
                         "type": "integer"
                       },
                       "param": {
@@ -952,22 +793,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A visual property of a generated shape clip.",
                 "properties": {
                   "shape": {
                     "properties": {
                       "param": {
-                        "description": "Animatable properties of a generated shape clip.",
-                        "enum": [
-                          "width",
-                          "height",
-                          "corner_radius",
-                          "inner_ratio",
-                          "fill",
-                          "stroke_color",
-                          "stroke_width"
-                        ],
                         "type": "string"
                       }
                     },
@@ -983,26 +812,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A visual style property of a generated text clip.",
                 "properties": {
                   "text": {
                     "properties": {
                       "param": {
-                        "description": "Animatable visual-style properties of a generated text clip.",
-                        "enum": [
-                          "size",
-                          "fill",
-                          "letter_spacing",
-                          "line_spacing",
-                          "stroke_width",
-                          "stroke_color",
-                          "shadow_blur",
-                          "shadow_distance",
-                          "shadow_color",
-                          "background_color",
-                          "background_radius"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1018,35 +831,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A scalar property of the clip's color look.",
                 "properties": {
                   "look": {
                     "properties": {
                       "param": {
-                        "description": "Animatable properties of a clip's color look / mask.\n\n`mask_center` / `mask_size` carry vec2 values; the rest are scalars.",
-                        "enum": [
-                          "filter_intensity",
-                          "lut_intensity",
-                          "adjust_brightness",
-                          "adjust_contrast",
-                          "adjust_saturation",
-                          "adjust_exposure",
-                          "adjust_temperature",
-                          "adjust_tint",
-                          "adjust_hue",
-                          "adjust_highlights",
-                          "adjust_shadows",
-                          "adjust_sharpness",
-                          "adjust_vignette",
-                          "mask_feather",
-                          "mask_center",
-                          "mask_size",
-                          "mask_rotation",
-                          "mask_roundness",
-                          "chroma_strength",
-                          "chroma_shadow"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1062,26 +850,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A property of the clip's layer-quad styles (shadow/glow/outline/\nbackground). Color params use `rgba`; `shadow_offset` uses\n`position`; the rest use scalar `value`.",
                 "properties": {
                   "style": {
                     "properties": {
                       "param": {
-                        "description": "Animatable properties of a clip's layer-quad styles.",
-                        "enum": [
-                          "shadow_color",
-                          "shadow_offset",
-                          "shadow_blur",
-                          "glow_color",
-                          "glow_radius",
-                          "glow_intensity",
-                          "outline_color",
-                          "outline_width",
-                          "background_color",
-                          "background_padding",
-                          "background_radius"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1099,9 +871,8 @@
             ]
           },
           "position": {
-            "description": "New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`,\nlook `mask_center` / `mask_size`, or vec2 effect params. Ignored for\nscalar, color, and rect params.",
+            "description": "Vec2 `[x,y]` canvas fractions from center.",
             "items": {
-              "format": "double",
               "type": "number"
             },
             "maxItems": 2,
@@ -1112,9 +883,8 @@
             ]
           },
           "rect": {
-            "description": "New `[x, y, w, h]` kept-region for `crop` (content fractions).\nIgnored for scalar, vec2, and color params.",
+            "description": "Crop `[x,y,w,h]` content fractions.",
             "items": {
-              "format": "double",
               "type": "number"
             },
             "maxItems": 4,
@@ -1125,11 +895,8 @@
             ]
           },
           "rgba": {
-            "description": "New `[red, green, blue, alpha]` for shape, text, style, or effect\ncolor parameters. Ignored for scalar, vec2, and rect params.",
+            "description": "`[r,g,b,a]` 0–255.",
             "items": {
-              "format": "uint8",
-              "maximum": 255,
-              "minimum": 0,
               "type": "integer"
             },
             "maxItems": 4,
@@ -1140,9 +907,8 @@
             ]
           },
           "tangent_in": {
-            "description": "Incoming spatial bezier handle for a **position** motion path.\nOffset from this keyframe's value, in canvas fractions. Position\nonly; see `tangent_out`.",
+            "description": "Position in-handle (canvas-fraction offset).",
             "items": {
-              "format": "double",
               "type": "number"
             },
             "maxItems": 2,
@@ -1153,9 +919,8 @@
             ]
           },
           "tangent_out": {
-            "description": "Outgoing spatial bezier handle for a **position** motion path\n(After Effects–style). Offset from this keyframe's value, in canvas\nfractions. Ignored / rejected on non-position params. Pair with\n`tangent_in` on the next keyframe to shape the segment.",
+            "description": "Position out-handle (canvas-fraction offset).",
             "items": {
-              "format": "double",
               "type": "number"
             },
             "maxItems": 2,
@@ -1166,8 +931,6 @@
             ]
           },
           "value": {
-            "description": "New value for scalar parameters. Ignored for position/vec2, color,\nand rect parameters.",
-            "format": "double",
             "type": [
               "number",
               "null"
@@ -1179,84 +942,43 @@
           "param",
           "at"
         ],
-        "title": "SetParamKeyframe",
         "type": "object"
       }
     },
     {
-      "description": "Remove the keyframe at a timeline position (seconds) on any animatable clip property. Use the same `param` selector as set_param_keyframe. Removing the last keyframe freezes the property at that value.",
+      "description": "Remove a keyframe at timeline seconds (same `param` as set_param_keyframe). Last keyframe freezes the value.",
       "name": "remove_param_keyframe",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Remove the keyframe at exactly a timeline position on one property.\nRemoving the last keyframe freezes the property at that value.",
         "properties": {
           "at": {
-            "description": "Timeline position of the keyframe to remove, in seconds.",
-            "format": "double",
+            "description": "Timeline seconds of the keyframe to remove.",
             "type": "number"
           },
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "param": {
-            "description": "An animatable clip property the keyframe commands can address.",
+            "description": "Clip property. Strings: position, anchor_point, scale, rotation, opacity, crop, volume, pan, speed. Tagged: {\"effect\":{\"index\":N,\"param\":name}}, {\"shape|text|look|style\":{\"param\":name}} — shape: width|height|corner_radius|inner_ratio|fill|stroke_*; text: size|fill|*_spacing|stroke_*|shadow_*|background_*; look: *_intensity|adjust_*|mask_*|chroma_*; style: shadow_*|glow_*|outline_*|background_*. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
             "oneOf": [
               {
-                "const": "position",
-                "description": "Canvas placement of the content center (vec2: use the `position`\nargument, not `value`).",
+                "enum": [
+                  "position",
+                  "anchor_point",
+                  "scale",
+                  "rotation",
+                  "opacity",
+                  "crop",
+                  "volume",
+                  "pan",
+                  "speed"
+                ],
                 "type": "string"
               },
               {
-                "const": "anchor_point",
-                "description": "Canvas point around which the clip scales and rotates (vec2: use the\n`position` argument, not `value`).",
-                "type": "string"
-              },
-              {
-                "const": "scale",
-                "description": "Scale (1.0 = fit inside the canvas). Use `value` for a uniform number\nor `position` as `[x, y]` for per-axis.",
-                "type": "string"
-              },
-              {
-                "const": "rotation",
-                "description": "Clockwise rotation in degrees.",
-                "type": "string"
-              },
-              {
-                "const": "opacity",
-                "description": "Layer opacity 0.0–1.0.",
-                "type": "string"
-              },
-              {
-                "const": "crop",
-                "description": "Kept-region crop window as content fractions (rect: use the `rect`\nargument `[x, y, w, h]`, not `value`). Visual clips only.",
-                "type": "string"
-              },
-              {
-                "const": "volume",
-                "description": "Audio gain envelope (0.0 = mute, 1.0 = unchanged, up to 10.0 boost).\nKeyframing it draws volume automation; this is how you fade audio in\nor out over time or duck music under a voice. Media-backed clips only.",
-                "type": "string"
-              },
-              {
-                "const": "pan",
-                "description": "Stereo pan envelope (−1.0 = full left, 0.0 = center, +1.0 = full\nright). Keyframing it draws balance automation. Media-backed clips\nonly (including video clips with sound — same target rule as volume).",
-                "type": "string"
-              },
-              {
-                "const": "speed",
-                "description": "Playback-rate ramp (scalar: 1.0 = normal speed). Media-backed clips\nonly; keyframes use normalized positions within the clip.",
-                "type": "string"
-              },
-              {
-                "additionalProperties": false,
-                "description": "A parameter of an effect already on the clip. `index` is the\neffect-chain position and `param` is its catalog name, as in\n`set_effect_param`. Use `value` for scalars, `position` for vec2\nparams, and `rgba` for color params.",
                 "properties": {
                   "effect": {
                     "properties": {
                       "index": {
-                        "format": "uint32",
-                        "minimum": 0,
                         "type": "integer"
                       },
                       "param": {
@@ -1276,22 +998,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A visual property of a generated shape clip.",
                 "properties": {
                   "shape": {
                     "properties": {
                       "param": {
-                        "description": "Animatable properties of a generated shape clip.",
-                        "enum": [
-                          "width",
-                          "height",
-                          "corner_radius",
-                          "inner_ratio",
-                          "fill",
-                          "stroke_color",
-                          "stroke_width"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1307,26 +1017,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A visual style property of a generated text clip.",
                 "properties": {
                   "text": {
                     "properties": {
                       "param": {
-                        "description": "Animatable visual-style properties of a generated text clip.",
-                        "enum": [
-                          "size",
-                          "fill",
-                          "letter_spacing",
-                          "line_spacing",
-                          "stroke_width",
-                          "stroke_color",
-                          "shadow_blur",
-                          "shadow_distance",
-                          "shadow_color",
-                          "background_color",
-                          "background_radius"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1342,35 +1036,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A scalar property of the clip's color look.",
                 "properties": {
                   "look": {
                     "properties": {
                       "param": {
-                        "description": "Animatable properties of a clip's color look / mask.\n\n`mask_center` / `mask_size` carry vec2 values; the rest are scalars.",
-                        "enum": [
-                          "filter_intensity",
-                          "lut_intensity",
-                          "adjust_brightness",
-                          "adjust_contrast",
-                          "adjust_saturation",
-                          "adjust_exposure",
-                          "adjust_temperature",
-                          "adjust_tint",
-                          "adjust_hue",
-                          "adjust_highlights",
-                          "adjust_shadows",
-                          "adjust_sharpness",
-                          "adjust_vignette",
-                          "mask_feather",
-                          "mask_center",
-                          "mask_size",
-                          "mask_rotation",
-                          "mask_roundness",
-                          "chroma_strength",
-                          "chroma_shadow"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1386,26 +1055,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A property of the clip's layer-quad styles (shadow/glow/outline/\nbackground). Color params use `rgba`; `shadow_offset` uses\n`position`; the rest use scalar `value`.",
                 "properties": {
                   "style": {
                     "properties": {
                       "param": {
-                        "description": "Animatable properties of a clip's layer-quad styles.",
-                        "enum": [
-                          "shadow_color",
-                          "shadow_offset",
-                          "shadow_blur",
-                          "glow_color",
-                          "glow_radius",
-                          "glow_intensity",
-                          "outline_color",
-                          "outline_width",
-                          "background_color",
-                          "background_padding",
-                          "background_radius"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1428,79 +1081,39 @@
           "param",
           "at"
         ],
-        "title": "RemoveParamKeyframe",
         "type": "object"
       }
     },
     {
-      "description": "Set any animatable clip property to a fixed value and remove all its keyframes (stops its animation). Use the same `param` selector as set_param_keyframe, with `value` for scalars (including uniform scale), `position` for position/anchor_point/per-axis scale and other vec2 params, `rgba` for colors, or `rect` as [x,y,w,h] for crop.",
+      "description": "Set an animatable property to a fixed value and clear its keyframes (same `param`/value args as set_param_keyframe).",
       "name": "set_param_constant",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Set one animatable property to a fixed value, removing all its\nkeyframes (stops the animation).",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "param": {
-            "description": "An animatable clip property the keyframe commands can address.",
+            "description": "Clip property. Strings: position, anchor_point, scale, rotation, opacity, crop, volume, pan, speed. Tagged: {\"effect\":{\"index\":N,\"param\":name}}, {\"shape|text|look|style\":{\"param\":name}} — shape: width|height|corner_radius|inner_ratio|fill|stroke_*; text: size|fill|*_spacing|stroke_*|shadow_*|background_*; look: *_intensity|adjust_*|mask_*|chroma_*; style: shadow_*|glow_*|outline_*|background_*. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
             "oneOf": [
               {
-                "const": "position",
-                "description": "Canvas placement of the content center (vec2: use the `position`\nargument, not `value`).",
+                "enum": [
+                  "position",
+                  "anchor_point",
+                  "scale",
+                  "rotation",
+                  "opacity",
+                  "crop",
+                  "volume",
+                  "pan",
+                  "speed"
+                ],
                 "type": "string"
               },
               {
-                "const": "anchor_point",
-                "description": "Canvas point around which the clip scales and rotates (vec2: use the\n`position` argument, not `value`).",
-                "type": "string"
-              },
-              {
-                "const": "scale",
-                "description": "Scale (1.0 = fit inside the canvas). Use `value` for a uniform number\nor `position` as `[x, y]` for per-axis.",
-                "type": "string"
-              },
-              {
-                "const": "rotation",
-                "description": "Clockwise rotation in degrees.",
-                "type": "string"
-              },
-              {
-                "const": "opacity",
-                "description": "Layer opacity 0.0–1.0.",
-                "type": "string"
-              },
-              {
-                "const": "crop",
-                "description": "Kept-region crop window as content fractions (rect: use the `rect`\nargument `[x, y, w, h]`, not `value`). Visual clips only.",
-                "type": "string"
-              },
-              {
-                "const": "volume",
-                "description": "Audio gain envelope (0.0 = mute, 1.0 = unchanged, up to 10.0 boost).\nKeyframing it draws volume automation; this is how you fade audio in\nor out over time or duck music under a voice. Media-backed clips only.",
-                "type": "string"
-              },
-              {
-                "const": "pan",
-                "description": "Stereo pan envelope (−1.0 = full left, 0.0 = center, +1.0 = full\nright). Keyframing it draws balance automation. Media-backed clips\nonly (including video clips with sound — same target rule as volume).",
-                "type": "string"
-              },
-              {
-                "const": "speed",
-                "description": "Playback-rate ramp (scalar: 1.0 = normal speed). Media-backed clips\nonly; keyframes use normalized positions within the clip.",
-                "type": "string"
-              },
-              {
-                "additionalProperties": false,
-                "description": "A parameter of an effect already on the clip. `index` is the\neffect-chain position and `param` is its catalog name, as in\n`set_effect_param`. Use `value` for scalars, `position` for vec2\nparams, and `rgba` for color params.",
                 "properties": {
                   "effect": {
                     "properties": {
                       "index": {
-                        "format": "uint32",
-                        "minimum": 0,
                         "type": "integer"
                       },
                       "param": {
@@ -1520,22 +1133,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A visual property of a generated shape clip.",
                 "properties": {
                   "shape": {
                     "properties": {
                       "param": {
-                        "description": "Animatable properties of a generated shape clip.",
-                        "enum": [
-                          "width",
-                          "height",
-                          "corner_radius",
-                          "inner_ratio",
-                          "fill",
-                          "stroke_color",
-                          "stroke_width"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1551,26 +1152,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A visual style property of a generated text clip.",
                 "properties": {
                   "text": {
                     "properties": {
                       "param": {
-                        "description": "Animatable visual-style properties of a generated text clip.",
-                        "enum": [
-                          "size",
-                          "fill",
-                          "letter_spacing",
-                          "line_spacing",
-                          "stroke_width",
-                          "stroke_color",
-                          "shadow_blur",
-                          "shadow_distance",
-                          "shadow_color",
-                          "background_color",
-                          "background_radius"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1586,35 +1171,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A scalar property of the clip's color look.",
                 "properties": {
                   "look": {
                     "properties": {
                       "param": {
-                        "description": "Animatable properties of a clip's color look / mask.\n\n`mask_center` / `mask_size` carry vec2 values; the rest are scalars.",
-                        "enum": [
-                          "filter_intensity",
-                          "lut_intensity",
-                          "adjust_brightness",
-                          "adjust_contrast",
-                          "adjust_saturation",
-                          "adjust_exposure",
-                          "adjust_temperature",
-                          "adjust_tint",
-                          "adjust_hue",
-                          "adjust_highlights",
-                          "adjust_shadows",
-                          "adjust_sharpness",
-                          "adjust_vignette",
-                          "mask_feather",
-                          "mask_center",
-                          "mask_size",
-                          "mask_rotation",
-                          "mask_roundness",
-                          "chroma_strength",
-                          "chroma_shadow"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1630,26 +1190,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A property of the clip's layer-quad styles (shadow/glow/outline/\nbackground). Color params use `rgba`; `shadow_offset` uses\n`position`; the rest use scalar `value`.",
                 "properties": {
                   "style": {
                     "properties": {
                       "param": {
-                        "description": "Animatable properties of a clip's layer-quad styles.",
-                        "enum": [
-                          "shadow_color",
-                          "shadow_offset",
-                          "shadow_blur",
-                          "glow_color",
-                          "glow_radius",
-                          "glow_intensity",
-                          "outline_color",
-                          "outline_width",
-                          "background_color",
-                          "background_padding",
-                          "background_radius"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1667,9 +1211,8 @@
             ]
           },
           "position": {
-            "description": "New `[x, y]` for `position`, `anchor_point`, style `shadow_offset`,\nlook `mask_center` / `mask_size`, or vec2 effect params. Ignored for\nscalar, color, and rect params.",
+            "description": "Vec2 `[x,y]` canvas fractions from center.",
             "items": {
-              "format": "double",
               "type": "number"
             },
             "maxItems": 2,
@@ -1680,9 +1223,8 @@
             ]
           },
           "rect": {
-            "description": "New `[x, y, w, h]` kept-region for `crop` (content fractions).\nIgnored for scalar, vec2, and color params.",
+            "description": "Crop `[x,y,w,h]` content fractions.",
             "items": {
-              "format": "double",
               "type": "number"
             },
             "maxItems": 4,
@@ -1693,11 +1235,8 @@
             ]
           },
           "rgba": {
-            "description": "New `[red, green, blue, alpha]` for shape, text, style, or effect\ncolor parameters. Ignored for scalar, vec2, and rect params.",
+            "description": "`[r,g,b,a]` 0–255.",
             "items": {
-              "format": "uint8",
-              "maximum": 255,
-              "minimum": 0,
               "type": "integer"
             },
             "maxItems": 4,
@@ -1708,8 +1247,6 @@
             ]
           },
           "value": {
-            "description": "New value for scalar parameters. Ignored for position/vec2, color,\nand rect parameters.",
-            "format": "double",
             "type": [
               "number",
               "null"
@@ -1720,84 +1257,43 @@
           "clip",
           "param"
         ],
-        "title": "SetParamConstant",
         "type": "object"
       }
     },
     {
-      "description": "Replace the outgoing keyframe segment at from_tick with a multi-keyframe bounce_out / elastic_out / back_out approximation. Requires a keyframe at from_tick and a following keyframe. Scalar and vec2 params only (not colors or crop). One undoable edit.",
+      "description": "Replace the outgoing KF segment at from_tick with bounce_out/elastic_out/back_out. Needs a following keyframe; scalar/vec2 only.",
       "name": "apply_easing_preset",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Expand the keyframe segment leaving `from_tick` into a bounce / elastic /\nback approximation (multiple keyframes). Scalar and vec2 params only.",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "from_tick": {
-            "description": "Timeline position of the departing keyframe, in seconds. Must have a\nfollowing keyframe on the same param.",
-            "format": "double",
+            "description": "Timeline seconds of the departing keyframe (needs a following KF).",
             "type": "number"
           },
           "param": {
-            "description": "An animatable clip property the keyframe commands can address.",
+            "description": "Clip property. Strings: position, anchor_point, scale, rotation, opacity, crop, volume, pan, speed. Tagged: {\"effect\":{\"index\":N,\"param\":name}}, {\"shape|text|look|style\":{\"param\":name}} — shape: width|height|corner_radius|inner_ratio|fill|stroke_*; text: size|fill|*_spacing|stroke_*|shadow_*|background_*; look: *_intensity|adjust_*|mask_*|chroma_*; style: shadow_*|glow_*|outline_*|background_*. Args: position=[x,y] canvas fractions from center (vec2: position, anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1, speed); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan/speed=media; crop=visual.",
             "oneOf": [
               {
-                "const": "position",
-                "description": "Canvas placement of the content center (vec2: use the `position`\nargument, not `value`).",
+                "enum": [
+                  "position",
+                  "anchor_point",
+                  "scale",
+                  "rotation",
+                  "opacity",
+                  "crop",
+                  "volume",
+                  "pan",
+                  "speed"
+                ],
                 "type": "string"
               },
               {
-                "const": "anchor_point",
-                "description": "Canvas point around which the clip scales and rotates (vec2: use the\n`position` argument, not `value`).",
-                "type": "string"
-              },
-              {
-                "const": "scale",
-                "description": "Scale (1.0 = fit inside the canvas). Use `value` for a uniform number\nor `position` as `[x, y]` for per-axis.",
-                "type": "string"
-              },
-              {
-                "const": "rotation",
-                "description": "Clockwise rotation in degrees.",
-                "type": "string"
-              },
-              {
-                "const": "opacity",
-                "description": "Layer opacity 0.0–1.0.",
-                "type": "string"
-              },
-              {
-                "const": "crop",
-                "description": "Kept-region crop window as content fractions (rect: use the `rect`\nargument `[x, y, w, h]`, not `value`). Visual clips only.",
-                "type": "string"
-              },
-              {
-                "const": "volume",
-                "description": "Audio gain envelope (0.0 = mute, 1.0 = unchanged, up to 10.0 boost).\nKeyframing it draws volume automation; this is how you fade audio in\nor out over time or duck music under a voice. Media-backed clips only.",
-                "type": "string"
-              },
-              {
-                "const": "pan",
-                "description": "Stereo pan envelope (−1.0 = full left, 0.0 = center, +1.0 = full\nright). Keyframing it draws balance automation. Media-backed clips\nonly (including video clips with sound — same target rule as volume).",
-                "type": "string"
-              },
-              {
-                "const": "speed",
-                "description": "Playback-rate ramp (scalar: 1.0 = normal speed). Media-backed clips\nonly; keyframes use normalized positions within the clip.",
-                "type": "string"
-              },
-              {
-                "additionalProperties": false,
-                "description": "A parameter of an effect already on the clip. `index` is the\neffect-chain position and `param` is its catalog name, as in\n`set_effect_param`. Use `value` for scalars, `position` for vec2\nparams, and `rgba` for color params.",
                 "properties": {
                   "effect": {
                     "properties": {
                       "index": {
-                        "format": "uint32",
-                        "minimum": 0,
                         "type": "integer"
                       },
                       "param": {
@@ -1817,22 +1313,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A visual property of a generated shape clip.",
                 "properties": {
                   "shape": {
                     "properties": {
                       "param": {
-                        "description": "Animatable properties of a generated shape clip.",
-                        "enum": [
-                          "width",
-                          "height",
-                          "corner_radius",
-                          "inner_ratio",
-                          "fill",
-                          "stroke_color",
-                          "stroke_width"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1848,26 +1332,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A visual style property of a generated text clip.",
                 "properties": {
                   "text": {
                     "properties": {
                       "param": {
-                        "description": "Animatable visual-style properties of a generated text clip.",
-                        "enum": [
-                          "size",
-                          "fill",
-                          "letter_spacing",
-                          "line_spacing",
-                          "stroke_width",
-                          "stroke_color",
-                          "shadow_blur",
-                          "shadow_distance",
-                          "shadow_color",
-                          "background_color",
-                          "background_radius"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1883,35 +1351,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A scalar property of the clip's color look.",
                 "properties": {
                   "look": {
                     "properties": {
                       "param": {
-                        "description": "Animatable properties of a clip's color look / mask.\n\n`mask_center` / `mask_size` carry vec2 values; the rest are scalars.",
-                        "enum": [
-                          "filter_intensity",
-                          "lut_intensity",
-                          "adjust_brightness",
-                          "adjust_contrast",
-                          "adjust_saturation",
-                          "adjust_exposure",
-                          "adjust_temperature",
-                          "adjust_tint",
-                          "adjust_hue",
-                          "adjust_highlights",
-                          "adjust_shadows",
-                          "adjust_sharpness",
-                          "adjust_vignette",
-                          "mask_feather",
-                          "mask_center",
-                          "mask_size",
-                          "mask_rotation",
-                          "mask_roundness",
-                          "chroma_strength",
-                          "chroma_shadow"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1927,26 +1370,10 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
-                "description": "A property of the clip's layer-quad styles (shadow/glow/outline/\nbackground). Color params use `rgba`; `shadow_offset` uses\n`position`; the rest use scalar `value`.",
                 "properties": {
                   "style": {
                     "properties": {
                       "param": {
-                        "description": "Animatable properties of a clip's layer-quad styles.",
-                        "enum": [
-                          "shadow_color",
-                          "shadow_offset",
-                          "shadow_blur",
-                          "glow_color",
-                          "glow_radius",
-                          "glow_intensity",
-                          "outline_color",
-                          "outline_width",
-                          "background_color",
-                          "background_padding",
-                          "background_radius"
-                        ],
                         "type": "string"
                       }
                     },
@@ -1979,33 +1406,27 @@
           "from_tick",
           "preset"
         ],
-        "title": "ApplyEasingPreset",
         "type": "object"
       }
     },
     {
-      "description": "Change a media clip's playback speed (2.0 = double speed, 0.5 = slow motion) and/or play it in reverse. The clip's timeline length re-derives from the speed; its audio time-stretches to match (pitch preserved by default). Not valid for generated clips.",
+      "description": "Set media playback speed (2.0=double, 0.5=slow-mo) and/or reverse. Length re-derives; audio time-stretches. Not for generated clips.",
       "name": "set_clip_speed",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Change a media clip's constant playback speed and/or direction. The clip\nkeeps its timeline start and source footage; its timeline length\nre-derives from the speed (a 2x clip takes half the time). Audio\ntime-stretches to match (pitch preserved by default; see set_clip_pitch).\nNot valid for generated clips (text/solid/shape).",
+        "description": "Change a media clip's constant playback speed and/or direction.",
         "properties": {
           "clip": {
-            "description": "The media clip to retime.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "reversed": {
-            "description": "Play the clip's footage backwards. Omit to keep the current\ndirection.",
+            "description": "Play footage backwards. Omit to keep.",
             "type": [
               "boolean",
               "null"
             ]
           },
           "speed": {
-            "description": "Playback rate multiplier: 2.0 plays at double speed (half as long on\nthe timeline), 0.5 is half-speed slow motion. Allowed range 0.05 to\n100. Omit to keep the current speed.",
-            "format": "double",
+            "description": "Playback rate: 2.0 = double speed, 0.5 = slow-mo; range 0.05..100.\nTimeline length re-derives; audio time-stretches. Omit to keep.",
             "type": [
               "number",
               "null"
@@ -2015,25 +1436,20 @@
         "required": [
           "clip"
         ],
-        "title": "SetClipSpeed",
         "type": "object"
       }
     },
     {
-      "description": "Apply a CapCut-style speed ramp to a media clip so its speed varies across its length: preset 'ramp_up' (slow to fast), 'ramp_down' (fast to slow), 'montage' (fast/slow/fast), 'hero' (slow-mo on the action), or 'bullet' (fast/hard-slow/fast). Omit preset to clear the ramp. The clip's length re-derives from the ramp's average speed; its audio time-stretches along the ramp. Not valid for generated clips.",
+      "description": "Apply/clear a speed ramp preset (ramp_up, ramp_down, montage, hero, bullet). Length re-derives from average speed. Not for generated clips.",
       "name": "set_speed_curve",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Apply (or clear) a CapCut-style speed ramp on a media clip: its playback\nspeed varies across its length following a named preset, instead of a\nsingle constant speed. The clip keeps its source footage; its timeline\nlength re-derives from the ramp's average speed. The audio time-stretches\nalong the ramp. Not valid for generated clips.",
+        "description": "Apply or clear a CapCut-style speed ramp on a media clip.",
         "properties": {
           "clip": {
-            "description": "The media clip to ramp.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "preset": {
-            "description": "Named ramp preset: \"ramp_up\" (slow→fast), \"ramp_down\" (fast→slow),\n\"montage\" (fast/slow/fast), \"hero\" (dip to slow-mo on the action),\n\"bullet\" (fast / hard slow / fast). Omit or set null to clear the ramp\nback to a constant speed.",
+            "description": "Preset: ramp_up, ramp_down, montage, hero, bullet. Null clears to\nconstant speed. Length re-derives from average speed.",
             "type": [
               "string",
               "null"
@@ -2043,25 +1459,20 @@
         "required": [
           "clip"
         ],
-        "title": "SetSpeedCurve",
         "type": "object"
       }
     },
     {
-      "description": "Lock or unlock a retimed media clip's pitch. preserve_pitch true (default) keeps the original pitch while time-stretching; false lets pitch follow speed (the chipmunk effect when sped up). Only affects a clip that is retimed (speed change, reverse, or ramp). Not valid for generated clips.",
+      "description": "preserve_pitch true keeps pitch while time-stretching; false lets pitch follow speed. Retimed media only.",
       "name": "set_clip_pitch",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Lock or unlock a retimed media clip's pitch (CapCut \"pitch\" switch). When\npreserved (the default), the audio time-stretches and keeps its original\npitch; when not, pitch rides the playback speed — the \"chipmunk\" effect on\na sped-up clip, a deep growl on a slowed one. Only affects sound on a\nretimed clip (a speed change, reverse, or ramp). Not valid for generated\nclips.",
+        "description": "Lock or unlock pitch on a retimed media clip.",
         "properties": {
           "clip": {
-            "description": "The media clip whose pitch handling to set.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "preserve_pitch": {
-            "description": "True keeps the original pitch (time-stretch); false lets the pitch\nfollow the playback speed.",
+            "description": "true = keep pitch while time-stretching; false = pitch follows speed.",
             "type": "boolean"
           }
         },
@@ -2069,42 +1480,35 @@
           "clip",
           "preserve_pitch"
         ],
-        "title": "SetClipPitch",
         "type": "object"
       }
     },
     {
-      "description": "Set a clip's volume (0.0 mutes, 1.0 unchanged, 2.0 doubles) and/or fade-in/fade-out durations in seconds. Omitted fields keep their current value. A video clip keeps its own sound, so target it directly.",
+      "description": "Set volume (0=mute, 1=unchanged, max 10) and/or fade-in/out seconds. Target video-with-sound or audio clips directly.",
       "name": "set_clip_audio",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Set a clip's audio mix: a constant volume gain plus linear fade-in/out\nramps. Volume 1.0 is unchanged, 0.0 mutes, 2.0 doubles (max 10). Fades\nare seconds of ramp at the clip's head/tail. A video clip keeps its own\nsound, so target it directly; only when a clip's audio was separated onto a\nlinked audio lane do you target that clip instead.",
+        "description": "Set a clip's volume gain and/or fade-in/out (seconds).",
         "properties": {
           "clip": {
-            "description": "The media clip to adjust — a video clip with sound, or an audio clip.",
-            "format": "uint64",
-            "minimum": 0,
+            "description": "Video clip with sound, or an audio clip.",
             "type": "integer"
           },
           "fade_in": {
-            "description": "Fade-in duration in seconds from the clip's start (0 removes the\nfade). Omit to keep the current fade-in.",
-            "format": "double",
+            "description": "Fade-in seconds from clip start (0 clears). Omit to keep.",
             "type": [
               "number",
               "null"
             ]
           },
           "fade_out": {
-            "description": "Fade-out duration in seconds ending at the clip's end (0 removes the\nfade). Omit to keep the current fade-out.",
-            "format": "double",
+            "description": "Fade-out seconds ending at clip end (0 clears). Omit to keep.",
             "type": [
               "number",
               "null"
             ]
           },
           "volume": {
-            "description": "Gain multiplier: 0.0 mutes, 1.0 keeps the recorded level, up to a\nmaximum of 10. Omit to keep the current volume.",
-            "format": "double",
+            "description": "Gain: 0.0 mute, 1.0 unchanged, max 10. Omit to keep.",
             "type": [
               "number",
               "null"
@@ -2114,25 +1518,19 @@
         "required": [
           "clip"
         ],
-        "title": "SetClipAudio",
         "type": "object"
       }
     },
     {
-      "description": "Turn noise reduction on or off for a media clip: runs its audio through a speech-preserving denoiser that suppresses steady background noise (hum, hiss, air-conditioning, room tone) while keeping voice. Use on clips with a constant background drone. A video clip keeps its own sound, so target it directly. Not valid for generated clips.",
+      "description": "Toggle speech-preserving denoise (steady hum/hiss/room tone). Media clips only; target video-with-sound directly.",
       "name": "set_denoise",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Turn noise reduction on or off for a media clip (CapCut \"Reduce noise\").\nRuns the clip's audio through a speech-preserving denoiser that suppresses\nsteady background noise — fan hum, hiss, air-conditioning, room tone — while\nkeeping voice. Best on clips with a constant background drone. A video clip\nkeeps its own sound, so target it directly; only when its audio was\nseparated onto a linked audio lane do you target that clip instead. Not\nvalid for generated clips.",
+        "description": "Enable/disable speech-preserving noise reduction on a media clip.",
         "properties": {
           "clip": {
-            "description": "The media clip to clean.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "denoise": {
-            "description": "True turns noise reduction on, false off.",
             "type": "boolean"
           }
         },
@@ -2140,29 +1538,24 @@
           "clip",
           "denoise"
         ],
-        "title": "SetDenoise",
         "type": "object"
       }
     },
     {
-      "description": "Set or clear a shaped alpha mask on a media-backed visual clip. Mask kinds: linear, mirror, circle, rectangle, heart, star. Optional constants: feather (0..1), invert, center/size as fractions of the layer, rotation in degrees clockwise, roundness (0..1, rectangle only). Omitted geometry uses defaults. Constants only — animate with set_param_keyframe using look params (mask_feather, mask_center, mask_size, mask_rotation, mask_roundness). Pass null for mask to clear.",
+      "description": "Set/clear a mask (linear/mirror/circle/rectangle/heart/star). feather 0..1; center/size = layer fractions; rotation deg CW; roundness 0..1 (rectangle). Animate via look params. null clears.",
       "name": "set_clip_mask",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Set (or clear) a per-clip mask on a media-backed visual clip.",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "mask": {
             "description": "Mask to apply. `null` clears the mask.",
             "properties": {
               "center": {
-                "description": "Mask center offset from the layer center, as fractions of the layer\nsize per axis (`[0,0]` = centered, `[0.5,0]` = right edge). Omitted\nuses the default (`[0,0]`).",
+                "description": "Center offset from layer center as layer-size fractions\n(`[0,0]` centered, `[0.5,0]` right edge). Default `[0,0]`.",
                 "items": {
-                  "format": "float",
                   "type": "number"
                 },
                 "maxItems": 2,
@@ -2173,15 +1566,14 @@
                 ]
               },
               "feather": {
-                "description": "Edge softness, 0 (hard) … 1 (fully feathered). Defaults to 0.",
-                "format": "double",
+                "description": "Edge softness 0 (hard) … 1 (fully feathered). Default 0.",
                 "type": [
                   "number",
                   "null"
                 ]
               },
               "invert": {
-                "description": "Keep the outside instead of the inside.",
+                "description": "Keep outside instead of inside.",
                 "type": [
                   "boolean",
                   "null"
@@ -2200,25 +1592,22 @@
                 "type": "string"
               },
               "rotation": {
-                "description": "Mask rotation in degrees, clockwise about the mask center. Omitted\nuses the default (`0`).",
-                "format": "float",
+                "description": "Rotation degrees CW about mask center. Default 0.",
                 "type": [
                   "number",
                   "null"
                 ]
               },
               "roundness": {
-                "description": "Rectangle corner rounding, `0` (sharp) … `1` (fully round). Ignored\nby other kinds. Omitted uses the default (`0`).",
-                "format": "float",
+                "description": "Rectangle corner roundness 0…1 (other kinds ignore). Default 0.",
                 "type": [
                   "number",
                   "null"
                 ]
               },
               "size": {
-                "description": "Mask size as fractions of the layer size per axis (`[1,1]` covers the\nlayer). Omitted uses the default (`[1,1]`).",
+                "description": "Size as layer-size fractions (`[1,1]` covers layer). Default `[1,1]`.",
                 "items": {
-                  "format": "float",
                   "type": "number"
                 },
                 "maxItems": 2,
@@ -2241,15 +1630,13 @@
         "required": [
           "clip"
         ],
-        "title": "SetClipMask",
         "type": "object"
       }
     },
     {
-      "description": "Set or clear chroma keying (green screen) on a media-backed visual clip. Pass null for chroma to clear.",
+      "description": "Set/clear chroma key on a media visual clip. null clears.",
       "name": "set_clip_chroma",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Set (or clear) chroma keying on a media-backed visual clip.",
         "properties": {
           "chroma": {
@@ -2258,9 +1645,6 @@
               "rgb": {
                 "description": "Key color as `[red, green, blue]`, each 0-255.",
                 "items": {
-                  "format": "uint8",
-                  "maximum": 255,
-                  "minimum": 0,
                   "type": "integer"
                 },
                 "maxItems": 3,
@@ -2269,7 +1653,6 @@
               },
               "shadow": {
                 "description": "Shadow retention, 0 … 1. Defaults to 0.",
-                "format": "double",
                 "type": [
                   "number",
                   "null"
@@ -2277,7 +1660,6 @@
               },
               "strength": {
                 "description": "Keying strength (tolerance), 0 … 1. Defaults to 0.",
-                "format": "double",
                 "type": [
                   "number",
                   "null"
@@ -2293,28 +1675,22 @@
             ]
           },
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
         "required": [
           "clip"
         ],
-        "title": "SetClipChroma",
         "type": "object"
       }
     },
     {
-      "description": "Set or clear video stabilization on a media-backed video clip (not still images). Levels: recommended, smooth, max_smooth. Pass null for level to clear.",
+      "description": "Set/clear stabilize on a media video clip: recommended, smooth, max_smooth. null clears.",
       "name": "set_clip_stabilize",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Set (or clear) video stabilization on a media-backed video clip (not stills).",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "level": {
@@ -2334,20 +1710,16 @@
         "required": [
           "clip"
         ],
-        "title": "SetClipStabilize",
         "type": "object"
       }
     },
     {
-      "description": "Set or clear a color-grade filter preset on any visual clip. Filter ids include vivid, warm, cool, noir, sunset, and others from the catalog. Pass null for filter to clear.",
+      "description": "Set/clear a color-grade filter (vivid, warm, cool, noir, …). null clears.",
       "name": "set_clip_filter",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Set (or clear) a color-grade filter preset on any visual clip.",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "filter": {
@@ -2359,7 +1731,6 @@
               },
               "intensity": {
                 "description": "Blend of the graded result over the original, 0 … 1. Defaults to 0.8.",
-                "format": "double",
                 "type": [
                   "number",
                   "null"
@@ -2378,22 +1749,18 @@
         "required": [
           "clip"
         ],
-        "title": "SetClipFilter",
         "type": "object"
       }
     },
     {
-      "description": "Set how a visual clip composites over the layers below it (CapCut Blend). Modes: normal, darken, multiply, color_burn, lighten, screen, color_dodge, add, overlay, soft_light, hard_light, difference, exclusion. Visual clips only; normal resets to plain source-over.",
+      "description": "Set blend mode over layers below: normal, darken, multiply, color_burn, lighten, screen, color_dodge, add, overlay, soft_light, hard_light, difference, exclusion.",
       "name": "set_clip_blend_mode",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
         "description": "Set how a clip composites over the stack below (CapCut \"Blend\").",
         "properties": {
           "clip": {
             "description": "Target clip id.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "mode": {
@@ -2420,31 +1787,25 @@
           "clip",
           "mode"
         ],
-        "title": "SetClipBlendMode",
         "type": "object"
       }
     },
     {
-      "description": "Enable or configure transform motion blur on a visual clip: when the clip's transform is animated, export supersamples its placement across the shutter and averages the samples (texture stays at the frame time — transform-only, like After Effects). Fields: enabled (bool), optional shutter_deg (0..720, default 180), optional samples (2..32, default 8; render clamps to 16). Plain values — not animatable. Visual clips only; requires an animated transform to have any visible effect.",
+      "description": "Transform motion blur on a visual clip (not animatable): enabled, shutter_deg 0..720 (default 180), samples 2..32 (clamped to 16). Needs an animated transform.",
       "name": "set_motion_blur",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
-        "description": "Set per-clip transform motion blur (temporal supersampling). Plain values\n— not animatable. Omitted `shutter_deg` / `samples` keep the clip's\ncurrent values (or model defaults when first enabling).",
+        "description": "Transform motion blur (not animatable). Omitted fields keep current values.",
         "properties": {
           "clip": {
-            "description": "Target clip id.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "enabled": {
-            "description": "When false, supersampling is skipped entirely.",
+            "description": "false skips supersampling entirely.",
             "type": "boolean"
           },
           "samples": {
-            "description": "Sub-frame sample count (`2..=32`; render clamps to `2..=16`). Omit to\nkeep the current value.",
-            "format": "uint32",
+            "description": "Sub-frame samples (`2..=32`; render clamps to 16).",
             "minimum": 0,
             "type": [
               "integer",
@@ -2452,8 +1813,7 @@
             ]
           },
           "shutter_deg": {
-            "description": "Shutter angle in degrees (`0..=720`). `360` = full frame interval.\n`0` disables even when enabled. Omit to keep the current value.",
-            "format": "float",
+            "description": "Shutter angle degrees (`0..=720`; 360 = full frame; 0 disables).",
             "type": [
               "number",
               "null"
@@ -2464,47 +1824,37 @@
           "clip",
           "enabled"
         ],
-        "title": "SetMotionBlur",
         "type": "object"
       }
     },
     {
-      "description": "Set layer-quad shadow/glow/outline/background styles on any visual clip (distinct from text glyph treatments). Each block is optional constants in reference pixels (1080p baseline); omitted blocks are removed. Empty styles clears every block. Constants only — animate with set_param_keyframe using style params (shadow_blur, glow_color, …).",
+      "description": "Set layer shadow/glow/outline/background (reference px @1080p; not text glyph styles). Omitted blocks removed; empty styles clears all. Animate via style params.",
       "name": "set_layer_styles",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
-        "description": "Replace a visual clip's layer styles (shadow/glow/outline/background).\nPass an empty `styles` object to clear every block.",
+        "description": "Replace layer styles; empty `styles` clears every block.",
         "properties": {
           "clip": {
-            "description": "Target clip id.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "styles": {
             "additionalProperties": false,
-            "description": "Style blocks to install. Omitted blocks are removed.",
+            "description": "Style blocks to install; omitted blocks are removed.",
             "properties": {
               "background": {
                 "additionalProperties": false,
-                "description": "Solid plate behind the layer (padded AABB of the alpha bounds).",
+                "description": "Solid plate behind layer alpha AABB. Lengths = reference px (1080p).",
                 "properties": {
                   "padding": {
-                    "description": "Padding around the alpha bounds in reference pixels (`>= 0`).",
-                    "format": "float",
+                    "description": "Padding in reference px (`>= 0`).",
                     "type": "number"
                   },
                   "radius": {
-                    "description": "Corner radius in reference pixels (`>= 0`).",
-                    "format": "float",
+                    "description": "Corner radius in reference px (`>= 0`).",
                     "type": "number"
                   },
                   "rgba": {
                     "items": {
-                      "format": "uint8",
-                      "maximum": 255,
-                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -2524,23 +1874,18 @@
               },
               "glow": {
                 "additionalProperties": false,
-                "description": "Soft glow bloom drawn from the layer's alpha.",
+                "description": "Soft glow from layer alpha. Lengths = reference px (1080p); rgba 0–255.",
                 "properties": {
                   "intensity": {
-                    "description": "Strength multiplier, `0` … `4`.",
-                    "format": "float",
+                    "description": "Strength `0`…`4`.",
                     "type": "number"
                   },
                   "radius": {
-                    "description": "Glow radius in reference pixels (`>= 0`).",
-                    "format": "float",
+                    "description": "Radius in reference px (`>= 0`).",
                     "type": "number"
                   },
                   "rgba": {
                     "items": {
-                      "format": "uint8",
-                      "maximum": 255,
-                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -2560,13 +1905,10 @@
               },
               "outline": {
                 "additionalProperties": false,
-                "description": "Hard outline / stroke around the layer's alpha silhouette.",
+                "description": "Hard outline around layer alpha. Width = reference px (1080p); rgba 0–255.",
                 "properties": {
                   "rgba": {
                     "items": {
-                      "format": "uint8",
-                      "maximum": 255,
-                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -2574,8 +1916,7 @@
                     "type": "array"
                   },
                   "width": {
-                    "description": "Outline width in reference pixels (`>= 0`).",
-                    "format": "float",
+                    "description": "Width in reference px (`>= 0`).",
                     "type": "number"
                   }
                 },
@@ -2590,17 +1931,15 @@
               },
               "shadow": {
                 "additionalProperties": false,
-                "description": "Drop shadow drawn from the layer's alpha. Lengths are reference pixels\n(1080p baseline); color is RGBA 0–255.",
+                "description": "Drop shadow from layer alpha. Lengths = reference px (1080p); rgba 0–255.",
                 "properties": {
                   "blur": {
-                    "description": "Blur radius in reference pixels (`>= 0`).",
-                    "format": "float",
+                    "description": "Blur radius in reference px (`>= 0`).",
                     "type": "number"
                   },
                   "offset": {
-                    "description": "Offset in reference pixels (`+x` right, `+y` down).",
+                    "description": "Offset in reference px (`+x` right, `+y` down).",
                     "items": {
-                      "format": "float",
                       "type": "number"
                     },
                     "maxItems": 2,
@@ -2609,9 +1948,6 @@
                   },
                   "rgba": {
                     "items": {
-                      "format": "uint8",
-                      "maximum": 255,
-                      "minimum": 0,
                       "type": "integer"
                     },
                     "maxItems": 4,
@@ -2637,45 +1973,37 @@
           "clip",
           "styles"
         ],
-        "title": "SetClipLayerStyles",
         "type": "object"
       }
     },
     {
-      "description": "Set manual color adjustments (brightness, contrast, saturation, exposure, temperature, tint, hue, highlights, shadows, sharpness, vignette) on any visual clip. Signed sliders are -1..1; sharpness and vignette are 0..1. Omitted sliders keep their current value.",
+      "description": "Manual color adjust: brightness/contrast/saturation/exposure/temperature/tint/hue/highlights/shadows (−1..1); sharpness/vignette (0..1). Omitted keep.",
       "name": "set_clip_adjustments",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Set manual color adjustments (CapCut adjust) on any visual clip. Omitted\nsliders keep their current value; all-neutral clears the grade.\n\nSigned sliders (`brightness` … `shadows`) are `-1..=1`. `sharpness` and\n`vignette` are one-directional `0..=1` (softening / inverse vignette are\nnot supported).",
+        "description": "Manual color adjust. Signed sliders `-1..=1`; sharpness/vignette `0..=1`.\nOmitted sliders keep their value.",
         "properties": {
           "brightness": {
-            "format": "double",
             "type": [
               "number",
               "null"
             ]
           },
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "contrast": {
-            "format": "double",
             "type": [
               "number",
               "null"
             ]
           },
           "exposure": {
-            "format": "double",
             "type": [
               "number",
               "null"
             ]
           },
           "highlights": {
-            "format": "double",
             "type": [
               "number",
               "null"
@@ -2683,52 +2011,45 @@
           },
           "hue": {
             "description": "Hue rotation; ±1 → ±30°.",
-            "format": "double",
             "type": [
               "number",
               "null"
             ]
           },
           "saturation": {
-            "format": "double",
             "type": [
               "number",
               "null"
             ]
           },
           "shadows": {
-            "format": "double",
             "type": [
               "number",
               "null"
             ]
           },
           "sharpness": {
-            "description": "Unsharp-mask strength (`0..=1`).",
-            "format": "double",
+            "description": "Unsharp-mask strength `0..=1`.",
             "type": [
               "number",
               "null"
             ]
           },
           "temperature": {
-            "format": "double",
             "type": [
               "number",
               "null"
             ]
           },
           "tint": {
-            "description": "Green (−) ↔ magenta (+).",
-            "format": "double",
+            "description": "Green (−) ↔ magenta (+), `-1..=1`.",
             "type": [
               "number",
               "null"
             ]
           },
           "vignette": {
-            "description": "Radial darkening (`0..=1`).",
-            "format": "double",
+            "description": "Radial darkening `0..=1`.",
             "type": [
               "number",
               "null"
@@ -2738,39 +2059,34 @@
         "required": [
           "clip"
         ],
-        "title": "SetClipAdjustments",
         "type": "object"
       }
     },
     {
-      "description": "Set or clear a look animation preset on any visual clip. Slots: in (entrance), out (exit), combo (looping). Animation ids include fade_in, slide_up, pulse, typewriter, wave, etc. Optional speed (0.25–4), intensity (0–2), and stagger (0–2, text presets). Pass null for animation to clear the slot.",
+      "description": "Set/clear look animation. Slots: in/out/combo. Optional speed 0.25–4, intensity 0–2, stagger 0–2 (text). null animation clears.",
       "name": "set_clip_animation",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "Set (or clear) a look animation preset on any visual clip.",
+        "description": "Set or clear a look animation preset on a visual clip.",
         "properties": {
           "animation": {
-            "description": "Catalog animation id (e.g. \"fade_in\", \"pulse\"). `null` clears the slot.",
+            "description": "Catalog id (e.g. fade_in, pulse). `null` clears the slot.",
             "type": [
               "string",
               "null"
             ]
           },
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "intensity": {
-            "description": "Magnitude of motion / opacity swing (`1` = catalog, `0` = none).\nOmit or `null` for the default. Range `0..=2`.",
-            "format": "float",
+            "description": "Motion/opacity magnitude `0..=2` (`1` = catalog). Omit for default.",
             "type": [
               "number",
               "null"
             ]
           },
           "slot": {
-            "description": "Which animation slot to set.",
+            "description": "Animation slot (CapCut In / Out / Combo tabs).",
             "enum": [
               "in",
               "out",
@@ -2779,16 +2095,14 @@
             "type": "string"
           },
           "speed": {
-            "description": "Playback rate of the entrance/exit window or combo period (`1` = catalog).\nOmit or `null` for the default. Range `0.25..=4`.",
-            "format": "float",
+            "description": "Playback rate `0.25..=4` (`1` = catalog). Omit for default.",
             "type": [
               "number",
               "null"
             ]
           },
           "stagger": {
-            "description": "Per-character stagger stretch (`1` = catalog). Text presets only.\nOmit or `null` for the default. Range `0..=2`.",
-            "format": "float",
+            "description": "Per-character stagger `0..=2` (text presets only). Omit for default.",
             "type": [
               "number",
               "null"
@@ -2799,20 +2113,16 @@
           "clip",
           "slot"
         ],
-        "title": "SetClipAnimation",
         "type": "object"
       }
     },
     {
-      "description": "Tag or untag what an audio-lane clip is: music, sfx, voiceover, or extracted. Pass null for role to clear the tag. Audio-track clips only.",
+      "description": "Tag an audio-lane clip: music, sfx, voiceover, extracted. null clears.",
       "name": "set_audio_role",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Tag (or untag) what an audio-lane clip is (music / sfx / voiceover / extracted).",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "role": {
@@ -2833,25 +2143,20 @@
         "required": [
           "clip"
         ],
-        "title": "SetAudioRole",
         "type": "object"
       }
     },
     {
-      "description": "Split a clip at a timeline position (seconds) into two abutting clips.",
+      "description": "Split a clip at timeline seconds into two abutting clips.",
       "name": "split_clip",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Split a clip at a timeline position into two abutting clips.",
         "properties": {
           "at": {
             "description": "Timeline position of the cut, in seconds. Must fall strictly inside\nthe clip.",
-            "format": "double",
             "type": "number"
           },
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
@@ -2859,30 +2164,24 @@
           "clip",
           "at"
         ],
-        "title": "SplitClip",
         "type": "object"
       }
     },
     {
-      "description": "Re-place / trim a clip to a new timeline start and duration in seconds. Trimming a media clip's head advances its source in-point.",
+      "description": "Re-place/trim to new start and duration (seconds). Media head trim advances source in-point.",
       "name": "trim_clip",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Re-place / trim a clip to a new timeline range. Trimming the head of a\nmedia clip advances its source in-point to match (like dragging a trim\nhandle).",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "duration": {
             "description": "New clip length, in seconds.",
-            "format": "double",
             "type": "number"
           },
           "start": {
             "description": "New timeline start of the clip, in seconds.",
-            "format": "double",
             "type": "number"
           }
         },
@@ -2891,31 +2190,24 @@
           "start",
           "duration"
         ],
-        "title": "TrimClip",
         "type": "object"
       }
     },
     {
-      "description": "Move a clip to a track at a new start time (seconds), keeping its duration.",
+      "description": "Move a clip to a track at a new start (seconds), keeping duration.",
       "name": "move_clip",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Move a clip to a track at a new start time, keeping its duration.",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "start": {
             "description": "New timeline start, in seconds.",
-            "format": "double",
             "type": "number"
           },
           "to_track": {
             "description": "Destination track id (may be the clip's current track).",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
@@ -2924,47 +2216,38 @@
           "to_track",
           "start"
         ],
-        "title": "MoveClip",
         "type": "object"
       }
     },
     {
-      "description": "Remove a clip, leaving a gap where it sat.",
+      "description": "Remove a clip, leaving a gap.",
       "name": "remove_clip",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Remove a clip, leaving a gap where it sat.",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
         "required": [
           "clip"
         ],
-        "title": "RemoveClip",
         "type": "object"
       }
     },
     {
-      "description": "Remove a track and any clips still on it. The main track (marked in describe_project) is permanent and cannot be removed.",
+      "description": "Remove a track and its clips. Main track (see describe_project) cannot be removed.",
       "name": "remove_track",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Remove a track and any clips still on it.",
         "properties": {
           "track": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
         "required": [
           "track"
         ],
-        "title": "RemoveTrack",
         "type": "object"
       }
     },
@@ -2972,15 +2255,12 @@
       "description": "Show or hide a visual track in the composite.",
       "name": "set_track_enabled",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Toggle whether a visual track contributes to the composite.",
         "properties": {
           "enabled": {
             "type": "boolean"
           },
           "track": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
@@ -2988,7 +2268,6 @@
           "track",
           "enabled"
         ],
-        "title": "SetTrackEnabled",
         "type": "object"
       }
     },
@@ -2996,15 +2275,12 @@
       "description": "Mute or unmute an audio track.",
       "name": "set_track_muted",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Toggle whether an audio track is silenced.",
         "properties": {
           "muted": {
             "type": "boolean"
           },
           "track": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
@@ -3012,23 +2288,19 @@
           "track",
           "muted"
         ],
-        "title": "SetTrackMuted",
         "type": "object"
       }
     },
     {
-      "description": "Lock or unlock a track's clips against editing.",
+      "description": "Lock or unlock a track against editing.",
       "name": "set_track_locked",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Toggle whether a track's clips are editable (selection / move / trim).",
         "properties": {
           "locked": {
             "type": "boolean"
           },
           "track": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
@@ -3036,50 +2308,40 @@
           "track",
           "locked"
         ],
-        "title": "SetTrackLocked",
         "type": "object"
       }
     },
     {
-      "description": "Remove a clip and slide later clips on its track left to close the gap.",
+      "description": "Remove a clip and slide later clips left to close the gap.",
       "name": "ripple_delete",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Remove a clip and slide later clips on its track left to close the gap.",
         "properties": {
           "clip": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
         "required": [
           "clip"
         ],
-        "title": "RippleDelete",
         "type": "object"
       }
     },
     {
-      "description": "Shift every clip on a track starting at/after a position by a signed number of seconds.",
+      "description": "Shift clips on a track at/after a position by signed seconds.",
       "name": "shift_clips",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Shift every clip on a track that starts at or after `from` by `delta`\nseconds (negative shifts left). Rejected if a left shift would collide\nwith an earlier clip or push a clip before time 0.",
         "properties": {
           "delta": {
             "description": "Signed shift amount in seconds.",
-            "format": "double",
             "type": "number"
           },
           "from": {
             "description": "Clips starting at or after this timeline position (seconds) shift.",
-            "format": "double",
             "type": "number"
           },
           "track": {
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
@@ -3088,42 +2350,33 @@
           "from",
           "delta"
         ],
-        "title": "ShiftClips",
         "type": "object"
       }
     },
     {
-      "description": "Insert a trimmed range of media at a timeline position, shifting later clips right to make room. Times are in seconds.",
+      "description": "Insert trimmed media at timeline seconds, shifting later clips right.",
       "name": "ripple_insert",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Insert a trimmed range of media at a timeline position, first shifting\nevery clip at or after that position right to make room.",
         "properties": {
           "at": {
             "description": "Timeline position of the insert, in seconds.",
-            "format": "double",
             "type": "number"
           },
           "media": {
             "description": "Media pool id of the source file.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "source_duration": {
             "description": "Length of the source range to use, in seconds.",
-            "format": "double",
             "type": "number"
           },
           "source_start": {
             "description": "In-point within the source media, in seconds.",
-            "format": "double",
             "type": "number"
           },
           "track": {
             "description": "Target track id (video or audio).",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
@@ -3134,22 +2387,18 @@
           "source_duration",
           "at"
         ],
-        "title": "RippleInsert",
         "type": "object"
       }
     },
     {
-      "description": "Link two or more clips so they select, move, and trim together (replaces their previous links).",
+      "description": "Link two or more clips to select/move/trim together (replaces prior links).",
       "name": "link_clips",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Put two or more clips into one link group: linked clips select, move,\nand trim together. Replaces any previous links on those clips.",
         "properties": {
           "clips": {
             "description": "Ids of the clips to link (at least two).",
             "items": {
-              "format": "uint64",
-              "minimum": 0,
               "type": "integer"
             },
             "maxItems": 64,
@@ -3160,22 +2409,18 @@
         "required": [
           "clips"
         ],
-        "title": "LinkClips",
         "type": "object"
       }
     },
     {
-      "description": "Dissolve every link group touched by one or more clip ids. Naming any member clears the complete group; distinct members of the same group are coalesced.",
+      "description": "Dissolve every link group touched by the given clip ids.",
       "name": "unlink_clips",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Dissolve every link group touched by one or more clips. Naming any member\nclears the complete group; distinct members of the same group are harmless\nand coalesced by the engine.",
         "properties": {
           "clips": {
             "description": "Ids of linked clips whose complete groups should be dissolved. List\neach clip id once; callers do not need to enumerate every group member.",
             "items": {
-              "format": "uint64",
-              "minimum": 0,
               "type": "integer"
             },
             "maxItems": 64,
@@ -3186,20 +2431,17 @@
         "required": [
           "clips"
         ],
-        "title": "UnlinkClips",
         "type": "object"
       }
     },
     {
-      "description": "Drop a named, colored marker on the timeline ruler at a position in seconds. Omit color to cycle the palette.",
+      "description": "Drop a named, colored ruler marker at timeline seconds. Omit color to cycle palette.",
       "name": "add_marker",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Drop a named, colored marker on the timeline ruler — an anchor for\nnavigation and for aligning edits (\"cut at the marker\", beat sync).",
         "properties": {
           "at": {
             "description": "Timeline position of the marker, in seconds.",
-            "format": "double",
             "type": "number"
           },
           "color": {
@@ -3231,7 +2473,6 @@
         "required": [
           "at"
         ],
-        "title": "AddMarker",
         "type": "object"
       }
     },
@@ -3239,33 +2480,27 @@
       "description": "Remove a ruler marker by id.",
       "name": "remove_marker",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Remove a timeline marker.",
         "properties": {
           "marker": {
             "description": "The marker to remove.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           }
         },
         "required": [
           "marker"
         ],
-        "title": "RemoveMarker",
         "type": "object"
       }
     },
     {
-      "description": "Move, rename, or recolor a ruler marker. Omitted fields keep their current value.",
+      "description": "Move, rename, or recolor a ruler marker. Omitted fields keep.",
       "name": "set_marker",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Move, rename, or recolor an existing timeline marker. Omitted fields\nkeep their current value.",
         "properties": {
           "at": {
             "description": "New timeline position in seconds. Omit to keep the position.",
-            "format": "double",
             "type": [
               "number",
               "null"
@@ -3291,8 +2526,6 @@
           },
           "marker": {
             "description": "The marker to change.",
-            "format": "uint64",
-            "minimum": 0,
             "type": "integer"
           },
           "name": {
@@ -3306,15 +2539,13 @@
         "required": [
           "marker"
         ],
-        "title": "SetMarker",
         "type": "object"
       }
     },
     {
-      "description": "Set the project canvas: aspect ratio preset ('auto' follows the footage; '16:9', '9:16', '1:1', '4:5', '21:9' reshape it) and/or the background color shown where no clip covers the canvas. Omitted fields keep their current value.",
+      "description": "Set canvas aspect ('auto'|'16:9'|'9:16'|'1:1'|'4:5'|'21:9') and/or background color. Omitted keep.",
       "name": "set_canvas",
       "parameters": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Set the project canvas: the aspect-ratio preset the composite renders\nat, and/or the background color shown where no clip covers the canvas.\nOmitted fields keep their current value.",
         "properties": {
           "aspect": {
@@ -3348,9 +2579,6 @@
           "background": {
             "description": "Canvas background color as `[red, green, blue]`, each 0-255. Omit\nto keep the current background.",
             "items": {
-              "format": "uint8",
-              "maximum": 255,
-              "minimum": 0,
               "type": "integer"
             },
             "maxItems": 3,
@@ -3361,7 +2589,6 @@
             ]
           }
         },
-        "title": "SetCanvas",
         "type": "object"
       }
     },
@@ -3390,5 +2617,5 @@
       }
     }
   ],
-  "version": 39
+  "version": 40
 }

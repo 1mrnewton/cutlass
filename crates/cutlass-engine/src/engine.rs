@@ -185,12 +185,12 @@ impl Engine {
         self.reset_project(project);
     }
 
-    /// Replace the session with `project` (e.g. the AI-agent sandbox replaying
-    /// a validated plan). Clears history and the project path; rebaselines clean.
-    pub fn reset_project(&mut self, project: Project) {
-        self.project = project;
-        self.history.clear();
-        self.project_path = None;
+    /// Drop every session-only override / live-preview lane.
+    ///
+    /// Clip ids are project-local: after a session replacement the same raw
+    /// id can name an unrelated clip, so stale overrides must never survive
+    /// `reset_project`, open/load, or apply-template.
+    fn clear_session_overrides(&mut self) {
         self.transform_override = None;
         self.generator_override = None;
         self.look_override = None;
@@ -198,6 +198,15 @@ impl Engine {
         self.param_overrides.clear();
         self.motion_blur_override = None;
         self.animation_override = None;
+    }
+
+    /// Replace the session with `project` (e.g. the AI-agent sandbox replaying
+    /// a validated plan). Clears history and the project path; rebaselines clean.
+    pub fn reset_project(&mut self, project: Project) {
+        self.project = project;
+        self.history.clear();
+        self.project_path = None;
+        self.clear_session_overrides();
         // Media ids are project-local: the same id can name a different
         // file in the incoming project, so all id-keyed render state is
         // stale (open decoders and still bitmaps, not only proxies).
@@ -232,8 +241,9 @@ impl Engine {
                 if self.project.timeline().main_track().is_none() {
                     self.project.add_track(TrackKind::Video, "Main");
                 }
-                // Same media-id hazard as `reset_project`: the incoming
-                // file's ids owe nothing to the outgoing registry.
+                // Same media-id / override hazard as `reset_project`: the
+                // incoming file's ids owe nothing to the outgoing session.
+                self.clear_session_overrides();
                 self.renderer.reset_media_sources();
                 // The session now mirrors the file it came from: rebaseline as
                 // clean (revision still bumps so observers see a change).
@@ -252,8 +262,9 @@ impl Engine {
             | ApplyOutcome::Imported { .. } => self.revision += 1,
             // Unlike Open/Load, a filled template exists nowhere on disk as a
             // project file: bump without rebaselining so the session reads
-            // dirty until first saved.
+            // dirty until first saved. Overrides/ids are still project-local.
             ApplyOutcome::AppliedTemplate => {
+                self.clear_session_overrides();
                 self.renderer.reset_media_sources();
                 self.revision += 1;
             }

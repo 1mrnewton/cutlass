@@ -448,6 +448,43 @@ fn new_session_clears_overrides() {
 }
 
 #[test]
+fn load_clears_session_overrides() {
+    use cutlass_models::{ClipParam, ParamValue};
+
+    let (dir, mut engine) = temp_engine();
+    let track = common::add_track(&mut engine, TrackKind::Sticker, "T1");
+    let clip_id = common::add_generated(
+        &mut engine,
+        track,
+        Generator::SolidColor {
+            rgba: [200, 40, 10, 255],
+        },
+        tr(0, 48),
+    );
+    let project_file = dir.path().join("with-override.cutlass");
+    common::save_project(&mut engine, &project_file);
+
+    engine.set_param_override(clip_id, ClipParam::Opacity, ParamValue::Scalar(0.25));
+    engine.set_transform_override(Some((
+        clip_id,
+        ClipTransform {
+            scale: 0.5.into(),
+            ..ClipTransform::IDENTITY
+        },
+    )));
+    assert!(engine.has_live_overrides());
+
+    // Open/Load replace the project in place; leftover overrides would bind
+    // to whatever clip reuses the same raw id in the incoming file.
+    common::load_project(&mut engine, &project_file);
+    assert!(
+        !engine.has_live_overrides(),
+        "load must drop every session-only override lane"
+    );
+    assert!(engine.param_overrides().is_empty());
+}
+
+#[test]
 fn media_proxy_registry_sets_clears_and_dies_with_the_session() {
     use cutlass_models::MediaId;
     use std::path::{Path, PathBuf};

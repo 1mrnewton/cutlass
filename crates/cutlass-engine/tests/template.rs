@@ -381,6 +381,23 @@ mod fill {
         let mut engine = Engine::new(EngineConfig { undo_limit: 8 }).expect("engine");
         common::add_track(&mut engine, TrackKind::Video, "scratch");
         assert!(engine.can_undo());
+        // Live overrides are project-local; template fill keeps clip ids, so
+        // a leftover override would silently bind to a template slot.
+        let sticker = common::add_track(&mut engine, TrackKind::Sticker, "S1");
+        let scratch_clip = common::add_generated(
+            &mut engine,
+            sticker,
+            Generator::SolidColor {
+                rgba: [1, 2, 3, 255],
+            },
+            tr(0, 24),
+        );
+        engine.set_param_override(
+            scratch_clip,
+            cutlass_models::ClipParam::Opacity,
+            cutlass_models::ParamValue::Scalar(0.1),
+        );
+        assert!(engine.has_live_overrides());
 
         let out = engine
             .apply(Command::Project(ProjectCommand::ApplyTemplate {
@@ -398,6 +415,10 @@ mod fill {
             }))
             .expect("apply template");
         assert!(matches!(out, ApplyOutcome::AppliedTemplate));
+        assert!(
+            !engine.has_live_overrides(),
+            "apply-template must drop every session-only override lane"
+        );
 
         // The session is the filled template now: fresh history, no project
         // path, dirty until first saved.

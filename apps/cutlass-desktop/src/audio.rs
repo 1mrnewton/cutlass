@@ -89,6 +89,10 @@ enum AudioMsg {
     ClearParamOverrides {
         clip: ClipId,
     },
+    /// Session replacement (new / open / template): drop every mirrored
+    /// volume/pan override. Clip ids are project-local, so leftovers must
+    /// not survive onto the next project's mixer.
+    ClearAllParamOverrides,
 }
 
 /// One mixed block on its way to the device.
@@ -220,6 +224,13 @@ impl AudioHandle {
     pub fn clear_param_overrides(&self, clip: ClipId) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(AudioMsg::ClearParamOverrides { clip });
+        }
+    }
+
+    /// Drop every mirrored volume/pan override (session replacement).
+    pub fn clear_all_param_overrides(&self) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(AudioMsg::ClearAllParamOverrides);
         }
     }
 
@@ -504,6 +515,12 @@ fn mixer_loop(msg_rx: Receiver<AudioMsg>, block_tx: Sender<AudioBlock>) {
                                 m.clear_param_overrides(clip);
                             }
                         }
+                        AudioMsg::ClearAllParamOverrides => {
+                            param_overrides.clear();
+                            if let Some(m) = &mut mixer {
+                                m.set_param_overrides(ParamOverrides::new());
+                            }
+                        }
                     }
                     latest = msg_rx.try_recv().ok();
                 }
@@ -692,16 +709,18 @@ mod tests {
     }
 
     /// One audio clip over `path`, timeline ticks `[0, 48)` at 24fps.
-    fn project_with_clip(path: &std::path::Path) -> Project {
+    fn project_with_clip(path: &std::path::Path) -> (Project, ClipId) {
         let mut project = Project::new("audio-test", Rational::FPS_24);
         let media = project.add_media(MediaSource::new(path, 0, 0, Rational::FPS_24, 480, true));
         let track = project.add_track(TrackKind::Audio, "A1");
         let range = |start: i64, dur: i64| TimeRange::at_rate(start, dur, Rational::FPS_24);
+        let clip = Clip::from_media(media, range(0, 48), range(0, 48));
+        let clip_id = clip.id;
         project
             .timeline_mut()
-            .add_clip(track, Clip::from_media(media, range(0, 48), range(0, 48)))
+            .add_clip(track, clip)
             .expect("clip placement is valid");
-        project
+        (project, clip_id)
     }
 
     #[test]
@@ -714,9 +733,8 @@ mod tests {
         let mixer = std::thread::spawn(move || mixer_loop(msg_rx, block_tx));
 
         // A clip over the scrub position so the burst carries real audio.
-        msg_tx
-            .send(AudioMsg::Snapshot(Box::new(project_with_clip(&path))))
-            .unwrap();
+        let (project, _) = project_with_clip(&path);
+        msg_tx.send(AudioMsg::Snapshot(Box::new(project))).unwrap();
         msg_tx.send(AudioMsg::Scrub { tick: 0, epoch: 7 }).unwrap();
 
         // Exactly SCRUB_BURST_BLOCKS blocks, all tagged with the scrub epoch.
@@ -734,6 +752,64 @@ mod tests {
         assert!(
             block_rx.recv_timeout(Duration::from_millis(200)).is_err(),
             "the burst is finite — the mixer stops producing after it"
+        );
+
+        drop(msg_tx);
+        while block_rx.try_recv().is_ok() {}
+        mixer.join().expect("mixer thread exits cleanly");
+    }
+
+    #[test]
+    fn session_reset_drops_mirrored_param_overrides() {
+        // A volume=0 override must not survive ClearAllParamOverrides across a
+        // Snapshot reopen (new/open/template) — otherwise the next project's
+        // clip with the same raw id stays muted.
+        let Some(path) = audio_asset() else {
+            return;
+        };
+        let (msg_tx, msg_rx) = unbounded::<AudioMsg>();
+        let (block_tx, block_rx) = bounded::<AudioBlock>(BLOCK_CAPACITY);
+        let mixer = std::thread::spawn(move || mixer_loop(msg_rx, block_tx));
+
+        let (project, clip) = project_with_clip(&path);
+        msg_tx
+            .send(AudioMsg::Snapshot(Box::new(project.clone())))
+            .unwrap();
+        msg_tx
+            .send(AudioMsg::ParamOverride {
+                clip,
+                param: ClipParam::Volume,
+                value: ParamValue::Scalar(0.0),
+            })
+            .unwrap();
+        msg_tx.send(AudioMsg::Scrub { tick: 0, epoch: 1 }).unwrap();
+
+        for _ in 0..SCRUB_BURST_BLOCKS {
+            let block = block_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("muted scrub burst");
+            assert!(
+                block.samples.iter().all(|&s| s == 0.0),
+                "volume override 0 must silence the burst"
+            );
+        }
+
+        // Session replacement: clear the mirror, then reopen over a snapshot.
+        msg_tx.send(AudioMsg::ClearAllParamOverrides).unwrap();
+        msg_tx.send(AudioMsg::Snapshot(Box::new(project))).unwrap();
+        msg_tx.send(AudioMsg::Scrub { tick: 0, epoch: 2 }).unwrap();
+
+        let mut heard = false;
+        for _ in 0..SCRUB_BURST_BLOCKS {
+            let block = block_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("post-reset scrub burst");
+            assert_eq!(block.epoch, 2);
+            heard |= block.samples.iter().any(|&s| s != 0.0);
+        }
+        assert!(
+            heard,
+            "after ClearAllParamOverrides a Snapshot reopen must not re-mute"
         );
 
         drop(msg_tx);

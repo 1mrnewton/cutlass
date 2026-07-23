@@ -394,8 +394,7 @@ fn terminal_display_events_are_forwarded_when_deltas_are_absent() {
 fn malformed_events_arguments_and_missing_terminal_are_errors() {
     let cancel = AtomicBool::new(false);
     let malformed =
-        consume_responses_sse("data: {not json}\n".as_bytes(), &cancel, &mut |_| {})
-            .unwrap_err();
+        consume_responses_sse("data: {not json}\n".as_bytes(), &cancel, &mut |_| {}).unwrap_err();
     assert!(matches!(malformed, ProviderError::Protocol(_)));
 
     let bad_arguments = concat!(
@@ -403,8 +402,7 @@ fn malformed_events_arguments_and_missing_terminal_are_errors() {
         "{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"trim_clip\",\"arguments\":\"{oops\"}",
         "]}}\n",
     );
-    let error =
-        consume_responses_sse(bad_arguments.as_bytes(), &cancel, &mut |_| {}).unwrap_err();
+    let error = consume_responses_sse(bad_arguments.as_bytes(), &cancel, &mut |_| {}).unwrap_err();
     match error {
         ProviderError::Protocol(message) => assert!(message.contains("trim_clip"), "{message}"),
         other => panic!("expected protocol error, got {other:?}"),

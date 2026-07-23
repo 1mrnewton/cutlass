@@ -312,6 +312,144 @@ mod tests {
     }
 
     #[test]
+    fn effect_preview_then_commit_clears_override() {
+        use cutlass_commands::{Command, EditCommand};
+
+        let r = Rational::FPS_24;
+        let mut project = Project::new("effect-lane", r);
+        let media = project.add_media(MediaSource::new(
+            "/tmp/effect-lane.mp4",
+            1920,
+            1080,
+            r,
+            1000,
+            true,
+        ));
+        let track = project.add_track(TrackKind::Video, "V1");
+        let clip = project
+            .add_clip(
+                track,
+                media,
+                TimeRange::at_rate(0, 48, r),
+                RationalTime::new(0, r),
+            )
+            .expect("clip");
+        project
+            .add_effect(clip, "gaussian_blur")
+            .expect("add blur");
+        let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+        let clip_s = clip.raw().to_string();
+        let param = ClipParam::Effect {
+            effect: 0,
+            param: 0,
+        };
+        let rev_before = engine.revision();
+
+        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(12.0));
+        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(24.0));
+        assert!(engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before);
+
+        let live = resolve_with(
+            engine.project(),
+            RationalTime::new(0, r),
+            ResolveOverrides {
+                params: Some(engine.param_overrides()),
+                ..ResolveOverrides::default()
+            },
+        )
+        .expect("live");
+        assert!((live.layers[0].effects[0].params[0] - 24.0).abs() < f32::EPSILON);
+
+        clear_param_override(&mut engine, &clip_s, param);
+        engine
+            .apply(Command::Edit(EditCommand::SetEffectParam {
+                clip,
+                index: 0,
+                param: 0,
+                value: 24.0,
+            }))
+            .expect("commit effect");
+        assert!(!engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before + 1);
+
+        let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+        assert!((plain.layers[0].effects[0].params[0] - 24.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn lut_intensity_preview_then_commit_clears_override() {
+        use cutlass_commands::{Command, EditCommand};
+        use cutlass_models::Lut;
+
+        let r = Rational::FPS_24;
+        let mut project = Project::new("lut-lane", r);
+        let media = project.add_media(MediaSource::new(
+            "/tmp/lut-lane.mp4",
+            1920,
+            1080,
+            r,
+            1000,
+            true,
+        ));
+        let track = project.add_track(TrackKind::Video, "V1");
+        let clip = project
+            .add_clip(
+                track,
+                media,
+                TimeRange::at_rate(0, 48, r),
+                RationalTime::new(0, r),
+            )
+            .expect("clip");
+        project
+            .set_clip_lut(
+                clip,
+                Some(Lut {
+                    path: "/tmp/test.cube".into(),
+                    intensity: 0.5.into(),
+                }),
+            )
+            .expect("lut");
+        let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+        let clip_s = clip.raw().to_string();
+        let param = ClipParam::Look {
+            param: LookParam::LutIntensity,
+        };
+        let rev_before = engine.revision();
+
+        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.9));
+        assert!(engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before);
+
+        let live = resolve_with(
+            engine.project(),
+            RationalTime::new(0, r),
+            ResolveOverrides {
+                params: Some(engine.param_overrides()),
+                ..ResolveOverrides::default()
+            },
+        )
+        .expect("live");
+        assert!((live.layers[0].lut.as_ref().unwrap().intensity - 0.9).abs() < f32::EPSILON);
+
+        clear_param_override(&mut engine, &clip_s, param);
+        engine
+            .apply(Command::Edit(EditCommand::SetClipLut {
+                clip,
+                lut: Some(Lut {
+                    path: "/tmp/test.cube".into(),
+                    intensity: 0.9.into(),
+                }),
+            }))
+            .expect("commit lut");
+        assert!(!engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before + 1);
+
+        let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+        assert!((plain.layers[0].lut.as_ref().unwrap().intensity - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn chroma_preview_then_commit_clears_override() {
         use cutlass_commands::{Command, EditCommand};
 

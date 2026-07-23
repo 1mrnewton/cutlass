@@ -656,9 +656,14 @@ export component LookInspector inherits VerticalLayout {
         step: 1;
         decimals: 0;
         reset-value: 80;
-        // No live preview: LUT application has no session override yet,
-        // so the slider commits on release only.
-        preview(v) => { }
+        preview(v) => {
+            InspectorBackend.preview-param(
+                root.model.id,
+                "look_lut_intensity",
+                clamp(v, 0, 100) / 100,
+                0,
+                TimelineStore.playhead-tick);
+        }
         commit(v) => {
             InspectorBackend.set-clip-lut(
                 root.model.id,

@@ -622,6 +622,20 @@ pub(crate) fn wire_inspector(
                 value,
             );
         });
+    let preview_effect_param_handle = preview_worker.handle();
+    app.global::<EffectsBackend>().on_preview_effect_param(
+        move |clip_id, index, param_index, value, tick| {
+            preview_effect_param_handle.param_override(
+                clip_id.to_string(),
+                cutlass_models::ClipParam::Effect {
+                    effect: index.max(0) as u32,
+                    param: param_index.max(0) as u32,
+                },
+                cutlass_models::ParamValue::Scalar(value),
+                i64::from(tick),
+            );
+        },
+    );
     let set_effect_param_color_handle = preview_worker.handle();
     app.global::<EffectsBackend>().on_set_effect_param_color(
         move |clip_id, index, param, r, g, b, a| {
@@ -649,6 +663,20 @@ pub(crate) fn wire_inspector(
                 cutlass_models::ParamValue::Vec2([x, y]),
             );
         });
+    let preview_effect_param_vec2_handle = preview_worker.handle();
+    app.global::<EffectsBackend>().on_preview_effect_param_vec2(
+        move |clip_id, index, param_index, x, y, tick| {
+            preview_effect_param_vec2_handle.param_override(
+                clip_id.to_string(),
+                cutlass_models::ClipParam::Effect {
+                    effect: index.max(0) as u32,
+                    param: param_index.max(0) as u32,
+                },
+                cutlass_models::ParamValue::Vec2([x, y]),
+                i64::from(tick),
+            );
+        },
+    );
     let add_transition_handle = preview_worker.handle();
     app.global::<EffectsBackend>()
         .on_add_transition(move |clip_id, transition_id| {

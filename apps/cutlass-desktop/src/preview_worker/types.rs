@@ -530,9 +530,6 @@ pub(super) enum WorkerMsg {
     /// projection republish. Uses the same [`ClipParam`] / [`ParamValue`]
     /// addressing as [`SetParamConstant`]. Bursts coalesce to the newest
     /// value per `(clip, param)` like `TransformOverride`.
-    /// UI senders land in a follow-up commit; the worker arm + tests exercise
-    /// the lane now.
-    #[allow(dead_code)]
     ParamOverride {
         clip: String,
         param: ClipParam,
@@ -541,7 +538,6 @@ pub(super) enum WorkerMsg {
     },
     /// Drop every live param override for `clip` (control released with no
     /// net change, or after commit) and re-render `tick` from committed state.
-    #[allow(dead_code)]
     ClearParamOverride {
         clip: String,
         tick: i64,

@@ -67,6 +67,13 @@ pub(super) fn set_effect_param_and_publish(
         error!(%clip_id, index, param, "set-effect-param ignored: unknown param");
         return;
     };
+    let effect_param = ClipParam::Effect {
+        effect: index,
+        param: slot as u32,
+    };
+    // Clear a live effect-param override before the commit so the next frame
+    // never flashes the stale drag value.
+    clear_param_override(engine, clip, effect_param);
     let edit = match value {
         ParamValue::Scalar(v) => EditCommand::SetEffectParam {
             clip: clip_id,
@@ -76,10 +83,7 @@ pub(super) fn set_effect_param_and_publish(
         },
         other => EditCommand::SetParamConstant {
             clip: clip_id,
-            param: ClipParam::Effect {
-                effect: index,
-                param: slot as u32,
-            },
+            param: effect_param,
             value: other,
         },
     };

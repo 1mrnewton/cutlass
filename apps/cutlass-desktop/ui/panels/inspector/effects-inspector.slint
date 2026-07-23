@@ -6,11 +6,12 @@
 //
 // Param values come from the clip-start projection and re-sync on every
 // republish, so a committed edit lands back through the projection rather
-// than being held UI-side. Release / Enter commit one undoable edit.
+// than being held UI-side. Drag ticks preview via `preview-effect-param*`
+// (`ClipParam::Effect` overrides); release / Enter commit one undoable edit.
 // Effect rows have no keyframe UI today (a deliberate follow-up).
 
 import { CutlassText, SubtleButton, CutlassColorSwatch } from "../../components/index.slint";
-import { AppStore } from "../../store/index.slint";
+import { AppStore, TimelineStore } from "../../store/index.slint";
 import { Clip } from "../../models/index.slint";
 import { EffectsBackend } from "../../lib/index.slint";
 import { SectionHeader, SliderRow, LabelCell } from "inspector-widgets.slint";
@@ -58,7 +59,7 @@ export component EffectsInspector inherits VerticalLayout {
             }
         }
 
-        for p in fx.params: VerticalLayout {
+        for p[pi] in fx.params: VerticalLayout {
             spacing: AppStore.theme.metrics.spacing.sm;
 
             if p.kind == "scalar": SliderRow {
@@ -71,6 +72,11 @@ export component EffectsInspector inherits VerticalLayout {
                 // Double-click reset: zero when the range allows it (the neutral
                 // value for blur/intensity-style params), otherwise the minimum.
                 reset-value: clamp(0, p.min, p.max);
+                preview(v) => {
+                    EffectsBackend.preview-effect-param(
+                        root.model.id, i, pi, clamp(v, p.min, p.max),
+                        TimelineStore.playhead-tick);
+                }
                 commit(v) => {
                     EffectsBackend.set-effect-param(root.model.id, i, p.name, clamp(v, p.min, p.max));
                 }
@@ -109,6 +115,11 @@ export component EffectsInspector inherits VerticalLayout {
                     step: max(0.001, (p.max - p.min) / 200);
                     decimals: 2;
                     reset-value: 0;
+                    preview(v) => {
+                        EffectsBackend.preview-effect-param-vec2(
+                            root.model.id, i, pi, clamp(v, p.min, p.max), p.vec2-y,
+                            TimelineStore.playhead-tick);
+                    }
                     commit(v) => {
                         EffectsBackend.set-effect-param-vec2(
                             root.model.id, i, p.name, clamp(v, p.min, p.max), p.vec2-y);
@@ -123,6 +134,11 @@ export component EffectsInspector inherits VerticalLayout {
                     step: max(0.001, (p.max - p.min) / 200);
                     decimals: 2;
                     reset-value: 0;
+                    preview(v) => {
+                        EffectsBackend.preview-effect-param-vec2(
+                            root.model.id, i, pi, p.vec2-x, clamp(v, p.min, p.max),
+                            TimelineStore.playhead-tick);
+                    }
                     commit(v) => {
                         EffectsBackend.set-effect-param-vec2(
                             root.model.id, i, p.name, p.vec2-x, clamp(v, p.min, p.max));

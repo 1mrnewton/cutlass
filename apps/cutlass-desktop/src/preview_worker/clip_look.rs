@@ -366,6 +366,15 @@ pub(super) fn set_clip_lut_and_publish(
         error!(clip, "set-clip-lut ignored: unparsable clip id");
         return;
     };
+    // Intensity slider drags leave a LookParam::LutIntensity override; clear
+    // it before the structural SetClipLut commit.
+    clear_param_override(
+        engine,
+        clip,
+        ClipParam::Look {
+            param: cutlass_models::LookParam::LutIntensity,
+        },
+    );
     let lut = (!path.is_empty()).then(|| Lut {
         path: path.to_string(),
         intensity: intensity.clamp(0.0, 1.0).into(),

@@ -19,7 +19,20 @@ export global EffectsBackend {
 
     // Set one scalar effect parameter (addressed by its catalog `param` name)
     // to a constant. Animated edits go through the keyframe path instead.
+    // Also clears any live override for that effect param.
     callback set-effect-param(clip-id: string, index: int, param: string, value: float);
+
+    // Live scalar effect-param preview during a slider drag. `param-index` is
+    // the catalog slot (same order as the projected `EffectParamView` list).
+    // Session-only `ClipParam::Effect` override; release commits via
+    // `set-effect-param`.
+    callback preview-effect-param(
+        clip-id: string,
+        index: int,
+        param-index: int,
+        value: float,
+        tick: int,
+    );
 
     // Set a color effect parameter (`rgba` channels 0..=255).
     callback set-effect-param-color(
@@ -39,6 +52,16 @@ export global EffectsBackend {
         param: string,
         x: float,
         y: float,
+    );
+
+    // Live vec2 effect-param preview during an X/Y slider drag.
+    callback preview-effect-param-vec2(
+        clip-id: string,
+        index: int,
+        param-index: int,
+        x: float,
+        y: float,
+        tick: int,
     );
 
     // Add `transition-id` at the junction after `clip-id` (needs an abutting

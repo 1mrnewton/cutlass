@@ -497,7 +497,14 @@ fn mask_feather_preview_then_kind_switch_clears_override() {
         "mask kind switch must not leave a feather preview override alive"
     );
     assert_eq!(
-        engine.project().clip(clip).unwrap().mask.as_ref().unwrap().kind,
+        engine
+            .project()
+            .clip(clip)
+            .unwrap()
+            .mask
+            .as_ref()
+            .unwrap()
+            .kind,
         MaskKind::Rectangle
     );
 }

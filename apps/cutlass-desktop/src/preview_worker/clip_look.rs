@@ -43,6 +43,9 @@ pub(super) fn set_clip_crop_and_publish(
         error!(clip, "set-clip-crop ignored: unparsable clip id");
         return;
     };
+    // Clear a live crop override before the commit so the next frame never
+    // flashes the stale drag value (same order as set_param_constant).
+    clear_param_override(engine, clip, ClipParam::Crop);
     let wrote_keyframe = engine
         .project()
         .clip(clip_id)

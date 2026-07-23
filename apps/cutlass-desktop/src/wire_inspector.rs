@@ -192,6 +192,30 @@ pub(crate) fn wire_inspector(
         },
     );
 
+    let preview_crop_handle = preview_worker.handle();
+    app.global::<InspectorBackend>().on_preview_clip_crop(
+        move |clip_id, left, top, right, bottom, tick| {
+            let crop = cutlass_models::CropRect {
+                x: left,
+                y: top,
+                w: (1.0 - left - right).max(cutlass_models::MIN_CROP_FRACTION),
+                h: (1.0 - top - bottom).max(cutlass_models::MIN_CROP_FRACTION),
+            };
+            preview_crop_handle.param_override(
+                clip_id.to_string(),
+                cutlass_models::ClipParam::Crop,
+                cutlass_models::ParamValue::Rect([crop.x, crop.y, crop.w, crop.h]),
+                i64::from(tick),
+            );
+        },
+    );
+
+    let clear_param_handle = preview_worker.handle();
+    app.global::<InspectorBackend>()
+        .on_clear_param_override(move |clip_id, tick| {
+            clear_param_handle.clear_param_override(clip_id.to_string(), i64::from(tick));
+        });
+
     let set_blend_handle = preview_worker.handle();
     app.global::<InspectorBackend>()
         .on_set_clip_blend_mode(move |clip_id, mode| {

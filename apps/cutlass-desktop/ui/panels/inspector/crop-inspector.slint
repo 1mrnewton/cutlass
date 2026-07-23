@@ -1,7 +1,9 @@
 // CapCut's crop block (M1): trim a percentage off each content edge and
 // mirror the result. Shown for visual clips; commits ride
 // `InspectorBackend.set-clip-crop` → one undoable `SetClipCrop` on the
-// worker. The compositor re-renders from the projection republish, and the
+// worker. Slider drags send a live `ClipParam::Crop` override via
+// `preview-clip-crop` so the preview frame updates during the gesture.
+// The compositor re-renders from the projection republish, and the
 // preview selection box hugs the cropped quad (`src/preview_select.rs`).
 //
 // Crop can be keyframed via the AI wire / param path; inspector sliders
@@ -63,9 +65,10 @@ export component CropInspector inherits VerticalLayout {
 
     // One funnel for every control, in inset fractions. Skips the engine
     // round-trip when nothing changed (slider released without motion,
-    // Enter on the same value, reset of an uncropped edge). Opposite insets
-    // cap at 49% each so the kept window never collapses (engine floor is
-    // 1%) — the rows clamp typed entries to the same range.
+    // Enter on the same value, reset of an uncropped edge) but still clears
+    // a lingering live crop override. Opposite insets cap at 49% each so
+    // the kept window never collapses (engine floor is 1%) — the rows clamp
+    // typed entries to the same range.
     function apply(l: float, t: float, r: float, b: float, fh: bool, fv: bool) {
         if (l == root.left-v
             && t == root.top-v
@@ -73,10 +76,17 @@ export component CropInspector inherits VerticalLayout {
             && b == root.bottom-v
             && fh == root.model.flip-h
             && fv == root.model.flip-v) {
+            InspectorBackend.clear-param-override(
+                root.model.id, TimelineStore.playhead-tick);
             return;
         }
         InspectorBackend.set-clip-crop(
             root.model.id, l, t, r, b, fh, fv, TimelineStore.playhead-tick);
+    }
+
+    function preview-insets(l: float, t: float, r: float, b: float) {
+        InspectorBackend.preview-clip-crop(
+            root.model.id, l, t, r, b, TimelineStore.playhead-tick);
     }
 
     SectionHeader {
@@ -89,6 +99,9 @@ export component CropInspector inherits VerticalLayout {
         value: root.left-v * 100;
         minimum: 0;
         maximum: 49;
+        preview(v) => {
+            root.preview-insets(clamp(v, 0, 49) / 100, root.top-v, root.right-v, root.bottom-v);
+        }
         commit(v) => {
             root.apply(clamp(v, 0, 49) / 100, root.top-v, root.right-v, root.bottom-v,
                 root.model.flip-h, root.model.flip-v);
@@ -101,6 +114,9 @@ export component CropInspector inherits VerticalLayout {
         value: root.top-v * 100;
         minimum: 0;
         maximum: 49;
+        preview(v) => {
+            root.preview-insets(root.left-v, clamp(v, 0, 49) / 100, root.right-v, root.bottom-v);
+        }
         commit(v) => {
             root.apply(root.left-v, clamp(v, 0, 49) / 100, root.right-v, root.bottom-v,
                 root.model.flip-h, root.model.flip-v);
@@ -113,6 +129,9 @@ export component CropInspector inherits VerticalLayout {
         value: root.right-v * 100;
         minimum: 0;
         maximum: 49;
+        preview(v) => {
+            root.preview-insets(root.left-v, root.top-v, clamp(v, 0, 49) / 100, root.bottom-v);
+        }
         commit(v) => {
             root.apply(root.left-v, root.top-v, clamp(v, 0, 49) / 100, root.bottom-v,
                 root.model.flip-h, root.model.flip-v);
@@ -125,6 +144,9 @@ export component CropInspector inherits VerticalLayout {
         value: root.bottom-v * 100;
         minimum: 0;
         maximum: 49;
+        preview(v) => {
+            root.preview-insets(root.left-v, root.top-v, root.right-v, clamp(v, 0, 49) / 100);
+        }
         commit(v) => {
             root.apply(root.left-v, root.top-v, root.right-v, clamp(v, 0, 49) / 100,
                 root.model.flip-h, root.model.flip-v);

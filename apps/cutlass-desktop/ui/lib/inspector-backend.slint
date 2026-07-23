@@ -240,7 +240,7 @@ export global InspectorBackend {
     // model's kept-region rect; the engine validates (visual lanes only,
     // non-degenerate window). `playhead-tick` is the absolute sequence tick
     // used to keyframe an already-animated crop (M2 compose). One undoable
-    // edit.
+    // edit. Also clears any live `ClipParam::Crop` override for the clip.
     callback set-clip-crop(
         clip-id: string,
         left: float,
@@ -251,6 +251,24 @@ export global InspectorBackend {
         flip-v: bool,
         playhead-tick: int,
     );
+
+    // Live crop-window preview during an inset slider drag. Same inset shape
+    // as `set-clip-crop` (no flip — flips commit immediately). Session-only
+    // `ClipParam::Crop` override; release commits via `set-clip-crop` or
+    // clears with `clear-param-override` when nothing changed.
+    callback preview-clip-crop(
+        clip-id: string,
+        left: float,
+        top: float,
+        right: float,
+        bottom: float,
+        tick: int,
+    );
+
+    // Drop every live param-override for `clip-id` and repaint `tick` from
+    // committed state (release with no net change). Matching commits also
+    // clear the param they write.
+    callback clear-param-override(clip-id: string, tick: int);
 
     // Set a visual clip's blend mode (CapCut "Blend"). `mode` is a catalog
     // id from `blend-catalog` (e.g. "multiply"); `"normal"` is the default.

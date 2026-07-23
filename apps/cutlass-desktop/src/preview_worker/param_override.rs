@@ -117,7 +117,8 @@ fn flush_param_overrides(engine: &mut Engine, pending: &HashMap<(String, ClipPar
 mod tests {
     use super::*;
     use cutlass_models::{
-        ChromaKey, LookParam, MediaSource, Project, Rational, RationalTime, TimeRange, TrackKind,
+        ChromaKey, CropRect, LookParam, MediaSource, Project, Rational, RationalTime, TimeRange,
+        TrackKind,
     };
     use cutlass_render::{ResolveOverrides, resolve, resolve_with};
 
@@ -308,5 +309,69 @@ mod tests {
         };
         assert_eq!(clip, "7");
         assert_eq!(tick, 14);
+    }
+
+    #[test]
+    fn crop_preview_then_commit_clears_override() {
+        use cutlass_commands::{Command, EditCommand};
+
+        let (mut engine, clip, clip_s, r) = engine_with_chroma();
+        let rev_before = engine.revision();
+        let could_undo = engine.can_undo();
+
+        // Drag ticks: session override only.
+        apply_param_override(
+            &mut engine,
+            &clip_s,
+            ClipParam::Crop,
+            ParamValue::Rect([0.1, 0.05, 0.7, 0.8]),
+        );
+        apply_param_override(
+            &mut engine,
+            &clip_s,
+            ClipParam::Crop,
+            ParamValue::Rect([0.2, 0.1, 0.6, 0.7]),
+        );
+        assert!(engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before);
+        assert_eq!(engine.can_undo(), could_undo);
+
+        let live = resolve_with(
+            engine.project(),
+            RationalTime::new(0, r),
+            ResolveOverrides {
+                params: Some(engine.param_overrides()),
+                ..ResolveOverrides::default()
+            },
+        )
+        .expect("live");
+        assert!((live.layers[0].uv[0] - 0.2).abs() < 1e-5);
+        assert!((live.layers[0].uv[1] - 0.1).abs() < 1e-5);
+
+        // Release: clear Crop override then one SetClipCrop (mirrors
+        // set_clip_crop_and_publish ordering).
+        let crop = CropRect {
+            x: 0.2,
+            y: 0.1,
+            w: 0.6,
+            h: 0.7,
+        };
+        clear_param_override(&mut engine, &clip_s, ClipParam::Crop);
+        engine
+            .apply(Command::Edit(EditCommand::SetClipCrop {
+                clip,
+                crop,
+                flip_h: false,
+                flip_v: false,
+                at: Some(RationalTime::new(0, r)),
+            }))
+            .expect("commit crop");
+        assert!(!engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before + 1);
+        assert!(engine.can_undo());
+
+        let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+        assert!((plain.layers[0].uv[0] - 0.2).abs() < 1e-5);
+        assert!((plain.layers[0].uv[2] - 0.8).abs() < 1e-5);
     }
 }

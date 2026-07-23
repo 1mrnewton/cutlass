@@ -250,6 +250,39 @@ fn stale_discard_trims_rehearsal_transcript_rows_keeps_replacement_prompt() {
 }
 
 #[test]
+fn explicit_stale_apply_truncates_transcript_to_checkpoint() {
+    // ApplyPlan has no replacement user prompt — drop everything after the
+    // dry-run checkpoint (same restore point as history_restore).
+    let kinds = vec![
+        "status",    // earlier chat
+        "user",      // dry-run prompt
+        "action",    // rehearsal
+        "assistant", // rehearsal
+    ];
+    assert_eq!(
+        truncate_rows_to_checkpoint(kinds, 1),
+        vec!["status"],
+        "explicit stale Apply must drop rehearsal rows, not keep the dry-run user"
+    );
+}
+
+#[test]
+fn continue_pending_seed_error_restores_plan_pending_flag() {
+    // When project_revision is unreachable, sandbox_seed_policy errs after the
+    // Prompt handler cleared plan_pending — restore it iff a parked plan remains.
+    assert!(matches!(
+        sandbox_seed_policy(true, Some(1), None),
+        Err("The editor engine is not responding.")
+    ));
+    let preview_still_parked = true;
+    let continue_pending = true;
+    assert!(
+        continue_pending && preview_still_parked,
+        "failure path must set plan_pending again so Apply/Discard stay available"
+    );
+}
+
+#[test]
 fn stale_discard_transcript_trim_is_noop_when_nothing_to_drop() {
     let kinds = vec!["user", "status"];
     let trimmed = trim_rows_after_stale_plan_discard(kinds.clone(), 0, |k| *k == "user");

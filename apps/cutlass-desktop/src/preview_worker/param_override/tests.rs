@@ -561,6 +561,39 @@ fn volume_preview_then_commit_clears_override() {
 }
 
 #[test]
+fn fade_only_set_clip_audio_clears_volume_override() {
+    use cutlass_commands::{Command, EditCommand};
+
+    let (mut engine, clip, clip_s, r) = engine_with_chroma();
+    apply_param_override(
+        &mut engine,
+        &clip_s,
+        ClipParam::Volume,
+        ParamValue::Scalar(0.4),
+        None,
+    );
+    assert!(engine.has_live_overrides());
+
+    // Fade-only SetClipAudio (volume: None) must still clear Volume — the
+    // commit path in clip_audio.rs clears Volume/Pan on every audio commit.
+    clear_param_override(&mut engine, &clip_s, ClipParam::Volume, None);
+    clear_param_override(&mut engine, &clip_s, ClipParam::Pan, None);
+    engine
+        .apply(Command::Edit(EditCommand::SetClipAudio {
+            clip,
+            volume: None,
+            fade_in: RationalTime::new(0, r),
+            fade_out: RationalTime::new(12, r),
+        }))
+        .expect("fade-only commit");
+    assert!(
+        !engine.has_live_overrides(),
+        "fade-only commit must not leave a volume preview override alive"
+    );
+    assert_eq!(engine.project().clip(clip).unwrap().fade_out, 12);
+}
+
+#[test]
 fn pan_preview_then_commit_clears_override() {
     use cutlass_commands::{Command, EditCommand};
 

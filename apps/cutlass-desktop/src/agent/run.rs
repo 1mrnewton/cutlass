@@ -24,7 +24,7 @@ use super::tool_host::{DesktopToolHandles, DesktopToolHost, abort_status_message
 use super::transcript::{
     append_assistant_text, append_reasoning_text, attach_usage_line, persist_session,
     publish_chat_list, push_entry, push_image_entry, replace_transcript, transcript_row_count,
-    trim_transcript_after_stale_plan_discard, with_store,
+    trim_transcript_after_stale_plan_discard, truncate_transcript_to_checkpoint, with_store,
 };
 use super::types::{
     AgentHandle, AgentPlanStep, AgentRequest, AgentRuntimeHandles, AgentWorker, ApprovalDecision,
@@ -333,10 +333,16 @@ pub(crate) fn agent_main(
                         preview.clear();
                     }
                     ApplyLiveOutcome::Stale => {
+                        // Match auto-discard: rewind provider history AND drop
+                        // rehearsal transcript rows so saved chat agrees.
+                        let transcript_checkpoint = preview.transcript_restore_len.take();
                         if let Some(saved) = preview.history_restore.take() {
                             history = saved;
                         }
                         preview.clear();
+                        if let Some(checkpoint_len) = transcript_checkpoint {
+                            truncate_transcript_to_checkpoint(&store, checkpoint_len);
+                        }
                         push_entry(&store, "status", STALE_APPLY_NOTICE.into());
                     }
                     ApplyLiveOutcome::EngineGone => {
@@ -582,7 +588,12 @@ pub(crate) fn run_one_prompt(
     let policy = match sandbox_seed_policy(continue_pending, preview.seed_revision, live_revision) {
         Ok(policy) => policy,
         Err(msg) => {
+            // Prompt handler already cleared plan_pending and pushed the user
+            // row; restore parked-plan UI so Apply/Discard remain usable.
             push_entry(store, "error", msg.into());
+            if continue_pending && preview.is_pending() {
+                with_store(store, |s| s.set_plan_pending(true));
+            }
             return;
         }
     };
@@ -592,6 +603,9 @@ pub(crate) fn run_one_prompt(
     {
         if let Err(msg) = reseed_sandbox_from_live(worker, engine, preview) {
             push_entry(store, "error", msg.into());
+            if preview.is_pending() {
+                with_store(store, |s| s.set_plan_pending(true));
+            }
             return;
         }
         if discarded_stale_plan {

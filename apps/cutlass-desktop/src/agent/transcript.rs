@@ -75,6 +75,25 @@ pub(crate) fn trim_transcript_after_stale_plan_discard(
     });
 }
 
+/// Explicit ApplyPlan rejected as stale: drop every rehearsal row after the
+/// dry-run checkpoint (no replacement user prompt to keep).
+pub(crate) fn truncate_transcript_to_checkpoint(
+    store: &slint::Weak<AgentStore<'static>>,
+    checkpoint_len: usize,
+) {
+    with_transcript(store, move |model| {
+        let count = model.row_count();
+        let rows: Vec<AgentEntry> = (0..count).filter_map(|i| model.row_data(i)).collect();
+        model.set_vec(truncate_rows_to_checkpoint(rows, checkpoint_len));
+    });
+}
+
+/// Pure prefix used by [`truncate_transcript_to_checkpoint`].
+pub(crate) fn truncate_rows_to_checkpoint<T>(mut rows: Vec<T>, checkpoint_len: usize) -> Vec<T> {
+    rows.truncate(checkpoint_len.min(rows.len()));
+    rows
+}
+
 /// Pure splice used by [`trim_transcript_after_stale_plan_discard`]: keep
 /// `[0..checkpoint_len)` plus the trailing segment that starts at the latest
 /// `user` row at or after the checkpoint.

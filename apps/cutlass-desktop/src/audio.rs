@@ -486,11 +486,7 @@ fn mixer_loop(msg_rx: Receiver<AudioMsg>, block_tx: Sender<AudioBlock>) {
                             write_frame = ticks_to_frames(tick, fps);
                             reopen = true;
                         }
-                        AudioMsg::ParamOverride {
-                            clip,
-                            param,
-                            value,
-                        } => {
+                        AudioMsg::ParamOverride { clip, param, value } => {
                             param_overrides.set(clip, param, value);
                             if let Some(m) = &mut mixer {
                                 m.set_param_override(clip, param, value);

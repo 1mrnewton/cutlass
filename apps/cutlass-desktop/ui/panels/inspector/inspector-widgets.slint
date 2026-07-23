@@ -233,6 +233,9 @@ export component SliderRow inherits HorizontalLayout {
 
     callback preview(value: float);
     callback commit(value: float);
+    // Drag abandoned (pointer-cancel / Escape while pressed) — parents that
+    // preview mid-drag clear overrides / gesture lanes here.
+    callback cancelled();
     callback kf-toggle();
     callback kf-set-easing(easing: int);
 
@@ -244,6 +247,13 @@ export component SliderRow inherits HorizontalLayout {
                 : Math.round(v * 100) / 100 + "");
     }
 
+    function resync-from-value() {
+        sl.value = clamp(root.value, root.minimum, root.maximum);
+        if !num.has-focus {
+            num.text = root.format(root.value);
+        }
+    }
+
     spacing: AppStore.theme.metrics.spacing.md;
     height: 28px;
     vertical-stretch: 0;
@@ -252,12 +262,13 @@ export component SliderRow inherits HorizontalLayout {
     // `text` on typing — both would permanently drop a plain binding, so
     // external updates (projection republish, live gestures, selection
     // changes, playhead moves over an animated property) re-sync through
-    // this watcher instead.
+    // this watcher instead. Ignore while the handle is pressed so animated
+    // samples during playback can't stomp an in-flight drag.
     changed value => {
-        sl.value = clamp(root.value, root.minimum, root.maximum);
-        if !num.has-focus {
-            num.text = root.format(root.value);
+        if sl.handle-pressed {
+            return;
         }
+        root.resync-from-value();
     }
 
     TouchArea {
@@ -301,6 +312,12 @@ export component SliderRow inherits HorizontalLayout {
 
         released(v) => {
             root.commit(v);
+            AppState.refocus-shortcuts();
+        }
+
+        cancelled => {
+            root.resync-from-value();
+            root.cancelled();
             AppState.refocus-shortcuts();
         }
     }

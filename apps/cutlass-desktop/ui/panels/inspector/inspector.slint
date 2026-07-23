@@ -656,6 +656,20 @@ component AudioClipInspector inherits VerticalLayout {
 export component InspectorPanel inherits PanelBase {
     private property <bool> has-selection: TimelineStore.selected-clip-id != "";
 
+    // When the primary selection changes mid-slider-drag, drop the previous
+    // clip's live param overrides (volume/spacing/…) so they can't bind to
+    // an unrelated clip that reuses the raw id.
+    private property <string> prev-selected-clip: "";
+    private property <string> selection-clip-watch: TimelineStore.selected-clip-id;
+    changed selection-clip-watch => {
+        if (root.prev-selected-clip != ""
+            && root.prev-selected-clip != TimelineStore.selected-clip-id) {
+            InspectorBackend.clear-param-override(
+                root.prev-selected-clip, TimelineStore.playhead-tick);
+        }
+        root.prev-selected-clip = TimelineStore.selected-clip-id;
+    }
+
     private property <SelectedClipInfo> selection: InspectorBackend.resolve-selection(
         EditorStore.project.sequence,
         TimelineStore.selected-track-id,

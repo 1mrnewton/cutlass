@@ -104,6 +104,26 @@ export component TransformInspector inherits VerticalLayout {
         root.apply(c.position-x, c.position-y, ax, ay, root.scale-x, root.scale-y, root.rot-v, root.opacity-v, commit);
     }
 
+    // Drop a mid-drag slider/sprite override without committing (pointer-
+    // cancel, Escape→deselect, or selection change).
+    function abandon-gesture() {
+        if (PreviewStore.gesture-active) {
+            EditorStore.on-preview-override-cleared(TimelineStore.playhead-tick);
+            PreviewStore.gesture-active = false;
+            PreviewStore.gesture-commit-pending = false;
+        }
+    }
+
+    // Selection / model rebind while a slider drag is live: clear the
+    // override so it can't stick to the next clip (ids are project-local).
+    private property <string> selection-watch: TimelineStore.selected-clip-id;
+    changed selection-watch => {
+        if (PreviewStore.gesture-active
+            && PreviewStore.gesture-clip != TimelineStore.selected-clip-id) {
+            root.abandon-gesture();
+        }
+    }
+
     // One funnel for every row, in normalized model units. Previews render
     // as an uncommitted worker override (no history, projection frozen);
     // commits land one undoable SetClipTransform — unless nothing changed
@@ -294,6 +314,9 @@ export component TransformInspector inherits VerticalLayout {
         commit(v) => {
             root.apply(v / root.canvas-w, root.pos-y, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, root.rot-v, root.opacity-v, true);
         }
+        cancelled => {
+            root.abandon-gesture();
+        }
         // Position is one vec2 param: either axis row keyframes both.
         kf-toggle => {
             root.toggle-kf("position", root.sample.position-row.on-keyframe, root.pos-x, root.pos-y);
@@ -319,6 +342,9 @@ export component TransformInspector inherits VerticalLayout {
         commit(v) => {
             root.apply(root.pos-x, v / root.canvas-h, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, root.rot-v, root.opacity-v, true);
         }
+        cancelled => {
+            root.abandon-gesture();
+        }
         kf-toggle => {
             root.toggle-kf("position", root.sample.position-row.on-keyframe, root.pos-x, root.pos-y);
         }
@@ -343,6 +369,9 @@ export component TransformInspector inherits VerticalLayout {
         commit(v) => {
             root.apply-anchor(v / 100, root.anchor-y, true);
         }
+        cancelled => {
+            root.abandon-gesture();
+        }
         kf-toggle => {
             root.toggle-kf("anchor", root.sample.anchor-row.on-keyframe, root.anchor-x, root.anchor-y);
         }
@@ -366,6 +395,9 @@ export component TransformInspector inherits VerticalLayout {
         }
         commit(v) => {
             root.apply-anchor(root.anchor-x, v / 100, true);
+        }
+        cancelled => {
+            root.abandon-gesture();
         }
         kf-toggle => {
             root.toggle-kf("anchor", root.sample.anchor-row.on-keyframe, root.anchor-x, root.anchor-y);
@@ -393,6 +425,9 @@ export component TransformInspector inherits VerticalLayout {
         commit(v) => {
             root.apply-scale-x(v, true);
         }
+        cancelled => {
+            root.abandon-gesture();
+        }
         // Scale is one param: either axis row keyframes both.
         kf-toggle => {
             root.toggle-kf("scale", root.sample.scale-row.on-keyframe, root.scale-x, root.scale-y);
@@ -417,6 +452,9 @@ export component TransformInspector inherits VerticalLayout {
         }
         commit(v) => {
             root.apply-scale-y(v, true);
+        }
+        cancelled => {
+            root.abandon-gesture();
         }
         kf-toggle => {
             root.toggle-kf("scale", root.sample.scale-row.on-keyframe, root.scale-x, root.scale-y);
@@ -458,6 +496,9 @@ export component TransformInspector inherits VerticalLayout {
         commit(v) => {
             root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, v, root.opacity-v, true);
         }
+        cancelled => {
+            root.abandon-gesture();
+        }
         kf-toggle => {
             root.toggle-kf("rotation", root.sample.rotation-row.on-keyframe, root.rot-v, 0);
         }
@@ -481,6 +522,9 @@ export component TransformInspector inherits VerticalLayout {
         }
         commit(v) => {
             root.apply(root.pos-x, root.pos-y, root.anchor-x, root.anchor-y, root.scale-x, root.scale-y, root.rot-v, clamp(v, 0, 100) / 100, true);
+        }
+        cancelled => {
+            root.abandon-gesture();
         }
         kf-toggle => {
             root.toggle-kf("opacity", root.sample.opacity-row.on-keyframe, root.opacity-v, 0);
@@ -529,6 +573,9 @@ export component TransformInspector inherits VerticalLayout {
                 root.model.motion-blur-samples,
             );
         }
+        cancelled => {
+            InspectorBackend.clear-clip-motion-blur(TimelineStore.playhead-tick);
+        }
     }
 
     if !root.is-canvas-pass && root.model.motion-blur-enabled: SliderRow {
@@ -549,6 +596,9 @@ export component TransformInspector inherits VerticalLayout {
                 root.model.motion-blur-shutter,
                 Math.round(clamp(v, 2, 16)),
             );
+        }
+        cancelled => {
+            InspectorBackend.clear-clip-motion-blur(TimelineStore.playhead-tick);
         }
     }
 }

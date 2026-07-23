@@ -451,6 +451,10 @@ export component TextStyleRows inherits VerticalLayout {
                     InspectorBackend.set-param-constant(model.id, "text_letter_spacing", v, 0);
                 }
             }
+            cancelled => {
+                InspectorBackend.clear-param-override(
+                    model.id, TimelineStore.playhead-tick);
+            }
             kf-toggle => {
                 root.toggle-kf(
                     "text_letter_spacing",
@@ -490,6 +494,10 @@ export component TextStyleRows inherits VerticalLayout {
                     InspectorBackend.set-param-constant(
                         model.id, "text_line_spacing", max(v, 10) / 100, 0);
                 }
+            }
+            cancelled => {
+                InspectorBackend.clear-param-override(
+                    model.id, TimelineStore.playhead-tick);
             }
             kf-toggle => {
                 root.toggle-kf(

@@ -10,6 +10,7 @@
 import { EditorStore } from "editor-store.slint";
 import { TimelineStore } from "timeline-store.slint";
 import { AppStore } from "app-store.slint";
+import { PreviewStore } from "preview-store.slint";
 import { TrackKind } from "../models/index.slint";
 import { TimelineViewState } from "../panels/timeline/state.slint";
 import { InspectorBackend, SelectedClipInfo } from "../lib/inspector-backend.slint";
@@ -25,6 +26,17 @@ export global TimelineActions {
     }
 
     public function clear-selection() {
+        // Escape clears selection mid-inspector-drag: drop any live transform
+        // override so it can't stick after the inspector unmounts.
+        if (PreviewStore.gesture-active) {
+            EditorStore.on-preview-override-cleared(TimelineStore.playhead-tick);
+            PreviewStore.gesture-active = false;
+            PreviewStore.gesture-commit-pending = false;
+        }
+        if (TimelineStore.selected-clip-id != "") {
+            InspectorBackend.clear-param-override(
+                TimelineStore.selected-clip-id, TimelineStore.playhead-tick);
+        }
         TimelineStore.selected-track-id = "";
         TimelineStore.selected-clip-id = "";
         TimelineStore.selected-ids = [];

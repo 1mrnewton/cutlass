@@ -26,6 +26,9 @@ export component CutlassSlider {
 
     callback changed(value: float);
     callback released(value: float);
+    // Pointer-cancel (or Escape while pressed): drag abandoned without commit.
+    // Callers that preview mid-drag should revert / clear overrides here.
+    callback cancelled();
 
     // Styling knobs.
     in property <brush> track-color: #ffffff1f;
@@ -149,7 +152,10 @@ export component CutlassSlider {
                 return;
             }
             if (event.kind == PointerEventKind.cancel) {
-                root.handle-pressed = false;
+                if (root.handle-pressed) {
+                    root.handle-pressed = false;
+                    root.cancelled();
+                }
                 return;
             }
             if (event.kind != PointerEventKind.down) {
@@ -190,7 +196,15 @@ export component CutlassSlider {
         enabled: root.enabled;
 
         key-pressed(event) => {
-            if (!self.enabled || root.step <= 0) {
+            if (!self.enabled) {
+                return reject;
+            }
+            if (event.text == Key.Escape && root.handle-pressed) {
+                root.handle-pressed = false;
+                root.cancelled();
+                return accept;
+            }
+            if (root.step <= 0) {
                 return reject;
             }
             if ((!root.vertical && event.text == Key.RightArrow) || (root.vertical && event.text == Key.UpArrow)) {

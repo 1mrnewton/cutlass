@@ -230,3 +230,86 @@ async fn apply_edits_unknown_command_is_readable() {
         "{err}"
     );
 }
+
+async fn project_with_red_solid(host: &EngineHost) {
+    host.new_project("frame".into(), 30.0)
+        .await
+        .expect("new_project");
+    let track = ensure_sticker_track(host).await;
+    host.apply_edits(vec![serde_json::json!({
+        "command": "add_generated",
+        "track": track,
+        "generator": { "type": "solid", "rgba": [255, 0, 0, 255] },
+        "start": 0.0,
+        "duration": 10.0,
+    })])
+    .await
+    .expect("add_generated");
+}
+
+#[tokio::test]
+async fn frame_get_red_solid_png() {
+    let host = EngineHost::spawn();
+    project_with_red_solid(&host).await;
+
+    let grab = host.get_frame(1.0, 128).await.expect("get_frame");
+    assert!(!grab.png.is_empty(), "png bytes");
+    assert!(
+        grab.png.starts_with(b"\x89PNG"),
+        "PNG magic missing: {:?}",
+        &grab.png[..grab.png.len().min(8)]
+    );
+    assert!(grab.width > 0 && grab.width <= 128, "w={}", grab.width);
+    assert!(grab.height > 0 && grab.height <= 128, "h={}", grab.height);
+    assert_eq!(grab.seconds, 1.0);
+
+    // Center pixel should be the solid red (proves compositor path).
+    let decoded = cutlass_render::decode_png(&grab.png).expect("decode_png");
+    let cx = (decoded.width / 2) as usize;
+    let cy = (decoded.height / 2) as usize;
+    let i = (cy * decoded.width as usize + cx) * 4;
+    let (r, g, b) = (
+        decoded.pixels[i],
+        decoded.pixels[i + 1],
+        decoded.pixels[i + 2],
+    );
+    assert!(r > 200, "center red channel: r={r} g={g} b={b}");
+    assert!(g < 50, "center green channel: r={r} g={g} b={b}");
+    assert!(b < 50, "center blue channel: r={r} g={g} b={b}");
+}
+
+#[tokio::test]
+async fn frame_get_requires_project_and_rejects_negative_time() {
+    let host = EngineHost::spawn();
+    let err = host.get_frame(0.0, 128).await.expect_err("no project");
+    assert_eq!(err, NO_PROJECT);
+
+    host.new_project("neg".into(), 30.0)
+        .await
+        .expect("new_project");
+    let err = host.get_frame(-1.0, 128).await.expect_err("neg time");
+    assert!(
+        err.contains("negative") || err.contains("must not be"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn export_video_rejects_empty_timeline() {
+    let host = EngineHost::spawn();
+    host.new_project("empty-export".into(), 30.0)
+        .await
+        .expect("new_project");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("out.mp4");
+    let err = host
+        .export_video(path.clone())
+        .await
+        .expect_err("empty timeline");
+    assert!(
+        err.contains("empty") || err.contains("nothing to render"),
+        "{err}"
+    );
+    assert!(!path.exists(), "must not create a file on rejection");
+}

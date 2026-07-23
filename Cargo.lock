@@ -1609,10 +1609,12 @@ name = "cutlass-mcp"
 version = "0.7.0-alpha.0"
 dependencies = [
  "anyhow",
+ "base64",
  "cutlass-ai",
  "cutlass-commands",
  "cutlass-engine",
  "cutlass-models",
+ "cutlass-render",
  "rmcp",
  "schemars",
  "serde",

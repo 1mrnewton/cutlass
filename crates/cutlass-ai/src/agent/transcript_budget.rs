@@ -7,7 +7,7 @@ use crate::provider::{ImagePart, Message};
 /// Shared by the in-prompt collapse and session-history collection so
 /// the wording cannot drift.
 pub(super) const DESCRIBE_PROJECT_RESULT_PLACEHOLDER: &str =
-    "(project state omitted — see the current state in the system message)";
+    "(stale project snapshot removed; call describe_project for the current state)";
 
 /// Replace the content of every `ToolResult` whose `call_id` is in
 /// `describe_call_ids` with [`DESCRIBE_PROJECT_RESULT_PLACEHOLDER`].

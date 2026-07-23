@@ -6,7 +6,7 @@
 //! outputs. The desktop creates a fresh provider for every user prompt, and
 //! terminal responses clear this in-memory state.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -166,6 +166,9 @@ impl OpenAiResponsesProvider {
                     let tool_outputs = replay_tool_outputs(messages, &state);
                     let base_message_count = state.base_message_count;
                     let mut continuation = state.continuation;
+                    // Keep stored outputs aligned with live `Message::ToolResult`
+                    // content (e.g. collapsed describe_project dumps).
+                    sync_continuation_tool_outputs(&mut continuation, messages);
                     continuation.extend(tool_outputs);
                     (base_message_count, continuation)
                 }
@@ -295,9 +298,35 @@ fn replay_matches(state: &ReplayState, messages: &[Message]) -> bool {
 
 fn replay_input(messages: &[Message], state: &ReplayState) -> Vec<serde_json::Value> {
     let mut input = to_responses_input(&messages[..state.base_message_count]);
-    input.extend(state.continuation.iter().cloned());
+    let mut continuation = state.continuation.clone();
+    // Continuation may still hold an earlier full `function_call_output`;
+    // rewrite from the live tool-result messages so in-prompt collapses win.
+    sync_continuation_tool_outputs(&mut continuation, messages);
+    input.extend(continuation);
     input.extend(replay_tool_outputs(messages, state));
     input
+}
+
+/// Rewrite every stored `function_call_output` whose `call_id` still has a
+/// matching [`Message::ToolResult`] so replay reflects current content.
+fn sync_continuation_tool_outputs(continuation: &mut [serde_json::Value], messages: &[Message]) {
+    let mut by_id: HashMap<&str, &Message> = HashMap::new();
+    for message in messages {
+        if let Message::ToolResult { call_id, .. } = message {
+            by_id.insert(call_id.as_str(), message);
+        }
+    }
+    for item in continuation.iter_mut() {
+        if item.get("type").and_then(|t| t.as_str()) != Some("function_call_output") {
+            continue;
+        }
+        let Some(call_id) = item.get("call_id").and_then(|c| c.as_str()) else {
+            continue;
+        };
+        if let Some(message) = by_id.get(call_id) {
+            *item = tool_result_input(message);
+        }
+    }
 }
 
 fn replay_tool_outputs(messages: &[Message], state: &ReplayState) -> Vec<serde_json::Value> {

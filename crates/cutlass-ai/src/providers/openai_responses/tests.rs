@@ -240,6 +240,112 @@ fn unrelated_request_does_not_replay_stale_output() {
 }
 
 #[test]
+fn replay_rewrites_stale_function_call_output_from_live_tool_results() {
+    let provider = provider(true);
+    let mut messages = vec![Message::system("system"), Message::user("edit this")];
+    let first_turn = ChatTurn {
+        text: String::new(),
+        reasoning_summary: "first".into(),
+        tool_calls: vec![ToolCall {
+            id: "call_1".into(),
+            name: "describe_project".into(),
+            arguments: serde_json::json!({}),
+        }],
+        finish: FinishReason::ToolCalls,
+        usage: None,
+    };
+    provider.update_replay(
+        &messages,
+        &first_turn,
+        vec![
+            serde_json::json!({
+                "type": "reasoning",
+                "encrypted_content": "encrypted-round-1",
+                "summary": [],
+            }),
+            serde_json::json!({
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "describe_project",
+                "arguments": "{}",
+            }),
+        ],
+    );
+    messages.push(Message::Assistant {
+        content: String::new(),
+        tool_calls: first_turn.tool_calls,
+    });
+    let full_dump = r#"{"project":{"tracks":[{"clips":[1,2,3]}]}}"#;
+    messages.push(Message::tool_result("call_1", full_dump));
+
+    let second_turn = ChatTurn {
+        text: String::new(),
+        reasoning_summary: "second".into(),
+        tool_calls: vec![ToolCall {
+            id: "call_2".into(),
+            name: "describe_project".into(),
+            arguments: serde_json::json!({}),
+        }],
+        finish: FinishReason::ToolCalls,
+        usage: None,
+    };
+    // Stores the full dump inside continuation before any in-prompt collapse.
+    provider.update_replay(
+        &messages,
+        &second_turn,
+        vec![
+            serde_json::json!({
+                "type": "reasoning",
+                "encrypted_content": "encrypted-round-2",
+                "summary": [],
+            }),
+            serde_json::json!({
+                "type": "function_call",
+                "call_id": "call_2",
+                "name": "describe_project",
+                "arguments": "{}",
+            }),
+        ],
+    );
+
+    let placeholder =
+        "(stale project snapshot removed; call describe_project for the current state)";
+    match messages.last_mut() {
+        Some(Message::ToolResult { content, .. }) => *content = placeholder.into(),
+        other => panic!("expected tool result to collapse, got {other:?}"),
+    }
+    messages.push(Message::Assistant {
+        content: String::new(),
+        tool_calls: second_turn.tool_calls,
+    });
+    messages.push(Message::tool_result(
+        "call_2",
+        r#"{"project":{"tracks":[]}}"#,
+    ));
+
+    let body = provider.request_body(&ChatRequest {
+        messages: &messages,
+        tools: &[],
+        session_id: None,
+    });
+    let rendered = body.to_string();
+    assert!(
+        !rendered.contains(r#""clips":[1,2,3]"#),
+        "stale full dump must not ride along in Responses replay: {rendered}"
+    );
+    let call_1_output = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item.get("type") == Some(&serde_json::json!("function_call_output"))
+                && item.get("call_id") == Some(&serde_json::json!("call_1"))
+        })
+        .expect("call_1 function_call_output");
+    assert_eq!(call_1_output["output"], placeholder);
+}
+
+#[test]
 fn consecutive_tool_rounds_preserve_every_exact_item_since_the_user() {
     let provider = provider(true);
     let mut messages = vec![Message::system("system"), Message::user("edit this")];

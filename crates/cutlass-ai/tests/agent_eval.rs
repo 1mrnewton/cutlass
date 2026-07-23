@@ -2219,7 +2219,7 @@ fn newer_describe_project_collapses_prior_dumps_in_flight() {
     let collapsed = tool_result_content(&requests[3], "call_1");
     let newest = tool_result_content(&requests[3], "call_3");
     assert!(
-        collapsed.contains("project state omitted"),
+        collapsed.contains("stale project snapshot removed"),
         "superseded dump collapses in-flight: {collapsed}"
     );
     assert!(
@@ -2246,7 +2246,7 @@ fn newer_describe_project_collapses_prior_dumps_in_flight() {
     assert_eq!(history_describes.len(), 2);
     for content in history_describes {
         assert!(
-            content.contains("project state omitted"),
+            content.contains("stale project snapshot removed"),
             "history collapses all describe results: {content}"
         );
         assert!(!content.contains("\"tracks\""), "{content}");
@@ -2267,9 +2267,8 @@ fn tool_result_content<'a>(messages: &'a [Message], call_id: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing tool result for {call_id}"))
 }
 
-/// `describe_project` results are large and the fresh system snapshot
-/// supersedes them, so history keeps only a placeholder — never a full
-/// stale project blob.
+/// `describe_project` results are large; session history collapses every
+/// dump to a placeholder so stale project blobs never persist.
 #[test]
 fn describe_project_results_are_collapsed_in_history() {
     let (mut host, _media, _track, _clip) = fixture();
@@ -2301,7 +2300,7 @@ fn describe_project_results_are_collapsed_in_history() {
         })
         .expect("the describe_project tool result");
     assert!(
-        tool_result.contains("project state omitted"),
+        tool_result.contains("stale project snapshot removed"),
         "the blob is collapsed: {tool_result}"
     );
     assert!(

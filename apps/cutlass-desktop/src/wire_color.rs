@@ -38,7 +38,9 @@ pub(crate) fn wire_color(
         HsvComponents { h, s, v }
     });
 
-    // Seed the shell model from settings (most-recent-first).
+    // Seed the shell model from settings (most-recent-first). Kept in memory
+    // for the session; disk writes are skipped when order is unchanged and
+    // otherwise happen off the UI thread.
     let initial: Vec<Color> = recent_colors
         .iter()
         .copied()
@@ -53,7 +55,12 @@ pub(crate) fn wire_color(
     util.on_record_recent(move |c| {
         let rgba = [c.red(), c.green(), c.blue(), c.alpha()];
         let mut list = live.borrow_mut();
+        let before = list.clone();
         cutlass_settings::push_recent(&mut list, rgba);
+        if list.as_slice() == before.as_slice() {
+            // Already most-recent — model and disk are current.
+            return;
+        }
 
         // Refresh the Slint model in place so every bound picker updates.
         model.set_vec(
@@ -67,9 +74,15 @@ pub(crate) fn wire_color(
                 .set_recent_colors(ModelRc::from(model.clone()));
         }
 
-        if let Err(error) = persist_recent_colors_at(&config_path, &list) {
-            tracing::warn!(%error, "recent colors could not be saved");
-        }
+        let snapshot = list.clone();
+        let path = config_path.clone();
+        let _ = std::thread::Builder::new()
+            .name("recent-colors-save".into())
+            .spawn(move || {
+                if let Err(error) = persist_recent_colors_at(&path, &snapshot) {
+                    tracing::warn!(%error, "recent colors could not be saved");
+                }
+            });
     });
 }
 

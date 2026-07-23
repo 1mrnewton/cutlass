@@ -96,11 +96,6 @@ impl MaskGestureSession {
     }
 
     #[cfg(test)]
-    pub fn active_clip(&self) -> Option<&str> {
-        self.active_clip.as_deref()
-    }
-
-    #[cfg(test)]
     pub fn handle(&self) -> i32 {
         self.handle
     }

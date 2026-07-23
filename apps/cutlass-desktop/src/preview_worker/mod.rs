@@ -19,6 +19,7 @@ mod frame_cache;
 mod frame_fit;
 mod handle;
 mod import_drop;
+mod invalidate;
 mod look_preview;
 mod markers_tracks;
 mod overrides;
@@ -75,6 +76,7 @@ use export::*;
 use frame_cache::*;
 use frame_fit::*;
 use import_drop::*;
+use invalidate::*;
 use look_preview::*;
 use markers_tracks::*;
 use overrides::*;
@@ -86,11 +88,9 @@ use render::*;
 use rpc::*;
 use timeline_ops::*;
 use types::*;
-// `PreviewWorker` (the other `pub` item in `worker_loop`) is re-exported
-// explicitly below; this one is a testable seam exercised directly by
-// `preview_worker::tests` and otherwise unused outside `worker_loop` itself.
+// Testable seam exercised directly by `preview_worker::tests`.
 #[allow(unused_imports)]
-use worker_loop::message_invalidates_preview;
+use invalidate::message_invalidates_preview;
 
 // Re-exported for `agent::tests`, which replays plans directly against a live
 // engine; unused outside `#[cfg(test)]` builds since `agent_bridge` itself

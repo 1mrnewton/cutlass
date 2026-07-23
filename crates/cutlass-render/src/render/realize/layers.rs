@@ -16,6 +16,7 @@ use crate::scene::{LayerSource, ResolvedPass, Scene, SceneLut, SizeSpec};
 
 use super::super::effects::{blend_mode, layer_effects, layer_styles};
 use super::super::media_cache::{CubeLutState, LottieState, StickerSequence, layer_lut};
+use super::super::raster_fit::fit_path_raster_scale;
 use super::super::{Renderer, SeekPolicy};
 use super::text;
 
@@ -499,14 +500,17 @@ impl Renderer {
                     fill: Some(*fill).filter(|c| c[3] > 0),
                     stroke: *stroke,
                 };
-                let image = self.paths.rasterize(path, &style, *raster_scale);
-                if image.width == 0 || image.height == 0 {
-                    return Err(RenderError::unsupported("degenerate path layer"));
-                }
-                let scale = match layer.size {
+                let residual = match layer.size {
                     SizeSpec::BitmapScaled(s) => s,
                     SizeSpec::Fixed(_) => [1.0, 1.0],
                 };
+                let stroke_w = stroke.map(|s| s.width).unwrap_or(0.0);
+                let (raster_scale, scale, _) =
+                    fit_path_raster_scale(path, stroke_w, *raster_scale, residual);
+                let image = self.paths.rasterize(path, &style, raster_scale);
+                if image.width == 0 || image.height == 0 {
+                    return Err(RenderError::unsupported("degenerate path layer"));
+                }
                 let size = [
                     image.width as f32 * scale[0],
                     image.height as f32 * scale[1],

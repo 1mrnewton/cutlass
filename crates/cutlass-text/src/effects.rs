@@ -20,11 +20,19 @@ const BOX_BLUR_ITERATIONS: u32 = 2;
 /// overflowing allocation or practically unbounded morphology loop.
 const MAX_EFFECT_EXTENT_PX: f32 = 4096.0;
 
+/// Pixel size of [`paint`] output for `shaped` + `style` (extent + effect pad).
+pub fn painted_size(shaped: &ShapedText, style: &TextStyle) -> (u32, u32) {
+    let pad = effect_padding(style);
+    (
+        shaped.extent.0.saturating_add(pad.saturating_mul(2)),
+        shaped.extent.1.saturating_add(pad.saturating_mul(2)),
+    )
+}
+
 /// Compose stroke / background / shadow around an already-shaped run.
 pub(crate) fn paint(shaped: &ShapedText, style: &TextStyle) -> RgbaImage {
     let pad = effect_padding(style);
-    let width = shaped.extent.0.saturating_add(pad.saturating_mul(2));
-    let height = shaped.extent.1.saturating_add(pad.saturating_mul(2));
+    let (width, height) = painted_size(shaped, style);
     let Some(pixel_len) = (width as usize)
         .checked_mul(height as usize)
         .and_then(|pixels| pixels.checked_mul(4))

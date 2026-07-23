@@ -19,6 +19,7 @@ use crate::scene::{LayerSource, Scene, SceneLut, SizeSpec};
 
 use super::effects::{EffectChain, blend_mode, layer_effects, layer_styles, pack_effects};
 use super::media_cache::layer_lut;
+use super::raster_fit::fit_path_raster_scale;
 use super::{FrameStats, Renderer, SLOW_FRAME_LOG_MS, SeekPolicy};
 
 impl Renderer {
@@ -240,14 +241,17 @@ impl Renderer {
                         fill: Some(*fill).filter(|c| c[3] > 0),
                         stroke: *stroke,
                     };
-                    let image = self.paths.rasterize(path, &style, *raster_scale);
-                    if image.width == 0 || image.height == 0 {
-                        continue; // nothing inked (degenerate path or style)
-                    }
-                    let scale = match layer.size {
+                    let residual = match layer.size {
                         SizeSpec::BitmapScaled(s) => s,
                         SizeSpec::Fixed(_) => [1.0, 1.0],
                     };
+                    let stroke_w = stroke.map(|s| s.width).unwrap_or(0.0);
+                    let (raster_scale, scale, _) =
+                        fit_path_raster_scale(path, stroke_w, *raster_scale, residual);
+                    let image = self.paths.rasterize(path, &style, raster_scale);
+                    if image.width == 0 || image.height == 0 {
+                        continue; // nothing inked (degenerate path or style)
+                    }
                     let size = [
                         image.width as f32 * scale[0],
                         image.height as f32 * scale[1],

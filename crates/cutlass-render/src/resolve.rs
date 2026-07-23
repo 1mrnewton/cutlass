@@ -43,6 +43,7 @@ mod shape;
 use generator::map_text_style;
 pub(crate) use generator::resolve_generator;
 pub use param_override::ParamOverrides;
+pub(crate) use raster_supersample::RASTER_EDGE_CAP;
 
 /// Vertical reference height that a generator's reference-pixel sizes (text
 /// `size`, shape `width`/`height`) are authored against. Matches the model's

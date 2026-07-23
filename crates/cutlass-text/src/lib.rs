@@ -43,6 +43,7 @@ use cosmic_text::{
 use cutlass_core::{ByteBudgetLru, RASTER_MEMO_BUDGET_BYTES, RgbaImage};
 
 pub use animated::{AnimatedText, paint_animated};
+pub use effects::painted_size;
 pub use style::{
     FontFamily, TextAlign, TextBackground, TextShadow, TextStroke, TextStyle, TextVerticalAlign,
 };

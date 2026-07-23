@@ -41,8 +41,9 @@ pub(super) const MAX_RASTER_EDGE_CANVAS_MULT: f32 = 2.0;
 
 /// Quantize a raw supersample factor to [`SUPER_SAMPLE_STEP`] increments.
 ///
-/// Values below 1 collapse to 1 — we never re-raster smaller than the
-/// reference; GPU downscale of the reference bitmap is fine for scale < 1.
+/// Transform scale `< 1` collapses to 1 here (GPU downscale of the reference
+/// bitmap is fine). [`clamp_supersample`] may still force `S < 1` when the
+/// reference raster alone would exceed the texture edge.
 pub(super) fn quantize_supersample(raw: f32) -> f32 {
     if !raw.is_finite() || raw <= 1.0 {
         return 1.0;
@@ -56,8 +57,12 @@ pub(super) fn supersample_from_scale(scale: Scale2) -> f32 {
 }
 
 /// Back `s` off so `ref_long_edge * s` stays within the raster cap.
+///
+/// May return **below 1.0** when the reference raster alone exceeds the cap
+/// (huge fonts / emoji / CJK) — that case must downscale rather than allocate
+/// past the texture edge. Realize still hard-caps with measured extents.
 pub(super) fn clamp_supersample(s: f32, ref_long_edge: f32, canvas_long: f32) -> f32 {
-    let s = if s.is_finite() && s >= 1.0 { s } else { 1.0 };
+    let s = if s.is_finite() && s > 0.0 { s } else { 1.0 };
     let canvas_long = if canvas_long.is_finite() && canvas_long > 0.0 {
         canvas_long
     } else {
@@ -69,9 +74,12 @@ pub(super) fn clamp_supersample(s: f32, ref_long_edge: f32, canvas_long: f32) ->
     if !ref_long_edge.is_finite() || ref_long_edge <= 0.0 {
         return s.min(cap);
     }
-    let max_s = (cap / ref_long_edge).max(1.0);
+    let max_s = (cap / ref_long_edge).max(f32::MIN_POSITIVE);
     s.min(max_s)
 }
+
+/// Absolute texture-edge cap shared with realize-time hard clamping.
+pub(crate) const RASTER_EDGE_CAP: f32 = MAX_RASTER_EDGE;
 
 /// Residual [`SizeSpec::BitmapScaled`] multipliers after folding `s` into the raster.
 pub(super) fn residual_bitmap_scale(scale: Scale2, s: f32) -> SizeSpec {
@@ -195,6 +203,14 @@ mod tests {
         approx(s, 50.0); // 50 still fits
         let s = clamp_supersample(1000.0, 10.0, 1920.0);
         approx(s, 384.0); // min(4096, 3840) / 10
+    }
+
+    #[test]
+    fn clamp_can_go_below_one_when_reference_exceeds_cap() {
+        // Huge reference edge on 1920 canvas → cap 3840 → S = 3840/8000.
+        let s = clamp_supersample(1.0, 8000.0, 1920.0);
+        approx(s, 3840.0 / 8000.0);
+        assert!(s < 1.0);
     }
 
     #[test]

@@ -8,6 +8,7 @@
 mod api;
 mod effects;
 mod media_cache;
+mod raster_fit;
 mod realize;
 mod text_anim;
 

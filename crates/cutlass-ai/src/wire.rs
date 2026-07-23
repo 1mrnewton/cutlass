@@ -75,7 +75,9 @@ use serde::{Deserialize, Serialize};
 /// 42: motion convention docs — position = anchor offset from canvas center;
 ///     speed not keyframable via set_param_keyframe (use set_speed_curve /
 ///     set_clip_speed); rotation about anchor; keyframe `at` = timeline secs.
-pub const TOOL_SCHEMA_VERSION: u32 = 42;
+/// 43: drop `speed` from keyframe-tool WireClipParam schema enum (serde still
+///     accepts it so validate can teach set_clip_speed / set_speed_curve).
+pub const TOOL_SCHEMA_VERSION: u32 = 43;
 
 mod dtos;
 mod tools;

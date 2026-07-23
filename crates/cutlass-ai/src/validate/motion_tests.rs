@@ -340,3 +340,40 @@ fn set_clip_transform_still_works_on_non_animated_clip() {
         other => panic!("unexpected {other:?}"),
     }
 }
+
+#[test]
+fn speed_keyframe_param_is_rejected_with_dedicated_tools_hint() {
+    let (project, clip) = fixture();
+    for cmd in [
+        WireCommand::SetParamKeyframe(wire::SetParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Speed,
+            at: 0.0,
+            value: Some(1.5),
+            position: None,
+            rgba: None,
+            rect: None,
+            easing: None,
+            tangent_out: None,
+            tangent_in: None,
+        }),
+        WireCommand::SetParamConstant(wire::SetParamConstant {
+            clip,
+            param: wire::WireClipParam::Speed,
+            value: Some(1.5),
+            position: None,
+            rgba: None,
+            rect: None,
+        }),
+        WireCommand::RemoveParamKeyframe(wire::RemoveParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Speed,
+            at: 0.0,
+        }),
+    ] {
+        let msg = reject(&project, cmd);
+        assert!(msg.contains("not keyframable"), "{msg}");
+        assert!(msg.contains("set_clip_speed"), "{msg}");
+        assert!(msg.contains("set_speed_curve"), "{msg}");
+    }
+}

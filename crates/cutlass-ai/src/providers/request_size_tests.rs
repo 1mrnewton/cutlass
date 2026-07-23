@@ -139,9 +139,9 @@ fn tools_only_body_stays_under_ceiling() {
     )];
     let bytes = body_bytes(&provider, &messages, &tools);
 
-    // Measured 2026-07-23 (post motion-convention doc refresh): 50_962 bytes
-    // (tools dominate). Ceiling = prior measured+15% headroom; still holds.
-    const TOOLS_ONLY_CEILING: usize = 52_500;
+    // Measured 2026-07-23 (post speed schema drop): 50_918 bytes
+    // (tools dominate). Ceiling = measured + ~3% headroom; ratchet down on shrinks.
+    const TOOLS_ONLY_CEILING: usize = 52_400;
     assert!(
         bytes < TOOLS_ONLY_CEILING,
         "tools-only request body grew to {bytes} bytes (ceiling {TOOLS_ONLY_CEILING}); \
@@ -222,9 +222,9 @@ fn transcript_growth_last_turn_stays_under_ceiling() {
     let tools_bytes = body_bytes(&provider, &[], &tools);
     let messages_bytes = body_bytes(&provider, &messages, &[]);
 
-    // Measured 2026-07-23 (post motion-convention doc refresh): total=65_606,
-    // tools≈50_890, messages≈14_807. Ceiling still holds with prior +15%.
-    const TRANSCRIPT_CEILING: usize = 68_500;
+    // Measured 2026-07-23 (post speed schema drop): total=65_562,
+    // tools≈50_846, messages≈14_807. Ceiling still holds with prior +15%.
+    const TRANSCRIPT_CEILING: usize = 68_400;
     assert!(
         total < TRANSCRIPT_CEILING,
         "last-turn request body grew to {total} bytes \

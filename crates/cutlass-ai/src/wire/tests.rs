@@ -1,6 +1,6 @@
 use super::dtos::{
-    WIRE_CLIP_PARAM_UNIT_TOKENS, WIRE_LOOK_PARAM_TOKENS, WIRE_SHAPE_PARAM_TOKENS,
-    WIRE_STYLE_PARAM_TOKENS, WIRE_TEXT_PARAM_TOKENS,
+    WIRE_CLIP_PARAM_SCHEMA_UNIT_TOKENS, WIRE_CLIP_PARAM_UNIT_TOKENS, WIRE_LOOK_PARAM_TOKENS,
+    WIRE_SHAPE_PARAM_TOKENS, WIRE_STYLE_PARAM_TOKENS, WIRE_TEXT_PARAM_TOKENS,
 };
 use super::*;
 
@@ -206,7 +206,12 @@ fn wire_clip_param_schema_enums_match_serde_tokens() {
         .iter()
         .map(|v| v.as_str().unwrap().to_string())
         .collect();
-    assert_token_set_eq("unit", &unit, WIRE_CLIP_PARAM_UNIT_TOKENS);
+    assert_token_set_eq("unit", &unit, WIRE_CLIP_PARAM_SCHEMA_UNIT_TOKENS);
+    assert!(
+        !unit.iter().any(|t| t == "speed"),
+        "speed must not be advertised on keyframe tools"
+    );
+    // Serde still accepts every unit token (including speed) so validate can teach.
     for token in WIRE_CLIP_PARAM_UNIT_TOKENS {
         let value = serde_json::Value::String((*token).into());
         serde_json::from_value::<WireClipParam>(value)

@@ -10,6 +10,18 @@ use crate::wire::{WireClipParam, WireScale};
 
 use super::Rejection;
 
+/// `speed` is still accepted by wire serde so a mistaken tool call reaches
+/// validate, but it is not keyframable — teach the dedicated speed tools.
+pub(super) fn reject_speed_keyframe_param(param: &WireClipParam) -> Result<(), Rejection> {
+    if matches!(param, WireClipParam::Speed) {
+        return Err(Rejection::new(
+            "speed is not keyframable — use set_clip_speed for a constant rate \
+             or set_speed_curve for a ramp",
+        ));
+    }
+    Ok(())
+}
+
 /// Reject a position component outside ±1.5 canvas fractions.
 pub(super) fn check_position_component(v: f64) -> Result<(), Rejection> {
     if !v.is_finite() || v.abs() > 1.5 {

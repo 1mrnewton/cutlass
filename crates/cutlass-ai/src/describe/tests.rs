@@ -269,7 +269,7 @@ fn position_keyframes_use_absolute_timeline_seconds() {
     assert_eq!(position[0].easing, None);
     assert_eq!(position[1].at, 2.0);
     assert_eq!(position[1].value, serde_json::json!([0.0, 0.0]));
-    assert_eq!(position[1].easing.as_deref(), Some("ease_out"));
+    assert_eq!(position[1].easing, Some(serde_json::json!("ease_out")));
     assert_eq!(clip.position, None);
 }
 
@@ -294,7 +294,34 @@ fn scale_keyframes_use_wire_scale_shape() {
     let scale = kfs.get("scale").expect("scale keyframes");
     assert_eq!(scale[0].value, serde_json::json!(1.0));
     assert_eq!(scale[1].value, serde_json::json!([1.5, 0.5]));
-    assert_eq!(scale[1].easing.as_deref(), Some("ease_in"));
+    assert_eq!(scale[1].easing, Some(serde_json::json!("ease_in")));
+}
+
+#[test]
+fn custom_bezier_easing_describes_wire_object_shape() {
+    let (mut project, clip_id) = media_clip_project();
+    let points = [0.2, 0.0, 0.8, 1.0];
+    {
+        let clip = project.timeline_mut().clip_mut(clip_id).unwrap();
+        clip.transform
+            .position
+            .set_keyframe(0, [-1.0, 0.0], Easing::Bezier { points });
+        clip.transform
+            .position
+            .set_keyframe(24, [0.0, 0.0], Easing::Linear);
+    }
+    let summary = summarize(&project);
+    let kfs = summary.tracks[0].clips[0]
+        .keyframes
+        .as_ref()
+        .expect("keyframes");
+    let position = kfs.get("position").expect("position");
+    assert_eq!(
+        position[0].easing,
+        Some(serde_json::json!({"bezier":{"points":[0.2, 0.0, 0.8, 1.0]}})),
+        "custom bezier must emit the wire object, not the bare string \"bezier\""
+    );
+    assert_eq!(position[1].easing, None);
 }
 
 #[test]

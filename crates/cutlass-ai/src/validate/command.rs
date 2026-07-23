@@ -350,6 +350,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         }
         WireCommand::SetParamKeyframe(args) => {
             let clip = clip_ref(project, args.clip)?;
+            reject_speed_keyframe_param(&args.param)?;
             let at = keyframe_position(project, clip, args.at)?;
             check_motion_param_args(&args.param, args.value, args.position)?;
             let value = param_value(
@@ -373,6 +374,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         }
         WireCommand::RemoveParamKeyframe(args) => {
             let clip = clip_ref(project, args.clip)?;
+            reject_speed_keyframe_param(&args.param)?;
             let at = keyframe_position(project, clip, args.at)?;
             EditCommand::RemoveParamKeyframe {
                 clip: clip.id,
@@ -397,6 +399,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         WireCommand::SetClipAudio(args) => set_clip_audio(project, args)?,
         WireCommand::SetParamConstant(args) => {
             let clip = clip_ref(project, args.clip)?;
+            reject_speed_keyframe_param(&args.param)?;
             check_motion_param_args(&args.param, args.value, args.position)?;
             let value = param_value(
                 clip,

@@ -148,6 +148,8 @@ pub struct SetTransition {
 }
 
 /// Unit (string) variants of [`WireClipParam`] — serde `rename_all = "snake_case"`.
+/// Includes `speed` so a model that still sends it gets a validate teaching
+/// rejection instead of a parse error.
 pub(crate) const WIRE_CLIP_PARAM_UNIT_TOKENS: &[&str] = &[
     "position",
     "anchor_point",
@@ -158,6 +160,19 @@ pub(crate) const WIRE_CLIP_PARAM_UNIT_TOKENS: &[&str] = &[
     "volume",
     "pan",
     "speed",
+];
+
+/// Unit tokens advertised in JSON Schema for keyframe tools. Omits `speed`
+/// (not keyframable — use `set_clip_speed` / `set_speed_curve`).
+pub(crate) const WIRE_CLIP_PARAM_SCHEMA_UNIT_TOKENS: &[&str] = &[
+    "position",
+    "anchor_point",
+    "scale",
+    "rotation",
+    "opacity",
+    "crop",
+    "volume",
+    "pan",
 ];
 
 /// Snake_case wire tokens for [`WireShapeParam`].
@@ -285,12 +300,18 @@ impl JsonSchema for WireClipParam {
     }
 
     fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
+        // Schema enum is a deliberate subset of serde tokens (`speed` omitted).
+        debug_assert!(
+            WIRE_CLIP_PARAM_SCHEMA_UNIT_TOKENS
+                .iter()
+                .all(|t| WIRE_CLIP_PARAM_UNIT_TOKENS.contains(t))
+        );
         // Compact shared description; nested param names are exact enums in
-        // each tagged branch (same tokens serde accepts).
+        // each tagged branch (same tokens serde accepts, minus speed).
         let schema = serde_json::json!({
-            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan|speed. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] = anchor offset from canvas center in canvas fractions (vec2 also: anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW about anchor, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). speed is not keyframable here — use set_clip_speed / set_speed_curve. volume/pan=media; crop=visual. Keyframe `at` = absolute timeline seconds inside the clip.",
+            "description": "Clip property. Strings: position|anchor_point|scale|rotation|opacity|crop|volume|pan. Tagged: {\"effect\":{\"index\":N,\"param\":effectParamName}}, {\"shape|text|look|style\":{\"param\":enum}}. Args: position=[x,y] = anchor offset from canvas center in canvas fractions (vec2 also: anchor_point, per-axis scale, mask_center/size, shadow_offset, vec2 effects); value=scalars (rot° CW about anchor, opacity 0..1, scale 1.0=fit, volume 0..10, pan −1..+1); rgba=[r,g,b,a] 0–255; rect=[x,y,w,h] content fractions (crop). volume/pan=media; crop=visual. Keyframe `at` = absolute timeline seconds inside the clip. For clip rate use set_clip_speed / set_speed_curve (not a keyframe param).",
             "oneOf": [
-                schema_string_enum(WIRE_CLIP_PARAM_UNIT_TOKENS),
+                schema_string_enum(WIRE_CLIP_PARAM_SCHEMA_UNIT_TOKENS),
                 {
                     "type": "object",
                     "additionalProperties": false,

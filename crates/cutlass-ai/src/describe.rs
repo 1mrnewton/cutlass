@@ -243,9 +243,11 @@ pub struct KeyframeSummary {
     /// number or `[x,y]` for scale ([`WireScale`]).
     #[serde(rename = "v")]
     pub value: serde_json::Value,
-    /// Wire easing name (`ease_out`, `snappy`, `hold`, …). Omitted when linear.
+    /// Wire easing shape: a plain string for named presets / `ease_*` /
+    /// `hold`, or `{"bezier":{"points":[x1,y1,x2,y2]}}` for a custom cubic.
+    /// Omitted when linear.
     #[serde(rename = "e", default, skip_serializing_if = "Option::is_none")]
-    pub easing: Option<String>,
+    pub easing: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -354,14 +356,30 @@ fn even_pixels(v: u32) -> u32 {
     (v & !1).max(2)
 }
 
-fn wire_easing_name(easing: Easing) -> Option<String> {
+/// Serialize an easing the way `set_param_keyframe.easing` accepts it.
+fn wire_easing_json(easing: Easing) -> Option<serde_json::Value> {
     match easing {
         Easing::Linear => None,
-        Easing::EaseIn => Some("ease_in".into()),
-        Easing::EaseOut => Some("ease_out".into()),
-        Easing::EaseInOut => Some("ease_in_out".into()),
-        Easing::Hold => Some("hold".into()),
-        Easing::Bezier { .. } => Some(easing.preset_id().unwrap_or("bezier").into()),
+        Easing::EaseIn => Some(serde_json::json!("ease_in")),
+        Easing::EaseOut => Some(serde_json::json!("ease_out")),
+        Easing::EaseInOut => Some(serde_json::json!("ease_in_out")),
+        Easing::Hold => Some(serde_json::json!("hold")),
+        Easing::Bezier { points } => {
+            if let Some(id) = easing.preset_id() {
+                Some(serde_json::json!(id))
+            } else {
+                Some(serde_json::json!({
+                    "bezier": {
+                        "points": [
+                            wire_f64(points[0]),
+                            wire_f64(points[1]),
+                            wire_f64(points[2]),
+                            wire_f64(points[3]),
+                        ]
+                    }
+                }))
+            }
+        }
     }
 }
 
@@ -401,7 +419,7 @@ fn push_keyframes<T, F>(
         .map(|kf| KeyframeSummary {
             at: seconds(clip_start_ticks + kf.tick, rate),
             value: value_json(kf.value),
-            easing: wire_easing_name(kf.easing),
+            easing: wire_easing_json(kf.easing),
         })
         .collect();
     if !points.is_empty() {

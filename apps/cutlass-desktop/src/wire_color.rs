@@ -92,11 +92,9 @@ fn persist_recent_colors_at(
     path: &std::path::Path,
     colors: &[cutlass_settings::Rgba],
 ) -> Result<(), String> {
-    let mut settings = cutlass_settings::load(path).map_err(|error| {
-        format!("recent colors not saved; settings file unreadable: {error}")
-    })?;
+    let mut settings = cutlass_settings::load(path)
+        .map_err(|error| format!("recent colors not saved; settings file unreadable: {error}"))?;
     settings.appearance.recent_colors = colors.to_vec();
-    cutlass_settings::save(path, &settings).map_err(|error| {
-        format!("recent colors could not be written: {error}")
-    })
+    cutlass_settings::save(path, &settings)
+        .map_err(|error| format!("recent colors could not be written: {error}"))
 }

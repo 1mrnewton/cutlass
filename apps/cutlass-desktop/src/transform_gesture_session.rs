@@ -39,9 +39,7 @@ impl TransformGestureSession {
 
     /// Live overlay mirror updated on every preview tick (inspector or canvas).
     pub fn overlay_mirror(&self) -> Option<(&str, &ClipTransform)> {
-        self.overlay
-            .as_ref()
-            .map(|(id, t)| (id.as_str(), t))
+        self.overlay.as_ref().map(|(id, t)| (id.as_str(), t))
     }
 
     /// Explicit begin (canvas press). Returns `true` when the caller should

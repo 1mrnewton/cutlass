@@ -3642,7 +3642,9 @@ fn inspector_transform_preview_commit_emits_begin_overrides_and_one_commit() {
     let t = sample_override_transform();
 
     preview_transform(&mut session, &handle, "7".into(), t, 12);
-    let (id, mirrored) = session.overlay_mirror().expect("overlay mirrored on preview");
+    let (id, mirrored) = session
+        .overlay_mirror()
+        .expect("overlay mirrored on preview");
     assert_eq!(id, "7");
     assert_eq!(mirrored.position, t.position);
     preview_transform(&mut session, &handle, "7".into(), t, 12);

@@ -23,7 +23,8 @@ use super::token_usage::format_usage_line;
 use super::tool_host::{DesktopToolHandles, DesktopToolHost, abort_status_message};
 use super::transcript::{
     append_assistant_text, append_reasoning_text, attach_usage_line, persist_session,
-    publish_chat_list, push_entry, push_image_entry, replace_transcript, with_store,
+    publish_chat_list, push_entry, push_image_entry, replace_transcript, transcript_row_count,
+    trim_transcript_after_stale_plan_discard, with_store,
 };
 use super::types::{
     AgentHandle, AgentPlanStep, AgentRequest, AgentRuntimeHandles, AgentWorker, ApprovalDecision,
@@ -89,6 +90,16 @@ pub(crate) const STALE_PLAN_NOTICE: &str = "Project changed since this plan was 
 pub(crate) const STALE_APPLY_NOTICE: &str =
     "Project changed since this plan was rehearsed — the plan was not applied.";
 
+/// Provider-history corrective notice when non-dry-run auto-apply fails to
+/// replay (transcript already carries the detailed error from
+/// [`apply_plan_live`]).
+pub(crate) const AUTO_APPLY_FAILED_HISTORY_NOTICE: &str =
+    "Could not apply the plan — the edits were not applied to the project.";
+
+/// Provider-history corrective notice when auto-apply cannot reach the engine.
+pub(crate) const AUTO_APPLY_ENGINE_GONE_HISTORY_NOTICE: &str =
+    "Could not apply the plan — the editor engine is not responding.";
+
 #[derive(Default)]
 pub(crate) struct Preview {
     pub(crate) plan: Vec<AgentPlanStep>,
@@ -97,6 +108,10 @@ pub(crate) struct Preview {
     pub(crate) phase_breaks: Vec<usize>,
     pub(crate) descriptions: Vec<SharedString>,
     pub(crate) history_restore: Option<Vec<Message>>,
+    /// Visible transcript length captured with [`Self::history_restore`] so a
+    /// stale-plan auto-discard can trim rehearsal rows the user should no
+    /// longer see.
+    pub(crate) transcript_restore_len: Option<usize>,
     /// Live engine revision captured when the sandbox was last seeded from
     /// the editor. Detects user edits under a parked dry-run plan.
     pub(crate) seed_revision: Option<u64>,
@@ -112,6 +127,7 @@ impl Preview {
         self.phase_breaks.clear();
         self.descriptions.clear();
         self.history_restore = None;
+        self.transcript_restore_len = None;
         self.seed_revision = None;
     }
 }
@@ -236,6 +252,9 @@ pub(crate) fn agent_main(
                 if dry_run {
                     if !preview.is_pending() {
                         preview.history_restore = Some(history.clone());
+                        // Capture before this prompt's user/status rows land
+                        // so a later stale discard can drop only the rehearsal.
+                        preview.transcript_restore_len = transcript_row_count(&store);
                     }
                 } else if preview.is_pending() {
                     if let Some(saved) = preview.history_restore.take() {
@@ -578,8 +597,15 @@ pub(crate) fn run_one_prompt(
         if discarded_stale_plan {
             // Drop rehearsal turns that describe edits no longer in the
             // reseeded sandbox; refresh the checkpoint for this new run.
+            let transcript_checkpoint = preview.transcript_restore_len.take();
             restore_history_after_stale_plan_discard(history, preview);
+            if let Some(checkpoint_len) = transcript_checkpoint {
+                trim_transcript_after_stale_plan_discard(store, checkpoint_len);
+            }
             push_entry(store, "status", STALE_PLAN_NOTICE.into());
+            // Next parked rehearsal's Discard/stale trim starts after this
+            // notice (and the already-pushed replacement user prompt).
+            preview.transcript_restore_len = transcript_row_count(store);
         }
     }
 
@@ -690,13 +716,19 @@ pub(crate) fn run_one_prompt(
             } else if !plan.is_empty() {
                 // Auto-apply never extends a parked preview (any pending one
                 // was discarded above), so the breaks are plan-relative.
-                let _ = apply_plan_live(
+                let apply = apply_plan_live(
                     worker,
                     store,
                     plan,
                     &outcome.phase_breaks,
                     preview.seed_revision,
                 );
+                // Keep provider history aligned with reality: turn_messages
+                // already describe sandbox edits, so a failed/stale replay
+                // must also post a corrective notice (transcript + history).
+                if let Some((kind, text)) = record_auto_apply_outcome(history, apply) {
+                    push_entry(store, kind, text.into());
+                }
             }
         }
     }
@@ -743,6 +775,33 @@ pub(crate) enum ApplyLiveOutcome {
     Stale,
     Failed,
     EngineGone,
+}
+
+/// After non-dry-run auto-apply, sync provider history (and optionally the
+/// visible transcript) when edits did not land on the live project.
+///
+/// Returns `(kind, text)` for a transcript row that still needs posting.
+/// [`ApplyLiveOutcome::Failed`] / [`ApplyLiveOutcome::EngineGone`] already
+/// pushed their errors inside [`apply_plan_live`]; only history is updated.
+pub(crate) fn record_auto_apply_outcome(
+    history: &mut Vec<Message>,
+    outcome: ApplyLiveOutcome,
+) -> Option<(&'static str, &'static str)> {
+    match outcome {
+        ApplyLiveOutcome::Applied => None,
+        ApplyLiveOutcome::Stale => {
+            history.push(Message::user(STALE_APPLY_NOTICE));
+            Some(("status", STALE_APPLY_NOTICE))
+        }
+        ApplyLiveOutcome::Failed => {
+            history.push(Message::user(AUTO_APPLY_FAILED_HISTORY_NOTICE));
+            None
+        }
+        ApplyLiveOutcome::EngineGone => {
+            history.push(Message::user(AUTO_APPLY_ENGINE_GONE_HISTORY_NOTICE));
+            None
+        }
+    }
 }
 
 pub(crate) fn apply_plan_live(

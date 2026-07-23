@@ -43,6 +43,60 @@ pub(crate) fn push_entry(
     with_transcript(store, move |model| model.push(entry(kind, text)));
 }
 
+/// Current transcript row count, observed on the Slint thread.
+pub(crate) fn transcript_row_count(store: &slint::Weak<AgentStore<'static>>) -> Option<usize> {
+    let (tx, rx) = bounded(1);
+    let store = store.clone();
+    slint::invoke_from_event_loop(move || {
+        let n = store
+            .upgrade()
+            .map(|store| store.get_transcript().row_count())
+            .unwrap_or(0);
+        let _ = tx.send(n);
+    })
+    .ok()?;
+    rx.recv_timeout(Duration::from_secs(2)).ok()
+}
+
+/// Drop discarded dry-run rehearsal rows from the chat UI while keeping the
+/// already-pushed replacement user prompt (and any status lines after it).
+pub(crate) fn trim_transcript_after_stale_plan_discard(
+    store: &slint::Weak<AgentStore<'static>>,
+    checkpoint_len: usize,
+) {
+    with_transcript(store, move |model| {
+        let count = model.row_count();
+        let rows: Vec<AgentEntry> = (0..count).filter_map(|i| model.row_data(i)).collect();
+        model.set_vec(trim_rows_after_stale_plan_discard(
+            rows,
+            checkpoint_len,
+            |row| row.kind == "user",
+        ));
+    });
+}
+
+/// Pure splice used by [`trim_transcript_after_stale_plan_discard`]: keep
+/// `[0..checkpoint_len)` plus the trailing segment that starts at the latest
+/// `user` row at or after the checkpoint.
+pub(crate) fn trim_rows_after_stale_plan_discard<T>(
+    mut rows: Vec<T>,
+    checkpoint_len: usize,
+    is_user: impl Fn(&T) -> bool,
+) -> Vec<T> {
+    let count = rows.len();
+    let checkpoint_len = checkpoint_len.min(count);
+    let keep_from = (checkpoint_len..count)
+        .rev()
+        .find(|&i| is_user(&rows[i]))
+        .unwrap_or(count);
+    if keep_from > checkpoint_len {
+        rows.drain(checkpoint_len..keep_from);
+    } else if keep_from < checkpoint_len {
+        rows.truncate(checkpoint_len);
+    }
+    rows
+}
+
 pub(crate) fn push_image_entry(
     store: &slint::Weak<AgentStore<'static>>,
     image: cutlass_ai::ImagePart,

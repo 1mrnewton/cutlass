@@ -181,6 +181,82 @@ fn stale_plan_discard_restores_history_and_refreshes_checkpoint() {
 }
 
 #[test]
+fn auto_apply_stale_outcome_posts_notice_and_corrects_history() {
+    let mut history = vec![
+        Message::user("trim the clip"),
+        Message::assistant_text("I'll trim it."),
+    ];
+    let turn_len = history.len();
+    // turn_messages already appended (sandbox edits looked successful).
+    history.push(Message::tool_result("call-1", "trimmed clip c1"));
+
+    let pending = record_auto_apply_outcome(&mut history, ApplyLiveOutcome::Stale);
+    assert_eq!(pending, Some(("status", STALE_APPLY_NOTICE)));
+    assert!(
+        history[turn_len..]
+            .iter()
+            .any(|m| matches!(m, Message::ToolResult { .. })),
+        "sandbox turn messages stay so the model sees what it attempted"
+    );
+    assert!(
+        matches!(
+            history.last(),
+            Some(Message::User { content, .. }) if content == STALE_APPLY_NOTICE
+        ),
+        "corrective notice must be last so the next turn knows nothing landed"
+    );
+}
+
+#[test]
+fn auto_apply_failed_outcome_corrects_history_without_duplicate_transcript() {
+    let mut history = vec![Message::user("add a marker")];
+    assert_eq!(
+        record_auto_apply_outcome(&mut history, ApplyLiveOutcome::Failed),
+        None,
+        "apply_plan_live already pushed the error row"
+    );
+    assert_eq!(
+        history.last(),
+        Some(&Message::user(AUTO_APPLY_FAILED_HISTORY_NOTICE))
+    );
+    assert_eq!(
+        record_auto_apply_outcome(&mut history, ApplyLiveOutcome::Applied),
+        None
+    );
+    assert_eq!(
+        history.last(),
+        Some(&Message::user(AUTO_APPLY_FAILED_HISTORY_NOTICE)),
+        "Applied must not append another notice"
+    );
+}
+
+#[test]
+fn stale_discard_trims_rehearsal_transcript_rows_keeps_replacement_prompt() {
+    // checkpoint = rows before the first dry-run user prompt.
+    let kinds = vec![
+        "status",    // earlier chat
+        "user",      // dry-run #1 prompt (discarded with rehearsal)
+        "action",    // rehearsal
+        "assistant", // rehearsal
+        "user",      // replacement prompt already pushed
+        "status",    // slash-expand / warnings after that user
+    ];
+    let trimmed = trim_rows_after_stale_plan_discard(kinds, 1, |k| *k == "user");
+    assert_eq!(
+        trimmed,
+        vec!["status", "user", "status"],
+        "rehearsal rows between the checkpoint and the latest user must drop"
+    );
+}
+
+#[test]
+fn stale_discard_transcript_trim_is_noop_when_nothing_to_drop() {
+    let kinds = vec!["user", "status"];
+    let trimmed = trim_rows_after_stale_plan_discard(kinds.clone(), 0, |k| *k == "user");
+    assert_eq!(trimmed, kinds);
+}
+
+#[test]
 fn apply_with_matching_seed_revision_succeeds() {
     let mut live = temp_engine(Project::new("apply-ok", Rational::FPS_24));
     let seed = live.revision();

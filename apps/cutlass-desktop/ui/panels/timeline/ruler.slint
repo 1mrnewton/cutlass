@@ -503,6 +503,10 @@ export component Ruler inherits Rectangle {
                         root.marker-edit-color = "#" + ColorUtil.color-to-hex(c);
                         ColorUtil.record-recent(c);
                     }
+                    dismiss-requested => {
+                        marker-editor.close();
+                        AppState.refocus-shortcuts();
+                    }
                 }
 
                 Rectangle {

@@ -37,6 +37,51 @@ export component ColorPickerThumb inherits Rectangle {
     drop-shadow-color: #00000066;
 }
 
+// Recent / preset chip — click or Enter/Space (slider-style FocusScope).
+export component PickerSwatchChip inherits Rectangle {
+    in property <color> swatch-color: #ffffff;
+    in property <bool> selected: false;
+    in property <bool> show-checker: false;
+    callback activated();
+
+    width: 22px;
+    height: 22px;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    clip: true;
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? AppStore.theme.accent.primary : #ffffff24;
+    background: root.show-checker ? transparent : root.swatch-color;
+
+    if root.show-checker: ColorCheckerboard {
+        width: 100%;
+        height: 100%;
+        cell: 4px;
+    }
+    if root.show-checker: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: root.swatch-color;
+    }
+
+    focus-scope := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space {
+                root.activated();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            focus-scope.focus();
+            root.activated();
+        }
+    }
+}
+
 // Saturation × value square for the active hue.
 export component ColorPickerSvSquare inherits Rectangle {
     in-out property <float> saturation: 1.0;
@@ -48,6 +93,8 @@ export component ColorPickerSvSquare inherits Rectangle {
     callback committed(s: float, v: float);
     // Pointer cancel / interrupted drag — value restored to pre-drag.
     callback cancelled(s: float, v: float);
+    // Bubbles Escape to the hosting popup (FocusScope steals keys while focused).
+    callback escape-pressed();
 
     private property <bool> dragging: false;
     private property <float> pre-s: 1.0;
@@ -108,6 +155,7 @@ export component ColorPickerSvSquare inherits Rectangle {
                 return;
             }
             if event.kind == PointerEventKind.down {
+                focus-scope.focus();
                 root.pre-s = root.saturation;
                 root.pre-v = root.value;
                 root.dragging = true;
@@ -124,6 +172,55 @@ export component ColorPickerSvSquare inherits Rectangle {
             }
         }
     }
+
+    // Arrow nudge (same FocusScope pattern as CutlassSlider).
+    focus-scope := FocusScope {
+        x: 0;
+        y: 0;
+        width: 0;
+        height: 0;
+        enabled: root.enabled;
+
+        key-pressed(event) => {
+            if !self.enabled {
+                return reject;
+            }
+            if event.text == Key.Escape {
+                root.escape-pressed();
+                return accept;
+            }
+            if event.text == Key.LeftArrow {
+                root.saturation = clamp(root.saturation - 0.01, 0.0, 1.0);
+                root.preview(root.saturation, root.value);
+                return accept;
+            }
+            if event.text == Key.RightArrow {
+                root.saturation = clamp(root.saturation + 0.01, 0.0, 1.0);
+                root.preview(root.saturation, root.value);
+                return accept;
+            }
+            if event.text == Key.DownArrow {
+                root.value = clamp(root.value - 0.01, 0.0, 1.0);
+                root.preview(root.saturation, root.value);
+                return accept;
+            }
+            if event.text == Key.UpArrow {
+                root.value = clamp(root.value + 0.01, 0.0, 1.0);
+                root.preview(root.saturation, root.value);
+                return accept;
+            }
+            return reject;
+        }
+
+        key-released(event) => {
+            if event.text == Key.LeftArrow || event.text == Key.RightArrow
+                || event.text == Key.UpArrow || event.text == Key.DownArrow {
+                root.committed(root.saturation, root.value);
+                return accept;
+            }
+            return reject;
+        }
+    }
 }
 
 // Horizontal rainbow hue rail.
@@ -134,6 +231,7 @@ export component ColorPickerHueStrip inherits Rectangle {
     callback preview(h: float);
     callback committed(h: float);
     callback cancelled(h: float);
+    callback escape-pressed();
 
     private property <bool> dragging: false;
     private property <float> pre-h: 0.0;
@@ -192,6 +290,7 @@ export component ColorPickerHueStrip inherits Rectangle {
                 return;
             }
             if event.kind == PointerEventKind.down {
+                focus-scope.focus();
                 root.pre-h = root.hue;
                 root.dragging = true;
                 root.apply-at(self.mouse-x);
@@ -207,6 +306,46 @@ export component ColorPickerHueStrip inherits Rectangle {
             }
         }
     }
+
+    focus-scope := FocusScope {
+        x: 0;
+        y: 0;
+        width: 0;
+        height: 0;
+        enabled: root.enabled;
+
+        key-pressed(event) => {
+            if !self.enabled {
+                return reject;
+            }
+            if event.text == Key.Escape {
+                root.escape-pressed();
+                return accept;
+            }
+            if event.text == Key.LeftArrow {
+                root.hue = clamp(root.hue - 1.0, 0.0, 359.0);
+                root.preview(root.hue);
+                return accept;
+            }
+            if event.text == Key.RightArrow {
+                root.hue = root.hue + 1.0;
+                if root.hue >= 360.0 {
+                    root.hue = 0.0;
+                }
+                root.preview(root.hue);
+                return accept;
+            }
+            return reject;
+        }
+
+        key-released(event) => {
+            if event.text == Key.LeftArrow || event.text == Key.RightArrow {
+                root.committed(root.hue);
+                return accept;
+            }
+            return reject;
+        }
+    }
 }
 
 // Horizontal alpha rail over a checkerboard.
@@ -220,6 +359,7 @@ export component ColorPickerAlphaStrip inherits Rectangle {
     callback preview(a: float);
     callback committed(a: float);
     callback cancelled(a: float);
+    callback escape-pressed();
 
     private property <bool> dragging: false;
     private property <float> pre-a: 1.0;
@@ -277,6 +417,7 @@ export component ColorPickerAlphaStrip inherits Rectangle {
                 return;
             }
             if event.kind == PointerEventKind.down {
+                focus-scope.focus();
                 root.pre-a = root.alpha;
                 root.dragging = true;
                 root.apply-at(self.mouse-x);
@@ -290,6 +431,43 @@ export component ColorPickerAlphaStrip inherits Rectangle {
             if root.dragging {
                 root.apply-at(self.mouse-x);
             }
+        }
+    }
+
+    focus-scope := FocusScope {
+        x: 0;
+        y: 0;
+        width: 0;
+        height: 0;
+        enabled: root.enabled;
+
+        key-pressed(event) => {
+            if !self.enabled {
+                return reject;
+            }
+            if event.text == Key.Escape {
+                root.escape-pressed();
+                return accept;
+            }
+            if event.text == Key.LeftArrow {
+                root.alpha = clamp(root.alpha - 1.0 / 255.0, 0.0, 1.0);
+                root.preview(root.alpha);
+                return accept;
+            }
+            if event.text == Key.RightArrow {
+                root.alpha = clamp(root.alpha + 1.0 / 255.0, 0.0, 1.0);
+                root.preview(root.alpha);
+                return accept;
+            }
+            return reject;
+        }
+
+        key-released(event) => {
+            if event.text == Key.LeftArrow || event.text == Key.RightArrow {
+                root.committed(root.alpha);
+                return accept;
+            }
+            return reject;
         }
     }
 }

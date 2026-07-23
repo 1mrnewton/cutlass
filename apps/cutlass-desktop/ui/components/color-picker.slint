@@ -12,6 +12,7 @@ import {
     ColorPickerSvSquare,
     ColorPickerHueStrip,
     ColorPickerAlphaStrip,
+    PickerSwatchChip,
 } from "color-picker-parts.slint";
 
 component RgbaChannelField inherits VerticalLayout {
@@ -59,6 +60,8 @@ export component CutlassColorPicker inherits Rectangle {
     callback committed(color);
     // Arms the global preview eyedropper; the hosting popup should close.
     callback eyedropper-requested();
+    // Escape from a focused rail / chip — host popup should dismiss.
+    callback dismiss-requested();
 
     // HSV(+A) interaction state — not derived from `current` while dragging /
     // editing so blacks and grays keep their prior hue / sat.
@@ -299,6 +302,9 @@ export component CutlassColorPicker inherits Rectangle {
                 root.push-preview();
                 root.interacting = false;
             }
+            escape-pressed => {
+                root.dismiss-requested();
+            }
         }
 
         ColorPickerHueStrip {
@@ -317,6 +323,9 @@ export component CutlassColorPicker inherits Rectangle {
                 root.h = h;
                 root.push-preview();
                 root.interacting = false;
+            }
+            escape-pressed => {
+                root.dismiss-requested();
             }
         }
 
@@ -339,6 +348,9 @@ export component CutlassColorPicker inherits Rectangle {
                 root.a = a;
                 root.push-preview();
                 root.interacting = false;
+            }
+            escape-pressed => {
+                root.dismiss-requested();
             }
         }
 
@@ -393,60 +405,22 @@ export component CutlassColorPicker inherits Rectangle {
 
                 HorizontalLayout {
                     spacing: AppStore.theme.metrics.spacing.sm;
-                    for _[i] in min(8, root.recent-colors.length): Rectangle {
-                        width: 22px;
-                        height: 22px;
-                        border-radius: AppStore.theme.metrics.radius.sm;
-                        clip: true;
-                        border-width: 1px;
-                        border-color: #ffffff24;
-
-                        ColorCheckerboard {
-                            width: 100%;
-                            height: 100%;
-                            cell: 4px;
-                        }
-
-                        Rectangle {
-                            width: 100%;
-                            height: 100%;
-                            background: root.recent-colors[i];
-                        }
-
-                        TouchArea {
-                            clicked => {
-                                root.apply-recent(root.recent-colors[i]);
-                            }
+                    for _[i] in min(8, root.recent-colors.length): PickerSwatchChip {
+                        swatch-color: root.recent-colors[i];
+                        show-checker: true;
+                        activated => {
+                            root.apply-recent(root.recent-colors[i]);
                         }
                     }
                 }
 
                 if root.recent-colors.length > 8: HorizontalLayout {
                     spacing: AppStore.theme.metrics.spacing.sm;
-                    for _[j] in root.recent-colors.length - 8: Rectangle {
-                        width: 22px;
-                        height: 22px;
-                        border-radius: AppStore.theme.metrics.radius.sm;
-                        clip: true;
-                        border-width: 1px;
-                        border-color: #ffffff24;
-
-                        ColorCheckerboard {
-                            width: 100%;
-                            height: 100%;
-                            cell: 4px;
-                        }
-
-                        Rectangle {
-                            width: 100%;
-                            height: 100%;
-                            background: root.recent-colors[j + 8];
-                        }
-
-                        TouchArea {
-                            clicked => {
-                                root.apply-recent(root.recent-colors[j + 8]);
-                            }
+                    for _[j] in root.recent-colors.length - 8: PickerSwatchChip {
+                        swatch-color: root.recent-colors[j + 8];
+                        show-checker: true;
+                        activated => {
+                            root.apply-recent(root.recent-colors[j + 8]);
                         }
                     }
                 }
@@ -465,33 +439,11 @@ export component CutlassColorPicker inherits Rectangle {
             for row in ColorPalette.swatches: HorizontalLayout {
                 spacing: AppStore.theme.metrics.spacing.sm;
 
-                for swatch-color in row: Rectangle {
-                    width: 22px;
-                    height: 22px;
-                    border-radius: AppStore.theme.metrics.radius.sm;
-                    background: swatch-color;
-                    border-width: swatch-color == root.live-color ? 2px : 1px;
-                    border-color: swatch-color == root.live-color
-                        ? AppStore.theme.accent.primary
-                        : #ffffff24;
-
-                    TouchArea {
-                        clicked => {
-                            root.interacting = true;
-                            let comps = ColorUtil.rgb-to-hsv-preserving(
-                                swatch-color.red / 255.0,
-                                swatch-color.green / 255.0,
-                                swatch-color.blue / 255.0,
-                                root.h,
-                                root.s,
-                            );
-                            root.h = comps.h;
-                            root.s = comps.s;
-                            root.v = comps.v;
-                            root.a = root.enable-alpha ? swatch-color.alpha / 255.0 : 1.0;
-                            root.push-commit();
-                            root.interacting = false;
-                        }
+                for swatch-color in row: PickerSwatchChip {
+                    swatch-color: swatch-color;
+                    selected: swatch-color == root.live-color;
+                    activated => {
+                        root.apply-recent(swatch-color);
                     }
                 }
             }

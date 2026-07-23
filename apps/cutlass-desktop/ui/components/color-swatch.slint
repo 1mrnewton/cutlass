@@ -157,6 +157,15 @@ export component CutlassColorSwatch inherits Rectangle {
         }
     }
 
+    function dismiss-popup() {
+        if (root.gesturing) {
+            root.gesturing = false;
+            root.live = root.value;
+            root.cancelled();
+        }
+        popup.close();
+    }
+
     // Slint clamps PopupWindow into the window via place_popup — size the
     // shell for the full picker and prefer below the well.
     popup := PopupWindow {
@@ -165,6 +174,7 @@ export component CutlassColorSwatch inherits Rectangle {
         width: 268px;
         height: shell.preferred-height;
         close-policy: PopupClosePolicy.close-on-click-outside;
+        forward-focus: popup-keys;
 
         shell := Rectangle {
             width: 100%;
@@ -177,31 +187,46 @@ export component CutlassColorSwatch inherits Rectangle {
             drop-shadow-color: #00000040;
             drop-shadow-offset-y: 3px;
 
-            VerticalLayout {
-                padding: AppStore.theme.metrics.spacing.md;
+            // Escape closes the popup (hex/RGBA fields keep revert-on-escape
+            // while focused). Matches CutlassSlider's FocusScope convention.
+            popup-keys := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.dismiss-popup();
+                        return accept;
+                    }
+                    return reject;
+                }
 
-                CutlassColorPicker {
-                    current: root.live;
-                    recent-colors: root.recent-colors;
-                    enable-alpha: root.enable-alpha;
-                    preview(c) => {
-                        root.gesturing = true;
-                        root.live = c;
-                        root.preview(c);
-                    }
-                    committed(c) => {
-                        root.commit-color(c);
-                    }
-                    eyedropper-requested => {
-                        // Clear any in-flight picker preview, then close and
-                        // arm — the popup-open handler finishes the arm.
-                        if (root.gesturing) {
-                            root.gesturing = false;
-                            root.live = root.value;
-                            root.cancelled();
+                VerticalLayout {
+                    padding: AppStore.theme.metrics.spacing.md;
+
+                    CutlassColorPicker {
+                        current: root.live;
+                        recent-colors: root.recent-colors;
+                        enable-alpha: root.enable-alpha;
+                        preview(c) => {
+                            root.gesturing = true;
+                            root.live = c;
+                            root.preview(c);
                         }
-                        root.arming-eyedropper = true;
-                        popup.close();
+                        committed(c) => {
+                            root.commit-color(c);
+                        }
+                        dismiss-requested => {
+                            root.dismiss-popup();
+                        }
+                        eyedropper-requested => {
+                            // Clear any in-flight picker preview, then close and
+                            // arm — the popup-open handler finishes the arm.
+                            if (root.gesturing) {
+                                root.gesturing = false;
+                                root.live = root.value;
+                                root.cancelled();
+                            }
+                            root.arming-eyedropper = true;
+                            popup.close();
+                        }
                     }
                 }
             }

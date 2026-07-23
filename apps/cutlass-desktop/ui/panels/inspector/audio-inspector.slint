@@ -1,9 +1,9 @@
 // Volume + fades for audio-lane clips (CapCut audio mix). Volume is a
 // keyframable gain envelope (M8): the diamond writes automation at the
 // playhead and the slider then sculpts it; a flat clip still rides the M1
-// constant slider. Each commit is one undoable edit; the projection
-// republish re-snapshots the playback mixer, so the change is audible within
-// a buffer block.
+// constant slider. Volume/pan slider drags preview live via `preview-param`
+// → `ClipParam::{Volume,Pan}` (engine + preview audio mixer); release commits
+// one undoable edit and clears the override. Fades stay commit-on-release.
 
 import { SubtleButton } from "../../components/index.slint";
 import { AppState } from "../../state.slint";
@@ -97,13 +97,19 @@ export component AudioMixInspector inherits VerticalLayout {
         // On an envelope the slider sculpts the keyframe at the playhead;
         // on a flat clip it sets the constant level (CapCut's basic slider).
         // Animated + playhead outside the clip: leave the envelope alone
-        // rather than flattening it.
-        // No live `preview` — volume commits on release only (same as pan).
+        // rather than flattening it (clear the live override only).
+        preview(v) => {
+            InspectorBackend.preview-param(
+                root.model.id, "volume", v / 100, 0, TimelineStore.playhead-tick);
+        }
         commit(v) => {
             if (root.sample.volume-row.animated) {
                 if (root.playhead-inside) {
                     InspectorBackend.set-param-keyframe(
                         root.model.id, "volume", TimelineStore.playhead-tick, v / 100, 0, 0);
+                } else {
+                    InspectorBackend.clear-param-override(
+                        root.model.id, TimelineStore.playhead-tick);
                 }
             } else {
                 root.commit(v / 100, root.model.fade-in-s, root.model.fade-out-s);
@@ -132,12 +138,19 @@ export component AudioMixInspector inherits VerticalLayout {
         kf-can-toggle: root.playhead-inside;
         // Flat: set-param-constant (no dedicated set_clip_pan — volume alone
         // has set-clip-audio because fades ride with it). Animated: keyframe
-        // at the playhead. No live preview (mirrors volume).
+        // at the playhead. Live preview mirrors volume.
+        preview(v) => {
+            InspectorBackend.preview-param(
+                root.model.id, "pan", v, 0, TimelineStore.playhead-tick);
+        }
         commit(v) => {
             if (root.sample.pan-row.animated) {
                 if (root.playhead-inside) {
                     InspectorBackend.set-param-keyframe(
                         root.model.id, "pan", TimelineStore.playhead-tick, v, 0, 0);
+                } else {
+                    InspectorBackend.clear-param-override(
+                        root.model.id, TimelineStore.playhead-tick);
                 }
             } else {
                 InspectorBackend.set-param-constant(root.model.id, "pan", v, 0);

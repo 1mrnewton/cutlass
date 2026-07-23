@@ -387,7 +387,7 @@ pub(super) fn dispatch(
             );
         }
         WorkerMsg::ClearParamOverride { clip, tick } => {
-            clear_param_overrides(engine, &clip);
+            clear_param_overrides(engine, &clip, Some(&ui.audio));
             render_frame(
                 engine,
                 tl_rate,
@@ -407,7 +407,7 @@ pub(super) fn dispatch(
             value,
             tick,
         } => {
-            apply_param_override(engine, &clip, param, value);
+            apply_param_override(engine, &clip, param, value, Some(&ui.audio));
             render_frame(
                 engine,
                 tl_rate,

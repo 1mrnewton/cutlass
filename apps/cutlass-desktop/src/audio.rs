@@ -36,8 +36,8 @@ use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
-use cutlass_models::Project;
-use cutlass_render::{EXPORT_AUDIO_RATE, ExportAudioMixer};
+use cutlass_models::{ClipId, ClipParam, ParamValue, Project};
+use cutlass_render::{EXPORT_AUDIO_RATE, ExportAudioMixer, ParamOverrides};
 use tracing::{info, warn};
 
 /// Interleaved channel count of every mixed block (the export mixer's).
@@ -72,6 +72,22 @@ enum AudioMsg {
     Scrub {
         tick: i64,
         epoch: u64,
+    },
+    /// Live volume/pan override during an inspector drag. Applied on the next
+    /// mix block without reopening source readers (unlike [`Snapshot`]).
+    ParamOverride {
+        clip: ClipId,
+        param: ClipParam,
+        value: ParamValue,
+    },
+    /// Drop one live volume/pan override after that param is committed.
+    ClearParamOverride {
+        clip: ClipId,
+        param: ClipParam,
+    },
+    /// Drop every live param override for `clip` (release with no net change).
+    ClearParamOverrides {
+        clip: ClipId,
     },
 }
 
@@ -176,6 +192,34 @@ impl AudioHandle {
     pub fn publish_snapshot(&self, project: Project) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(AudioMsg::Snapshot(Box::new(project)));
+        }
+    }
+
+    /// Live volume/pan preview during an inspector drag. No-ops for other
+    /// params and when audio output is unavailable.
+    pub fn set_param_override(&self, clip: ClipId, param: ClipParam, value: ParamValue) {
+        if !matches!(param, ClipParam::Volume | ClipParam::Pan) {
+            return;
+        }
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(AudioMsg::ParamOverride { clip, param, value });
+        }
+    }
+
+    /// Drop one live volume/pan override after that param is committed.
+    pub fn clear_param_override(&self, clip: ClipId, param: ClipParam) {
+        if !matches!(param, ClipParam::Volume | ClipParam::Pan) {
+            return;
+        }
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(AudioMsg::ClearParamOverride { clip, param });
+        }
+    }
+
+    /// Drop every live param override for `clip` (release with no net change).
+    pub fn clear_param_overrides(&self, clip: ClipId) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(AudioMsg::ClearParamOverrides { clip });
         }
     }
 
@@ -388,6 +432,9 @@ fn mixer_loop(msg_rx: Receiver<AudioMsg>, block_tx: Sender<AudioBlock>) {
     // Streamed mixer over the snapshot. `None` while the timeline is silent
     // or after a decode failure (silence until the next reopen).
     let mut mixer: Option<ExportAudioMixer> = None;
+    // Session-only volume/pan overrides survive mixer reopen (snapshot /
+    // seek) so a mid-drag project republish doesn't drop the live gain.
+    let mut param_overrides = ParamOverrides::new();
     let mut fps = (0i32, 0i32);
     let mut epoch = 0u64;
     let mut playing = false;
@@ -439,6 +486,28 @@ fn mixer_loop(msg_rx: Receiver<AudioMsg>, block_tx: Sender<AudioBlock>) {
                             write_frame = ticks_to_frames(tick, fps);
                             reopen = true;
                         }
+                        AudioMsg::ParamOverride {
+                            clip,
+                            param,
+                            value,
+                        } => {
+                            param_overrides.set(clip, param, value);
+                            if let Some(m) = &mut mixer {
+                                m.set_param_override(clip, param, value);
+                            }
+                        }
+                        AudioMsg::ClearParamOverride { clip, param } => {
+                            param_overrides.clear_param(clip, param);
+                            if let Some(m) = &mut mixer {
+                                m.clear_param_override(clip, param);
+                            }
+                        }
+                        AudioMsg::ClearParamOverrides { clip } => {
+                            param_overrides.clear_clip(clip);
+                            if let Some(m) = &mut mixer {
+                                m.clear_param_overrides(clip);
+                            }
+                        }
                     }
                     latest = msg_rx.try_recv().ok();
                 }
@@ -450,9 +519,13 @@ fn mixer_loop(msg_rx: Receiver<AudioMsg>, block_tx: Sender<AudioBlock>) {
         // Reopen on every snapshot and seek (the mobile reader semantics): a
         // fresh mixer re-derives its spans from the snapshot and re-seeks
         // its source readers lazily on the next mix. Cheap — readers open on
-        // first overlap only.
+        // first overlap only. Re-apply live volume/pan overrides so a drag
+        // survives the reopen.
         if reopen {
             mixer = project.as_ref().and_then(ExportAudioMixer::for_project);
+            if let Some(m) = &mut mixer {
+                m.set_param_overrides(param_overrides.clone());
+            }
         }
 
         // Idle unless playing or mid-scrub-burst.

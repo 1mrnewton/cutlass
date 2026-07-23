@@ -73,7 +73,7 @@ pub(super) fn set_effect_param_and_publish(
     };
     // Clear a live effect-param override before the commit so the next frame
     // never flashes the stale drag value.
-    clear_param_override(engine, clip, effect_param);
+    clear_param_override(engine, clip, effect_param, Some(&ui.audio));
     let edit = match value {
         ParamValue::Scalar(v) => EditCommand::SetEffectParam {
             clip: clip_id,

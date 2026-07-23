@@ -45,7 +45,7 @@ pub(super) fn set_clip_crop_and_publish(
     };
     // Clear a live crop override before the commit so the next frame never
     // flashes the stale drag value (same order as set_param_constant).
-    clear_param_override(engine, clip, ClipParam::Crop);
+    clear_param_override(engine, clip, ClipParam::Crop, Some(&ui.audio));
     let wrote_keyframe = engine
         .project()
         .clip(clip_id)
@@ -377,6 +377,7 @@ pub(super) fn set_clip_lut_and_publish(
         ClipParam::Look {
             param: cutlass_models::LookParam::LutIntensity,
         },
+        Some(&ui.audio),
     );
     let lut = (!path.is_empty()).then(|| Lut {
         path: path.to_string(),

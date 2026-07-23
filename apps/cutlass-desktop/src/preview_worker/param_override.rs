@@ -1,39 +1,66 @@
 //! Generic per-param live preview override lane.
 //!
 //! UI/inspector drags send [`WorkerMsg::ParamOverride`]; the worker stores
-//! `(clip, param) → value` on the engine and re-renders. Release commits via
-//! `SetParamConstant` / `SetParamKeyframe` and clears with
-//! [`WorkerMsg::ClearParamOverride`]. No history, revision, or projection.
+//! `(clip, param) → value` on the engine and re-renders. Volume/pan also
+//! mirror onto the preview audio mixer so drag is audible without a project
+//! republish. Release commits via `SetParamConstant` / `SetParamKeyframe`
+//! and clears with [`WorkerMsg::ClearParamOverride`]. No history, revision,
+//! or projection.
 
 use super::*;
 
 /// Point the engine's param-override map at `(clip, param)` for the next
-/// renders. Unparsable ids are dropped (stale projection race).
+/// renders. Volume/pan also update the preview audio mixer. Unparsable ids
+/// are dropped (stale projection race).
 pub(super) fn apply_param_override(
     engine: &mut Engine,
     clip: &str,
     param: ClipParam,
     value: ParamValue,
+    audio: Option<&crate::audio::AudioHandle>,
 ) {
     match parse_raw_id(clip).map(ClipId::from_raw) {
-        Some(id) => engine.set_param_override(id, param, value),
+        Some(id) => {
+            engine.set_param_override(id, param, value);
+            if let Some(audio) = audio {
+                audio.set_param_override(id, param, value);
+            }
+        }
         None => error!(clip, "param override ignored: unparsable clip id"),
     }
 }
 
-/// Drop every live param override for `clip` and re-render `tick` from
-/// committed state.
-pub(super) fn clear_param_overrides(engine: &mut Engine, clip: &str) {
+/// Drop every live param override for `clip` (and any mirrored audio
+/// volume/pan override).
+pub(super) fn clear_param_overrides(
+    engine: &mut Engine,
+    clip: &str,
+    audio: Option<&crate::audio::AudioHandle>,
+) {
     match parse_raw_id(clip).map(ClipId::from_raw) {
-        Some(id) => engine.clear_param_overrides(id),
+        Some(id) => {
+            engine.clear_param_overrides(id);
+            if let Some(audio) = audio {
+                audio.clear_param_overrides(id);
+            }
+        }
         None => error!(clip, "clear param override ignored: unparsable clip id"),
     }
 }
 
-/// Drop one live param override after that param is committed.
-pub(super) fn clear_param_override(engine: &mut Engine, clip: &str, param: ClipParam) {
+/// Drop one live param override after that param is committed (and any
+/// mirrored audio volume/pan override).
+pub(super) fn clear_param_override(
+    engine: &mut Engine,
+    clip: &str,
+    param: ClipParam,
+    audio: Option<&crate::audio::AudioHandle>,
+) {
     if let Some(id) = parse_raw_id(clip).map(ClipId::from_raw) {
         engine.clear_param_override(id, param);
+        if let Some(audio) = audio {
+            audio.clear_param_override(id, param);
+        }
     }
 }
 
@@ -81,7 +108,7 @@ pub(super) fn coalesce_param_overrides(
             }
             other => {
                 if std::mem::take(&mut dirty) {
-                    flush_param_overrides(engine, &pending);
+                    flush_param_overrides(engine, &pending, Some(&ui.audio));
                 }
                 dispatch(
                     engine,
@@ -102,14 +129,18 @@ pub(super) fn coalesce_param_overrides(
     }
 
     if dirty {
-        flush_param_overrides(engine, &pending);
+        flush_param_overrides(engine, &pending, Some(&ui.audio));
     }
     tick
 }
 
-fn flush_param_overrides(engine: &mut Engine, pending: &HashMap<(String, ClipParam), ParamValue>) {
+fn flush_param_overrides(
+    engine: &mut Engine,
+    pending: &HashMap<(String, ClipParam), ParamValue>,
+    audio: Option<&crate::audio::AudioHandle>,
+) {
     for ((clip, param), value) in pending {
-        apply_param_override(engine, clip, *param, *value);
+        apply_param_override(engine, clip, *param, *value, audio);
     }
 }
 
@@ -172,7 +203,7 @@ mod tests {
         let revision = engine.revision();
         let could_undo = engine.can_undo();
 
-        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.9));
+        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.9), None);
         assert!(engine.has_live_overrides());
         let scene = resolve_with(
             engine.project(),
@@ -187,7 +218,7 @@ mod tests {
         assert_eq!(engine.revision(), revision);
         assert_eq!(engine.can_undo(), could_undo);
 
-        clear_param_overrides(&mut engine, &clip_s);
+        clear_param_overrides(&mut engine, &clip_s, None);
         assert!(!engine.has_live_overrides());
         let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("plain");
         assert!((plain.layers[0].chroma_key.unwrap().strength - 0.2).abs() < f32::EPSILON);
@@ -224,7 +255,7 @@ mod tests {
         let mid = resolve(engine.project(), RationalTime::new(20, r)).expect("mid");
         assert!((mid.layers[0].chroma_key.unwrap().strength - 0.5).abs() < 1e-5);
 
-        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.12));
+        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.12), None);
         let live = resolve_with(
             engine.project(),
             RationalTime::new(20, r),
@@ -243,13 +274,14 @@ mod tests {
         let chroma = ClipParam::Look {
             param: LookParam::ChromaStrength,
         };
-        apply_param_override(&mut engine, &clip_s, chroma, ParamValue::Scalar(0.3));
-        apply_param_override(&mut engine, &clip_s, chroma, ParamValue::Scalar(0.7));
+        apply_param_override(&mut engine, &clip_s, chroma, ParamValue::Scalar(0.3), None);
+        apply_param_override(&mut engine, &clip_s, chroma, ParamValue::Scalar(0.7), None);
         apply_param_override(
             &mut engine,
             &clip_s,
             ClipParam::Crop,
             ParamValue::Rect([0.25, 0.0, 0.5, 1.0]),
+            None,
         );
 
         assert_eq!(
@@ -343,8 +375,8 @@ mod tests {
         };
         let rev_before = engine.revision();
 
-        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(12.0));
-        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(24.0));
+        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(12.0), None);
+        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(24.0), None);
         assert!(engine.has_live_overrides());
         assert_eq!(engine.revision(), rev_before);
 
@@ -359,7 +391,7 @@ mod tests {
         .expect("live");
         assert!((live.layers[0].effects[0].params[0] - 24.0).abs() < f32::EPSILON);
 
-        clear_param_override(&mut engine, &clip_s, param);
+        clear_param_override(&mut engine, &clip_s, param, None);
         engine
             .apply(Command::Edit(EditCommand::SetEffectParam {
                 clip,
@@ -415,7 +447,7 @@ mod tests {
         };
         let rev_before = engine.revision();
 
-        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.9));
+        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.9), None);
         assert!(engine.has_live_overrides());
         assert_eq!(engine.revision(), rev_before);
 
@@ -430,7 +462,7 @@ mod tests {
         .expect("live");
         assert!((live.layers[0].lut.as_ref().unwrap().intensity - 0.9).abs() < f32::EPSILON);
 
-        clear_param_override(&mut engine, &clip_s, param);
+        clear_param_override(&mut engine, &clip_s, param, None);
         engine
             .apply(Command::Edit(EditCommand::SetClipLut {
                 clip,
@@ -458,8 +490,8 @@ mod tests {
         let rev_before = engine.revision();
         let could_undo = engine.can_undo();
 
-        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.4));
-        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.85));
+        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.4), None);
+        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.85), None);
         assert!(engine.has_live_overrides());
         assert_eq!(engine.revision(), rev_before);
         assert_eq!(engine.can_undo(), could_undo);
@@ -476,7 +508,7 @@ mod tests {
         assert!((live.layers[0].chroma_key.unwrap().strength - 0.85).abs() < f32::EPSILON);
 
         // Release: clear then one SetParamConstant (set_param_constant_and_publish).
-        clear_param_override(&mut engine, &clip_s, param);
+        clear_param_override(&mut engine, &clip_s, param, None);
         engine
             .apply(Command::Edit(EditCommand::SetParamConstant {
                 clip,
@@ -506,12 +538,14 @@ mod tests {
             &clip_s,
             ClipParam::Crop,
             ParamValue::Rect([0.1, 0.05, 0.7, 0.8]),
+            None,
         );
         apply_param_override(
             &mut engine,
             &clip_s,
             ClipParam::Crop,
             ParamValue::Rect([0.2, 0.1, 0.6, 0.7]),
+            None,
         );
         assert!(engine.has_live_overrides());
         assert_eq!(engine.revision(), rev_before);
@@ -537,7 +571,7 @@ mod tests {
             w: 0.6,
             h: 0.7,
         };
-        clear_param_override(&mut engine, &clip_s, ClipParam::Crop);
+        clear_param_override(&mut engine, &clip_s, ClipParam::Crop, None);
         engine
             .apply(Command::Edit(EditCommand::SetClipCrop {
                 clip,
@@ -554,5 +588,90 @@ mod tests {
         let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
         assert!((plain.layers[0].uv[0] - 0.2).abs() < 1e-5);
         assert!((plain.layers[0].uv[2] - 0.8).abs() < 1e-5);
+    }
+
+    #[test]
+    fn volume_preview_then_commit_clears_override() {
+        use cutlass_commands::{Command, EditCommand};
+
+        let (mut engine, clip, clip_s, _r) = engine_with_chroma();
+        let rev_before = engine.revision();
+        let could_undo = engine.can_undo();
+
+        apply_param_override(
+            &mut engine,
+            &clip_s,
+            ClipParam::Volume,
+            ParamValue::Scalar(0.35),
+            None,
+        );
+        apply_param_override(
+            &mut engine,
+            &clip_s,
+            ClipParam::Volume,
+            ParamValue::Scalar(0.6),
+            None,
+        );
+        assert!(engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before);
+        assert_eq!(engine.can_undo(), could_undo);
+        assert_eq!(
+            engine.param_overrides().get(clip, ClipParam::Volume),
+            Some(ParamValue::Scalar(0.6))
+        );
+
+        // Release: clear then one SetParamConstant (SetClipAudio clears
+        // Volume the same way before its edit). Mix-time consultation of
+        // this map is covered by cutlass-render export_audio tests.
+        clear_param_override(&mut engine, &clip_s, ClipParam::Volume, None);
+        engine
+            .apply(Command::Edit(EditCommand::SetParamConstant {
+                clip,
+                param: ClipParam::Volume,
+                value: ParamValue::Scalar(0.6),
+            }))
+            .expect("commit volume");
+        assert!(!engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before + 1);
+        assert!(engine.can_undo());
+        assert_eq!(
+            engine.project().clip(clip).unwrap().volume.constant(),
+            Some(0.6)
+        );
+    }
+
+    #[test]
+    fn pan_preview_then_commit_clears_override() {
+        use cutlass_commands::{Command, EditCommand};
+
+        let (mut engine, clip, clip_s, _r) = engine_with_chroma();
+        let rev_before = engine.revision();
+
+        apply_param_override(
+            &mut engine,
+            &clip_s,
+            ClipParam::Pan,
+            ParamValue::Scalar(-0.5),
+            None,
+        );
+        assert_eq!(
+            engine.param_overrides().get(clip, ClipParam::Pan),
+            Some(ParamValue::Scalar(-0.5))
+        );
+
+        clear_param_override(&mut engine, &clip_s, ClipParam::Pan, None);
+        engine
+            .apply(Command::Edit(EditCommand::SetParamConstant {
+                clip,
+                param: ClipParam::Pan,
+                value: ParamValue::Scalar(-0.5),
+            }))
+            .expect("commit pan");
+        assert!(!engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before + 1);
+        assert_eq!(
+            engine.project().clip(clip).unwrap().pan.constant(),
+            Some(-0.5)
+        );
     }
 }

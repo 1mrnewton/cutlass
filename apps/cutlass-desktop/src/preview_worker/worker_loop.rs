@@ -243,7 +243,13 @@ fn worker_loop(
                             value,
                             tick: at,
                         } => {
-                            apply_param_override(engine, &clip, param, value);
+                            apply_param_override(
+                                engine,
+                                &clip,
+                                param,
+                                value,
+                                Some(&ui.audio),
+                            );
                             tick = at;
                         }
                         other => dispatch(

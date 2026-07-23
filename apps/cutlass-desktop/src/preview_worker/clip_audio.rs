@@ -41,6 +41,15 @@ pub(super) fn set_clip_audio_and_publish(
     };
     let (fade_in, fade_out) = (to_ticks(fade_in_s), to_ticks(fade_out_s));
 
+    // Flat volume commits clear a live Volume override so the next mix block
+    // never flashes the stale drag gain (mirrors set_param_constant).
+    if volume.is_some() {
+        for target in &targets {
+            engine.clear_param_override(*target, ClipParam::Volume);
+            ui.audio.clear_param_override(*target, ClipParam::Volume);
+        }
+    }
+
     engine.begin_group();
     for target in &targets {
         if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipAudio {

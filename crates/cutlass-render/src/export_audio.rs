@@ -32,9 +32,10 @@ use std::f32::consts::{FRAC_PI_4, SQRT_2};
 use std::path::PathBuf;
 
 use cutlass_core::{AudioReader, DecodeError};
-use cutlass_models::{Param, Project, audio_gain_at};
+use cutlass_models::{ClipId, ClipParam, Param, ParamValue, Project, audio_gain_at};
 
 use crate::audio_dsp::{DenoiseReader, SpanWarp, warped_source_frame};
+use crate::resolve::ParamOverrides;
 
 /// Export audio sample rate: the broadcast/web standard for video files.
 pub const EXPORT_AUDIO_RATE: u32 = 48_000;
@@ -45,6 +46,7 @@ const CHANNELS: usize = EXPORT_AUDIO_CHANNELS as usize;
 
 /// One audible clip resolved to output sample frames at [`EXPORT_AUDIO_RATE`].
 struct Span {
+    clip_id: ClipId,
     path: PathBuf,
     /// Timeline placement in output sample frames.
     start: i64,
@@ -73,6 +75,8 @@ pub struct ExportAudioMixer {
     spans: Vec<Span>,
     scratch: Vec<f32>,
     warp_scratch: Vec<f32>,
+    /// Session-only volume/pan substitutions (preview drag). Empty on export.
+    param_overrides: ParamOverrides,
 }
 
 impl ExportAudioMixer {
@@ -133,6 +137,7 @@ impl ExportAudioMixer {
                     SpanWarp::Linear
                 };
                 spans.push(Span {
+                    clip_id: clip.id,
                     path: media.path().to_path_buf(),
                     start: ticks_to_samples(clip.timeline.start.value, fps.num, fps.den),
                     end: ticks_to_samples(clip.timeline.end_tick(), fps.num, fps.den),
@@ -163,8 +168,37 @@ impl ExportAudioMixer {
                 spans,
                 scratch: Vec::new(),
                 warp_scratch: Vec::new(),
+                param_overrides: ParamOverrides::new(),
             })
         }
+    }
+
+    /// Replace the live volume/pan override map (preview drag). Export leaves
+    /// this empty; empty maps are free on the mix hot path.
+    pub fn set_param_overrides(&mut self, overrides: ParamOverrides) {
+        self.param_overrides = overrides;
+    }
+
+    /// Insert or replace one live `(clip, param)` value during a slider drag.
+    pub fn set_param_override(&mut self, clip: ClipId, param: ClipParam, value: ParamValue) {
+        if matches!(param, ClipParam::Volume | ClipParam::Pan) {
+            self.param_overrides.set(clip, param, value);
+        }
+    }
+
+    /// Drop every live override for `clip` (inspector release / abandon).
+    pub fn clear_param_overrides(&mut self, clip: ClipId) {
+        self.param_overrides.clear_clip(clip);
+    }
+
+    /// Drop one live override after that param is committed.
+    pub fn clear_param_override(&mut self, clip: ClipId, param: ClipParam) {
+        self.param_overrides.clear_param(clip, param);
+    }
+
+    /// Session-only override map (tests / preview audio wiring).
+    pub fn param_overrides(&self) -> &ParamOverrides {
+        &self.param_overrides
     }
 
     /// Mix every span overlapping `[pos, pos + out.len()/2)` into `out`
@@ -182,7 +216,15 @@ impl ExportAudioMixer {
             let s = span.start.max(pos);
             let e = span.end.min(block_end);
             if matches!(span.warp, SpanWarp::Linear) {
-                Self::mix_linear_span(&mut self.spans[i], &mut self.scratch, s, e, pos, out)?;
+                Self::mix_linear_span(
+                    &mut self.spans[i],
+                    &mut self.scratch,
+                    s,
+                    e,
+                    pos,
+                    out,
+                    &self.param_overrides,
+                )?;
             } else {
                 Self::mix_warped_span(
                     &mut self.spans[i],
@@ -192,6 +234,7 @@ impl ExportAudioMixer {
                     e,
                     pos,
                     out,
+                    &self.param_overrides,
                 )?;
             }
         }
@@ -209,6 +252,7 @@ impl ExportAudioMixer {
         e: i64,
         pos: i64,
         out: &mut [f32],
+        overrides: &ParamOverrides,
     ) -> Result<(), DecodeError> {
         let reader = match &mut span.reader {
             Some(reader) => reader,
@@ -236,7 +280,7 @@ impl ExportAudioMixer {
         }
 
         let offset = ((s - pos + lead) as usize) * CHANNELS;
-        accumulate_span_samples(span, s + lead, got, offset, out, scratch);
+        accumulate_span_samples(span, s + lead, got, offset, out, scratch, overrides);
         Ok(())
     }
 
@@ -248,6 +292,7 @@ impl ExportAudioMixer {
         e: i64,
         pos: i64,
         out: &mut [f32],
+        overrides: &ParamOverrides,
     ) -> Result<(), DecodeError> {
         let reader = match &mut span.reader {
             Some(reader) => reader,
@@ -309,7 +354,7 @@ impl ExportAudioMixer {
         }
 
         let offset = ((s - pos) as usize) * CHANNELS;
-        accumulate_span_samples(span, s, out_frames, offset, out, scratch);
+        accumulate_span_samples(span, s, out_frames, offset, out, scratch, overrides);
         Ok(())
     }
 }
@@ -339,12 +384,26 @@ fn accumulate_span_samples(
     out_offset: usize,
     out: &mut [f32],
     samples: &[f32],
+    overrides: &ParamOverrides,
 ) {
     let span_len = span.end - span.start;
     let first = span_rel_start - span.start;
+    // Live preview overrides flatten volume/pan to a constant for the drag.
+    // Built once outside the sample loop (empty map ⇒ free `get`).
+    let volume_override = match overrides.get(span.clip_id, ClipParam::Volume) {
+        Some(ParamValue::Scalar(v)) => Some(Param::Constant(v)),
+        _ => None,
+    };
+    let pan_override = match overrides.get(span.clip_id, ClipParam::Pan) {
+        Some(ParamValue::Scalar(v)) => Some(v),
+        _ => None,
+    };
+    let volume = volume_override.as_ref().unwrap_or(&span.volume);
     // Center pan + unit volume + no fades: bit-exact passthrough of today's
-    // pre-pan mix (no √2 scaling at rest).
-    let unity = span.volume.constant() == Some(1.0)
+    // pre-pan mix (no √2 scaling at rest). Overrides always leave this path.
+    let unity = volume_override.is_none()
+        && pan_override.is_none()
+        && span.volume.constant() == Some(1.0)
         && span.pan.constant() == Some(0.0)
         && span.fade_in == 0
         && span.fade_out == 0;
@@ -358,8 +417,9 @@ fn accumulate_span_samples(
     } else {
         for frame in 0..frames {
             let pos = first + frame as i64;
-            let gain = audio_gain_at(pos, span_len, &span.volume, span.fade_in, span.fade_out);
-            let (left, right) = pan_channel_gains(span.pan.sample(pos));
+            let gain = audio_gain_at(pos, span_len, volume, span.fade_in, span.fade_out);
+            let pan = pan_override.unwrap_or_else(|| span.pan.sample(pos));
+            let (left, right) = pan_channel_gains(pan);
             let base = out_offset + frame * CHANNELS;
             out[base] += samples[frame * CHANNELS] * gain * left;
             out[base + 1] += samples[frame * CHANNELS + 1] * gain * right;
@@ -464,6 +524,7 @@ mod tests {
     fn warped_mix_reads_double_source_for_2x_speed() {
         let mut mixer = ExportAudioMixer {
             spans: vec![Span {
+                clip_id: ClipId::from_raw(1),
                 path: PathBuf::from("/dev/null"),
                 start: 0,
                 end: 1000,
@@ -483,6 +544,7 @@ mod tests {
             }],
             scratch: Vec::new(),
             warp_scratch: Vec::new(),
+            param_overrides: ParamOverrides::new(),
         };
         let mut out = vec![0.0; 500 * CHANNELS];
         mixer.mix_into(0, &mut out).unwrap();
@@ -527,11 +589,13 @@ mod tests {
             spans: vec![span],
             scratch: Vec::new(),
             warp_scratch: Vec::new(),
+            param_overrides: ParamOverrides::new(),
         }
     }
 
     fn flat_span(pan: Param<f32>, left: f32, right: f32) -> Span {
         Span {
+            clip_id: ClipId::from_raw(7),
             path: PathBuf::from("/dev/null"),
             start: 0,
             end: 1000,
@@ -656,5 +720,57 @@ mod tests {
         let (l, r) = pan_channel_gains(1.0);
         assert!(l.abs() < 1e-6);
         assert!((r - SQRT_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn volume_override_scales_mix_and_clears() {
+        let clip = ClipId::from_raw(7);
+        let src = 0.5_f32;
+        let mut mixer = mixer_with_span(flat_span(Param::Constant(0.0), src, src));
+        mixer.set_param_override(clip, ClipParam::Volume, ParamValue::Scalar(0.25));
+        assert!(!mixer.param_overrides().is_empty());
+
+        let mut out = vec![0.0; 8 * CHANNELS];
+        mixer.mix_into(0, &mut out).unwrap();
+        for frame in 0..8 {
+            assert!(
+                (out[frame * CHANNELS] - src * 0.25).abs() < 1e-6,
+                "live volume override must scale the mix"
+            );
+        }
+
+        mixer.clear_param_override(clip, ClipParam::Volume);
+        assert!(mixer.param_overrides().is_empty());
+        out.fill(0.0);
+        mixer.mix_into(0, &mut out).unwrap();
+        for frame in 0..8 {
+            assert_eq!(out[frame * CHANNELS], src);
+        }
+    }
+
+    #[test]
+    fn pan_override_wins_over_stored_envelope() {
+        let clip = ClipId::from_raw(7);
+        let src = 0.5_f32;
+        // Stored pan is full-right; live override pulls full-left.
+        let mut mixer = mixer_with_span(flat_span(Param::Constant(1.0), src, src));
+        mixer.set_param_override(clip, ClipParam::Pan, ParamValue::Scalar(-1.0));
+
+        let mut out = vec![0.0; 4 * CHANNELS];
+        mixer.mix_into(0, &mut out).unwrap();
+        let expect_l = src * SQRT_2;
+        for frame in 0..4 {
+            assert!((out[frame * CHANNELS] - expect_l).abs() < 1e-6);
+            assert_eq!(out[frame * CHANNELS + 1], 0.0);
+        }
+
+        mixer.clear_param_overrides(clip);
+        out.fill(0.0);
+        mixer.mix_into(0, &mut out).unwrap();
+        let expect_r = src * SQRT_2;
+        for frame in 0..4 {
+            assert!(out[frame * CHANNELS].abs() < 1e-6);
+            assert!((out[frame * CHANNELS + 1] - expect_r).abs() < 1e-6);
+        }
     }
 }

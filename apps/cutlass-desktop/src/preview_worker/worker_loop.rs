@@ -577,8 +577,7 @@ fn worker_loop(
                     }
                 }
                 last_tick = tick;
-                if pending
-                    && let Some(generator) = generator_fill_from_engine(engine, &clip, rgba)
+                if pending && let Some(generator) = generator_fill_from_engine(engine, &clip, rgba)
                 {
                     apply_generator_override(engine, &clip, generator);
                 }

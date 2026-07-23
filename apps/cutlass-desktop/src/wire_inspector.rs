@@ -530,8 +530,8 @@ pub(crate) fn wire_inspector(
         });
 
     let preview_fill_handle = preview_worker.handle();
-    app.global::<InspectorBackend>().on_preview_generator_fill(
-        move |clip_id, r, g, b, a, tick| {
+    app.global::<InspectorBackend>()
+        .on_preview_generator_fill(move |clip_id, r, g, b, a, tick| {
             preview_fill_handle.preview_generator_fill(
                 clip_id.to_string(),
                 [
@@ -542,8 +542,7 @@ pub(crate) fn wire_inspector(
                 ],
                 i64::from(tick),
             );
-        },
-    );
+        });
 
     let set_fill_handle = preview_worker.handle();
     app.global::<InspectorBackend>()

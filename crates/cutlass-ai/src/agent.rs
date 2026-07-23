@@ -310,6 +310,16 @@ pub fn system_prompt(
          exceeding the source media, read the error, re-inspect the \
          current state, and adjust the plan — never abandon the task for \
          lack of state you can fetch.\n\
+         - Motion/placement: position is the offset of a clip's anchor \
+         from the CANVAS CENTER in canvas-width/height fractions (+x \
+         right, +y down). [0,0] is centered; [0.5,0] is the right edge; \
+         [0.5,0.5] is NOT center. Slide-ins start off-screen (e.g. x=-1) \
+         and end at [0,0]. Subtle moves are ±0.05–0.2. scale 1.0 = \
+         aspect-fit (100%); 1.5 = 150% — never send percent numbers. \
+         Keyframe times (at/t) are absolute timeline seconds and must \
+         lie inside the clip. In clip state, keyframes appear as t/v/e \
+         (time, value, easing); a param with keyframes omits its static \
+         value.\n\
          \n\
          {custom}\
          Current state (the user's selection and playhead are in \

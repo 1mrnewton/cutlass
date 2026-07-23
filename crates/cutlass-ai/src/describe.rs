@@ -16,11 +16,17 @@
 use std::collections::BTreeMap;
 
 use cutlass_models::{
-    Clip, ClipSource, Easing, Generator, Param, Project, Rational, Scale2, Shape, Track,
+    Clip, ClipSource, Easing, Generator, MediaKind, Param, Project, Rational, Scale2, Shape, Track,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::wire::WireScale;
+
+/// Vertical reference used by the renderer for fixed aspect presets (1080p
+/// baseline on the longer side). Kept in sync with `cutlass_render::canvas_size`.
+const CANVAS_REFERENCE_HEIGHT: f32 = 1080.0;
+/// Fallback when aspect is Auto and no video media is on a visual track.
+const DEFAULT_CANVAS_PIXELS: (u32, u32) = (1920, 1080);
 
 /// UI session state captured when the user hits send. This is how "the
 /// selected clip" and "at the playhead" resolve to ids and times.
@@ -51,16 +57,19 @@ pub struct ProjectSummary {
     /// Ruler markers in tick order (M1). Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<MarkerSummary>,
-    /// Canvas settings (set_canvas). Omitted at the default (auto aspect,
-    /// black background).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canvas: Option<CanvasSummary>,
+    /// Canvas size and settings (set_canvas). Always present so the model
+    /// knows the pixel frame placement fractions refer to.
+    pub canvas: CanvasSummary,
     /// The media pool, id-ascending.
     pub media: Vec<MediaSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanvasSummary {
+    /// Resolved canvas width in pixels (same box preview/export use).
+    pub width: u32,
+    /// Resolved canvas height in pixels.
+    pub height: u32,
     /// Aspect preset name: auto, 16:9, 9:16, 1:1, 4:5, 21:9.
     pub aspect: String,
     /// Background color as `[red, green, blue]`, each 0-255.
@@ -289,6 +298,60 @@ pub struct MediaSummary {
 
 fn seconds(ticks: i64, rate: Rational) -> f64 {
     ticks as f64 * rate.seconds_per_unit()
+}
+
+/// Pixel size of the project's canvas — mirrors `cutlass_render::canvas_size`
+/// so describe stays free of a render dependency.
+fn describe_canvas_size(project: &Project) -> (u32, u32) {
+    match project.timeline().canvas().aspect.ratio() {
+        Some((rw, rh)) => ratio_to_pixels(rw, rh),
+        None => auto_canvas_size(project),
+    }
+}
+
+fn ratio_to_pixels(rw: u32, rh: u32) -> (u32, u32) {
+    let (rw, rh) = (rw as f32, rh as f32);
+    let (w, h) = if rw >= rh {
+        (
+            (CANVAS_REFERENCE_HEIGHT * rw / rh).round(),
+            CANVAS_REFERENCE_HEIGHT,
+        )
+    } else {
+        (
+            CANVAS_REFERENCE_HEIGHT,
+            (CANVAS_REFERENCE_HEIGHT * rh / rw).round(),
+        )
+    };
+    (even_pixels(w as u32), even_pixels(h as u32))
+}
+
+fn auto_canvas_size(project: &Project) -> (u32, u32) {
+    let mut best: Option<(u32, u32)> = None;
+    for track in project.timeline().tracks_ordered() {
+        if !track.kind.is_visual() {
+            continue;
+        }
+        for clip in track.clips() {
+            let Some(id) = clip.media() else { continue };
+            let Some(media) = project.media(id) else {
+                continue;
+            };
+            if media.kind() != MediaKind::Video {
+                continue;
+            }
+            let area = u64::from(media.width) * u64::from(media.height);
+            if best.is_none_or(|(bw, bh)| area > u64::from(bw) * u64::from(bh)) {
+                best = Some((media.width, media.height));
+            }
+        }
+    }
+    best.map_or(DEFAULT_CANVAS_PIXELS, |(w, h)| {
+        (even_pixels(w), even_pixels(h))
+    })
+}
+
+fn even_pixels(v: u32) -> u32 {
+    (v & !1).max(2)
 }
 
 fn wire_easing_name(easing: Easing) -> Option<String> {
@@ -730,11 +793,14 @@ pub fn summarize(project: &Project) -> ProjectSummary {
         })
         .collect();
 
-    let canvas = project.timeline().canvas();
-    let canvas = (!canvas.is_default()).then(|| CanvasSummary {
-        aspect: canvas.aspect.name().to_string(),
-        background: canvas.background,
-    });
+    let settings = project.timeline().canvas();
+    let (width, height) = describe_canvas_size(project);
+    let canvas = CanvasSummary {
+        width,
+        height,
+        aspect: settings.aspect.name().to_string(),
+        background: settings.background,
+    };
 
     ProjectSummary {
         name: project.name.clone(),

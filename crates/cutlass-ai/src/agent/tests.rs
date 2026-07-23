@@ -94,7 +94,12 @@ fn system_prompt_carries_state_and_trim_rule() {
         duration_seconds: 10.0,
         tracks: vec![],
         markers: vec![],
-        canvas: None,
+        canvas: crate::describe::CanvasSummary {
+            width: 1920,
+            height: 1080,
+            aspect: "auto".into(),
+            background: [0, 0, 0],
+        },
         media: vec![],
     };
     let ctx = EditorContext {
@@ -119,6 +124,11 @@ fn system_prompt_carries_state_and_trim_rule() {
     assert!(prompt.contains("Never ask the user to pre-place footage"));
     // The overlap rule: make room before growing into a packed track.
     assert!(prompt.contains("Clips on one track can never overlap"));
+    // Motion convention: [0,0] is center; [0.5,0.5] is not.
+    assert!(prompt.contains("Motion/placement: position is the offset"));
+    assert!(prompt.contains("[0,0] is centered"));
+    assert!(prompt.contains("[0.5,0.5] is NOT center"));
+    assert!(prompt.contains("keyframes appear as t/v/e"));
     // No extensions ⇒ no rules or skills sections.
     assert!(!prompt.contains("User rules"));
     assert!(!prompt.contains("read_skill"));
@@ -132,7 +142,12 @@ fn system_prompt_injects_rules_and_skill_index_only() {
         duration_seconds: 10.0,
         tracks: vec![],
         markers: vec![],
-        canvas: None,
+        canvas: crate::describe::CanvasSummary {
+            width: 1920,
+            height: 1080,
+            aspect: "auto".into(),
+            background: [0, 0, 0],
+        },
         media: vec![],
     };
     let extensions = AgentExtensions {

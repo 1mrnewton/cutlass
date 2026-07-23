@@ -222,8 +222,8 @@ fn transcript_growth_last_turn_stays_under_ceiling() {
     let tools_bytes = body_bytes(&provider, &[], &tools);
     let messages_bytes = body_bytes(&provider, &messages, &[]);
 
-    // Measured 2026-07-23 (post enum-tokens + kept u8 bounds): total=63_894,
-    // tools≈50_005, messages≈13_980. Ceiling still holds with prior +15%.
+    // Measured 2026-07-23 (post canvas size + motion describe): total=64_721,
+    // tools≈50_005, messages≈14_807. Ceiling still holds with prior +15%.
     const TRANSCRIPT_CEILING: usize = 68_500;
     assert!(
         total < TRANSCRIPT_CEILING,

@@ -126,9 +126,18 @@ fn phantom_generators_surface_as_other() {
 }
 
 #[test]
-fn canvas_surfaces_only_when_not_default() {
+fn canvas_always_includes_pixel_size() {
     let mut project = Project::new("canvas", R24);
-    assert_eq!(summarize(&project).canvas, None);
+    // Empty Auto project → default 1920×1080.
+    assert_eq!(
+        summarize(&project).canvas,
+        CanvasSummary {
+            width: 1920,
+            height: 1080,
+            aspect: "auto".to_string(),
+            background: [0, 0, 0],
+        }
+    );
 
     project
         .timeline_mut()
@@ -138,10 +147,12 @@ fn canvas_surfaces_only_when_not_default() {
         });
     assert_eq!(
         summarize(&project).canvas,
-        Some(CanvasSummary {
+        CanvasSummary {
+            width: 1080,
+            height: 1920,
             aspect: "9:16".to_string(),
             background: [20, 20, 28],
-        })
+        }
     );
 }
 

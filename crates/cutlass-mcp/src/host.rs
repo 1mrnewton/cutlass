@@ -9,6 +9,7 @@
 mod edits;
 mod render;
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
@@ -30,7 +31,7 @@ pub const NO_PROJECT: &str = "no project open — call project_new or project_op
 
 /// Session flags + identity for the open project (mirrors mobile `SessionMeta`
 /// plus name/path so agents can round-trip saves).
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Serialize, PartialEq)]
 pub struct Meta {
     pub revision: u64,
     pub dirty: bool,
@@ -42,14 +43,14 @@ pub struct Meta {
 
 /// Compact project summary plus session meta — the same summary shape the
 /// in-app agent sees via [`cutlass_ai::summarize`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ProjectDoc {
     pub meta: Meta,
     pub project: serde_json::Value,
 }
 
 /// Per-path import outcome. Failures for one path do not abort the batch.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ImportedMedia {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -191,41 +192,86 @@ fn host_loop(rx: mpsc::Receiver<HostRequest>) {
     while let Ok(req) = rx.recv() {
         match req {
             HostRequest::NewProject { name, fps, reply } => {
-                let _ = reply.send(do_new_project(&mut engine, name, fps));
+                dispatch_request(&mut engine, reply, |slot| do_new_project(slot, name, fps));
             }
             HostRequest::OpenProject { path, reply } => {
-                let _ = reply.send(do_open_project(&mut engine, path));
+                dispatch_request(&mut engine, reply, |slot| do_open_project(slot, path));
             }
             HostRequest::SaveProject { path, reply } => {
-                let _ = reply.send(do_save_project(&mut engine, path));
+                dispatch_request(&mut engine, reply, |slot| do_save_project(slot, path));
             }
             HostRequest::GetProject { reply } => {
-                let _ = reply.send(do_get_project(&engine));
+                dispatch_request(&mut engine, reply, |slot| do_get_project(slot));
             }
             HostRequest::ImportMedia { paths, reply } => {
-                let _ = reply.send(do_import_media(&mut engine, paths));
+                dispatch_request(&mut engine, reply, |slot| do_import_media(slot, paths));
             }
             HostRequest::ApplyEdits { edits, reply } => {
-                let _ = reply.send(edits::do_apply_edits(&mut engine, edits));
+                dispatch_request(&mut engine, reply, |slot| {
+                    edits::do_apply_edits(slot, edits)
+                });
             }
             HostRequest::Undo { reply } => {
-                let _ = reply.send(edits::do_undo(&mut engine));
+                dispatch_request(&mut engine, reply, edits::do_undo);
             }
             HostRequest::Redo { reply } => {
-                let _ = reply.send(edits::do_redo(&mut engine));
+                dispatch_request(&mut engine, reply, edits::do_redo);
             }
             HostRequest::GetFrame {
                 seconds,
                 max_dim,
                 reply,
             } => {
-                let _ = reply.send(render::do_get_frame(&mut engine, seconds, max_dim));
+                dispatch_request(&mut engine, reply, |slot| {
+                    render::do_get_frame(slot, seconds, max_dim)
+                });
             }
             HostRequest::ExportVideo { path, reply } => {
-                let _ = reply.send(render::do_export_video(&mut engine, path));
+                dispatch_request(&mut engine, reply, |slot| {
+                    render::do_export_video(slot, path)
+                });
             }
         }
     }
+}
+
+/// Run one request handler under `catch_unwind`.
+///
+/// A long-lived MCP server must survive one bad edit: without this, a panic
+/// inside a `do_*` handler unwinds the `cutlass-mcp-engine` thread, the MCP
+/// connection stays up, and every later call returns "engine host thread
+/// stopped" while the in-flight call gets the misleading "engine host dropped
+/// reply". On panic we reply honestly, discard the (possibly corrupted) open
+/// project — unsaved work is lost — and keep the loop alive.
+fn dispatch_request<T, F>(
+    engine: &mut Option<Engine>,
+    reply: oneshot::Sender<Result<T, String>>,
+    f: F,
+) where
+    F: FnOnce(&mut Option<Engine>) -> Result<T, String>,
+{
+    match catch_unwind(AssertUnwindSafe(|| f(engine))) {
+        Ok(payload) => {
+            let _ = reply.send(payload);
+        }
+        Err(panic) => {
+            *engine = None;
+            let msg = panic_message(&*panic);
+            let _ = reply.send(Err(format!(
+                "engine crashed while handling the request: {msg}; \
+                 open project state was discarded — project_open or project_new to continue"
+            )));
+        }
+    }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .map(str::to_owned)
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".into())
 }
 
 fn do_new_project(slot: &mut Option<Engine>, name: String, fps: f64) -> Result<Meta, String> {

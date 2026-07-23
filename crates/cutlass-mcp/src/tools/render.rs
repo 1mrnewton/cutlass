@@ -16,14 +16,15 @@ use crate::server::CutlassMcp;
 /// Default max edge for `frame_get` when the agent omits `max_dim`.
 const DEFAULT_MAX_DIM: u32 = 1024;
 const MIN_MAX_DIM: u32 = 64;
-const MAX_MAX_DIM: u32 = 4096;
+/// Cap well under a 4096² base64 PNG, which can exceed MCP tool-result limits.
+const MAX_MAX_DIM: u32 = 2048;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FrameGetParams {
     /// Timeline time in seconds (frame-snapped to the project rate).
     pub time: f64,
     /// Longest edge in pixels after fit-scale (default 1024, clamped to
-    /// 64..=4096). Aspect is preserved; never upscaled past the canvas.
+    /// 64..=2048). Aspect is preserved; never upscaled past the canvas.
     pub max_dim: Option<u32>,
 }
 

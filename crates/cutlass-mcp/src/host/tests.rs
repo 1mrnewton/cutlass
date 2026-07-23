@@ -231,6 +231,20 @@ async fn apply_edits_unknown_command_is_readable() {
     );
 }
 
+#[tokio::test]
+async fn apply_edits_rejects_empty_batch() {
+    let host = EngineHost::spawn();
+    host.new_project("empty-batch".into(), 30.0)
+        .await
+        .expect("new_project");
+
+    let err = host.apply_edits(vec![]).await.expect_err("empty batch");
+    assert!(
+        err.contains("empty edits batch"),
+        "expected readable rejection, got: {err}"
+    );
+}
+
 async fn project_with_red_solid(host: &EngineHost) {
     host.new_project("frame".into(), 30.0)
         .await
@@ -291,6 +305,19 @@ async fn frame_get_requires_project_and_rejects_negative_time() {
     assert!(
         err.contains("negative") || err.contains("must not be"),
         "{err}"
+    );
+}
+
+#[tokio::test]
+async fn frame_get_rejects_out_of_range_time() {
+    let host = EngineHost::spawn();
+    host.new_project("range".into(), 30.0)
+        .await
+        .expect("new_project");
+    let err = host.get_frame(1e18, 128).await.expect_err("huge time");
+    assert!(
+        err.contains("out of range"),
+        "expected readable rejection (not a saturated frame), got: {err}"
     );
 }
 

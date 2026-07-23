@@ -55,22 +55,13 @@ pub(crate) fn wire_inspector(
             inspector::sample_scalar_param(&clip, param.as_str(), playhead)
         });
 
-    // Declared early so keyframe / constant / preview / clear can end it.
-    let mask_session = Rc::new(RefCell::new(
-        crate::mask_gesture_session::MaskGestureSession::new(),
-    ));
-
     let kf_set_handle = preview_worker.handle();
-    let kf_mask_session = mask_session.clone();
     app.global::<InspectorBackend>().on_set_param_keyframe(
         move |clip_id, param, tick, value_x, value_y, easing| {
             let Some((param, value)) = clip_param_value(param.as_str(), value_x, value_y) else {
                 tracing::error!(param = param.as_str(), "ignoring keyframe on unknown param");
                 return;
             };
-            if crate::mask_gesture_session::clip_param_to_handle(param).is_some() {
-                kf_mask_session.borrow_mut().end();
-            }
             kf_set_handle.set_param_keyframe(
                 clip_id.to_string(),
                 param,
@@ -96,33 +87,23 @@ pub(crate) fn wire_inspector(
         });
 
     let param_constant_handle = preview_worker.handle();
-    let constant_mask_session = mask_session.clone();
     app.global::<InspectorBackend>().on_set_param_constant(
         move |clip_id, param, value_x, value_y| {
             let Some((param, value)) = clip_param_value(param.as_str(), value_x, value_y) else {
                 tracing::error!(param = param.as_str(), "ignoring constant on unknown param");
                 return;
             };
-            if crate::mask_gesture_session::clip_param_to_handle(param).is_some() {
-                constant_mask_session.borrow_mut().end();
-            }
             param_constant_handle.set_param_constant(clip_id.to_string(), param, value);
         },
     );
 
     let preview_param_handle = preview_worker.handle();
-    let preview_mask_session = mask_session.clone();
     app.global::<InspectorBackend>().on_preview_param(
         move |clip_id, param, value_x, value_y, tick| {
             let Some((param, value)) = clip_param_value(param.as_str(), value_x, value_y) else {
                 tracing::error!(param = param.as_str(), "ignoring preview on unknown param");
                 return;
             };
-            if let Some(handle) = crate::mask_gesture_session::clip_param_to_handle(param) {
-                let _ = preview_mask_session
-                    .borrow_mut()
-                    .preview(clip_id.as_str(), handle);
-            }
             preview_param_handle.param_override(clip_id.to_string(), param, value, i64::from(tick));
         },
     );

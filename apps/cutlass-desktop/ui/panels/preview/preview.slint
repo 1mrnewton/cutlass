@@ -237,6 +237,9 @@ export component PreviewPanel inherits PanelBase {
                     changed selected-clip-watch => {
                         PreviewStore.motion-path-selected-tick = -1;
                         PreviewStore.motion-path-edit-mode = 0;
+                        // MaskOverlay watches selection and cancels an active
+                        // gizmo drag against its press-time clip before these
+                        // flags clear. Inspector slider live state just drops.
                         PreviewStore.mask-live-active = false;
                         PreviewStore.mask-drag-handle = 0;
                     }

@@ -25,6 +25,21 @@ export global TimelineActions {
         return TimelineStore.selected-clip-id != "";
     }
 
+    // Escape while a mask-gizmo handle is pressed: clear the ParamOverride
+    // without committing and without deselecting (matches slider cancel-preview).
+    public function cancel-mask-gizmo-drag() -> bool {
+        if (PreviewStore.mask-drag-handle == 0) {
+            return false;
+        }
+        if (TimelineStore.selected-clip-id != "") {
+            InspectorBackend.clear-param-override(
+                TimelineStore.selected-clip-id, TimelineStore.playhead-tick);
+        }
+        PreviewStore.mask-live-active = false;
+        PreviewStore.mask-drag-handle = 0;
+        return true;
+    }
+
     public function clear-selection() {
         // Escape clears selection mid-inspector-drag: drop any live transform
         // override so it can't stick after the inspector unmounts.

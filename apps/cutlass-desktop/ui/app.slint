@@ -642,6 +642,11 @@ export component AppWindow inherits Window {
                 return accept;
             }
             if (event.text == Key.Escape) {
+                // Active mask-gizmo drag: cancel like inspector slider Escape
+                // (clear override, no commit) without deselecting the clip.
+                if (TimelineActions.cancel-mask-gizmo-drag()) {
+                    return accept;
+                }
                 TimelineActions.clear-selection();
                 return accept;
             }

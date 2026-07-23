@@ -2,6 +2,12 @@
 // drags ride the generic ParamOverride lane (same as mask inspector sliders).
 // Visible whenever the selected clip has a mask (no separate edit mode —
 // MaskInspector is always in the visual inspector scroll).
+//
+// Press-time anchors: clip id, playhead tick, mask kind, and animation flags
+// are captured at begin-drag and reused for every preview/commit/cancel so
+// playback, clip switching, or mask removal mid-drag cannot retarget the edit.
+// External cancel (Escape, selection change, mask gone) clears
+// PreviewStore.mask-drag-handle; the overlay watches that and abandons locally.
 
 import { AppStore } from "../../store/index.slint";
 import { EditorStore, PreviewStore, TimelineStore } from "../../store/index.slint";
@@ -80,21 +86,49 @@ export component MaskOverlay inherits Rectangle {
     private property <MaskGizmoDragResolution> drag-res;
     private property <bool> shift-held: false;
 
-    private property <bool> center-animated:
-        TimelineActions.selected-clip().found
-        && TimelineActions.selected-clip().clip.kf-look-mask-center.length > 0;
-    private property <bool> size-animated:
-        TimelineActions.selected-clip().found
-        && TimelineActions.selected-clip().clip.kf-look-mask-size.length > 0;
-    private property <bool> rotation-animated:
-        TimelineActions.selected-clip().found
-        && TimelineActions.selected-clip().clip.kf-look-mask-rotation.length > 0;
-    private property <bool> feather-animated:
-        TimelineActions.selected-clip().found
-        && TimelineActions.selected-clip().clip.kf-look-mask-feather.length > 0;
-    private property <bool> roundness-animated:
-        TimelineActions.selected-clip().found
-        && TimelineActions.selected-clip().clip.kf-look-mask-roundness.length > 0;
+    // Press-time anchors (not re-read from TimelineStore mid-drag).
+    private property <string> drag-clip: "";
+    private property <int> drag-tick: 0;
+    private property <string> drag-kind: "";
+    private property <bool> drag-center-animated: false;
+    private property <bool> drag-size-animated: false;
+    private property <bool> drag-rotation-animated: false;
+    private property <bool> drag-feather-animated: false;
+    private property <bool> drag-roundness-animated: false;
+
+    // External cancel (Escape / selection change) zeros mask-drag-handle
+    // while this overlay may still hold private drag state — drop any live
+    // override against the press-time clip, then sync locally.
+    private property <int> drag-handle-watch: PreviewStore.mask-drag-handle;
+    changed drag-handle-watch => {
+        if (PreviewStore.mask-drag-handle == 0 && root.handle != 0) {
+            if (root.dragging && root.drag-clip != "") {
+                InspectorBackend.clear-param-override(root.drag-clip, root.drag-tick);
+            }
+            root.handle = 0;
+            root.dragging = false;
+            root.drag-clip = "";
+            root.drag-kind = "";
+        }
+    }
+
+    // Mask removed, clip left the playhead, or gizmo otherwise vanished
+    // mid-drag → abandon (clear override, no commit).
+    private property <bool> gizmo-visible-watch: root.gizmo.visible;
+    changed gizmo-visible-watch => {
+        if (!root.gizmo.visible && root.handle != 0) {
+            root.end-drag(false);
+        }
+    }
+
+    // Selection changed under an active gizmo drag → abandon against the
+    // press-time clip (not the new selection).
+    private property <string> selected-clip-watch: TimelineStore.selected-clip-id;
+    changed selected-clip-watch => {
+        if (root.handle != 0 && TimelineStore.selected-clip-id != root.drag-clip) {
+            root.end-drag(false);
+        }
+    }
 
     function seed-live-from-gizmo() {
         PreviewStore.mask-live-center-x = root.gizmo.center-fx;
@@ -108,7 +142,7 @@ export component MaskOverlay inherits Rectangle {
     }
 
     function begin(handle: int, px: float, py: float) {
-        if (handle == 0 || TimelineStore.selected-clip-id == "") {
+        if (handle == 0 || TimelineStore.selected-clip-id == "" || !root.gizmo.visible) {
             return;
         }
         root.handle = handle;
@@ -122,6 +156,29 @@ export component MaskOverlay inherits Rectangle {
         root.start-feather = root.gizmo.feather;
         root.start-roundness = root.gizmo.roundness;
         root.dragging = false;
+
+        root.drag-clip = TimelineStore.selected-clip-id;
+        root.drag-tick = TimelineStore.playhead-tick;
+        root.drag-kind = root.gizmo.kind;
+        if (TimelineActions.selected-clip().found) {
+            root.drag-center-animated =
+                TimelineActions.selected-clip().clip.kf-look-mask-center.length > 0;
+            root.drag-size-animated =
+                TimelineActions.selected-clip().clip.kf-look-mask-size.length > 0;
+            root.drag-rotation-animated =
+                TimelineActions.selected-clip().clip.kf-look-mask-rotation.length > 0;
+            root.drag-feather-animated =
+                TimelineActions.selected-clip().clip.kf-look-mask-feather.length > 0;
+            root.drag-roundness-animated =
+                TimelineActions.selected-clip().clip.kf-look-mask-roundness.length > 0;
+        } else {
+            root.drag-center-animated = false;
+            root.drag-size-animated = false;
+            root.drag-rotation-animated = false;
+            root.drag-feather-animated = false;
+            root.drag-roundness-animated = false;
+        }
+
         PreviewStore.mask-drag-handle = handle;
         root.seed-live-from-gizmo();
     }
@@ -138,35 +195,35 @@ export component MaskOverlay inherits Rectangle {
 
         if (root.handle == 1 || root.handle == 2) {
             InspectorBackend.preview-param(
-                TimelineStore.selected-clip-id, "look_mask_center",
-                res.center-fx, res.center-fy, TimelineStore.playhead-tick);
+                root.drag-clip, "look_mask_center",
+                res.center-fx, res.center-fy, root.drag-tick);
         } else if (root.handle == 3 || root.handle == 4) {
             InspectorBackend.preview-param(
-                TimelineStore.selected-clip-id, "look_mask_size",
-                res.size-w, res.size-h, TimelineStore.playhead-tick);
+                root.drag-clip, "look_mask_size",
+                res.size-w, res.size-h, root.drag-tick);
         } else if (root.handle == 5) {
             InspectorBackend.preview-param(
-                TimelineStore.selected-clip-id, "look_mask_rotation",
-                res.rotation-deg, 0, TimelineStore.playhead-tick);
+                root.drag-clip, "look_mask_rotation",
+                res.rotation-deg, 0, root.drag-tick);
         } else if (root.handle == 6) {
             InspectorBackend.preview-param(
-                TimelineStore.selected-clip-id, "look_mask_feather",
-                res.feather, 0, TimelineStore.playhead-tick);
+                root.drag-clip, "look_mask_feather",
+                res.feather, 0, root.drag-tick);
         } else if (root.handle == 7) {
             InspectorBackend.preview-param(
-                TimelineStore.selected-clip-id, "look_mask_roundness",
-                res.roundness, 0, TimelineStore.playhead-tick);
+                root.drag-clip, "look_mask_roundness",
+                res.roundness, 0, root.drag-tick);
         }
     }
 
     function move-to(cx: float, cy: float, keep-aspect: bool) {
-        if (root.handle == 0) {
+        if (root.handle == 0 || root.drag-clip == "") {
             return;
         }
         root.drag-res = PreviewBackend.resolve-mask-gizmo-drag(
             EditorStore.project.sequence,
-            TimelineStore.selected-clip-id,
-            TimelineStore.playhead-tick,
+            root.drag-clip,
+            root.drag-tick,
             root.handle,
             root.press-x,
             root.press-y,
@@ -184,7 +241,7 @@ export component MaskOverlay inherits Rectangle {
             root.start-rotation,
             root.start-feather,
             root.start-roundness,
-            root.gizmo.kind,
+            root.drag-kind,
             keep-aspect);
         if (!root.drag-res.valid) {
             return;
@@ -196,16 +253,25 @@ export component MaskOverlay inherits Rectangle {
     function commit-param(param: string, vx: float, vy: float, animated: bool) {
         if (animated) {
             InspectorBackend.set-param-keyframe(
-                TimelineStore.selected-clip-id, param,
-                TimelineStore.playhead-tick, vx, vy, 0);
+                root.drag-clip, param,
+                root.drag-tick, vx, vy, 0);
         } else {
             InspectorBackend.set-param-constant(
-                TimelineStore.selected-clip-id, param, vx, vy);
+                root.drag-clip, param, vx, vy);
         }
     }
 
+    function clear-drag-ui() {
+        PreviewStore.mask-live-active = false;
+        PreviewStore.mask-drag-handle = 0;
+        root.handle = 0;
+        root.dragging = false;
+        root.drag-clip = "";
+        root.drag-kind = "";
+    }
+
     function end-drag(commit: bool) {
-        if (root.handle == 0) {
+        if (root.handle == 0 || root.drag-clip == "") {
             return;
         }
         if (commit && root.dragging) {
@@ -214,76 +280,94 @@ export component MaskOverlay inherits Rectangle {
                     "look_mask_center",
                     PreviewStore.mask-live-center-x,
                     PreviewStore.mask-live-center-y,
-                    root.center-animated);
+                    root.drag-center-animated);
             } else if (root.handle == 3 || root.handle == 4) {
                 root.commit-param(
                     "look_mask_size",
                     PreviewStore.mask-live-size-w,
                     PreviewStore.mask-live-size-h,
-                    root.size-animated);
+                    root.drag-size-animated);
             } else if (root.handle == 5) {
                 root.commit-param(
                     "look_mask_rotation",
                     PreviewStore.mask-live-rotation,
                     0,
-                    root.rotation-animated);
+                    root.drag-rotation-animated);
             } else if (root.handle == 6) {
                 root.commit-param(
                     "look_mask_feather",
                     PreviewStore.mask-live-feather,
                     0,
-                    root.feather-animated);
+                    root.drag-feather-animated);
             } else if (root.handle == 7) {
                 root.commit-param(
                     "look_mask_roundness",
                     PreviewStore.mask-live-roundness,
                     0,
-                    root.roundness-animated);
+                    root.drag-roundness-animated);
             }
         } else if (root.dragging) {
-            InspectorBackend.clear-param-override(
-                TimelineStore.selected-clip-id, TimelineStore.playhead-tick);
+            InspectorBackend.clear-param-override(root.drag-clip, root.drag-tick);
         }
-        PreviewStore.mask-live-active = false;
-        PreviewStore.mask-drag-handle = 0;
-        root.handle = 0;
-        root.dragging = false;
+        root.clear-drag-ui();
     }
 
     // Double-click a handle → Mask::new defaults for that param (one commit).
     function reset-handle(handle: int) {
-        if (handle == 0 || TimelineStore.selected-clip-id == "") {
+        if (handle == 0 || TimelineStore.selected-clip-id == "" || !root.gizmo.visible) {
             return;
         }
-        if (root.dragging) {
-            InspectorBackend.clear-param-override(
-                TimelineStore.selected-clip-id, TimelineStore.playhead-tick);
+        if (root.dragging && root.drag-clip != "") {
+            InspectorBackend.clear-param-override(root.drag-clip, root.drag-tick);
             root.dragging = false;
         }
         root.handle = handle;
+        root.drag-clip = TimelineStore.selected-clip-id;
+        root.drag-tick = TimelineStore.playhead-tick;
+        root.drag-kind = root.gizmo.kind;
+        if (TimelineActions.selected-clip().found) {
+            root.drag-center-animated =
+                TimelineActions.selected-clip().clip.kf-look-mask-center.length > 0;
+            root.drag-size-animated =
+                TimelineActions.selected-clip().clip.kf-look-mask-size.length > 0;
+            root.drag-rotation-animated =
+                TimelineActions.selected-clip().clip.kf-look-mask-rotation.length > 0;
+            root.drag-feather-animated =
+                TimelineActions.selected-clip().clip.kf-look-mask-feather.length > 0;
+            root.drag-roundness-animated =
+                TimelineActions.selected-clip().clip.kf-look-mask-roundness.length > 0;
+        } else {
+            root.drag-center-animated = false;
+            root.drag-size-animated = false;
+            root.drag-rotation-animated = false;
+            root.drag-feather-animated = false;
+            root.drag-roundness-animated = false;
+        }
         root.seed-live-from-gizmo();
         if (handle == 1 || handle == 2) {
             PreviewStore.mask-live-center-x = 0;
             PreviewStore.mask-live-center-y = 0;
-            root.commit-param("look_mask_center", 0, 0, root.center-animated);
+            root.commit-param("look_mask_center", 0, 0, root.drag-center-animated);
         } else if (handle == 3 || handle == 4) {
-            PreviewStore.mask-live-size-w = 1;
+            // Mirror band default thickness is 0.5; other kinds keep size [1,1].
+            PreviewStore.mask-live-size-w = root.drag-kind == "mirror" ? 0.5 : 1.0;
             PreviewStore.mask-live-size-h = 1;
-            root.commit-param("look_mask_size", 1, 1, root.size-animated);
+            root.commit-param(
+                "look_mask_size",
+                PreviewStore.mask-live-size-w,
+                1,
+                root.drag-size-animated);
         } else if (handle == 5) {
             PreviewStore.mask-live-rotation = 0;
-            root.commit-param("look_mask_rotation", 0, 0, root.rotation-animated);
+            root.commit-param("look_mask_rotation", 0, 0, root.drag-rotation-animated);
         } else if (handle == 6) {
             PreviewStore.mask-live-feather = 0;
-            root.commit-param("look_mask_feather", 0, 0, root.feather-animated);
+            root.commit-param("look_mask_feather", 0, 0, root.drag-feather-animated);
         } else if (handle == 7) {
             PreviewStore.mask-live-roundness = 0;
-            root.commit-param("look_mask_roundness", 0, 0, root.roundness-animated);
+            root.commit-param("look_mask_roundness", 0, 0, root.drag-roundness-animated);
         }
-        PreviewStore.mask-live-active = false;
-        PreviewStore.mask-drag-handle = 0;
-        root.handle = 0;
-        root.dragging = false;
+        root.clear-drag-ui();
     }
 
     // Body grab (moves center): large soft hit around the mask center.

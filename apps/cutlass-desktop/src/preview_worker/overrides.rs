@@ -155,6 +155,59 @@ pub(super) fn apply_styles_override(engine: &mut Engine, clip: &str, styles: Lay
     }
 }
 
+/// Build the live styles override for one inspector style-param delta by
+/// reading the clip's committed styles from the engine (cheap, off the UI
+/// thread) and applying the named field. Returns `None` for unknown clips or
+/// keys — same drop semantics as the old UI-side snapshot path.
+pub(super) fn styles_from_preview_delta(
+    engine: &Engine,
+    clip: &str,
+    key: &str,
+    value_x: f32,
+    value_y: f32,
+    tick: i64,
+) -> Option<LayerStyles> {
+    let clip_id = parse_raw_id(clip).map(ClipId::from_raw)?;
+    let clip_ref = engine.project().clip(clip_id)?;
+    let mut styles = clip_ref.styles.clone();
+    let local_tick = clip_ref.animation_tick(tick);
+    if !crate::library_helpers::apply_style_preview_constant(
+        &mut styles,
+        key,
+        value_x,
+        value_y,
+        local_tick,
+    ) {
+        return None;
+    }
+    Some(styles)
+}
+
+/// Resolve a style-param delta against engine state and install the session
+/// styles override. Unknown clips/keys are logged and dropped.
+pub(super) fn apply_styles_preview_delta(
+    engine: &mut Engine,
+    clip: &str,
+    key: &str,
+    value_x: f32,
+    value_y: f32,
+    tick: i64,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "styles preview delta ignored: unparsable clip id");
+        return;
+    };
+    if engine.project().clip(clip_id).is_none() {
+        error!(clip, "styles preview delta ignored: unknown clip");
+        return;
+    }
+    let Some(styles) = styles_from_preview_delta(engine, clip, key, value_x, value_y, tick) else {
+        error!(key, "styles preview delta ignored: unknown key");
+        return;
+    };
+    apply_styles_override(engine, clip, styles);
+}
+
 pub(super) fn filter_from_ui(filter_id: &str, intensity: f32) -> Option<Filter> {
     let id = filter_id.trim();
     if id.is_empty() {

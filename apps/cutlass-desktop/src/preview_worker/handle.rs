@@ -304,16 +304,40 @@ impl WorkerHandle {
         let _ = self.tx.send(WorkerMsg::SetMotionBlur { clip, motion_blur });
     }
 
+    /// Full styles replace. Inspector toggles use [`Self::toggle_layer_style`].
+    #[allow(dead_code)] // Retained for tests / direct full-replace commits.
     pub fn set_layer_styles(&self, clip: String, styles: LayerStyles) {
         let _ = self.tx.send(WorkerMsg::SetLayerStyles { clip, styles });
     }
 
+    pub fn toggle_layer_style(&self, clip: String, block: String, enabled: bool) {
+        let _ = self.tx.send(WorkerMsg::ToggleLayerStyle {
+            clip,
+            block,
+            enabled,
+        });
+    }
+
+    /// Full mask replace. Inspector kind/invert use the merge helpers below.
+    #[allow(dead_code)] // Retained for tests / direct full-replace commits.
     pub fn set_mask(&self, clip: String, mask: Option<Mask>) {
         let _ = self.tx.send(WorkerMsg::SetMask { clip, mask });
     }
 
+    pub fn set_mask_kind(&self, clip: String, kind: String) {
+        let _ = self.tx.send(WorkerMsg::SetMaskKind { clip, kind });
+    }
+
+    pub fn set_mask_invert(&self, clip: String, invert: bool) {
+        let _ = self.tx.send(WorkerMsg::SetMaskInvert { clip, invert });
+    }
+
     pub fn set_chroma(&self, clip: String, chroma: Option<ChromaKey>) {
         let _ = self.tx.send(WorkerMsg::SetChroma { clip, chroma });
+    }
+
+    pub fn set_chroma_color(&self, clip: String, rgb: [u8; 3]) {
+        let _ = self.tx.send(WorkerMsg::SetChromaColor { clip, rgb });
     }
 
     pub fn set_clip_filter(&self, clip: String, filter_id: String, intensity: f32) {
@@ -376,10 +400,23 @@ impl WorkerHandle {
         });
     }
 
-    pub fn preview_clip_styles(&self, clip: String, styles: LayerStyles, tick: i64) {
-        let _ = self
-            .tx
-            .send(WorkerMsg::PreviewClipStyles { clip, styles, tick });
+    /// Live style-param preview: send only the delta; the worker merges it
+    /// against the clip's committed styles (no UI-thread project snapshot).
+    pub fn preview_clip_style_delta(
+        &self,
+        clip: String,
+        key: String,
+        value_x: f32,
+        value_y: f32,
+        tick: i64,
+    ) {
+        let _ = self.tx.send(WorkerMsg::PreviewClipStyleDelta {
+            clip,
+            key,
+            value_x,
+            value_y,
+            tick,
+        });
     }
 
     pub fn clear_styles_override(&self, tick: i64) {

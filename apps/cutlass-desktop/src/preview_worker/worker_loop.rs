@@ -579,31 +579,40 @@ fn worker_loop(
                     SeekPolicy::Exact,
                 );
             }
-            // Layer-style slider drags carry the whole styles block so preview
-            // frames never mix a new blur with a stale color. Coalesce to the
-            // newest value like look/transform/generator overrides.
-            WorkerMsg::PreviewClipStyles {
+            // Layer-style slider drags carry a single param delta; the worker
+            // rebuilds the full styles override from committed engine state +
+            // that delta. Coalesce to the newest delta (latest wins per clip)
+            // like look/transform/generator overrides.
+            WorkerMsg::PreviewClipStyleDelta {
                 mut clip,
-                mut styles,
+                mut key,
+                mut value_x,
+                mut value_y,
                 mut tick,
             } => {
                 let mut pending = true;
                 while let Ok(next) = req_rx.try_recv() {
                     match next {
                         WorkerMsg::Frame(latest) => tick = latest,
-                        WorkerMsg::PreviewClipStyles {
+                        WorkerMsg::PreviewClipStyleDelta {
                             clip: c,
-                            styles: s,
+                            key: k,
+                            value_x: x,
+                            value_y: y,
                             tick: at,
                         } => {
                             clip = c;
-                            styles = s;
+                            key = k;
+                            value_x = x;
+                            value_y = y;
                             tick = at;
                             pending = true;
                         }
                         other => {
                             if std::mem::take(&mut pending) {
-                                apply_styles_override(engine, &clip, styles.clone());
+                                apply_styles_preview_delta(
+                                    engine, &clip, &key, value_x, value_y, tick,
+                                );
                             }
                             dispatch(
                                 engine,
@@ -624,7 +633,7 @@ fn worker_loop(
                 }
                 last_tick = tick;
                 if pending {
-                    apply_styles_override(engine, &clip, styles);
+                    apply_styles_preview_delta(engine, &clip, &key, value_x, value_y, tick);
                 }
                 render_frame(
                     engine,
@@ -779,8 +788,12 @@ pub(super) fn message_invalidates_preview(msg: &WorkerMsg) -> bool {
             | WorkerMsg::SetBlendMode { .. }
             | WorkerMsg::SetMotionBlur { .. }
             | WorkerMsg::SetLayerStyles { .. }
+            | WorkerMsg::ToggleLayerStyle { .. }
             | WorkerMsg::SetMask { .. }
+            | WorkerMsg::SetMaskKind { .. }
+            | WorkerMsg::SetMaskInvert { .. }
             | WorkerMsg::SetChroma { .. }
+            | WorkerMsg::SetChromaColor { .. }
             | WorkerMsg::SetClipFilter { .. }
             | WorkerMsg::SetClipAdjust { .. }
             | WorkerMsg::SetClipLut { .. }

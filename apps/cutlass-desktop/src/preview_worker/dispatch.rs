@@ -185,8 +185,22 @@ pub(super) fn dispatch(
         WorkerMsg::SetLayerStyles { clip, styles } => {
             set_layer_styles_and_publish(engine, &clip, styles, ui)
         }
+        WorkerMsg::ToggleLayerStyle {
+            clip,
+            block,
+            enabled,
+        } => toggle_layer_style_and_publish(engine, &clip, &block, enabled, ui),
         WorkerMsg::SetMask { clip, mask } => set_mask_and_publish(engine, &clip, mask, ui),
+        WorkerMsg::SetMaskKind { clip, kind } => {
+            set_mask_kind_and_publish(engine, &clip, &kind, ui)
+        }
+        WorkerMsg::SetMaskInvert { clip, invert } => {
+            set_mask_invert_and_publish(engine, &clip, invert, ui)
+        }
         WorkerMsg::SetChroma { clip, chroma } => set_chroma_and_publish(engine, &clip, chroma, ui),
+        WorkerMsg::SetChromaColor { clip, rgb } => {
+            set_chroma_color_and_publish(engine, &clip, rgb, ui)
+        }
         WorkerMsg::SetClipFilter {
             clip,
             filter_id,
@@ -243,8 +257,14 @@ pub(super) fn dispatch(
             );
         }
         // Same interleave fallback for styles preview bursts.
-        WorkerMsg::PreviewClipStyles { clip, styles, tick } => {
-            apply_styles_override(engine, &clip, styles);
+        WorkerMsg::PreviewClipStyleDelta {
+            clip,
+            key,
+            value_x,
+            value_y,
+            tick,
+        } => {
+            apply_styles_preview_delta(engine, &clip, &key, value_x, value_y, tick);
             render_frame(
                 engine,
                 tl_rate,

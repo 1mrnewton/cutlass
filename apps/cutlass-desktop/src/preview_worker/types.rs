@@ -333,22 +333,52 @@ pub(super) enum WorkerMsg {
         motion_blur: MotionBlur,
     },
     /// Replace a visual clip's layer styles (shadow/glow/outline/background).
-    /// One undoable history entry.
+    /// One undoable history entry. Inspector toggles use [`Self::ToggleLayerStyle`]
+    /// (worker merges); this full-replace form remains for tests / direct commits.
+    #[allow(dead_code)]
     SetLayerStyles {
         clip: String,
         styles: LayerStyles,
     },
+    /// Toggle one layer-style block (shadow/glow/outline/background) on or
+    /// off. The worker merges against the clip's committed styles — no UI
+    /// snapshot. One undoable history entry.
+    ToggleLayerStyle {
+        clip: String,
+        block: String,
+        enabled: bool,
+    },
     /// Set (or clear) a visual clip's shaped alpha mask. `None` clears.
-    /// One undoable history entry.
+    /// One undoable history entry. Inspector kind/invert use the merge
+    /// messages below; this full-replace form remains for tests / direct commits.
+    #[allow(dead_code)]
     SetMask {
         clip: String,
         mask: Option<Mask>,
+    },
+    /// Switch mask catalog kind (or clear with empty `kind`). Worker merges
+    /// feather/invert/geometry from the clip's current mask. One undoable
+    /// history entry.
+    SetMaskKind {
+        clip: String,
+        kind: String,
+    },
+    /// Toggle mask invert on the clip's existing mask. One undoable entry.
+    SetMaskInvert {
+        clip: String,
+        invert: bool,
     },
     /// Set (or clear) chroma keying on a visual clip. `None` clears.
     /// One undoable history entry.
     SetChroma {
         clip: String,
         chroma: Option<ChromaKey>,
+    },
+    /// Set chroma-key RGB on an already-enabled chroma clip. Worker merges
+    /// against committed chroma. One undoable history entry.
+    SetChromaColor {
+        clip: String,
+        rgb: [u8; 3],
     },
     /// Set (or clear) a visual clip's filter preset. `filter_id == ""`
     /// clears; intensity is normalized 0..=1. One undoable history entry.
@@ -394,12 +424,16 @@ pub(super) enum WorkerMsg {
         adjust: ColorAdjustments,
         tick: i64,
     },
-    /// Live layer-styles preview: replace one clip's styles through the
-    /// engine's session-only styles override. Bursts coalesce to the newest
-    /// like look/transform/generator overrides.
-    PreviewClipStyles {
+    /// Live layer-styles preview: one style-param delta. The worker reads the
+    /// clip's committed styles from engine state, applies the delta, and sets
+    /// the session-only styles override — no UI-thread project snapshot.
+    /// Bursts coalesce to the newest delta per clip (same as
+    /// look/transform/generator overrides).
+    PreviewClipStyleDelta {
         clip: String,
-        styles: LayerStyles,
+        key: String,
+        value_x: f32,
+        value_y: f32,
         tick: i64,
     },
     /// Drop the styles override (control released with no net change) and

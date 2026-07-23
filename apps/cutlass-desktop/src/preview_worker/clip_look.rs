@@ -164,6 +164,69 @@ pub(super) fn set_mask_and_publish(
     publish_projection(engine, ui);
 }
 
+/// Switch mask kind (or clear with empty `kind`), preserving feather / invert /
+/// geometry from the clip's committed mask. Reads engine state — no UI snapshot.
+pub(super) fn set_mask_kind_and_publish(engine: &mut Engine, clip: &str, kind: &str, ui: &UiSink) {
+    let Some(mask) = mask_with_kind(engine, clip, kind) else {
+        return;
+    };
+    set_mask_and_publish(engine, clip, mask, ui);
+}
+
+/// Build the mask for a kind switch against the clip's committed state.
+/// `None` return means the edit was dropped (bad id / unknown kind).
+pub(super) fn mask_with_kind(engine: &Engine, clip: &str, kind: &str) -> Option<Option<Mask>> {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-mask-kind ignored: unparsable clip id");
+        return None;
+    };
+    let Some(clip_ref) = engine.project().clip(clip_id) else {
+        error!(clip, "set-mask-kind ignored: unknown clip");
+        return None;
+    };
+    if kind.is_empty() {
+        return Some(None);
+    }
+    let Some(spec) = cutlass_models::mask_catalog()
+        .iter()
+        .find(|s| s.kind.id() == kind)
+    else {
+        error!(kind, "set-mask-kind ignored: unknown kind");
+        return None;
+    };
+    // Preserve feather / invert / geometry when switching kind;
+    // enable-from-none uses Mask::new defaults.
+    let mut mask = clip_ref
+        .mask
+        .clone()
+        .unwrap_or_else(|| Mask::new(spec.kind));
+    mask.kind = spec.kind;
+    Some(Some(mask))
+}
+
+/// Toggle invert on the clip's existing mask. No-op (logged) when mask is off.
+pub(super) fn set_mask_invert_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    invert: bool,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-mask-invert ignored: unparsable clip id");
+        return;
+    };
+    let Some(clip_ref) = engine.project().clip(clip_id) else {
+        error!(clip, "set-mask-invert ignored: unknown clip");
+        return;
+    };
+    let Some(mut mask) = clip_ref.mask.clone() else {
+        error!(clip, "set-mask-invert ignored: clip has no mask");
+        return;
+    };
+    mask.invert = invert;
+    set_mask_and_publish(engine, clip, Some(mask), ui);
+}
+
 /// Set or clear chroma keying (CapCut green screen).
 pub(super) fn set_chroma_and_publish(
     engine: &mut Engine,
@@ -185,6 +248,80 @@ pub(super) fn set_chroma_and_publish(
     }
     info!(%clip_id, enabled, "set clip chroma");
     publish_projection(engine, ui);
+}
+
+/// Set chroma RGB on a clip that already has chroma enabled.
+pub(super) fn set_chroma_color_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    rgb: [u8; 3],
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-chroma-color ignored: unparsable clip id");
+        return;
+    };
+    let Some(clip_ref) = engine.project().clip(clip_id) else {
+        error!(clip, "set-chroma-color ignored: unknown clip");
+        return;
+    };
+    let Some(mut chroma) = clip_ref.chroma_key.clone() else {
+        error!(clip, "set-chroma-color ignored: chroma off");
+        return;
+    };
+    chroma.rgb = rgb;
+    set_chroma_and_publish(engine, clip, Some(chroma), ui);
+}
+
+/// Enable/disable one layer-style block, merging against committed styles.
+pub(super) fn toggle_layer_style_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    block: &str,
+    enabled: bool,
+    ui: &UiSink,
+) {
+    let Some(styles) = styles_with_toggled_block(engine, clip, block, enabled) else {
+        return;
+    };
+    set_layer_styles_and_publish(engine, clip, styles, ui);
+}
+
+/// Merge a style-block toggle against the clip's committed styles.
+pub(super) fn styles_with_toggled_block(
+    engine: &Engine,
+    clip: &str,
+    block: &str,
+    enabled: bool,
+) -> Option<LayerStyles> {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "toggle-layer-style ignored: unparsable clip id");
+        return None;
+    };
+    let Some(clip_ref) = engine.project().clip(clip_id) else {
+        error!(clip, "toggle-layer-style ignored: unknown clip");
+        return None;
+    };
+    let mut styles = clip_ref.styles.clone();
+    match block {
+        "shadow" => {
+            styles.shadow = enabled.then(cutlass_models::LayerShadow::default);
+        }
+        "glow" => {
+            styles.glow = enabled.then(cutlass_models::LayerGlow::default);
+        }
+        "outline" => {
+            styles.outline = enabled.then(cutlass_models::LayerOutline::default);
+        }
+        "background" => {
+            styles.background = enabled.then(cutlass_models::LayerBackground::default);
+        }
+        other => {
+            error!(block = other, "toggle-layer-style ignored: unknown block");
+            return None;
+        }
+    }
+    Some(styles)
 }
 
 /// Set or clear a visual clip's filter preset. A live look drag may have left

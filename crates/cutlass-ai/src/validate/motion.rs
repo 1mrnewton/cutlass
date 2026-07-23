@@ -39,12 +39,23 @@ pub(super) fn check_position(xy: [f64; 2]) -> Result<(), Rejection> {
     check_position_component(xy[1])
 }
 
-/// Reject a scale component that is non-positive or exceeds 10 (1000%).
-/// Values that look like CapCut percents get a division hint.
+/// Smallest scale the AI path accepts. Tiny positives (e.g. `1e-50`) pass an
+/// `(0, 10]` f64 clamp but collapse to `0.0f32` in the engine — reject them
+/// here with a usable floor. Position / anchor / tangent allow 0, so f64→f32
+/// denormal collapse is harmless for those axes.
+pub(super) const MIN_USABLE_SCALE: f64 = 0.001;
+
+/// Reject a scale component that is non-positive, below [`MIN_USABLE_SCALE`],
+/// or exceeds 10 (1000%). Values that look like CapCut percents get a hint.
 pub(super) fn check_scale_component(v: f64) -> Result<(), Rejection> {
     if !v.is_finite() || v <= 0.0 {
         return Err(Rejection::new(format!(
             "scale {v} must be positive: scale 1.0 = 100% (aspect-fit); never send 0"
+        )));
+    }
+    if v < MIN_USABLE_SCALE {
+        return Err(Rejection::new(format!(
+            "scale {v} is below {MIN_USABLE_SCALE} — the smallest usable scale; 1.0 = 100%"
         )));
     }
     if v > 10.0 {

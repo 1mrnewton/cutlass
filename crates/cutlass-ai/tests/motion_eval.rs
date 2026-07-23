@@ -67,8 +67,8 @@ impl EngineBridge for EngineHost {
     }
 }
 
-/// 24 fps project, one video track, one 10 s clip (of a 60 s source) at 0 s.
-fn fixture() -> (EngineHost, u64) {
+/// 24 fps project, one video track, one 10 s clip (of a 60 s source).
+fn fixture_starting_at(start_seconds: f64) -> (EngineHost, u64) {
     let mut project = Project::new("motion-eval", R24);
     let media = project.add_media(MediaSource::new(
         "/tmp/motion-eval.mp4",
@@ -79,15 +79,21 @@ fn fixture() -> (EngineHost, u64) {
         true,
     ));
     let track = project.add_track(TrackKind::Video, "V1");
+    let start_ticks = (start_seconds * f64::from(R24.num) / f64::from(R24.den)).round() as i64;
     let clip = project
         .add_clip(
             track,
             media,
             TimeRange::at_rate(0, 240, R24),
-            RationalTime::new(0, R24),
+            RationalTime::new(start_ticks, R24),
         )
         .unwrap();
     (EngineHost::new(project), clip.raw())
+}
+
+/// Clip at timeline 0 — used by evals that do not exercise clip-start offset.
+fn fixture() -> (EngineHost, u64) {
+    fixture_starting_at(0.0)
 }
 
 fn tool_turn(calls: Vec<(&str, &str, serde_json::Value)>) -> ChatTurn {
@@ -151,14 +157,16 @@ fn tool_result_contents(provider: &ScriptedProvider) -> Vec<String> {
         .collect()
 }
 
-/// Clip-relative tick for an absolute timeline offset (clip starts at 0).
+/// Clip-relative tick for an offset from the clip's timeline start.
 fn tick_at(seconds: f64) -> i64 {
     (seconds * f64::from(R24.num) / f64::from(R24.den)).round() as i64
 }
 
 #[test]
 fn slide_in_pan_keyframes_sample_monotonic_to_center() {
-    let (mut host, clip) = fixture();
+    // Non-zero clip start exercises absolute `at` → clip-relative tick mapping.
+    const CLIP_START: f64 = 2.0;
+    let (mut host, clip) = fixture_starting_at(CLIP_START);
     let provider = ScriptedProvider::new(vec![
         tool_turn(vec![
             (
@@ -167,8 +175,10 @@ fn slide_in_pan_keyframes_sample_monotonic_to_center() {
                 serde_json::json!({
                     "clip": clip,
                     "param": "position",
-                    "at": 0.0,
+                    "at": CLIP_START,
                     "position": [-1.0, 0.0],
+                    // Easing shapes the segment *leaving* this keyframe.
+                    "easing": "ease_out",
                 }),
             ),
             (
@@ -177,19 +187,18 @@ fn slide_in_pan_keyframes_sample_monotonic_to_center() {
                 serde_json::json!({
                     "clip": clip,
                     "param": "position",
-                    "at": 1.0,
+                    "at": CLIP_START + 1.0,
                     "position": [0.0, 0.0],
-                    "easing": "ease_out",
                 }),
             ),
         ]),
-        text_turn("Slid the clip in from the left over the first second."),
+        text_turn("Slid the clip in from the left over one second."),
     ]);
 
     let (outcome, _) = run(
         &provider,
         &mut host,
-        "slide the clip in from the left over the first second",
+        "slide the clip in from the left over one second",
     );
 
     assert_eq!(outcome.status, PromptStatus::Completed);
@@ -198,11 +207,11 @@ fn slide_in_pan_keyframes_sample_monotonic_to_center() {
     let placed = host.engine.project().clip(ClipId::from_raw(clip)).unwrap();
     let kfs = placed.transform.position.keyframes();
     assert_eq!(kfs.len(), 2);
-    assert_eq!(kfs[0].tick, 0);
+    assert_eq!(kfs[0].tick, 0, "keyframes are clip-relative");
     assert_eq!(kfs[0].value, [-1.0, 0.0]);
+    assert_eq!(kfs[0].easing, Easing::EaseOut);
     assert_eq!(kfs[1].tick, 24);
     assert_eq!(kfs[1].value, [0.0, 0.0]);
-    assert_eq!(kfs[1].easing, Easing::EaseOut);
 
     // Sample at start, +0.25s, +0.5s, +0.75s, +1s — x rises to on-canvas center.
     let samples: Vec<[f32; 2]> = [0.0, 0.25, 0.5, 0.75, 1.0]
@@ -223,6 +232,23 @@ fn slide_in_pan_keyframes_sample_monotonic_to_center() {
         assert_eq!(window[0][1], 0.0);
         assert_eq!(window[1][1], 0.0);
     }
+    // ease_out is ahead of linear at the midpoint (−0.25 vs −0.5).
+    let linear_mid = -0.5f32;
+    assert!(
+        samples[2][0] > linear_mid + 0.1,
+        "ease_out midpoint must be further along than linear ({linear_mid}): got {}",
+        samples[2][0]
+    );
+
+    let summary = summarize(host.engine.project());
+    let position = summary.tracks[0].clips[0]
+        .keyframes
+        .as_ref()
+        .expect("keyframes")
+        .get("position")
+        .expect("position");
+    assert_eq!(position[0].at, CLIP_START);
+    assert_eq!(position[1].at, CLIP_START + 1.0);
 }
 
 #[test]

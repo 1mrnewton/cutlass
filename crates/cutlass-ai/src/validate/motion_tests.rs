@@ -152,6 +152,43 @@ fn scale_boundary_10_passes() {
 }
 
 #[test]
+fn scale_boundary_0_001_passes_and_underflow_is_rejected() {
+    let (project, clip) = fixture();
+    let edit = lower(
+        &project,
+        transform(
+            clip,
+            None,
+            None,
+            None,
+            None,
+            Some(wire::WireScale::Uniform(0.001)),
+        ),
+    );
+    match edit {
+        EditCommand::SetClipTransform { transform, .. } => {
+            assert_eq!(transform.scale, cutlass_models::Scale2::uniform(0.001));
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+
+    let msg = reject(
+        &project,
+        transform(
+            clip,
+            None,
+            None,
+            None,
+            None,
+            Some(wire::WireScale::Uniform(1e-50)),
+        ),
+    );
+    assert!(msg.contains("below 0.001"), "{msg}");
+    assert!(msg.contains("smallest usable scale"), "{msg}");
+    assert!(msg.contains("1.0 = 100%"), "{msg}");
+}
+
+#[test]
 fn scale_keyframe_percent_hint() {
     let (project, clip) = fixture();
     let msg = reject(

@@ -87,24 +87,7 @@ pub(super) fn residual_bitmap_scale(scale: Scale2, s: f32) -> SizeSpec {
 /// Left alone (relative / non-px): `shadow.blur` (fraction of font size),
 /// `background.radius` (0..=1 corner fraction), colors, flags, alignment, family.
 pub(super) fn apply_text_supersample(mut style: TextStyle, s: f32) -> TextStyle {
-    if !s.is_finite() || (s - 1.0).abs() < f32::EPSILON {
-        return style;
-    }
-    style.font_size *= s;
-    style.line_height *= s;
-    style.letter_spacing *= s;
-    if let Some(w) = style.max_width {
-        style.max_width = Some(w * s);
-    }
-    style.padding = ((style.padding as f32) * s)
-        .round()
-        .clamp(0.0, u32::MAX as f32) as u32;
-    if let Some(stroke) = &mut style.stroke {
-        stroke.width *= s;
-    }
-    if let Some(shadow) = &mut style.shadow {
-        shadow.distance *= s;
-    }
+    style.scale_raster_metrics(s);
     style
 }
 

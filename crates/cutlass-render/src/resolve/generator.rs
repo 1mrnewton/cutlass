@@ -51,6 +51,7 @@ pub(crate) fn resolve_generator(
                     content: text,
                     style,
                     animation: None,
+                    raster_density: s,
                 },
                 center,
                 anchor_point,

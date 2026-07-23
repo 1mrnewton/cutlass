@@ -161,9 +161,11 @@ fn text_generator_maps_style_and_defers_size() {
             content,
             style,
             animation,
+            raster_density,
         } => {
             assert!(animation.is_none());
             assert_eq!(content, "Hi");
+            approx(*raster_density, 1.0);
             approx(style.font_size, 90.0);
             assert_eq!(style.color, [255, 0, 0, 255]);
             assert!(style.bold);

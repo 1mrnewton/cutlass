@@ -93,13 +93,11 @@ impl Scene {
             layer.center = [layer.center[0] * factor, layer.center[1] * factor];
             layer.size = match layer.size {
                 SizeSpec::Fixed([w, h]) => SizeSpec::Fixed([w * factor, h * factor]),
-                // Text / path bitmaps: resolve already folds transform-scale
-                // supersample `S` into the raster (style / `raster_scale`) and
-                // leaves residual `scale/S` here. Scene fit only multiplies
-                // that residual (and path `raster_scale` below) — no second `S`.
-                SizeSpec::BitmapScaled([sx, sy]) => {
-                    SizeSpec::BitmapScaled([sx * factor, sy * factor])
-                }
+                // Text / path residuals stay put: density is raised on the
+                // source below so on-canvas size = raster × residual scales
+                // by `factor` once (not factor² for paths, not GPU-stretch
+                // for text).
+                SizeSpec::BitmapScaled(s) => SizeSpec::BitmapScaled(s),
             };
             for pass in &mut layer.blur_passes {
                 pass.center = [pass.center[0] * factor, pass.center[1] * factor];
@@ -113,15 +111,22 @@ impl Scene {
                         stroke.width *= factor;
                     }
                 }
-                // Path strokes live in path-local pixels folded into the
-                // raster, so scaling the raster factor scales them too.
+                // Path density: fold factor into raster_scale only.
                 LayerSource::PathShape { raster_scale, .. } => *raster_scale *= factor,
+                // Text density: fold factor into style metrics (+ density tag).
+                LayerSource::Text {
+                    style,
+                    raster_density,
+                    ..
+                } => {
+                    style.scale_raster_metrics(factor);
+                    *raster_density *= factor;
+                }
                 LayerSource::CanvasPass
                 | LayerSource::Media { .. }
                 | LayerSource::Still { .. }
                 | LayerSource::Sticker { .. }
                 | LayerSource::Lottie { .. }
-                | LayerSource::Text { .. }
                 | LayerSource::Solid(_)
                 | LayerSource::Transition { .. } => {}
             }
@@ -417,6 +422,11 @@ pub enum LayerSource {
         content: String,
         style: TextStyle,
         animation: Option<TextAnimation>,
+        /// Cumulative raster density relative to reference resolve metrics
+        /// (supersample `S`, then any [`Scene::scale`] factors). Catalog
+        /// per-character animation deltas are in reference run-pixels and
+        /// must be multiplied by this before the residual quad scale.
+        raster_density: f32,
     },
     /// A solid RGBA fill across the placed quad.
     Solid([u8; 4]),
@@ -528,6 +538,7 @@ mod tests {
                 content: "hi".into(),
                 style: TextStyle::new(48.0),
                 animation: None,
+                raster_density: 1.0,
             },
             center: [50.0, 25.0],
             anchor_point: [0.5, 0.5],
@@ -596,8 +607,18 @@ mod tests {
         assert_eq!(scene.layers[0].opacity, 0.8);
         assert_eq!(scene.layers[0].uv, [0.1, 0.2, 0.9, 0.8]);
 
-        // Text scales through its bitmap multiplier.
-        assert_eq!(scene.layers[1].size, SizeSpec::BitmapScaled([1.0, 1.0]));
+        // Text density folds into style metrics; residual stays put.
+        assert_eq!(scene.layers[1].size, SizeSpec::BitmapScaled([2.0, 2.0]));
+        let LayerSource::Text {
+            style,
+            raster_density,
+            ..
+        } = &scene.layers[1].source
+        else {
+            panic!("text layer");
+        };
+        assert!((style.font_size - 24.0).abs() < 1e-4);
+        assert!((*raster_density - 0.5).abs() < 1e-4);
 
         // SDF stroke width and pad are canvas-pixel quantities.
         let LayerSource::Shape { stroke, pad, .. } = &scene.layers[2].source else {
@@ -605,6 +626,91 @@ mod tests {
         };
         assert_eq!(stroke.unwrap().width, 4.0);
         assert_eq!(*pad, 3.0);
+    }
+
+    #[test]
+    fn scale_raises_bitmap_density_without_factor_squared_residual() {
+        // Export/preview fit must change raster density once: residual stays,
+        // so on-canvas size (= density × residual × ref_extent) tracks `factor`
+        // — not factor² for paths, and not GPU-stretch-only for text.
+        let mut scene = Scene::empty(1920, 1080, [0, 0, 0, 255]);
+        scene.layers.push(SceneLayer {
+            clip: None,
+            source: LayerSource::Text {
+                content: "Hi".into(),
+                style: TextStyle::new(100.0),
+                animation: None,
+                raster_density: 2.0,
+            },
+            center: [960.0, 540.0],
+            anchor_point: [0.5, 0.5],
+            size: SizeSpec::BitmapScaled([1.0, 1.0]),
+            rotation: 0.0,
+            opacity: 1.0,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            effects: Vec::new(),
+            mask: None,
+            chroma_key: None,
+            color_grade: None,
+            lut: None,
+            blend_mode: BlendMode::Normal,
+            styles: None,
+            blur_passes: Vec::new(),
+        });
+        scene.layers.push(SceneLayer {
+            clip: None,
+            source: LayerSource::PathShape {
+                path: BezierPath {
+                    points: Vec::new(),
+                    closed: false,
+                },
+                fill: [255, 0, 0, 255],
+                stroke: None,
+                raster_scale: 2.0,
+            },
+            center: [960.0, 540.0],
+            anchor_point: [0.5, 0.5],
+            size: SizeSpec::BitmapScaled([0.5, 0.5]),
+            rotation: 0.0,
+            opacity: 1.0,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            effects: Vec::new(),
+            mask: None,
+            chroma_key: None,
+            color_grade: None,
+            lut: None,
+            blend_mode: BlendMode::Normal,
+            styles: None,
+            blur_passes: Vec::new(),
+        });
+
+        scene.scale(2.0);
+
+        let LayerSource::Text {
+            style,
+            raster_density,
+            ..
+        } = &scene.layers[0].source
+        else {
+            panic!("text");
+        };
+        assert!((style.font_size - 200.0).abs() < 1e-3);
+        assert!((*raster_density - 4.0).abs() < 1e-3);
+        assert_eq!(scene.layers[0].size, SizeSpec::BitmapScaled([1.0, 1.0]));
+        // density × residual (= 4 × 1) is 2× the pre-scale product (2 × 1).
+        assert!(((*raster_density) * 1.0 - 4.0).abs() < 1e-3);
+
+        let LayerSource::PathShape { raster_scale, .. } = &scene.layers[1].source else {
+            panic!("path");
+        };
+        assert!((*raster_scale - 4.0).abs() < 1e-3);
+        // Residual unchanged — product raster_scale × residual_x = 4 × 0.5 = 2
+        // (= 2× the pre-scale product 2 × 0.5), not factor² (would be 4).
+        assert_eq!(scene.layers[1].size, SizeSpec::BitmapScaled([0.5, 0.5]));
+        let SizeSpec::BitmapScaled(r) = scene.layers[1].size else {
+            panic!("bitmap");
+        };
+        assert!((*raster_scale * r[0] - 2.0).abs() < 1e-3);
     }
 
     #[test]

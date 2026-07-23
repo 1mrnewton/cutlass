@@ -367,6 +367,7 @@ impl Renderer {
                 content,
                 style,
                 animation,
+                raster_density: _,
             } => {
                 // Transition sides keep the bitmap path — per-character
                 // animation on a transition edge is not a supported surface.

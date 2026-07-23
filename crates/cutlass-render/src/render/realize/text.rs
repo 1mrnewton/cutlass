@@ -22,6 +22,7 @@ pub(super) fn realize_text_layer(
     content: &str,
     style: &TextStyle,
     animation: &Option<TextAnimation>,
+    raster_density: f32,
     canvas: [f32; 2],
     effects: Vec<ResolvedPass>,
     fx: LayerEffects,
@@ -40,9 +41,21 @@ pub(super) fn realize_text_layer(
             return None;
         }
         let painted = cutlass_text::paint_animated(&shaped, style);
-        // Deltas use the ink-tight shaped clusters (logical
-        // order / baselines); placement uses painted images.
-        let deltas = cluster_deltas(&shaped, anim);
+        // Catalog deltas are reference run-pixels; multiply by cumulative
+        // raster density so on-canvas motion tracks transform scale (and
+        // stays invariant across supersample step crossings).
+        let density = if raster_density.is_finite() && raster_density > 0.0 {
+            raster_density
+        } else {
+            1.0
+        };
+        let deltas: Vec<_> = cluster_deltas(&shaped, anim)
+            .into_iter()
+            .map(|mut d| {
+                d.position = [d.position[0] * density, d.position[1] * density];
+                d
+            })
+            .collect();
         let extent_size = [
             painted.extent.0 as f32 * scale[0],
             painted.extent.1 as f32 * scale[1],

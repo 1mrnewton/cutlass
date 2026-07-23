@@ -105,6 +105,7 @@ impl Renderer {
                     content,
                     style,
                     animation,
+                    raster_density,
                 } => {
                     let Some(layer_realized) = text::realize_text_layer(
                         &mut self.text,
@@ -112,6 +113,7 @@ impl Renderer {
                         content,
                         style,
                         animation,
+                        *raster_density,
                         [scene.width as f32, scene.height as f32],
                         layer.effects.clone(),
                         fx,

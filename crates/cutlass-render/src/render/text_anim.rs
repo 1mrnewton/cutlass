@@ -375,4 +375,37 @@ mod tests {
             "wave should differentiate neighboring clusters"
         );
     }
+
+    #[test]
+    fn slide_in_on_canvas_offset_doubles_with_raster_density() {
+        // Catalog slide is 24 run-px at t=0. With residual [1,1] (S folded into
+        // density), density 2 must place the glyph 48 canvas-px from rest —
+        // matching pre-supersample scale-2 behavior (residual 2 × 24).
+        let cluster = ClusterBox {
+            text_range: 0..1,
+            line: 0,
+            offset: [0.0, 0.0],
+            baseline: 10.0,
+            image: cutlass_core::RgbaImage::new(10, 12, vec![255; 10 * 12 * 4]),
+        };
+        let shaped = ShapedText {
+            extent: (10, 12),
+            clusters: vec![cluster.clone()],
+        };
+        let delta = cluster_deltas(&shaped, &anim("char_slide_in", AnimationSlot::In, 0.0))[0];
+        assert!((delta.position[0] - 24.0).abs() < 1e-3);
+
+        let place = |density: f32| {
+            let mut d = delta;
+            d.position = [d.position[0] * density, d.position[1] * density];
+            let instances = place_clusters(&shaped, &[d], [0.0, 0.0], [1.0, 1.0], 0.0, 1.0);
+            instances[0].center[0]
+        };
+        let at_1 = place(1.0);
+        let at_2 = place(2.0);
+        // Rest center is 5.0 (half of 10px glyph); slide adds density×24.
+        assert!((at_1 - (5.0 + 24.0)).abs() < 1e-3);
+        assert!((at_2 - (5.0 + 48.0)).abs() < 1e-3);
+        assert!((at_2 - at_1 - 24.0).abs() < 1e-3);
+    }
 }

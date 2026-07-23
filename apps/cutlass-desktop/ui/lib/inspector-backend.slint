@@ -149,12 +149,23 @@ export global InspectorBackend {
     // Replace one animatable property with a constant, dropping its
     // keyframes. Scalars ride `value-x`; vec2 params use both axes; color
     // params pack RG into `value-x` and BA into `value-y` (u16 lanes).
-    // One undoable engine edit.
+    // One undoable engine edit. Also clears any live override for `param`.
     callback set-param-constant(
         clip-id: string,
         param: string,
         value-x: float,
         value-y: float,
+    );
+
+    // Live preview of one animatable param during a slider drag. Same
+    // addressing as `set-param-constant` (scalars ride `value-x`). Session-
+    // only; the matching commit / `clear-param-override` drops it.
+    callback preview-param(
+        clip-id: string,
+        param: string,
+        value-x: float,
+        value-y: float,
+        tick: int,
     );
 
     // Retime a media clip (CapCut speed, M1): positive rational `num/den`

@@ -1,7 +1,7 @@
 // CapCut chroma key (green screen) for media-backed visual clips. Enable /
 // color are structural SetClipChroma edits; strength / shadow ride the
 // generic look_chroma_* param callbacks (LookParam already supports them).
-// No live-preview path for chroma — sliders commit on release only.
+// Slider drags preview via `preview-param` → `ClipParam::Look` override.
 
 import { CutlassColorSwatch } from "../../components/index.slint";
 import { AppStore, TimelineStore } from "../../store/index.slint";
@@ -41,6 +41,11 @@ export component ChromaInspector inherits VerticalLayout {
         } else {
             InspectorBackend.set-param-constant(model.id, param, value, 0);
         }
+    }
+
+    function preview-scalar(param: string, value: float) {
+        InspectorBackend.preview-param(
+            model.id, param, value, 0, TimelineStore.playhead-tick);
     }
 
     SectionHeader {
@@ -87,7 +92,9 @@ export component ChromaInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.strength-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-scalar("look_chroma_strength", clamp(v, 0, 1));
+        }
         commit(v) => {
             root.commit-scalar("look_chroma_strength", root.strength-sample, clamp(v, 0, 1));
         }
@@ -111,7 +118,9 @@ export component ChromaInspector inherits VerticalLayout {
         kf-visible: true;
         kf: root.shadow-sample.row;
         kf-can-toggle: root.playhead-inside;
-        preview(v) => { }
+        preview(v) => {
+            root.preview-scalar("look_chroma_shadow", clamp(v, 0, 1));
+        }
         commit(v) => {
             root.commit-scalar("look_chroma_shadow", root.shadow-sample, clamp(v, 0, 1));
         }

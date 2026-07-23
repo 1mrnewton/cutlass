@@ -97,6 +97,22 @@ pub(crate) fn wire_inspector(
         },
     );
 
+    let preview_param_handle = preview_worker.handle();
+    app.global::<InspectorBackend>().on_preview_param(
+        move |clip_id, param, value_x, value_y, tick| {
+            let Some((param, value)) = clip_param_value(param.as_str(), value_x, value_y) else {
+                tracing::error!(param = param.as_str(), "ignoring preview on unknown param");
+                return;
+            };
+            preview_param_handle.param_override(
+                clip_id.to_string(),
+                param,
+                value,
+                i64::from(tick),
+            );
+        },
+    );
+
     // Timeline keyframe diamonds: merged tick model for the selected clip,
     // drag-retime, right-click delete.
     app.global::<KeyframeBackend>()

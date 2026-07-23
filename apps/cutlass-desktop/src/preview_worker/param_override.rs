@@ -312,6 +312,51 @@ mod tests {
     }
 
     #[test]
+    fn chroma_preview_then_commit_clears_override() {
+        use cutlass_commands::{Command, EditCommand};
+
+        let (mut engine, clip, clip_s, r) = engine_with_chroma();
+        let param = ClipParam::Look {
+            param: LookParam::ChromaStrength,
+        };
+        let rev_before = engine.revision();
+        let could_undo = engine.can_undo();
+
+        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.4));
+        apply_param_override(&mut engine, &clip_s, param, ParamValue::Scalar(0.85));
+        assert!(engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before);
+        assert_eq!(engine.can_undo(), could_undo);
+
+        let live = resolve_with(
+            engine.project(),
+            RationalTime::new(0, r),
+            ResolveOverrides {
+                params: Some(engine.param_overrides()),
+                ..ResolveOverrides::default()
+            },
+        )
+        .expect("live");
+        assert!((live.layers[0].chroma_key.unwrap().strength - 0.85).abs() < f32::EPSILON);
+
+        // Release: clear then one SetParamConstant (set_param_constant_and_publish).
+        clear_param_override(&mut engine, &clip_s, param);
+        engine
+            .apply(Command::Edit(EditCommand::SetParamConstant {
+                clip,
+                param,
+                value: ParamValue::Scalar(0.85),
+            }))
+            .expect("commit chroma");
+        assert!(!engine.has_live_overrides());
+        assert_eq!(engine.revision(), rev_before + 1);
+        assert!(engine.can_undo());
+
+        let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+        assert!((plain.layers[0].chroma_key.unwrap().strength - 0.85).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn crop_preview_then_commit_clears_override() {
         use cutlass_commands::{Command, EditCommand};
 

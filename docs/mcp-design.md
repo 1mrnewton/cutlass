@@ -149,8 +149,8 @@ Tools only, text results only. MCP **resources** and **prompts** are
 explicitly out (skills cover the prompt-template need); binary/media
 results are out until the import-consent story exists (an MCP tool that
 returns a generated file would need the same click-to-import flow as
-stock, never auto-import). Streamable HTTP transport, OAuth-protected
-servers, and a curated server directory are all later.
+the SFX catalog, never auto-import). Streamable HTTP transport,
+OAuth-protected servers, and a curated server directory are all later.
 
 ## Eval strategy
 

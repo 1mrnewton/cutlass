@@ -701,53 +701,25 @@ fn fallback_backup_cleanup_failure_does_not_uncommit_installation() {
 }
 
 #[test]
-fn providers_and_cloud_round_trip() {
+fn cloud_base_url_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
 
     let mut s = Settings::default();
-    s.providers.insert(
-        "pexels".into(),
-        ProviderSettings {
-            api_key: None,
-            api_key_env: Some("PEXELS_API_KEY".into()),
-        },
-    );
-    s.providers.insert(
-        "elevenlabs".into(),
-        ProviderSettings {
-            api_key: Some("sk-11".into()),
-            api_key_env: None,
-        },
-    );
     s.cloud.base_url = "https://staging.api.cutlass.sh".into();
     save(&path, &s).unwrap();
 
     let loaded = load(&path).unwrap();
-    assert_eq!(
-        loaded.provider("pexels").api_key_env.as_deref(),
-        Some("PEXELS_API_KEY")
-    );
-    assert!(loaded.provider("pexels").is_configured());
-    assert_eq!(
-        loaded.provider("elevenlabs").api_key.as_deref(),
-        Some("sk-11")
-    );
-    assert!(!loaded.provider("nonexistent").is_configured());
     assert_eq!(loaded.cloud.base_url, "https://staging.api.cutlass.sh");
     let raw = std::fs::read_to_string(&path).unwrap();
     assert!(raw.contains("[cloud]"), "{raw}");
 
-    // Dropping a provider removes its table; clearing the cloud
-    // override removes the key.
+    // Clearing the cloud override removes the key.
     let mut s = loaded;
-    s.providers.remove("elevenlabs");
     s.cloud.base_url.clear();
     save(&path, &s).unwrap();
     let raw = std::fs::read_to_string(&path).unwrap();
-    assert!(!raw.contains("elevenlabs"), "{raw}");
     assert!(!raw.contains("base_url = \"https://staging"), "{raw}");
-    assert!(raw.contains("[providers.pexels]"), "{raw}");
 }
 
 #[test]
@@ -768,21 +740,6 @@ fn legacy_account_base_url_loads_into_cloud() {
     assert!(raw.contains("[cloud]"), "{raw}");
     assert!(!raw.contains("[account]"), "{raw}");
     assert!(!raw.contains("auth_base_url"), "{raw}");
-}
-
-#[test]
-fn provider_key_resolution_prefers_literal() {
-    let p = ProviderSettings {
-        api_key: Some("literal".into()),
-        api_key_env: Some("SOME_ENV_THAT_IS_UNSET_12345".into()),
-    };
-    assert_eq!(p.resolve_key().as_deref(), Some("literal"));
-    let p = ProviderSettings {
-        api_key: None,
-        api_key_env: Some("SOME_ENV_THAT_IS_UNSET_12345".into()),
-    };
-    assert_eq!(p.resolve_key(), None);
-    assert!(p.is_configured(), "env-named key counts as configured");
 }
 
 #[test]

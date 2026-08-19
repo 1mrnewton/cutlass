@@ -1,6 +1,6 @@
 [package]
 name = "cutlass-cloud"
-description = "Cutlass cloud client: shared API DTOs and anonymous asset/stock access"
+description = "Cutlass cloud client: shared API DTOs and anonymous asset catalog access"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

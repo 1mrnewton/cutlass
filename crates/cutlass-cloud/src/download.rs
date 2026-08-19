@@ -1,4 +1,4 @@
-//! Direct-CDN file downloads (stock media, template bundles, packs).
+//! Direct-CDN file downloads (template bundles, SFX, LUT/Lottie packs).
 //!
 //! The `proxy.rs` worker pattern: blocking on a worker thread, progress
 //! callbacks, a shared cancel flag, and atomic tmp-then-rename so a crash

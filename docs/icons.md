@@ -58,8 +58,8 @@ lacks cleanly (`letter-spacing`, `line-height`): **[Tabler](https://tabler.io/ic
 ## Already shipped
 
 `play`, `pause`, `fullscreen` (preview transport) · library tabs/sections
-`media`, `audio`, `text`, `stickers`, `effects`, `transitions`, `stock`,
-`sfx`, `filters`, `adjustment` · logo `cutlass.png` /
+`media`, `audio`, `text`, `stickers`, `effects`, `transitions`, `sfx`,
+`filters`, `adjustment` · logo `cutlass.png` /
 `cutlass-in-app.png` · chat `send` / `circle-stop`.
 
 ---

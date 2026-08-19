@@ -1,6 +1,6 @@
 //! The quota-managed download cache.
 //!
-//! Stock files, template bundles, and packs land here before import.
+//! Template bundles, SFX, and packs land here before import.
 //! Unbounded data-dir growth is a real complaint generator, so the cache
 //! enforces a byte quota with LRU eviction (by modification time — files
 //! get re-touched on use). Legacy projects may still reference downloaded
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::error::CloudError;
 
-/// Default quota: 2 GiB of downloaded stock/bundles before eviction.
+/// Default quota: 2 GiB of downloaded assets/bundles before eviction.
 pub const DEFAULT_QUOTA_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// A directory with a byte budget.
@@ -303,7 +303,7 @@ impl DownloadCache {
         }
     }
 
-    /// Where a download for `key` (e.g. `stock/pexels-857191-hd.mp4`)
+    /// Where a download for `key` (e.g. `sfx/whoosh-01.mp3`)
     /// should land. Creates parent directories.
     pub fn path_for(&self, key: &str) -> Result<PathBuf, CloudError> {
         let key = validated_key(key)?;
@@ -747,10 +747,10 @@ mod tests {
     fn quota_evicts_oldest_first() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DownloadCache::new(dir.path().to_path_buf(), 250);
-        let old = write(&cache, "stock/old.bin", 100);
+        let old = write(&cache, "sfx/old.bin", 100);
         // Ensure distinct mtimes even on coarse filesystems.
         backdate(&old);
-        let new = write(&cache, "stock/new.bin", 200);
+        let new = write(&cache, "sfx/new.bin", 200);
 
         cache.enforce_quota();
         assert!(!old.exists(), "oldest file evicted");
@@ -762,9 +762,9 @@ mod tests {
     fn quota_updates_apply_to_subsequent_enforcement() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DownloadCache::new(dir.path().to_path_buf(), 300);
-        let old = write(&cache, "stock/old.bin", 100);
+        let old = write(&cache, "sfx/old.bin", 100);
         backdate(&old);
-        let new = write(&cache, "stock/new.bin", 200);
+        let new = write(&cache, "sfx/new.bin", 200);
 
         assert_eq!(cache.quota_bytes(), 300);
         cache.enforce_quota();
@@ -827,9 +827,9 @@ mod tests {
     fn protected_project_media_survives_eviction_and_explicit_clear() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DownloadCache::new(dir.path().to_path_buf(), 1);
-        let protected = write(&cache, "stock/project.mp4", 100);
+        let protected = write(&cache, "sfx/project.mp4", 100);
         backdate(&protected);
-        let disposable = write(&cache, "stock/thumbnail.img", 20);
+        let disposable = write(&cache, "sfx/thumbnail.img", 20);
         cache.protect_path(&protected).unwrap();
 
         assert_eq!(cache.protected_path_count(), 1);
@@ -850,11 +850,11 @@ mod tests {
     fn missing_project_media_can_be_protected_before_redownload() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DownloadCache::new(dir.path().to_path_buf(), 0);
-        let future = dir.path().join("stock/future.mp4");
+        let future = dir.path().join("sfx/future.mp4");
         cache.protect_path(&future).unwrap();
         assert_eq!(cache.protected_path_count(), 1);
 
-        write(&cache, "stock/future.mp4", 8);
+        write(&cache, "sfx/future.mp4", 8);
         cache.enforce_quota();
         assert!(future.exists());
         let report = cache.clear().unwrap();
@@ -890,8 +890,8 @@ mod tests {
         let old_root = dir.path().join("old-cache");
         let new_root = dir.path().join("new-cache");
         let cache = DownloadCache::new(old_root.clone(), 1_000);
-        let protected = write(&cache, "stock/project.mp4", 100);
-        let disposable = write(&cache, "stock/disposable.bin", 20);
+        let protected = write(&cache, "sfx/project.mp4", 100);
+        let disposable = write(&cache, "sfx/disposable.bin", 20);
         cache.protect_path(&protected).unwrap();
 
         cache
@@ -902,8 +902,8 @@ mod tests {
             })
             .unwrap();
 
-        let moved_protected = new_root.join("stock/project.mp4");
-        let moved_disposable = new_root.join("stock/disposable.bin");
+        let moved_protected = new_root.join("sfx/project.mp4");
+        let moved_disposable = new_root.join("sfx/disposable.bin");
         assert_eq!(cache.root(), new_root);
         assert!(!old_root.exists());
         assert!(moved_protected.exists());
@@ -929,7 +929,7 @@ mod tests {
         let old_root = dir.path().join("old-cache");
         let new_root = dir.path().join("new-cache");
         let cache = DownloadCache::new(old_root.clone(), 1_000);
-        let protected = write(&cache, "stock/project.mp4", 8);
+        let protected = write(&cache, "sfx/project.mp4", 8);
         cache.protect_path(&protected).unwrap();
         let protected_before = read_protected(&cache.protected_paths).clone();
 
@@ -948,8 +948,8 @@ mod tests {
         assert_eq!(cache.root(), old_root);
         assert_eq!(&*read_protected(&cache.protected_paths), &protected_before);
         assert_eq!(
-            cache.path_for("stock/after-failure.bin").unwrap(),
-            old_root.join("stock/after-failure.bin")
+            cache.path_for("sfx/after-failure.bin").unwrap(),
+            old_root.join("sfx/after-failure.bin")
         );
     }
 
@@ -959,7 +959,7 @@ mod tests {
         let old_root = dir.path().join("old-cache");
         let new_root = dir.path().join("new-cache");
         let cache = Arc::new(DownloadCache::new(old_root.clone(), 1_000));
-        let lease = cache.lease("stock/in-flight.mp4").unwrap();
+        let lease = cache.lease("sfx/in-flight.mp4").unwrap();
         let lease_path = lease.path().to_path_buf();
         let started = Arc::new(Barrier::new(2));
         let closure_called = Arc::new(AtomicBool::new(false));
@@ -988,7 +988,7 @@ mod tests {
         worker.join().unwrap().unwrap();
         assert!(closure_called.load(Ordering::Acquire));
         assert_eq!(cache.root(), new_root);
-        assert_eq!(lease_path, old_root.join("stock/in-flight.mp4"));
+        assert_eq!(lease_path, old_root.join("sfx/in-flight.mp4"));
     }
 
     #[test]
@@ -1158,8 +1158,8 @@ mod tests {
     fn leases_exclude_maintenance_until_they_drop() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DownloadCache::new(dir.path().to_path_buf(), 100);
-        let lease = cache.lease("stock/in-flight.mp4").unwrap();
-        assert_eq!(lease.path(), dir.path().join("stock/in-flight.mp4"));
+        let lease = cache.lease("sfx/in-flight.mp4").unwrap();
+        assert_eq!(lease.path(), dir.path().join("sfx/in-flight.mp4"));
         assert!(cache.begin_maintenance(Duration::ZERO).is_err());
 
         drop(lease);
@@ -1177,7 +1177,7 @@ mod tests {
 
         thread::scope(|scope| {
             let worker = scope.spawn(|| {
-                let _lease = cache.lease("stock/after-clear.mp4").unwrap();
+                let _lease = cache.lease("sfx/after-clear.mp4").unwrap();
                 acquired.store(true, Ordering::Release);
             });
             thread::sleep(Duration::from_millis(20));
@@ -1200,7 +1200,7 @@ mod tests {
     fn destructive_operations_fail_closed_during_project_inventory() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DownloadCache::new(dir.path().to_path_buf(), 0);
-        let path = write(&cache, "stock/unclassified.mp4", 8);
+        let path = write(&cache, "sfx/unclassified.mp4", 8);
 
         cache.block_destructive_operations();
         assert!(cache.destructive_operations_blocked());
@@ -1244,7 +1244,7 @@ mod tests {
             ".",
             "..",
             "../escaped.bin",
-            "stock/../../escaped.bin",
+            "sfx/../../escaped.bin",
             "/absolute.bin",
         ] {
             assert!(cache.path_for(key).is_err(), "{key:?} must be rejected");
@@ -1318,7 +1318,7 @@ mod tests {
     fn clear_empties_but_keeps_root() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DownloadCache::new(dir.path().to_path_buf(), 1000);
-        write(&cache, "stock/a.bin", 10);
+        write(&cache, "sfx/a.bin", 10);
         write(&cache, "bundles/b.bin", 10);
         cache.clear().unwrap();
         assert_eq!(cache.size_bytes(), 0);

@@ -7,7 +7,6 @@
 import { CutlassText } from "../../components/index.slint";
 import { AppStore, EditorStore, TimelineStore } from "../../store/index.slint";
 import { EffectsBackend } from "../../lib/effects-backend.slint";
-import { CloudBackend, StockTile } from "../../lib/cloud-backend.slint";
 import { SfxBackend, SfxTile } from "../../lib/sfx-backend.slint";
 import { TextPresetTile } from "../../lib/text-presets-backend.slint";
 import { AppState } from "../../state.slint";
@@ -562,141 +561,11 @@ export component GeneratedTile inherits Rectangle {
     }
 }
 
-// One stock search result: thumbnail card, corner label chip (duration /
-// dimensions), attribution strip, and a click-to-import flow with inline
-// download progress. Stock tiles are not draggable — the file isn't local
-// until imported, at which point it appears under Local as normal pool
-// media (and gets the usual draggable MediaTile).
-export component StockMediaTile inherits Rectangle {
-    in property <StockTile> tile;
-    in property <int> index;
-
-    // Lazy-content gate, bound by grid call sites to the grid's
-    // visible-index range so offscreen tiles skip the thumbnail
-    // element (and its texture) entirely. Chrome stays unconditional.
-    in property <bool> thumbnail-visible: true;
-
-    background: AppStore.theme.surface.content-background;
-    border-radius: 4px;
-    clip: true;
-
-    if thumbnail-visible && tile.has-thumbnail: Image {
-        width: parent.width;
-        height: parent.height;
-        source: tile.thumbnail;
-        image-fit: cover;
-    }
-
-    // Corner chip: duration / dimensions.
-    if tile.label != "": Rectangle {
-        x: 4px;
-        y: 4px;
-        width: chip.preferred-width + 8px;
-        height: 16px;
-        border-radius: 3px;
-        background: #000000a0;
-
-        chip := CutlassText {
-            text: tile.label;
-            style: { size: 10px, weight: 500, italic: false };
-            foreground: #ffffffcc;
-        }
-    }
-
-    // Attribution strip (Pexels/Pixabay goodwill credit), hover-revealed.
-    if ta.has-hover && tile.attribution != "": VerticalLayout {
-        alignment: end;
-        Rectangle {
-            height: 22px;
-            background: #000000a0;
-            CutlassText {
-                text: tile.attribution;
-                style: { size: 10px, weight: 400, italic: false };
-                overflow: elide;
-                x: 4px;
-                width: parent.width - 8px;
-                vertical-alignment: center;
-            }
-        }
-    }
-
-    // Download state overlay.
-    if tile.state == "downloading": Rectangle {
-        background: #00000080;
-
-        VerticalLayout {
-            alignment: center;
-            padding: 12px;
-            spacing: 6px;
-
-            CutlassText {
-                text: "Downloading…";
-                style: AppStore.theme.typography.caption;
-                horizontal-alignment: center;
-            }
-
-            Rectangle {
-                height: 3px;
-                border-radius: 1.5px;
-                background: #ffffff22;
-
-                Rectangle {
-                    x: 0;
-                    width: parent.width * max(0.05, tile.progress);
-                    height: parent.height;
-                    border-radius: parent.border-radius;
-                    background: AppStore.theme.accent.primary;
-                }
-            }
-        }
-    }
-
-    if tile.state == "imported": Rectangle {
-        x: parent.width - self.width - 4px;
-        y: 4px;
-        width: 18px;
-        height: 18px;
-        border-radius: 9px;
-        background: AppStore.theme.accent.primary;
-
-        CutlassText {
-            text: "✓";
-            style: { size: 11px, weight: 700, italic: false };
-            foreground: #ffffff;
-        }
-    }
-
-    if tile.state == "failed": VerticalLayout {
-        alignment: end;
-        Rectangle {
-            height: 22px;
-            background: #7a1f1fd0;
-            CutlassText {
-                text: "Download failed — click to retry";
-                style: { size: 10px, weight: 500, italic: false };
-                overflow: elide;
-                x: 4px;
-                width: parent.width - 8px;
-                vertical-alignment: center;
-            }
-        }
-    }
-
-    ta := TouchArea {
-        clicked => {
-            AppState.refocus-shortcuts();
-            if tile.state != "downloading" && tile.state != "imported" {
-                CloudBackend.stock-import(root.index);
-            }
-        }
-    }
-}
-
 // One catalog sound effect (Library > Audio > Sound effects): name over an
-// audio glyph stage, duration chip, provenance strip on hover, and the
-// stock click-to-import flow with inline download progress. Like stock,
-// SFX tiles are not draggable — importing lands the file in the pool under
-// Audio > Local as a normal draggable MediaTile.
+// audio glyph stage, duration chip, provenance strip on hover, and a
+// click-to-import flow with inline download progress. SFX tiles are not
+// draggable — the file isn't local until imported, at which point it lands
+// in the pool under Audio > Local as a normal draggable MediaTile.
 export component SfxAudioTile inherits Rectangle {
     in property <SfxTile> tile;
     in property <int> index;

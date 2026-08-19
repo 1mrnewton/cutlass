@@ -37,7 +37,7 @@ fn disk_snapshots_are_deterministic_and_missing_directories_are_zero() {
     let download = layout.resolve(CacheId::Download).unwrap();
     fs::create_dir_all(&analysis).unwrap();
     fs::create_dir_all(&ai_models).unwrap();
-    let nested = download.join("stock");
+    let nested = download.join("sfx");
     fs::create_dir_all(&nested).unwrap();
     fs::write(analysis.join("moments.sqlite3"), b"analysis!").unwrap();
     fs::write(ai_models.join("ggml-base.en.bin"), b"model-weights").unwrap();
@@ -282,9 +282,9 @@ fn incomplete_missing_or_cancelled_download_inventory_stays_blocked() {
 fn complete_download_inventory_heals_block_after_all_paths_are_protected() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("downloads");
-    fs::create_dir_all(root.join("stock")).unwrap();
-    let saved_path = root.join("stock/saved.mp4");
-    let live_path = root.join("stock/live.mp4");
+    fs::create_dir_all(root.join("sfx")).unwrap();
+    let saved_path = root.join("sfx/saved.mp4");
+    let live_path = root.join("sfx/live.mp4");
     fs::write(&saved_path, b"saved").unwrap();
     fs::write(&live_path, b"live").unwrap();
     let cache = DownloadCache::new(root, 1_000);
@@ -329,10 +329,10 @@ fn download_protection_failure_leaves_cache_blocked() {
 fn protected_downloads_survive_clear_with_exact_accounting() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("downloads");
-    fs::create_dir_all(root.join("stock")).unwrap();
-    let saved_path = root.join("stock/saved.mp4");
-    let live_path = root.join("stock/live.mp4");
-    let disposable = root.join("stock/disposable.bin");
+    fs::create_dir_all(root.join("sfx")).unwrap();
+    let saved_path = root.join("sfx/saved.mp4");
+    let live_path = root.join("sfx/live.mp4");
+    let disposable = root.join("sfx/disposable.bin");
     fs::write(&saved_path, b"saved").unwrap();
     fs::write(&live_path, b"live").unwrap();
     fs::write(&disposable, b"discard").unwrap();
@@ -407,7 +407,6 @@ fn relocation_field_mapping_covers_every_disk_cache_and_preserves_other_settings
 
         assert_eq!(updated.appearance, original.appearance);
         assert_eq!(updated.ai, original.ai);
-        assert_eq!(updated.providers, original.providers);
         assert_eq!(updated.cloud, original.cloud);
         assert_eq!(updated.storage.root, original.storage.root);
         assert_eq!(
@@ -706,9 +705,9 @@ fn download_relocation_switches_root_and_remaps_protected_paths() {
     let temporary = tempfile::tempdir().unwrap();
     let old_path = temporary.path().join("download-old");
     let destination = temporary.path().join("download-new");
-    fs::create_dir_all(old_path.join("stock")).unwrap();
-    let protected = old_path.join("stock/project.mp4");
-    let disposable = old_path.join("stock/disposable.bin");
+    fs::create_dir_all(old_path.join("sfx")).unwrap();
+    let protected = old_path.join("sfx/project.mp4");
+    let disposable = old_path.join("sfx/disposable.bin");
     fs::write(&protected, b"project").unwrap();
     fs::write(&disposable, b"temporary").unwrap();
     let cache = DownloadCache::new(old_path.clone(), 1_000);
@@ -727,8 +726,8 @@ fn download_relocation_switches_root_and_remaps_protected_paths() {
     assert_eq!(outcome.report.files, 2);
     assert_eq!(cache.root(), destination);
     assert!(!old_path.exists());
-    let moved_protected = destination.join("stock/project.mp4");
-    let moved_disposable = destination.join("stock/disposable.bin");
+    let moved_protected = destination.join("sfx/project.mp4");
+    let moved_disposable = destination.join("sfx/disposable.bin");
     assert!(moved_protected.exists());
     assert!(moved_disposable.exists());
 

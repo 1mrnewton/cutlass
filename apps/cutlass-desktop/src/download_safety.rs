@@ -275,10 +275,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (cache, cache_root) = cache_in(&temp);
 
-        let inside = cache_root.join("stock/inside.mp4");
+        let inside = cache_root.join("sfx/inside.mp4");
         fs::create_dir(inside.parent().unwrap()).unwrap();
         fs::write(&inside, b"media").unwrap();
-        let future = cache_root.join("stock/future.mp4");
+        let future = cache_root.join("sfx/future.mp4");
         let directory = cache_root.join("not-media");
         fs::create_dir(&directory).unwrap();
         let outside = temp.path().join("outside.mp4");
@@ -364,7 +364,7 @@ mod tests {
         let (cache, cache_root) = cache_in(&temp);
         let drafts = temp.path().join("projects");
         fs::create_dir(&drafts).unwrap();
-        let media = cache_root.join("stock/kept.mp4");
+        let media = cache_root.join("sfx/kept.mp4");
         fs::create_dir(media.parent().unwrap()).unwrap();
         fs::write(&media, b"media").unwrap();
         save_draft(&drafts, "valid", &project_with_media([media]));

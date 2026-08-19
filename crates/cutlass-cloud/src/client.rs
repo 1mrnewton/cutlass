@@ -1,15 +1,14 @@
 //! The typed HTTP client for `cutlass-backend`'s anonymous surface.
 //!
-//! Auth-requiring routes (credits, generation) join in the accounts
-//! workstream; nothing here sends a token. Catalog responses are
-//! ETag-cached on disk so Library sections repaint instantly offline and
-//! revalidate in the background (the "editor never blocks on the backend"
-//! principle — callers still run this on worker threads).
+//! Nothing here sends a token. Catalog responses are ETag-cached on disk
+//! so Library sections repaint instantly offline and revalidate in the
+//! background (the "editor never blocks on the backend" principle —
+//! callers still run this on worker threads).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::dto::{CatalogResponse, LatestVersion, StockKind, StockSearchResponse};
+use crate::dto::{CatalogResponse, LatestVersion};
 use crate::error::CloudError;
 
 /// Blocking client over the backend's anonymous routes.
@@ -42,27 +41,6 @@ impl CloudClient {
         let response = self
             .agent
             .get(&url)
-            .call()
-            .map_err(|e| CloudError::from_ureq(&url, e))?;
-        parse_json(&url, response)
-    }
-
-    /// `GET /v1/stock/search` — normalized stock metadata. Not disk-cached
-    /// (queries are ad hoc; the server holds the shared response cache).
-    pub fn stock_search(
-        &self,
-        query: &str,
-        kind: StockKind,
-        page: u32,
-    ) -> Result<StockSearchResponse, CloudError> {
-        let url = format!("{}/v1/stock/search", self.base_url);
-        let page_string = page.to_string();
-        let response = self
-            .agent
-            .get(&url)
-            .query("q", query)
-            .query("kind", kind.as_str())
-            .query("page", &page_string)
             .call()
             .map_err(|e| CloudError::from_ureq(&url, e))?;
         parse_json(&url, response)

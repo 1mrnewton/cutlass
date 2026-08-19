@@ -2,10 +2,10 @@
 //!
 //! The worker fetches the anonymous SFX catalog (`/v1/assets/sfx`) and
 //! publishes metadata tiles immediately — audio files are bigger than
-//! Lottie JSON, so they download lazily on click-to-import (the stock
-//! pattern in `cloud.rs`): download into the quota-managed cache, verify
-//! the catalog checksum, then ride the normal import path. An imported SFX
-//! is ordinary pool media under Audio > Local, draggable to audio lanes.
+//! Lottie JSON, so they download lazily on click-to-import: download into
+//! the quota-managed cache, verify the catalog checksum, then ride the
+//! normal import path. An imported SFX is ordinary pool media under
+//! Audio > Local, draggable to audio lanes.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

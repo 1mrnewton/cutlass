@@ -48,21 +48,11 @@
 //! # lottie = "/Volumes/Scratch/Cutlass/lottie"
 //! # templates = "/Volumes/Scratch/Cutlass/templates"
 //!
-//! # BYOK provider keys (stock, generation, TTS) — same literal-or-env
-//! # pattern as [ai]. A configured key routes calls direct to the provider,
-//! # bypassing the Cutlass backend entirely.
-//! [providers.pexels]
-//! api_key_env = "PEXELS_API_KEY"
-//!
-//! [providers.elevenlabs]
-//! api_key = "sk-..."
-//!
-//! # Anonymous cloud API host (stock, catalogs, update check).
+//! # Anonymous cloud API host (asset catalogs, update check).
 //! [cloud]
 //! base_url = "https://api.cutlass.sh"     # API override; empty = default
 //! ```
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -321,46 +311,9 @@ pub struct AppearanceSettings {
     pub recent_colors: Vec<Rgba>,
 }
 
-/// One `[providers.<name>]` entry: a BYOK key for a third-party service
-/// (stock search, image/video generation, TTS). Same literal-or-env shape
-/// as [`AiSettings`]; key *resolution* stays with the caller (the env
-/// indirection is a use-site concern). A configured provider routes calls
-/// direct — the Cutlass backend never sees the key.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProviderSettings {
-    /// Literal API key.
-    pub api_key: Option<String>,
-    /// Name of an environment variable holding the key (preferred).
-    pub api_key_env: Option<String>,
-}
-
-impl ProviderSettings {
-    /// Whether either key form is present (the BYOK routing predicate).
-    pub fn is_configured(&self) -> bool {
-        self.api_key
-            .as_deref()
-            .is_some_and(|k| !k.trim().is_empty())
-            || self
-                .api_key_env
-                .as_deref()
-                .is_some_and(|k| !k.trim().is_empty())
-    }
-
-    /// Resolve the key: literal wins, else the named environment variable.
-    pub fn resolve_key(&self) -> Option<String> {
-        if let Some(key) = self.api_key.as_deref().filter(|k| !k.trim().is_empty()) {
-            return Some(key.to_string());
-        }
-        self.api_key_env
-            .as_deref()
-            .filter(|name| !name.trim().is_empty())
-            .and_then(|name| std::env::var(name).ok())
-            .filter(|v| !v.is_empty())
-    }
-}
-
-/// The `[cloud]` table: anonymous API host override for stock, catalogs,
-/// and the update check. Empty `base_url` means the shipped default.
+/// The `[cloud]` table: anonymous API host override for the asset
+/// catalogs and the update check. Empty `base_url` means the shipped
+/// default.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CloudSettings {
     /// Backend (API) base URL override; empty = the shipped default.
@@ -391,7 +344,7 @@ pub struct StoragePathOverrides {
     pub analysis: Option<PathBuf>,
     /// Downloaded AI model weights for transcription, vision, and embeddings.
     pub ai_models: Option<PathBuf>,
-    /// Downloaded stock and generated assets.
+    /// Downloaded re-fetchable assets (SFX, template media).
     pub download: Option<PathBuf>,
     /// Cached asset-catalog responses and metadata.
     pub catalog: Option<PathBuf>,
@@ -463,20 +416,10 @@ pub struct Settings {
     pub appearance: AppearanceSettings,
     /// `[ai]`.
     pub ai: AiSettings,
-    /// `[providers.<name>]` — BYOK keys by provider name ("pexels",
-    /// "pixabay", "elevenlabs", …). Sorted map so saves are deterministic.
-    pub providers: BTreeMap<String, ProviderSettings>,
     /// `[cloud]`.
     pub cloud: CloudSettings,
     /// `[storage]`.
     pub storage: StorageSettings,
-}
-
-impl Settings {
-    /// The named provider's settings, defaulting to unconfigured.
-    pub fn provider(&self, name: &str) -> ProviderSettings {
-        self.providers.get(name).cloned().unwrap_or_default()
-    }
 }
 
 /// `~/.cutlass/config.toml` — the user's home dir on every platform
@@ -930,20 +873,6 @@ impl Settings {
             }
         }
 
-        if let Some(t) = section(doc, "providers") {
-            for (name, item) in t.iter() {
-                if let Some(entry) = item.as_table() {
-                    s.providers.insert(
-                        name.to_string(),
-                        ProviderSettings {
-                            api_key: string_at(entry, "api_key"),
-                            api_key_env: string_at(entry, "api_key_env"),
-                        },
-                    );
-                }
-            }
-        }
-
         // Prefer `[cloud]`; fall back to legacy `[account].base_url`.
         if let Some(t) = section(doc, "cloud") {
             if let Some(v) = string_at(t, "base_url") {
@@ -1088,39 +1017,6 @@ impl Settings {
                 .is_some_and(Table::is_empty);
             if remove_storage {
                 doc.remove("storage");
-            }
-        }
-        {
-            // Only write providers we hold; hand-added entries under
-            // `[providers.*]` that we loaded are re-written unchanged, and
-            // ones we never parsed (non-table junk) are left alone.
-            for (name, provider) in &self.providers {
-                let t = ensure_table(doc, "providers");
-                if t.get(name).and_then(Item::as_table).is_none() {
-                    t.insert(name, Item::Table(Table::new()));
-                }
-                let entry = t
-                    .get_mut(name)
-                    .and_then(Item::as_table_mut)
-                    .expect("provider table ensured above");
-                set_optional(entry, "api_key", provider.api_key.as_deref());
-                set_optional(entry, "api_key_env", provider.api_key_env.as_deref());
-            }
-            // Dropping a provider from the map removes its table.
-            if let Some(t) = doc.get_mut("providers").and_then(Item::as_table_mut) {
-                let stale: Vec<String> = t
-                    .iter()
-                    .filter(|(name, item)| {
-                        item.as_table().is_some() && !self.providers.contains_key(*name)
-                    })
-                    .map(|(name, _)| name.to_string())
-                    .collect();
-                for name in stale {
-                    t.remove(&name);
-                }
-                if t.is_empty() {
-                    doc.remove("providers");
-                }
             }
         }
         {

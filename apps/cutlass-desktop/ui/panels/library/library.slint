@@ -1,11 +1,8 @@
 // Library panel, CapCut-shaped: a tab strip across the top (Media / Audio /
 // Text / Stickers), a section sidebar under it, and the active section's
-// content filling the rest. Sections without a backend yet (stock music)
-// are honest "coming soon" placeholders so the navigation already has its
-// final shape.
+// content filling the rest.
 
 import {
-    CutlassLineInput,
     CutlassGridView,
     CutlassText,
     SubtleButton,
@@ -15,8 +12,8 @@ import {
 } from "../../components/index.slint";
 import { AppStore, EditorStore, TimelineStore } from "../../store/index.slint";
 import { Media, TrackKind, CatalogEntry } from "../../models/index.slint";
-import { EffectsBackend, CloudBackend, TextPresetsBackend, LottieBackend, SfxBackend, CaptionBackend } from "../../lib/index.slint";
-import { MediaTile, GeneratedTile, CatalogTile, TransitionCatalogTile, StockMediaTile, TextPresetLibraryTile, SfxAudioTile } from "tiles.slint";
+import { EffectsBackend, TextPresetsBackend, LottieBackend, SfxBackend, CaptionBackend } from "../../lib/index.slint";
+import { MediaTile, GeneratedTile, CatalogTile, TransitionCatalogTile, TextPresetLibraryTile, SfxAudioTile } from "tiles.slint";
 import { SectionPlaceholder } from "placeholder.slint";
 import { CutlassScrollView } from "../../components/scroll-view.slint";
 import { AppState } from "../../state.slint";
@@ -142,41 +139,6 @@ component SectionList inherits VerticalLayout {
         active: root.active == s.id;
         activate => {
             root.select(s.id);
-        }
-    }
-}
-
-// Videos / Photos toggle chip for the stock browser.
-component StockKindChip inherits Rectangle {
-    in property <string> kind;
-    in property <string> label;
-
-    property <bool> active: CloudBackend.stock-kind == root.kind;
-
-    width: lbl.preferred-width + 16px;
-    height: 24px;
-    border-radius: 12px;
-    background: root.active ? AppStore.theme.accent.primary.with-alpha(0.22)
-        : ta.has-hover ? #ffffff0a
-        : transparent;
-    border-width: 1px;
-    border-color: root.active ? AppStore.theme.accent.primary : #ffffff14;
-
-    lbl := CutlassText {
-        text: root.label;
-        style: { size: 11px, weight: 600, italic: false };
-        foreground: root.active ? AppStore.theme.accent.primary : AppStore.theme.text.secondary;
-    }
-
-    ta := TouchArea {
-        clicked => {
-            if CloudBackend.stock-kind != root.kind {
-                CloudBackend.stock-kind = root.kind;
-                if CloudBackend.stock-query != "" {
-                    CloudBackend.stock-search();
-                }
-            }
-            AppState.refocus-shortcuts();
         }
     }
 }
@@ -317,10 +279,7 @@ export component LibraryPanel inherits PanelBase {
 
                 if LibraryState.active-tab == "media": SectionList {
                     width: parent.width;
-                    sections: [
-                        { id: "local", label: "Local" },
-                        { id: "stock", label: "Stock" },
-                    ];
+                    sections: [{ id: "local", label: "Local" }];
                     active: LibraryState.media-section;
                     select(id) => {
                         LibraryState.media-section = id;
@@ -332,7 +291,6 @@ export component LibraryPanel inherits PanelBase {
                     sections: [
                         { id: "local", label: "Local" },
                         { id: "sfx", label: "Sound effects" },
-                        { id: "stock", label: "Stock music" },
                     ];
                     active: LibraryState.audio-section;
                     select(id) => {
@@ -420,154 +378,6 @@ export component LibraryPanel inherits PanelBase {
                             // Offscreen tiles skip their poster-frame texture.
                             thumbnail-visible: i >= media-grid.first-visible-index
                                 && i <= media-grid.last-visible-index;
-                        }
-                    }
-                }
-
-                // ---- Media > Stock ------------------------------------------
-                // Search metadata comes from the backend (or directly from the
-                // providers with BYOK stock keys); media files download straight
-                // from the provider CDNs. Importing a result lands it in the
-                // pool under Local like any other media (src/cloud.rs).
-                if LibraryState.active-tab == "media" && LibraryState.media-section == "stock": VerticalLayout {
-                    spacing: AppStore.theme.metrics.spacing.none;
-
-                    VerticalLayout {
-                        padding: AppStore.theme.metrics.spacing.sm;
-                        spacing: AppStore.theme.metrics.spacing.sm;
-
-                        CutlassLineInput {
-                            text <=> CloudBackend.stock-query;
-                            placeholder-text: "Search stock media…";
-                            accessibility-label: "Stock media search";
-                            accepted(_) => {
-                                CloudBackend.stock-search();
-                            }
-                        }
-
-                        HorizontalLayout {
-                            spacing: AppStore.theme.metrics.spacing.sm;
-                            alignment: start;
-
-                            StockKindChip {
-                                kind: "video";
-                                label: "Videos";
-                            }
-
-                            StockKindChip {
-                                kind: "photo";
-                                label: "Photos";
-                            }
-                        }
-                    }
-
-                    if CloudBackend.stock-status == "idle": SectionPlaceholder {
-                        vertical-stretch: 1;
-                        icon: @image-url("../../../../../assets/icon/library/stock.svg");
-                        title: "Stock library";
-                        message: "Royalty-free clips and photos from Pexels and Pixabay. Type a search above to browse.";
-                    }
-
-                    if CloudBackend.stock-status == "searching": VerticalLayout {
-                        vertical-stretch: 1;
-                        alignment: center;
-
-                        CutlassText {
-                            text: "Searching…";
-                            style: AppStore.theme.typography.caption;
-                            foreground: AppStore.theme.text.secondary;
-                            horizontal-alignment: center;
-                        }
-                    }
-
-                    if CloudBackend.stock-status == "empty": VerticalLayout {
-                        vertical-stretch: 1;
-                        alignment: center;
-                        padding: AppStore.theme.metrics.spacing.xl;
-
-                        CutlassText {
-                            text: "No results — try a different search.";
-                            style: AppStore.theme.typography.caption;
-                            foreground: AppStore.theme.text.secondary;
-                            horizontal-alignment: center;
-                            wrap: word-wrap;
-                        }
-                    }
-
-                    if CloudBackend.stock-status == "error": VerticalLayout {
-                        vertical-stretch: 1;
-                        alignment: center;
-                        padding: AppStore.theme.metrics.spacing.xl;
-                        spacing: AppStore.theme.metrics.spacing.sm;
-
-                        CutlassText {
-                            text: "Search failed";
-                            style: AppStore.theme.typography.heading-sm;
-                            horizontal-alignment: center;
-                        }
-
-                        CutlassText {
-                            text: CloudBackend.stock-error;
-                            style: AppStore.theme.typography.caption;
-                            foreground: AppStore.theme.text.secondary;
-                            horizontal-alignment: center;
-                            wrap: word-wrap;
-                        }
-
-                        HorizontalLayout {
-                            alignment: center;
-                            SubtleButton {
-                                label: "Retry";
-                                clicked => {
-                                    CloudBackend.stock-search();
-                                    AppState.refocus-shortcuts();
-                                }
-                            }
-                        }
-                    }
-
-                    if CloudBackend.stock-status == "results": VerticalLayout {
-                        vertical-stretch: 1;
-                        spacing: AppStore.theme.metrics.spacing.none;
-
-                        stock-grid := CutlassGridView {
-                            interactive: false;
-                            vertical-stretch: 1;
-                            horizontal-stretch: 1;
-
-                            auto-columns: true;
-                            cell-width: 100px;
-                            cell-height: 100px;
-                            spacing: AppStore.theme.metrics.spacing.md;
-                            inset: AppStore.theme.metrics.spacing.md;
-                            item-count: CloudBackend.stock-items.length;
-
-                            for tile[i] in CloudBackend.stock-items: StockMediaTile {
-                                x: stock-grid.cell-x(i);
-                                y: stock-grid.cell-y(i);
-                                width: stock-grid.cell-width;
-                                height: stock-grid.cell-height;
-                                tile: tile;
-                                index: i;
-                                // Offscreen tiles skip their thumbnail texture.
-                                thumbnail-visible: i >= stock-grid.first-visible-index
-                                    && i <= stock-grid.last-visible-index;
-                            }
-                        }
-
-                        if CloudBackend.stock-has-more: HorizontalLayout {
-                            padding: AppStore.theme.metrics.spacing.sm;
-                            alignment: center;
-
-                            SubtleButton {
-                                label: CloudBackend.stock-loading-more ? "Loading…" : "Load more";
-                                clicked => {
-                                    if !CloudBackend.stock-loading-more {
-                                        CloudBackend.stock-load-more();
-                                    }
-                                    AppState.refocus-shortcuts();
-                                }
-                            }
                         }
                     }
                 }
@@ -700,14 +510,6 @@ export component LibraryPanel inherits PanelBase {
                             index: i;
                         }
                     }
-                }
-
-                if LibraryState.active-tab == "audio" && LibraryState.audio-section == "stock": SectionPlaceholder {
-                    width: parent.width;
-                    height: parent.height;
-                    icon: @image-url("../../../../../assets/icon/library/audio.svg");
-                    title: "Stock music";
-                    message: "Royalty-free tracks to score your edit. Coming soon.";
                 }
 
                 // ---- Text > Add text ----------------------------------------

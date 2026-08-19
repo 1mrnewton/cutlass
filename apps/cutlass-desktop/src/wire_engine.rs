@@ -36,7 +36,6 @@ pub(crate) struct EngineHandles {
     pub interaction_gate: Arc<crate::interaction::InteractionGate>,
     pub strip_worker: crate::strips::StripWorker,
     _thumbnail_worker: crate::thumbnails::ThumbnailWorker,
-    _cloud_worker: crate::cloud::CloudWorker,
     _templates_worker: crate::templates::TemplatesWorker,
     _updates_worker: crate::updates::UpdatesWorker,
     _text_presets_worker: crate::text_presets::TextPresetsWorker,
@@ -173,41 +172,6 @@ pub(crate) fn wire_engine(
         std::sync::Arc::clone(&download_cache),
     )
     .map_err(slint::PlatformError::from)?;
-
-    // Library stock browsing: search + direct-CDN downloads on their own
-    // thread (src/cloud.rs); imports route through the preview worker like
-    // any local file.
-    let cloud_worker = cloud::CloudWorker::spawn(
-        app.as_weak(),
-        preview_worker.handle(),
-        std::sync::Arc::clone(&download_cache),
-        storage_layout.clone(),
-    )
-    .map_err(slint::PlatformError::Other)?;
-    {
-        let cloud_backend = app.global::<CloudBackend>();
-        let search_handle = cloud_worker.handle();
-        let search_app = app.as_weak();
-        cloud_backend.on_stock_search(move || {
-            let Some(app) = search_app.upgrade() else {
-                return;
-            };
-            let backend = app.global::<CloudBackend>();
-            let query = backend.get_stock_query().trim().to_string();
-            if query.is_empty() {
-                return;
-            }
-            search_handle.search(query, backend.get_stock_kind().as_str());
-        });
-        let more_handle = cloud_worker.handle();
-        cloud_backend.on_stock_load_more(move || more_handle.load_more());
-        let import_handle = cloud_worker.handle();
-        cloud_backend.on_stock_import(move |index| {
-            if index >= 0 {
-                import_handle.import(index as usize);
-            }
-        });
-    }
 
     // Launch-screen templates gallery: catalog fetches, bundle installs, and
     // the pick flow on their own thread (src/templates.rs); the filled
@@ -815,7 +779,6 @@ pub(crate) fn wire_engine(
         interaction_gate,
         strip_worker,
         _thumbnail_worker: thumbnail_worker,
-        _cloud_worker: cloud_worker,
         _templates_worker: templates_worker,
         _updates_worker: updates_worker,
         _text_presets_worker: text_presets_worker,

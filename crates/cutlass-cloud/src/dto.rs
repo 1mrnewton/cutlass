@@ -9,9 +9,9 @@
 //!   builds keep parsing.
 //! - **Additive-only within `/v1`**: renaming/removing a field or changing
 //!   a type means `/v2`, not an edit here.
-//! - Enums that may grow (asset kinds, providers) carry an `Other`
-//!   catch-all so new server values degrade gracefully instead of failing
-//!   the whole response.
+//! - Enums that may grow (asset kinds) carry an `Other` catch-all so new
+//!   server values degrade gracefully instead of failing the whole
+//!   response.
 
 use serde::{Deserialize, Serialize};
 
@@ -46,107 +46,6 @@ pub struct LatestVersion {
     /// Optional one-line release note for the tooltip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Stock search (metadata only — files download direct from provider CDNs)
-// ---------------------------------------------------------------------------
-
-/// What kind of stock media a search targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StockKind {
-    Video,
-    Photo,
-    Audio,
-}
-
-impl StockKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            StockKind::Video => "video",
-            StockKind::Photo => "photo",
-            StockKind::Audio => "audio",
-        }
-    }
-}
-
-/// Which upstream a stock item came from. `Other` keeps old clients
-/// parsing when a new provider joins server-side.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StockProviderId {
-    Pexels,
-    Pixabay,
-    #[serde(other)]
-    Other,
-}
-
-/// `GET /v1/stock/search` response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StockSearchResponse {
-    pub items: Vec<StockItem>,
-    /// 1-based page echoed back.
-    pub page: u32,
-    /// Whether asking for `page + 1` is worthwhile.
-    pub has_more: bool,
-}
-
-/// One stock result, normalized across providers. Carries **everything
-/// needed at download time** (file URLs, attribution, license) so there is
-/// no second metadata round-trip and nothing breaks if a provider changes
-/// its detail API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StockItem {
-    /// Provider-scoped id, opaque to the client.
-    pub id: String,
-    pub provider: StockProviderId,
-    pub kind: StockKind,
-    /// Pixel size of the largest file, when known (0 for audio).
-    #[serde(default)]
-    pub width: u32,
-    #[serde(default)]
-    pub height: u32,
-    /// Duration in seconds for video/audio; `None` for photos.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_seconds: Option<f64>,
-    /// Small preview image (grid thumbnail), direct provider CDN URL.
-    pub thumbnail_url: String,
-    /// Downloadable files by quality, best first. Direct CDN URLs — the
-    /// client never routes bytes through the backend.
-    pub files: Vec<StockFile>,
-    /// Display name of the creator.
-    #[serde(default)]
-    pub author: String,
-    /// Ready-to-display attribution line ("Video by X on Pexels").
-    #[serde(default)]
-    pub attribution: String,
-    /// Short license note ("Pexels License", "Pixabay Content License").
-    #[serde(default)]
-    pub license: String,
-    /// Provider page for the item (attribution link target).
-    #[serde(default)]
-    pub source_url: String,
-}
-
-/// One downloadable rendition of a stock item.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StockFile {
-    /// Direct provider-CDN URL (keyless).
-    pub url: String,
-    /// Human label ("1080p", "4K", "original", "mp3").
-    #[serde(default)]
-    pub quality: String,
-    #[serde(default)]
-    pub width: u32,
-    #[serde(default)]
-    pub height: u32,
-    /// MIME type when the provider reports one.
-    #[serde(default)]
-    pub content_type: String,
-    /// File size in bytes when the provider reports one (0 = unknown).
-    #[serde(default)]
-    pub size_bytes: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -383,24 +282,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stock_item_tolerates_unknown_fields_and_providers() {
-        // A future server adds fields and a new provider; an old client
-        // must keep parsing (the compat principle, contract-tested).
-        let json = r#"{
-            "id": "123", "provider": "shutterstock_free", "kind": "video",
-            "width": 1920, "height": 1080, "duration_seconds": 12.5,
-            "thumbnail_url": "https://cdn/x.jpg",
-            "files": [{"url": "https://cdn/x.mp4", "quality": "1080p",
-                       "width": 1920, "height": 1080, "brand_new_field": 1}],
-            "author": "A", "attribution": "Video by A", "license": "L",
-            "source_url": "https://p/x", "brand_new_field": true
-        }"#;
-        let item: StockItem = serde_json::from_str(json).expect("tolerant parse");
-        assert_eq!(item.provider, StockProviderId::Other);
-        assert_eq!(item.files.len(), 1);
-    }
-
-    #[test]
     fn catalog_entry_defaults_optional_fields() {
         let json = r#"{
             "id": "tpl-1", "kind": "template", "name": "Vlog intro",
@@ -453,13 +334,25 @@ mod tests {
 
     #[test]
     fn dto_roundtrips() {
-        let resp = StockSearchResponse {
-            items: vec![],
-            page: 1,
-            has_more: false,
+        let entry = CatalogEntry {
+            id: "sfx-1".into(),
+            kind: AssetKind::Sfx,
+            name: "Whoosh".into(),
+            category: String::new(),
+            tags: vec!["transition".into()],
+            file_url: "https://cdn/sfx-1.mp3".into(),
+            preview_url: None,
+            size_bytes: 12_000,
+            checksum_sha256: String::new(),
+            min_schema_version: None,
+            author: "Cutlass".into(),
+            license: "CC0".into(),
+            duration_seconds: Some(1.2),
+            slot_count: None,
         };
-        let json = serde_json::to_string(&resp).unwrap();
-        let back: StockSearchResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.page, 1);
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: CatalogEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, AssetKind::Sfx);
+        assert_eq!(back.duration_seconds, Some(1.2));
     }
 }

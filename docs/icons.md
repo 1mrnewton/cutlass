@@ -59,7 +59,7 @@ lacks cleanly (`letter-spacing`, `line-height`): **[Tabler](https://tabler.io/ic
 
 `play`, `pause`, `fullscreen` (preview transport) · library tabs/sections
 `media`, `audio`, `text`, `stickers`, `effects`, `transitions`, `stock`,
-`ai`, `sfx`, `filters`, `adjustment` · logo `cutlass.png` /
+`sfx`, `filters`, `adjustment` · logo `cutlass.png` /
 `cutlass-in-app.png` · chat `send` / `circle-stop`.
 
 ---

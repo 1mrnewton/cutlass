@@ -1,8 +1,8 @@
 // Library panel, CapCut-shaped: a tab strip across the top (Media / Audio /
 // Text / Stickers), a section sidebar under it, and the active section's
-// content filling the rest. Sections without a backend yet (stock browsing,
-// AI generation) are honest "coming soon" placeholders so the navigation
-// already has its final shape.
+// content filling the rest. Sections without a backend yet (stock music)
+// are honest "coming soon" placeholders so the navigation already has its
+// final shape.
 
 import {
     CutlassLineInput,
@@ -15,8 +15,8 @@ import {
 } from "../../components/index.slint";
 import { AppStore, EditorStore, TimelineStore } from "../../store/index.slint";
 import { Media, TrackKind, CatalogEntry } from "../../models/index.slint";
-import { EffectsBackend, CloudBackend, TextPresetsBackend, AiBackend, LottieBackend, SfxBackend, CaptionBackend } from "../../lib/index.slint";
-import { MediaTile, GeneratedTile, CatalogTile, TransitionCatalogTile, StockMediaTile, TextPresetLibraryTile, AiMediaTile, SfxAudioTile } from "tiles.slint";
+import { EffectsBackend, CloudBackend, TextPresetsBackend, LottieBackend, SfxBackend, CaptionBackend } from "../../lib/index.slint";
+import { MediaTile, GeneratedTile, CatalogTile, TransitionCatalogTile, StockMediaTile, TextPresetLibraryTile, SfxAudioTile } from "tiles.slint";
 import { SectionPlaceholder } from "placeholder.slint";
 import { CutlassScrollView } from "../../components/scroll-view.slint";
 import { AppState } from "../../state.slint";
@@ -181,58 +181,6 @@ component StockKindChip inherits Rectangle {
     }
 }
 
-// Image / Video toggle chip for the AI media section.
-component AiKindChip inherits Rectangle {
-    in property <string> kind;
-    in property <string> label;
-
-    property <bool> active: AiBackend.media-kind == root.kind;
-
-    width: lbl.preferred-width + 16px;
-    height: 24px;
-    border-radius: 12px;
-    background: root.active ? AppStore.theme.accent.primary.with-alpha(0.22)
-        : ta.has-hover ? #ffffff0a
-        : transparent;
-    border-width: 1px;
-    border-color: root.active ? AppStore.theme.accent.primary : #ffffff14;
-
-    lbl := CutlassText {
-        text: root.label;
-        style: { size: 11px, weight: 600, italic: false };
-        foreground: root.active ? AppStore.theme.accent.primary : AppStore.theme.text.secondary;
-    }
-
-    ta := TouchArea {
-        clicked => {
-            AiBackend.media-kind = root.kind;
-            AppState.refocus-shortcuts();
-        }
-    }
-}
-
-// The "who pays" line under every generate button (the BYOK-first rule
-// made visible), plus the last error when one exists.
-component AiRouteLine inherits VerticalLayout {
-    padding-left: AppStore.theme.metrics.spacing.sm;
-    padding-right: AppStore.theme.metrics.spacing.sm;
-    spacing: 2px;
-
-    CutlassText {
-        text: AiBackend.route-label;
-        style: AppStore.theme.typography.caption;
-        foreground: AppStore.theme.text.muted;
-        wrap: word-wrap;
-    }
-
-    if AiBackend.error != "": CutlassText {
-        text: AiBackend.error;
-        style: AppStore.theme.typography.caption;
-        foreground: #FF6B6B;
-        wrap: word-wrap;
-    }
-}
-
 // Import row shown atop the Local sections (media + audio share the same
 // picker; main.rs owns the async dialog).
 component ImportToolbar inherits HorizontalLayout {
@@ -372,7 +320,6 @@ export component LibraryPanel inherits PanelBase {
                     sections: [
                         { id: "local", label: "Local" },
                         { id: "stock", label: "Stock" },
-                        { id: "ai", label: "AI media" },
                     ];
                     active: LibraryState.media-section;
                     select(id) => {
@@ -386,7 +333,6 @@ export component LibraryPanel inherits PanelBase {
                         { id: "local", label: "Local" },
                         { id: "sfx", label: "Sound effects" },
                         { id: "stock", label: "Stock music" },
-                        { id: "ai", label: "AI generated" },
                     ];
                     active: LibraryState.audio-section;
                     select(id) => {
@@ -626,90 +572,6 @@ export component LibraryPanel inherits PanelBase {
                     }
                 }
 
-                // ---- Media > AI media ---------------------------------------
-                // Prompt → job → poll → direct-CDN download → normal import
-                // path (src/ai_media.rs). Routed BYOK-or-managed.
-                if LibraryState.active-tab == "media" && LibraryState.media-section == "ai": VerticalLayout {
-                    spacing: AppStore.theme.metrics.spacing.none;
-
-                    VerticalLayout {
-                        padding: AppStore.theme.metrics.spacing.sm;
-                        spacing: AppStore.theme.metrics.spacing.sm;
-
-                        CutlassLineInput {
-                            placeholder-text: "Describe an image or clip…";
-                            accessibility-label: "AI media prompt";
-                            text <=> AiBackend.media-prompt;
-                            accepted(prompt) => {
-                                if !AiBackend.busy && prompt != "" {
-                                    AiBackend.generate(AiBackend.media-kind, prompt);
-                                }
-                            }
-                        }
-
-                        HorizontalLayout {
-                            spacing: AppStore.theme.metrics.spacing.sm;
-                            alignment: start;
-
-                            AiKindChip {
-                                kind: "image";
-                                label: "Image";
-                            }
-
-                            AiKindChip {
-                                kind: "video";
-                                label: "Video";
-                            }
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                            }
-
-                            SubtleButton {
-                                label: AiBackend.busy ? "Generating…" : "Generate";
-                                enabled: !AiBackend.busy && AiBackend.media-prompt != "";
-                                clicked => {
-                                    AiBackend.generate(AiBackend.media-kind, AiBackend.media-prompt);
-                                    AppState.refocus-shortcuts();
-                                }
-                            }
-                        }
-                    }
-
-                    AiRouteLine { }
-
-                    if AiBackend.media-items.length == 0: SectionPlaceholder {
-                        vertical-stretch: 1;
-                        icon: @image-url("../../../../../assets/icon/library/ai.svg");
-                        title: "AI media";
-                        message: AiBackend.available
-                            ? "Generate images and video clips from a prompt; click a result to add it to the library."
-                            : "Add a fal.ai key under [providers.fal] to enable generation.";
-                    }
-
-                    if AiBackend.media-items.length > 0: ai-media-grid := CutlassGridView {
-                        interactive: false;
-                        vertical-stretch: 1;
-                        horizontal-stretch: 1;
-
-                        auto-columns: true;
-                        cell-width: 100px;
-                        cell-height: 100px;
-                        spacing: AppStore.theme.metrics.spacing.md;
-                        inset: AppStore.theme.metrics.spacing.md;
-                        item-count: AiBackend.media-items.length;
-
-                        for tile[i] in AiBackend.media-items: AiMediaTile {
-                            x: ai-media-grid.cell-x(i);
-                            y: ai-media-grid.cell-y(i);
-                            width: ai-media-grid.cell-width;
-                            height: ai-media-grid.cell-height;
-                            tile: tile;
-                            index: i;
-                        }
-                    }
-                }
-
                 // ---- Audio > Local ------------------------------------------
                 if LibraryState.active-tab == "audio" && LibraryState.audio-section == "local": VerticalLayout {
                     spacing: AppStore.theme.metrics.spacing.none;
@@ -846,73 +708,6 @@ export component LibraryPanel inherits PanelBase {
                     icon: @image-url("../../../../../assets/icon/library/audio.svg");
                     title: "Stock music";
                     message: "Royalty-free tracks to score your edit. Coming soon.";
-                }
-
-                // ---- Audio > AI generated (TTS voice-overs) -----------------
-                if LibraryState.active-tab == "audio" && LibraryState.audio-section == "ai": VerticalLayout {
-                    spacing: AppStore.theme.metrics.spacing.none;
-
-                    VerticalLayout {
-                        padding: AppStore.theme.metrics.spacing.sm;
-                        spacing: AppStore.theme.metrics.spacing.sm;
-
-                        CutlassLineInput {
-                            placeholder-text: "Text to speak…";
-                            accessibility-label: "Text to speak";
-                            text <=> AiBackend.tts-prompt;
-                            accepted(prompt) => {
-                                if !AiBackend.busy && prompt != "" {
-                                    AiBackend.generate("tts", prompt);
-                                }
-                            }
-                        }
-
-                        HorizontalLayout {
-                            alignment: end;
-
-                            SubtleButton {
-                                label: AiBackend.busy ? "Generating…" : "Generate";
-                                enabled: !AiBackend.busy && AiBackend.tts-prompt != "";
-                                clicked => {
-                                    AiBackend.generate("tts", AiBackend.tts-prompt);
-                                    AppState.refocus-shortcuts();
-                                }
-                            }
-                        }
-                    }
-
-                    AiRouteLine { }
-
-                    if AiBackend.tts-items.length == 0: SectionPlaceholder {
-                        vertical-stretch: 1;
-                        icon: @image-url("../../../../../assets/icon/library/ai.svg");
-                        title: "AI voice-over";
-                        message: AiBackend.available
-                            ? "Type a line and generate a voice-over; click a result to add it as audio media."
-                            : "Add a fal.ai key under [providers.fal] to enable generation.";
-                    }
-
-                    if AiBackend.tts-items.length > 0: ai-tts-grid := CutlassGridView {
-                        interactive: false;
-                        vertical-stretch: 1;
-                        horizontal-stretch: 1;
-
-                        auto-columns: true;
-                        cell-width: 100px;
-                        cell-height: 100px;
-                        spacing: AppStore.theme.metrics.spacing.md;
-                        inset: AppStore.theme.metrics.spacing.md;
-                        item-count: AiBackend.tts-items.length;
-
-                        for tile[i] in AiBackend.tts-items: AiMediaTile {
-                            x: ai-tts-grid.cell-x(i);
-                            y: ai-tts-grid.cell-y(i);
-                            width: ai-tts-grid.cell-width;
-                            height: ai-tts-grid.cell-height;
-                            tile: tile;
-                            index: i;
-                        }
-                    }
                 }
 
                 // ---- Text > Add text ----------------------------------------

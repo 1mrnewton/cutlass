@@ -38,7 +38,6 @@ pub(crate) struct EngineHandles {
     _thumbnail_worker: crate::thumbnails::ThumbnailWorker,
     _cloud_worker: crate::cloud::CloudWorker,
     _templates_worker: crate::templates::TemplatesWorker,
-    _ai_media_worker: crate::ai_media::AiMediaWorker,
     _updates_worker: crate::updates::UpdatesWorker,
     _text_presets_worker: crate::text_presets::TextPresetsWorker,
     _lottie_worker: crate::lottie_stickers::LottieWorker,
@@ -230,30 +229,6 @@ pub(crate) fn wire_engine(
                 use_handle.use_template(index as usize);
             }
         });
-    }
-
-    // AI generation (Library AI sections): prompt → job → poll → import on
-    // its own thread (src/ai_media.rs), routed BYOK-or-managed.
-    let ai_media_worker = ai_media::AiMediaWorker::spawn(
-        app.as_weak(),
-        preview_worker.handle(),
-        std::sync::Arc::clone(&download_cache),
-    )
-    .map_err(slint::PlatformError::Other)?;
-    {
-        let ai_backend = app.global::<AiBackend>();
-        let generate_handle = ai_media_worker.handle();
-        ai_backend.on_generate(move |kind, prompt| {
-            generate_handle.generate(kind.to_string(), prompt.trim().to_string());
-        });
-        let import_handle = ai_media_worker.handle();
-        ai_backend.on_import(move |kind, index| {
-            if index >= 0 {
-                import_handle.import(kind.to_string(), index as usize);
-            }
-        });
-        let route_handle = ai_media_worker.handle();
-        ai_backend.on_refresh_route(move || route_handle.refresh_route());
     }
 
     // Launch-screen update nudge: anonymous latest-version check on its
@@ -842,7 +817,6 @@ pub(crate) fn wire_engine(
         _thumbnail_worker: thumbnail_worker,
         _cloud_worker: cloud_worker,
         _templates_worker: templates_worker,
-        _ai_media_worker: ai_media_worker,
         _updates_worker: updates_worker,
         _text_presets_worker: text_presets_worker,
         _lottie_worker: lottie_worker,

@@ -18,7 +18,6 @@
 //!   client downloads **directly from provider CDNs** into a quota-managed
 //!   cache (LRU eviction, clear-cache action) with atomic tmp-then-rename
 //!   writes, progress callbacks, and cancellation.
-//! - [`generate`]: BYOK fal.ai generation (image / video / TTS).
 //!
 //! **The routing rule** (BYOK): a user-configured provider key routes the
 //! call direct to the provider; else only the anonymous surface (stock,
@@ -34,7 +33,6 @@ pub mod client;
 pub mod download;
 pub mod dto;
 pub mod error;
-pub mod generate;
 pub mod stock;
 
 pub use client::CloudClient;

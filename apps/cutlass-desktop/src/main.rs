@@ -6,7 +6,6 @@ mod agent_senses;
 mod agent_session;
 mod agent_system;
 mod agent_vision;
-mod ai_media;
 mod analysis_index;
 mod audio;
 mod auto_captions;

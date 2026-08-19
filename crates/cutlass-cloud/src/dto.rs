@@ -378,54 +378,6 @@ pub struct CaptionTemplateHighlight {
     pub scale: f32,
 }
 
-// ---------------------------------------------------------------------------
-// Generation jobs (BYOK fal path; shared shape with the backend contract)
-// ---------------------------------------------------------------------------
-
-/// Generation request payload (prompt + optional model / duration).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GenerateRequest {
-    pub prompt: String,
-    /// Provider-recognizable model id; empty = client default.
-    #[serde(default)]
-    pub model: String,
-    /// Seconds, for video/TTS where the provider accepts it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_seconds: Option<f64>,
-    /// Client idempotency key.
-    pub idempotency_key: String,
-}
-
-/// Job status. `Other` tolerates new server states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum JobStatus {
-    Pending,
-    Running,
-    Succeeded,
-    Failed,
-    #[serde(other)]
-    Other,
-}
-
-/// Generation job status / result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Job {
-    pub id: String,
-    pub status: JobStatus,
-    /// Provider URL of the result once succeeded — the app downloads it
-    /// directly (no bytes through the backend) and imports it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_url: Option<String>,
-    /// Reserved for contract compatibility with the backend DTO; BYOK
-    /// always reports `0`.
-    #[serde(default)]
-    pub credits_charged: i64,
-    /// Failure detail when `status == Failed`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,16 +461,5 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let back: StockSearchResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.page, 1);
-
-        let job = Job {
-            id: "j".into(),
-            status: JobStatus::Succeeded,
-            result_url: Some("https://p/out.mp4".into()),
-            credits_charged: 50,
-            error: None,
-        };
-        let json = serde_json::to_string(&job).unwrap();
-        let back: Job = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.status, JobStatus::Succeeded);
     }
 }

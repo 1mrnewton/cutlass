@@ -2,10 +2,11 @@
 //! [`cutlass_core::VideoDecoder`].
 //!
 //! `AVAssetReader` reads decoded `CVPixelBuffer`s forward from a configurable
-//! start time. The output settings list every format we can ingest, so
-//! VideoToolbox vends frames in its native decoded format (NV12 video/full
-//! range, or 10-bit/`BGRA` for some sources); the exact format is detected per
-//! frame from the pixel buffer. Sample data is *not* copied out of the decoder
+//! start time. The output settings list the 8-bit formats the compositor can
+//! sample (NV12 video/full range, or `BGRA`); 10-bit sources are converted
+//! down by VideoToolbox rather than vend as P010, which the compositor cannot
+//! sample yet. The exact format is detected per frame from the pixel buffer.
+//! Sample data is *not* copied out of the decoder
 //! (`alwaysCopiesSampleData = NO`): the CPU path copies planes itself and the
 //! GPU path hands the renderer the decoder's own IOSurface, retained.
 //!
@@ -610,11 +611,16 @@ fn first_audio_track(path: &Path) -> Option<Retained<AVAssetTrack>> {
     tracks.firstObject()
 }
 
-/// Output settings asking the reader for decoded pixel buffers in one of our
-/// supported formats. Listing several lets VideoToolbox return the native depth
-/// (8-bit NV12 or 10-bit) rather than forcing a conversion.
+/// Output settings asking the reader for decoded pixel buffers the compositor
+/// can sample: 8-bit NV12 (limited or full range) or BGRA.
+///
+/// 10-bit (`x420` / P010) is omitted on purpose. VideoToolbox converts Main 10
+/// and other 10-bit sources down to 8-bit NV12 instead of vending native P010,
+/// which the compositor cannot sample yet — the same limitation the Windows
+/// backend documents by forcing NV12. An 8-bit source still passes through in
+/// its native range (`420v` or `420f`) with no conversion.
 fn decode_output_settings() -> Retained<NSDictionary<NSString, AnyObject>> {
-    let formats = [FOURCC_420V, FOURCC_420F, FOURCC_X420, FOURCC_BGRA];
+    let formats = [FOURCC_420V, FOURCC_420F, FOURCC_BGRA];
     let numbers: Vec<Retained<NSNumber>> = formats
         .iter()
         .map(|&f| NSNumber::numberWithUnsignedInt(f))
@@ -641,9 +647,9 @@ fn build_reader(
         .map_err(|e| DecodeError::Open(e.localizedDescription().to_string()))?;
 
     // Request decoded pixel buffers. With `nil` settings the reader hands back
-    // *compressed* sample buffers; we list the formats we can ingest and let
-    // VideoToolbox pick the one closest to its native decode output (no extra
-    // conversion when the source is 8-bit 4:2:0 or 10-bit), detected per frame.
+    // *compressed* sample buffers; we list the 8-bit formats the compositor
+    // can sample and let VideoToolbox pick the closest (no conversion for
+    // 8-bit 4:2:0; a 10-bit→8-bit conversion for Main 10), detected per frame.
     let settings = decode_output_settings();
     let output = unsafe {
         AVAssetReaderTrackOutput::initWithTrack_outputSettings(

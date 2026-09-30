@@ -137,8 +137,10 @@ fn mask_alpha(
             alpha = coverage(-p.x, aa);
         }
         case MASK_MIRROR: {
-            // Keep the left half visible (x <= 0).
-            alpha = coverage(p.x, aa);
+            // CapCut parallel band: keep |x| <= half.x in mask space
+            // (layer half-width × size.x after undoing center/rotation).
+            // Feather softens both edges symmetrically via `aa`.
+            alpha = coverage(abs(p.x) - half.x, aa);
         }
         case MASK_CIRCLE: {
             alpha = coverage(sd_ellipse(p, half), aa);

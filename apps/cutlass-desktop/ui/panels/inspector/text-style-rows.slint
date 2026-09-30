@@ -15,7 +15,8 @@ import {
 import { InspectorBackend, ScalarParamSample } from "../../lib/inspector-backend.slint";
 import { Clip, TextClipStyle } from "../../models/index.slint";
 import { AppState } from "../../state.slint";
-import { LabelCell } from "inspector-widgets.slint";
+import { LabelCell, SliderRow } from "inspector-widgets.slint";
+import { InspectorRowMetrics } from "inspector-metrics.slint";
 import { KeyframeControl } from "keyframe-control.slint";
 
 export component IconButton inherits Rectangle {
@@ -27,8 +28,13 @@ export component IconButton inherits Rectangle {
 
     callback clicked();
 
-    width: show-icon ? 32px : max(32px, text.preferred-width + 2 * AppStore.theme.metrics.spacing.sm);
-    height: 28px;
+    width: show-icon
+        ? InspectorRowMetrics.icon-button
+        : max(
+            InspectorRowMetrics.icon-button,
+            text.preferred-width + 2 * AppStore.theme.metrics.spacing.sm,
+        );
+    height: InspectorRowMetrics.control-height;
     border-radius: AppStore.theme.metrics.radius.sm;
     background: selected
         ? #4a4a4a
@@ -66,6 +72,15 @@ export component IconButton inherits Rectangle {
     }
 }
 
+// A cluster of mutually-related icon toggles (the three case buttons, one
+// alignment axis). Tighter than the row's column gap so the cluster reads
+// as a single control — and so six alignment buttons still fit beside the
+// label column at the panel's minimum width.
+export component IconButtonGroup inherits HorizontalLayout {
+    spacing: InspectorRowMetrics.group-spacing;
+    height: InspectorRowMetrics.control-height;
+    vertical-stretch: 0;
+}
 
 export component NumberBox inherits Rectangle {
     in property <string> prefix;
@@ -75,8 +90,8 @@ export component NumberBox inherits Rectangle {
     in property <string> accessibility-label: root.prefix + " value";
     callback commit(value: float);
 
-    width: 92px;
-    height: 28px;
+    width: InspectorRowMetrics.vector-field;
+    height: InspectorRowMetrics.control-height;
     vertical-stretch: 0;
 
     changed value => {
@@ -87,9 +102,9 @@ export component NumberBox inherits Rectangle {
 
     field := CutlassLineInput {
         width: 100%;
-        minimum-field-width: 92px;
+        minimum-field-width: InspectorRowMetrics.vector-field;
         height: parent.height;
-        text-padding-left: 24px;
+        text-padding-left: 22px;
         text-padding-right: AppStore.theme.metrics.spacing.xs;
         horizontal-alignment: TextHorizontalAlignment.right;
         accessibility-label: root.accessibility-label;
@@ -195,7 +210,7 @@ export component TextStyleRows inherits VerticalLayout {
     }
 
         HorizontalLayout {
-            spacing: AppStore.theme.metrics.spacing.md;
+            spacing: InspectorRowMetrics.spacing;
 
             LabelCell {
                 label: "Font";
@@ -216,7 +231,7 @@ export component TextStyleRows inherits VerticalLayout {
 
         font-size-row := HorizontalLayout {
             property <float> model-size: root.size-sample.value;
-            spacing: AppStore.theme.metrics.spacing.md;
+            spacing: InspectorRowMetrics.spacing;
 
             changed model-size => {
                 if !size-num.has-focus {
@@ -230,7 +245,7 @@ export component TextStyleRows inherits VerticalLayout {
 
             CutlassSlider {
                 horizontal-stretch: 1;
-                height: 28px;
+                height: InspectorRowMetrics.control-height;
                 vertical-stretch: 0;
                 minimum: 8;
                 maximum: 240;
@@ -253,9 +268,9 @@ export component TextStyleRows inherits VerticalLayout {
             }
 
             size-num := CutlassLineInput {
-                width: 56px;
-                minimum-field-width: 56px;
-                height: 28px;
+                width: InspectorRowMetrics.number-field;
+                minimum-field-width: InspectorRowMetrics.number-field;
+                height: InspectorRowMetrics.control-height;
                 vertical-stretch: 0;
                 horizontal-alignment: TextHorizontalAlignment.right;
                 accessibility-label: "Font size";
@@ -284,6 +299,13 @@ export component TextStyleRows inherits VerticalLayout {
                 }
             }
 
+            // Font size carries no unit, but it keeps the unit column so its
+            // readout and keyframe cluster line up with the slider rows below.
+            Rectangle {
+                width: InspectorRowMetrics.suffix-width;
+                horizontal-stretch: 0;
+            }
+
             KeyframeControl {
                 state: root.size-sample.row;
                 can-toggle: root.playhead-inside;
@@ -298,48 +320,50 @@ export component TextStyleRows inherits VerticalLayout {
         }
 
         HorizontalLayout {
-            spacing: AppStore.theme.metrics.spacing.md;
+            spacing: InspectorRowMetrics.spacing;
 
             LabelCell {
                 label: "Pattern";
             }
 
-            IconButton {
-                label: "Bold";
-                show-icon: true;
-                icon: @image-url("../../../../../assets/icon/text/bold.svg");
-                enabled: true;
-                selected: model.text-style.bold;
-                clicked => {
-                    root.begin-edit();
-                    root.style.bold = !model.text-style.bold;
-                    root.commit-style();
+            IconButtonGroup {
+                IconButton {
+                    label: "Bold";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/bold.svg");
+                    enabled: true;
+                    selected: model.text-style.bold;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.bold = !model.text-style.bold;
+                        root.commit-style();
+                    }
                 }
-            }
 
-            IconButton {
-                label: "Underline";
-                show-icon: true;
-                icon: @image-url("../../../../../assets/icon/text/underline.svg");
-                enabled: true;
-                selected: model.text-style.underline;
-                clicked => {
-                    root.begin-edit();
-                    root.style.underline = !model.text-style.underline;
-                    root.commit-style();
+                IconButton {
+                    label: "Underline";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/underline.svg");
+                    enabled: true;
+                    selected: model.text-style.underline;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.underline = !model.text-style.underline;
+                        root.commit-style();
+                    }
                 }
-            }
 
-            IconButton {
-                label: "Italic";
-                show-icon: true;
-                icon: @image-url("../../../../../assets/icon/text/italic.svg");
-                enabled: true;
-                selected: model.text-style.italic;
-                clicked => {
-                    root.begin-edit();
-                    root.style.italic = !model.text-style.italic;
-                    root.commit-style();
+                IconButton {
+                    label: "Italic";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/italic.svg");
+                    enabled: true;
+                    selected: model.text-style.italic;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.italic = !model.text-style.italic;
+                        root.commit-style();
+                    }
                 }
             }
 
@@ -349,48 +373,50 @@ export component TextStyleRows inherits VerticalLayout {
         }
 
         HorizontalLayout {
-            spacing: AppStore.theme.metrics.spacing.md;
+            spacing: InspectorRowMetrics.spacing;
 
             LabelCell {
                 label: "Case";
             }
 
-            IconButton {
-                label: "Uppercase";
-                show-icon: true;
-                icon: @image-url("../../../../../assets/icon/text/case-upper.svg");
-                enabled: true;
-                selected: model.text-style.case == 1;
-                clicked => {
-                    root.begin-edit();
-                    root.style.case = model.text-style.case == 1 ? 0 : 1;
-                    root.commit-style();
+            IconButtonGroup {
+                IconButton {
+                    label: "Uppercase";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/case-upper.svg");
+                    enabled: true;
+                    selected: model.text-style.case == 1;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.case = model.text-style.case == 1 ? 0 : 1;
+                        root.commit-style();
+                    }
                 }
-            }
 
-            IconButton {
-                label: "Lowercase";
-                show-icon: true;
-                icon: @image-url("../../../../../assets/icon/text/case-lower.svg");
-                enabled: true;
-                selected: model.text-style.case == 2;
-                clicked => {
-                    root.begin-edit();
-                    root.style.case = model.text-style.case == 2 ? 0 : 2;
-                    root.commit-style();
+                IconButton {
+                    label: "Lowercase";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/case-lower.svg");
+                    enabled: true;
+                    selected: model.text-style.case == 2;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.case = model.text-style.case == 2 ? 0 : 2;
+                        root.commit-style();
+                    }
                 }
-            }
 
-            IconButton {
-                label: "Title case";
-                show-icon: true;
-                icon: @image-url("../../../../../assets/icon/text/case-sensitive.svg");
-                enabled: true;
-                selected: model.text-style.case == 3;
-                clicked => {
-                    root.begin-edit();
-                    root.style.case = model.text-style.case == 3 ? 0 : 3;
-                    root.commit-style();
+                IconButton {
+                    label: "Title case";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/case-sensitive.svg");
+                    enabled: true;
+                    selected: model.text-style.case == 3;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.case = model.text-style.case == 3 ? 0 : 3;
+                        root.commit-style();
+                    }
                 }
             }
 
@@ -400,7 +426,7 @@ export component TextStyleRows inherits VerticalLayout {
         }
 
         HorizontalLayout {
-            spacing: AppStore.theme.metrics.spacing.md;
+            spacing: InspectorRowMetrics.spacing;
 
             LabelCell {
                 label: "Color";
@@ -408,10 +434,18 @@ export component TextStyleRows inherits VerticalLayout {
 
             CutlassColorSwatch {
                 value: model.text-style.fill;
+                preview(c) => {
+                    root.begin-edit();
+                    root.style.fill = c;
+                    root.preview-style();
+                }
                 changed(c) => {
                     root.begin-edit();
                     root.style.fill = c;
-                    root.commit-style();
+                    root.commit-or-clear-style();
+                }
+                cancelled => {
+                    InspectorBackend.clear-text-generator(TimelineStore.playhead-tick);
                 }
             }
 
@@ -420,150 +454,184 @@ export component TextStyleRows inherits VerticalLayout {
             }
         }
 
-        HorizontalLayout {
-            spacing: AppStore.theme.metrics.spacing.md;
-
-            LabelCell {
-                label: "Spacing";
+        // Letter / line spacing: live SliderRows through the generic
+        // ClipParam override lane (preview-param → ParamOverride). Release
+        // commits one edit (constant or playhead keyframe) then clears —
+        // same ordering as volume/pan.
+        SliderRow {
+            label: "Letter";
+            suffix: "px";
+            value: root.letter-spacing-sample.value;
+            minimum: -100;
+            maximum: 200;
+            reset-value: 0;
+            kf-visible: true;
+            kf: root.letter-spacing-sample.row;
+            kf-can-toggle: root.playhead-inside;
+            preview(v) => {
+                InspectorBackend.preview-param(
+                    model.id, "text_letter_spacing", v, 0, TimelineStore.playhead-tick);
             }
-
-            NumberBox {
-                prefix: "C";
-                show-prefix-icon: true;
-                prefix-icon: @image-url("../../../../../assets/icon/text/letter-spacing.svg");
-                accessibility-label: "Character spacing";
-                value: root.letter-spacing-sample.value;
-                commit(v) => {
-                    root.begin-edit();
-                    root.style.letter-spacing = v;
-                    root.commit-style();
-                }
-            }
-
-            KeyframeControl {
-                state: root.letter-spacing-sample.row;
-                can-toggle: root.playhead-inside;
-                toggle => {
-                    root.toggle-kf("text_letter_spacing", root.letter-spacing-sample.row.on-keyframe, root.letter-spacing-sample.value);
-                }
-                jump(tick) => { TimelineStore.playhead-tick = tick; }
-                set-easing(easing) => {
-                    root.ease-kf("text_letter_spacing", easing, root.letter-spacing-sample.value);
-                }
-            }
-
-            NumberBox {
-                prefix: "L";
-                show-prefix-icon: true;
-                prefix-icon: @image-url("../../../../../assets/icon/text/line-height.svg");
-                accessibility-label: "Line spacing percent";
-                value: root.line-spacing-sample.value * 100;
-                commit(v) => {
-                    root.begin-edit();
-                    root.style.line-spacing = max(v, 10) / 100;
-                    root.commit-style();
+            commit(v) => {
+                if (root.letter-spacing-sample.row.animated) {
+                    if (root.playhead-inside) {
+                        InspectorBackend.set-param-keyframe(
+                            model.id, "text_letter_spacing", TimelineStore.playhead-tick, v, 0, 0);
+                    } else {
+                        InspectorBackend.clear-param-override(
+                            model.id, TimelineStore.playhead-tick);
+                    }
+                } else {
+                    InspectorBackend.set-param-constant(model.id, "text_letter_spacing", v, 0);
                 }
             }
+            cancelled => {
+                InspectorBackend.clear-param-override(
+                    model.id, TimelineStore.playhead-tick);
+            }
+            kf-toggle => {
+                root.toggle-kf(
+                    "text_letter_spacing",
+                    root.letter-spacing-sample.row.on-keyframe,
+                    root.letter-spacing-sample.value);
+            }
+            kf-set-easing(easing) => {
+                root.ease-kf("text_letter_spacing", easing, root.letter-spacing-sample.value);
+            }
+        }
 
-            KeyframeControl {
-                state: root.line-spacing-sample.row;
-                can-toggle: root.playhead-inside;
-                toggle => {
-                    root.toggle-kf("text_line_spacing", root.line-spacing-sample.row.on-keyframe, root.line-spacing-sample.value);
-                }
-                jump(tick) => { TimelineStore.playhead-tick = tick; }
-                set-easing(easing) => {
-                    root.ease-kf("text_line_spacing", easing, root.line-spacing-sample.value);
+        SliderRow {
+            label: "Line";
+            suffix: "%";
+            value: root.line-spacing-sample.value * 100;
+            minimum: 50;
+            maximum: 300;
+            reset-value: 120;
+            kf-visible: true;
+            kf: root.line-spacing-sample.row;
+            kf-can-toggle: root.playhead-inside;
+            preview(v) => {
+                InspectorBackend.preview-param(
+                    model.id, "text_line_spacing", max(v, 10) / 100, 0, TimelineStore.playhead-tick);
+            }
+            commit(v) => {
+                if (root.line-spacing-sample.row.animated) {
+                    if (root.playhead-inside) {
+                        InspectorBackend.set-param-keyframe(
+                            model.id, "text_line_spacing", TimelineStore.playhead-tick,
+                            max(v, 10) / 100, 0, 0);
+                    } else {
+                        InspectorBackend.clear-param-override(
+                            model.id, TimelineStore.playhead-tick);
+                    }
+                } else {
+                    InspectorBackend.set-param-constant(
+                        model.id, "text_line_spacing", max(v, 10) / 100, 0);
                 }
             }
-
-            Rectangle {
-                horizontal-stretch: 1;
+            cancelled => {
+                InspectorBackend.clear-param-override(
+                    model.id, TimelineStore.playhead-tick);
+            }
+            kf-toggle => {
+                root.toggle-kf(
+                    "text_line_spacing",
+                    root.line-spacing-sample.row.on-keyframe,
+                    root.line-spacing-sample.value);
+            }
+            kf-set-easing(easing) => {
+                root.ease-kf("text_line_spacing", easing, root.line-spacing-sample.value);
             }
         }
 
         HorizontalLayout {
-            spacing: AppStore.theme.metrics.spacing.md;
+            spacing: InspectorRowMetrics.spacing;
 
             LabelCell {
                 label: "Alignment";
             }
 
-            IconButton {
-                label: "Align left";
-                show-icon: true;
-                icon: @image-url("../../../../../assets/icon/text/align-left.svg");
-                enabled: true;
-                selected: model.text-style.align-h == 0;
-                clicked => {
-                    root.begin-edit();
-                    root.style.align-h = 0;
-                    root.commit-style();
+            // Paragraph alignment and box alignment are separate choices, so
+            // they cluster separately even though they share the row.
+            IconButtonGroup {
+                IconButton {
+                    label: "Align left";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/align-left.svg");
+                    enabled: true;
+                    selected: model.text-style.align-h == 0;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.align-h = 0;
+                        root.commit-style();
+                    }
+                }
+
+                IconButton {
+                    label: "Align center";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/align-center.svg");
+                    enabled: true;
+                    selected: model.text-style.align-h == 1;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.align-h = 1;
+                        root.commit-style();
+                    }
+                }
+
+                IconButton {
+                    label: "Align right";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/align-right.svg");
+                    enabled: true;
+                    selected: model.text-style.align-h == 2;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.align-h = 2;
+                        root.commit-style();
+                    }
                 }
             }
 
-            IconButton {
-                label: "Align center";
-                show-icon: true;
-                icon: @image-url("../../../../../assets/icon/text/align-center.svg");
-                enabled: true;
-                selected: model.text-style.align-h == 1;
-                clicked => {
-                    root.begin-edit();
-                    root.style.align-h = 1;
-                    root.commit-style();
+            IconButtonGroup {
+                IconButton {
+                    label: "Align top";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/align-start-vertical.svg");
+                    enabled: true;
+                    selected: model.text-style.align-v == 0;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.align-v = 0;
+                        root.commit-style();
+                    }
                 }
-            }
 
-            IconButton {
-                label: "Align right";
-                show-icon: true;
-                icon: @image-url("../../../../../assets/icon/text/align-right.svg");
-                enabled: true;
-                selected: model.text-style.align-h == 2;
-                clicked => {
-                    root.begin-edit();
-                    root.style.align-h = 2;
-                    root.commit-style();
+                IconButton {
+                    label: "Align middle";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/align-center-vertical.svg");
+                    enabled: true;
+                    selected: model.text-style.align-v == 1;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.align-v = 1;
+                        root.commit-style();
+                    }
                 }
-            }
 
-            IconButton {
-                label: "Align top";
-                show-icon: true;
-                icon: @image-url("../../../../../assets/icon/text/align-start-vertical.svg");
-                enabled: true;
-                selected: model.text-style.align-v == 0;
-                clicked => {
-                    root.begin-edit();
-                    root.style.align-v = 0;
-                    root.commit-style();
-                }
-            }
-
-            IconButton {
-                label: "Align middle";
-                show-icon: true;
-                icon: @image-url("../../../../../assets/icon/text/align-center-vertical.svg");
-                enabled: true;
-                selected: model.text-style.align-v == 1;
-                clicked => {
-                    root.begin-edit();
-                    root.style.align-v = 1;
-                    root.commit-style();
-                }
-            }
-
-            IconButton {
-                label: "Align bottom";
-                show-icon: true;
-                icon: @image-url("../../../../../assets/icon/text/align-end-vertical.svg");
-                enabled: true;
-                selected: model.text-style.align-v == 2;
-                clicked => {
-                    root.begin-edit();
-                    root.style.align-v = 2;
-                    root.commit-style();
+                IconButton {
+                    label: "Align bottom";
+                    show-icon: true;
+                    icon: @image-url("../../../../../assets/icon/text/align-end-vertical.svg");
+                    enabled: true;
+                    selected: model.text-style.align-v == 2;
+                    clicked => {
+                        root.begin-edit();
+                        root.style.align-v = 2;
+                        root.commit-style();
+                    }
                 }
             }
 
@@ -573,7 +641,7 @@ export component TextStyleRows inherits VerticalLayout {
         }
 
         HorizontalLayout {
-            spacing: AppStore.theme.metrics.spacing.md;
+            spacing: InspectorRowMetrics.spacing;
 
             LabelCell {
                 label: "Wrap";

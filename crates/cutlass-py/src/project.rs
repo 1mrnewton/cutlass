@@ -10,6 +10,7 @@ use numpy::{IntoPyArray, PyArray3};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
+use crate::captions::Captions;
 use crate::convert::{parse_color, parse_track_kind, rate_from_fps, time_at};
 use crate::errors::{CutlassError, media_err, model_err, render_err};
 use crate::media::Media;
@@ -160,6 +161,17 @@ impl Project {
             }
         };
         Ok(Track::new(slf.into_pyobject(py)?.unbind(), id))
+    }
+
+    /// Every caption group in the project.
+    #[getter]
+    fn captions(slf: PyRef<'_, Self>, py: Python) -> PyResult<Vec<Captions>> {
+        let ids = crate::captions::groups(&slf);
+        let project = slf.into_pyobject(py)?.unbind();
+        Ok(ids
+            .into_iter()
+            .map(|id| Captions::new(project.clone_ref(py), id))
+            .collect())
     }
 
     #[getter]

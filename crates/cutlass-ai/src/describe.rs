@@ -6,11 +6,27 @@
 //! tool results after edits, so the model always sees the world it is
 //! editing. Output order is deterministic (stack order for tracks, start
 //! order for clips, id order for media) so eval tests can assert verbatim.
+//!
+//! Keyframed clip params appear under [`ClipSummary::keyframes`] as compact
+//! `{t,v,e}` points: `t` is absolute timeline seconds (same as
+//! `set_param_keyframe.at`), `v` is the wire value shape, and `e` is the wire
+//! easing name (omitted when linear). A param with keyframes omits its static
+//! field on the clip summary.
 
-use cutlass_models::{ClipSource, Generator, Project, Rational, Scale2, Shape, Track};
+use std::collections::BTreeMap;
+
+use cutlass_models::{
+    Clip, ClipSource, Easing, Generator, MediaKind, Param, Project, Rational, Scale2, Shape, Track,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::wire::WireScale;
+
+/// Vertical reference used by the renderer for fixed aspect presets (1080p
+/// baseline on the longer side). Kept in sync with `cutlass_render::canvas_size`.
+const CANVAS_REFERENCE_HEIGHT: f32 = 1080.0;
+/// Fallback when aspect is Auto and no video media is on a visual track.
+const DEFAULT_CANVAS_PIXELS: (u32, u32) = (1920, 1080);
 
 /// UI session state captured when the user hits send. This is how "the
 /// selected clip" and "at the playhead" resolve to ids and times.
@@ -41,16 +57,22 @@ pub struct ProjectSummary {
     /// Ruler markers in tick order (M1). Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<MarkerSummary>,
-    /// Canvas settings (set_canvas). Omitted at the default (auto aspect,
-    /// black background).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canvas: Option<CanvasSummary>,
+    /// Caption groups, id-ascending. Omitted when the project has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub captions: Vec<CaptionGroupSummary>,
+    /// Canvas size and settings (set_canvas). Always present so the model
+    /// knows the pixel frame placement fractions refer to.
+    pub canvas: CanvasSummary,
     /// The media pool, id-ascending.
     pub media: Vec<MediaSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanvasSummary {
+    /// Resolved canvas width in pixels (same box preview/export use).
+    pub width: u32,
+    /// Resolved canvas height in pixels.
+    pub height: u32,
     /// Aspect preset name: auto, 16:9, 9:16, 1:1, 4:5, 21:9.
     pub aspect: String,
     /// Background color as `[red, green, blue]`, each 0-255.
@@ -69,6 +91,30 @@ pub struct MarkerSummary {
     pub name: String,
     /// Palette name: teal, blue, purple, pink, red, orange, yellow, green.
     pub color: String,
+}
+
+/// A caption group: the shared look and rules behind a run of cue clips.
+/// The cues themselves appear as text clips on `track`, each tagged with
+/// `caption` (this id).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaptionGroupSummary {
+    pub id: u64,
+    pub label: String,
+    /// The text track holding this group's lines.
+    pub track: u64,
+    /// How many lines the group owns.
+    pub cues: usize,
+    /// Where the lines came from: manual, imported, or auto (recognized).
+    pub source: String,
+    /// Caption template id the look came from; absent once hand-styled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// Word-highlight mode when on: word or line. Absent when off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlight: Option<String>,
+    /// Whether the lines carry per-word timings (needed for highlighting).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub word_timings: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -131,7 +177,8 @@ pub struct ClipSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade_out: Option<f64>,
     /// Fractions trimmed off each edge as `[left, top, right, bottom]`
-    /// (set_clip_crop); absent when the full frame shows.
+    /// (set_clip_crop); absent when the full frame shows. Omitted when crop
+    /// is keyframed (see `keyframes.crop` for wire `[x,y,w,h]` rects).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop: Option<[f64; 4]>,
     /// Mirrored left-right (set_clip_crop); absent when not flipped.
@@ -140,10 +187,34 @@ pub struct ClipSummary {
     /// Mirrored top-bottom (set_clip_crop); absent when not flipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flip_v: Option<bool>,
+    /// Anchor offset from the canvas CENTER in canvas-width/height fractions
+    /// (+x right, +y down); `[0,0]` = centered (set_clip_transform). Absent
+    /// when centered. Omitted entirely when the position param is keyframed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<[f64; 2]>,
+    /// Pivot within content bounds (0 = left/top, 0.5 = center). Absent at
+    /// `[0.5, 0.5]`. Omitted when the anchor_point param is keyframed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<[f64; 2]>,
     /// Placement scale (set_clip_transform): a bare number when uniform, or
-    /// `[x, y]` when split. Absent at the default identity (1).
+    /// `[x, y]` when split. Absent at the default identity (1). Omitted when
+    /// the scale param is keyframed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<WireScale>,
+    /// Clockwise rotation in degrees about the anchor (set_clip_transform).
+    /// Absent at 0. Omitted when the rotation param is keyframed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f64>,
+    /// Layer opacity 0.0–1.0 (set_clip_transform). Absent at 1.0. Omitted
+    /// when the opacity param is keyframed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<f64>,
+    /// Keyframed clip params, keyed by wire name (`position`, `anchor_point`,
+    /// `scale`, `rotation`, `opacity`, `volume`, `pan`). Absent when nothing
+    /// is animated. Each point uses `t`/`v`/`e` (absolute timeline seconds,
+    /// wire-shaped value, wire easing name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyframes: Option<BTreeMap<String, Vec<KeyframeSummary>>>,
     /// Visual effects in chain order (add_effect); the index of each entry is
     /// what remove_effect / move_effect / set_effect_param address. Absent
     /// when empty.
@@ -186,6 +257,29 @@ pub struct ClipSummary {
     /// Audio role tag (set_audio_role); absent when untagged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_role: Option<String>,
+    /// Caption group this clip is a line of (see `captions`); absent on
+    /// ordinary titles. Restyle the group, not the clip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<u64>,
+}
+
+/// One keyframe on a clip param, in the same units the model writes with
+/// `set_param_keyframe` / `remove_param_keyframe`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyframeSummary {
+    /// Absolute timeline seconds (clip start + clip-relative tick). Matches
+    /// `set_param_keyframe.at` so existing keyframes can be addressed directly.
+    #[serde(rename = "t")]
+    pub at: f64,
+    /// Wire-shaped value: `[x,y]` for vec2, bare number for scalars, uniform
+    /// number or `[x,y]` for scale ([`WireScale`]).
+    #[serde(rename = "v")]
+    pub value: serde_json::Value,
+    /// Wire easing shape: a plain string for named presets / `ease_*` /
+    /// `hold`, or `{"bezier":{"points":[x1,y1,x2,y2]}}` for a custom cubic.
+    /// Omitted when linear.
+    #[serde(rename = "e", default, skip_serializing_if = "Option::is_none")]
+    pub easing: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -193,8 +287,8 @@ pub struct EffectSummary {
     /// Catalog id, e.g. "gaussian_blur".
     pub effect: String,
     /// Current parameter values, sampled at the clip start, by name.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub params: std::collections::BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -238,6 +332,191 @@ pub struct MediaSummary {
 
 fn seconds(ticks: i64, rate: Rational) -> f64 {
     ticks as f64 * rate.seconds_per_unit()
+}
+
+/// Pixel size of the project's canvas — mirrors `cutlass_render::canvas_size`
+/// so describe stays free of a render dependency.
+fn describe_canvas_size(project: &Project) -> (u32, u32) {
+    match project.timeline().canvas().aspect.ratio() {
+        Some((rw, rh)) => ratio_to_pixels(rw, rh),
+        None => auto_canvas_size(project),
+    }
+}
+
+fn ratio_to_pixels(rw: u32, rh: u32) -> (u32, u32) {
+    let (rw, rh) = (rw as f32, rh as f32);
+    let (w, h) = if rw >= rh {
+        (
+            (CANVAS_REFERENCE_HEIGHT * rw / rh).round(),
+            CANVAS_REFERENCE_HEIGHT,
+        )
+    } else {
+        (
+            CANVAS_REFERENCE_HEIGHT,
+            (CANVAS_REFERENCE_HEIGHT * rh / rw).round(),
+        )
+    };
+    (even_pixels(w as u32), even_pixels(h as u32))
+}
+
+fn auto_canvas_size(project: &Project) -> (u32, u32) {
+    let mut best: Option<(u32, u32)> = None;
+    for track in project.timeline().tracks_ordered() {
+        if !track.kind.is_visual() {
+            continue;
+        }
+        for clip in track.clips() {
+            let Some(id) = clip.media() else { continue };
+            let Some(media) = project.media(id) else {
+                continue;
+            };
+            if media.kind() != MediaKind::Video {
+                continue;
+            }
+            let area = u64::from(media.width) * u64::from(media.height);
+            if best.is_none_or(|(bw, bh)| area > u64::from(bw) * u64::from(bh)) {
+                best = Some((media.width, media.height));
+            }
+        }
+    }
+    best.map_or(DEFAULT_CANVAS_PIXELS, |(w, h)| {
+        (even_pixels(w), even_pixels(h))
+    })
+}
+
+fn even_pixels(v: u32) -> u32 {
+    (v & !1).max(2)
+}
+
+/// Serialize an easing the way `set_param_keyframe.easing` accepts it.
+fn wire_easing_json(easing: Easing) -> Option<serde_json::Value> {
+    match easing {
+        Easing::Linear => None,
+        Easing::EaseIn => Some(serde_json::json!("ease_in")),
+        Easing::EaseOut => Some(serde_json::json!("ease_out")),
+        Easing::EaseInOut => Some(serde_json::json!("ease_in_out")),
+        Easing::Hold => Some(serde_json::json!("hold")),
+        Easing::Bezier { points } => {
+            if let Some(id) = easing.preset_id() {
+                Some(serde_json::json!(id))
+            } else {
+                Some(serde_json::json!({
+                    "bezier": {
+                        "points": [
+                            wire_f64(points[0]),
+                            wire_f64(points[1]),
+                            wire_f64(points[2]),
+                            wire_f64(points[3]),
+                        ]
+                    }
+                }))
+            }
+        }
+    }
+}
+
+/// Stored params are `f32`; wire / describe JSON is `f64`. A raw
+/// `f64::from(1.3f32)` expands to `1.2999999523162842`, which the model
+/// would echo back. Prefer the shortest decimal that round-trips through
+/// `f32` Display so `1.3` stays `1.3`.
+fn wire_f64(v: f32) -> f64 {
+    format!("{v}").parse().unwrap_or(f64::from(v))
+}
+
+fn scale_wire_value(s: Scale2) -> serde_json::Value {
+    if s.is_uniform() {
+        serde_json::json!(wire_f64(s.x))
+    } else {
+        serde_json::json!([wire_f64(s.x), wire_f64(s.y)])
+    }
+}
+
+fn push_keyframes<T, F>(
+    out: &mut BTreeMap<String, Vec<KeyframeSummary>>,
+    name: &str,
+    param: &Param<T>,
+    clip_start_ticks: i64,
+    rate: Rational,
+    mut value_json: F,
+) where
+    T: Copy,
+    F: FnMut(T) -> serde_json::Value,
+{
+    if !param.is_animated() {
+        return;
+    }
+    let points: Vec<KeyframeSummary> = param
+        .keyframes()
+        .iter()
+        .map(|kf| KeyframeSummary {
+            at: seconds(clip_start_ticks + kf.tick, rate),
+            value: value_json(kf.value),
+            easing: wire_easing_json(kf.easing),
+        })
+        .collect();
+    if !points.is_empty() {
+        out.insert(name.to_string(), points);
+    }
+}
+
+fn summarize_clip_keyframes(
+    clip: &Clip,
+    rate: Rational,
+) -> Option<BTreeMap<String, Vec<KeyframeSummary>>> {
+    let start = clip.timeline.start.value;
+    let mut map = BTreeMap::new();
+    push_keyframes(
+        &mut map,
+        "position",
+        &clip.transform.position,
+        start,
+        rate,
+        |v| serde_json::json!([wire_f64(v[0]), wire_f64(v[1])]),
+    );
+    push_keyframes(
+        &mut map,
+        "anchor_point",
+        &clip.transform.anchor_point,
+        start,
+        rate,
+        |v| serde_json::json!([wire_f64(v[0]), wire_f64(v[1])]),
+    );
+    push_keyframes(
+        &mut map,
+        "scale",
+        &clip.transform.scale,
+        start,
+        rate,
+        scale_wire_value,
+    );
+    push_keyframes(
+        &mut map,
+        "rotation",
+        &clip.transform.rotation,
+        start,
+        rate,
+        |v| serde_json::json!(wire_f64(v)),
+    );
+    push_keyframes(
+        &mut map,
+        "opacity",
+        &clip.transform.opacity,
+        start,
+        rate,
+        |v| serde_json::json!(wire_f64(v)),
+    );
+    push_keyframes(&mut map, "volume", &clip.volume, start, rate, |v| {
+        serde_json::json!(wire_f64(v))
+    });
+    push_keyframes(&mut map, "pan", &clip.pan, start, rate, |v| {
+        serde_json::json!(wire_f64(v))
+    });
+    // Wire crop keyframes use kept-region `[x,y,w,h]` (same as `rect` on
+    // set_param_keyframe), not the static-field inset shape.
+    push_keyframes(&mut map, "crop", &clip.crop, start, rate, |c| {
+        serde_json::json!([wire_f64(c.x), wire_f64(c.y), wire_f64(c.w), wire_f64(c.h)])
+    });
+    (!map.is_empty()).then_some(map)
 }
 
 fn summarize_adjust(adjust: &cutlass_models::ColorAdjustments) -> Option<String> {
@@ -391,33 +670,73 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                     fade_in: (clip.fade_in > 0).then(|| seconds(clip.fade_in, rate)),
                     fade_out: (clip.fade_out > 0).then(|| seconds(clip.fade_out, rate)),
                     crop: {
-                        // Constants: describe the stored framing. Keyframed:
-                        // sample at clip-relative 0 (playhead-aware describe
-                        // is a later pass).
-                        let c = clip.crop.sample(0);
-                        (!c.is_full() || clip.crop.is_animated()).then(|| {
-                            [
-                                f64::from(c.x),
-                                f64::from(c.y),
-                                f64::from(1.0 - c.x - c.w),
-                                f64::from(1.0 - c.y - c.h),
-                            ]
-                        })
+                        // Static insets only. Animated crop omits this field
+                        // (keyframe dump carries the wire `[x,y,w,h]` rects).
+                        (!clip.crop.is_animated())
+                            .then(|| {
+                                let c = clip.crop.sample(0);
+                                (!c.is_full()).then(|| {
+                                    [
+                                        wire_f64(c.x),
+                                        wire_f64(c.y),
+                                        wire_f64(1.0 - c.x - c.w),
+                                        wire_f64(1.0 - c.y - c.h),
+                                    ]
+                                })
+                            })
+                            .flatten()
                     },
                     flip_h: clip.flip_h.then_some(true),
                     flip_v: clip.flip_v.then_some(true),
-                    scale: {
-                        let s = clip.transform.scale.sample(0);
-                        let interesting =
-                            s != Scale2::uniform(1.0) || clip.transform.scale.is_animated();
-                        interesting.then(|| {
-                            if s.is_uniform() {
-                                WireScale::Uniform(f64::from(s.x))
-                            } else {
-                                WireScale::Axes([f64::from(s.x), f64::from(s.y)])
-                            }
-                        })
+                    position: {
+                        // Static sample at clip-relative 0. Animated params
+                        // omit the static field (keyframe dump is the truth).
+                        (!clip.transform.position.is_animated())
+                            .then(|| {
+                                let p = clip.transform.position.sample(0);
+                                (p != [0.0, 0.0]).then_some([wire_f64(p[0]), wire_f64(p[1])])
+                            })
+                            .flatten()
                     },
+                    anchor: {
+                        (!clip.transform.anchor_point.is_animated())
+                            .then(|| {
+                                let a = clip.transform.anchor_point.sample(0);
+                                (a != [0.5, 0.5]).then_some([wire_f64(a[0]), wire_f64(a[1])])
+                            })
+                            .flatten()
+                    },
+                    scale: {
+                        (!clip.transform.scale.is_animated())
+                            .then(|| {
+                                let s = clip.transform.scale.sample(0);
+                                (s != Scale2::uniform(1.0)).then(|| {
+                                    if s.is_uniform() {
+                                        WireScale::Uniform(wire_f64(s.x))
+                                    } else {
+                                        WireScale::Axes([wire_f64(s.x), wire_f64(s.y)])
+                                    }
+                                })
+                            })
+                            .flatten()
+                    },
+                    rotation: {
+                        (!clip.transform.rotation.is_animated())
+                            .then(|| {
+                                let r = clip.transform.rotation.sample(0);
+                                (r != 0.0).then_some(wire_f64(r))
+                            })
+                            .flatten()
+                    },
+                    opacity: {
+                        (!clip.transform.opacity.is_animated())
+                            .then(|| {
+                                let o = clip.transform.opacity.sample(0);
+                                (o != 1.0).then_some(wire_f64(o))
+                            })
+                            .flatten()
+                    },
+                    keyframes: summarize_clip_keyframes(clip, rate),
                     effects: clip
                         .effects
                         .iter()
@@ -501,6 +820,7 @@ pub fn summarize(project: &Project) -> ProjectSummary {
                     animation_out: clip.animation_out.as_ref().map(|a| a.id.clone()),
                     animation_combo: clip.animation_combo.as_ref().map(|a| a.id.clone()),
                     audio_role: clip.audio_role.map(|r| r.id().to_string()),
+                    caption: clip.caption_group().map(|g| g.raw()),
                 })
                 .collect(),
         })
@@ -536,15 +856,50 @@ pub fn summarize(project: &Project) -> ProjectSummary {
             at_seconds: seconds(m.tick.value, rate),
             at_frames: m.tick.value,
             name: m.name.clone(),
-            color: m.color.name().to_string(),
+            color: m.color.token(),
         })
         .collect();
 
-    let canvas = project.timeline().canvas();
-    let canvas = (!canvas.is_default()).then(|| CanvasSummary {
-        aspect: canvas.aspect.name().to_string(),
-        background: canvas.background,
-    });
+    let captions = project
+        .timeline()
+        .caption_groups_ordered()
+        .iter()
+        .map(|group| {
+            let cues = project.timeline().caption_cues(group.id);
+            CaptionGroupSummary {
+                id: group.id.raw(),
+                label: group.label.clone(),
+                track: group.track.raw(),
+                cues: cues.len(),
+                source: match &group.source {
+                    cutlass_models::CaptionSource::Manual => "manual".to_string(),
+                    cutlass_models::CaptionSource::Imported { format } => {
+                        format!("imported:{}", format.id())
+                    }
+                    cutlass_models::CaptionSource::Auto { language, .. } => match language {
+                        Some(language) => format!("auto:{language}"),
+                        None => "auto".to_string(),
+                    },
+                },
+                template: group.template.clone(),
+                highlight: group.highlights().map(|h| h.mode.id().to_string()),
+                word_timings: cues.iter().any(|clip| {
+                    clip.caption
+                        .as_ref()
+                        .is_some_and(|cue| !cue.words.is_empty())
+                }),
+            }
+        })
+        .collect();
+
+    let settings = project.timeline().canvas();
+    let (width, height) = describe_canvas_size(project);
+    let canvas = CanvasSummary {
+        width,
+        height,
+        aspect: settings.aspect.name().to_string(),
+        background: settings.background,
+    };
 
     ProjectSummary {
         name: project.name.clone(),
@@ -552,159 +907,11 @@ pub fn summarize(project: &Project) -> ProjectSummary {
         duration_seconds: seconds(duration_ticks, rate),
         tracks,
         markers,
+        captions,
         canvas,
         media,
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use cutlass_models::{MediaSource, RationalTime, TimeRange, TrackKind};
-
-    const R24: Rational = Rational::FPS_24;
-
-    #[test]
-    fn summary_is_deterministic_and_complete() {
-        let mut project = Project::new("demo", R24);
-        let media = project.add_media(MediaSource::new(
-            "/footage/interview.mp4",
-            1920,
-            1080,
-            R24,
-            24 * 60,
-            true,
-        ));
-        let video = project.add_track(TrackKind::Video, "V1");
-        let text = project.add_track(TrackKind::Text, "Titles");
-
-        // Insert out of timeline order to prove ordering is by start time.
-        let late = project
-            .add_clip(
-                video,
-                media,
-                TimeRange::at_rate(0, 48, R24),
-                RationalTime::new(96, R24),
-            )
-            .unwrap();
-        let early = project
-            .add_clip(
-                video,
-                media,
-                TimeRange::at_rate(48, 48, R24),
-                RationalTime::new(0, R24),
-            )
-            .unwrap();
-        project
-            .add_generated(
-                text,
-                Generator::text("INTRO"),
-                TimeRange::at_rate(24, 48, R24),
-            )
-            .unwrap();
-
-        let summary = summarize(&project);
-        assert_eq!(summary.name, "demo");
-        assert_eq!(summary.frame_rate_fps, 24.0);
-        assert_eq!(summary.duration_seconds, 6.0);
-        assert_eq!(summary.tracks.len(), 2);
-        assert_eq!(summary.media.len(), 1);
-
-        let v1 = &summary.tracks[0];
-        assert_eq!(v1.kind, "video");
-        let clip_ids: Vec<u64> = v1.clips.iter().map(|c| c.id).collect();
-        assert_eq!(clip_ids, vec![early.raw(), late.raw()]);
-        assert_eq!(v1.clips[0].start_seconds, 0.0);
-        assert_eq!(v1.clips[0].duration_seconds, 2.0);
-        assert_eq!(v1.clips[0].start_frames, 0);
-        assert_eq!(v1.clips[0].duration_frames, 48);
-        match &v1.clips[0].content {
-            ClipContent::Media {
-                file,
-                source_start_seconds,
-                ..
-            } => {
-                assert_eq!(file, "interview.mp4");
-                assert_eq!(*source_start_seconds, 2.0);
-            }
-            other => panic!("expected media content, got {other:?}"),
-        }
-
-        let titles = &summary.tracks[1];
-        assert_eq!(titles.kind, "text");
-        assert_eq!(
-            titles.clips[0].content,
-            ClipContent::Text {
-                text: "INTRO".to_string()
-            }
-        );
-
-        assert_eq!(summary.media[0].file, "interview.mp4");
-        assert_eq!(summary.media[0].duration_seconds, 60.0);
-        assert!(summary.media[0].has_audio);
-    }
-
-    #[test]
-    fn phantom_generators_surface_as_other() {
-        let mut project = Project::new("phantoms", R24);
-        let adj = project.add_track(TrackKind::Adjustment, "FX");
-        project
-            .add_generated(adj, Generator::Adjustment, TimeRange::at_rate(0, 24, R24))
-            .unwrap();
-
-        let summary = summarize(&project);
-        assert_eq!(summary.tracks[0].kind, "adjustment");
-        assert_eq!(
-            summary.tracks[0].clips[0].content,
-            ClipContent::Other {
-                kind: "adjustment".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn canvas_surfaces_only_when_not_default() {
-        let mut project = Project::new("canvas", R24);
-        assert_eq!(summarize(&project).canvas, None);
-
-        project
-            .timeline_mut()
-            .set_canvas(cutlass_models::CanvasSettings {
-                aspect: cutlass_models::CanvasAspect::Tall9x16,
-                background: [20, 20, 28],
-            });
-        assert_eq!(
-            summarize(&project).canvas,
-            Some(CanvasSummary {
-                aspect: "9:16".to_string(),
-                background: [20, 20, 28],
-            })
-        );
-    }
-
-    #[test]
-    fn summary_and_context_serialize_to_stable_json() {
-        let mut project = Project::new("json", R24);
-        let track = project.add_track(TrackKind::Text, "T");
-        project
-            .add_generated(track, Generator::text("hi"), TimeRange::at_rate(0, 24, R24))
-            .unwrap();
-
-        let summary_json = serde_json::to_value(summarize(&project)).unwrap();
-        let clip = &summary_json["tracks"][0]["clips"][0];
-        assert_eq!(clip["content"], "text");
-        assert_eq!(clip["text"], "hi");
-
-        let ctx = EditorContext {
-            selected_clips: vec![12],
-            playhead_seconds: 3.5,
-            in_point_seconds: None,
-            out_point_seconds: None,
-        };
-        let ctx_json = serde_json::to_value(&ctx).unwrap();
-        assert_eq!(
-            ctx_json,
-            serde_json::json!({ "selected_clips": [12], "playhead_seconds": 3.5 })
-        );
-    }
-}
+mod tests;

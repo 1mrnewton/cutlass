@@ -161,9 +161,12 @@ fn text_generator_maps_style_and_defers_size() {
             content,
             style,
             animation,
+            highlight: _,
+            raster_density,
         } => {
             assert!(animation.is_none());
             assert_eq!(content, "Hi");
+            approx(*raster_density, 1.0);
             approx(style.font_size, 90.0);
             assert_eq!(style.color, [255, 0, 0, 255]);
             assert!(style.bold);
@@ -841,6 +844,8 @@ fn resolve_with_substitutes_transform_and_generator_for_one_clip() {
             },
         )),
         styles: None,
+        params: None,
+        ..ResolveOverrides::default()
     };
     let scene = resolve_with(&project, rt(5), overrides).unwrap();
     let layer = &scene.layers[0];
@@ -1313,6 +1318,43 @@ fn mask_rotation_degrees_resolve_to_radians() {
         scene.layers[0].mask.unwrap().rotation_rad,
         std::f32::consts::FRAC_PI_2,
     );
+}
+
+#[test]
+fn mirror_mask_resolves_band_size_and_kind() {
+    use cutlass_models::{LookParam, Mask, MaskKind};
+
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_clip_mask(clip, Some(Mask::new(MaskKind::Mirror)))
+        .unwrap();
+    project
+        .set_param_constant(
+            clip,
+            ClipParam::Look {
+                param: LookParam::MaskSize,
+            },
+            ParamValue::Vec2([0.5, 1.0]),
+        )
+        .unwrap();
+    project
+        .set_param_constant(
+            clip,
+            ClipParam::Look {
+                param: LookParam::MaskRotation,
+            },
+            ParamValue::Scalar(45.0),
+        )
+        .unwrap();
+
+    let scene = resolve(&project, rt(5)).unwrap();
+    let mask = scene.layers[0].mask.unwrap();
+    assert_eq!(mask.kind, MaskKind::Mirror);
+    approx2(mask.size, [0.5, 1.0]);
+    approx(mask.rotation_rad, std::f32::consts::FRAC_PI_4);
 }
 
 #[test]
@@ -2056,10 +2098,8 @@ fn resolve_with_substitutes_styles_for_one_clip() {
         ..Default::default()
     };
     let overrides = ResolveOverrides {
-        transform: None,
-        generator: None,
-        look: None,
         styles: Some((clip, &live)),
+        ..ResolveOverrides::default()
     };
     let scene = resolve_with(&project, rt(5), overrides).unwrap();
     approx(
@@ -2087,6 +2127,113 @@ fn resolve_with_substitutes_styles_for_one_clip() {
             .blur,
         8.0,
     );
+}
+
+#[test]
+fn resolve_with_param_override_wins_over_stored_and_keyframed() {
+    use crate::ParamOverrides;
+    use cutlass_models::{ChromaKey, LookParam};
+
+    let mut project = Project::new("p", FPS_24);
+    let media = project.add_media(video(1920, 1080));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project.add_clip(track, media, tr(0, 100), rt(0)).unwrap();
+    project
+        .set_clip_chroma_key(
+            clip,
+            Some(ChromaKey {
+                rgb: [0, 255, 0],
+                strength: 0.2.into(),
+                shadow: 0.0.into(),
+            }),
+        )
+        .unwrap();
+    project
+        .set_param_constant(
+            clip,
+            ClipParam::Crop,
+            ParamValue::Rect([0.1, 0.1, 0.8, 0.8]),
+        )
+        .unwrap();
+
+    let chroma = ClipParam::Look {
+        param: LookParam::ChromaStrength,
+    };
+    let mut params = ParamOverrides::new();
+    params.set(clip, chroma, ParamValue::Scalar(0.9));
+    params.set(
+        clip,
+        ClipParam::Crop,
+        ParamValue::Rect([0.25, 0.0, 0.5, 1.0]),
+    );
+
+    let scene = resolve_with(
+        &project,
+        rt(5),
+        ResolveOverrides {
+            params: Some(&params),
+            ..ResolveOverrides::default()
+        },
+    )
+    .unwrap();
+    assert!((scene.layers[0].chroma_key.unwrap().strength - 0.9).abs() < 1e-6);
+    // Crop [0.25, 0, 0.5, 1] → UV [0.25, 0, 0.75, 1].
+    approx(scene.layers[0].uv[0], 0.25);
+    approx(scene.layers[0].uv[2], 0.75);
+
+    // Committed state unchanged.
+    let plain = resolve(&project, rt(5)).unwrap();
+    assert!((plain.layers[0].chroma_key.unwrap().strength - 0.2).abs() < 1e-6);
+    approx(plain.layers[0].uv[0], 0.1);
+
+    // Animated chroma: override still wins at the playhead.
+    project
+        .set_param_keyframe(
+            clip,
+            chroma,
+            rt(0),
+            ParamValue::Scalar(0.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    project
+        .set_param_keyframe(
+            clip,
+            chroma,
+            rt(40),
+            ParamValue::Scalar(1.0),
+            Easing::Linear,
+            None,
+        )
+        .unwrap();
+    let mid = resolve(&project, rt(20)).unwrap();
+    assert!((mid.layers[0].chroma_key.unwrap().strength - 0.5).abs() < 1e-6);
+
+    params.set(clip, chroma, ParamValue::Scalar(0.15));
+    let overridden = resolve_with(
+        &project,
+        rt(20),
+        ResolveOverrides {
+            params: Some(&params),
+            ..ResolveOverrides::default()
+        },
+    )
+    .unwrap();
+    assert!((overridden.layers[0].chroma_key.unwrap().strength - 0.15).abs() < 1e-6);
+
+    // Clear restores keyframed sampling.
+    params.clear_clip(clip);
+    let cleared = resolve_with(
+        &project,
+        rt(20),
+        ResolveOverrides {
+            params: Some(&params),
+            ..ResolveOverrides::default()
+        },
+    )
+    .unwrap();
+    assert!((cleared.layers[0].chroma_key.unwrap().strength - 0.5).abs() < 1e-6);
 }
 
 #[test]

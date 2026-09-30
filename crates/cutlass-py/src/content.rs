@@ -61,14 +61,14 @@ impl Text {
             content: content.to_string(),
             style: TextStyle {
                 font: font.to_string(),
-                size,
+                size: size.into(),
                 bold,
                 italic,
                 underline,
                 case: parse_text_case(case)?,
-                fill: parse_color_opt(color)?,
-                letter_spacing,
-                line_spacing,
+                fill: parse_color_opt(color)?.into(),
+                letter_spacing: letter_spacing.into(),
+                line_spacing: line_spacing.into(),
                 align_h: parse_align_h(&align.0)?,
                 align_v: parse_align_v(&align.1)?,
                 wrap,
@@ -83,7 +83,11 @@ impl Text {
     }
 
     fn __repr__(&self) -> String {
-        format!("Text({:?}, size={})", self.content, self.style.size)
+        format!(
+            "Text({:?}, size={})",
+            self.content,
+            self.style.size.constant().unwrap_or_default()
+        )
     }
 }
 
@@ -141,8 +145,8 @@ impl TextStroke {
     fn new(color: &Bound<'_, PyAny>, width: f32) -> PyResult<Self> {
         Ok(Self {
             inner: ModelTextStroke {
-                rgba: parse_color(color)?,
-                width,
+                rgba: parse_color(color)?.into(),
+                width: width.into(),
             },
         })
     }
@@ -183,9 +187,9 @@ impl TextShadow {
     fn new(color: &Bound<'_, PyAny>, blur: f32, distance: f32) -> PyResult<Self> {
         Ok(Self {
             inner: ModelTextShadow {
-                rgba: parse_color(color)?,
-                blur,
-                distance,
+                rgba: parse_color(color)?.into(),
+                blur: blur.into(),
+                distance: distance.into(),
             },
         })
     }
@@ -533,13 +537,13 @@ pub(crate) fn apply_text_style(style: &mut TextStyle, dict: &Bound<'_, PyDict>) 
         let key: String = key.extract()?;
         match key.as_str() {
             "font" => style.font = value.extract()?,
-            "size" => style.size = value.extract()?,
-            "color" => style.fill = parse_color(&value)?,
+            "size" => style.size = value.extract::<f32>()?.into(),
+            "color" => style.fill = parse_color(&value)?.into(),
             "bold" => style.bold = value.extract()?,
             "italic" => style.italic = value.extract()?,
             "underline" => style.underline = value.extract()?,
-            "letter_spacing" => style.letter_spacing = value.extract()?,
-            "line_spacing" => style.line_spacing = value.extract()?,
+            "letter_spacing" => style.letter_spacing = value.extract::<f32>()?.into(),
+            "line_spacing" => style.line_spacing = value.extract::<f32>()?.into(),
             "wrap" => style.wrap = value.extract()?,
             "case" => style.case = parse_text_case(&value.extract::<String>()?)?,
             "align" => {

@@ -55,3 +55,44 @@ fn tool_schema_matches_snapshot() {
          BLESS_TOOL_SCHEMA=1"
     );
 }
+
+/// Position docs must teach the anchor convention (not the legacy
+/// "content center" wording that misleads motion keyframes).
+#[test]
+fn set_param_keyframe_position_docs_teach_anchor() {
+    let schema = current_schema();
+    let tools = schema["tools"].as_array().expect("tools array");
+    let keyframe = tools
+        .iter()
+        .find(|t| t["name"] == "set_param_keyframe")
+        .expect("set_param_keyframe tool");
+    let position_desc = keyframe["parameters"]["properties"]["position"]["description"]
+        .as_str()
+        .expect("position field description");
+    assert!(
+        position_desc.to_ascii_lowercase().contains("anchor"),
+        "expected 'anchor' in position description, got: {position_desc}"
+    );
+    assert!(
+        !position_desc
+            .to_ascii_lowercase()
+            .contains("content center"),
+        "stale 'content center' wording in position description: {position_desc}"
+    );
+
+    let transform = tools
+        .iter()
+        .find(|t| t["name"] == "set_clip_transform")
+        .expect("set_clip_transform tool");
+    let px = transform["parameters"]["properties"]["position_x"]["description"]
+        .as_str()
+        .expect("position_x description");
+    assert!(
+        px.to_ascii_lowercase().contains("anchor"),
+        "expected 'anchor' in position_x description, got: {px}"
+    );
+    assert!(
+        !px.to_ascii_lowercase().contains("content center"),
+        "stale 'content center' wording in position_x: {px}"
+    );
+}

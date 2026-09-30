@@ -15,11 +15,12 @@
 use std::path::PathBuf;
 
 use cutlass_models::{
-    AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
-    ClipTransform, ColorAdjustments, CropRect, Easing, Filter, Generator, LayerStyles, Lut,
-    MarkerColor, MarkerId, Mask, MediaId, MotionBlur, Param, ParamValue, PiecewiseEasingPreset,
-    Rational, RationalTime, Replaceable, StabilizeLevel, TemplateMeta, TimeRange, TrackId,
-    TrackKind,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, CaptionCueSpec,
+    CaptionGroupId, CaptionGroupSpec, CaptionHighlight, CaptionLayout, CaptionStyle,
+    CaptionStyleScope, CaptionWord, ChromaKey, ClipId, ClipParam, ClipTransform, ColorAdjustments,
+    CropRect, Easing, Filter, Generator, LayerStyles, Lut, MarkerColor, MarkerId, Mask, MediaId,
+    MotionBlur, Param, ParamValue, PiecewiseEasingPreset, Rational, RationalTime, Replaceable,
+    StabilizeLevel, TemplateMeta, TimeRange, TrackId, TrackKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -495,6 +496,75 @@ pub enum EditCommand {
         aspect: CanvasAspect,
         background: [u8; 3],
     },
+    /// Create a caption group and all of its cue clips in one command
+    /// (captions): the group carries the shared style, layout rules, and
+    /// provenance; each cue becomes a text clip on the group's lane.
+    ///
+    /// Auto-captioning a three-minute video is a couple of hundred cues, so
+    /// this is deliberately one command rather than a `begin_group` of N
+    /// `AddGenerated`s — one history entry, one validation pass, and a trivial
+    /// inverse. Atomic: a rejected batch places nothing. The inverse removes
+    /// the group and its cues.
+    AddCaptionGroup {
+        group: Box<CaptionGroupSpec>,
+        cues: Vec<CaptionCueSpec>,
+    },
+    /// Remove a caption group and every cue clip it owns. The inverse restores
+    /// the group and all its cues with their original ids.
+    RemoveCaptionGroup { group: CaptionGroupId },
+    /// Replace a caption group's shared style and write it through to its cues
+    /// (CapCut "Apply to all"). `scope` decides whether cues the user styled
+    /// individually are rewritten or left alone.
+    SetCaptionGroupStyle {
+        group: CaptionGroupId,
+        style: Box<CaptionStyle>,
+        scope: CaptionStyleScope,
+    },
+    /// Replace a caption group's segmentation rules (characters per line, cue
+    /// duration bounds, safe area), moving its cues into the new safe area.
+    /// Re-splitting existing cues against the new rules is a separate
+    /// `AddCaptionGroup` from the segmenter.
+    SetCaptionGroupLayout {
+        group: CaptionGroupId,
+        layout: CaptionLayout,
+    },
+    /// Apply a caption template by catalog id: its style, layout, and highlight
+    /// at once, written through to every cue.
+    SetCaptionGroupTemplate {
+        group: CaptionGroupId,
+        template: String,
+    },
+    /// Rename a caption group (its label in the caption list).
+    SetCaptionGroupLabel {
+        group: CaptionGroupId,
+        label: String,
+    },
+    /// Set (or clear, with `None`) how a caption group highlights words during
+    /// playback (karaoke).
+    SetCaptionHighlight {
+        group: CaptionGroupId,
+        highlight: Option<CaptionHighlight>,
+    },
+    /// Edit one cue's text, and optionally its word timings and speaker.
+    /// `words: None` remaps the existing timings onto the new text; `Some`
+    /// sets them explicitly.
+    SetCaptionCue {
+        clip: ClipId,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        words: Option<Vec<CaptionWord>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speaker: Option<String>,
+    },
+    /// Split a caption cue at `at`, partitioning its text and word timings
+    /// between the halves and renumbering the group.
+    SplitCaptionCue { clip: ClipId, at: RationalTime },
+    /// Merge caption cues of one group into the earliest, joining their text
+    /// and concatenating their word timings.
+    MergeCaptionCues { clips: Vec<ClipId> },
+    /// Detach cues from their caption group, leaving ordinary text clips
+    /// behind. A group left with no cues is dropped.
+    UngroupCaptions { clips: Vec<ClipId> },
 }
 
 /// Top-level command surface: media registration or a timeline edit.
@@ -535,6 +605,11 @@ pub enum EditOutcome {
     CreatedMarker(MarkerId),
     UpdatedMarker(MarkerId),
     RemovedMarker(MarkerId),
+    /// A caption group was added / restyled / removed (captions). Cue-level
+    /// edits report the cue clip through `Created`/`Updated`/`Removed`.
+    CreatedCaptionGroup(CaptionGroupId),
+    UpdatedCaptionGroup(CaptionGroupId),
+    RemovedCaptionGroup(CaptionGroupId),
     /// The project canvas settings changed (M1 canvas settings).
     UpdatedCanvas,
     /// A project-level property (its display name) changed.

@@ -84,15 +84,6 @@ fn extended_wire_clip_params_lower_to_model_params() {
         ),
         (
             clip,
-            wire::WireClipParam::Speed,
-            None,
-            Some(1.5),
-            None,
-            ClipParam::Speed,
-            ParamValue::Scalar(1.5),
-        ),
-        (
-            clip,
             wire::WireClipParam::Effect {
                 index: 0,
                 param: "radius".into(),
@@ -428,21 +419,17 @@ fn extended_wire_params_work_for_constant_and_removal() {
             value: ParamValue::Vec2([0.25, 0.5]),
         }
     );
-    assert_eq!(
-        lower(
-            &project,
-            WireCommand::RemoveParamKeyframe(wire::RemoveParamKeyframe {
-                clip,
-                param: wire::WireClipParam::Speed,
-                at: 1.0,
-            }),
-        ),
-        EditCommand::RemoveParamKeyframe {
-            clip: ClipId::from_raw(clip),
-            param: ClipParam::Speed,
-            at: RationalTime::new(24, R24),
-        }
+    // `speed` still deserializes, but keyframe tools reject it with a teach.
+    let speed_msg = reject(
+        &project,
+        WireCommand::RemoveParamKeyframe(wire::RemoveParamKeyframe {
+            clip,
+            param: wire::WireClipParam::Speed,
+            at: 1.0,
+        }),
     );
+    assert!(speed_msg.contains("not keyframable"), "{speed_msg}");
+    assert!(speed_msg.contains("set_clip_speed"), "{speed_msg}");
 }
 
 #[test]
@@ -782,7 +769,10 @@ fn transform_merges_with_current_values() {
             opacity: None,
         }),
     );
-    assert!(msg.contains("invalid transform"), "{msg}");
+    assert!(
+        msg.contains("scale 0") && msg.contains("must be positive"),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -2726,6 +2716,26 @@ fn marker_commands_lower_to_engine() {
     );
     assert!(msg.contains("marker 404 does not exist"), "{msg}");
     assert!(msg.contains(&id.raw().to_string()), "{msg}");
+
+    // Custom opaque RGB is accepted and forced opaque in the model.
+    let edit = lower(
+        &project,
+        WireCommand::SetMarker(wire::SetMarker {
+            marker: id.raw(),
+            at: None,
+            name: None,
+            color: Some(WireMarkerColor::Rgba([0x12, 0x34, 0x56])),
+        }),
+    );
+    assert_eq!(
+        edit,
+        EditCommand::SetMarker {
+            marker: id,
+            at: RationalTime::new(48, R24),
+            name: "mid".into(),
+            color: MarkerColor::custom(0x12, 0x34, 0x56),
+        }
+    );
 }
 
 #[test]

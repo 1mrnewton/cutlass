@@ -132,6 +132,14 @@ fn motion_blur_defaults_and_validation() {
 }
 
 #[test]
+fn mirror_new_seeds_half_width_band_thickness() {
+    let mirror = Mask::new(MaskKind::Mirror);
+    assert_eq!(mirror.size.constant(), Some([0.5, 1.0]));
+    let circle = Mask::new(MaskKind::Circle);
+    assert_eq!(circle.size.constant(), Some([1.0, 1.0]));
+}
+
+#[test]
 fn defaults_are_elided_from_the_wire() {
     let mask = Mask::new(MaskKind::Circle);
     assert_eq!(

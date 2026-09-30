@@ -12,11 +12,19 @@ use crate::{AgentStore, AppWindow};
 
 /// An entity id the sandbox allocated while rehearsing a command. Replay
 /// maps it onto the id the live engine allocates for the same step.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum AgentCreated {
     Clip(u64),
     Track(u64),
     Marker(u64),
+    /// `add_captions` creates a group *and* one clip per line. The cue ids
+    /// are recorded in timeline order so replay can pair them with the live
+    /// group's cues — a later `set_caption_text` on a rehearsed line has to
+    /// find the line the live engine created.
+    Captions {
+        group: u64,
+        cues: Vec<u64>,
+    },
 }
 
 /// One rehearsed command, ready for live replay.

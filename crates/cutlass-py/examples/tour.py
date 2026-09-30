@@ -54,6 +54,16 @@ def main() -> None:
     bed.volume = 0.6
     bed.fade_out = 1.5
 
+    captions = p.add_track("text", name="Captions").add_captions(
+        [
+            ("the swell builds all morning", 4.2, 2.0),
+            ("then the set arrives", 6.2, 1.8),
+        ],
+        template="karaoke_pop",
+    )
+    captions.highlight("word", fill="#ffd800")
+    captions.to_srt(str(OUT_DIR / "trailer.srt"))
+
     for track in p.tracks:
         print(track.name, [c.start for c in track])
 

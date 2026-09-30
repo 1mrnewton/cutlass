@@ -15,4 +15,9 @@ export global AppStore {
         theme-id == 0 ? DefaultTheme.theme
         : theme-id == 1 ? EmberTheme.theme
         : DarkBlueTheme.theme;
+
+    // App-wide recent picker colors (most-recent-first). Seeded from
+    // `[appearance].recent_colors` in config.toml; `ColorUtil.record-recent`
+    // updates this model and persists on every picker/eyedropper commit.
+    in-out property <[color]> recent-colors: [];
 }

@@ -21,17 +21,25 @@
 //! ([`PromptOutcome::phase_breaks`]).
 
 use std::collections::HashSet;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cutlass_commands::EditOutcome;
 
 use crate::describe::{EditorContext, ProjectSummary};
 use crate::extend::AgentExtensions;
 use crate::provider::{
-    ChatProvider, ChatRequest, FinishReason, ImagePart, Message, ProviderError, ProviderStreamEvent,
+    ChatProvider, ChatRequest, FinishReason, ImagePart, Message, ProviderError,
+    ProviderStreamEvent, TokenUsage,
 };
 use crate::tools::{HostToolSpec, ToolHost, is_host_tool_name};
 use crate::wire::{self, WireCommand};
+
+mod transcript_budget;
+use transcript_budget::{
+    collapse_describe_project_results, collect_turn_messages, enforce_image_budget,
+    enforce_tool_output_image_budget,
+};
 
 /// The loop's only view of the engine. The UI implements this over a
 /// sandbox engine whose validated plan replays onto the live one
@@ -101,7 +109,13 @@ pub trait EngineBridge {
     fn rollback_group(&mut self);
 }
 
-/// Guardrail knobs.
+/// Guardrail knobs — a cost fuse for one user prompt.
+///
+/// Every provider turn re-sends the growing transcript (text + tool results +
+/// images), so uncapped loops burn money fast. These defaults bound worst-case
+/// spend per prompt while keeping normal edit sessions usable. Turn and host
+/// caps abort the prompt and roll back its sandbox edit group; the edit-tool
+/// cap refuses further edits but keeps work already applied.
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     /// Hard cap on edit-tool calls per prompt (the runaway-loop fuse).
@@ -109,13 +123,16 @@ pub struct AgentConfig {
     /// and the run completes keeping the edits already applied.
     pub max_tool_calls: usize,
     /// Hard cap on host-tool calls per prompt. A separate fuse: senses
-    /// and app control must not starve editing, nor the reverse.
+    /// and app control must not starve editing, nor the reverse. Exceeding
+    /// this aborts the prompt and rolls back its sandbox edit group.
     pub max_host_calls: usize,
-    /// Hard cap on provider turns per prompt.
+    /// Hard cap on provider turns per prompt. Exceeding this aborts the
+    /// prompt and rolls back its sandbox edit group. Kept well below the
+    /// edit cap because each turn retransmits the full transcript.
     pub max_turns: usize,
     /// Hard cap on images carried by one request, newest kept. Screenshot
     /// tools bound each image's dimensions, so count × bounded size caps
-    /// the whole vision payload.
+    /// the whole vision payload (and its base64 cost on every later turn).
     pub max_images: usize,
     /// Hard cap on total encoded image bytes carried by one request. This
     /// protects the provider boundary even when an extensible host tool does
@@ -128,11 +145,11 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_tool_calls: 1000,
-            max_host_calls: 200,
-            max_turns: 200,
-            max_images: 25,
-            max_image_bytes: 24 * 1024 * 1024,
+            max_tool_calls: 200,
+            max_host_calls: 60,
+            max_turns: 40,
+            max_images: 8,
+            max_image_bytes: 6 * 1024 * 1024,
             dry_run: false,
         }
     }
@@ -162,6 +179,9 @@ pub enum AgentEvent {
     /// payload limits. Embedders can render it inline while the same encoded
     /// bytes continue to the model.
     Image(ImagePart),
+    /// Cumulative token usage for this prompt so far (sum of every provider
+    /// turn that reported usage). Emitted after each such turn.
+    Usage(TokenUsage),
 }
 
 /// How the prompt ended.
@@ -197,6 +217,9 @@ pub struct PromptOutcome {
     /// `describe_project` results are collapsed to a short placeholder —
     /// they're large and the fresh system snapshot supersedes them.
     pub turn_messages: Vec<Message>,
+    /// Cumulative provider-reported token usage across every turn of this
+    /// prompt (including turns before an abort — tokens already spent stay).
+    pub usage: TokenUsage,
 }
 
 /// House rules + user/project rules + the skill index + the send-time
@@ -287,6 +310,16 @@ pub fn system_prompt(
          exceeding the source media, read the error, re-inspect the \
          current state, and adjust the plan — never abandon the task for \
          lack of state you can fetch.\n\
+         - Motion/placement: position is the offset of a clip's anchor \
+         from the CANVAS CENTER in canvas-width/height fractions (+x \
+         right, +y down). [0,0] is centered; [0.5,0] is the right edge; \
+         [0.5,0.5] is NOT center. Slide-ins start off-screen (e.g. x=-1) \
+         and end at [0,0]. Subtle moves are ±0.05–0.2. scale 1.0 = \
+         aspect-fit (100%); 1.5 = 150% — never send percent numbers. \
+         Keyframe times (at/t) are absolute timeline seconds and must \
+         lie inside the clip. In clip state, keyframes appear as t/v/e \
+         (time, value, easing); a param with keyframes omits its static \
+         value.\n\
          \n\
          {custom}\
          Current state (the user's selection and playhead are in \
@@ -461,18 +494,29 @@ pub fn run_prompt_with_host(
     // rather than burning turns until the turn cap rolls the prompt back.
     let mut edit_cap_tripped = false;
     let mut final_text = String::new();
+    let mut usage = TokenUsage::default();
     // The first image-bearing tool result is appended after the current user
     // message. Images are surfaced only after the whole request budget has run,
     // immediately before those exact attachments are sent to the provider.
     let mut image_event_cursor = messages.len();
-    // Call ids of `describe_project` results, collapsed in `turn_messages`
-    // so the session history never carries a full stale project blob.
+    // Call ids of `describe_project` results. Older dumps are collapsed
+    // in-flight when a newer one arrives (at most one full dump lives in
+    // `messages`); all of them are collapsed again in `turn_messages` so
+    // session history never carries a full stale project blob.
     let mut describe_call_ids: Vec<String> = Vec::new();
+    // One OpenRouter sticky-routing id for every `provider.chat` call in this
+    // prompt run. Within one prompt the prefix (tools + system + transcript)
+    // grows monotonically, so sticky routing + automatic breakpoints give
+    // cache reads from turn 2 on.
+    let session_id = new_prompt_session_id();
 
     if !config.dry_run {
         bridge.begin_group();
     }
-    let abort = |bridge: &mut dyn EngineBridge, actions: Vec<ActionLogEntry>, reason: String| {
+    let abort = |bridge: &mut dyn EngineBridge,
+                 actions: Vec<ActionLogEntry>,
+                 usage: TokenUsage,
+                 reason: String| {
         if !config.dry_run {
             bridge.rollback_group();
         }
@@ -483,6 +527,7 @@ pub fn run_prompt_with_host(
             phase_breaks: Vec::new(),
             status: PromptStatus::Aborted(reason),
             turn_messages: Vec::new(),
+            usage,
         }
     };
 
@@ -509,17 +554,22 @@ pub fn run_prompt_with_host(
                 &ChatRequest {
                     messages: &messages,
                     tools: &tools,
+                    session_id: Some(&session_id),
                 },
                 cancel,
                 &mut forward,
             ) {
                 Ok(turn) => turn,
                 Err(ProviderError::Cancelled) => {
-                    return abort(bridge, actions, "cancelled".to_string());
+                    return abort(bridge, actions, usage, "cancelled".to_string());
                 }
-                Err(e) => return abort(bridge, actions, e.to_string()),
+                Err(e) => return abort(bridge, actions, usage, e.to_string()),
             }
         };
+        if let Some(turn_usage) = &turn.usage {
+            usage.add(turn_usage);
+            on_event(AgentEvent::Usage(usage));
+        }
 
         if turn.tool_calls.is_empty() {
             final_text = turn.text;
@@ -527,6 +577,7 @@ pub fn run_prompt_with_host(
                 return abort(
                     bridge,
                     actions,
+                    usage,
                     "the model ran out of tokens mid-answer".to_string(),
                 );
             }
@@ -543,6 +594,13 @@ pub fn run_prompt_with_host(
             // Only host successes attach images; every other path is text.
             let mut images: Vec<ImagePart> = Vec::new();
             let result: String = if call.name == "describe_project" {
+                // Collapse prior dumps already in `messages` before we append
+                // this new full-size one. OpenRouter prompt caching: mutating
+                // an earlier ToolResult invalidates the cached prefix from
+                // that point once — bounded: at most one full dump lives in
+                // the transcript, and the collapse happens as we append a new
+                // dump anyway, so the suffix was going to be written regardless.
+                collapse_describe_project_results(&mut messages, &describe_call_ids);
                 describe_call_ids.push(call.id.clone());
                 let state = serde_json::json!({
                     "project": bridge.summary(),
@@ -575,6 +633,7 @@ pub fn run_prompt_with_host(
                     return abort(
                         bridge,
                         actions,
+                        usage,
                         format!(
                             "exceeded the {}-host-call cap for one prompt",
                             config.max_host_calls
@@ -609,6 +668,7 @@ pub fn run_prompt_with_host(
                     return abort(
                         bridge,
                         actions,
+                        usage,
                         format!(
                             "exceeded the {}-host-call cap for one prompt",
                             config.max_host_calls
@@ -634,6 +694,7 @@ pub fn run_prompt_with_host(
                                     return abort(
                                         bridge,
                                         actions,
+                                        usage,
                                         format!(
                                             "host tool '{}' was dispatched, but reconciliation \
                                              failed: {reason}; host effects may already have \
@@ -735,6 +796,7 @@ pub fn run_prompt_with_host(
             return abort(
                 bridge,
                 actions,
+                usage,
                 format!("exceeded the {}-turn cap for one prompt", config.max_turns),
             );
         }
@@ -749,6 +811,7 @@ pub fn run_prompt_with_host(
             phase_breaks,
             status: PromptStatus::DryRun,
             turn_messages,
+            usage,
         };
     }
     bridge.end_group();
@@ -758,6 +821,7 @@ pub fn run_prompt_with_host(
         phase_breaks,
         status: PromptStatus::Completed,
         turn_messages,
+        usage,
     }
 }
 
@@ -790,1098 +854,22 @@ fn read_skill_result(skills: &[crate::extend::Skill], arguments: &serde_json::Va
     }
 }
 
-/// Bound a single extensible tool result before it reaches either the
-/// transcript or the request history. Count and encoded-byte limits both keep
-/// the newest attachments, matching the whole-request policy below.
-fn enforce_tool_output_image_budget(
-    content: &mut String,
-    images: &mut Vec<ImagePart>,
-    max_images: usize,
-    max_bytes: usize,
-) {
-    let mut count = images.len();
-    let mut bytes = images
-        .iter()
-        .map(|image| image.data.len())
-        .fold(0usize, usize::saturating_add);
-    let mut drop_count = 0usize;
-    for image in images.iter() {
-        if count <= max_images && bytes <= max_bytes {
-            break;
-        }
-        count = count.saturating_sub(1);
-        bytes = bytes.saturating_sub(image.data.len());
-        drop_count += 1;
-    }
-    for dropped in images.drain(..drop_count) {
-        content.push_str(&format!(
-            "\n[image not attached because it exceeded the request budget: {}]",
-            dropped.label
-        ));
-    }
+/// Unique sticky-routing id for one `run_prompt` invocation.
+///
+/// Combines process id, a process-local counter, and wall-clock nanos so
+/// consecutive prompts never reuse an id without pulling in an extra crate.
+fn new_prompt_session_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("cutlass-{}-{}-{}", std::process::id(), counter, nanos)
 }
 
-/// Keep only the newest `max_images` images across the request; older
-/// ones are dropped in place and noted with a text placeholder carrying
-/// the label, so the model knows what it saw and can re-request it.
-/// Newest-wins matches how the agent works with vision: screenshot, look,
-/// act — a stale frame is cheaper to re-take than to carry.
-fn enforce_image_budget(messages: &mut [Message], max_images: usize, max_bytes: usize) {
-    let mut image_total: usize = messages.iter().map(image_count).sum();
-    let mut byte_total: usize = messages
-        .iter()
-        .flat_map(message_images)
-        .map(|image| image.data.len())
-        .fold(0usize, usize::saturating_add);
-    if image_total <= max_images && byte_total <= max_bytes {
-        return;
-    }
-
-    // Oldest first. Count how much of each image vector to drain before
-    // mutating it, keeping this O(number of images) rather than repeatedly
-    // removing index zero.
-    for message in messages.iter_mut() {
-        if image_total <= max_images && byte_total <= max_bytes {
-            break;
-        }
-        let (content, images) = match message {
-            Message::User { content, images } => (content, images),
-            Message::ToolResult {
-                content, images, ..
-            } => (content, images),
-            _ => continue,
-        };
-        let mut drop_count = 0usize;
-        for image in images.iter() {
-            if image_total <= max_images && byte_total <= max_bytes {
-                break;
-            }
-            image_total = image_total.saturating_sub(1);
-            byte_total = byte_total.saturating_sub(image.data.len());
-            drop_count += 1;
-        }
-        for dropped in images.drain(..drop_count) {
-            content.push_str(&format!("\n[image no longer attached: {}]", dropped.label));
-        }
-    }
-}
-
-fn image_count(message: &Message) -> usize {
-    match message {
-        Message::User { images, .. } | Message::ToolResult { images, .. } => images.len(),
-        _ => 0,
-    }
-}
-
-fn message_images(message: &Message) -> &[ImagePart] {
-    match message {
-        Message::User { images, .. } | Message::ToolResult { images, .. } => images,
-        _ => &[],
-    }
-}
-
-/// Session history is text-only: raw image bytes would bloat every later
-/// request and the persisted session file for no benefit — the agent can
-/// always re-screenshot the *current* state. A labeled placeholder keeps
-/// the narrative ("looked at the timeline here") without the payload.
-fn strip_images(content: &mut String, images: &mut Vec<ImagePart>) {
-    for image in images.drain(..) {
-        content.push_str(&format!("\n[image: {}]", image.label));
-    }
-}
-
-/// This turn's slice of the conversation (`messages[turn_start..]`: the
-/// user prompt plus every assistant/tool message the loop appended), with
-/// the final text answer added (it isn't pushed during the loop),
-/// `describe_project` results collapsed to a placeholder, and images
-/// stripped to labels (history is text-only). This is what the session
-/// appends to its history so the next prompt remembers the turn.
-fn collect_turn_messages(
-    messages: Vec<Message>,
-    turn_start: usize,
-    describe_call_ids: &[String],
-    final_text: &str,
-) -> Vec<Message> {
-    let mut turn: Vec<Message> = messages.into_iter().skip(turn_start).collect();
-    for message in &mut turn {
-        match message {
-            Message::ToolResult {
-                call_id,
-                content,
-                images,
-            } => {
-                if describe_call_ids.iter().any(|id| id == call_id) {
-                    *content =
-                        "(project state omitted — see the current state in the system message)"
-                            .to_string();
-                }
-                strip_images(content, images);
-            }
-            Message::User { content, images } => strip_images(content, images),
-            _ => {}
-        }
-    }
-    if !final_text.is_empty() {
-        turn.push(Message::Assistant {
-            content: final_text.to_string(),
-            tool_calls: Vec::new(),
-        });
-    }
-    turn
-}
-
-// --- action log ---------------------------------------------------------
-
-fn secs(v: f64) -> String {
-    format!("{v:.2}s")
-}
-
-fn rgba(c: [u8; 4]) -> String {
-    format!("#{:02x}{:02x}{:02x}{:02x}", c[0], c[1], c[2], c[3])
-}
-
-fn param_name(param: &wire::WireClipParam) -> String {
-    match param {
-        wire::WireClipParam::Position => "position".into(),
-        wire::WireClipParam::AnchorPoint => "anchor point".into(),
-        wire::WireClipParam::Scale => "scale".into(),
-        wire::WireClipParam::Rotation => "rotation".into(),
-        wire::WireClipParam::Opacity => "opacity".into(),
-        wire::WireClipParam::Crop => "crop".into(),
-        wire::WireClipParam::Volume => "volume".into(),
-        wire::WireClipParam::Pan => "pan".into(),
-        wire::WireClipParam::Speed => "speed".into(),
-        wire::WireClipParam::Effect { index, param } => format!("effect {index} {param}"),
-        wire::WireClipParam::Shape { param } => format!("shape {param:?}").to_lowercase(),
-        wire::WireClipParam::Text { param } => format!("text {param:?}").to_lowercase(),
-        wire::WireClipParam::Look { param } => format!("look {param:?}").to_lowercase(),
-        wire::WireClipParam::Style { param } => format!("style {param:?}").to_lowercase(),
-    }
-}
-
-/// The keyframed value in editor language: "scale 150%", "rotation 90°",
-/// "[0.25, -0.10]". Falls back to "?" when the call omitted the value (the
-/// validation rejection carries the real message).
-fn param_value_phrase(
-    param: &wire::WireClipParam,
-    value: Option<f64>,
-    position: Option<[f64; 2]>,
-    color: Option<[u8; 4]>,
-    rect: Option<[f64; 4]>,
-) -> String {
-    match param {
-        wire::WireClipParam::Position | wire::WireClipParam::AnchorPoint => position
-            .map(|p| format!("[{:.2}, {:.2}]", p[0], p[1]))
-            .unwrap_or_else(|| "?".into()),
-        wire::WireClipParam::Crop => rect
-            .map(|r| format!("[{:.2}, {:.2}, {:.2}, {:.2}]", r[0], r[1], r[2], r[3]))
-            .unwrap_or_else(|| "?".into()),
-        wire::WireClipParam::Scale => {
-            if let Some(p) = position {
-                format!("[{}, {}]", p[0], p[1])
-            } else if let Some(v) = value {
-                format!("{:.0}%", v * 100.0)
-            } else {
-                "?".into()
-            }
-        }
-        wire::WireClipParam::Opacity | wire::WireClipParam::Volume => value
-            .map(|v| format!("{:.0}%", v * 100.0))
-            .unwrap_or_else(|| "?".into()),
-        wire::WireClipParam::Pan => value
-            .map(|v| format!("{v:.2}"))
-            .unwrap_or_else(|| "?".into()),
-        wire::WireClipParam::Rotation => value
-            .map(|v| format!("{v:.0}°"))
-            .unwrap_or_else(|| "?".into()),
-        wire::WireClipParam::Shape {
-            param: wire::WireShapeParam::Fill | wire::WireShapeParam::StrokeColor,
-        }
-        | wire::WireClipParam::Text {
-            param:
-                wire::WireTextParam::Fill
-                | wire::WireTextParam::StrokeColor
-                | wire::WireTextParam::ShadowColor
-                | wire::WireTextParam::BackgroundColor,
-        }
-        | wire::WireClipParam::Style {
-            param:
-                wire::WireStyleParam::ShadowColor
-                | wire::WireStyleParam::GlowColor
-                | wire::WireStyleParam::OutlineColor
-                | wire::WireStyleParam::BackgroundColor,
-        } => color.map(rgba).unwrap_or_else(|| "?".into()),
-        wire::WireClipParam::Style {
-            param: wire::WireStyleParam::ShadowOffset,
-        }
-        | wire::WireClipParam::Look {
-            param: wire::WireLookParam::MaskCenter | wire::WireLookParam::MaskSize,
-        } => position
-            .map(|p| format!("[{:.2}, {:.2}]", p[0], p[1]))
-            .unwrap_or_else(|| "?".into()),
-        _ => value.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
-    }
-}
-
-fn generator_phrase(generator: &wire::WireGenerator) -> String {
-    match generator {
-        wire::WireGenerator::Text { content } => format!("text '{content}'"),
-        wire::WireGenerator::Solid { rgba: c } => format!("solid {}", rgba(*c)),
-        wire::WireGenerator::Shape {
-            shape,
-            rgba: c,
-            width,
-            height,
-        } => {
-            let name = match shape {
-                wire::WireShape::Rectangle => "rectangle",
-                wire::WireShape::Ellipse => "ellipse",
-            };
-            let size = match (width, height) {
-                (Some(w), Some(h)) => format!(" {w:.0}×{h:.0} ref px"),
-                _ => String::new(),
-            };
-            format!("{} {}{}", rgba(*c), name, size)
-        }
-    }
-}
-
-/// One transcript line per command: what happened, in editor language.
-/// `outcome` is `None` for dry-run (planned, not applied).
-pub fn describe_action(command: &WireCommand, outcome: Option<&EditOutcome>) -> String {
-    let mut line = match command {
-        WireCommand::AddTrack(a) => format!("added {:?} track '{}'", a.kind, a.name).to_lowercase(),
-        WireCommand::AddClip(a) => format!(
-            "placed media {} ({}–{} of source) at {} on track {}",
-            a.media,
-            secs(a.source_start),
-            secs(a.source_start + a.source_duration),
-            secs(a.start),
-            a.track,
-        ),
-        WireCommand::ExtractAudio(a) => {
-            format!(
-                "extracted audio from clip {} onto track {}",
-                a.clip, a.track
-            )
-        }
-        WireCommand::DuplicateClip(a) => format!(
-            "duplicated clip {} onto track {} at {}",
-            a.clip,
-            a.to_track,
-            secs(a.start),
-        ),
-        WireCommand::AddGenerated(a) => format!(
-            "added {} at {} for {} on track {}",
-            generator_phrase(&a.generator),
-            secs(a.start),
-            secs(a.duration),
-            a.track,
-        ),
-        WireCommand::SetGenerator(a) => format!(
-            "changed clip {} to {}",
-            a.clip,
-            generator_phrase(&a.generator)
-        ),
-        WireCommand::SetClipTransform(a) => {
-            let mut parts = Vec::new();
-            if a.position_x.is_some() || a.position_y.is_some() {
-                parts.push("position".to_string());
-            }
-            if let Some(s) = a.scale {
-                parts.push(match s {
-                    wire::WireScale::Uniform(u) => format!("scale {:.0}%", u * 100.0),
-                    wire::WireScale::Axes([x, y]) => format!("scale: [{x}, {y}]"),
-                });
-            }
-            if let Some(r) = a.rotation {
-                parts.push(format!("rotation {r:.0}°"));
-            }
-            if let Some(o) = a.opacity {
-                parts.push(format!("opacity {:.0}%", o * 100.0));
-            }
-            format!("set clip {} {}", a.clip, parts.join(", "))
-        }
-        WireCommand::SetClipCrop(a) => {
-            let mut parts = Vec::new();
-            let edges: Vec<String> = [
-                ("left", a.left),
-                ("top", a.top),
-                ("right", a.right),
-                ("bottom", a.bottom),
-            ]
-            .iter()
-            .filter_map(|(name, v)| v.map(|v| format!("{name} {:.0}%", v * 100.0)))
-            .collect();
-            if !edges.is_empty() {
-                parts.push(format!("cropped {}", edges.join(", ")));
-            }
-            if let Some(h) = a.flip_h {
-                parts.push(
-                    if h {
-                        "flipped horizontally"
-                    } else {
-                        "unflipped horizontally"
-                    }
-                    .into(),
-                );
-            }
-            if let Some(v) = a.flip_v {
-                parts.push(
-                    if v {
-                        "flipped vertically"
-                    } else {
-                        "unflipped vertically"
-                    }
-                    .into(),
-                );
-            }
-            if parts.is_empty() {
-                parts.push("framing unchanged".into());
-            }
-            format!("set clip {} {}", a.clip, parts.join(", "))
-        }
-        WireCommand::SetParamKeyframe(a) => format!(
-            "keyframed clip {} {} = {} at {}",
-            a.clip,
-            param_name(&a.param),
-            param_value_phrase(&a.param, a.value, a.position, a.rgba, a.rect),
-            secs(a.at),
-        ),
-        WireCommand::RemoveParamKeyframe(a) => format!(
-            "removed clip {} {} keyframe at {}",
-            a.clip,
-            param_name(&a.param),
-            secs(a.at),
-        ),
-        WireCommand::SetParamConstant(a) => format!(
-            "set clip {} {} to {} (animation cleared)",
-            a.clip,
-            param_name(&a.param),
-            param_value_phrase(&a.param, a.value, a.position, a.rgba, a.rect),
-        ),
-        WireCommand::ApplyEasingPreset(a) => format!(
-            "applied {} easing preset on clip {} {} from {}",
-            match a.preset {
-                crate::wire::WireEasingPreset::BounceOut => "bounce_out",
-                crate::wire::WireEasingPreset::ElasticOut => "elastic_out",
-                crate::wire::WireEasingPreset::BackOut => "back_out",
-            },
-            a.clip,
-            param_name(&a.param),
-            secs(a.from_tick),
-        ),
-        WireCommand::SetClipSpeed(a) => {
-            let mut parts = Vec::new();
-            if let Some(s) = a.speed {
-                parts.push(format!("speed {s}x"));
-            }
-            if let Some(r) = a.reversed {
-                parts.push(if r {
-                    "reversed".into()
-                } else {
-                    "forward".to_string()
-                });
-            }
-            if parts.is_empty() {
-                parts.push("retiming unchanged".into());
-            }
-            format!("set clip {} {}", a.clip, parts.join(", "))
-        }
-        WireCommand::SetSpeedCurve(a) => match &a.preset {
-            Some(preset) => format!("applied {preset} speed ramp to clip {}", a.clip),
-            None => format!("cleared speed ramp on clip {}", a.clip),
-        },
-        WireCommand::SetClipPitch(a) => format!(
-            "set clip {} pitch to {}",
-            a.clip,
-            if a.preserve_pitch {
-                "preserved"
-            } else {
-                "follow speed"
-            }
-        ),
-        WireCommand::SetDenoise(a) => format!(
-            "turned noise reduction {} on clip {}",
-            if a.denoise { "on" } else { "off" },
-            a.clip
-        ),
-        WireCommand::SetClipMask(a) => match &a.mask {
-            Some(mask) => format!(
-                "set {} mask on clip {}",
-                match mask.kind {
-                    crate::wire::WireMaskKind::Linear => "linear",
-                    crate::wire::WireMaskKind::Mirror => "mirror",
-                    crate::wire::WireMaskKind::Circle => "circle",
-                    crate::wire::WireMaskKind::Rectangle => "rectangle",
-                    crate::wire::WireMaskKind::Heart => "heart",
-                    crate::wire::WireMaskKind::Star => "star",
-                },
-                a.clip
-            ),
-            None => format!("cleared mask on clip {}", a.clip),
-        },
-        WireCommand::SetClipChroma(a) => match &a.chroma {
-            Some(_) => format!("set chroma key on clip {}", a.clip),
-            None => format!("cleared chroma key on clip {}", a.clip),
-        },
-        WireCommand::SetClipStabilize(a) => match a.level {
-            Some(level) => format!(
-                "set {} stabilization on clip {}",
-                match level {
-                    crate::wire::WireStabilizeLevel::Recommended => "recommended",
-                    crate::wire::WireStabilizeLevel::Smooth => "smooth",
-                    crate::wire::WireStabilizeLevel::MaxSmooth => "max smooth",
-                },
-                a.clip
-            ),
-            None => format!("cleared stabilization on clip {}", a.clip),
-        },
-        WireCommand::SetClipFilter(a) => match &a.filter {
-            Some(filter) => format!("set {} filter on clip {}", filter.id, a.clip),
-            None => format!("cleared filter on clip {}", a.clip),
-        },
-        WireCommand::SetClipBlendMode(a) => format!(
-            "set clip {} blend mode to {}",
-            a.clip,
-            match a.mode {
-                crate::wire::WireBlendMode::Normal => "normal",
-                crate::wire::WireBlendMode::Darken => "darken",
-                crate::wire::WireBlendMode::Multiply => "multiply",
-                crate::wire::WireBlendMode::ColorBurn => "color_burn",
-                crate::wire::WireBlendMode::Lighten => "lighten",
-                crate::wire::WireBlendMode::Screen => "screen",
-                crate::wire::WireBlendMode::ColorDodge => "color_dodge",
-                crate::wire::WireBlendMode::Add => "add",
-                crate::wire::WireBlendMode::Overlay => "overlay",
-                crate::wire::WireBlendMode::SoftLight => "soft_light",
-                crate::wire::WireBlendMode::HardLight => "hard_light",
-                crate::wire::WireBlendMode::Difference => "difference",
-                crate::wire::WireBlendMode::Exclusion => "exclusion",
-            }
-        ),
-        WireCommand::SetMotionBlur(a) => {
-            if a.enabled {
-                let mut parts = vec![format!("enable motion blur on clip {}", a.clip)];
-                if let Some(s) = a.shutter_deg {
-                    parts.push(format!("shutter={s}"));
-                }
-                if let Some(n) = a.samples {
-                    parts.push(format!("samples={n}"));
-                }
-                parts.join(" ")
-            } else {
-                format!("disable motion blur on clip {}", a.clip)
-            }
-        }
-        WireCommand::SetClipLayerStyles(a) => {
-            let mut blocks = Vec::new();
-            if a.styles.shadow.is_some() {
-                blocks.push("shadow");
-            }
-            if a.styles.glow.is_some() {
-                blocks.push("glow");
-            }
-            if a.styles.outline.is_some() {
-                blocks.push("outline");
-            }
-            if a.styles.background.is_some() {
-                blocks.push("background");
-            }
-            if blocks.is_empty() {
-                format!("cleared layer styles on clip {}", a.clip)
-            } else {
-                format!(
-                    "set layer styles ({}) on clip {}",
-                    blocks.join(", "),
-                    a.clip
-                )
-            }
-        }
-        WireCommand::SetClipAdjustments(a) => {
-            let mut parts = Vec::new();
-            if let Some(v) = a.brightness {
-                parts.push(format!("brightness {v:.2}"));
-            }
-            if let Some(v) = a.contrast {
-                parts.push(format!("contrast {v:.2}"));
-            }
-            if let Some(v) = a.saturation {
-                parts.push(format!("saturation {v:.2}"));
-            }
-            if let Some(v) = a.exposure {
-                parts.push(format!("exposure {v:.2}"));
-            }
-            if let Some(v) = a.temperature {
-                parts.push(format!("temperature {v:.2}"));
-            }
-            if let Some(v) = a.tint {
-                parts.push(format!("tint {v:.2}"));
-            }
-            if let Some(v) = a.hue {
-                parts.push(format!("hue {v:.2}"));
-            }
-            if let Some(v) = a.highlights {
-                parts.push(format!("highlights {v:.2}"));
-            }
-            if let Some(v) = a.shadows {
-                parts.push(format!("shadows {v:.2}"));
-            }
-            if let Some(v) = a.sharpness {
-                parts.push(format!("sharpness {v:.2}"));
-            }
-            if let Some(v) = a.vignette {
-                parts.push(format!("vignette {v:.2}"));
-            }
-            if parts.is_empty() {
-                parts.push("adjustments unchanged".into());
-            }
-            format!("set clip {} {}", a.clip, parts.join(", "))
-        }
-        WireCommand::SetClipAnimation(a) => {
-            let slot = match a.slot {
-                crate::wire::WireAnimationSlot::In => "in",
-                crate::wire::WireAnimationSlot::Out => "out",
-                crate::wire::WireAnimationSlot::Combo => "combo",
-            };
-            match &a.animation {
-                Some(id) => format!("set {} animation on clip {} ({} slot)", id, a.clip, slot),
-                None => format!("cleared {} animation on clip {}", slot, a.clip),
-            }
-        }
-        WireCommand::SetAudioRole(a) => match a.role {
-            Some(role) => format!(
-                "tagged clip {} as {}",
-                a.clip,
-                match role {
-                    crate::wire::WireAudioRole::Music => "music",
-                    crate::wire::WireAudioRole::Sfx => "sfx",
-                    crate::wire::WireAudioRole::Voiceover => "voiceover",
-                    crate::wire::WireAudioRole::Extracted => "extracted",
-                }
-            ),
-            None => format!("cleared audio role on clip {}", a.clip),
-        },
-        WireCommand::SetClipAudio(a) => {
-            let mut parts = Vec::new();
-            if let Some(v) = a.volume {
-                parts.push(if v == 0.0 {
-                    "muted".to_string()
-                } else {
-                    format!("volume {:.0}%", v * 100.0)
-                });
-            }
-            if let Some(f) = a.fade_in {
-                parts.push(format!("fade in {}", secs(f)));
-            }
-            if let Some(f) = a.fade_out {
-                parts.push(format!("fade out {}", secs(f)));
-            }
-            if parts.is_empty() {
-                parts.push("audio unchanged".into());
-            }
-            format!("set clip {} {}", a.clip, parts.join(", "))
-        }
-        WireCommand::AddEffect(a) => format!("added {} effect to clip {}", a.effect, a.clip),
-        WireCommand::RemoveEffect(a) => {
-            format!("removed effect {} from clip {}", a.index, a.clip)
-        }
-        WireCommand::MoveEffect(a) => format!(
-            "moved effect {} to {} on clip {}",
-            a.from_index, a.to_index, a.clip
-        ),
-        WireCommand::SetEffectParam(a) => {
-            let shown = if let Some(c) = a.rgba {
-                rgba(c)
-            } else if let Some(p) = a.position {
-                format!("[{:.2}, {:.2}]", p[0], p[1])
-            } else {
-                a.value.map(|v| v.to_string()).unwrap_or_else(|| "?".into())
-            };
-            format!(
-                "set clip {} effect {} {} = {}",
-                a.clip, a.index, a.param, shown
-            )
-        }
-        WireCommand::AddTransition(a) => {
-            format!("added {} transition after clip {}", a.transition, a.clip)
-        }
-        WireCommand::RemoveTransition(a) => {
-            format!("removed transition after clip {}", a.clip)
-        }
-        WireCommand::SetTransition(a) => {
-            format!("set transition after clip {} to {}s", a.clip, a.seconds)
-        }
-        WireCommand::SplitClip(a) => format!("split clip {} at {}", a.clip, secs(a.at)),
-        WireCommand::TrimClip(a) => format!(
-            "trimmed clip {} to {}–{}",
-            a.clip,
-            secs(a.start),
-            secs(a.start + a.duration)
-        ),
-        WireCommand::MoveClip(a) => {
-            format!(
-                "moved clip {} to {} on track {}",
-                a.clip,
-                secs(a.start),
-                a.to_track
-            )
-        }
-        WireCommand::RemoveClip(a) => format!("removed clip {}", a.clip),
-        WireCommand::RemoveTrack(a) => format!("removed track {}", a.track),
-        WireCommand::SetTrackEnabled(a) => format!(
-            "{} track {}",
-            if a.enabled { "showed" } else { "hid" },
-            a.track
-        ),
-        WireCommand::SetTrackMuted(a) => format!(
-            "{} track {}",
-            if a.muted { "muted" } else { "unmuted" },
-            a.track
-        ),
-        WireCommand::SetTrackLocked(a) => format!(
-            "{} track {}",
-            if a.locked { "locked" } else { "unlocked" },
-            a.track
-        ),
-        WireCommand::RippleDelete(a) => {
-            format!(
-                "ripple-deleted clip {} (later clips closed the gap)",
-                a.clip
-            )
-        }
-        WireCommand::ShiftClips(a) => format!(
-            "shifted clips on track {} from {} by {:+.2}s",
-            a.track,
-            secs(a.from),
-            a.delta
-        ),
-        WireCommand::RippleInsert(a) => format!(
-            "ripple-inserted media {} at {} on track {} (later clips moved right)",
-            a.media,
-            secs(a.at),
-            a.track
-        ),
-        WireCommand::LinkClips(a) => format!(
-            "linked clips {}",
-            a.clips
-                .iter()
-                .map(|c| c.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        WireCommand::UnlinkClips(a) => format!(
-            "unlinked complete groups touched by clips {}",
-            a.clips
-                .iter()
-                .map(|c| c.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        WireCommand::AddMarker(a) => {
-            let name = match &a.name {
-                Some(name) if !name.is_empty() => format!(" '{name}'"),
-                _ => String::new(),
-            };
-            let color = a
-                .color
-                .map(|c| format!(" ({c:?})").to_lowercase())
-                .unwrap_or_default();
-            format!("added marker{name} at {}{color}", secs(a.at))
-        }
-        WireCommand::RemoveMarker(a) => format!("removed marker {}", a.marker),
-        WireCommand::SetMarker(a) => {
-            let mut parts = Vec::new();
-            if let Some(at) = a.at {
-                parts.push(format!("moved to {}", secs(at)));
-            }
-            if let Some(name) = &a.name {
-                parts.push(format!("named '{name}'"));
-            }
-            if let Some(color) = a.color {
-                parts.push(format!("colored {color:?}").to_lowercase());
-            }
-            if parts.is_empty() {
-                parts.push("unchanged".into());
-            }
-            format!("set marker {} {}", a.marker, parts.join(", "))
-        }
-        WireCommand::SetCanvas(a) => {
-            let mut parts = Vec::new();
-            if let Some(aspect) = a.aspect {
-                parts.push(format!("aspect {}", aspect.name()));
-            }
-            if let Some([r, g, b]) = a.background {
-                parts.push(format!("background rgb({r}, {g}, {b})"));
-            }
-            if parts.is_empty() {
-                parts.push("unchanged".into());
-            }
-            format!("set canvas {}", parts.join(", "))
-        }
-    };
-    match outcome {
-        Some(EditOutcome::Created(id)) => line.push_str(&format!(" (new clip {})", id.raw())),
-        Some(EditOutcome::CreatedTrack(id)) => line.push_str(&format!(" (track {})", id.raw())),
-        Some(EditOutcome::CreatedMarker(id)) => line.push_str(&format!(" (marker {})", id.raw())),
-        _ => {}
-    }
-    line
-}
+mod action_log;
+pub use action_log::describe_action;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use cutlass_models::ClipId;
-
-    #[test]
-    fn action_lines_read_like_an_edit_log() {
-        let split = WireCommand::SplitClip(wire::SplitClip { clip: 7, at: 12.4 });
-        assert_eq!(
-            describe_action(&split, Some(&EditOutcome::Created(ClipId::from_raw(21)))),
-            "split clip 7 at 12.40s (new clip 21)"
-        );
-
-        let move_effect = WireCommand::MoveEffect(wire::MoveEffect {
-            clip: 7,
-            from_index: 0,
-            to_index: 2,
-        });
-        assert_eq!(
-            describe_action(&move_effect, None),
-            "moved effect 0 to 2 on clip 7"
-        );
-
-        let extract = WireCommand::ExtractAudio(wire::ExtractAudio { clip: 7, track: 3 });
-        assert_eq!(
-            describe_action(&extract, Some(&EditOutcome::Created(ClipId::from_raw(22)))),
-            "extracted audio from clip 7 onto track 3 (new clip 22)"
-        );
-
-        let duplicate = WireCommand::DuplicateClip(wire::DuplicateClip {
-            clip: 7,
-            to_track: 3,
-            start: 12.5,
-        });
-        assert_eq!(
-            describe_action(
-                &duplicate,
-                Some(&EditOutcome::Created(ClipId::from_raw(23)))
-            ),
-            "duplicated clip 7 onto track 3 at 12.50s (new clip 23)"
-        );
-
-        let trim = WireCommand::TrimClip(wire::TrimClip {
-            clip: 12,
-            start: 3.0,
-            duration: 7.0,
-        });
-        assert_eq!(
-            describe_action(&trim, Some(&EditOutcome::Updated(ClipId::from_raw(12)))),
-            "trimmed clip 12 to 3.00s–10.00s"
-        );
-
-        let title = WireCommand::AddGenerated(wire::AddGenerated {
-            track: 3,
-            generator: wire::WireGenerator::Text {
-                content: "INTRO".into(),
-            },
-            start: 0.0,
-            duration: 3.0,
-        });
-        assert_eq!(
-            describe_action(&title, None),
-            "added text 'INTRO' at 0.00s for 3.00s on track 3"
-        );
-
-        let canvas = WireCommand::SetCanvas(wire::SetCanvas {
-            aspect: Some(wire::WireCanvasAspect::Tall9x16),
-            background: Some([20, 20, 28]),
-        });
-        assert_eq!(
-            describe_action(&canvas, Some(&EditOutcome::UpdatedCanvas)),
-            "set canvas aspect 9:16, background rgb(20, 20, 28)"
-        );
-    }
-
-    #[test]
-    fn system_prompt_carries_state_and_trim_rule() {
-        let summary = ProjectSummary {
-            name: "demo".into(),
-            frame_rate_fps: 24.0,
-            duration_seconds: 10.0,
-            tracks: vec![],
-            markers: vec![],
-            canvas: None,
-            media: vec![],
-        };
-        let ctx = EditorContext {
-            selected_clips: vec![12],
-            playhead_seconds: 3.5,
-            ..Default::default()
-        };
-        let prompt = system_prompt(&summary, &ctx, &AgentExtensions::default());
-        assert!(prompt.contains("\"selected_clips\":[12]"));
-        assert!(prompt.contains("INCREASE start"));
-        assert!(prompt.contains("\"name\":\"demo\""));
-        // The Q&A rule: answer from the pushed state, no tool calls.
-        assert!(prompt.contains("answer directly from"));
-        // The re-inspect rule: after edits, read the new state, don't give up.
-        assert!(prompt.contains("call describe_project to read the new"));
-        // Unknown footage content is fetchable, not grounds to refuse.
-        assert!(prompt.contains("Unknown source-footage content is not missing project state"));
-        assert!(prompt.contains("instead of declining the task"));
-        // An empty timeline can be constructed directly from media-pool items.
-        assert!(prompt.contains("add_clip is the operation that places media-pool footage"));
-        assert!(prompt.contains("An empty timeline is a starting point"));
-        assert!(prompt.contains("Never ask the user to pre-place footage"));
-        // The overlap rule: make room before growing into a packed track.
-        assert!(prompt.contains("Clips on one track can never overlap"));
-        // No extensions ⇒ no rules or skills sections.
-        assert!(!prompt.contains("User rules"));
-        assert!(!prompt.contains("read_skill"));
-    }
-
-    #[test]
-    fn system_prompt_injects_rules_and_skill_index_only() {
-        let summary = ProjectSummary {
-            name: "demo".into(),
-            frame_rate_fps: 24.0,
-            duration_seconds: 10.0,
-            tracks: vec![],
-            markers: vec![],
-            canvas: None,
-            media: vec![],
-        };
-        let extensions = AgentExtensions {
-            rules: "[user]\nalways vertical 9:16".into(),
-            skills: vec![crate::extend::Skill {
-                id: "podcast-cleanup".into(),
-                name: "Podcast cleanup".into(),
-                description: "Clean up a talk recording.".into(),
-                body: "SECRET BODY".into(),
-            }],
-        };
-        let prompt = system_prompt(&summary, &EditorContext::default(), &extensions);
-        assert!(prompt.contains("always vertical 9:16"));
-        assert!(prompt.contains("podcast-cleanup (Podcast cleanup): Clean up a talk recording."));
-        // Only the index enters the prompt — bodies load through read_skill.
-        assert!(!prompt.contains("SECRET BODY"));
-    }
-
-    #[test]
-    fn engine_sense_rules_make_open_ended_creative_work_actionable() {
-        let rules = engine_sense_rules(&[
-            HostToolSpec {
-                name: "media_pool_sheet".into(),
-                description: "Survey imported visual media.".into(),
-                parameters: serde_json::json!({"type": "object"}),
-                tier: crate::tools::ToolTier::ReadOnly,
-            },
-            HostToolSpec {
-                name: "media_asset_strip".into(),
-                description: "Inspect one source over time.".into(),
-                parameters: serde_json::json!({"type": "object"}),
-                tier: crate::tools::ToolTier::ReadOnly,
-            },
-        ]);
-
-        assert!(rules.contains("complete current project snapshot"));
-        assert!(rules.contains("freestyle edits"));
-        assert!(rules.contains("media_pool_sheet"));
-        assert!(rules.contains("media_asset_strip"));
-        assert!(rules.contains("rather than declining"));
-        assert!(rules.contains("create the required tracks with add_track"));
-        assert!(rules.contains("build the sequence with add_clip"));
-    }
-
-    #[test]
-    fn image_budget_drops_oldest_and_leaves_labeled_placeholders() {
-        let mut messages = vec![
-            Message::system("s"),
-            Message::User {
-                content: "look at these".into(),
-                images: vec![
-                    ImagePart::png(vec![1], "timeline at 2.00s"),
-                    ImagePart::png(vec![2], "timeline at 5.00s"),
-                ],
-            },
-            Message::ToolResult {
-                call_id: "call_1".into(),
-                content: "screenshot taken".into(),
-                images: vec![ImagePart::jpeg(vec![3], "preview at 8.00s")],
-            },
-        ];
-
-        enforce_image_budget(&mut messages, 1, usize::MAX);
-
-        match &messages[1] {
-            Message::User { content, images } => {
-                assert!(images.is_empty(), "both older images dropped");
-                assert!(content.contains("no longer attached: timeline at 2.00s"));
-                assert!(content.contains("no longer attached: timeline at 5.00s"));
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-        match &messages[2] {
-            Message::ToolResult {
-                content, images, ..
-            } => {
-                assert_eq!(images.len(), 1, "the newest image survives");
-                assert_eq!(images[0].label, "preview at 8.00s");
-                assert!(!content.contains("no longer attached"));
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-
-        // Under budget: untouched.
-        let mut under = vec![Message::User {
-            content: "one".into(),
-            images: vec![ImagePart::png(vec![1], "a")],
-        }];
-        enforce_image_budget(&mut under, 8, usize::MAX);
-        assert_eq!(image_count(&under[0]), 1);
-    }
-
-    #[test]
-    fn image_byte_budget_keeps_the_newest_payload_that_fits() {
-        let mut messages = vec![
-            Message::User {
-                content: "old".into(),
-                images: vec![ImagePart::png(vec![1; 6], "old six bytes")],
-            },
-            Message::ToolResult {
-                call_id: "call_1".into(),
-                content: "new".into(),
-                images: vec![
-                    ImagePart::png(vec![2; 4], "new four bytes"),
-                    ImagePart::png(vec![3; 5], "newest five bytes"),
-                ],
-            },
-        ];
-
-        enforce_image_budget(&mut messages, 8, 9);
-
-        let Message::User { content, images } = &messages[0] else {
-            panic!("user message");
-        };
-        assert!(images.is_empty());
-        assert!(content.contains("old six bytes"));
-        let Message::ToolResult {
-            content, images, ..
-        } = &messages[1]
-        else {
-            panic!("tool result");
-        };
-        assert_eq!(
-            images
-                .iter()
-                .map(|image| image.label.as_str())
-                .collect::<Vec<_>>(),
-            vec!["new four bytes", "newest five bytes"]
-        );
-        assert!(!content.contains("no longer attached"));
-
-        enforce_image_budget(&mut messages, 8, 3);
-        let Message::ToolResult {
-            content, images, ..
-        } = &messages[1]
-        else {
-            panic!("tool result");
-        };
-        assert!(
-            images.is_empty(),
-            "an individually oversized newest image drops"
-        );
-        assert!(content.contains("new four bytes"));
-        assert!(content.contains("newest five bytes"));
-    }
-
-    #[test]
-    fn tool_output_budget_drops_before_transcript_delivery() {
-        let mut content = "frames ready".to_string();
-        let mut images = vec![
-            ImagePart::png(vec![1; 5], "old"),
-            ImagePart::png(vec![2; 4], "middle"),
-            ImagePart::png(vec![3; 3], "new"),
-        ];
-
-        enforce_tool_output_image_budget(&mut content, &mut images, 2, 7);
-
-        assert_eq!(
-            images
-                .iter()
-                .map(|image| image.label.as_str())
-                .collect::<Vec<_>>(),
-            vec!["middle", "new"]
-        );
-        assert!(content.contains("request budget: old"), "{content}");
-    }
-
-    #[test]
-    fn turn_messages_strip_images_to_labels() {
-        let messages = vec![
-            Message::system("s"),
-            Message::User {
-                content: "what's here?".into(),
-                images: vec![ImagePart::png(vec![1], "frame at 0.00s")],
-            },
-            Message::Assistant {
-                content: String::new(),
-                tool_calls: Vec::new(),
-            },
-            Message::ToolResult {
-                call_id: "call_1".into(),
-                content: "took the shot".into(),
-                images: vec![ImagePart::jpeg(vec![2], "preview at 3.00s")],
-            },
-        ];
-
-        let turn = collect_turn_messages(messages, 1, &[], "done");
-
-        for message in &turn {
-            assert_eq!(image_count(message), 0, "history is text-only: {message:?}");
-        }
-        match &turn[0] {
-            Message::User { content, .. } => {
-                assert!(content.contains("[image: frame at 0.00s]"), "{content}");
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-        match &turn[2] {
-            Message::ToolResult { content, .. } => {
-                assert!(content.contains("[image: preview at 3.00s]"), "{content}");
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-        assert_eq!(
-            turn.last(),
-            Some(&Message::assistant_text("done")),
-            "the final answer is appended"
-        );
-    }
-
-    #[test]
-    fn host_action_summary_keeps_the_first_line_capped() {
-        assert_eq!(host_action_summary("saved\ndetails follow"), "saved");
-        let long = "x".repeat(200);
-        let summary = host_action_summary(&long);
-        assert_eq!(summary.chars().count(), 121, "120 chars + ellipsis");
-        assert!(summary.ends_with('…'));
-    }
-
-    #[test]
-    fn read_skill_returns_body_or_lists_available() {
-        let skills = vec![crate::extend::Skill {
-            id: "podcast-cleanup".into(),
-            name: "Podcast cleanup".into(),
-            description: "d".into(),
-            body: "Step 1: denoise.".into(),
-        }];
-        let ok = read_skill_result(&skills, &serde_json::json!({ "id": "podcast-cleanup" }));
-        assert!(ok.contains("Step 1: denoise."));
-        let missing = read_skill_result(&skills, &serde_json::json!({ "id": "nope" }));
-        assert!(missing.starts_with("rejected: unknown skill 'nope'"));
-        assert!(missing.contains("podcast-cleanup"));
-    }
-}
+mod tests;

@@ -455,64 +455,15 @@ impl Project {
         param: ClipParam,
         value: ParamValue,
     ) -> Result<(), ModelError> {
-        if param == ClipParam::Volume {
-            let v = super::helpers::scalar_param(value)?;
-            crate::clip::validate_volume(v)?;
-            self.check_audio_param_target(clip_id)?;
-            let clip = self
-                .timeline
-                .clip_mut(clip_id)
-                .ok_or(ModelError::UnknownClip(clip_id))?;
-            clip.volume.set_constant(v);
-            return Ok(());
+        match param {
+            ClipParam::Volume | ClipParam::Pan => self.check_audio_param_target(clip_id)?,
+            _ => self.check_param_target(clip_id)?,
         }
-        if param == ClipParam::Pan {
-            let v = super::helpers::scalar_param(value)?;
-            crate::clip::validate_pan(v)?;
-            self.check_audio_param_target(clip_id)?;
-            let clip = self
-                .timeline
-                .clip_mut(clip_id)
-                .ok_or(ModelError::UnknownClip(clip_id))?;
-            clip.pan.set_constant(v);
-            return Ok(());
-        }
-        if param == ClipParam::Crop {
-            let crop = super::helpers::crop_rect_param(value)?;
-            self.check_param_target(clip_id)?;
-            let clip = self
-                .timeline
-                .clip_mut(clip_id)
-                .ok_or(ModelError::UnknownClip(clip_id))?;
-            clip.crop.set_constant(crop);
-            return Ok(());
-        }
-        self.check_param_target(clip_id)?;
         let clip = self
             .timeline
             .clip_mut(clip_id)
             .ok_or(ModelError::UnknownClip(clip_id))?;
-        match param {
-            ClipParam::Effect { effect, param } => super::helpers::effect_mut(clip, effect)?
-                .set_param_value_constant(param as usize, value),
-            ClipParam::Shape { param } => {
-                super::helpers::generator_mut(clip)?.set_shape_param_constant(param, value)
-            }
-            ClipParam::Text { param } => {
-                super::helpers::generator_mut(clip)?.set_text_param_constant(param, value)
-            }
-            ClipParam::Look { param } if is_mask_param(param) => {
-                set_mask_param_constant(&mut clip.mask, param, value)
-            }
-            ClipParam::Look { param } => {
-                let value = super::helpers::scalar_param(value)?;
-                validate_look_value(param, value)?;
-                look_param_mut(clip, param)?.set_constant(value);
-                Ok(())
-            }
-            ClipParam::Style { param } => set_style_param_constant(&mut clip.styles, param, value),
-            _ => clip.transform.set_param_constant(param, value),
-        }
+        clip.set_param_constant(param, value)
     }
 
     /// Expand the outgoing keyframe segment at `at` with a piecewise easing

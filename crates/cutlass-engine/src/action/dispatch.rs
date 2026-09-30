@@ -681,5 +681,95 @@ fn dispatch_edit(
                 Some(inverse),
             ))
         }
+        EditCommand::AddCaptionGroup { group, cues } => {
+            let (id, inverse) = edit::caption::add(ctx, &group, &cues)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::CreatedCaptionGroup(id)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::RemoveCaptionGroup { group } => {
+            let inverse = Box::new(edit::caption::RemoveCaptionGroupAction { group }).apply(ctx)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::RemovedCaptionGroup(group)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::SetCaptionGroupStyle {
+            group,
+            style,
+            scope,
+        } => {
+            let inverse = edit::caption::set_style(ctx, group, *style, scope)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::UpdatedCaptionGroup(group)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::SetCaptionGroupLayout { group, layout } => {
+            let inverse = edit::caption::set_layout(ctx, group, layout)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::UpdatedCaptionGroup(group)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::SetCaptionGroupTemplate { group, template } => {
+            let inverse = edit::caption::set_template(ctx, group, &template)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::UpdatedCaptionGroup(group)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::SetCaptionGroupLabel { group, label } => {
+            let inverse = edit::caption::set_label(ctx, group, label)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::UpdatedCaptionGroup(group)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::SetCaptionHighlight { group, highlight } => {
+            let inverse = edit::caption::set_highlight(ctx, group, highlight)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::UpdatedCaptionGroup(group)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::SetCaptionCue {
+            clip,
+            text,
+            words,
+            speaker,
+        } => {
+            let inverse = edit::caption::set_cue(ctx, clip, text, words, speaker)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(clip)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::SplitCaptionCue { clip, at } => {
+            let (right, inverse) = edit::caption::split_cue(ctx, clip, at)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Created(right)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::MergeCaptionCues { clips } => {
+            let (merged, inverse) = edit::caption::merge_cues(ctx, &clips)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(merged)),
+                Some(inverse),
+            ))
+        }
+        EditCommand::UngroupCaptions { clips } => {
+            let first = clips
+                .first()
+                .copied()
+                .ok_or_else(|| EngineError::from(cutlass_models::ModelError::InvalidRange))?;
+            let inverse = edit::caption::ungroup(ctx, &clips)?;
+            Ok((
+                ApplyOutcome::Edited(EditOutcome::Updated(first)),
+                Some(inverse),
+            ))
+        }
     }
 }

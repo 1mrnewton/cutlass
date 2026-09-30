@@ -8,6 +8,9 @@ pub mod openai_compat;
 pub mod openai_responses;
 pub mod scripted;
 
+#[cfg(test)]
+mod request_size_tests;
+
 pub use openai_compat::{OpenAiCompatExtras, OpenAiCompatProvider};
 pub use openai_responses::OpenAiResponsesProvider;
 pub use scripted::ScriptedProvider;
@@ -42,6 +45,8 @@ enum OpenAiProviderInner {
 pub fn openrouter_compat_extras(model_id: &str) -> OpenAiCompatExtras {
     let mut extras = OpenAiCompatExtras {
         openrouter_headers: true,
+        usage_accounting: true,
+        prompt_caching: true,
         ..OpenAiCompatExtras::default()
     };
     if let Some(pin) = crate::catalog::openrouter_model(model_id).and_then(|m| m.pin) {

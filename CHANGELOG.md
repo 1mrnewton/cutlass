@@ -50,7 +50,19 @@ Notes for the latest release. For previous releases, see the
 - **Typed effect parameters.** Effects can take color and vec2 parameters
   (not just scalars), with new duotone and color-overlay effect passes.
 
+### Fixed
+
+- **Scaled text and pen paths stay sharp.** Transform scale > 1 no longer
+  bilinear-upscales a reference bitmap. Resolve supersamples the CPU raster
+  in quantized quarter steps (memo-warm during scale drags) and leaves only
+  the residual on the GPU quad; absurd scales clamp to a sane texture edge.
+
 ### Changed
+
+- **Mirror mask is a parallel band.** CapCut-parity Mirror uses `size[0]` as
+  band thickness (default `0.5`) instead of a size-independent half-plane.
+  Project schema **v3** migrates older Mirror masks that still carried the
+  unused default `[1,1]` to a half-width band so they stay visible.
 
 - **Almost everything is keyframable.** Text style metrics, filter / LUT /
   adjust intensities, mask and chroma settings, and layer styles all route

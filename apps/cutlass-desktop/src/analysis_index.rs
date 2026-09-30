@@ -102,7 +102,6 @@ impl From<CacheCoordinationError> for AnalysisIndexError {
 /// change immediately after a successful check, and a mutation that is made
 /// and fully restored between metadata observations may evade detection on a
 /// filesystem with insufficient timestamp fidelity.
-#[allow(dead_code)] // Consumed by the next media-analysis job slice.
 pub(crate) struct ValidatedMediaContent {
     content_key: MediaContentKey,
     canonical_path: PathBuf,
@@ -110,7 +109,6 @@ pub(crate) struct ValidatedMediaContent {
     version: FileVersion,
 }
 
-#[allow(dead_code)] // Consumed by the next media-analysis job slice.
 impl ValidatedMediaContent {
     /// The SHA-256 media content key.
     pub(crate) const fn content_key(&self) -> MediaContentKey {
@@ -126,6 +124,7 @@ impl ValidatedMediaContent {
     ///
     /// This is a point-in-time check with the same post-success limitation as
     /// token construction. It does not rehash the media bytes.
+    #[allow(dead_code)] // For an analyzer that must revalidate mid-job.
     pub(crate) fn verify_unchanged(&self) -> Result<(), AnalysisIndexError> {
         verify_open_identity_version(&self.identity, &self.version)?;
         let remapped = fs::canonicalize(&self.canonical_path)
@@ -152,7 +151,6 @@ impl ValidatedMediaContent {
 /// change immediately afterward, and a fully restored mutation between
 /// metadata snapshots can evade detection on filesystems whose timestamps do
 /// not distinguish it.
-#[allow(dead_code)] // Called by the next media-analysis job slice.
 pub(crate) fn validate_media_content_with_cancel(
     path: &Path,
     cancelled: &dyn Fn() -> bool,
@@ -355,12 +353,10 @@ fn media_io(operation: &'static str, source: io::Error) -> AnalysisIndexError {
 /// before either guard is released. Methods are synchronous and must run only
 /// on a job or worker thread.
 #[derive(Clone)]
-#[allow(dead_code)] // Wired to jobs and tools in the next slice.
 pub(crate) struct AnalysisIndexService {
     registry: CacheRegistry,
 }
 
-#[allow(dead_code)] // Wired to jobs and tools in the next slice.
 impl AnalysisIndexService {
     pub(crate) fn new(registry: CacheRegistry) -> Self {
         Self { registry }
@@ -395,6 +391,9 @@ impl AnalysisIndexService {
         })
     }
 
+    /// Drop one analyzer's results for one asset — the path a "re-analyze from
+    /// scratch" action takes.
+    #[allow(dead_code)] // No UI invalidates a single batch yet.
     pub(crate) fn delete_batch(
         &self,
         key: &MomentBatchKey,

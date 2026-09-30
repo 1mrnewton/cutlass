@@ -1,0 +1,125 @@
+import { CutlassScrollView, CutlassText } from "../../components/index.slint";
+import { AppStore } from "../../store/index.slint";
+import { AppState } from "../../state.slint";
+import { CaptionCueRow } from "../../lib/caption-backend.slint";
+
+// One caption line in the cue list: number, timecode, text, and the two dots
+// that say something about the line — weak transcription (amber) and
+// hand-tuned styling (accent).
+component CueRow inherits Rectangle {
+    in property <CaptionCueRow> cue;
+    in property <bool> selected: false;
+
+    callback activated();
+
+    height: layout.preferred-height + 2 * AppStore.theme.metrics.spacing.sm;
+    vertical-stretch: 0;
+    border-radius: AppStore.theme.metrics.radius.sm;
+    background: root.selected
+        ? AppStore.theme.accent.primary.with-alpha(0.16)
+        : ta.has-hover ? #ffffff0d : transparent;
+
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.activated();
+            AppState.refocus-shortcuts();
+        }
+    }
+
+    layout := VerticalLayout {
+        x: AppStore.theme.metrics.spacing.sm;
+        y: AppStore.theme.metrics.spacing.sm;
+        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+        spacing: 2px;
+
+        HorizontalLayout {
+            spacing: AppStore.theme.metrics.spacing.sm;
+            height: 14px;
+
+            CutlassText {
+                text: root.cue.number + ".";
+                width: 20px;
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.muted;
+            }
+
+            CutlassText {
+                text: root.cue.timecode;
+                horizontal-stretch: 1;
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.muted;
+                overflow: elide;
+            }
+
+            if root.cue.low-confidence: Rectangle {
+                width: 6px;
+                height: 6px;
+                y: 4px;
+                border-radius: 3px;
+                background: #e8a33d;
+            }
+
+            if root.cue.style-override: Rectangle {
+                width: 6px;
+                height: 6px;
+                y: 4px;
+                border-radius: 3px;
+                background: AppStore.theme.accent.primary;
+            }
+        }
+
+        CutlassText {
+            text: root.cue.text;
+            style: AppStore.theme.typography.body;
+            foreground: root.selected
+                ? AppStore.theme.text.primary
+                : AppStore.theme.text.secondary;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// The group's cues, in timeline order. Clicking a line seeks to it and makes
+// it the inspector's subject, so editing runs top-to-bottom without leaving
+// the panel.
+export component CaptionCueList inherits VerticalLayout {
+    in property <[CaptionCueRow]> cues;
+    in property <string> selected-clip-id;
+    // Rows beyond this scroll; sized so a caption pass shows context without
+    // the sheet's other sections falling off the panel.
+    in property <length> list-height: 260px;
+
+    callback activated(clip-id: string, tick: int);
+
+    spacing: AppStore.theme.metrics.spacing.sm;
+
+    if root.cues.length == 0: CutlassText {
+        text: "No caption lines yet.";
+        style: AppStore.theme.typography.caption;
+        foreground: AppStore.theme.text.muted;
+    }
+
+    if root.cues.length > 0: CutlassScrollView {
+        height: min(root.list-height, rows.preferred-height);
+        vertical-stretch: 0;
+        viewport-width: self.width - AppStore.theme.scrollbar.size;
+        viewport-height: rows.preferred-height;
+        show-horizontal-scrollbar: false;
+        interactive: false;
+
+        rows := VerticalLayout {
+            width: 100%;
+            spacing: 2px;
+            alignment: LayoutAlignment.start;
+
+            for cue in root.cues: CueRow {
+                cue: cue;
+                selected: cue.clip-id == root.selected-clip-id;
+                activated => {
+                    root.activated(cue.clip-id, cue.start-tick);
+                }
+            }
+        }
+    }
+}

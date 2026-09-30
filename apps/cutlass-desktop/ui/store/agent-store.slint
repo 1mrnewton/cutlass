@@ -18,6 +18,8 @@ export struct AgentEntry {
     image: image,
     // Source width / height. The transcript guards non-positive values.
     image-aspect: float,
+    // Per-prompt token usage / cost, shown under assistant rows when set.
+    usage: string,
 }
 
 export global AgentStore {

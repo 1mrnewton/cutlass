@@ -91,6 +91,28 @@ main.add(clip[3:8], start=0.0)   # slicing sugar
 main.add(still, start=0.0, duration=10.0)  # hold the still for 10s
 ```
 
+## Captions
+
+Caption cues are text clips bound by a group that owns the shared look. Write
+them by hand or import an SRT/WebVTT file, then restyle every line at once and
+export a sidecar.
+
+```python
+subs = p.add_track("text", name="Captions")
+caps = subs.add_captions(
+    [("Cutlass edits with words", 0.0, 1.8), ("and renders on the GPU", 1.8, 2.0)],
+    template="karaoke_pop",
+)
+caps.style(size=96, uppercase=True, position_y=0.32)
+caps.highlight("word", fill="#ffd800")
+caps.to_srt("out.srt")
+
+imported = p.add_track("text").import_subtitles("dialogue.srt")
+```
+
+Browse the looks with `cutlass.caption_templates()`; `p.captions` lists the
+groups in a project, and `clip.caption` points a cue back at its group.
+
 ## Track kinds
 
 `video`, `audio`, `text`, `sticker`, `effect`, `filter`, `adjustment`. The kind

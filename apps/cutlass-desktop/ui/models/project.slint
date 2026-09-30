@@ -524,6 +524,21 @@ export struct Clip {
     // Visual effect chain (M4), in order. The index of each entry is what
     // remove-effect / set-effect-param address. Empty ⇔ no effects.
     effects: [EffectView],
+    // Caption cue metadata (captions M0). `caption-group` is the raw
+    // `CaptionGroupId` of the group this cue belongs to, or "" for an ordinary
+    // title clip — it is what routes the inspector to the caption sheet and
+    // draws the timeline CC badge. `caption-index` is the cue's 1-based line
+    // number as the cue list shows it. `caption-confidence` is 0 when unknown
+    // (hand-typed or imported); `caption-has-words` marks a cue that can drive
+    // the word highlight.
+    caption-group: string,
+    caption-index: int,
+    caption-speaker: string,
+    caption-confidence: float,
+    caption-has-words: bool,
+    // This cue's look was hand-tuned away from its group's template, so a
+    // "keep overrides" restyle leaves it alone.
+    caption-style-override: bool,
     // Detected beat positions (CapCut "Beat", M8 Phase 6) as ABSOLUTE
     // sequence ticks, in order — only the beats inside the clip's current
     // window. The timeline draws a dot per beat and the magnet snaps clip
@@ -579,6 +594,47 @@ export struct Track {
     transitions: [TransitionView],
 }
 
+// A caption group: the cues sharing it are ordinary text clips that carry one
+// shared style, one set of segmentation rules, and one provenance (captions
+// M0). Projected read-only from `Timeline::caption_groups`; edits go through
+// `CaptionBackend`.
+//
+// `style` is the group's *template* — the look "Apply to all" writes through to
+// every cue. Each cue clip still owns its own `text-style` as the render truth,
+// so a hand-tuned line can differ until the next group restyle.
+@rust-attr(derive(serde::Serialize, serde::Deserialize))
+export struct CaptionGroupView {
+    id: string,
+    label: string,
+    // The text lane the cues live on.
+    track-id: string,
+    // Caption template id ("clean", "karaoke_pop", …), or "" once the style was
+    // edited away from the template it came from.
+    template: string,
+    // Where the captions came from, for the group header: "Manual",
+    // "Imported (SRT)", "Auto (en)", …
+    source-label: string,
+    cue-count: int,
+    // Segmentation rules (`CaptionLayout`). Characters/lines bound the
+    // segmenter and re-flow; the durations and gap shape cue timing;
+    // `safe-area-bottom` is the fraction of canvas height kept clear below the
+    // caption block.
+    max-chars-per-line: int,
+    max-lines: int,
+    min-duration-ms: int,
+    max-duration-ms: int,
+    min-gap-ms: int,
+    safe-area-bottom: float,
+    // Word highlight (karaoke): 0 off, 1 word, 2 line — mirroring
+    // `CaptionHighlightMode`.
+    highlight-mode: int,
+    highlight-fill: color,
+    highlight-plate-enabled: bool,
+    highlight-plate: color,
+    highlight-scale: float,
+    style: TextClipStyle,
+}
+
 // A named, colored anchor on the timeline ruler (M1 markers).
 @rust-attr(derive(serde::Serialize, serde::Deserialize))
 export struct TimelineMarker {
@@ -607,6 +663,8 @@ export struct Sequence {
     tracks: [Track],
     // Ruler markers in tick order (M1). Empty when none are placed.
     markers: [TimelineMarker],
+    // Caption groups, ordered by their first cue. Empty ⇔ no captions.
+    caption-groups: [CaptionGroupView],
     width: length,
     height: length,
     // Canvas settings (M1): preset index in `CanvasAspect::ALL` order

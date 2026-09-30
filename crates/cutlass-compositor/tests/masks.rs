@@ -180,6 +180,75 @@ fn rectangle_roundness_clears_extreme_corner() {
 }
 
 #[test]
+fn mirror_band_keeps_center_hides_outside() {
+    // CapCut Mirror: band half-thickness = half.x × size[0] in layer px.
+    // size=[0.5,1] on 200² → edge at ±50 px from center.
+    let gpu = gpu_or_skip!();
+    let n = 200u32;
+    let cx = n / 2;
+    let cy = n / 2;
+    let mut mask = LayerMask::new(mask_kind::MIRROR);
+    mask.size = [0.5, 1.0];
+    let img = render_masked(&gpu, n, [0, 0, 255, 255], [255, 0, 0, 255], mask);
+
+    // Center line is inside the band.
+    assert_px(&img, cx, cy, [255, 0, 0, 255], 3);
+    // Just inside the edge (±50).
+    assert_px(&img, cx + 35, cy, [255, 0, 0, 255], 3);
+    // Outside the band.
+    assert_px(&img, cx + 70, cy, [0, 0, 255, 255], 3);
+}
+
+#[test]
+fn mirror_band_feather_softens_edge() {
+    let gpu = gpu_or_skip!();
+    let n = 200u32;
+    let cx = n / 2;
+    let cy = n / 2;
+    // Just outside the hard edge (±50): opaque=0 with feather=0, but the
+    // feathered falloff still covers this pixel.
+    let probe_x = cx + 55;
+
+    let mut hard = LayerMask::new(mask_kind::MIRROR);
+    hard.size = [0.5, 1.0];
+    hard.feather = 0.0;
+    let hard_img = render_masked(&gpu, n, [0, 0, 255, 255], [255, 0, 0, 255], hard);
+
+    let mut soft = LayerMask::new(mask_kind::MIRROR);
+    soft.size = [0.5, 1.0];
+    soft.feather = 0.5;
+    let soft_img = render_masked(&gpu, n, [0, 0, 255, 255], [255, 0, 0, 255], soft);
+
+    let hard_r = i32::from(hard_img.pixel(probe_x, cy)[0]);
+    let soft_r = i32::from(soft_img.pixel(probe_x, cy)[0]);
+    assert!(
+        hard_r < 20,
+        "hard edge should hide just outside the band: red={hard_r}"
+    );
+    assert!(
+        soft_r > 40,
+        "feather should extend coverage past the hard edge: soft red={soft_r}"
+    );
+}
+
+#[test]
+fn mirror_band_invert_flips_inside_outside() {
+    let gpu = gpu_or_skip!();
+    let n = 200u32;
+    let cx = n / 2;
+    let cy = n / 2;
+    let mut mask = LayerMask::new(mask_kind::MIRROR);
+    mask.size = [0.5, 1.0];
+    mask.invert = 1;
+    let img = render_masked(&gpu, n, [0, 0, 255, 255], [255, 0, 0, 255], mask);
+
+    // Inverted: center of band is a hole.
+    assert_px(&img, cx, cy, [0, 0, 255, 255], 3);
+    // Outside the band is kept.
+    assert_px(&img, cx + 70, cy, [255, 0, 0, 255], 3);
+}
+
+#[test]
 fn inverted_shifted_circle_is_hole() {
     let gpu = gpu_or_skip!();
     let n = 200u32;

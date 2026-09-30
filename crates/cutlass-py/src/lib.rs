@@ -1,5 +1,6 @@
 //! Python bindings for the Cutlass video engine (v2 API).
 
+mod captions;
 mod catalog;
 mod clip;
 mod content;
@@ -16,6 +17,7 @@ use content::{
 };
 use pyo3::prelude::*;
 
+use captions::Captions;
 use catalog::register as register_catalog;
 use clip::Clip;
 use effect::Effect;
@@ -34,6 +36,7 @@ fn cutlass(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MediaSlice>()?;
     m.add_class::<Track>()?;
     m.add_class::<Clip>()?;
+    m.add_class::<Captions>()?;
     m.add_class::<Effect>()?;
     m.add_class::<Text>()?;
     m.add_class::<TextStroke>()?;

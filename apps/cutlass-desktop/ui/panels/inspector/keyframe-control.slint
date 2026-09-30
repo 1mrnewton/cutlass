@@ -12,6 +12,7 @@ import { AppStore } from "../../store/index.slint";
 import { CutlassText } from "../../components/index.slint";
 import { ParamRowState } from "../../lib/inspector-backend.slint";
 import { AppState } from "../../state.slint";
+import { InspectorRowMetrics } from "inspector-metrics.slint";
 
 component JumpArrow inherits Rectangle {
     // Tick to jump to; < 0 disables the arrow.
@@ -81,6 +82,10 @@ export component KeyframeControl inherits HorizontalLayout {
 
     spacing: AppStore.theme.metrics.spacing.none;
     alignment: LayoutAlignment.center;
+    // Pinned rather than left to the children's intrinsic width: a centered
+    // layout has no upper bound, so rows would hand it their leftover space
+    // and the cluster would drift left of the clusters in neighboring rows.
+    width: InspectorRowMetrics.keyframe-cluster;
 
     JumpArrow {
         target: root.state.prev-tick;

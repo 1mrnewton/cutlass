@@ -9,12 +9,15 @@ mod agent_vision;
 mod ai_media;
 mod analysis_index;
 mod audio;
+mod auto_captions;
 mod cache_references;
 mod cache_registry;
 mod cloud;
 mod download_safety;
 mod drafts;
+mod drag_preview;
 mod external;
+mod eyedropper;
 mod graph_editor;
 mod inspector;
 mod interaction;
@@ -25,6 +28,7 @@ mod params;
 mod paths;
 mod placement;
 mod preview_gesture;
+mod preview_mask_gizmo;
 mod preview_motion_path;
 mod preview_select;
 mod preview_view;
@@ -42,6 +46,7 @@ mod thumbnails;
 mod timecode;
 mod timeline;
 mod timeline_map;
+mod transform_gesture_session;
 mod transport;
 mod updates;
 mod window;
@@ -67,8 +72,12 @@ use cache_ui::*;
 
 mod bootstrap;
 mod cache_ui;
+mod captions;
+mod color_math;
 mod library_helpers;
 mod session;
+mod wire_captions;
+mod wire_color;
 mod wire_engine;
 mod wire_inspector;
 mod wire_preview;
@@ -76,6 +85,7 @@ mod wire_settings;
 mod wire_timeline;
 mod wire_ui;
 
+use wire_captions::wire_captions;
 use wire_engine::wire_engine;
 use wire_inspector::wire_inspector;
 use wire_preview::wire_preview;
@@ -218,13 +228,18 @@ fn main() -> Result<(), slint::PlatformError> {
     // surface (drag/trim/split, inspector commits, clipboard, tracks,
     // keyframes, effects), audio playback, library/timeline tiles, and the
     // export job bind to the workers below. Still to come: live overrides (6).
-    let engine = wire_engine(&app, storage_layout, download_quota_bytes, job_manager)?;
+    let engine = wire_engine(
+        &app,
+        storage_layout,
+        download_quota_bytes,
+        job_manager.clone(),
+    )?;
 
     wire_timeline(&app, &engine.preview_worker, &engine.download_cache);
 
     wire_settings(
         &app,
-        config_path,
+        config_path.clone(),
         &app_settings,
         download_quota_mib,
         &engine.cache_registry,
@@ -237,11 +252,20 @@ fn main() -> Result<(), slint::PlatformError> {
         &engine.audio_system,
         &engine.interaction_gate,
         &engine.strip_worker,
+        config_path,
+        &app_settings.appearance.recent_colors,
     );
 
     wire_preview(&app, &engine.preview_worker);
 
     wire_inspector(&app, &engine.preview_worker);
+
+    wire_captions(
+        &app,
+        &engine.preview_worker,
+        &job_manager,
+        &engine.cache_registry,
+    );
 
     // Hold engine handles for the app lifetime (background worker threads).
     let _engine = engine;

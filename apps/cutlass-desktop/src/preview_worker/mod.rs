@@ -6,6 +6,7 @@
 //! export, live gesture/generator overrides, and the AI agent bridge.
 
 mod agent_bridge;
+mod captions;
 mod clip_audio;
 mod clip_look;
 mod clip_place;
@@ -19,8 +20,11 @@ mod frame_cache;
 mod frame_fit;
 mod handle;
 mod import_drop;
+mod invalidate;
+mod look_preview;
 mod markers_tracks;
 mod overrides;
+mod param_override;
 mod project;
 mod proxy;
 mod publish;
@@ -44,11 +48,11 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounde
 use cutlass_commands::{Command, EditCommand, EditOutcome, ProjectCommand, TemplatePick};
 use cutlass_engine::{ApplyOutcome, Engine, EngineConfig, SeekPolicy};
 use cutlass_models::{
-    AnimatedTransform, BlendMode, ChromaKey, ClipId, ClipParam, ClipSource, ClipTransform,
-    ColorAdjustments, CropRect, Easing, Filter, Generator, LayerStyles, LinkId, Lut, MAX_SPEED,
-    MIN_SPEED, MarkerColor, MarkerId, Mask, MediaId, MotionBlur, Param, ParamValue,
-    PiecewiseEasingPreset, Project, Rational, RationalTime, TimeRange, Track, TrackId, TrackKind,
-    resample,
+    AnimatedTransform, AnimationRef, AnimationSlot, BlendMode, CaptionFileFormat, ChromaKey,
+    ClipId, ClipParam, ClipSource, ClipTransform, ColorAdjustments, CropRect, Easing, Filter,
+    Generator, LayerStyles, LinkId, Lut, MAX_SPEED, MIN_SPEED, MarkerColor, MarkerId, Mask,
+    MaskKind, MediaId, MotionBlur, Param, ParamValue, PiecewiseEasingPreset, Project, Rational,
+    RationalTime, TimeRange, Track, TrackId, TrackKind, resample,
 };
 use cutlass_render::{ExportSettings, RenderError, Renderer};
 use slint::{Rgba8Pixel, SharedPixelBuffer};
@@ -61,6 +65,7 @@ use crate::thumbnails::{ThumbKind, ThumbnailHandle};
 use crate::{EditorStore, ExportBackend, PreviewStore};
 
 use agent_bridge::*;
+use captions::*;
 use clip_audio::*;
 use clip_look::*;
 use clip_place::*;
@@ -73,8 +78,11 @@ use export::*;
 use frame_cache::*;
 use frame_fit::*;
 use import_drop::*;
+use invalidate::*;
+use look_preview::*;
 use markers_tracks::*;
 use overrides::*;
+use param_override::*;
 use project::*;
 use proxy::*;
 use publish::*;
@@ -82,17 +90,13 @@ use render::*;
 use rpc::*;
 use timeline_ops::*;
 use types::*;
-// `PreviewWorker` (the other `pub` item in `worker_loop`) is re-exported
-// explicitly below; this one is a testable seam exercised directly by
-// `preview_worker::tests` and otherwise unused outside `worker_loop` itself.
-#[allow(unused_imports)]
-use worker_loop::message_invalidates_preview;
 
 // Re-exported for `agent::tests`, which replays plans directly against a live
 // engine; unused outside `#[cfg(test)]` builds since `agent_bridge` itself
 // already reaches `agent_replay` through the glob import above.
 #[allow(unused_imports)]
-pub(crate) use agent_bridge::agent_replay;
+pub(crate) use agent_bridge::{STALE_PLAN_SEED_ERROR, agent_apply_with_seed, agent_replay};
+pub use captions::{CaptionOp, TranscribedCaptions};
 pub(crate) use rpc::ProjectMaintenanceGuard;
 pub(crate) use types::{
     ApplyTemplateRpcResult, ImportMediaRpcResult, NewProjectRpcResult, OpenProjectRpcResult,

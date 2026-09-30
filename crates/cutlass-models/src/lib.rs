@@ -22,6 +22,7 @@
 //! and animations stay locked.
 
 mod capabilities;
+mod caption;
 mod clip;
 mod effects;
 mod error;
@@ -47,6 +48,15 @@ mod transition;
 pub type Map<K, V> = rustc_hash::FxHashMap<K, V>;
 
 pub use capabilities::{ClipAction, ClipCapabilities};
+pub use caption::{
+    CaptionCue, CaptionCueSpec, CaptionFileFormat, CaptionGroup, CaptionGroupSpec,
+    CaptionHighlight, CaptionHighlightMode, CaptionLayout, CaptionPlateSpec, CaptionShadowSpec,
+    CaptionSource, CaptionStrokeSpec, CaptionStyle, CaptionStyleScope, CaptionTemplateSpec,
+    CaptionWord, DEFAULT_SAFE_AREA_BOTTOM, MAX_CAPTION_CHARS_PER_LINE, MAX_CAPTION_CUES,
+    MAX_CAPTION_DURATION_MS, MAX_CAPTION_LINES, MAX_CAPTION_WORDS, MAX_HIGHLIGHT_SCALE,
+    MIN_CAPTION_CHARS_PER_LINE, MIN_HIGHLIGHT_SCALE, caption_template_catalog,
+    caption_template_spec,
+};
 pub use clip::{
     AnimatedTransform, Clip, ClipParam, ClipSource, ClipTransform, CropRect, Generator, LookParam,
     MAX_CLIP_PAN, MAX_CLIP_VOLUME, MAX_SHAPE_DIM, MAX_SPEED, MAX_STAR_POINTS, MAX_STROKE_WIDTH,
@@ -62,7 +72,7 @@ pub use effects::{
     EffectInstance, EffectParamKind, EffectParamSpec, EffectSpec, effect_catalog, effect_spec,
 };
 pub use error::ModelError;
-pub use ids::{ClipId, LinkId, MarkerId, MediaId, ProjectId, TemplateId, TrackId};
+pub use ids::{CaptionGroupId, ClipId, LinkId, MarkerId, MediaId, ProjectId, TemplateId, TrackId};
 pub use look::{
     ANIMATION_INTENSITY_RANGE, ANIMATION_PARAM_DEFAULT, ANIMATION_SPEED_RANGE,
     ANIMATION_STAGGER_RANGE, AnimationKnobs, AnimationRef, AnimationSlot, AnimationSpec, AudioRole,

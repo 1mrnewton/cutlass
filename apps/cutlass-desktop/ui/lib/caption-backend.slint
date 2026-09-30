@@ -1,0 +1,169 @@
+import { CaptionGroupView, CatalogEntry, Project, Sequence, TextClipStyle } from "../models/index.slint";
+
+// The clip auto captions would transcribe, resolved Rust-side from the
+// selection (or the playhead) so the dialog does not walk the timeline itself.
+export struct CaptionAutoSource {
+    // Timeline clip whose audio would be transcribed; "" ⇔ nothing usable, and
+    // `reason` says why.
+    clip-id: string,
+    // Asset name, shown as the source line.
+    name: string,
+    // The clip's own length, e.g. "0:42".
+    duration-label: string,
+    // Why captioning is unavailable ("" when it is available).
+    reason: string,
+}
+
+// One caption line as the cue list shows it. Derived Rust-side from the
+// projected clips of a group (`src/captions.rs`) — cues are ordinary text
+// clips, so there is nothing to store here.
+export struct CaptionCueRow {
+    clip-id: string,
+    // 1-based line number, matching `Clip.caption-index`.
+    number: int,
+    text: string,
+    start-tick: int,
+    duration-ticks: int,
+    // "0:04.20 → 0:06.80", ready to draw.
+    timecode: string,
+    speaker: string,
+    // 0 when unknown (hand-typed or imported).
+    confidence: float,
+    // Transcription confidence below the review threshold: the row gets a dot
+    // so a pass over the weak lines is quick.
+    low-confidence: bool,
+    has-words: bool,
+    // This line's look was hand-tuned, so a group restyle with
+    // "keep overrides" skips it.
+    style-override: bool,
+}
+
+// Caption group lookup and caption edits. Implemented in Rust
+// (`src/captions.rs` for the pure lookups, `src/wire_captions.rs` for the
+// commands) so model traversal and command construction stay out of Slint.
+//
+// Every mutating callback lands as one undoable engine edit, exactly like
+// `InspectorBackend`.
+export global CaptionBackend {
+    // Caption template catalog ("clean", "bold_box", "karaoke_pop", …),
+    // populated once at startup from `caption_template_catalog()`.
+    in-out property <[CatalogEntry]> templates: [];
+
+    // The group a cue belongs to. Returns a default-valued group (empty `id`)
+    // when `group-id` is unknown, so callers test `group.id != ""`.
+    pure callback group(sequence: Sequence, group-id: string) -> CaptionGroupView;
+
+    // Every cue of a group in timeline order.
+    pure callback cues(sequence: Sequence, group-id: string) -> [CaptionCueRow];
+
+    // Replace one cue's text, keeping its word timings proportionally
+    // retimed (`SetCaptionCue`) rather than dropping them the way a plain
+    // text edit would.
+    callback set-cue-text(clip-id: string, text: string);
+
+    // Write one cue's current look through to every cue of its group
+    // (CapCut's "Apply to all"). `keep-overrides` leaves hand-tuned lines
+    // alone; false overwrites them and clears their override flag.
+    callback apply-style-to-all(group-id: string, style: TextClipStyle, keep-overrides: bool);
+
+    // Apply a caption template to the whole group: style, highlight, and
+    // layout in one edit.
+    callback set-template(group-id: string, template: string);
+
+    // Group label shown in the inspector header and the cue list.
+    callback set-label(group-id: string, label: string);
+
+    // Segmentation rules. `reflow` re-flows every cue onto them: new line
+    // breaks, and a cue too long for the line budget is cut into several.
+    callback set-layout(
+        group-id: string,
+        max-chars-per-line: int,
+        max-lines: int,
+        safe-area-bottom: float,
+        reflow: bool,
+    );
+
+    // Word highlight: `mode` 0 off / 1 word / 2 line, fill and optional plate
+    // as 0..=255 channels, `scale` the active word's size multiplier.
+    callback set-highlight(
+        group-id: string,
+        mode: int,
+        fill-r: int,
+        fill-g: int,
+        fill-b: int,
+        plate-enabled: bool,
+        plate-r: int,
+        plate-g: int,
+        plate-b: int,
+        plate-a: int,
+        scale: float,
+    );
+
+    // Split a cue at an absolute sequence tick into two cues, repartitioning
+    // its text and word timings.
+    callback split-cue(clip-id: string, tick: int);
+
+    // Merge a cue with the next cue of its group (the worker resolves the
+    // neighbor), joining text and word timings.
+    callback merge-with-next(clip-id: string);
+
+    // Delete the group and every cue clip in it.
+    callback remove-group(group-id: string);
+
+    // Keep the cue clips as ordinary text clips and drop the group.
+    callback ungroup(group-id: string);
+
+    // Create a one-cue caption group at `tick` on the text lane (a new lane
+    // when `track-id` is empty), styled by `template`. The library's
+    // "Add caption" entry point.
+    callback add-caption(track-id: string, tick: int, text: string, template: string);
+
+    // Open a native picker for an `.srt` / `.vtt` file and import it as a new
+    // caption group starting at `tick`. Cancel changes nothing; a read or
+    // parse failure surfaces as a session error dialog.
+    callback import-subtitles(tick: int, template: string);
+
+    // --- auto captions (speech recognition) ----------------------------
+    // The clip the Auto Captions dialog would transcribe: the selected media
+    // clip, else the one under the playhead. Cheap enough to call per repaint.
+    pure callback auto-source(project: Project, selected-clip: string, playhead-tick: int)
+        -> CaptionAutoSource;
+
+    // Transcribe `clip-id`'s audio and add the cues as one caption group.
+    // Runs as a background job (model install, decode, inference); progress
+    // lands in the properties below and the cues arrive as one undoable edit.
+    callback start-auto(
+        project: Project,
+        clip-id: string,
+        max-chars-per-line: int,
+        template: string,
+    );
+
+    // Ask the running transcription to stop at its next checkpoint.
+    callback cancel-auto();
+
+    // --- transcription job state, published from the job thread --------
+    in-out property <bool> auto-running: false;
+    // 0..1 across the whole job (model install, decode, inference).
+    in-out property <float> auto-progress: 0.0;
+    // Current phase, e.g. "Installing the speech model… 102 MB of 148 MB".
+    in-out property <string> auto-stage: "";
+    // The phase cannot report a position, so the bar animates instead.
+    in-out property <bool> auto-indeterminate: false;
+    // Terminal states: exactly one goes true when `auto-running` drops.
+    in-out property <bool> auto-completed: false;
+    in-out property <bool> auto-failed: false;
+    in-out property <string> auto-status: "";
+
+    // Back to the pre-job state (dialog open while idle, and the close
+    // buttons after a terminal state).
+    public function reset-auto-state() {
+        self.auto-running = false;
+        self.auto-progress = 0.0;
+        self.auto-stage = "";
+        self.auto-indeterminate = false;
+        self.auto-completed = false;
+        self.auto-failed = false;
+        self.auto-status = "";
+    }
+}

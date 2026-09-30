@@ -150,15 +150,5 @@ pub(super) fn set_track_name_and_publish(
 }
 
 pub(super) fn parse_marker_color(name: &str) -> Option<MarkerColor> {
-    match name {
-        "teal" => Some(MarkerColor::Teal),
-        "blue" => Some(MarkerColor::Blue),
-        "purple" => Some(MarkerColor::Purple),
-        "pink" => Some(MarkerColor::Pink),
-        "red" => Some(MarkerColor::Red),
-        "orange" => Some(MarkerColor::Orange),
-        "yellow" => Some(MarkerColor::Yellow),
-        "green" => Some(MarkerColor::Green),
-        _ => None,
-    }
+    MarkerColor::parse_token(name)
 }

@@ -17,17 +17,42 @@ impl WorkerHandle {
     /// Synchronous round-trip: clone of the live project as of every edit
     /// sent before this call. `None` only if the worker thread is gone.
     pub fn snapshot_project(&self) -> Option<Project> {
+        self.snapshot_project_with_revision()
+            .map(|(project, _)| project)
+    }
+
+    /// Like [`Self::snapshot_project`], plus the live engine revision at the
+    /// same instant (for parked-plan divergence checks).
+    pub fn snapshot_project_with_revision(&self) -> Option<(Project, u64)> {
         let (reply, rx) = bounded(1);
         self.tx.send(WorkerMsg::SnapshotProject { reply }).ok()?;
         rx.recv().ok()
     }
 
+    /// Synchronous round-trip: monotonic live-engine revision. Cheap — no
+    /// project clone. `None` only if the worker thread is gone.
+    pub fn project_revision(&self) -> Option<u64> {
+        let (reply, rx) = bounded(1);
+        self.tx.send(WorkerMsg::ProjectRevision { reply }).ok()?;
+        rx.recv().ok()
+    }
+
     /// Synchronous round-trip: replay a rehearsed agent plan, one undo
-    /// entry per phase. `None` only if the worker thread is gone.
-    pub fn agent_apply_plan(&self, phases: Vec<Vec<AgentPlanStep>>) -> Option<Result<(), String>> {
+    /// entry per phase. `expected_seed_revision` is checked against the live
+    /// engine revision inside the worker immediately before replay. `None`
+    /// only if the worker thread is gone.
+    pub fn agent_apply_plan(
+        &self,
+        phases: Vec<Vec<AgentPlanStep>>,
+        expected_seed_revision: u64,
+    ) -> Option<Result<(), String>> {
         let (reply, rx) = bounded(1);
         self.tx
-            .send(WorkerMsg::AgentApplyPlan { phases, reply })
+            .send(WorkerMsg::AgentApplyPlan {
+                phases,
+                expected_seed_revision,
+                reply,
+            })
             .ok()?;
         rx.recv().ok()
     }
@@ -165,6 +190,30 @@ impl WorkerHandle {
         let _ = self.tx.send(WorkerMsg::SetGenerator { clip, generator });
     }
 
+    /// Send one caption edit (create, import, restyle, re-segment). Each op is
+    /// one undoable engine edit; see [`CaptionOp`].
+    pub fn caption(&self, op: CaptionOp) {
+        let _ = self.tx.send(WorkerMsg::Caption(op));
+    }
+
+    /// Synchronous round-trip: place transcribed cues, returning how many
+    /// landed. Blocking is deliberate — the caller is the transcription job's
+    /// own thread, and its dialog must report the engine's answer. `None` only
+    /// if the worker thread is gone.
+    pub fn add_transcribed_captions(
+        &self,
+        captions: Box<TranscribedCaptions>,
+    ) -> Option<Result<usize, String>> {
+        let (reply, rx) = bounded(1);
+        self.tx
+            .send(WorkerMsg::Caption(CaptionOp::AddTranscribed {
+                captions,
+                reply,
+            }))
+            .ok()?;
+        rx.recv().ok()
+    }
+
     pub fn set_shape_size(&self, clip: String, width: f32, height: f32) {
         let _ = self.tx.send(WorkerMsg::SetShapeSize {
             clip,
@@ -279,16 +328,65 @@ impl WorkerHandle {
         let _ = self.tx.send(WorkerMsg::SetMotionBlur { clip, motion_blur });
     }
 
+    /// Live motion-blur field preview (`"shutter"` / `"samples"`).
+    pub fn preview_motion_blur_delta(&self, clip: String, key: String, value: f32, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::PreviewMotionBlurDelta {
+            clip,
+            key,
+            value,
+            tick,
+        });
+    }
+
+    pub fn clear_motion_blur_override(&self, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::ClearMotionBlurOverride { tick });
+    }
+
+    /// Full styles replace. Inspector toggles use [`Self::toggle_layer_style`].
+    #[allow(dead_code)] // Retained for tests / direct full-replace commits.
     pub fn set_layer_styles(&self, clip: String, styles: LayerStyles) {
         let _ = self.tx.send(WorkerMsg::SetLayerStyles { clip, styles });
     }
 
+    pub fn toggle_layer_style(&self, clip: String, block: String, enabled: bool) {
+        let _ = self.tx.send(WorkerMsg::ToggleLayerStyle {
+            clip,
+            block,
+            enabled,
+        });
+    }
+
+    /// Full mask replace. Inspector kind/invert use the merge helpers below.
+    #[allow(dead_code)] // Retained for tests / direct full-replace commits.
     pub fn set_mask(&self, clip: String, mask: Option<Mask>) {
         let _ = self.tx.send(WorkerMsg::SetMask { clip, mask });
     }
 
+    pub fn set_mask_kind(&self, clip: String, kind: String) {
+        let _ = self.tx.send(WorkerMsg::SetMaskKind { clip, kind });
+    }
+
+    pub fn set_mask_invert(&self, clip: String, invert: bool) {
+        let _ = self.tx.send(WorkerMsg::SetMaskInvert { clip, invert });
+    }
+
     pub fn set_chroma(&self, clip: String, chroma: Option<ChromaKey>) {
         let _ = self.tx.send(WorkerMsg::SetChroma { clip, chroma });
+    }
+
+    pub fn set_chroma_color(&self, clip: String, rgb: [u8; 3]) {
+        let _ = self.tx.send(WorkerMsg::SetChromaColor { clip, rgb });
+    }
+
+    /// Live chroma-key RGB preview (color-well drag).
+    pub fn preview_chroma_color(&self, clip: String, rgb: [u8; 3], tick: i64) {
+        let _ = self
+            .tx
+            .send(WorkerMsg::PreviewChromaColor { clip, rgb, tick });
+    }
+
+    pub fn clear_chroma_color_override(&self, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::ClearChromaColorOverride { tick });
     }
 
     pub fn set_clip_filter(&self, clip: String, filter_id: String, intensity: f32) {
@@ -334,6 +432,28 @@ impl WorkerHandle {
         });
     }
 
+    /// Live animation-knob preview (`"speed"` / `"intensity"` / `"stagger"`).
+    pub fn preview_clip_animation_delta(
+        &self,
+        clip: String,
+        slot: String,
+        key: String,
+        value: f32,
+        tick: i64,
+    ) {
+        let _ = self.tx.send(WorkerMsg::PreviewClipAnimationDelta {
+            clip,
+            slot,
+            key,
+            value,
+            tick,
+        });
+    }
+
+    pub fn clear_animation_override(&self, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::ClearAnimationOverride { tick });
+    }
+
     pub fn preview_clip_look(
         &self,
         clip: String,
@@ -351,10 +471,23 @@ impl WorkerHandle {
         });
     }
 
-    pub fn preview_clip_styles(&self, clip: String, styles: LayerStyles, tick: i64) {
-        let _ = self
-            .tx
-            .send(WorkerMsg::PreviewClipStyles { clip, styles, tick });
+    /// Live style-param preview: send only the delta; the worker merges it
+    /// against the clip's committed styles (no UI-thread project snapshot).
+    pub fn preview_clip_style_delta(
+        &self,
+        clip: String,
+        key: String,
+        value_x: f32,
+        value_y: f32,
+        tick: i64,
+    ) {
+        let _ = self.tx.send(WorkerMsg::PreviewClipStyleDelta {
+            clip,
+            key,
+            value_x,
+            value_y,
+            tick,
+        });
     }
 
     pub fn clear_styles_override(&self, tick: i64) {
@@ -541,6 +674,21 @@ impl WorkerHandle {
         let _ = self.tx.send(WorkerMsg::ClearGeneratorOverride { tick });
     }
 
+    /// Live inspector param drag (`ClipParam` / `ParamValue` addressing).
+    pub fn param_override(&self, clip: String, param: ClipParam, value: ParamValue, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::ParamOverride {
+            clip,
+            param,
+            value,
+            tick,
+        });
+    }
+
+    /// Drop every live param override for `clip`.
+    pub fn clear_param_override(&self, clip: String, tick: i64) {
+        let _ = self.tx.send(WorkerMsg::ClearParamOverride { clip, tick });
+    }
+
     pub fn preview_shape_size(&self, clip: String, width: f32, height: f32, tick: i64) {
         let _ = self.tx.send(WorkerMsg::PreviewShapeSize {
             clip,
@@ -548,6 +696,16 @@ impl WorkerHandle {
             height,
             tick,
         });
+    }
+
+    pub fn set_generator_fill(&self, clip: String, rgba: [u8; 4]) {
+        let _ = self.tx.send(WorkerMsg::SetGeneratorFill { clip, rgba });
+    }
+
+    pub fn preview_generator_fill(&self, clip: String, rgba: [u8; 4], tick: i64) {
+        let _ = self
+            .tx
+            .send(WorkerMsg::PreviewGeneratorFill { clip, rgba, tick });
     }
 
     pub fn undo(&self) {

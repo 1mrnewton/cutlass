@@ -24,11 +24,13 @@ const MAX_HISTORY_MESSAGES: usize = 1_000;
 const MAX_TRANSCRIPT_ENTRIES: usize = 2_000;
 
 /// One rendered transcript row. `kind` is persisted verbatim; the UI decides
-/// how known, unknown, or empty kinds should look.
-#[derive(Clone, Debug, PartialEq)]
+/// how known, unknown, or empty kinds should look. `usage` is the optional
+/// per-prompt token line attached to assistant rows.
+#[derive(Clone, Debug, PartialEq, Default)]
 pub(crate) struct TranscriptEntry {
     pub kind: String,
     pub text: String,
+    pub usage: String,
 }
 
 /// Provider history and visible transcript for one draft.
@@ -561,6 +563,9 @@ impl PersistedToolCall {
 struct PersistedTranscriptEntry {
     kind: String,
     text: String,
+    /// Absent in sessions written before usage lines existed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    usage: String,
 }
 
 impl PersistedTranscriptEntry {
@@ -568,6 +573,7 @@ impl PersistedTranscriptEntry {
         Self {
             kind: entry.kind.clone(),
             text: entry.text.clone(),
+            usage: entry.usage.clone(),
         }
     }
 
@@ -575,6 +581,7 @@ impl PersistedTranscriptEntry {
         TranscriptEntry {
             kind: self.kind,
             text: self.text,
+            usage: self.usage,
         }
     }
 }
@@ -600,7 +607,16 @@ mod tests {
             transcript: vec![TranscriptEntry {
                 kind: "user".to_owned(),
                 text: prompt.to_owned(),
+                usage: String::new(),
             }],
+        }
+    }
+
+    fn entry(kind: &str, text: &str) -> TranscriptEntry {
+        TranscriptEntry {
+            kind: kind.to_owned(),
+            text: text.to_owned(),
+            usage: String::new(),
         }
     }
 
@@ -684,10 +700,7 @@ mod tests {
                 .map(|index| Message::user(format!("history-{index}")))
                 .collect(),
             transcript: (0..MAX_TRANSCRIPT_ENTRIES + 5)
-                .map(|index| TranscriptEntry {
-                    kind: "user".into(),
-                    text: format!("transcript-{index}"),
-                })
+                .map(|index| entry("user", &format!("transcript-{index}")))
                 .collect(),
         };
 
@@ -740,17 +753,12 @@ mod tests {
                 },
             ],
             transcript: vec![
-                TranscriptEntry {
-                    kind: "user".to_owned(),
-                    text: "Cut at the frame shown.".to_owned(),
-                },
-                TranscriptEntry {
-                    kind: "reasoning".to_owned(),
-                    text: "The requested frame is a safe split point.".to_owned(),
-                },
+                entry("user", "Cut at the frame shown."),
+                entry("reasoning", "The requested frame is a safe split point."),
                 TranscriptEntry {
                     kind: "assistant".to_owned(),
                     text: "Done.".to_owned(),
+                    usage: "12.3k tokens in (0% cached) · 456 out · $0.68".to_owned(),
                 },
             ],
         };
@@ -761,6 +769,7 @@ mod tests {
         assert!(!raw.contains("image/png"));
         assert!(!raw.contains("image/jpeg"));
         assert!(raw.contains("\"kind\": \"reasoning\""));
+        assert!(raw.contains("12.3k tokens in (0% cached)"));
 
         let loaded = load(&project).expect("load");
         assert_eq!(
@@ -837,10 +846,7 @@ mod tests {
                 .map(|index| Message::user(format!("history-{index}")))
                 .collect(),
             transcript: (0..MAX_TRANSCRIPT_ENTRIES + extra_transcript)
-                .map(|index| TranscriptEntry {
-                    kind: String::new(),
-                    text: format!("transcript-{index}"),
-                })
+                .map(|index| entry("", &format!("transcript-{index}")))
                 .collect(),
         };
         save(&project, &session).expect("save");
@@ -867,20 +873,36 @@ mod tests {
         assert_eq!(loaded.transcript.len(), MAX_TRANSCRIPT_ENTRIES);
         assert_eq!(
             loaded.transcript.first(),
-            Some(&TranscriptEntry {
-                kind: String::new(),
-                text: format!("transcript-{extra_transcript}"),
-            })
+            Some(&entry("", &format!("transcript-{extra_transcript}")))
         );
         assert_eq!(
             loaded.transcript.last(),
-            Some(&TranscriptEntry {
-                kind: String::new(),
-                text: format!(
+            Some(&entry(
+                "",
+                &format!(
                     "transcript-{}",
                     MAX_TRANSCRIPT_ENTRIES + extra_transcript - 1
-                ),
-            })
+                )
+            ))
+        );
+    }
+
+    #[test]
+    fn transcript_usage_defaults_when_absent_from_older_sessions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = project_path(&dir);
+        write_sidecar(
+            &project,
+            br#"{"version":1,"history":[],"transcript":[{"kind":"assistant","text":"Hello"}]}"#,
+        );
+        let loaded = load(&project).expect("load legacy transcript");
+        assert_eq!(
+            loaded.transcript,
+            vec![TranscriptEntry {
+                kind: "assistant".to_owned(),
+                text: "Hello".to_owned(),
+                usage: String::new(),
+            }]
         );
     }
 
@@ -898,10 +920,7 @@ mod tests {
         save(&project, &first).expect("first save");
         let second = AgentSession {
             history: vec![Message::assistant_text("second")],
-            transcript: vec![TranscriptEntry {
-                kind: "custom".to_owned(),
-                text: "replacement".to_owned(),
-            }],
+            transcript: vec![entry("custom", "replacement")],
         };
         save(&project, &second).expect("replacement save");
 

@@ -713,9 +713,22 @@ fn look_edits_invalidate_preview() {
             ..Default::default()
         },
     }));
+    assert!(message_invalidates_preview(&WorkerMsg::ToggleLayerStyle {
+        clip: "1".into(),
+        block: "shadow".into(),
+        enabled: true,
+    }));
     assert!(message_invalidates_preview(&WorkerMsg::SetMask {
         clip: "1".into(),
         mask: Some(cutlass_models::Mask::new(cutlass_models::MaskKind::Circle)),
+    }));
+    assert!(message_invalidates_preview(&WorkerMsg::SetMaskKind {
+        clip: "1".into(),
+        kind: "circle".into(),
+    }));
+    assert!(message_invalidates_preview(&WorkerMsg::SetMaskInvert {
+        clip: "1".into(),
+        invert: true,
     }));
     assert!(message_invalidates_preview(&WorkerMsg::SetChroma {
         clip: "1".into(),
@@ -724,6 +737,10 @@ fn look_edits_invalidate_preview() {
             strength: cutlass_models::Param::Constant(0.5),
             shadow: cutlass_models::Param::Constant(0.0),
         }),
+    }));
+    assert!(message_invalidates_preview(&WorkerMsg::SetChromaColor {
+        clip: "1".into(),
+        rgb: [10, 20, 30],
     }));
 }
 
@@ -773,27 +790,24 @@ fn set_layer_styles_enqueues_worker_msg() {
 }
 
 #[test]
-fn preview_clip_styles_enqueues_worker_msg() {
+fn preview_clip_style_delta_enqueues_worker_msg() {
     let (tx, rx) = unbounded();
     let handle = WorkerHandle { tx };
-    let styles = LayerStyles {
-        shadow: Some(cutlass_models::LayerShadow {
-            blur: cutlass_models::Param::Constant(24.0),
-            ..cutlass_models::LayerShadow::default()
-        }),
-        ..Default::default()
-    };
-    handle.preview_clip_styles("42".into(), styles.clone(), 12);
-    let WorkerMsg::PreviewClipStyles {
+    handle.preview_clip_style_delta("42".into(), "style_shadow_blur".into(), 24.0, 0.0, 12);
+    let WorkerMsg::PreviewClipStyleDelta {
         clip,
-        styles: got,
+        key,
+        value_x,
+        value_y,
         tick,
     } = rx.try_recv().unwrap()
     else {
-        panic!("expected PreviewClipStyles");
+        panic!("expected PreviewClipStyleDelta");
     };
     assert_eq!(clip, "42");
-    assert_eq!(got, styles);
+    assert_eq!(key, "style_shadow_blur");
+    assert!((value_x - 24.0).abs() < f32::EPSILON);
+    assert!((value_y - 0.0).abs() < f32::EPSILON);
     assert_eq!(tick, 12);
 
     handle.clear_styles_override(7);
@@ -801,6 +815,247 @@ fn preview_clip_styles_enqueues_worker_msg() {
         panic!("expected ClearStylesOverride");
     };
     assert_eq!(tick, 7);
+}
+
+#[test]
+fn preview_chroma_color_enqueues_worker_msg() {
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    handle.preview_chroma_color("9".into(), [10, 20, 30], 4);
+    let WorkerMsg::PreviewChromaColor { clip, rgb, tick } = rx.try_recv().unwrap() else {
+        panic!("expected PreviewChromaColor");
+    };
+    assert_eq!(clip, "9");
+    assert_eq!(rgb, [10, 20, 30]);
+    assert_eq!(tick, 4);
+
+    handle.clear_chroma_color_override(5);
+    let WorkerMsg::ClearChromaColorOverride { tick } = rx.try_recv().unwrap() else {
+        panic!("expected ClearChromaColorOverride");
+    };
+    assert_eq!(tick, 5);
+}
+
+#[test]
+fn style_delta_builds_merged_override_from_committed_styles() {
+    use cutlass_models::{LayerShadow, Param};
+    use cutlass_render::{ResolveOverrides, resolve_with};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("styles-delta", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/styles-delta.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow {
+                    blur: Param::Constant(8.0),
+                    offset: Param::Constant([3.0, 5.0]),
+                    ..LayerShadow::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("enable shadow");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+
+    // Worker merges delta against committed styles (keeps offset, changes blur).
+    let merged = styles_from_preview_delta(&engine, &clip_s, "style_shadow_blur", 24.0, 0.0, 0)
+        .expect("delta");
+    assert!((merged.shadow.as_ref().unwrap().blur.sample(0) - 24.0).abs() < f32::EPSILON);
+    assert_eq!(merged.shadow.as_ref().unwrap().offset.sample(0), [3.0, 5.0]);
+
+    apply_styles_preview_delta(&mut engine, &clip_s, "style_shadow_blur", 24.0, 0.0, 0);
+    assert!(engine.has_live_overrides());
+    let overrides = ResolveOverrides {
+        styles: Some((clip, &merged)),
+        ..ResolveOverrides::default()
+    };
+    let scene = resolve_with(engine.project(), RationalTime::new(0, r), overrides)
+        .expect("resolve with override");
+    assert!(
+        (scene.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .blur
+            - 24.0)
+            .abs()
+            < f32::EPSILON
+    );
+}
+
+#[test]
+fn style_delta_coalesce_keeps_latest() {
+    use cutlass_models::{LayerShadow, Param};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("styles-coalesce", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/styles-coalesce.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow {
+                    blur: Param::Constant(8.0),
+                    ..LayerShadow::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("enable shadow");
+    let engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+
+    // Simulate the worker_loop drain: consecutive deltas → latest wins.
+    let mut pending = ("style_shadow_blur", 10.0_f32, 0.0_f32, 1_i64);
+    for (v, t) in [(16.0, 2_i64), (24.0, 3_i64)] {
+        pending = ("style_shadow_blur", v, 0.0, t);
+    }
+    let early = styles_from_preview_delta(&engine, &clip_s, "style_shadow_blur", 10.0, 0.0, 1)
+        .expect("early");
+    let coalesced =
+        styles_from_preview_delta(&engine, &clip_s, pending.0, pending.1, pending.2, pending.3)
+            .expect("coalesced");
+    assert!((early.shadow.as_ref().unwrap().blur.sample(0) - 10.0).abs() < f32::EPSILON);
+    assert!((coalesced.shadow.as_ref().unwrap().blur.sample(0) - 24.0).abs() < f32::EPSILON);
+    // Each delta rebuilds from committed styles (not the prior override), so
+    // applying only the latest matches a coalesced burst.
+    assert_eq!(pending.3, 3);
+}
+
+#[test]
+fn style_delta_commit_after_preview_is_one_edit() {
+    use cutlass_models::{ClipParam, LayerShadow, Param, ParamValue, StyleParam};
+    use cutlass_render::resolve;
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("styles-commit", r);
+    let media = project.add_media(cutlass_models::MediaSource::new(
+        "/tmp/styles-commit.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow {
+                    blur: Param::Constant(8.0),
+                    ..LayerShadow::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("enable shadow");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let rev_before_preview = engine.revision();
+
+    // Drag ticks: session override only — no history / revision bump.
+    apply_styles_preview_delta(&mut engine, &clip_s, "style_shadow_blur", 16.0, 0.0, 0);
+    apply_styles_preview_delta(&mut engine, &clip_s, "style_shadow_blur", 24.0, 0.0, 0);
+    assert!(engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before_preview);
+    assert!(!engine.can_undo());
+
+    // Release commit: clear override + one SetParamConstant (same as
+    // set_param_constant_and_publish for style params).
+    engine.set_styles_override(None);
+    engine
+        .apply(Command::Edit(EditCommand::SetParamConstant {
+            clip,
+            param: ClipParam::Style {
+                param: StyleParam::ShadowBlur,
+            },
+            value: ParamValue::Scalar(24.0),
+        }))
+        .expect("commit style param");
+    assert!(!engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before_preview + 1);
+    assert!(engine.can_undo());
+    assert!(!engine.can_redo());
+
+    let scene = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+    assert!(
+        (scene.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .blur
+            - 24.0)
+            .abs()
+            < f32::EPSILON
+    );
+
+    // Single undo restores the pre-drag committed blur.
+    assert!(engine.undo());
+    assert!(!engine.can_undo());
+    let scene = resolve(engine.project(), RationalTime::new(0, r)).expect("undone");
+    assert!(
+        (scene.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .blur
+            - 8.0)
+            .abs()
+            < f32::EPSILON
+    );
 }
 
 #[test]
@@ -840,23 +1095,17 @@ fn styles_override_previews_then_clears_on_commit() {
         )
         .expect("enable shadow");
     let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
 
-    let live = LayerStyles {
-        shadow: Some(LayerShadow {
-            blur: Param::Constant(24.0),
-            ..LayerShadow::default()
-        }),
-        ..Default::default()
-    };
-    // Same path the PreviewClipStyles worker arm uses.
-    apply_styles_override(&mut engine, &clip.raw().to_string(), live.clone());
+    // Same path the PreviewClipStyleDelta worker arm uses.
+    apply_styles_preview_delta(&mut engine, &clip_s, "style_shadow_blur", 24.0, 0.0, 0);
     assert!(engine.has_live_overrides());
+    let live = styles_from_preview_delta(&engine, &clip_s, "style_shadow_blur", 24.0, 0.0, 0)
+        .expect("delta");
 
     let overrides = ResolveOverrides {
-        transform: None,
-        generator: None,
-        look: None,
         styles: Some((clip, &live)),
+        ..ResolveOverrides::default()
     };
     let scene = resolve_with(engine.project(), RationalTime::new(0, r), overrides)
         .expect("resolve with override");
@@ -897,6 +1146,396 @@ fn styles_override_previews_then_clears_on_commit() {
             .abs()
             < f32::EPSILON
     );
+}
+
+#[test]
+fn style_color_preview_then_commit_clears_override() {
+    use cutlass_commands::{Command, EditCommand};
+    use cutlass_models::{LayerShadow, LayerStyles, MediaSource, StyleParam};
+    use cutlass_render::{ResolveOverrides, resolve, resolve_with};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("style-color", r);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/style-color.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow::default()),
+                ..Default::default()
+            },
+        )
+        .expect("enable shadow");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let rev_before = engine.revision();
+    // Pack RGBA as u16 lanes (same as preview-clip-style-color wire).
+    let value_x = ((10u16 << 8) | 20) as f32;
+    let value_y = ((30u16 << 8) | 40) as f32;
+
+    apply_styles_preview_delta(
+        &mut engine,
+        &clip_s,
+        "style_shadow_color",
+        value_x,
+        value_y,
+        0,
+    );
+    assert!(engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before);
+
+    let live =
+        styles_from_preview_delta(&engine, &clip_s, "style_shadow_color", value_x, value_y, 0)
+            .expect("delta");
+    let scene = resolve_with(
+        engine.project(),
+        RationalTime::new(0, r),
+        ResolveOverrides {
+            styles: Some((clip, &live)),
+            ..ResolveOverrides::default()
+        },
+    )
+    .expect("live");
+    assert_eq!(
+        scene.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .rgba,
+        [10, 20, 30, 40]
+    );
+
+    engine.set_styles_override(None);
+    engine
+        .apply(Command::Edit(EditCommand::SetParamConstant {
+            clip,
+            param: ClipParam::Style {
+                param: StyleParam::ShadowColor,
+            },
+            value: ParamValue::Color([10, 20, 30, 40]),
+        }))
+        .expect("commit style color");
+    assert!(!engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before + 1);
+    assert!(engine.can_undo());
+
+    let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+    assert_eq!(
+        plain.layers[0]
+            .styles
+            .as_ref()
+            .unwrap()
+            .shadow
+            .as_ref()
+            .unwrap()
+            .rgba,
+        [10, 20, 30, 40]
+    );
+}
+
+#[test]
+fn style_color_preview_cancel_clears_override_without_edit() {
+    use cutlass_models::{LayerShadow, LayerStyles, MediaSource};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("style-color-cancel", r);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/style-color-cancel.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_layer_styles(
+            clip,
+            LayerStyles {
+                shadow: Some(LayerShadow::default()),
+                ..Default::default()
+            },
+        )
+        .expect("enable shadow");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let rev_before = engine.revision();
+    let could_undo = engine.can_undo();
+    let value_x = ((1u16 << 8) | 2) as f32;
+    let value_y = ((3u16 << 8) | 4) as f32;
+
+    apply_styles_preview_delta(
+        &mut engine,
+        &clip_s,
+        "style_shadow_color",
+        value_x,
+        value_y,
+        0,
+    );
+    assert!(engine.has_live_overrides());
+
+    // Popup dismiss without commit — clear override only.
+    engine.set_styles_override(None);
+    assert!(!engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before);
+    assert_eq!(engine.can_undo(), could_undo);
+}
+
+#[test]
+fn shape_fill_preview_then_commit_clears_override() {
+    use cutlass_commands::{Command, EditCommand};
+    use cutlass_models::Shape;
+    use cutlass_render::{ResolveOverrides, resolve, resolve_with};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("shape-fill", r);
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::shape(Shape::Rectangle, [255, 255, 255, 255]),
+            TimeRange::at_rate(0, 48, r),
+        )
+        .expect("shape");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let rev_before = engine.revision();
+    let fill = [10, 20, 30, 255];
+
+    let preview = generator_fill_from_engine(&engine, &clip_s, fill).expect("fill preview");
+    apply_generator_override(&mut engine, &clip_s, preview.clone());
+    assert!(engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before);
+
+    let scene = resolve_with(
+        engine.project(),
+        RationalTime::new(0, r),
+        ResolveOverrides {
+            generator: Some((clip, &preview)),
+            ..ResolveOverrides::default()
+        },
+    )
+    .expect("live");
+    let layer_fill = match &scene.layers[0].source {
+        cutlass_render::LayerSource::Solid(rgba) => *rgba,
+        cutlass_render::LayerSource::Shape { fill, .. } => *fill,
+        other => panic!("expected solid/shape layer, got {other:?}"),
+    };
+    assert_eq!(layer_fill, fill);
+
+    engine.set_generator_override(None);
+    engine
+        .apply(Command::Edit(EditCommand::SetGenerator {
+            clip,
+            generator: preview,
+        }))
+        .expect("commit fill");
+    assert!(!engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before + 1);
+    assert!(engine.can_undo());
+
+    let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+    let committed = match &plain.layers[0].source {
+        cutlass_render::LayerSource::Solid(rgba) => *rgba,
+        cutlass_render::LayerSource::Shape { fill, .. } => *fill,
+        other => panic!("expected solid/shape layer, got {other:?}"),
+    };
+    assert_eq!(committed, fill);
+}
+
+#[test]
+fn parse_marker_color_accepts_palette_and_hex_tokens() {
+    assert_eq!(parse_marker_color("red"), Some(MarkerColor::Red));
+    assert_eq!(
+        parse_marker_color("#123456"),
+        Some(MarkerColor::custom(0x12, 0x34, 0x56))
+    );
+    assert_eq!(
+        parse_marker_color("aabbcc"),
+        Some(MarkerColor::custom(0xAA, 0xBB, 0xCC))
+    );
+    assert_eq!(MarkerColor::custom(1, 2, 3).token(), "#010203");
+    assert!(parse_marker_color("not-a-color").is_none());
+}
+
+#[test]
+fn shape_fill_preview_cancel_clears_override_without_edit() {
+    use cutlass_models::Shape;
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("shape-fill-cancel", r);
+    let track = project.add_track(TrackKind::Sticker, "S1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::shape(Shape::Ellipse, [1, 2, 3, 255]),
+            TimeRange::at_rate(0, 48, r),
+        )
+        .expect("shape");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let rev_before = engine.revision();
+    let could_undo = engine.can_undo();
+
+    let preview =
+        generator_fill_from_engine(&engine, &clip_s, [9, 8, 7, 255]).expect("fill preview");
+    apply_generator_override(&mut engine, &clip_s, preview);
+    assert!(engine.has_live_overrides());
+
+    engine.set_generator_override(None);
+    assert!(!engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before);
+    assert_eq!(engine.can_undo(), could_undo);
+}
+
+#[test]
+fn chroma_color_preview_then_commit_clears_override() {
+    use cutlass_commands::{Command, EditCommand};
+    use cutlass_models::MediaSource;
+    use cutlass_render::{ResolveOverrides, resolve, resolve_with};
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("chroma-color", r);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/chroma-color.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_clip_chroma_key(
+            clip,
+            Some(ChromaKey {
+                rgb: [0, 255, 0],
+                strength: 0.5.into(),
+                shadow: 0.0.into(),
+            }),
+        )
+        .expect("chroma");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let rev_before = engine.revision();
+
+    apply_chroma_color_override(&mut engine, &clip_s, [10, 20, 30]);
+    apply_chroma_color_override(&mut engine, &clip_s, [40, 50, 60]);
+    assert!(engine.has_live_overrides());
+    assert_eq!(engine.chroma_color_override(), Some((clip, [40, 50, 60])));
+    assert_eq!(engine.revision(), rev_before);
+
+    let scene = resolve_with(
+        engine.project(),
+        RationalTime::new(0, r),
+        ResolveOverrides {
+            chroma_color: Some((clip, [40, 50, 60])),
+            ..ResolveOverrides::default()
+        },
+    )
+    .expect("live");
+    assert_eq!(scene.layers[0].chroma_key.unwrap().rgb, [40, 50, 60]);
+
+    // Commit ordering: clear override then one SetClipChroma merge.
+    engine.set_chroma_color_override(None);
+    engine
+        .apply(Command::Edit(EditCommand::SetClipChroma {
+            clip,
+            chroma: Some(ChromaKey {
+                rgb: [40, 50, 60],
+                strength: 0.5.into(),
+                shadow: 0.0.into(),
+            }),
+        }))
+        .expect("commit chroma color");
+    assert!(!engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before + 1);
+    assert!(engine.can_undo());
+
+    let plain = resolve(engine.project(), RationalTime::new(0, r)).expect("committed");
+    assert_eq!(plain.layers[0].chroma_key.unwrap().rgb, [40, 50, 60]);
+}
+
+#[test]
+fn chroma_color_preview_cancel_clears_override_without_edit() {
+    use cutlass_models::MediaSource;
+
+    let r = Rational::FPS_24;
+    let mut project = Project::new("chroma-color-cancel", r);
+    let media = project.add_media(MediaSource::new(
+        "/tmp/chroma-color-cancel.mp4",
+        1920,
+        1080,
+        r,
+        1000,
+        true,
+    ));
+    let track = project.add_track(TrackKind::Video, "V1");
+    let clip = project
+        .add_clip(
+            track,
+            media,
+            TimeRange::at_rate(0, 48, r),
+            RationalTime::new(0, r),
+        )
+        .expect("clip");
+    project
+        .set_clip_chroma_key(
+            clip,
+            Some(ChromaKey {
+                rgb: [0, 255, 0],
+                strength: 0.5.into(),
+                shadow: 0.0.into(),
+            }),
+        )
+        .expect("chroma");
+    let mut engine = Engine::with_project(EngineConfig::default(), project).expect("engine");
+    let clip_s = clip.raw().to_string();
+    let rev_before = engine.revision();
+    let could_undo = engine.can_undo();
+
+    apply_chroma_color_override(&mut engine, &clip_s, [1, 2, 3]);
+    assert!(engine.has_live_overrides());
+
+    engine.set_chroma_color_override(None);
+    assert!(!engine.has_live_overrides());
+    assert_eq!(engine.revision(), rev_before);
+    assert_eq!(engine.can_undo(), could_undo);
 }
 
 #[test]
@@ -1057,6 +1696,40 @@ fn set_mask_enqueues_worker_msg() {
     };
     assert_eq!(clip, "42");
     assert_eq!(got, Some(mask));
+
+    handle.set_mask_kind("42".into(), "rectangle".into());
+    let WorkerMsg::SetMaskKind { clip, kind } = rx.try_recv().unwrap() else {
+        panic!("expected SetMaskKind");
+    };
+    assert_eq!(clip, "42");
+    assert_eq!(kind, "rectangle");
+
+    handle.set_mask_invert("7".into(), true);
+    let WorkerMsg::SetMaskInvert { clip, invert } = rx.try_recv().unwrap() else {
+        panic!("expected SetMaskInvert");
+    };
+    assert_eq!(clip, "7");
+    assert!(invert);
+
+    handle.toggle_layer_style("9".into(), "glow".into(), true);
+    let WorkerMsg::ToggleLayerStyle {
+        clip,
+        block,
+        enabled,
+    } = rx.try_recv().unwrap()
+    else {
+        panic!("expected ToggleLayerStyle");
+    };
+    assert_eq!(clip, "9");
+    assert_eq!(block, "glow");
+    assert!(enabled);
+
+    handle.set_chroma_color("3".into(), [1, 2, 3]);
+    let WorkerMsg::SetChromaColor { clip, rgb } = rx.try_recv().unwrap() else {
+        panic!("expected SetChromaColor");
+    };
+    assert_eq!(clip, "3");
+    assert_eq!(rgb, [1, 2, 3]);
 }
 
 #[test]
@@ -1110,9 +1783,10 @@ fn set_mask_kind_preserves_feather_and_geometry_round_trips() {
     assert!((c.mask_feather - 0.4).abs() < f32::EPSILON);
     assert!(!c.mask_invert);
 
-    // Kind switch preserves feather / geometry (wire_inspector snapshot path).
-    let mut switched = engine.project().clip(clip).unwrap().mask.clone().unwrap();
-    switched.kind = MaskKind::Rectangle;
+    // Kind switch preserves feather / geometry (worker-side merge path).
+    let switched = mask_with_kind(&engine, &clip.raw().to_string(), "rectangle")
+        .expect("kind merge")
+        .expect("mask present");
     engine
         .apply(Command::Edit(EditCommand::SetClipMask {
             clip,
@@ -1132,7 +1806,7 @@ fn set_mask_kind_preserves_feather_and_geometry_round_trips() {
     assert!((c.mask_feather - 0.4).abs() < f32::EPSILON);
     assert!((c.mask_center_x - 0.1).abs() < f32::EPSILON);
 
-    // Invert toggles.
+    // Invert toggles against committed mask (worker SetMaskInvert path).
     let mut inverted = engine.project().clip(clip).unwrap().mask.clone().unwrap();
     inverted.invert = true;
     engine
@@ -1901,6 +2575,7 @@ fn export_settings_default_to_the_project_native_output() {
         path: PathBuf::from("/tmp/out.mp4"),
         target_height: None,
         fps_num: None,
+        subtitles: None,
     };
     let settings = export_settings_for(&project, &request);
     let native = ExportSettings::for_project(&project).evened();
@@ -1915,6 +2590,7 @@ fn export_settings_scale_to_the_target_height_preserving_aspect() {
         path: PathBuf::from("/tmp/out.mp4"),
         target_height: Some(720),
         fps_num: None,
+        subtitles: None,
     };
     let settings = export_settings_for(&project, &request);
     assert_eq!(settings.size.1, 720);
@@ -1933,6 +2609,7 @@ fn export_settings_override_the_frame_rate() {
         path: PathBuf::from("/tmp/out.mp4"),
         target_height: None,
         fps_num: Some(24),
+        subtitles: None,
     };
     let settings = export_settings_for(&project, &request);
     assert_eq!(settings.frame_rate, Rational::new(24, 1));
@@ -1941,9 +2618,72 @@ fn export_settings_override_the_frame_rate() {
         path: PathBuf::from("/tmp/out.mp4"),
         target_height: None,
         fps_num: Some(0),
+        subtitles: None,
     };
     let settings = export_settings_for(&project, &request);
     assert_eq!(settings.frame_rate, Rational::FPS_30);
+}
+
+// --- subtitle sidecar ------------------------------------------------------
+
+#[test]
+fn subtitle_sidecar_writes_every_group_beside_the_video() {
+    use cutlass_models::{CaptionCueSpec, CaptionGroupSpec};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let video = dir.path().join("reel.mp4");
+    let mut project = Project::new("captions", Rational::FPS_24);
+    let track = project.add_track(TrackKind::Text, "Captions");
+    project
+        .add_caption_group(
+            &CaptionGroupSpec::manual(track, "Dialogue"),
+            &[
+                CaptionCueSpec::new("first line", TimeRange::at_rate(0, 24, Rational::FPS_24)),
+                CaptionCueSpec::new("second line", TimeRange::at_rate(48, 24, Rational::FPS_24)),
+            ],
+        )
+        .expect("caption group");
+    // A second group's lines interleave into the same file by start time.
+    let other = project.add_track(TrackKind::Text, "Signs");
+    project
+        .add_caption_group(
+            &CaptionGroupSpec::manual(other, "Signs"),
+            &[CaptionCueSpec::new(
+                "middle line",
+                TimeRange::at_rate(24, 24, Rational::FPS_24),
+            )],
+        )
+        .expect("second group");
+
+    let srt = write_subtitle_sidecar(&project, &video, CaptionFileFormat::Srt).expect("sidecar");
+    assert_eq!(srt, dir.path().join("reel.srt"));
+    let text = std::fs::read_to_string(&srt).expect("read sidecar");
+    assert!(
+        text.starts_with("1\n00:00:00,000 --> 00:00:01,000\nfirst line"),
+        "{text}"
+    );
+    let order: Vec<&str> = text
+        .lines()
+        .filter(|line| line.ends_with(" line"))
+        .collect();
+    assert_eq!(order, ["first line", "middle line", "second line"]);
+
+    let vtt = write_subtitle_sidecar(&project, &video, CaptionFileFormat::Vtt).expect("sidecar");
+    assert_eq!(vtt, dir.path().join("reel.vtt"));
+    assert!(
+        std::fs::read_to_string(&vtt)
+            .expect("read sidecar")
+            .starts_with("WEBVTT")
+    );
+}
+
+#[test]
+fn subtitle_sidecar_of_a_caption_free_project_is_empty() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let video = dir.path().join("reel.mp4");
+    let project = Project::new("no captions", Rational::FPS_24);
+    let path = write_subtitle_sidecar(&project, &video, CaptionFileFormat::Srt).expect("sidecar");
+    assert_eq!(std::fs::read_to_string(&path).expect("read sidecar"), "");
 }
 
 // --- magnet ripple trim (commit path) -----------------------------------
@@ -2922,5 +3662,139 @@ fn motion_path_selection_does_not_touch_the_model() {
     assert_eq!(
         &before,
         &engine.project().clip(clip).unwrap().transform.position
+    );
+}
+
+fn transform_msg_tag(msg: &WorkerMsg) -> &'static str {
+    match msg {
+        WorkerMsg::BeginTransformGesture { .. } => "begin",
+        WorkerMsg::TransformOverride { .. } => "override",
+        WorkerMsg::SetTransform { .. } => "commit",
+        WorkerMsg::ClearTransformOverride { .. } => "clear",
+        WorkerMsg::EndTransformGesture => "abandon",
+        _ => "other",
+    }
+}
+
+fn drain_transform_tags(rx: &Receiver<WorkerMsg>) -> Vec<&'static str> {
+    let mut tags = Vec::new();
+    while let Ok(msg) = rx.try_recv() {
+        tags.push(transform_msg_tag(&msg));
+    }
+    tags
+}
+
+fn sample_override_transform() -> ClipTransform {
+    ClipTransform {
+        position: [0.1, -0.2],
+        anchor_point: [0.5, 0.5],
+        scale: cutlass_models::Scale2 { x: 1.0, y: 1.0 },
+        rotation: 15.0,
+        opacity: 0.8,
+    }
+}
+
+/// Inspector sliders call override-first; the session must emit begin before
+/// the first override, then exactly one SetTransform on commit.
+#[test]
+fn inspector_transform_preview_commit_emits_begin_overrides_and_one_commit() {
+    use crate::transform_gesture_session::{
+        TransformGestureSession, commit_transform, preview_transform,
+    };
+
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let mut session = TransformGestureSession::new();
+    let t = sample_override_transform();
+
+    preview_transform(&mut session, &handle, "7".into(), t, 12);
+    let (id, mirrored) = session
+        .overlay_mirror()
+        .expect("overlay mirrored on preview");
+    assert_eq!(id, "7");
+    assert_eq!(mirrored.position, t.position);
+    preview_transform(&mut session, &handle, "7".into(), t, 12);
+    commit_transform(&mut session, &handle, "7".into(), t, 12);
+
+    assert_eq!(
+        drain_transform_tags(&rx),
+        vec!["begin", "override", "override", "commit"]
+    );
+    assert!(!session.is_active());
+    assert!(
+        session.overlay_mirror().is_none(),
+        "commit clears overlay mirror (UI keeps gesture until projection)"
+    );
+}
+
+/// No-op release (slider released on the playhead sample) must clear the
+/// override without enqueueing a SetTransform / undoable edit.
+#[test]
+fn inspector_transform_preview_unchanged_commit_clears_without_commit() {
+    use crate::transform_gesture_session::{
+        TransformGestureSession, clear_transform_override, preview_transform,
+    };
+
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let mut session = TransformGestureSession::new();
+
+    preview_transform(
+        &mut session,
+        &handle,
+        "7".into(),
+        sample_override_transform(),
+        3,
+    );
+    clear_transform_override(&mut session, &handle, 3);
+
+    assert_eq!(
+        drain_transform_tags(&rx),
+        vec!["begin", "override", "clear"]
+    );
+    assert!(!session.is_active());
+}
+
+#[test]
+fn canvas_begin_then_override_does_not_double_begin() {
+    use crate::transform_gesture_session::{
+        TransformGestureSession, begin_transform_gesture, preview_transform,
+    };
+
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let mut session = TransformGestureSession::new();
+
+    begin_transform_gesture(&mut session, &handle, "7".into(), 1);
+    preview_transform(
+        &mut session,
+        &handle,
+        "7".into(),
+        sample_override_transform(),
+        1,
+    );
+
+    assert_eq!(drain_transform_tags(&rx), vec!["begin", "override"]);
+}
+
+#[test]
+fn sequential_inspector_drags_each_begin_again() {
+    use crate::transform_gesture_session::{
+        TransformGestureSession, clear_transform_override, commit_transform, preview_transform,
+    };
+
+    let (tx, rx) = unbounded();
+    let handle = WorkerHandle { tx };
+    let mut session = TransformGestureSession::new();
+    let t = sample_override_transform();
+
+    preview_transform(&mut session, &handle, "7".into(), t, 1);
+    commit_transform(&mut session, &handle, "7".into(), t, 1);
+    preview_transform(&mut session, &handle, "7".into(), t, 1);
+    clear_transform_override(&mut session, &handle, 1);
+
+    assert_eq!(
+        drain_transform_tags(&rx),
+        vec!["begin", "override", "commit", "begin", "override", "clear"]
     );
 }

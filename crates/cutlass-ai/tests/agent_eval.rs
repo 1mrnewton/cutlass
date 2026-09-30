@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicBool;
 use cutlass_ai::agent::{
     AgentConfig, AgentEvent, EngineBridge, PromptStatus, run_prompt_with_host,
 };
-use cutlass_ai::provider::{ChatTurn, FinishReason, ImagePart, Message, ToolCall};
+use cutlass_ai::provider::{ChatTurn, FinishReason, ImagePart, Message, TokenUsage, ToolCall};
 use cutlass_ai::providers::ScriptedProvider;
 use cutlass_ai::tools::{HostToolSpec, NullToolHost, ToolHost, ToolOutput, ToolTier};
 use cutlass_ai::{EditorContext, ProjectSummary, WireCommand, summarize, validate};
@@ -166,6 +166,7 @@ fn tool_turn(calls: Vec<(&str, &str, serde_json::Value)>) -> ChatTurn {
             })
             .collect(),
         finish: FinishReason::ToolCalls,
+        usage: None,
     }
 }
 
@@ -175,6 +176,7 @@ fn text_turn(text: &str) -> ChatTurn {
         reasoning_summary: String::new(),
         tool_calls: Vec::new(),
         finish: FinishReason::Stop,
+        usage: None,
     }
 }
 
@@ -275,6 +277,54 @@ fn host_spec(name: &'static str) -> HostToolSpec {
         parameters: serde_json::json!({ "type": "object", "properties": {} }),
         tier: ToolTier::ReadOnly,
     }
+}
+
+#[test]
+fn prompt_run_reuses_one_session_id_across_turns() {
+    let (mut host, _, _, clip) = fixture();
+    let first = ScriptedProvider::new(vec![
+        tool_turn(vec![(
+            "call_1",
+            "trim_clip",
+            serde_json::json!({ "clip": clip, "start": 3.0, "duration": 7.0 }),
+        )]),
+        text_turn("Trimmed."),
+    ]);
+    let context = EditorContext {
+        selected_clips: vec![clip],
+        ..Default::default()
+    };
+    let (outcome, _) = run(
+        &first,
+        &mut host,
+        &context,
+        "trim the start",
+        &AgentConfig::default(),
+    );
+    assert_eq!(outcome.status, PromptStatus::Completed);
+
+    let ids = first.session_ids();
+    assert_eq!(ids.len(), 2, "multi-turn prompt should call chat twice");
+    let first_id = ids[0].as_deref().expect("session id on turn 1");
+    assert!(!first_id.is_empty());
+    assert_eq!(ids[1].as_deref(), Some(first_id));
+
+    let second = ScriptedProvider::new(vec![text_turn("Done.")]);
+    let (outcome2, _) = run(
+        &second,
+        &mut host,
+        &context,
+        "confirm",
+        &AgentConfig::default(),
+    );
+    assert_eq!(outcome2.status, PromptStatus::Completed);
+    let second_ids = second.session_ids();
+    assert_eq!(second_ids.len(), 1);
+    let second_id = second_ids[0]
+        .as_deref()
+        .expect("session id on second prompt");
+    assert!(!second_id.is_empty());
+    assert_ne!(second_id, first_id);
 }
 
 #[test]
@@ -750,6 +800,7 @@ fn reasoning_summaries_stream_across_tool_rounds_without_entering_history() {
                 arguments: serde_json::json!({}),
             }],
             finish: FinishReason::ToolCalls,
+            usage: None,
         },
         ChatTurn {
             text: String::new(),
@@ -760,12 +811,14 @@ fn reasoning_summaries_stream_across_tool_rounds_without_entering_history() {
                 arguments: serde_json::json!({"clip": clip, "at": 5.0}),
             }],
             finish: FinishReason::ToolCalls,
+            usage: None,
         },
         ChatTurn {
             text: "Split the clip at 5 seconds.".into(),
             reasoning_summary: final_summary.into(),
             tool_calls: Vec::new(),
             finish: FinishReason::Stop,
+            usage: None,
         },
     ]);
 
@@ -1167,7 +1220,7 @@ fn lower_music_volume_with_fades() {
     assert_eq!(outcome.actions.len(), 1);
     assert_eq!(
         outcome.actions[0].description,
-        format!("set clip {clip} volume 50%, fade in 1.00s, fade out 2.00s")
+        format!("set clip {clip} volume 50% (=0.5), fade in 1.00s, fade out 2.00s")
     );
 
     let clip_id = cutlass_models::ClipId::from_raw(clip);
@@ -1255,7 +1308,7 @@ fn volume_envelope_with_keyframes() {
     assert_eq!(outcome.actions.len(), 3);
     assert_eq!(
         outcome.actions[1].description,
-        format!("keyframed clip {clip} volume = 20% at 3.00s")
+        format!("keyframed clip {clip} volume = 20% (=0.2) at 3.00s")
     );
 
     // The envelope landed: a keyframed volume that dips at 3s (72 ticks).
@@ -1376,11 +1429,11 @@ fn fade_in_with_opacity_keyframes() {
     assert_eq!(outcome.actions.len(), 2);
     assert_eq!(
         outcome.actions[0].description,
-        format!("keyframed clip {clip} opacity = 0% at 0.00s")
+        format!("keyframed clip {clip} opacity = 0% (=0) at 0.00s")
     );
     assert_eq!(
         outcome.actions[1].description,
-        format!("keyframed clip {clip} opacity = 100% at 1.00s")
+        format!("keyframed clip {clip} opacity = 100% (=1) at 1.00s")
     );
 
     // The curve landed: 0 → 1 over the first 24 ticks, eased.
@@ -1582,7 +1635,9 @@ fn crop_to_center_and_mirror_clip() {
     assert_eq!(outcome.actions.len(), 1);
     assert_eq!(
         outcome.actions[0].description,
-        format!("set clip {clip} cropped left 25%, right 25%, flipped horizontally")
+        format!(
+            "set clip {clip} cropped left 25% (=0.25), right 25% (=0.25), flipped horizontally"
+        )
     );
 
     // The kept region and flip land on the model, and the next describe()
@@ -1878,6 +1933,90 @@ fn provider_failure_mid_prompt_rolls_back() {
     assert!(!host.engine.undo());
 }
 
+#[test]
+fn token_usage_accumulates_across_turns_with_cumulative_events() {
+    let (mut host, _, _, clip) = fixture();
+    let first = TokenUsage {
+        input_tokens: 100,
+        cached_input_tokens: 40,
+        output_tokens: 10,
+        cost: Some(0.01),
+    };
+    let second = TokenUsage {
+        input_tokens: 50,
+        cached_input_tokens: 20,
+        output_tokens: 5,
+        cost: Some(0.02),
+    };
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![(
+            "call_1",
+            "split_clip",
+            serde_json::json!({ "clip": clip, "at": 5.0 }),
+        )])
+        .with_usage(first),
+        text_turn("Split at 5s.").with_usage(second),
+    ]);
+
+    let (outcome, events) = run(
+        &provider,
+        &mut host,
+        &EditorContext::default(),
+        "split the clip",
+        &AgentConfig::default(),
+    );
+
+    assert_eq!(outcome.status, PromptStatus::Completed);
+    assert_eq!(outcome.usage.input_tokens, 150);
+    assert_eq!(outcome.usage.cached_input_tokens, 60);
+    assert_eq!(outcome.usage.output_tokens, 15);
+    assert_eq!(outcome.usage.cost, Some(0.03));
+    let usage_events: Vec<TokenUsage> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Usage(usage) => Some(*usage),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(usage_events, [first, outcome.usage]);
+}
+
+#[test]
+fn aborted_prompt_keeps_usage_spent_before_abort() {
+    let (mut host, _, _, clip) = fixture();
+    let spent = TokenUsage {
+        input_tokens: 80,
+        cached_input_tokens: 10,
+        output_tokens: 4,
+        cost: Some(0.005),
+    };
+    // One successful turn with usage, then the script runs dry → abort.
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![(
+            "call_1",
+            "split_clip",
+            serde_json::json!({ "clip": clip, "at": 5.0 }),
+        )])
+        .with_usage(spent),
+    ]);
+
+    let (outcome, events) = run(
+        &provider,
+        &mut host,
+        &EditorContext::default(),
+        "split the clip",
+        &AgentConfig::default(),
+    );
+
+    assert!(matches!(outcome.status, PromptStatus::Aborted(_)));
+    assert_eq!(outcome.usage, spent);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Usage(usage) if *usage == spent))
+    );
+}
+
 fn message_kind(m: &Message) -> &'static str {
     match m {
         Message::System { .. } => "system",
@@ -2039,9 +2178,99 @@ fn read_skill_feeds_the_procedure_then_edits_follow() {
     assert!(host.engine.undo(), "one undo entry for the whole prompt");
 }
 
-/// `describe_project` results are large and the fresh system snapshot
-/// supersedes them, so history keeps only a placeholder — never a full
-/// stale project blob.
+/// Within one prompt, only the newest `describe_project` dump stays
+/// full-size in the in-flight message list; older dumps collapse to the
+/// history placeholder so later provider turns don't re-send every dump.
+#[test]
+fn newer_describe_project_collapses_prior_dumps_in_flight() {
+    let (mut host, _, _, clip) = fixture();
+    let provider = ScriptedProvider::new(vec![
+        tool_turn(vec![("call_1", "describe_project", serde_json::json!({}))]),
+        tool_turn(vec![(
+            "call_2",
+            "split_clip",
+            serde_json::json!({ "clip": clip, "at": 5.0 }),
+        )]),
+        tool_turn(vec![("call_3", "describe_project", serde_json::json!({}))]),
+        text_turn("Split and re-inspected."),
+    ]);
+
+    let (outcome, _) = run(
+        &provider,
+        &mut host,
+        &EditorContext::default(),
+        "inspect, split, re-inspect",
+        &AgentConfig::default(),
+    );
+
+    assert_eq!(outcome.status, PromptStatus::Completed);
+    assert_eq!(outcome.actions.len(), 1);
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 4);
+
+    // Turn after the first describe: that dump is still full-size.
+    let first_dump = tool_result_content(&requests[1], "call_1");
+    assert!(
+        first_dump.contains("\"project\""),
+        "first dump is full before a newer one: {first_dump}"
+    );
+    assert!(first_dump.contains("eval.mp4"), "{first_dump}");
+
+    // Turn after the second describe: first is placeholder, second is full.
+    let collapsed = tool_result_content(&requests[3], "call_1");
+    let newest = tool_result_content(&requests[3], "call_3");
+    assert!(
+        collapsed.contains("stale project snapshot removed"),
+        "superseded dump collapses in-flight: {collapsed}"
+    );
+    assert!(
+        !collapsed.contains("\"tracks\""),
+        "no full project json in the superseded dump: {collapsed}"
+    );
+    assert!(
+        newest.contains("\"project\""),
+        "newest dump stays full-size: {newest}"
+    );
+    assert!(newest.contains("eval.mp4"), "{newest}");
+
+    // Session history still collapses every describe result.
+    let history_describes: Vec<&str> = outcome
+        .turn_messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult {
+                call_id, content, ..
+            } if call_id == "call_1" || call_id == "call_3" => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(history_describes.len(), 2);
+    for content in history_describes {
+        assert!(
+            content.contains("stale project snapshot removed"),
+            "history collapses all describe results: {content}"
+        );
+        assert!(!content.contains("\"tracks\""), "{content}");
+    }
+}
+
+fn tool_result_content<'a>(messages: &'a [Message], call_id: &str) -> &'a str {
+    messages
+        .iter()
+        .find_map(|m| match m {
+            Message::ToolResult {
+                call_id: id,
+                content,
+                ..
+            } if id == call_id => Some(content.as_str()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing tool result for {call_id}"))
+}
+
+/// `describe_project` results are large; session history collapses every
+/// dump to a placeholder so stale project blobs never persist.
 #[test]
 fn describe_project_results_are_collapsed_in_history() {
     let (mut host, _media, _track, _clip) = fixture();
@@ -2073,7 +2302,7 @@ fn describe_project_results_are_collapsed_in_history() {
         })
         .expect("the describe_project tool result");
     assert!(
-        tool_result.contains("project state omitted"),
+        tool_result.contains("stale project snapshot removed"),
         "the blob is collapsed: {tool_result}"
     );
     assert!(

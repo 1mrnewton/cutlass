@@ -1442,6 +1442,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutlass-captions"
+version = "0.7.0-alpha.0"
+dependencies = [
+ "cutlass-models",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cutlass-cli"
 version = "0.7.0-alpha.0"
 dependencies = [
@@ -1534,6 +1542,7 @@ dependencies = [
  "crossbeam-channel",
  "cutlass-ai",
  "cutlass-analysis",
+ "cutlass-captions",
  "cutlass-cloud",
  "cutlass-commands",
  "cutlass-compositor",
@@ -1546,6 +1555,7 @@ dependencies = [
  "cutlass-settings",
  "cutlass-storage",
  "cutlass-text",
+ "cutlass-transcription",
  "dirs",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -1649,6 +1659,7 @@ dependencies = [
  "cutlass-models",
  "cutlass-shapes",
  "cutlass-text",
+ "image",
  "nnnoiseless",
  "png 0.17.16",
  "serde_json",

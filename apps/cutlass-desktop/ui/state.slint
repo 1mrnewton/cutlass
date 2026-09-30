@@ -38,6 +38,10 @@ export global AppState {
     // Export settings dialog (modal overlay; see shell/export-dialog.slint).
     in-out property <bool> export-dialog-open: false;
 
+    // Auto captions dialog (modal overlay; see shell/captions-dialog.slint).
+    // Opened from the library's Captions section.
+    in-out property <bool> captions-dialog-open: false;
+
     // Canvas settings dialog (M1: ratio preset + background; see
     // shell/canvas-dialog.slint).
     in-out property <bool> canvas-dialog-open: false;

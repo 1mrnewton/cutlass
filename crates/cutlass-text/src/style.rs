@@ -193,4 +193,34 @@ impl TextStyle {
         self.shadow = Some(shadow);
         self
     }
+
+    /// Multiply every raster-pixel metric by `factor`.
+    ///
+    /// Scaled: `font_size`, `line_height`, `letter_spacing`, `max_width`,
+    /// `padding`, `stroke.width`, `shadow.distance`.
+    /// Unchanged: `shadow.blur` (fraction of font size), `background.radius`
+    /// (0..=1), colors, flags, alignment, family.
+    ///
+    /// Used by resolve supersampling and scene fit/export scaling so density
+    /// changes happen in the CPU raster, not as a GPU stretch of a soft bitmap.
+    pub fn scale_raster_metrics(&mut self, factor: f32) {
+        if !factor.is_finite() || (factor - 1.0).abs() < f32::EPSILON {
+            return;
+        }
+        self.font_size *= factor;
+        self.line_height *= factor;
+        self.letter_spacing *= factor;
+        if let Some(w) = self.max_width {
+            self.max_width = Some(w * factor);
+        }
+        self.padding = ((self.padding as f32) * factor)
+            .round()
+            .clamp(0.0, u32::MAX as f32) as u32;
+        if let Some(stroke) = &mut self.stroke {
+            stroke.width *= factor;
+        }
+        if let Some(shadow) = &mut self.shadow {
+            shadow.distance *= factor;
+        }
+    }
 }

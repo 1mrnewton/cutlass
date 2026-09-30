@@ -608,6 +608,23 @@ export component ClipView inherits Rectangle {
                 }
             }
 
+            // Caption badge: a cue reads as part of a caption group rather
+            // than a standalone title, and the line number says where in the
+            // group it sits.
+            if model.caption-group != "" && root.width > 50px: Rectangle {
+                width: caption-badge-text.preferred-width + 6px;
+                border-radius: 2px;
+                background: dimmed ? #ffffff14 : #ffffff2b;
+
+                caption-badge-text := Text {
+                    text: "CC " + model.caption-index;
+                    font-size: 8px;
+                    font-weight: 700;
+                    color: AppStore.theme.text.primary;
+                    opacity: root.dimmed ? 0.35 : 1.0;
+                }
+            }
+
             // Retime badge ("2x", "0.5x R", …), CapCut-style accent chip
             // next to the duration. Only present on retimed clips.
             if model.speed-label != "" && root.width > 50px: Rectangle {

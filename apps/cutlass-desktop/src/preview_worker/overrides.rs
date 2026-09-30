@@ -155,6 +155,59 @@ pub(super) fn apply_styles_override(engine: &mut Engine, clip: &str, styles: Lay
     }
 }
 
+/// Build the live styles override for one inspector style-param delta by
+/// reading the clip's committed styles from the engine (cheap, off the UI
+/// thread) and applying the named field. Returns `None` for unknown clips or
+/// keys — same drop semantics as the old UI-side snapshot path.
+pub(super) fn styles_from_preview_delta(
+    engine: &Engine,
+    clip: &str,
+    key: &str,
+    value_x: f32,
+    value_y: f32,
+    tick: i64,
+) -> Option<LayerStyles> {
+    let clip_id = parse_raw_id(clip).map(ClipId::from_raw)?;
+    let clip_ref = engine.project().clip(clip_id)?;
+    let mut styles = clip_ref.styles.clone();
+    let local_tick = clip_ref.animation_tick(tick);
+    if !crate::library_helpers::apply_style_preview_constant(
+        &mut styles,
+        key,
+        value_x,
+        value_y,
+        local_tick,
+    ) {
+        return None;
+    }
+    Some(styles)
+}
+
+/// Resolve a style-param delta against engine state and install the session
+/// styles override. Unknown clips/keys are logged and dropped.
+pub(super) fn apply_styles_preview_delta(
+    engine: &mut Engine,
+    clip: &str,
+    key: &str,
+    value_x: f32,
+    value_y: f32,
+    tick: i64,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "styles preview delta ignored: unparsable clip id");
+        return;
+    };
+    if engine.project().clip(clip_id).is_none() {
+        error!(clip, "styles preview delta ignored: unknown clip");
+        return;
+    }
+    let Some(styles) = styles_from_preview_delta(engine, clip, key, value_x, value_y, tick) else {
+        error!(key, "styles preview delta ignored: unknown key");
+        return;
+    };
+    apply_styles_override(engine, clip, styles);
+}
+
 pub(super) fn filter_from_ui(filter_id: &str, intensity: f32) -> Option<Filter> {
     let id = filter_id.trim();
     if id.is_empty() {
@@ -230,6 +283,7 @@ pub(super) fn set_param_keyframe_and_publish(
     if matches!(param, ClipParam::Style { .. }) {
         engine.set_styles_override(None);
     }
+    clear_param_override(engine, clip, param, Some(&ui.audio));
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-param-keyframe ignored: unparsable clip id");
         return;
@@ -314,6 +368,9 @@ pub(super) fn set_param_constant_and_publish(
     if matches!(param, ClipParam::Style { .. }) {
         engine.set_styles_override(None);
     }
+    // Clear the matching live param override so the commit doesn't flicker
+    // against a stale drag value (mirrors SetTransform / styles).
+    clear_param_override(engine, clip, param, Some(&ui.audio));
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-param-constant ignored: unparsable clip id");
         return;
@@ -333,6 +390,8 @@ pub(super) fn set_param_constant_and_publish(
 
 /// Move one property's keyframe to a new absolute tick (graph editor).
 /// `remove` + `set` inside one history group so a single undo restores it.
+/// Clears any live param override for this property first (graph-editor
+/// drag release) so the next frame never flashes a stale playhead sample.
 pub(super) fn move_param_keyframe_and_publish(
     engine: &mut Engine,
     req: &MoveParamKeyframeRequest,
@@ -343,6 +402,7 @@ pub(super) fn move_param_keyframe_and_publish(
     if matches!(param, ClipParam::Style { .. }) {
         engine.set_styles_override(None);
     }
+    clear_param_override(engine, &req.clip, param, Some(&ui.audio));
     let Some(clip_id) = parse_raw_id(&req.clip).map(ClipId::from_raw) else {
         error!(clip = %req.clip, "move-param-keyframe ignored: unparsable clip id");
         return;

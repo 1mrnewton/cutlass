@@ -3,8 +3,9 @@
 //! This crate has two deliberately separate responsibilities:
 //!
 //! - [`transcribe_pcm`] runs `whisper.cpp` against caller-supplied 16 kHz mono
-//!   floating-point PCM. Audio decoding and resampling belong to Cutlass's
-//!   native media pipeline and are intentionally not included here.
+//!   floating-point PCM ([`transcribe_pcm_observed`] additionally reports decode
+//!   progress). Audio decoding and resampling belong to Cutlass's native media
+//!   pipeline and are intentionally not included here.
 //! - [`ModelManager`] installs catalogued Whisper models transactionally after
 //!   exact size and SHA-256 verification.
 //! - [`transcript_to_moment_batch`] converts normalized output into one atomic,
@@ -33,8 +34,8 @@ pub use moments::{
     TranscriptMomentRecordIndex, transcript_to_moment_batch,
 };
 pub use transcribe::{
-    CancellationCheck, NeverCancel, TranscriptionError, TranscriptionOptions,
-    TranscriptionOptionsError, transcribe_pcm,
+    CancellationCheck, IgnoreProgress, NeverCancel, ProgressObserver, TranscriptionError,
+    TranscriptionOptions, TranscriptionOptionsError, transcribe_pcm, transcribe_pcm_observed,
 };
 pub use transcript::{Transcript, TranscriptSegment, TranscriptWord};
 

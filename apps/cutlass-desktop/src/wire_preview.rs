@@ -31,6 +31,49 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
 
     // --- preview viewport: click-to-select, gestures, zoom/pan ------------
 
+    app.global::<PreviewBackend>().on_sample_preview(
+        |frame, x, y, view_w, view_h, zoom, pan_x, pan_y, canvas_w, canvas_h, enable_alpha| {
+            let sample = crate::eyedropper::sample_preview(
+                &frame,
+                x,
+                y,
+                view_w,
+                view_h,
+                zoom,
+                pan_x,
+                pan_y,
+                canvas_w,
+                canvas_h,
+                enable_alpha,
+            );
+            if !sample.hit {
+                return EyedropperSample {
+                    hit: false,
+                    color: slint::Color::from_argb_u8(0, 0, 0, 0),
+                    loupe: slint::Image::default(),
+                    label: SharedString::default(),
+                };
+            }
+            let [r, g, b, a] = sample.rgba;
+            let loupe = slint::Image::from_rgba8(
+                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                    &sample.loupe_rgba,
+                    crate::eyedropper::LOUPE_SIZE,
+                    crate::eyedropper::LOUPE_SIZE,
+                ),
+            );
+            EyedropperSample {
+                hit: true,
+                color: slint::Color::from_argb_u8(a, r, g, b),
+                loupe,
+                label: SharedString::from(sample.label),
+            }
+        },
+    );
+
+    app.global::<PreviewBackend>()
+        .on_empty_frame(slint::Image::default);
+
     app.global::<PreviewBackend>().on_hit_test(
         |sequence, tick, x, y, view_w, view_h, zoom, pan_x, pan_y| {
             preview_select::hit_test_in_viewport(
@@ -57,7 +100,17 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
     );
 
     app.global::<PreviewBackend>().on_selection_box(
-        |sequence, clip_id, tick, view_w, view_h, zoom, pan_x, pan_y, gesture_active, gesture| {
+        |sequence,
+         clip_id,
+         tick,
+         view_w,
+         view_h,
+         zoom,
+         pan_x,
+         pan_y,
+         gesture_active,
+         gesture,
+         _gesture_epoch| {
             preview_select::selection_box_in_viewport(
                 &sequence,
                 clip_id.as_str(),
@@ -73,7 +126,17 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
     );
 
     app.global::<PreviewBackend>().on_sprite_placement(
-        |sequence, clip_id, tick, view_w, view_h, zoom, pan_x, pan_y, gesture_active, gesture| {
+        |sequence,
+         clip_id,
+         tick,
+         view_w,
+         view_h,
+         zoom,
+         pan_x,
+         pan_y,
+         gesture_active,
+         gesture,
+         _gesture_epoch| {
             preview_select::sprite_placement_in_viewport(
                 &sequence,
                 clip_id.as_str(),
@@ -116,6 +179,145 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
                 edit_x,
                 edit_y,
                 mirror,
+            )
+        },
+    );
+
+    app.global::<PreviewBackend>().on_mask_gizmo(
+        |sequence,
+         clip_id,
+         playhead,
+         view_w,
+         view_h,
+         zoom,
+         pan_x,
+         pan_y,
+         live_active,
+         live_center_x,
+         live_center_y,
+         live_size_w,
+         live_size_h,
+         live_rotation,
+         live_feather,
+         live_roundness| {
+            preview_mask_gizmo::mask_gizmo_in_viewport(
+                &sequence,
+                clip_id.as_str(),
+                playhead,
+                view_w,
+                view_h,
+                zoom,
+                pan_x,
+                pan_y,
+                live_active,
+                live_center_x,
+                live_center_y,
+                live_size_w,
+                live_size_h,
+                live_rotation,
+                live_feather,
+                live_roundness,
+            )
+        },
+    );
+
+    app.global::<PreviewBackend>().on_hit_test_mask_gizmo(
+        |sequence,
+         clip_id,
+         playhead,
+         x,
+         y,
+         view_w,
+         view_h,
+         zoom,
+         pan_x,
+         pan_y,
+         live_active,
+         live_center_x,
+         live_center_y,
+         live_size_w,
+         live_size_h,
+         live_rotation,
+         live_feather,
+         live_roundness,
+         tolerance| {
+            preview_mask_gizmo::hit_test_mask_gizmo_in_viewport(
+                &sequence,
+                clip_id.as_str(),
+                playhead,
+                x,
+                y,
+                view_w,
+                view_h,
+                zoom,
+                pan_x,
+                pan_y,
+                live_active,
+                live_center_x,
+                live_center_y,
+                live_size_w,
+                live_size_h,
+                live_rotation,
+                live_feather,
+                live_roundness,
+                tolerance,
+            )
+        },
+    );
+
+    app.global::<PreviewBackend>().on_resolve_mask_gizmo_drag(
+        |sequence,
+         clip_id,
+         playhead,
+         handle,
+         press_x,
+         press_y,
+         cursor_x,
+         cursor_y,
+         view_w,
+         view_h,
+         zoom,
+         pan_x,
+         pan_y,
+         start_center_x,
+         start_center_y,
+         start_size_w,
+         start_size_h,
+         start_rotation,
+         start_feather,
+         start_roundness,
+         kind,
+         keep_aspect| {
+            let kind = match kind.as_str() {
+                "linear" => cutlass_models::MaskKind::Linear,
+                "mirror" => cutlass_models::MaskKind::Mirror,
+                "circle" => cutlass_models::MaskKind::Circle,
+                "rectangle" => cutlass_models::MaskKind::Rectangle,
+                "heart" => cutlass_models::MaskKind::Heart,
+                "star" => cutlass_models::MaskKind::Star,
+                _ => return MaskGizmoDragResolution::default(),
+            };
+            preview_mask_gizmo::resolve_mask_gizmo_drag_in_viewport(
+                &sequence,
+                clip_id.as_str(),
+                playhead,
+                handle,
+                [press_x, press_y],
+                [cursor_x, cursor_y],
+                view_w,
+                view_h,
+                zoom,
+                pan_x,
+                pan_y,
+                preview_mask_gizmo::MaskGizmoParams {
+                    kind,
+                    center: [start_center_x, start_center_y],
+                    size: [start_size_w.max(0.05), start_size_h.max(0.05)],
+                    rotation_deg: start_rotation,
+                    feather: start_feather,
+                    roundness: start_roundness,
+                },
+                keep_aspect,
             )
         },
     );
@@ -369,7 +571,16 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
         },
     );
 
+    // Shared across begin / override / commit / clear / abandon so
+    // override-first callers (inspector sliders) still get a paired
+    // BeginTransformGesture, and sequential drags re-begin after end.
+    let gesture_session = Rc::new(RefCell::new(
+        crate::transform_gesture_session::TransformGestureSession::new(),
+    ));
+
     let override_handle = preview_worker.handle();
+    let override_session = gesture_session.clone();
+    let override_app = app.as_weak();
     editor.on_on_preview_transform_overridden(
         move |clip_id,
               pos_x,
@@ -381,39 +592,95 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
               rotation,
               opacity,
               tick| {
-            override_handle.transform_override(
-                clip_id.to_string(),
-                cutlass_models::ClipTransform {
-                    position: [pos_x, pos_y],
-                    anchor_point: [anchor_x, anchor_y],
-                    scale: cutlass_models::Scale2 {
-                        x: scale_x,
-                        y: scale_y,
-                    },
-                    rotation,
-                    opacity,
+            let transform = cutlass_models::ClipTransform {
+                position: [pos_x, pos_y],
+                anchor_point: [anchor_x, anchor_y],
+                scale: cutlass_models::Scale2 {
+                    x: scale_x,
+                    y: scale_y,
                 },
-                i64::from(tick),
-            );
+                rotation,
+                opacity,
+            };
+            let overlay = {
+                let mut session = override_session.borrow_mut();
+                crate::transform_gesture_session::preview_transform(
+                    &mut session,
+                    &override_handle,
+                    clip_id.to_string(),
+                    transform,
+                    i64::from(tick),
+                );
+                session.overlay_mirror().map(|(id, t)| (id.to_string(), *t))
+            };
+            // Mirror session overlay into PreviewStore so on-canvas
+            // selection/handles follow inspector slider drags the same way
+            // canvas gestures do. Bump gesture-epoch so the pure
+            // selection-box binding re-evaluates. Preserve snap guides when
+            // the canvas path already filled them in.
+            let Some((mirror_clip, mirrored)) = overlay else {
+                return;
+            };
+            let Some(app) = override_app.upgrade() else {
+                return;
+            };
+            let store = app.global::<PreviewStore>();
+            let prev = store.get_gesture();
+            store.set_gesture_clip(SharedString::from(mirror_clip));
+            store.set_gesture(PreviewDragResolution {
+                valid: true,
+                moved: true,
+                position_x: mirrored.position[0],
+                position_y: mirrored.position[1],
+                anchor_x: mirrored.anchor_point[0],
+                anchor_y: mirrored.anchor_point[1],
+                scale: mirrored.scale.x,
+                scale_y: mirrored.scale.y,
+                rotation: mirrored.rotation,
+                opacity: mirrored.opacity,
+                snap_h: prev.snap_h,
+                snap_v: prev.snap_v,
+                guide_x: prev.guide_x,
+                guide_y: prev.guide_y,
+            });
+            store.set_gesture_commit_pending(false);
+            store.set_gesture_active(true);
+            store.set_gesture_epoch(store.get_gesture_epoch().wrapping_add(1));
         },
     );
 
     let gesture_start_handle = preview_worker.handle();
+    let begin_session = gesture_session.clone();
     editor.on_on_preview_gesture_started(move |clip_id, tick| {
-        gesture_start_handle.begin_transform_gesture(clip_id.to_string(), i64::from(tick));
+        crate::transform_gesture_session::begin_transform_gesture(
+            &mut begin_session.borrow_mut(),
+            &gesture_start_handle,
+            clip_id.to_string(),
+            i64::from(tick),
+        );
     });
 
     let gesture_abandon_handle = preview_worker.handle();
+    let abandon_session = gesture_session.clone();
     editor.on_on_preview_gesture_abandoned(move || {
-        gesture_abandon_handle.end_transform_gesture();
+        crate::transform_gesture_session::abandon_transform_gesture(
+            &mut abandon_session.borrow_mut(),
+            &gesture_abandon_handle,
+        );
     });
 
     let override_clear_handle = preview_worker.handle();
+    let clear_session = gesture_session.clone();
     editor.on_on_preview_override_cleared(move |tick| {
-        override_clear_handle.clear_transform_override(i64::from(tick));
+        crate::transform_gesture_session::clear_transform_override(
+            &mut clear_session.borrow_mut(),
+            &override_clear_handle,
+            i64::from(tick),
+        );
     });
 
     let transform_commit_handle = preview_worker.handle();
+    let commit_session = gesture_session;
     editor.on_on_clip_transform_committed(
         move |clip_id,
               pos_x,
@@ -425,7 +692,9 @@ pub(crate) fn wire_preview(app: &AppWindow, preview_worker: &crate::preview_work
               rotation,
               opacity,
               tick| {
-            transform_commit_handle.set_transform(
+            crate::transform_gesture_session::commit_transform(
+                &mut commit_session.borrow_mut(),
+                &transform_commit_handle,
                 clip_id.to_string(),
                 cutlass_models::ClipTransform {
                     position: [pos_x, pos_y],

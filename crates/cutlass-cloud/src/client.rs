@@ -78,6 +78,12 @@ impl CloudClient {
         self.catalog("/v1/assets/text-presets", "text-presets.json")
     }
 
+    /// `GET /v1/assets/caption-templates` — caption looks served alongside
+    /// the ones the app embeds.
+    pub fn caption_templates(&self) -> Result<CatalogResponse, CloudError> {
+        self.catalog("/v1/assets/caption-templates", "caption-templates.json")
+    }
+
     /// `GET /v1/assets/sfx`.
     pub fn sfx(&self) -> Result<CatalogResponse, CloudError> {
         self.catalog("/v1/assets/sfx", "sfx.json")

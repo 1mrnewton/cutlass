@@ -66,6 +66,39 @@ pub(super) fn export_settings_for(
     settings.evened()
 }
 
+/// Write the project's caption cues beside the finished video, so players and
+/// upload pipelines get toggleable subtitles alongside the burned-in captions.
+///
+/// Every group contributes its lines; groups that overlap in time interleave by
+/// start, which is all a subtitle file can express.
+pub(super) fn write_subtitle_sidecar(
+    project: &Project,
+    video: &Path,
+    format: CaptionFileFormat,
+) -> std::io::Result<PathBuf> {
+    let timeline = project.timeline();
+    let cues = cutlass_captions::subtitles_from_clips(
+        timeline
+            .caption_groups_ordered()
+            .iter()
+            .flat_map(|group| timeline.caption_cues(group.id))
+            .map(|clip| {
+                (
+                    clip.timeline,
+                    clip.text_content().unwrap_or_default().to_string(),
+                )
+            }),
+        cutlass_captions::Placement::at_rate(timeline.frame_rate),
+    );
+    let text = match format {
+        CaptionFileFormat::Srt => cutlass_captions::write_srt(&cues),
+        CaptionFileFormat::Vtt => cutlass_captions::write_vtt(&cues),
+    };
+    let path = video.with_extension(format.id());
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
 /// Snapshot the project and run the export on a dedicated thread: decode +
 /// GPU composite + encode would otherwise freeze preview and edits for the
 /// whole render. The thread brings up its own headless [`Renderer`] (own GPU
@@ -90,6 +123,7 @@ pub(super) fn start_export(
     let active = state.active.clone();
     let cancel = state.cancel.clone();
     let path = request.path;
+    let subtitles = request.subtitles;
 
     publish_export_state(
         &export_weak,
@@ -148,17 +182,38 @@ pub(super) fn start_export(
                         path = %path.display(),
                         "export job finished"
                     );
+                    let mut status = format!(
+                        "Saved {}×{}, {} frames to {}",
+                        settings.size.0,
+                        settings.size.1,
+                        frames,
+                        path.display()
+                    );
+                    // The video is already on disk, so a sidecar failure is
+                    // reported alongside the success rather than as one.
+                    if let Some(format) = subtitles {
+                        match write_subtitle_sidecar(&project, &path, format) {
+                            Ok(sidecar) => {
+                                info!(path = %sidecar.display(), "wrote subtitle sidecar");
+                                status.push_str(&format!(
+                                    " · subtitles: {}",
+                                    sidecar
+                                        .file_name()
+                                        .unwrap_or(sidecar.as_os_str())
+                                        .to_string_lossy()
+                                ));
+                            }
+                            Err(e) => {
+                                error!("failed to write subtitle sidecar: {e}");
+                                status.push_str(&format!(" · subtitles failed: {e}"));
+                            }
+                        }
+                    }
                     ExportUiState {
                         done: frames,
                         total: frames,
                         completed: true,
-                        status: format!(
-                            "Saved {}×{}, {} frames to {}",
-                            settings.size.0,
-                            settings.size.1,
-                            frames,
-                            path.display()
-                        ),
+                        status,
                         ..Default::default()
                     }
                 }

@@ -151,6 +151,7 @@ impl AgentSenses {
                 playhead_seconds: request.playhead_seconds,
             },
         )?;
+        // Schematic (thin lines / small text) is JPEG's worst case — keep PNG.
         let png = cutlass_render::encode_png(&image)
             .map_err(|error| format!("could not encode timeline map as PNG: {error}"))?;
         let label = format!(
@@ -214,8 +215,8 @@ impl AgentSenses {
             page.total_pages,
             request.max_width,
         )?;
-        let png = cutlass_render::encode_png(&sheet.image)
-            .map_err(|error| format!("could not encode media-pool sheet as PNG: {error}"))?;
+        let jpeg = cutlass_render::encode_jpeg(&sheet.image)
+            .map_err(|error| format!("could not encode media-pool sheet as JPEG: {error}"))?;
         let label = format!(
             "media pool sheet page {} of {}",
             page.number, page.total_pages
@@ -231,7 +232,7 @@ impl AgentSenses {
 
         Ok(ToolOutput {
             text,
-            images: vec![ImagePart::png(png, label)],
+            images: vec![ImagePart::jpeg(jpeg, label)],
         })
     }
 

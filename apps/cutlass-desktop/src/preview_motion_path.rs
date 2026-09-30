@@ -428,6 +428,7 @@ mod tests {
             drop_frame: false,
             tracks: ModelRc::from(Rc::new(VecModel::from(vec![track(clips)]))),
             markers: Default::default(),
+            caption_groups: Default::default(),
             width: 1920.0,
             height: 1080.0,
             aspect_index: 0,

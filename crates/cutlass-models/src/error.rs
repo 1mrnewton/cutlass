@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::clip::SlotMedia;
-use crate::ids::{ClipId, MarkerId, MediaId, TrackId};
+use crate::ids::{CaptionGroupId, ClipId, MarkerId, MediaId, TrackId};
 use crate::media::MediaKind;
 use crate::schema::ProjectSchema;
 use crate::time::{Rational, TimeError};
@@ -34,6 +34,15 @@ pub enum ModelError {
 
     #[error("unknown marker: {0}")]
     UnknownMarker(MarkerId),
+
+    #[error("unknown caption group: {0}")]
+    UnknownCaptionGroup(CaptionGroupId),
+
+    #[error("caption group {0} already exists on the timeline")]
+    DuplicateCaptionGroup(CaptionGroupId),
+
+    #[error("clip {0} is not a caption cue")]
+    NotACaptionCue(ClipId),
 
     #[error("clip overlaps an existing clip on {0}")]
     Overlap(TrackId),

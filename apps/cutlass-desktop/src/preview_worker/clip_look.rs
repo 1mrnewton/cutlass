@@ -43,6 +43,9 @@ pub(super) fn set_clip_crop_and_publish(
         error!(clip, "set-clip-crop ignored: unparsable clip id");
         return;
     };
+    // Clear a live crop override before the commit so the next frame never
+    // flashes the stale drag value (same order as set_param_constant).
+    clear_param_override(engine, clip, ClipParam::Crop, Some(&ui.audio));
     let wrote_keyframe = engine
         .project()
         .clip(clip_id)
@@ -98,6 +101,9 @@ pub(super) fn set_motion_blur_and_publish(
     motion_blur: MotionBlur,
     ui: &UiSink,
 ) {
+    // Clear a live shutter/samples override before the commit so the next
+    // frame never flashes the stale drag value.
+    engine.set_motion_blur_override(None);
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-motion-blur ignored: unparsable clip id");
         return;
@@ -152,6 +158,9 @@ pub(super) fn set_mask_and_publish(
         error!(clip, "set-mask ignored: unparsable clip id");
         return;
     };
+    // Structural mask edits (kind / invert / clear) must drop live look_mask_*
+    // overrides — same order as SetClipAudio / SetClipLut commits.
+    clear_mask_param_overrides(engine, clip, Some(&ui.audio));
     let kind = mask.as_ref().map(|m| m.kind.id());
     if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipMask {
         clip: clip_id,
@@ -162,6 +171,77 @@ pub(super) fn set_mask_and_publish(
     }
     info!(%clip_id, ?kind, "set clip mask");
     publish_projection(engine, ui);
+}
+
+/// Switch mask kind (or clear with empty `kind`), preserving feather / invert /
+/// geometry from the clip's committed mask. Reads engine state — no UI snapshot.
+pub(super) fn set_mask_kind_and_publish(engine: &mut Engine, clip: &str, kind: &str, ui: &UiSink) {
+    let Some(mask) = mask_with_kind(engine, clip, kind) else {
+        return;
+    };
+    set_mask_and_publish(engine, clip, mask, ui);
+}
+
+/// Build the mask for a kind switch against the clip's committed state.
+/// `None` return means the edit was dropped (bad id / unknown kind).
+pub(super) fn mask_with_kind(engine: &Engine, clip: &str, kind: &str) -> Option<Option<Mask>> {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-mask-kind ignored: unparsable clip id");
+        return None;
+    };
+    let Some(clip_ref) = engine.project().clip(clip_id) else {
+        error!(clip, "set-mask-kind ignored: unknown clip");
+        return None;
+    };
+    if kind.is_empty() {
+        return Some(None);
+    }
+    let Some(spec) = cutlass_models::mask_catalog()
+        .iter()
+        .find(|s| s.kind.id() == kind)
+    else {
+        error!(kind, "set-mask-kind ignored: unknown kind");
+        return None;
+    };
+    // Preserve feather / invert / geometry when switching kind;
+    // enable-from-none uses Mask::new defaults.
+    let mut mask = clip_ref
+        .mask
+        .clone()
+        .unwrap_or_else(|| Mask::new(spec.kind));
+    mask.kind = spec.kind;
+    // Switching onto Mirror with the historical full-layer size[0]=1 yields
+    // a no-op band — seed CapCut-parity half-width thickness instead.
+    if spec.kind == MaskKind::Mirror
+        && let Some([w, h]) = mask.size.constant()
+        && (w - 1.0).abs() < f32::EPSILON
+    {
+        mask.size = Param::Constant([0.5, h]);
+    }
+    Some(Some(mask))
+}
+
+/// Toggle invert on the clip's existing mask. No-op (logged) when mask is off.
+pub(super) fn set_mask_invert_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    invert: bool,
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-mask-invert ignored: unparsable clip id");
+        return;
+    };
+    let Some(clip_ref) = engine.project().clip(clip_id) else {
+        error!(clip, "set-mask-invert ignored: unknown clip");
+        return;
+    };
+    let Some(mut mask) = clip_ref.mask.clone() else {
+        error!(clip, "set-mask-invert ignored: clip has no mask");
+        return;
+    };
+    mask.invert = invert;
+    set_mask_and_publish(engine, clip, Some(mask), ui);
 }
 
 /// Set or clear chroma keying (CapCut green screen).
@@ -175,6 +255,8 @@ pub(super) fn set_chroma_and_publish(
         error!(clip, "set-chroma ignored: unparsable clip id");
         return;
     };
+    // Drop a live chroma-color override so enable/disable never flashes it.
+    engine.set_chroma_color_override(None);
     let enabled = chroma.is_some();
     if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipChroma {
         clip: clip_id,
@@ -185,6 +267,101 @@ pub(super) fn set_chroma_and_publish(
     }
     info!(%clip_id, enabled, "set clip chroma");
     publish_projection(engine, ui);
+}
+
+/// Set chroma RGB on a clip that already has chroma enabled.
+pub(super) fn set_chroma_color_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    rgb: [u8; 3],
+    ui: &UiSink,
+) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "set-chroma-color ignored: unparsable clip id");
+        return;
+    };
+    let Some(clip_ref) = engine.project().clip(clip_id) else {
+        error!(clip, "set-chroma-color ignored: unknown clip");
+        return;
+    };
+    let Some(mut chroma) = clip_ref.chroma_key.clone() else {
+        error!(clip, "set-chroma-color ignored: chroma off");
+        return;
+    };
+    // Clear a live chroma-color override before the commit so the next frame
+    // never flashes the stale drag value.
+    engine.set_chroma_color_override(None);
+    chroma.rgb = rgb;
+    set_chroma_and_publish(engine, clip, Some(chroma), ui);
+}
+
+/// Install a session-only chroma RGB override for live color-well preview.
+pub(super) fn apply_chroma_color_override(engine: &mut Engine, clip: &str, rgb: [u8; 3]) {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "chroma-color preview ignored: unparsable clip id");
+        return;
+    };
+    if engine
+        .project()
+        .clip(clip_id)
+        .and_then(|c| c.chroma_key.as_ref())
+        .is_none()
+    {
+        error!(clip, "chroma-color preview ignored: chroma off");
+        return;
+    }
+    engine.set_chroma_color_override(Some((clip_id, rgb)));
+}
+
+/// Enable/disable one layer-style block, merging against committed styles.
+pub(super) fn toggle_layer_style_and_publish(
+    engine: &mut Engine,
+    clip: &str,
+    block: &str,
+    enabled: bool,
+    ui: &UiSink,
+) {
+    let Some(styles) = styles_with_toggled_block(engine, clip, block, enabled) else {
+        return;
+    };
+    set_layer_styles_and_publish(engine, clip, styles, ui);
+}
+
+/// Merge a style-block toggle against the clip's committed styles.
+pub(super) fn styles_with_toggled_block(
+    engine: &Engine,
+    clip: &str,
+    block: &str,
+    enabled: bool,
+) -> Option<LayerStyles> {
+    let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
+        error!(clip, "toggle-layer-style ignored: unparsable clip id");
+        return None;
+    };
+    let Some(clip_ref) = engine.project().clip(clip_id) else {
+        error!(clip, "toggle-layer-style ignored: unknown clip");
+        return None;
+    };
+    let mut styles = clip_ref.styles.clone();
+    match block {
+        "shadow" => {
+            styles.shadow = enabled.then(cutlass_models::LayerShadow::default);
+        }
+        "glow" => {
+            styles.glow = enabled.then(cutlass_models::LayerGlow::default);
+        }
+        "outline" => {
+            styles.outline = enabled.then(cutlass_models::LayerOutline::default);
+        }
+        "background" => {
+            styles.background = enabled.then(cutlass_models::LayerBackground::default);
+        }
+        other => {
+            error!(block = other, "toggle-layer-style ignored: unknown block");
+            return None;
+        }
+    }
+    Some(styles)
 }
 
 /// Set or clear a visual clip's filter preset. A live look drag may have left
@@ -226,6 +403,16 @@ pub(super) fn set_clip_lut_and_publish(
         error!(clip, "set-clip-lut ignored: unparsable clip id");
         return;
     };
+    // Intensity slider drags leave a LookParam::LutIntensity override; clear
+    // it before the structural SetClipLut commit.
+    clear_param_override(
+        engine,
+        clip,
+        ClipParam::Look {
+            param: cutlass_models::LookParam::LutIntensity,
+        },
+        Some(&ui.audio),
+    );
     let lut = (!path.is_empty()).then(|| Lut {
         path: path.to_string(),
         intensity: intensity.clamp(0.0, 1.0).into(),
@@ -274,6 +461,8 @@ pub(super) fn set_clip_animation_and_publish(
     animation: Option<cutlass_models::AnimationRef>,
     ui: &UiSink,
 ) {
+    // Clear a live speed/intensity/stagger override before the commit.
+    engine.set_animation_override(None);
     let Some(clip_id) = parse_raw_id(clip).map(ClipId::from_raw) else {
         error!(clip, "set-clip-animation ignored: unparsable clip id");
         return;

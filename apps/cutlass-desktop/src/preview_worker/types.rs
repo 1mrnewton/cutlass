@@ -219,6 +219,11 @@ pub(super) enum WorkerMsg {
         clip: String,
         generator: Generator,
     },
+    /// One caption edit (create / import / restyle / re-segment). The whole
+    /// caption surface rides one variant because every op resolves raw ids,
+    /// applies one caption command, and republishes — see
+    /// [`CaptionOp`](crate::preview_worker::CaptionOp).
+    Caption(CaptionOp),
     /// Resize a shape clip's reference-pixel dimensions. Preserves shape kind
     /// and fill from the committed generator.
     SetShapeSize {
@@ -235,6 +240,19 @@ pub(super) enum WorkerMsg {
         clip: String,
         width: f32,
         height: f32,
+        tick: i64,
+    },
+    /// Commit a solid/shape fill recolor (inspector color well). Rebuilds the
+    /// generator from committed state with the new RGBA.
+    SetGeneratorFill {
+        clip: String,
+        rgba: [u8; 4],
+    },
+    /// Live solid/shape fill drag: generator override, no history until
+    /// [`SetGeneratorFill`] commits. Coalesces to the newest like shape size.
+    PreviewGeneratorFill {
+        clip: String,
+        rgba: [u8; 4],
         tick: i64,
     },
     /// Retime a media clip (CapCut speed, M1): positive rational `num/den`
@@ -333,22 +351,64 @@ pub(super) enum WorkerMsg {
         motion_blur: MotionBlur,
     },
     /// Replace a visual clip's layer styles (shadow/glow/outline/background).
-    /// One undoable history entry.
+    /// One undoable history entry. Inspector toggles use [`Self::ToggleLayerStyle`]
+    /// (worker merges); this full-replace form remains for tests / direct commits.
+    #[allow(dead_code)]
     SetLayerStyles {
         clip: String,
         styles: LayerStyles,
     },
+    /// Toggle one layer-style block (shadow/glow/outline/background) on or
+    /// off. The worker merges against the clip's committed styles — no UI
+    /// snapshot. One undoable history entry.
+    ToggleLayerStyle {
+        clip: String,
+        block: String,
+        enabled: bool,
+    },
     /// Set (or clear) a visual clip's shaped alpha mask. `None` clears.
-    /// One undoable history entry.
+    /// One undoable history entry. Inspector kind/invert use the merge
+    /// messages below; this full-replace form remains for tests / direct commits.
+    #[allow(dead_code)]
     SetMask {
         clip: String,
         mask: Option<Mask>,
+    },
+    /// Switch mask catalog kind (or clear with empty `kind`). Worker merges
+    /// feather/invert/geometry from the clip's current mask. One undoable
+    /// history entry.
+    SetMaskKind {
+        clip: String,
+        kind: String,
+    },
+    /// Toggle mask invert on the clip's existing mask. One undoable entry.
+    SetMaskInvert {
+        clip: String,
+        invert: bool,
     },
     /// Set (or clear) chroma keying on a visual clip. `None` clears.
     /// One undoable history entry.
     SetChroma {
         clip: String,
         chroma: Option<ChromaKey>,
+    },
+    /// Set chroma-key RGB on an already-enabled chroma clip. Worker merges
+    /// against committed chroma. One undoable history entry. Clears any live
+    /// chroma-color override first.
+    SetChromaColor {
+        clip: String,
+        rgb: [u8; 3],
+    },
+    /// Live chroma-key RGB preview during a color-well edit. Session-only;
+    /// bursts coalesce to the newest RGB per clip.
+    PreviewChromaColor {
+        clip: String,
+        rgb: [u8; 3],
+        tick: i64,
+    },
+    /// Drop the chroma-color override and re-render `tick` from committed state.
+    ClearChromaColorOverride {
+        tick: i64,
     },
     /// Set (or clear) a visual clip's filter preset. `filter_id == ""`
     /// clears; intensity is normalized 0..=1. One undoable history entry.
@@ -394,18 +454,47 @@ pub(super) enum WorkerMsg {
         adjust: ColorAdjustments,
         tick: i64,
     },
-    /// Live layer-styles preview: replace one clip's styles through the
-    /// engine's session-only styles override. Bursts coalesce to the newest
-    /// like look/transform/generator overrides.
-    PreviewClipStyles {
+    /// Live layer-styles preview: one style-param delta. The worker reads the
+    /// clip's committed styles from engine state, applies the delta, and sets
+    /// the session-only styles override — no UI-thread project snapshot.
+    /// Bursts coalesce to the newest delta per clip (same as
+    /// look/transform/generator overrides).
+    PreviewClipStyleDelta {
         clip: String,
-        styles: LayerStyles,
+        key: String,
+        value_x: f32,
+        value_y: f32,
         tick: i64,
     },
     /// Drop the styles override (control released with no net change) and
     /// re-render `tick` from committed state. Look clears on commit only;
     /// styles also clear on SetLayerStyles / style param commits.
     ClearStylesOverride {
+        tick: i64,
+    },
+    /// Live motion-blur preview: one field delta (`"shutter"` / `"samples"`).
+    /// Worker merges against committed blur and sets the session override.
+    PreviewMotionBlurDelta {
+        clip: String,
+        key: String,
+        value: f32,
+        tick: i64,
+    },
+    /// Drop the motion-blur override and re-render `tick` from committed state.
+    ClearMotionBlurOverride {
+        tick: i64,
+    },
+    /// Live look-animation knob preview: one field delta
+    /// (`"speed"` / `"intensity"` / `"stagger"`) for slot `"in"`/`"out"`/`"combo"`.
+    PreviewClipAnimationDelta {
+        clip: String,
+        slot: String,
+        key: String,
+        value: f32,
+        tick: i64,
+    },
+    /// Drop the animation override and re-render `tick` from committed state.
+    ClearAnimationOverride {
         tick: i64,
     },
     /// Append a catalog effect to a clip's chain (M4). One undoable entry.
@@ -489,6 +578,23 @@ pub(super) enum WorkerMsg {
     /// Drop the generator override (control released with no net change) and
     /// re-render `tick` from committed state.
     ClearGeneratorOverride {
+        tick: i64,
+    },
+    /// Live inspector param drag: render `tick` with `clip`'s `param` replaced
+    /// by `value` — session state on the engine, no history entry, no
+    /// projection republish. Uses the same [`ClipParam`] / [`ParamValue`]
+    /// addressing as [`SetParamConstant`]. Bursts coalesce to the newest
+    /// value per `(clip, param)` like `TransformOverride`.
+    ParamOverride {
+        clip: String,
+        param: ClipParam,
+        value: ParamValue,
+        tick: i64,
+    },
+    /// Drop every live param override for `clip` (control released with no
+    /// net change, or after commit) and re-render `tick` from committed state.
+    ClearParamOverride {
+        clip: String,
         tick: i64,
     },
     /// Commit a transform gesture: clear any override and apply one undoable
@@ -787,16 +893,24 @@ pub(super) enum WorkerMsg {
     },
     /// Clone the live project for the AI agent's sandbox rehearsal
     /// (`src/agent.rs`). Ordered with mutations, so the snapshot always
-    /// reflects every edit sent before it.
+    /// reflects every edit sent before it. Carries the engine revision so
+    /// the agent can detect live edits under a parked dry-run plan.
     SnapshotProject {
-        reply: Sender<Project>,
+        reply: Sender<(Project, u64)>,
+    },
+    /// Cheap live-engine revision probe (no project clone).
+    ProjectRevision {
+        reply: Sender<u64>,
     },
     /// Replay a rehearsed agent plan, one history group per phase,
     /// re-validating every step against the live project and remapping ids
     /// the sandbox allocated. A failure rolls back the failing phase only
     /// and stops; phases already committed stay, each its own undo step.
+    /// `expected_seed_revision` must match [`Engine::revision`] immediately
+    /// before replay (TOCTOU guard against live edits under a parked plan).
     AgentApplyPlan {
         phases: Vec<Vec<AgentPlanStep>>,
+        expected_seed_revision: u64,
         reply: Sender<Result<(), String>>,
     },
 }
@@ -810,6 +924,9 @@ pub struct ExportRequest {
     pub target_height: Option<u32>,
     /// Resample to this integer frame rate; `None` keeps the timeline rate.
     pub fps_num: Option<i32>,
+    /// Write the project's caption cues as a subtitle file next to the video;
+    /// `None` writes no sidecar.
+    pub subtitles: Option<CaptionFileFormat>,
 }
 
 /// One clip's resolved landing inside a [`WorkerMsg::MoveGroup`] batch.

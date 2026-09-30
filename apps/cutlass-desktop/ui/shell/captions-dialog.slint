@@ -1,0 +1,301 @@
+// Auto captions dialog: transcribe one clip's speech and add the lines as a
+// caption group. An in-window modal over the whole shell, like the export
+// dialog, and for the same reason — the shell is frameless, so a native dialog
+// would look foreign.
+//
+// The work runs as a background job (src/auto_captions.rs): install the speech
+// model, decode the clip's audio, run inference, then hand the cues to the
+// preview worker as one undoable edit. This file only reads and writes
+// CaptionBackend; while a job runs the dialog cannot be dismissed, so the
+// explicit Cancel is the only way to stop it.
+
+import { CutlassText, AccentButton, SubtleButton } from "../components/index.slint";
+import { AppStore, EditorStore, TimelineStore } from "../store/index.slint";
+import { CaptionBackend, CaptionAutoSource } from "../lib/caption-backend.slint";
+import { LibraryState } from "../panels/library/library.slint";
+import { AppState } from "../state.slint";
+import { ComboBox } from "std-widgets.slint";
+
+component FieldLabel inherits CutlassText {
+    width: 104px;
+    vertical-alignment: center;
+    style: AppStore.theme.typography.label;
+    foreground: AppStore.theme.text.secondary;
+}
+
+export component CaptionsDialog inherits Rectangle {
+    background: #000000A0;
+
+    // Index-aligned with the ComboBox model below.
+    property <[int]> line-lengths: [32, 42, 56];
+
+    // The clip whose audio would be transcribed, resolved Rust-side from the
+    // selection or the playhead.
+    property <CaptionAutoSource> source: CaptionBackend.auto-source(
+        EditorStore.project,
+        TimelineStore.selected-clip-id,
+        TimelineStore.playhead-tick);
+
+    property <bool> configuring: !CaptionBackend.auto-running
+        && !CaptionBackend.auto-completed
+        && !CaptionBackend.auto-failed;
+
+    init => {
+        // A previous run's outcome is stale on reopen; a job still running
+        // keeps its live progress view.
+        if (!CaptionBackend.auto-running) {
+            CaptionBackend.reset-auto-state();
+        }
+    }
+
+    function close() {
+        CaptionBackend.reset-auto-state();
+        AppState.captions-dialog-open = false;
+    }
+
+    // Scrim: absorb every pointer event so the editor underneath is inert.
+    TouchArea { }
+
+    panel := Rectangle {
+        width: 460px;
+        height: content.preferred-height;
+        background: AppStore.theme.panel.background;
+        border-radius: AppStore.theme.metrics.radius.lg;
+        border-width: 1px;
+        border-color: #ffffff14;
+        drop-shadow-blur: 32px;
+        drop-shadow-color: #00000080;
+        drop-shadow-offset-y: 8px;
+
+        // Keep clicks inside the panel from reaching the scrim above.
+        TouchArea { }
+
+        content := VerticalLayout {
+            padding: AppStore.theme.metrics.spacing.xl;
+            spacing: AppStore.theme.metrics.spacing.lg;
+
+            HorizontalLayout {
+                CutlassText {
+                    text: "Auto captions";
+                    style: AppStore.theme.typography.heading-md;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                close-button := Rectangle {
+                    width: 26px;
+                    height: 26px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: close-ta.has-hover && root.configuring ? #ffffff14 : transparent;
+                    opacity: root.configuring ? 1.0 : 0.3;
+
+                    Image {
+                        width: 14px;
+                        height: 14px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        source: @image-url("../../../../assets/icon/ui/x.svg");
+                        image-fit: contain;
+                        colorize: AppStore.theme.text.secondary;
+                    }
+
+                    close-ta := TouchArea {
+                        enabled: root.configuring;
+                        clicked => {
+                            root.close();
+                        }
+                    }
+                }
+            }
+
+            // --- source ------------------------------------------------
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                FieldLabel {
+                    text: "Transcribe";
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 26px;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: #00000040;
+                    border-width: 1px;
+                    border-color: #ffffff14;
+
+                    CutlassText {
+                        x: AppStore.theme.metrics.spacing.sm;
+                        width: parent.width - 2 * AppStore.theme.metrics.spacing.sm;
+                        height: parent.height;
+                        text: root.source.clip-id == ""
+                            ? root.source.reason
+                            : root.source.name + "  ·  " + root.source.duration-label;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        style: AppStore.theme.typography.caption;
+                        foreground: root.source.clip-id == ""
+                            ? AppStore.theme.text.muted
+                            : AppStore.theme.text.primary;
+                    }
+                }
+            }
+
+            // --- settings ----------------------------------------------
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                FieldLabel {
+                    text: "Line length";
+                }
+
+                line-length := ComboBox {
+                    horizontal-stretch: 1;
+                    enabled: root.configuring;
+                    model: ["Short (32 characters)", "Standard (42)", "Long (56)"];
+                    current-index: 1;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+                alignment: LayoutAlignment.start;
+
+                FieldLabel {
+                    text: "Style";
+                }
+
+                // Templates come from the model's catalog, so the chips can't
+                // drift from what the caption commands accept.
+                for template in CaptionBackend.templates: Rectangle {
+                    property <bool> selected: template.id == LibraryState.caption-template;
+
+                    height: 26px;
+                    width: chip-label.preferred-width + 2 * AppStore.theme.metrics.spacing.md;
+                    border-radius: AppStore.theme.metrics.radius.sm;
+                    background: self.selected ? #ffffff14 : #ffffff08;
+                    border-width: 1px;
+                    border-color: self.selected ? AppStore.theme.accent.primary : #ffffff14;
+                    opacity: root.configuring ? 1.0 : 0.4;
+
+                    chip-label := CutlassText {
+                        width: 100%;
+                        height: 100%;
+                        text: template.label;
+                        style: AppStore.theme.typography.label;
+                        foreground: parent.selected
+                            ? AppStore.theme.text.primary
+                            : AppStore.theme.text.secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    TouchArea {
+                        enabled: root.configuring;
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            LibraryState.caption-template = template.id;
+                        }
+                    }
+                }
+            }
+
+            if root.configuring: CutlassText {
+                text: "English speech, recognized on this machine. The 148 MB model downloads once, the first time you caption something.";
+                wrap: word-wrap;
+                style: AppStore.theme.typography.caption;
+                foreground: AppStore.theme.text.muted;
+            }
+
+            // --- progress / outcome ------------------------------------
+            if CaptionBackend.auto-running: VerticalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+
+                track := Rectangle {
+                    height: 6px;
+                    border-radius: 3px;
+                    background: #00000060;
+
+                    // A phase that cannot report a position sweeps a short bar
+                    // instead of freezing a filled one.
+                    Rectangle {
+                        x: CaptionBackend.auto-indeterminate ? sweep-x : 0;
+                        width: CaptionBackend.auto-indeterminate
+                            ? parent.width * 0.3
+                            : parent.width * clamp(CaptionBackend.auto-progress, 0.0, 1.0);
+                        height: parent.height;
+                        border-radius: parent.border-radius;
+                        background: AppStore.theme.accent.primary;
+
+                        property <length> sweep-x: 0px;
+                        animate sweep-x {
+                            duration: 1200ms;
+                            iteration-count: -1;
+                            easing: ease-in-out;
+                        }
+                        init => {
+                            self.sweep-x = track.width * 0.7;
+                        }
+                    }
+                }
+
+                CutlassText {
+                    text: CaptionBackend.auto-indeterminate
+                        ? CaptionBackend.auto-stage
+                        : round(clamp(CaptionBackend.auto-progress, 0.0, 1.0) * 100) + "%  ·  "
+                            + CaptionBackend.auto-stage;
+                    style: AppStore.theme.typography.caption;
+                    foreground: AppStore.theme.text.secondary;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+
+            if CaptionBackend.auto-completed || CaptionBackend.auto-failed: CutlassText {
+                text: CaptionBackend.auto-status;
+                wrap: word-wrap;
+                style: AppStore.theme.typography.caption;
+                foreground: CaptionBackend.auto-failed ? #FF6B6B : AppStore.theme.accent.primary;
+            }
+
+            // --- actions -----------------------------------------------
+            HorizontalLayout {
+                spacing: AppStore.theme.metrics.spacing.sm;
+                alignment: end;
+
+                if root.configuring: SubtleButton {
+                    label: "Cancel";
+                    clicked => {
+                        root.close();
+                    }
+                }
+
+                if root.configuring: AccentButton {
+                    label: "Generate captions";
+                    enabled: root.source.clip-id != "";
+                    clicked => {
+                        CaptionBackend.start-auto(
+                            EditorStore.project,
+                            root.source.clip-id,
+                            root.line-lengths[line-length.current-index],
+                            LibraryState.caption-template);
+                    }
+                }
+
+                if CaptionBackend.auto-running: SubtleButton {
+                    label: "Cancel transcription";
+                    clicked => {
+                        CaptionBackend.cancel-auto();
+                    }
+                }
+
+                if CaptionBackend.auto-completed || CaptionBackend.auto-failed: AccentButton {
+                    label: CaptionBackend.auto-completed ? "Done" : "Close";
+                    clicked => {
+                        root.close();
+                    }
+                }
+            }
+        }
+    }
+}

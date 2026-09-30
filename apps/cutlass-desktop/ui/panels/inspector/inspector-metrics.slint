@@ -1,0 +1,50 @@
+// Row geometry shared by every inspector property sheet.
+//
+// Inspector rows are built from a fixed label column plus fixed-width
+// controls, so a row cannot reflow: once the sum of its parts exceeds the
+// panel width, Slint overflows the layout and `PanelBase`/the body scroll
+// view clip whatever hangs off the right edge (the keyframe cluster, the
+// last alignment button, …). Keeping the sizes here means the panel's
+// intrinsic minimum width can be derived from them instead of guessed, and
+// the sheets reserve that minimum so a narrow pane scrolls horizontally
+// rather than hiding controls.
+//
+// When adding a row archetype wider than the two below, widen
+// `min-content-width` to match or it will clip at narrow pane widths.
+
+import { AppStore } from "../../store/index.slint";
+
+export global InspectorRowMetrics {
+    // Label column. Sized for the longest label in the sheets
+    // ("Plane rotation"); fixed so value columns line up across sections.
+    out property <length> label-width: 92px;
+    // Gap between a row's columns.
+    out property <length> spacing: AppStore.theme.metrics.spacing.sm;
+    // Gap inside a cluster of related toggles (bold/underline/italic,
+    // the two alignment triples) — tighter than the column gap so the
+    // cluster reads as one control.
+    out property <length> group-spacing: AppStore.theme.metrics.spacing.xs;
+    out property <length> control-height: 28px;
+    // Square icon toggle.
+    out property <length> icon-button: 28px;
+    // Numeric readout beside a slider.
+    out property <length> number-field: 52px;
+    // One axis of a vec2 row (position / anchor); two per row.
+    out property <length> vector-field: 60px;
+    // Unit label after a numeric readout ("px", "%", "deg").
+    out property <length> suffix-width: 22px;
+    // `KeyframeControl`'s width: two 14px jump arrows, the 18px diamond, and
+    // the 16px easing slot.
+    out property <length> keyframe-cluster: 62px;
+
+    // Widest intrinsic row, padding included. The slider archetype
+    // (label + slider + readout + unit + keyframes) and the vec2
+    // archetype (label + two fields + keyframes) are the two that set the
+    // floor; `CutlassSlider` refuses to go below 50px.
+    out property <length> min-content-width: max(
+        self.label-width + 50px + self.number-field + self.suffix-width
+            + self.keyframe-cluster + 4 * self.spacing,
+        self.label-width + 2 * self.vector-field + self.keyframe-cluster
+            + 4 * self.spacing,
+    ) + 2 * AppStore.theme.metrics.spacing.lg;
+}

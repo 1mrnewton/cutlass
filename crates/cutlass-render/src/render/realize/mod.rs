@@ -19,6 +19,7 @@ use crate::scene::{LayerSource, Scene, SceneLut, SizeSpec};
 
 use super::effects::{EffectChain, blend_mode, layer_effects, layer_styles, pack_effects};
 use super::media_cache::layer_lut;
+use super::raster_fit::fit_path_raster_scale;
 use super::{FrameStats, Renderer, SLOW_FRAME_LOG_MS, SeekPolicy};
 
 impl Renderer {
@@ -105,6 +106,8 @@ impl Renderer {
                     content,
                     style,
                     animation,
+                    highlight,
+                    raster_density,
                 } => {
                     let Some(layer_realized) = text::realize_text_layer(
                         &mut self.text,
@@ -112,6 +115,8 @@ impl Renderer {
                         content,
                         style,
                         animation,
+                        highlight,
+                        *raster_density,
                         [scene.width as f32, scene.height as f32],
                         layer.effects.clone(),
                         fx,
@@ -238,14 +243,17 @@ impl Renderer {
                         fill: Some(*fill).filter(|c| c[3] > 0),
                         stroke: *stroke,
                     };
-                    let image = self.paths.rasterize(path, &style, *raster_scale);
-                    if image.width == 0 || image.height == 0 {
-                        continue; // nothing inked (degenerate path or style)
-                    }
-                    let scale = match layer.size {
+                    let residual = match layer.size {
                         SizeSpec::BitmapScaled(s) => s,
                         SizeSpec::Fixed(_) => [1.0, 1.0],
                     };
+                    let stroke_w = stroke.map(|s| s.width).unwrap_or(0.0);
+                    let (raster_scale, scale, _) =
+                        fit_path_raster_scale(path, stroke_w, *raster_scale, residual);
+                    let image = self.paths.rasterize(path, &style, raster_scale);
+                    if image.width == 0 || image.height == 0 {
+                        continue; // nothing inked (degenerate path or style)
+                    }
                     let size = [
                         image.width as f32 * scale[0],
                         image.height as f32 * scale[1],
@@ -380,37 +388,44 @@ impl Renderer {
                     });
                 }
                 Realized::Glyphs {
-                    background: Some((bg_image, bg_placement)),
+                    cards,
                     effects,
                     fx,
                     color_grade,
                     lut,
                     blend_mode,
                     ..
-                } => {
-                    // Whole-run background card sits behind the glyphs.
-                    let bg_effects = if effects.is_empty() {
+                } if !cards.is_empty() => {
+                    // Background card, then a caption's active-word plate, then
+                    // the glyphs on top.
+                    let card_effects = if effects.is_empty() {
                         &[]
                     } else {
                         let chain = &instance_store[effect_idx];
                         effect_idx += 1;
                         chain.as_slice()
                     };
-                    layer_storage.push(
-                        CompositeLayer::rgba(bg_image, *bg_placement)
-                            .with_fx(*fx)
-                            .with_effects(bg_effects)
-                            .with_color_grade(*color_grade)
-                            .with_lut(layer_lut(lut, &self.luts))
-                            .with_blend_mode(*blend_mode),
-                    );
-                    jobs.push(LayerJob::Plain {
-                        storage_idx: layer_storage.len() - 1,
-                    });
+                    for (image, placement) in cards {
+                        layer_storage.push(
+                            CompositeLayer::rgba(image, *placement)
+                                .with_fx(*fx)
+                                .with_effects(card_effects)
+                                .with_color_grade(*color_grade)
+                                .with_lut(layer_lut(lut, &self.luts))
+                                .with_blend_mode(*blend_mode),
+                        );
+                        jobs.push(LayerJob::Plain {
+                            storage_idx: layer_storage.len() - 1,
+                        });
+                    }
                     // Glyphs share the same effect chain reference when present.
                     // Per-glyph instances own placement; transform motion blur
                     // is not applied to glyph runs (bitmap text still blurs).
-                    let glyph_effects = if effects.is_empty() { &[] } else { bg_effects };
+                    let glyph_effects = if effects.is_empty() {
+                        &[]
+                    } else {
+                        card_effects
+                    };
                     layer_storage.push(composite_from_realized(
                         r,
                         &self.stills,

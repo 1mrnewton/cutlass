@@ -19,9 +19,23 @@ export global EffectsBackend {
 
     // Set one scalar effect parameter (addressed by its catalog `param` name)
     // to a constant. Animated edits go through the keyframe path instead.
+    // Also clears any live override for that effect param.
     callback set-effect-param(clip-id: string, index: int, param: string, value: float);
 
+    // Live scalar effect-param preview during a slider drag. `param-index` is
+    // the catalog slot (same order as the projected `EffectParamView` list).
+    // Session-only `ClipParam::Effect` override; release commits via
+    // `set-effect-param`.
+    callback preview-effect-param(
+        clip-id: string,
+        index: int,
+        param-index: int,
+        value: float,
+        tick: int,
+    );
+
     // Set a color effect parameter (`rgba` channels 0..=255).
+    // Also clears any live override for that effect param.
     callback set-effect-param-color(
         clip-id: string,
         index: int,
@@ -32,6 +46,21 @@ export global EffectsBackend {
         a: int,
     );
 
+    // Live color effect-param preview during a swatch edit. `param-index` is
+    // the catalog slot (same order as the projected `EffectParamView` list).
+    // Session-only `ClipParam::Effect` override; release commits via
+    // `set-effect-param-color`.
+    callback preview-effect-param-color(
+        clip-id: string,
+        index: int,
+        param-index: int,
+        r: int,
+        g: int,
+        b: int,
+        a: int,
+        tick: int,
+    );
+
     // Set a vec2 effect parameter (`[x, y]`).
     callback set-effect-param-vec2(
         clip-id: string,
@@ -39,6 +68,16 @@ export global EffectsBackend {
         param: string,
         x: float,
         y: float,
+    );
+
+    // Live vec2 effect-param preview during an X/Y slider drag.
+    callback preview-effect-param-vec2(
+        clip-id: string,
+        index: int,
+        param-index: int,
+        x: float,
+        y: float,
+        tick: int,
     );
 
     // Add `transition-id` at the junction after `clip-id` (needs an abutting
@@ -51,4 +90,9 @@ export global EffectsBackend {
     // Set the window length (timeline ticks) of the transition after
     // `clip-id`.
     callback set-transition(clip-id: string, duration: int);
+
+    // Scrub-style preview tick while resizing a transition pill: the cut
+    // (window midpoint). No project mutation — callers feed this to
+    // `EditorStore.on-hover-preview` during the drag.
+    pure callback transition-preview-tick(cut-tick: int) -> int;
 }

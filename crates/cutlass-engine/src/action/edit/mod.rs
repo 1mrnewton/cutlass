@@ -3,6 +3,7 @@
 pub mod add_clip;
 pub mod add_generated;
 pub mod add_track;
+pub mod caption;
 pub mod clip_beats;
 pub mod duplicate_clip;
 pub mod extract_audio;

@@ -11,7 +11,14 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(transitions, m)?)?;
     m.add_function(wrap_pyfunction!(stickers, m)?)?;
     m.add_function(wrap_pyfunction!(animations, m)?)?;
+    m.add_function(wrap_pyfunction!(caption_templates, m)?)?;
     Ok(())
+}
+
+/// The caption template catalog: ids accepted by `add_captions(template=…)`.
+#[pyfunction]
+fn caption_templates(py: Python) -> PyResult<Vec<Py<PyDict>>> {
+    crate::captions::template_dicts(py)
 }
 
 #[pyfunction]

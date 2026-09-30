@@ -93,6 +93,12 @@ define_id!(
     LinkId
 );
 define_id!(
+    /// Identifies a caption group: the cue clips sharing a `CaptionGroupId`
+    /// share one style template, layout rules, and provenance (CapCut's
+    /// auto-caption batch).
+    CaptionGroupId
+);
+define_id!(
     /// Identifies a [`Marker`](crate::Marker) on the timeline ruler.
     MarkerId
 );

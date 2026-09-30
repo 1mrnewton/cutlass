@@ -185,6 +185,51 @@ fn tunable_typewriter_params_still_render() {
 }
 
 #[test]
+fn a_char_entrance_renders_its_transparent_first_tick() {
+    // Every cluster of a per-character entrance sits at zero opacity on the
+    // run's first tick. That frame has no text in it, but it still has to
+    // render — a caption is otherwise able to take the whole preview down.
+    let mut project = Project::new("char-entrance", FPS_24);
+    let track = project.add_track(TrackKind::Text, "T1");
+    let clip = project
+        .add_generated(
+            track,
+            Generator::Text {
+                content: "Fade".into(),
+                style: ModelTextStyle {
+                    size: 64.0.into(),
+                    fill: [255, 255, 255, 255].into(),
+                    ..ModelTextStyle::default()
+                },
+            },
+            TimeRange::at_rate(0, 48, FPS_24),
+        )
+        .unwrap();
+    project
+        .set_clip_animation(
+            clip,
+            AnimationSlot::In,
+            Some(AnimationRef::new("char_fade_in")),
+        )
+        .unwrap();
+
+    let mut renderer = match Renderer::new_headless() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("skipping char-entrance smoke: no GPU ({e})");
+            return;
+        }
+    };
+
+    let first = renderer
+        .render_frame(&project, rt(0))
+        .expect("transparent first tick still renders");
+    assert_eq!(ink(&first), 0, "nothing is faded in yet at t0");
+    let later = renderer.render_frame(&project, rt(12)).expect("mid fade");
+    assert!(ink(&later) > 0, "the run should be inking by mid-fade");
+}
+
+#[test]
 fn keyframed_text_opacity_matches_tolerance() {
     // Opacity keyframes on the clip transform — compositor path with a
     // tolerance check against a constant half-opacity control frame.

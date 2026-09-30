@@ -52,6 +52,7 @@ fn main() {
             &ChatRequest {
                 messages: &messages,
                 tools: &tools,
+                session_id: None,
             },
             &cancel,
             &mut |event| {

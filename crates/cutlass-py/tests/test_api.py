@@ -516,6 +516,154 @@ class TestText:
             c.set_style(color="blue")
 
 
+# --- captions ----------------------------------------------------------------
+
+
+SRT = """1
+00:00:00,000 --> 00:00:01,500
+first line
+
+2
+00:00:01,500 --> 00:00:03,000
+second line
+that wraps
+"""
+
+
+class TestCaptions:
+    def add(self, p: Project, **kwargs) -> cutlass.Captions:
+        return p.add_track("text").add_captions(
+            [("hello there", 0.0, 1.5), ("general kenobi", 1.5, 2.0)], **kwargs
+        )
+
+    def test_cues_are_ordinary_text_clips(self, p: Project) -> None:
+        captions = self.add(p)
+        assert len(captions) == 2
+        first, second = captions.cues
+        assert first.text == "hello there"
+        assert (first.start, first.duration) == (0.0, 1.5)
+        assert second.start == 1.5
+        # A cue trims, moves, and animates like any other clip.
+        second.opacity = 0.5
+        second.trim(end=3.0)
+        assert second.duration == 1.5
+
+    def test_dict_cues_accept_end_or_duration(self, p: Project) -> None:
+        captions = p.add_track("text").add_captions(
+            [
+                {"text": "by duration", "start": 0.0, "duration": 1.0},
+                {"text": "by end", "start": 1.0, "end": 2.5},
+            ]
+        )
+        assert [c.duration for c in captions.cues] == [1.0, 1.5]
+
+    def test_malformed_cues_rejected(self, p: Project) -> None:
+        t = p.add_track("text")
+        with pytest.raises(ValueError):
+            t.add_captions([])
+        with pytest.raises(ValueError):
+            t.add_captions(["just a string"])
+        with pytest.raises(ValueError):
+            t.add_captions([("no time",)])  # type: ignore[list-item]
+        with pytest.raises(ValueError):
+            t.add_captions([("zero length", 0.0, 0.0)])
+        with pytest.raises(ValueError):
+            t.add_captions([{"start": 0.0, "duration": 1.0}])
+
+    def test_captions_need_a_text_lane(self, p: Project) -> None:
+        with pytest.raises(CutlassError):
+            p.add_track("video").add_captions([("nope", 0.0, 1.0)])
+
+    def test_project_lists_groups_and_clip_points_back(self, p: Project) -> None:
+        captions = self.add(p, label="Intro")
+        assert [c.label for c in p.captions] == ["Intro"]
+        cue = captions.cues[0]
+        assert cue.caption is not None
+        assert cue.caption.label == "Intro"
+        plain = p.add_track("text").add(Text("title"), start=10.0, duration=1.0)
+        assert plain.caption is None
+
+    def test_template_styles_every_line(self, p: Project) -> None:
+        ids = [t["id"] for t in cutlass.caption_templates()]
+        assert "karaoke_pop" in ids
+        captions = self.add(p, template="karaoke_pop")
+        assert captions.template == "karaoke_pop"
+        captions.template = "clean"
+        assert captions.template == "clean"
+        with pytest.raises(ValueError):
+            self.add(p, template="neon_wobble")
+
+    def test_style_and_layout_patch(self, p: Project) -> None:
+        captions = self.add(p)
+        captions.style(size=96, fill="#ffcc00", uppercase=True, position_y=0.2)
+        captions.layout(max_chars_per_line=20, max_lines=1, min_duration=0.5)
+        captions.label = "Captions v2"
+        assert captions.label == "Captions v2"
+        with pytest.raises(CutlassError):
+            captions.style(scale=50.0)
+        with pytest.raises(CutlassError):
+            captions.layout(max_chars_per_line=2)
+
+    def test_highlight_modes(self, p: Project) -> None:
+        captions = self.add(p)
+        captions.highlight("word", fill="#ffd800", plate="#000000c8", scale=1.15)
+        captions.highlight("line")
+        captions.highlight("off")
+        with pytest.raises(ValueError):
+            captions.highlight("strobe")  # type: ignore[arg-type]
+
+    def test_import_subtitles_round_trips_through_srt(self, p: Project, tmp_path) -> None:
+        path = tmp_path / "dialogue.srt"
+        path.write_text(SRT)
+        captions = p.add_track("text").import_subtitles(str(path))
+        assert len(captions) == 2
+        assert captions.label == "dialogue.srt"
+        assert captions.cues[0].text == "first line"
+        # The file's own line breaks survive the trip.
+        assert captions.cues[1].text == "second line\nthat wraps"
+
+        out = tmp_path / "out.srt"
+        text = captions.to_srt(str(out))
+        assert out.read_text() == text
+        # Cues are separated by the layout's minimum gap, so the first line ends
+        # a frame early rather than touching the second.
+        assert text.startswith("1\n00:00:00,000 --> 00:00:01,4")
+        assert "second line\nthat wraps" in text
+        assert captions.to_vtt().startswith("WEBVTT")
+
+        # The sidecar reads back as the same lines.
+        reimported = p.add_track("text").import_subtitles(str(out))
+        assert [c.text for c in reimported.cues] == [c.text for c in captions.cues]
+
+    def test_import_offsets_and_rewraps(self, p: Project, tmp_path) -> None:
+        path = tmp_path / "dialogue.srt"
+        path.write_text(SRT)
+        captions = p.add_track("text").import_subtitles(
+            str(path), start=10.0, rewrap=True, label="Reel"
+        )
+        assert captions.cues[0].start == 10.0
+        assert "\n" not in captions.cues[1].text
+        assert captions.label == "Reel"
+
+    def test_import_rejects_missing_and_empty_files(self, p: Project, tmp_path) -> None:
+        t = p.add_track("text")
+        with pytest.raises(CutlassError):
+            t.import_subtitles(str(tmp_path / "nope.srt"))
+        empty = tmp_path / "empty.srt"
+        empty.write_text("")
+        with pytest.raises(CutlassError):
+            t.import_subtitles(str(empty))
+
+    def test_remove_takes_the_lines_with_it(self, p: Project) -> None:
+        track = p.add_track("text")
+        captions = track.add_captions([("bye", 0.0, 1.0)])
+        captions.remove()
+        assert len(track) == 0
+        assert p.captions == []
+        with pytest.raises(CutlassError):
+            captions.label  # noqa: B018 — a stale handle raises
+
+
 # --- shapes ------------------------------------------------------------------
 
 

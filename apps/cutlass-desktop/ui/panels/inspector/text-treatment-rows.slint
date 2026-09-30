@@ -16,6 +16,7 @@ import {
     LabelCell,
     SliderRow,
 } from "inspector-widgets.slint";
+import { InspectorRowMetrics } from "inspector-metrics.slint";
 
 export component FakeField inherits Rectangle {
     in property <string> text;
@@ -43,7 +44,7 @@ export component DisabledPropertyRow inherits HorizontalLayout {
     in property <string> label;
     in property <string> value;
 
-    spacing: AppStore.theme.metrics.spacing.md;
+    spacing: InspectorRowMetrics.spacing;
     height: 28px;
     vertical-stretch: 0;
     opacity: 0.55;
@@ -158,7 +159,7 @@ export component TextTreatmentRows inherits VerticalLayout {
         }
 
         if model.text-style.stroke-enabled: HorizontalLayout {
-            spacing: AppStore.theme.metrics.spacing.md;
+            spacing: InspectorRowMetrics.spacing;
 
             LabelCell {
                 label: "Color";
@@ -166,10 +167,18 @@ export component TextTreatmentRows inherits VerticalLayout {
 
             CutlassColorSwatch {
                 value: model.text-style.stroke-color;
+                preview(c) => {
+                    root.begin-edit();
+                    root.style.stroke-color = c;
+                    root.preview-style();
+                }
                 changed(c) => {
                     root.begin-edit();
                     root.style.stroke-color = c;
-                    root.commit-style();
+                    root.commit-or-clear-style();
+                }
+                cancelled => {
+                    InspectorBackend.clear-text-generator(TimelineStore.playhead-tick);
                 }
             }
 
@@ -226,7 +235,7 @@ export component TextTreatmentRows inherits VerticalLayout {
         }
 
         if model.text-style.background-enabled: HorizontalLayout {
-            spacing: AppStore.theme.metrics.spacing.md;
+            spacing: InspectorRowMetrics.spacing;
 
             LabelCell {
                 label: "Color";
@@ -234,10 +243,18 @@ export component TextTreatmentRows inherits VerticalLayout {
 
             CutlassColorSwatch {
                 value: model.text-style.background-color;
+                preview(c) => {
+                    root.begin-edit();
+                    root.style.background-color = c;
+                    root.preview-style();
+                }
                 changed(c) => {
                     root.begin-edit();
                     root.style.background-color = c;
-                    root.commit-style();
+                    root.commit-or-clear-style();
+                }
+                cancelled => {
+                    InspectorBackend.clear-text-generator(TimelineStore.playhead-tick);
                 }
             }
 
@@ -302,7 +319,7 @@ export component TextTreatmentRows inherits VerticalLayout {
         }
 
         HorizontalLayout {
-            spacing: AppStore.theme.metrics.spacing.md;
+            spacing: InspectorRowMetrics.spacing;
 
             DisabledEffectCard {
                 label: "Aa";
@@ -344,7 +361,7 @@ export component TextTreatmentRows inherits VerticalLayout {
         }
 
         if model.text-style.shadow-enabled: HorizontalLayout {
-            spacing: AppStore.theme.metrics.spacing.md;
+            spacing: InspectorRowMetrics.spacing;
 
             LabelCell {
                 label: "Color";
@@ -352,10 +369,18 @@ export component TextTreatmentRows inherits VerticalLayout {
 
             CutlassColorSwatch {
                 value: model.text-style.shadow-color;
+                preview(c) => {
+                    root.begin-edit();
+                    root.style.shadow-color = c;
+                    root.preview-style();
+                }
                 changed(c) => {
                     root.begin-edit();
                     root.style.shadow-color = c;
-                    root.commit-style();
+                    root.commit-or-clear-style();
+                }
+                cancelled => {
+                    InspectorBackend.clear-text-generator(TimelineStore.playhead-tick);
                 }
             }
 

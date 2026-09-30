@@ -41,6 +41,16 @@ pub(super) fn set_clip_audio_and_publish(
     };
     let (fade_in, fade_out) = (to_ticks(fade_in_s), to_ticks(fade_out_s));
 
+    // Any SetClipAudio commit (volume and/or fades-only) clears live Volume/
+    // Pan overrides so a fade-only release after a volume preview cannot leave
+    // the mixer stuck on the drag gain.
+    for target in &targets {
+        engine.clear_param_override(*target, ClipParam::Volume);
+        ui.audio.clear_param_override(*target, ClipParam::Volume);
+        engine.clear_param_override(*target, ClipParam::Pan);
+        ui.audio.clear_param_override(*target, ClipParam::Pan);
+    }
+
     engine.begin_group();
     for target in &targets {
         if let Err(e) = engine.apply(Command::Edit(EditCommand::SetClipAudio {

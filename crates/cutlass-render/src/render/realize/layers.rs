@@ -16,6 +16,7 @@ use crate::scene::{LayerSource, ResolvedPass, Scene, SceneLut, SizeSpec};
 
 use super::super::effects::{blend_mode, layer_effects, layer_styles};
 use super::super::media_cache::{CubeLutState, LottieState, StickerSequence, layer_lut};
+use super::super::raster_fit::fit_path_raster_scale;
 use super::super::{Renderer, SeekPolicy};
 use super::text;
 
@@ -164,7 +165,7 @@ pub(super) fn composite_from_realized<'a>(
             glyphs,
             instances,
             atlas_key,
-            background,
+            cards,
             placement,
             fx,
             color_grade,
@@ -173,9 +174,9 @@ pub(super) fn composite_from_realized<'a>(
             styles,
             ..
         } => {
-            // Background is composited as a separate preceding layer in the
-            // job walk; this arm only builds the glyph instances.
-            let _ = background;
+            // Cards are composited as separate preceding layers in the job
+            // walk; this arm only builds the glyph instances.
+            let _ = cards;
             CompositeLayer::glyphs(
                 GlyphsLayer {
                     atlas_key: *atlas_key,
@@ -292,8 +293,9 @@ pub(super) enum Realized {
         glyphs: Vec<RgbaImage>,
         instances: Vec<GlyphInstance>,
         atlas_key: u64,
-        /// Optional whole-run background card drawn behind the glyphs.
-        background: Option<(RgbaImage, LayerPlacement)>,
+        /// Cards drawn behind the glyphs, back to front: the whole-run
+        /// background, then a caption's active-word plate.
+        cards: Vec<(RgbaImage, LayerPlacement)>,
         /// Layer opacity multiplier (instance opacities are pre-multiplied).
         placement: LayerPlacement,
         effects: Vec<ResolvedPass>,
@@ -367,10 +369,13 @@ impl Renderer {
                 content,
                 style,
                 animation,
+                highlight,
+                raster_density: _,
             } => {
-                // Transition sides keep the bitmap path — per-character
-                // animation on a transition edge is not a supported surface.
-                let _ = animation;
+                // Transition sides keep the bitmap path — neither
+                // per-character animation nor a caption highlight is a
+                // supported surface on a transition edge.
+                let _ = (animation, highlight);
                 text::realize_text_bitmap(
                     &mut self.text,
                     layer,
@@ -498,14 +503,17 @@ impl Renderer {
                     fill: Some(*fill).filter(|c| c[3] > 0),
                     stroke: *stroke,
                 };
-                let image = self.paths.rasterize(path, &style, *raster_scale);
-                if image.width == 0 || image.height == 0 {
-                    return Err(RenderError::unsupported("degenerate path layer"));
-                }
-                let scale = match layer.size {
+                let residual = match layer.size {
                     SizeSpec::BitmapScaled(s) => s,
                     SizeSpec::Fixed(_) => [1.0, 1.0],
                 };
+                let stroke_w = stroke.map(|s| s.width).unwrap_or(0.0);
+                let (raster_scale, scale, _) =
+                    fit_path_raster_scale(path, stroke_w, *raster_scale, residual);
+                let image = self.paths.rasterize(path, &style, raster_scale);
+                if image.width == 0 || image.height == 0 {
+                    return Err(RenderError::unsupported("degenerate path layer"));
+                }
                 let size = [
                     image.width as f32 * scale[0],
                     image.height as f32 * scale[1],

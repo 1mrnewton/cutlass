@@ -618,9 +618,51 @@ fn migration_chain_covers_every_supported_version() {
     for from in 1..=PROJECT_SCHEMA_VERSION {
         let mut doc = serde_json::json!({});
         migrate_document(&mut doc, from);
-        // No current step rewrites anything (v1 shapes are valid v2).
+        // Empty docs have nothing to rewrite.
         assert_eq!(doc, serde_json::json!({}));
     }
+}
+
+#[test]
+fn migrate_v2_mirror_default_size_to_half_width_band() {
+    let mut doc = serde_json::json!({
+        "timeline": {
+            "tracks": [[1, {
+                "clips": [[10, {
+                    "mask": { "kind": "mirror" }
+                }], [11, {
+                    "mask": {
+                        "kind": "mirror",
+                        "size": [1.0, 1.0]
+                    }
+                }], [12, {
+                    "mask": {
+                        "kind": "mirror",
+                        "size": [0.25, 1.0]
+                    }
+                }], [13, {
+                    "mask": {
+                        "kind": "circle",
+                        "size": [1.0, 1.0]
+                    }
+                }]]
+            }]]
+        }
+    });
+    migrate_document(&mut doc, 2);
+    let clips = &doc["timeline"]["tracks"][0][1]["clips"];
+    assert_eq!(clips[0][1]["mask"]["size"], serde_json::json!([0.5, 1.0]));
+    assert_eq!(clips[1][1]["mask"]["size"], serde_json::json!([0.5, 1.0]));
+    assert_eq!(
+        clips[2][1]["mask"]["size"],
+        serde_json::json!([0.25, 1.0]),
+        "custom thickness must be preserved"
+    );
+    assert_eq!(
+        clips[3][1]["mask"]["size"],
+        serde_json::json!([1.0, 1.0]),
+        "non-mirror kinds are untouched"
+    );
 }
 
 #[test]
@@ -637,6 +679,7 @@ fn unknown_root_project_field_does_not_trip_envelope_unwrap() {
     .unwrap();
     let loaded = Project::load_from_file(&path).unwrap();
     assert_eq!(loaded.name, "keep");
+    // Provenance keeps the file's schema version; save re-stamps current.
     assert_eq!(loaded.schema.version, 2);
 }
 

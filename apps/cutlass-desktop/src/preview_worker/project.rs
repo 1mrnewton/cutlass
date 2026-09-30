@@ -136,6 +136,10 @@ pub(super) fn complete_session_replacement<T>(
                 register_media_with_workers(media, ui);
             }
         }
+        // Engine already cleared its override lanes on replace; drop the
+        // audio mixer's mirrored volume/pan map before the snapshot reopen
+        // re-applies it onto the new project's mixer.
+        ui.audio.clear_all_param_overrides();
         publish_projection(engine, ui);
         bump_session_epoch(ui);
     }

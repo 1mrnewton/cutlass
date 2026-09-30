@@ -100,9 +100,25 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         }
         WireCommand::SetClipTransform(args) => {
             let clip = clip_ref(project, args.clip)?;
-            // Omitted properties keep their current value — sampled at the
-            // clip start for animated params (the agent edits whole-clip
-            // placement; keyframe-level edits get their own commands).
+            // Lowering uses `at: None`, which flattens every transform param
+            // to a constant — refuse when any param is already keyframed.
+            check_set_clip_transform_preserves_keyframes(clip, args.clip)?;
+            // Omitted properties keep their current constant value.
+            if let Some(x) = args.position_x {
+                check_position_component(x)?;
+            }
+            if let Some(y) = args.position_y {
+                check_position_component(y)?;
+            }
+            if let Some(x) = args.anchor_x {
+                check_anchor_component(x)?;
+            }
+            if let Some(y) = args.anchor_y {
+                check_anchor_component(y)?;
+            }
+            if let Some(scale) = args.scale {
+                check_wire_scale(scale)?;
+            }
             let current = clip.transform.sample(0);
             let transform = ClipTransform {
                 position: [
@@ -139,9 +155,10 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                     args.clip
                 )));
             }
-            // Omitted edges keep the clip's current framing. Current insets
-            // derive from the stored kept-region rect (sample at clip start
-            // when keyframed — set_clip_crop itself flattens to a constant).
+            // Lowering uses `at: None`, which flattens crop to a constant —
+            // refuse when crop is already keyframed (flips are separate bools).
+            check_set_clip_crop_preserves_keyframes(clip, args.clip)?;
+            // Omitted edges keep the clip's current framing (constant crop).
             let current = clip.crop.sample(0);
             let inset = |requested: Option<f64>, current: f32, what: &str| {
                 let Some(v) = requested else {
@@ -334,7 +351,9 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         }
         WireCommand::SetParamKeyframe(args) => {
             let clip = clip_ref(project, args.clip)?;
+            reject_speed_keyframe_param(&args.param)?;
             let at = keyframe_position(project, clip, args.at)?;
+            check_motion_param_args(&args.param, args.value, args.position)?;
             let value = param_value(
                 clip,
                 args.clip,
@@ -356,6 +375,7 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         }
         WireCommand::RemoveParamKeyframe(args) => {
             let clip = clip_ref(project, args.clip)?;
+            reject_speed_keyframe_param(&args.param)?;
             let at = keyframe_position(project, clip, args.at)?;
             EditCommand::RemoveParamKeyframe {
                 clip: clip.id,
@@ -380,6 +400,8 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
         WireCommand::SetClipAudio(args) => set_clip_audio(project, args)?,
         WireCommand::SetParamConstant(args) => {
             let clip = clip_ref(project, args.clip)?;
+            reject_speed_keyframe_param(&args.param)?;
+            check_motion_param_args(&args.param, args.value, args.position)?;
             let value = param_value(
                 clip,
                 args.clip,
@@ -450,7 +472,13 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                     ticks_to_seconds(tl.end_tick(), rate),
                 )));
             }
-            EditCommand::SplitClip { clip: clip.id, at }
+            // Splitting a caption cue has to partition its text and word
+            // timings, not duplicate the whole line into both halves.
+            if clip.caption.is_some() {
+                EditCommand::SplitCaptionCue { clip: clip.id, at }
+            } else {
+                EditCommand::SplitClip { clip: clip.id, at }
+            }
         }
         WireCommand::TrimClip(args) => {
             let clip = clip_ref(project, args.clip)?;
@@ -633,6 +661,29 @@ pub fn validate(command: &WireCommand, project: &Project) -> Result<Command, Rej
                 background: args.background.unwrap_or(current.background),
             }
         }
+        WireCommand::AddCaptions(args) => add_captions(project, args)?,
+        WireCommand::RemoveCaptions(args) => EditCommand::RemoveCaptionGroup {
+            group: caption_group_ref(project, args.group)?.id,
+        },
+        WireCommand::SetCaptionTemplate(args) => {
+            let group = caption_group_ref(project, args.group)?;
+            if cutlass_models::caption_template_spec(&args.template).is_none() {
+                return Err(Rejection::new(format!(
+                    "unknown caption template '{}'; available templates: {}",
+                    args.template,
+                    caption_template_ids()
+                )));
+            }
+            EditCommand::SetCaptionGroupTemplate {
+                group: group.id,
+                template: args.template.clone(),
+            }
+        }
+        WireCommand::SetCaptionStyle(args) => set_caption_style(project, args)?,
+        WireCommand::SetCaptionLayout(args) => set_caption_layout(project, args)?,
+        WireCommand::SetCaptionHighlight(args) => set_caption_highlight(project, args)?,
+        WireCommand::SetCaptionText(args) => set_caption_text(project, args)?,
+        WireCommand::MergeCaptions(args) => merge_captions(project, args)?,
     };
     Ok(Command::Edit(edit))
 }

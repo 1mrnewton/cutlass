@@ -178,7 +178,7 @@ pub(crate) fn clip_crop(clip: &Clip) -> CropRect {
     }
 }
 
-fn covers_tick(clip: &Clip, tick: i32) -> bool {
+pub(crate) fn covers_tick(clip: &Clip, tick: i32) -> bool {
     let start = clip.timeline_start.value;
     let end = start.saturating_add(clip.source_range.duration.value);
     start <= tick && tick < end

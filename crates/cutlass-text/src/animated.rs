@@ -29,6 +29,15 @@ impl AnimatedText {
     pub fn has_ink(&self) -> bool {
         self.extent.0 > 0 && self.extent.1 > 0
     }
+
+    /// Payload bytes retained by a memo entry (cluster bitmaps + card).
+    pub(crate) fn memo_bytes(&self) -> usize {
+        self.clusters
+            .iter()
+            .map(|cluster| cluster.image.pixels.len())
+            .sum::<usize>()
+            + self.background.as_ref().map_or(0, |card| card.pixels.len())
+    }
 }
 
 /// Paint stroke / shadow per cluster and an optional background card for

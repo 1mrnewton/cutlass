@@ -2,6 +2,7 @@ use cutlass_compositor::ColorGrade;
 use cutlass_models::{BlendMode, Param, Scale2, Shape, ShapePath, ShapeStroke};
 use cutlass_shapes::{BezierPath, PathPoint, SDF_AA, SdfParams, Stroke};
 
+use super::raster_supersample::{bitmap_supersample, estimate_path_ref_long_edge};
 use crate::scene::{LayerSource, ResolvedPass, SceneLayer, SizeSpec};
 
 /// Resolve one shape generator at `tick` into a placed layer.
@@ -23,6 +24,7 @@ pub(super) fn resolve_shape(
     tick: i64,
     ref_scale: f32,
     scale: Scale2,
+    canvas_long: f32,
     center: [f32; 2],
     anchor_point: [f32; 2],
     rotation: f32,
@@ -39,14 +41,20 @@ pub(super) fn resolve_shape(
         width: (s.width.sample(tick) * px_iso).max(0.0),
     });
 
-    // Pen paths: rasterized on the CPU at the *reference* scale so the memo
-    // stays warm under transform-scale animation (the quad magnifies the
-    // bitmap, like text).
+    // Pen paths: CPU-raster at `ref_scale × S` (quantized supersample from
+    // transform scale) so scale > 1 stays sharp; residual `scale / S` rides
+    // the quad. Memo stays warm between quarter-step crossings — same
+    // contract as text. `Scene::scale` may still multiply `raster_scale` for
+    // export/preview fit (composes as `ref × S × factor` under the same
+    // absolute edge clamp applied here at resolve).
     if let Shape::Path(path) = shape {
         let bezier = to_bezier(path);
         if !bezier.is_drawable() {
             return None;
         }
+        let stroke_w = stroke.map(|s| s.width.sample(tick).max(0.0)).unwrap_or(0.0);
+        let est = estimate_path_ref_long_edge(&bezier, stroke_w, ref_scale);
+        let (s, size) = bitmap_supersample(scale, est, canvas_long);
         return Some(SceneLayer {
             clip: None,
             source: LayerSource::PathShape {
@@ -54,16 +62,17 @@ pub(super) fn resolve_shape(
                 fill,
                 // Raster-space stroke: `PathRaster` folds `raster_scale` into
                 // the width itself, so hand it the unscaled model value.
+                // With `raster_scale = ref_scale × S`, stroke px grow with S
+                // in lockstep with the path geometry.
                 stroke: stroke.map(|s| Stroke {
                     rgba: s.rgba.sample(tick),
                     width: s.width.sample(tick).max(0.0),
                 }),
-                raster_scale: ref_scale,
+                raster_scale: ref_scale * s,
             },
             center,
             anchor_point,
-            // Per-axis placement of the path bitmap quad.
-            size: SizeSpec::BitmapScaled([scale.x, scale.y]),
+            size,
             rotation,
             opacity,
             uv,

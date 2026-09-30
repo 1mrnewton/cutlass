@@ -8,6 +8,9 @@ export global PreviewStore {
     in-out property <float> viewport-zoom: 1.0;
     in-out property <length> viewport-pan-x: 0px;
     in-out property <length> viewport-pan-y: 0px;
+    // Session-only: hide on-canvas transform/mask/motion-path gizmos (CapCut
+    // "show controls"). Clip hit-test selection and body-drag still work.
+    in-out property <bool> show-transform-controls: true;
 
     // The preview area's on-screen size (logical px), reported by whichever
     // preview surface is live (docked panel or fullscreen). The engine worker
@@ -33,6 +36,25 @@ export global PreviewStore {
     // a toggle rather than a modifier.
     in-out property <bool> motion-path-mirror: true;
 
+    // Live mask gizmo / inspector ParamOverride. When `mask-live-active` the
+    // mask-gizmo callback uses these instead of playhead samples so handles
+    // track mid-drag (projection stays frozen until commit).
+    in-out property <bool> mask-live-active: false;
+    // A mask commit was sent while the projection still contains the
+    // press-time values. Keep live mask geometry visible until the next
+    // projection publish swaps in the committed params (mirrors
+    // gesture-commit-pending for transforms).
+    in-out property <bool> mask-commit-pending: false;
+    in-out property <float> mask-live-center-x: 0;
+    in-out property <float> mask-live-center-y: 0;
+    in-out property <float> mask-live-size-w: 1;
+    in-out property <float> mask-live-size-h: 1;
+    in-out property <float> mask-live-rotation: 0;
+    in-out property <float> mask-live-feather: 0;
+    in-out property <float> mask-live-roundness: 0;
+    // Active mask-handle drag id (0=idle; see MaskGizmo hit ids).
+    in-out property <int> mask-drag-handle: 0;
+
     // Live transform gesture (preview roadmap Phases 3–5): the uncommitted
     // resolution of whatever gesture is in flight — a preview move/scale/
     // rotate drag or an inspector slider — mirrored UI-wide. The projection
@@ -46,6 +68,10 @@ export global PreviewStore {
     in-out property <bool> gesture-commit-pending: false;
     in-out property <string> gesture-clip;
     in-out property <PreviewDragResolution> gesture;
+    // Bumped on every override tick (Rust seam) so selection-box /
+    // sprite-placement bindings re-evaluate when inspector sliders drive
+    // the gesture — passing the struct alone can miss field updates.
+    in-out property <int> gesture-epoch: 0;
 
     // Zero-drift transform gesture: partitioned frames rendered once at press.
     in-out property <image> gesture-frame-below;

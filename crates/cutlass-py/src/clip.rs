@@ -8,6 +8,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
+use crate::captions::Captions;
 use crate::content::apply_text_style;
 use crate::convert::{
     clip_key_time, parse_color, parse_easing, parse_keyframe_pairs, seconds, span, speed_from_f64,
@@ -342,12 +343,7 @@ impl Clip {
     }
 
     #[pyo3(signature = (slot, animation_id=None))]
-    fn set_animation(
-        &self,
-        py: Python,
-        slot: &str,
-        animation_id: Option<&str>,
-    ) -> PyResult<()> {
+    fn set_animation(&self, py: Python, slot: &str, animation_id: Option<&str>) -> PyResult<()> {
         let animation_slot = parse_animation_slot(slot)?;
         let animation = animation_id.map(AnimationRef::new);
         self.with_project(py, |project| {
@@ -643,6 +639,15 @@ impl Clip {
             else {
                 return Err(PyValueError::new_err("clip is not a text clip"));
             };
+            // Rewording a caption cue keeps its word timings, remapped onto the
+            // new text; a plain set_generator would drop them (the byte ranges
+            // no longer describe the content).
+            if clip.caption.is_some() {
+                return project
+                    .model_mut()
+                    .set_caption_cue(self.id, content, None, None)
+                    .map_err(model_err);
+            }
             let generator = Generator::Text {
                 content,
                 style: style.clone(),
@@ -651,6 +656,17 @@ impl Clip {
                 .model_mut()
                 .set_generator(self.id, generator)
                 .map_err(model_err)
+        })
+    }
+
+    /// The caption group this clip is a line of, or `None` for an ordinary
+    /// title.
+    #[getter]
+    fn caption(&self, py: Python) -> PyResult<Option<Captions>> {
+        self.with_project(py, |project| {
+            Ok(Self::require(project, self.id)?
+                .caption_group()
+                .map(|group| Captions::new(self.project.clone_ref(py), group)))
         })
     }
 
@@ -800,7 +816,15 @@ fn param_value_for(param: ClipParam, value: &Bound<'_, PyAny>) -> PyResult<Param
         ClipParam::Effect { .. } => Err(PyValueError::new_err(
             "use Effect.animate for effect parameters",
         )),
-        ClipParam::Speed => Err(PyValueError::new_err("speed curves are not exposed yet")),
+        // Reachable only if `clip_param` grows a name for them.
+        ClipParam::Speed
+        | ClipParam::Crop
+        | ClipParam::Pan
+        | ClipParam::Text { .. }
+        | ClipParam::Look { .. }
+        | ClipParam::Style { .. } => Err(PyValueError::new_err(
+            "this property is not animatable from Python yet",
+        )),
     }
 }
 

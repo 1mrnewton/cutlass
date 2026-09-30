@@ -15,6 +15,7 @@ name = "cutlass"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+cutlass-captions = { path = "../cutlass-captions" }
 cutlass-core = { path = "../cutlass-core" }
 cutlass-decoder = { path = "../cutlass-decoder" }
 cutlass-models = { path = "../cutlass-models" }

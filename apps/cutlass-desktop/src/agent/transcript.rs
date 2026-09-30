@@ -16,6 +16,7 @@ pub(crate) fn entry(kind: &str, text: impl Into<SharedString>) -> AgentEntry {
         text: text.into(),
         image: Default::default(),
         image_aspect: 0.0,
+        usage: Default::default(),
     }
 }
 
@@ -40,6 +41,122 @@ pub(crate) fn push_entry(
     text: String,
 ) {
     with_transcript(store, move |model| model.push(entry(kind, text)));
+}
+
+/// Current transcript row count, observed on the Slint thread.
+///
+/// Retries a few times when the event loop is briefly busy so park-time
+/// checkpoints are not lost to a single scheduling miss.
+pub(crate) fn transcript_row_count(store: &slint::Weak<AgentStore<'static>>) -> Option<usize> {
+    for attempt in 0..3 {
+        if let Some(n) = transcript_row_count_once(store) {
+            return Some(n);
+        }
+        if attempt + 1 < 3 {
+            std::thread::sleep(Duration::from_millis(20 * (attempt as u64 + 1)));
+        }
+    }
+    None
+}
+
+fn transcript_row_count_once(store: &slint::Weak<AgentStore<'static>>) -> Option<usize> {
+    let (tx, rx) = bounded(1);
+    let store = store.clone();
+    slint::invoke_from_event_loop(move || {
+        let n = store
+            .upgrade()
+            .map(|store| store.get_transcript().row_count())
+            .unwrap_or(0);
+        let _ = tx.send(n);
+    })
+    .ok()?;
+    rx.recv_timeout(Duration::from_secs(2)).ok()
+}
+
+/// Push a transcript row and return the pre-push row count from the same
+/// event-loop turn — a reliable restore anchor when a separate count call
+/// would race or time out.
+pub(crate) fn push_entry_with_prior_count(
+    store: &slint::Weak<AgentStore<'static>>,
+    kind: &'static str,
+    text: String,
+) -> Option<usize> {
+    let (tx, rx) = bounded(1);
+    let store = store.clone();
+    slint::invoke_from_event_loop(move || {
+        let prior = match store.upgrade() {
+            Some(store) => {
+                let transcript = store.get_transcript();
+                let prior = transcript.row_count();
+                if let Some(model) = transcript.as_any().downcast_ref::<VecModel<AgentEntry>>() {
+                    model.push(entry(kind, text));
+                }
+                prior
+            }
+            None => 0,
+        };
+        let _ = tx.send(prior);
+    })
+    .ok()?;
+    rx.recv_timeout(Duration::from_secs(2)).ok()
+}
+
+/// Drop discarded dry-run rehearsal rows from the chat UI while keeping the
+/// already-pushed replacement user prompt (and any status lines after it).
+pub(crate) fn trim_transcript_after_stale_plan_discard(
+    store: &slint::Weak<AgentStore<'static>>,
+    checkpoint_len: usize,
+) {
+    with_transcript(store, move |model| {
+        let count = model.row_count();
+        let rows: Vec<AgentEntry> = (0..count).filter_map(|i| model.row_data(i)).collect();
+        model.set_vec(trim_rows_after_stale_plan_discard(
+            rows,
+            checkpoint_len,
+            |row| row.kind == "user",
+        ));
+    });
+}
+
+/// Explicit ApplyPlan rejected as stale: drop every rehearsal row after the
+/// dry-run checkpoint (no replacement user prompt to keep).
+pub(crate) fn truncate_transcript_to_checkpoint(
+    store: &slint::Weak<AgentStore<'static>>,
+    checkpoint_len: usize,
+) {
+    with_transcript(store, move |model| {
+        let count = model.row_count();
+        let rows: Vec<AgentEntry> = (0..count).filter_map(|i| model.row_data(i)).collect();
+        model.set_vec(truncate_rows_to_checkpoint(rows, checkpoint_len));
+    });
+}
+
+/// Pure prefix used by [`truncate_transcript_to_checkpoint`].
+pub(crate) fn truncate_rows_to_checkpoint<T>(mut rows: Vec<T>, checkpoint_len: usize) -> Vec<T> {
+    rows.truncate(checkpoint_len.min(rows.len()));
+    rows
+}
+
+/// Pure splice used by [`trim_transcript_after_stale_plan_discard`]: keep
+/// `[0..checkpoint_len)` plus the trailing segment that starts at the latest
+/// `user` row at or after the checkpoint.
+pub(crate) fn trim_rows_after_stale_plan_discard<T>(
+    mut rows: Vec<T>,
+    checkpoint_len: usize,
+    is_user: impl Fn(&T) -> bool,
+) -> Vec<T> {
+    let count = rows.len();
+    let checkpoint_len = checkpoint_len.min(count);
+    let keep_from = (checkpoint_len..count)
+        .rev()
+        .find(|&i| is_user(&rows[i]))
+        .unwrap_or(count);
+    if keep_from > checkpoint_len {
+        rows.drain(checkpoint_len..keep_from);
+    } else if keep_from < checkpoint_len {
+        rows.truncate(checkpoint_len);
+    }
+    rows
 }
 
 pub(crate) fn push_image_entry(
@@ -68,7 +185,41 @@ pub(crate) fn push_image_entry(
             text: label.into(),
             image: slint::Image::from_rgba8(buffer),
             image_aspect: aspect,
+            usage: Default::default(),
         });
+    });
+}
+
+/// Attach a finished prompt's usage line to the current exchange: prefer the
+/// last assistant row after the latest user prompt; otherwise a status line.
+pub(crate) fn attach_usage_line(store: &slint::Weak<AgentStore<'static>>, usage: String) {
+    with_transcript(store, move |model| {
+        let count = model.row_count();
+        let mut last_user = None;
+        for index in 0..count {
+            if model.row_data(index).is_some_and(|row| row.kind == "user") {
+                last_user = Some(index);
+            }
+        }
+        let start = last_user.map(|index| index + 1).unwrap_or(0);
+        let mut assistant_idx = None;
+        for index in (start..count).rev() {
+            if model
+                .row_data(index)
+                .is_some_and(|row| row.kind == "assistant")
+            {
+                assistant_idx = Some(index);
+                break;
+            }
+        }
+        if let Some(index) = assistant_idx {
+            if let Some(mut row) = model.row_data(index) {
+                row.usage = usage.into();
+                model.set_row_data(index, row);
+            }
+        } else {
+            model.push(entry("status", usage));
+        }
     });
 }
 
@@ -180,6 +331,7 @@ pub(crate) fn transcript_snapshot(
                     .map(|row| TranscriptEntry {
                         kind: row.kind.to_string(),
                         text: row.text.to_string(),
+                        usage: row.usage.to_string(),
                     })
                     .collect()
             })
@@ -201,6 +353,7 @@ pub(crate) fn replace_transcript(
         transcript.push(TranscriptEntry {
             kind: "error".into(),
             text: "The previous agent conversation could not be restored.".into(),
+            usage: String::new(),
         });
     }
     with_store(store, move |store| {
@@ -217,7 +370,11 @@ pub(crate) fn replace_transcript(
                     };
                     entry("status", caption)
                 } else {
-                    entry(&saved.kind, saved.text)
+                    let mut row = entry(&saved.kind, saved.text);
+                    if !saved.usage.is_empty() {
+                        row.usage = saved.usage.into();
+                    }
+                    row
                 }
             })
             .collect();

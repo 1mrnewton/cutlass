@@ -9,10 +9,16 @@
 //! re-validates everything on apply.
 
 mod audio;
+mod caption;
+#[cfg(test)]
+mod caption_tests;
 mod command;
 mod look;
 mod lookup;
 mod lower;
+mod motion;
+#[cfg(test)]
+mod motion_tests;
 #[cfg(test)]
 mod tests;
 mod time;
@@ -21,24 +27,28 @@ use std::collections::HashSet;
 
 use cutlass_commands::{Command, EditCommand};
 use cutlass_models::{
-    AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, Clip, ClipId,
-    ClipParam, ClipTransform, CropRect, Easing, Filter, Generator, LayerBackground, LayerGlow,
-    LayerOutline, LayerShadow, LayerStyles, Marker, MarkerColor, MarkerId, Mask, MaskKind, MediaId,
-    Param, ParamValue, PiecewiseEasingPreset, Project, Rational, RationalTime, StabilizeLevel,
-    StyleParam, TimeRange, TrackId, TrackKind, animation_spec, filter_catalog, filter_spec,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, CaptionCueSpec, CaptionGroup,
+    CaptionGroupId, CaptionGroupSpec, CaptionHighlightMode, CaptionSource, CaptionStyleScope,
+    ChromaKey, Clip, ClipId, ClipParam, ClipTransform, CropRect, Easing, Filter, Generator,
+    LayerBackground, LayerGlow, LayerOutline, LayerShadow, LayerStyles, Marker, MarkerColor,
+    MarkerId, Mask, MaskKind, MediaId, Param, ParamValue, PiecewiseEasingPreset, Project, Rational,
+    RationalTime, StabilizeLevel, StyleParam, TimeRange, TrackId, TrackKind, animation_spec,
+    filter_catalog, filter_spec,
 };
 
 use crate::wire::{
-    MAX_MULTI_CLIP_REFS, WireAnimationSlot, WireAudioRole, WireBlendMode, WireCanvasAspect,
-    WireChromaKey, WireClipParam, WireCommand, WireEasing, WireEasingPreset, WireGenerator,
-    WireLayerStyles, WireMarkerColor, WireMask, WireMaskKind, WireShape, WireStabilizeLevel,
-    WireTrackKind,
+    MAX_MULTI_CLIP_REFS, MAX_WIRE_CAPTION_CUES, WireAnimationSlot, WireAudioRole, WireBlendMode,
+    WireCanvasAspect, WireCaptionHighlightMode, WireChromaKey, WireClipParam, WireCommand,
+    WireEasing, WireEasingPreset, WireGenerator, WireLayerStyles, WireMarkerColor, WireMask,
+    WireMaskKind, WireShape, WireStabilizeLevel, WireTrackKind,
 };
 
 use audio::*;
+use caption::*;
 use look::*;
 use lookup::*;
 use lower::*;
+use motion::*;
 use time::*;
 
 /// A wire command the project as it stands cannot accept. The message is

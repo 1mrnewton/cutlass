@@ -4,6 +4,7 @@ use cutlass_models::{TimeRange, TrackId};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use crate::captions::{self, Captions};
 use crate::clip::Clip;
 use crate::content::generator_from;
 use crate::convert::{seconds, span, ticks, time_at, track_kind_name};
@@ -92,6 +93,60 @@ impl Track {
                 content,
                 start,
                 duration,
+            )
+        })
+    }
+
+    /// Place caption lines on this text lane as one group.
+    ///
+    /// Each cue is `(text, start, duration)` in seconds, or a dict with
+    /// `text`, `start`, and either `duration` or `end`. `template` styles every
+    /// line from the catalog (see `cutlass.caption_templates()`).
+    #[pyo3(signature = (cues, template = None, label = None))]
+    fn add_captions(
+        &self,
+        py: Python,
+        cues: &Bound<'_, PyAny>,
+        template: Option<&str>,
+        label: Option<&str>,
+    ) -> PyResult<Captions> {
+        self.with_project(py, |project| {
+            captions::add_captions(
+                project,
+                self.project.clone_ref(py),
+                self.id,
+                cues,
+                template,
+                label,
+            )
+        })
+    }
+
+    /// Import an SRT or WebVTT file onto this text lane as one caption group,
+    /// with caption time zero landing at `start` seconds on the timeline.
+    ///
+    /// The file's own line breaks are kept unless `rewrap=True`. Per-word
+    /// timings are estimated, so an imported group can drive the highlight.
+    #[pyo3(signature = (path, start = 0.0, template = None, label = None, rewrap = false))]
+    fn import_subtitles(
+        &self,
+        py: Python,
+        path: &str,
+        start: f64,
+        template: Option<&str>,
+        label: Option<&str>,
+        rewrap: bool,
+    ) -> PyResult<Captions> {
+        self.with_project(py, |project| {
+            captions::import_subtitles(
+                project,
+                self.project.clone_ref(py),
+                self.id,
+                path,
+                start,
+                template,
+                label,
+                rewrap,
             )
         })
     }

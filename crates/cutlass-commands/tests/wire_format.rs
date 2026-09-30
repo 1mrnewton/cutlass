@@ -10,11 +10,13 @@
 use std::path::PathBuf;
 
 use cutlass_commands::{
-    AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
-    ClipTransform, ColorAdjustments, Command, CropRect, Easing, EditCommand, EditOutcome, Filter,
-    Generator, LayerShadow, LayerStyles, Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId,
-    MotionBlur, Param, ParamValue, ProjectCommand, Rational, RationalTime, Replaceable,
-    SpatialTangents, StabilizeLevel, TemplateMeta, TemplatePick, TimeRange, TrackId, TrackKind,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, CaptionCueSpec,
+    CaptionGroupId, CaptionGroupSpec, CaptionHighlight, CaptionLayout, CaptionStyle,
+    CaptionStyleScope, CaptionWord, ChromaKey, ClipId, ClipParam, ClipTransform, ColorAdjustments,
+    Command, CropRect, Easing, EditCommand, EditOutcome, Filter, Generator, LayerShadow,
+    LayerStyles, Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId, MotionBlur, Param,
+    ParamValue, ProjectCommand, Rational, RationalTime, Replaceable, SpatialTangents,
+    StabilizeLevel, TemplateMeta, TemplatePick, TimeRange, TrackId, TrackKind,
 };
 use serde_json::{Value, json};
 
@@ -38,6 +40,10 @@ fn track(raw: u64) -> TrackId {
 
 fn media(raw: u64) -> MediaId {
     MediaId::from_raw(raw)
+}
+
+fn caption_group(raw: u64) -> CaptionGroupId {
+    CaptionGroupId::from_raw(raw)
 }
 
 /// One sample per [`ProjectCommand`] variant.
@@ -408,6 +414,59 @@ fn edit_samples() -> Vec<EditCommand> {
         EditCommand::SetProjectName {
             name: "Sunday cut".into(),
         },
+        EditCommand::AddCaptionGroup {
+            group: Box::new(
+                CaptionGroupSpec::manual(track(4), "Auto captions").with_template("clean"),
+            ),
+            cues: vec![
+                CaptionCueSpec::new("hello world", tr(0, 30)).with_words(vec![CaptionWord::new(
+                    0,
+                    500,
+                    0..5,
+                )]),
+                CaptionCueSpec::new("second line", tr(30, 30)),
+            ],
+        },
+        EditCommand::RemoveCaptionGroup {
+            group: caption_group(2),
+        },
+        EditCommand::SetCaptionGroupStyle {
+            group: caption_group(2),
+            style: Box::new(CaptionStyle::default()),
+            scope: CaptionStyleScope::KeepOverrides,
+        },
+        EditCommand::SetCaptionGroupLayout {
+            group: caption_group(2),
+            layout: CaptionLayout::default(),
+        },
+        EditCommand::SetCaptionGroupTemplate {
+            group: caption_group(2),
+            template: "karaoke_pop".into(),
+        },
+        EditCommand::SetCaptionGroupLabel {
+            group: caption_group(2),
+            label: "English".into(),
+        },
+        EditCommand::SetCaptionHighlight {
+            group: caption_group(2),
+            highlight: Some(CaptionHighlight::word([255, 216, 0, 255])),
+        },
+        EditCommand::SetCaptionCue {
+            clip: clip(11),
+            text: "hello there".into(),
+            words: Some(vec![CaptionWord::new(0, 500, 0..5)]),
+            speaker: Some("Host".into()),
+        },
+        EditCommand::SplitCaptionCue {
+            clip: clip(11),
+            at: t(15),
+        },
+        EditCommand::MergeCaptionCues {
+            clips: vec![clip(11), clip(12)],
+        },
+        EditCommand::UngroupCaptions {
+            clips: vec![clip(11)],
+        },
     ]
 }
 
@@ -492,6 +551,17 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
         EditCommand::SetMarker { .. } => "SetMarker",
         EditCommand::SetCanvas { .. } => "SetCanvas",
         EditCommand::SetProjectName { .. } => "SetProjectName",
+        EditCommand::AddCaptionGroup { .. } => "AddCaptionGroup",
+        EditCommand::RemoveCaptionGroup { .. } => "RemoveCaptionGroup",
+        EditCommand::SetCaptionGroupStyle { .. } => "SetCaptionGroupStyle",
+        EditCommand::SetCaptionGroupLayout { .. } => "SetCaptionGroupLayout",
+        EditCommand::SetCaptionGroupTemplate { .. } => "SetCaptionGroupTemplate",
+        EditCommand::SetCaptionGroupLabel { .. } => "SetCaptionGroupLabel",
+        EditCommand::SetCaptionHighlight { .. } => "SetCaptionHighlight",
+        EditCommand::SetCaptionCue { .. } => "SetCaptionCue",
+        EditCommand::SplitCaptionCue { .. } => "SplitCaptionCue",
+        EditCommand::MergeCaptionCues { .. } => "MergeCaptionCues",
+        EditCommand::UngroupCaptions { .. } => "UngroupCaptions",
     }
 }
 
@@ -500,7 +570,7 @@ fn edit_variant_name(cmd: &EditCommand) -> &'static str {
 #[test]
 fn command_variant_counts_are_locked() {
     assert_eq!(project_samples().len(), 9);
-    assert_eq!(edit_samples().len(), 63);
+    assert_eq!(edit_samples().len(), 74);
 }
 
 #[test]
@@ -571,6 +641,57 @@ fn golden_add_clip() {
             },
             "start": {"value": 30, "rate": {"num": 30, "den": 1}},
         })
+    );
+}
+
+#[test]
+fn golden_add_caption_group() {
+    // The AI agent and the Python bindings both build captions from this
+    // shape: one command carrying the group's provenance plus every cue.
+    let cmd = Command::Edit(EditCommand::AddCaptionGroup {
+        group: Box::new(CaptionGroupSpec::manual(track(4), "Captions").with_template("clean")),
+        cues: vec![
+            CaptionCueSpec::new("hello", tr(0, 30)).with_words(vec![CaptionWord::new(
+                0,
+                500,
+                0..5,
+            )]),
+        ],
+    });
+    assert_eq!(
+        serde_json::to_value(&cmd).unwrap(),
+        json!({
+            "type": "AddCaptionGroup",
+            "group": {
+                "track": 4,
+                "label": "Captions",
+                "source": "Manual",
+                "template": "clean",
+            },
+            "cues": [{
+                "text": "hello",
+                "timeline": {
+                    "start": {"value": 0, "rate": {"num": 30, "den": 1}},
+                    "duration": {"value": 30, "rate": {"num": 30, "den": 1}},
+                },
+                "words": [{"start_ms": 0, "end_ms": 500, "range": {"start": 0, "end": 5}}],
+            }],
+        })
+    );
+}
+
+#[test]
+fn golden_set_caption_cue() {
+    let cmd = Command::Edit(EditCommand::SetCaptionCue {
+        clip: clip(11),
+        text: "hi".into(),
+        words: None,
+        speaker: None,
+    });
+    assert_eq!(
+        serde_json::to_value(&cmd).unwrap(),
+        json!({"type": "SetCaptionCue", "clip": 11, "text": "hi"}),
+        "omitted word timings mean 'remap the existing ones'"
     );
 }
 

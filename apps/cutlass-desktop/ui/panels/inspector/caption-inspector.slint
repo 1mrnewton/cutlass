@@ -1,0 +1,330 @@
+import {
+    CutlassLineInput,
+    CutlassScrollView,
+    CutlassText,
+    SubtleButton,
+} from "../../components/index.slint";
+import { AppStore, EditorStore, TimelineStore } from "../../store/index.slint";
+import { AppState } from "../../state.slint";
+import { CaptionBackend, CaptionCueRow } from "../../lib/caption-backend.slint";
+import { CaptionGroupView, Clip } from "../../models/index.slint";
+import {
+    InspectorDivider,
+    InspectorTabHeader,
+    LabelCell,
+    SectionHeader,
+} from "inspector-widgets.slint";
+import { InspectorRowMetrics } from "inspector-metrics.slint";
+import { AnimationInspector } from "animation-inspector.slint";
+import { CaptionCueList } from "caption-cue-list.slint";
+import { CaptionGroupRows } from "caption-group-rows.slint";
+import { MultilineTextInput } from "text-inspector.slint";
+import { StylesInspector } from "styles-inspector.slint";
+import { TextStyleRows } from "text-style-rows.slint";
+import { TextTreatmentRows } from "text-treatment-rows.slint";
+
+// Property sheet for a caption cue — a text clip that belongs to a
+// `CaptionGroup`. The selected line is edited on the Captions tab; the Style
+// tab edits that one line's look and can write it through to the whole group
+// ("Apply to all"), which is how a caption pass is meant to go: style one
+// line, apply, then fix the handful that need it.
+export component CaptionInspector inherits VerticalLayout {
+    in property <string> track-id;
+    // Named `model` — `clip` is a built-in boolean on Slint elements.
+    in property <Clip> model;
+
+    spacing: AppStore.theme.metrics.spacing.none;
+
+    private property <CaptionGroupView> group: CaptionBackend.group(
+        EditorStore.project.sequence, root.model.caption-group);
+    private property <[CaptionCueRow]> cues: CaptionBackend.cues(
+        EditorStore.project.sequence, root.model.caption-group);
+    private property <int> selected-tab: 0;
+    private property <string> bound-clip-id: root.model.id;
+    private property <string> edit-text: root.model.text-content;
+    // A restyle leaves hand-tuned lines alone by default; unchecking it makes
+    // "Apply to all" the reset button for a group whose lines have drifted.
+    private property <bool> keep-overrides: true;
+    private property <bool> playhead-inside: TimelineStore.playhead-tick > root.model.timeline-start.value
+        && TimelineStore.playhead-tick < root.model.timeline-start.value + root.model.source-range.duration.value;
+    private property <bool> has-next-cue: root.model.caption-index < root.cues.length;
+
+    changed bound-clip-id => {
+        root.edit-text = root.model.text-content;
+    }
+
+    // Cue text goes through `SetCaptionCue`, not the plain text-clip path, so
+    // the line's word timings are remapped onto the new text instead of
+    // dropped (the karaoke highlight needs them).
+    function commit-cue-text(text: string) {
+        root.edit-text = text;
+        if (text != root.model.text-content) {
+            CaptionBackend.set-cue-text(root.model.id, text);
+        }
+    }
+
+    InspectorTabHeader {
+        tabs: ["Captions", "Style", "Animation"];
+        selected: root.selected-tab;
+        tab-selected(idx) => {
+            root.selected-tab = idx;
+        }
+    }
+
+    body-scroll := CutlassScrollView {
+        vertical-stretch: 1;
+        // Property rows are fixed-width, so a narrow panel scrolls sideways
+        // rather than clipping the right-hand controls (same as the other
+        // sheets).
+        viewport-width: content.width;
+        viewport-height: content.preferred-height;
+        interactive: false;
+
+        // Blur catcher: a click no control claims commits the focused input.
+        TouchArea {
+            x: 0;
+            y: 0;
+            width: max(body-scroll.width, content.width);
+            height: max(body-scroll.height, content.preferred-height);
+            clicked => {
+                AppState.refocus-shortcuts();
+            }
+        }
+
+        content := VerticalLayout {
+            width: max(
+                root.width - AppStore.theme.scrollbar.size,
+                InspectorRowMetrics.min-content-width,
+            );
+            spacing: AppStore.theme.metrics.spacing.lg;
+            alignment: LayoutAlignment.start;
+            padding: AppStore.theme.metrics.spacing.lg;
+
+            if root.selected-tab == 2: AnimationInspector {
+                model: root.model;
+                text-only-combos: true;
+            }
+
+            if root.selected-tab == 1: VerticalLayout {
+                spacing: AppStore.theme.metrics.spacing.lg;
+                alignment: LayoutAlignment.start;
+
+                // Per-line typography: the same rows a title uses, so a cue
+                // stays an ordinary text clip in every other respect.
+                TextStyleRows {
+                    track-id: root.track-id;
+                    model: root.model;
+                    edit-text: root.edit-text;
+                }
+
+                InspectorDivider { }
+
+                TextTreatmentRows {
+                    track-id: root.track-id;
+                    model: root.model;
+                    edit-text: root.edit-text;
+                }
+
+                InspectorDivider { }
+
+                StylesInspector {
+                    model: root.model;
+                }
+
+                InspectorDivider { }
+
+                HorizontalLayout {
+                    spacing: InspectorRowMetrics.spacing;
+                    height: InspectorRowMetrics.control-height;
+                    vertical-stretch: 0;
+
+                    LabelCell {
+                        label: "Keep tuned lines";
+                    }
+
+                    Rectangle {
+                        width: 14px;
+                        height: 14px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: root.keep-overrides
+                            ? AppStore.theme.accent.primary
+                            : #ffffff2f;
+                        background: root.keep-overrides
+                            ? AppStore.theme.accent.primary
+                            : #ffffff14;
+
+                        TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                root.keep-overrides = !root.keep-overrides;
+                                AppState.refocus-shortcuts();
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+
+                    SubtleButton {
+                        label: "Apply to all";
+                        clicked => {
+                            CaptionBackend.apply-style-to-all(
+                                root.group.id, root.model.text-style, root.keep-overrides);
+                        }
+                    }
+                }
+
+                CutlassText {
+                    text: root.keep-overrides
+                        ? "Applies this line's look to every caption, except lines you styled by hand."
+                        : "Applies this line's look to every caption, replacing hand-styled lines.";
+                    style: AppStore.theme.typography.caption;
+                    foreground: AppStore.theme.text.muted;
+                    wrap: word-wrap;
+                }
+            }
+
+            if root.selected-tab == 0: VerticalLayout {
+                spacing: AppStore.theme.metrics.spacing.lg;
+                alignment: LayoutAlignment.start;
+
+                SectionHeader {
+                    title: "Caption group";
+                }
+
+                HorizontalLayout {
+                    spacing: InspectorRowMetrics.spacing;
+                    height: InspectorRowMetrics.control-height;
+                    vertical-stretch: 0;
+
+                    LabelCell {
+                        label: "Name";
+                    }
+
+                    CutlassLineInput {
+                        text: root.group.label;
+                        placeholder-text: "Captions";
+                        accessibility-label: "Caption group name";
+                        commit-on-blur: true;
+                        revert-on-escape: true;
+                        accepted(value) => {
+                            if (value != root.group.label) {
+                                CaptionBackend.set-label(root.group.id, value);
+                            }
+                            AppState.refocus-shortcuts();
+                        }
+                    }
+                }
+
+                CutlassText {
+                    text: root.group.source-label + " · " + root.group.cue-count + " lines";
+                    style: AppStore.theme.typography.caption;
+                    foreground: AppStore.theme.text.muted;
+                }
+
+                InspectorDivider { }
+
+                SectionHeader {
+                    title: "Line " + root.model.caption-index;
+                }
+
+                MultilineTextInput {
+                    text: root.edit-text;
+                    placeholder-text: "Caption text";
+                    accessibility-label: "Caption line text";
+
+                    // Typing stays local; the engine edit commits on blur so
+                    // undo isn't spammed per keystroke and the republish can't
+                    // fight the box.
+                    edited(new-text) => {
+                        root.edit-text = new-text;
+                    }
+                    commit(new-text) => {
+                        root.commit-cue-text(new-text);
+                    }
+                    cancelled => {
+                        self.text = root.model.text-content;
+                        root.edit-text = root.model.text-content;
+                        AppState.refocus-shortcuts();
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: AppStore.theme.metrics.spacing.sm;
+
+                    SubtleButton {
+                        label: "Split at playhead";
+                        enabled: root.playhead-inside;
+                        clicked => {
+                            CaptionBackend.split-cue(root.model.id, TimelineStore.playhead-tick);
+                        }
+                    }
+
+                    SubtleButton {
+                        label: "Merge with next";
+                        enabled: root.has-next-cue;
+                        clicked => {
+                            CaptionBackend.merge-with-next(root.model.id);
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                InspectorDivider { }
+
+                SectionHeader {
+                    title: "Lines";
+                }
+
+                // Clicking a line seeks to it and selects it, so the sheet
+                // walks the transcript without leaving the panel.
+                CaptionCueList {
+                    cues: root.cues;
+                    selected-clip-id: root.model.id;
+                    activated(clip-id, tick) => {
+                        TimelineStore.playhead-tick = tick;
+                        TimelineStore.selected-track-id = root.track-id;
+                        TimelineStore.selected-clip-id = clip-id;
+                        TimelineStore.selected-ids = [clip-id];
+                    }
+                }
+
+                InspectorDivider { }
+
+                CaptionGroupRows {
+                    group: root.group;
+                }
+
+                InspectorDivider { }
+
+                HorizontalLayout {
+                    spacing: AppStore.theme.metrics.spacing.sm;
+
+                    SubtleButton {
+                        label: "Ungroup";
+                        clicked => {
+                            CaptionBackend.ungroup(root.group.id);
+                        }
+                    }
+
+                    SubtleButton {
+                        label: "Delete captions";
+                        clicked => {
+                            CaptionBackend.remove-group(root.group.id);
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+        }
+    }
+}

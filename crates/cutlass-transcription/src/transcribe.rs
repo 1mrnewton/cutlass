@@ -140,6 +140,36 @@ impl CancellationCheck for NeverCancel {
     }
 }
 
+/// Decode progress observed by [`transcribe_pcm_observed`].
+///
+/// Reports run from inside inference, so an implementation must be cheap and
+/// must not block — a slow observer slows the decode itself. A panic is caught
+/// and discarded before control can cross the C callback boundary.
+pub trait ProgressObserver: Send + Sync + 'static {
+    /// Reports the percentage of the audio decoded so far, in `0..=100`.
+    ///
+    /// Whisper reports monotonically, but a caller should not depend on it:
+    /// treat this as the latest estimate rather than an incrementing counter.
+    fn progress(&self, percent: u8);
+}
+
+impl<F> ProgressObserver for F
+where
+    F: Fn(u8) + Send + Sync + 'static,
+{
+    fn progress(&self, percent: u8) {
+        self(percent);
+    }
+}
+
+/// A progress observer that discards every report.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IgnoreProgress;
+
+impl ProgressObserver for IgnoreProgress {
+    fn progress(&self, _percent: u8) {}
+}
+
 /// An error produced before, during, or after Whisper inference.
 #[derive(Debug, Error)]
 pub enum TranscriptionError {
@@ -200,6 +230,37 @@ pub fn transcribe_pcm<C>(
 where
     C: CancellationCheck + ?Sized,
 {
+    transcribe_pcm_observed(
+        model_path,
+        pcm,
+        options,
+        cancellation,
+        Arc::new(IgnoreProgress),
+    )
+}
+
+/// Transcribes like [`transcribe_pcm`], reporting decode progress as it runs.
+///
+/// Inference over a long recording takes minutes, so a caller with a progress
+/// bar wants Whisper's own percentage rather than an estimate. `progress` is
+/// invoked from inside the decode; everything else — validation order,
+/// cancellation points, DTW preset selection, normalization — is identical.
+///
+/// # Errors
+///
+/// Returns the same [`TranscriptionError`] values as [`transcribe_pcm`]. A
+/// panicking observer is swallowed and does not fail the transcription.
+pub fn transcribe_pcm_observed<C, P>(
+    model_path: impl AsRef<Path>,
+    pcm: &[f32],
+    options: &TranscriptionOptions,
+    cancellation: Arc<C>,
+    progress: Arc<P>,
+) -> Result<Transcript, TranscriptionError>
+where
+    C: CancellationCheck + ?Sized,
+    P: ProgressObserver + ?Sized,
+{
     options.validate()?;
     if pcm.is_empty() {
         return Err(TranscriptionError::EmptyPcm);
@@ -253,6 +314,12 @@ where
     });
     parameters.set_abort_callback_safe::<_, Box<dyn FnMut() -> bool>>(Some(abort_callback));
 
+    let callback_progress = Arc::clone(&progress);
+    let progress_callback: Box<dyn FnMut(i32)> = Box::new(move |percent| {
+        report_progress(callback_progress.as_ref(), percent);
+    });
+    parameters.set_progress_callback_safe::<_, Box<dyn FnMut(i32)>>(Some(progress_callback));
+
     let mut state = context.create_state()?;
     if cancellation_requested(cancellation.as_ref()) {
         return Err(TranscriptionError::Cancelled);
@@ -290,6 +357,17 @@ where
 {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cancellation.is_cancelled()))
         .unwrap_or(true)
+}
+
+/// Report one progress percentage, clamping Whisper's `int` and containing a
+/// panicking observer — unlike cancellation there is no safe way to interpret a
+/// failed progress report, so it is dropped.
+fn report_progress<P>(progress: &P, percent: i32)
+where
+    P: ProgressObserver + ?Sized,
+{
+    let percent = percent.clamp(0, 100) as u8;
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| progress.progress(percent)));
 }
 
 fn collect_segment_tokens(
@@ -432,6 +510,44 @@ mod tests {
         )
         .expect_err("cancellation must win before the missing model is opened");
         assert!(matches!(error, TranscriptionError::Cancelled));
+    }
+
+    #[test]
+    fn an_observer_never_runs_when_validation_fails_first() {
+        let reports = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&reports);
+        let error = transcribe_pcm_observed(
+            "/definitely/missing/model.bin",
+            &[],
+            &TranscriptionOptions::default(),
+            Arc::new(NeverCancel),
+            Arc::new(move |_| observed.store(true, Ordering::Relaxed)),
+        )
+        .expect_err("empty PCM must fail before loading a model");
+        assert!(matches!(error, TranscriptionError::EmptyPcm));
+        assert!(!reports.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn progress_reports_are_clamped_and_survive_a_panicking_observer() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        let observer: Arc<dyn ProgressObserver> = Arc::new(move |percent: u8| {
+            recorder.lock().expect("progress recorder").push(percent);
+            assert!(percent <= 100, "clamped before the observer sees it");
+        });
+        for reported in [-7, 0, 42, 100, 273] {
+            report_progress(observer.as_ref(), reported);
+        }
+        assert_eq!(
+            *seen.lock().expect("progress recorder"),
+            [0, 0, 42, 100, 100]
+        );
+
+        report_progress(
+            &|_: u8| panic!("observers must not fail a transcription"),
+            50,
+        );
     }
 
     #[test]

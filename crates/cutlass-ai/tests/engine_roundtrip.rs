@@ -474,6 +474,175 @@ fn unlink_one_member_dissolves_complete_group_and_undoes_once() {
     }
 }
 
+/// "Caption this, in the karaoke look, and make the lines yellow": the
+/// agent's caption vocabulary through validation into a real engine, with
+/// each call landing as exactly one undoable entry.
+#[test]
+fn caption_commands_round_trip_through_the_engine() {
+    let mut engine = engine_with(Project::new("agent-captions", R24));
+    let text = created_track(apply(
+        &mut engine,
+        WireCommand::AddTrack(wire::AddTrack {
+            kind: wire::WireTrackKind::Text,
+            name: "Captions".into(),
+            index: None,
+        }),
+    ));
+
+    let outcome = apply(
+        &mut engine,
+        WireCommand::AddCaptions(wire::AddCaptions {
+            track: text,
+            cues: vec![
+                wire::WireCaptionCue {
+                    text: "we start here".into(),
+                    start: 0.0,
+                    duration: 2.0,
+                },
+                wire::WireCaptionCue {
+                    text: "and end here".into(),
+                    start: 2.0,
+                    duration: 2.0,
+                },
+            ],
+            label: Some("Intro captions".into()),
+            template: Some("karaoke_pop".into()),
+        }),
+    );
+    let group = match outcome {
+        ApplyOutcome::Edited(EditOutcome::CreatedCaptionGroup(id)) => id,
+        other => panic!("expected CreatedCaptionGroup, got {other:?}"),
+    };
+    let cues: Vec<_> = engine.project().timeline().caption_cue_ids(group);
+    assert_eq!(cues.len(), 2);
+
+    // Every cue is a text clip the rest of the vocabulary already covers.
+    apply(
+        &mut engine,
+        WireCommand::SetCaptionStyle(wire::SetCaptionStyle {
+            group: group.raw(),
+            font: None,
+            size: None,
+            fill: Some([255, 216, 0, 255]),
+            bold: None,
+            italic: None,
+            uppercase: Some(true),
+            position_y: None,
+            scale: None,
+            keep_overrides: None,
+        }),
+    );
+    apply(
+        &mut engine,
+        WireCommand::SetCaptionHighlight(wire::SetCaptionHighlight {
+            group: group.raw(),
+            mode: wire::WireCaptionHighlightMode::Word,
+            fill: Some([255, 0, 96, 255]),
+            plate: None,
+            plate_radius: None,
+            scale: Some(1.1),
+        }),
+    );
+    {
+        let project = engine.project();
+        let cue = project.clip(cues[0]).unwrap();
+        assert_eq!(cue.caption.as_ref().map(|c| c.group), Some(group));
+        let styled = project.timeline().caption_group(group).unwrap();
+        assert_eq!(styled.style.text.fill.constant(), Some([255, 216, 0, 255]));
+        assert_eq!(
+            styled.highlights().map(|h| h.fill),
+            Some([255, 0, 96, 255]),
+            "the highlight is on and carries the requested color"
+        );
+        // The write-through reached the cue clips, which are the render truth.
+        let style = cue.text_style().expect("a cue is a text clip");
+        assert_eq!(style.fill.constant(), Some([255, 216, 0, 255]));
+    }
+
+    // The summary the model reads back names the group and tags its cues.
+    let summary = summarize(engine.project());
+    assert_eq!(summary.captions.len(), 1);
+    let described = &summary.captions[0];
+    assert_eq!(described.id, group.raw());
+    assert_eq!(described.label, "Intro captions");
+    assert_eq!(described.cues, 2);
+    assert_eq!(described.source, "manual");
+    assert_eq!(described.highlight.as_deref(), Some("word"));
+    assert!(
+        !described.word_timings,
+        "hand-written lines carry no per-word timings"
+    );
+    assert!(
+        summary.tracks[0]
+            .clips
+            .iter()
+            .all(|clip| clip.caption == Some(group.raw()))
+    );
+
+    // Splitting a cue is caption-aware: the halves stay in the group and get
+    // renumbered rather than becoming two loose titles.
+    let outcome = apply(
+        &mut engine,
+        WireCommand::SplitClip(wire::SplitClip {
+            clip: cues[0].raw(),
+            at: 1.0,
+        }),
+    );
+    let right = match outcome {
+        ApplyOutcome::Edited(EditOutcome::Created(id)) => id,
+        other => panic!("expected Created, got {other:?}"),
+    };
+    {
+        let project = engine.project();
+        assert_eq!(project.timeline().caption_cues(group).len(), 3);
+        let indices: Vec<u32> = project
+            .timeline()
+            .caption_cues(group)
+            .iter()
+            .filter_map(|clip| clip.caption.as_ref().map(|cue| cue.index))
+            .collect();
+        assert_eq!(
+            indices,
+            vec![0, 1, 2],
+            "the group renumbered around the cut"
+        );
+        assert_eq!(project.clip(right).unwrap().caption_group(), Some(group));
+    }
+    assert!(engine.undo(), "the split was one history entry");
+
+    let text_of = |engine: &Engine, id: cutlass_models::ClipId| {
+        engine
+            .project()
+            .clip(id)
+            .and_then(|clip| clip.text_content())
+            .expect("a cue is a text clip")
+            .to_string()
+    };
+    apply(
+        &mut engine,
+        WireCommand::MergeCaptions(wire::MergeCaptions {
+            clips: vec![cues[0].raw(), cues[1].raw()],
+        }),
+    );
+    assert_eq!(text_of(&engine, cues[0]), "we start here and end here");
+    assert!(engine.project().clip(cues[1]).is_none());
+
+    apply(
+        &mut engine,
+        WireCommand::RemoveCaptions(wire::RemoveCaptions { group: group.raw() }),
+    );
+    assert!(engine.project().timeline().caption_group(group).is_none());
+    assert_eq!(engine.project().timeline().clip_count(), 0);
+
+    // Six surviving commands, six history entries; unwinding restores each.
+    let mut undone = 0;
+    while engine.undo() {
+        undone += 1;
+    }
+    assert_eq!(undone, 6);
+    assert_eq!(engine.project().timeline().track_count(), 0);
+}
+
 #[test]
 fn engine_rejections_leave_state_untouched() {
     let mut project = Project::new("agent-rejects", R24);

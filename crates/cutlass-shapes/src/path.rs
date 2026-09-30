@@ -10,9 +10,7 @@
 //! Fill rule is **non-zero winding** everywhere (raster and
 //! [`path_hit_test`]), matching the pen-tool convention in Photoshop/AE.
 
-use std::collections::HashMap;
-
-use cutlass_core::RgbaImage;
+use cutlass_core::{ByteBudgetLru, RASTER_MEMO_BUDGET_BYTES, RgbaImage};
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Transform};
 
 use crate::{BezierPath, PathPoint, ShapeStyle};
@@ -29,8 +27,11 @@ const RASTER_PAD: f32 = 2.0;
 /// Rasterizes pen paths, memoizing recent results. Owned by the renderer next
 /// to the `TextRenderer`; reuse one across frames so unchanged paths cost a
 /// memo lookup plus a bitmap copy-out.
+///
+/// Memo is **byte-budgeted** ([`RASTER_MEMO_BUDGET_BYTES`]): LRU by payload
+/// size. Entries larger than the budget bypass the cache.
 pub struct PathRaster {
-    memo: HashMap<PathKey, RgbaImage>,
+    memo: ByteBudgetLru<PathKey, RgbaImage>,
 }
 
 impl Default for PathRaster {
@@ -42,7 +43,7 @@ impl Default for PathRaster {
 impl PathRaster {
     pub fn new() -> Self {
         Self {
-            memo: HashMap::new(),
+            memo: ByteBudgetLru::new(RASTER_MEMO_BUDGET_BYTES),
         }
     }
 
@@ -53,17 +54,12 @@ impl PathRaster {
     /// nothing to draw (fewer than 2 points, or no fill and no stroke).
     pub fn rasterize(&mut self, path: &BezierPath, style: &ShapeStyle, scale: f32) -> RgbaImage {
         let key = PathKey::new(path, style, scale);
-        if let Some(hit) = self.memo.get(&key) {
-            return hit.clone();
+        if let Some(hit) = self.memo.get_cloned(&key) {
+            return hit;
         }
         let image = rasterize_uncached(path, style, scale);
-        // Bounded memory: wholesale clear at the cap (a frame loop keeps a
-        // handful of live keys; see cutlass-text for the same reasoning).
-        const MEMO_CAP: usize = 32;
-        if self.memo.len() >= MEMO_CAP {
-            self.memo.clear();
-        }
-        self.memo.insert(key, image.clone());
+        let cost = image.pixels.len();
+        self.memo.insert(key, image.clone(), cost);
         image
     }
 }
@@ -297,7 +293,7 @@ fn flatten_segment(a: &PathPoint, b: &PathPoint, out: &mut Vec<[f32; 2]>) {
 
 /// Memo identity of a raster request: every coordinate/color/width by bit
 /// pattern, so any edit is a new key (never a wrong hit).
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct PathKey {
     points: Vec<[u32; 6]>,
     closed: bool,
@@ -444,6 +440,22 @@ mod tests {
         assert_eq!(r.memo.len(), 1);
         let _ = r.rasterize(&diamond(11.0), &filled([1, 2, 3, 255]), 1.0);
         assert_eq!(r.memo.len(), 2, "different geometry is a new entry");
+    }
+
+    #[test]
+    fn memo_evicts_oldest_when_byte_budget_exceeded() {
+        let mut r = PathRaster {
+            memo: ByteBudgetLru::new(4 * 1024),
+        };
+        let a = r.rasterize(&diamond(40.0), &filled([1, 2, 3, 255]), 2.0);
+        let b = r.rasterize(&diamond(41.0), &filled([1, 2, 3, 255]), 2.0);
+        assert!(a.pixels.len() + b.pixels.len() > 4 * 1024);
+        let _ = r.rasterize(&diamond(42.0), &filled([1, 2, 3, 255]), 2.0);
+        assert!(
+            r.memo.bytes() <= 4 * 1024,
+            "path memo bytes {} exceeded budget",
+            r.memo.bytes()
+        );
     }
 
     #[test]

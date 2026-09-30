@@ -20,6 +20,7 @@ slint = { version = "=1.17.1", features = [
 # bridge like the iOS/Android apps. The same `crates/cutlass-engine` drives
 # three unrelated frontends.
 cutlass-analysis = { path = "../../crates/cutlass-analysis", features = ["sqlite"] }
+cutlass-captions = { path = "../../crates/cutlass-captions" }
 cutlass-commands = { path = "../../crates/cutlass-commands" }
 cutlass-compositor = { path = "../../crates/cutlass-compositor" }
 cutlass-decoder = { path = "../../crates/cutlass-decoder" }
@@ -31,6 +32,10 @@ cutlass-models = { path = "../../crates/cutlass-models" }
 cutlass-render = { path = "../../crates/cutlass-render" }
 cutlass-settings = { path = "../../crates/cutlass-settings" }
 cutlass-storage = { path = "../../crates/cutlass-storage" }
+# Auto captions. `whisper-rs-sys` builds whisper.cpp through cmake, so this is
+# the one dependency that adds a measurable cold-build cost (~30 s); it does not
+# rebuild afterwards and the model itself is downloaded on demand, never bundled.
+cutlass-transcription = { path = "../../crates/cutlass-transcription" }
 cutlass-ai = { path = "../../crates/cutlass-ai" }
 cutlass-cloud = { path = "../../crates/cutlass-cloud" }
 cpal = "0.18.1"

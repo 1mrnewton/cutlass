@@ -36,6 +36,7 @@
 //! `thiserror` and (optional) `serde`.
 
 pub mod audio;
+pub mod byte_budget;
 pub mod color;
 pub mod decode;
 pub mod encode;
@@ -46,6 +47,7 @@ pub mod pixel;
 pub mod time;
 
 pub use audio::{AudioEncoderConfig, AudioReader};
+pub use byte_budget::{ByteBudgetLru, RASTER_MEMO_BUDGET_BYTES};
 pub use color::{ColorPrimaries, ColorRange, ColorSpace, MatrixCoefficients, TransferFunction};
 pub use decode::{DecodeError, SourceInfo, VideoDecoder};
 pub use encode::{EncodeError, EncoderConfig, VideoEncoder};

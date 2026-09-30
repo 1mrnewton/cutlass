@@ -9,8 +9,9 @@ export global ExportBackend {
     // Kick off the export. `target-height` 0 ⇒ the composite canvas size;
     // `fps-num` 0 ⇒ the timeline rate (presets are integer rates, den 1).
     // Rate control belongs to the platform encoder (VideoToolbox on macOS),
-    // so there is no quality knob.
-    callback start(path: string, target-height: int, fps-num: int);
+    // so there is no quality knob. `subtitles` writes a sidecar next to the
+    // video from the project's caption groups: 0 none, 1 `.srt`, 2 `.vtt`.
+    callback start(path: string, target-height: int, fps-num: int, subtitles: int);
     // Flag the running job to stop after the frame in flight. The job
     // confirms by publishing `failed` with a cancellation status.
     callback cancel();

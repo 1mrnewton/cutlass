@@ -1,0 +1,15 @@
+[package]
+name = "cutlass-captions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Caption logic for Cutlass: segmenting timed words into readable cues, reflowing and retiming them, and reading/writing SRT and WebVTT."
+
+[dependencies]
+# The data model only: cues come out as `CaptionCueSpec`, ready for
+# `AddCaptionGroup`. No IO, no speech recognition, so this stays cheap to build
+# for the desktop, CLI, Python, and AI layers alike.
+cutlass-models = { path = "../cutlass-models" }
+thiserror.workspace = true

@@ -12,6 +12,7 @@ use crate::param::{Easing, Keyframe};
 
 mod crop;
 mod generator;
+mod params;
 mod retiming;
 mod template;
 mod text;
@@ -251,6 +252,13 @@ pub struct Clip {
     /// `Generator::Text` clips; `false` (and absent from saves) otherwise.
     #[serde(default, skip_serializing_if = "is_false")]
     pub text_editable: bool,
+    /// Caption cue metadata: this clip is one line of a
+    /// [`CaptionGroup`](crate::CaptionGroup) — group membership, order, and
+    /// optional word timings for highlight rendering. `None` ⇔ an ordinary
+    /// title/text clip. `Generator::Text` clips on text lanes only; absent
+    /// from saves while `None`, so non-caption projects stay byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<crate::caption::CaptionCue>,
 }
 
 /// Upper bound for [`Clip::volume`] (CapCut's 1000% ceiling).
@@ -450,6 +458,7 @@ impl Clip {
             audio_role: None,
             replaceable: None,
             text_editable: false,
+            caption: None,
         }
     }
 
@@ -566,6 +575,7 @@ impl Clip {
         frozen.animation_combo = None;
         frozen.replaceable = None;
         frozen.text_editable = false;
+        frozen.caption = None;
         Ok(frozen)
     }
 
@@ -607,6 +617,7 @@ impl Clip {
             audio_role: None,
             replaceable: None,
             text_editable: false,
+            caption: None,
         }
     }
 
@@ -668,6 +679,52 @@ impl Clip {
     /// True iff the clip carries detected beat markers (M8 Phase 6).
     pub fn has_beats(&self) -> bool {
         !self.beats.is_empty()
+    }
+
+    // --- captions -----------------------------------------------------------
+
+    /// This clip's text, when it is a text generator (a title or caption cue).
+    pub fn text_content(&self) -> Option<&str> {
+        match &self.content {
+            ClipSource::Generated(Generator::Text { content, .. }) => Some(content.as_str()),
+            _ => None,
+        }
+    }
+
+    /// This clip's text style, when it is a text generator.
+    pub fn text_style(&self) -> Option<&TextStyle> {
+        match &self.content {
+            ClipSource::Generated(Generator::Text { style, .. }) => Some(style),
+            _ => None,
+        }
+    }
+
+    /// The caption group this clip is a cue of, or `None` for an ordinary clip.
+    pub fn caption_group(&self) -> Option<crate::ids::CaptionGroupId> {
+        self.caption.as_ref().map(|cue| cue.group)
+    }
+
+    /// True iff this clip is a caption cue.
+    pub fn is_caption(&self) -> bool {
+        self.caption.is_some()
+    }
+
+    /// Byte range of the word this cue highlights at `tick` (clip-relative
+    /// timeline ticks at `rate`), or `None` when the clip is not a caption cue,
+    /// has no word timings, or the playhead sits before the first word.
+    ///
+    /// Called per frame by the resolver, so it stays an `O(log words)` lookup
+    /// with no allocation.
+    pub fn caption_word_at(&self, tick: i64, rate: Rational) -> Option<std::ops::Range<usize>> {
+        let cue = self.caption.as_ref()?;
+        let ms = (tick.max(0) as f64 * rate.seconds_per_unit() * 1000.0).round();
+        let ms = if ms.is_finite() {
+            ms.clamp(0.0, f64::from(u32::MAX)) as u32
+        } else {
+            return None;
+        };
+        let index = cue.active_word_at(ms)?;
+        Some(cue.words[index].byte_range())
     }
 
     /// Absolute timeline ticks (at the clip's timeline rate) for every detected

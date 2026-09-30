@@ -27,12 +27,17 @@ mod resolve;
 mod scene;
 mod transactional_file;
 
+// Re-export for desktop look-preview tests (session override attach path).
+#[doc(hidden)]
+pub use motion_blur::attach_motion_blur_passes;
+
 pub use cutlass_compositor::FrameSink;
 pub use cutlass_core::RgbaImage;
 pub use error::RenderError;
 pub use export::{
-    ExportObserver, ExportSettings, PngSequenceEncoder, decode_png, encode_png, export,
-    export_config, export_config_with, export_observed, export_to_file, export_to_file_observed,
+    ExportObserver, ExportSettings, PngSequenceEncoder, decode_png, encode_jpeg, encode_png,
+    export, export_config, export_config_with, export_observed, export_to_file,
+    export_to_file_observed,
 };
 pub use export_audio::{EXPORT_AUDIO_CHANNELS, EXPORT_AUDIO_RATE, ExportAudioMixer};
 pub use lut_pack::{STARTER_LUT_SIZE, StarterLut, starter_lut_pack};
@@ -40,7 +45,7 @@ pub use lut_pack::{STARTER_LUT_SIZE, StarterLut, starter_lut_pack};
 pub use render::text_anim_bench;
 pub use render::{FrameStats, GestureFrames, Renderer, SeekPolicy};
 pub use resolve::{
-    GESTURE_IDENTITY_TRANSFORM, GestureScenePartition, ResolveOverrides, canvas_size, resolve,
-    resolve_gesture_partitions, resolve_with,
+    GESTURE_IDENTITY_TRANSFORM, GestureScenePartition, ParamOverrides, ResolveOverrides,
+    canvas_size, resolve, resolve_gesture_partitions, resolve_with,
 };
-pub use scene::{LayerSource, Scene, SceneLayer, SizeSpec, TextAnimation};
+pub use scene::{LayerSource, Scene, SceneLayer, SizeSpec, TextAnimation, TextHighlight};

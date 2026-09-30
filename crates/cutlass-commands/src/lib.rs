@@ -9,11 +9,13 @@ pub use command::{Command, EditCommand, EditOutcome, ProjectCommand, TemplatePic
 // Every model type a command field carries, so callers (shell FFI, the AI
 // agent, tests) can build any command from this crate alone.
 pub use cutlass_models::{
-    AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, ChromaKey, ClipId, ClipParam,
-    ClipTransform, ColorAdjustments, CropRect, Easing, Filter, Generator, LayerShadow, LayerStyles,
-    Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId, MotionBlur, Param, ParamValue,
-    PiecewiseEasingPreset, Rational, RationalTime, Replaceable, SpatialTangents, StabilizeLevel,
-    TemplateMeta, TimeRange, TrackId, TrackKind,
+    AnimationRef, AnimationSlot, AudioRole, BlendMode, CanvasAspect, CaptionCueSpec,
+    CaptionFileFormat, CaptionGroupId, CaptionGroupSpec, CaptionHighlight, CaptionHighlightMode,
+    CaptionLayout, CaptionSource, CaptionStyle, CaptionStyleScope, CaptionWord, ChromaKey, ClipId,
+    ClipParam, ClipTransform, ColorAdjustments, CropRect, Easing, Filter, Generator, LayerShadow,
+    LayerStyles, Lut, MarkerColor, MarkerId, Mask, MaskKind, MediaId, MotionBlur, Param,
+    ParamValue, PiecewiseEasingPreset, Rational, RationalTime, Replaceable, SpatialTangents,
+    StabilizeLevel, TemplateMeta, TimeRange, TrackId, TrackKind,
 };
 
 use tracing::info;

@@ -20,11 +20,19 @@ const BOX_BLUR_ITERATIONS: u32 = 2;
 /// overflowing allocation or practically unbounded morphology loop.
 const MAX_EFFECT_EXTENT_PX: f32 = 4096.0;
 
+/// Pixel size of [`paint`] output for `shaped` + `style` (extent + effect pad).
+pub fn painted_size(shaped: &ShapedText, style: &TextStyle) -> (u32, u32) {
+    let pad = effect_padding(style);
+    (
+        shaped.extent.0.saturating_add(pad.saturating_mul(2)),
+        shaped.extent.1.saturating_add(pad.saturating_mul(2)),
+    )
+}
+
 /// Compose stroke / background / shadow around an already-shaped run.
 pub(crate) fn paint(shaped: &ShapedText, style: &TextStyle) -> RgbaImage {
     let pad = effect_padding(style);
-    let width = shaped.extent.0.saturating_add(pad.saturating_mul(2));
-    let height = shaped.extent.1.saturating_add(pad.saturating_mul(2));
+    let (width, height) = painted_size(shaped, style);
     let Some(pixel_len) = (width as usize)
         .checked_mul(height as usize)
         .and_then(|pixels| pixels.checked_mul(4))
@@ -465,15 +473,15 @@ fn index_1d(w: u32, outer: i32, inner: i32, horizontal: bool) -> usize {
 }
 
 /// Axis-aligned card rectangle in bitmap space.
-struct CardRect {
-    x0: f32,
-    y0: f32,
-    x1: f32,
-    y1: f32,
+pub(crate) struct CardRect {
+    pub(crate) x0: f32,
+    pub(crate) y0: f32,
+    pub(crate) x1: f32,
+    pub(crate) y1: f32,
 }
 
 /// Fill a rounded rectangle (axis-aligned) with analytic coverage.
-fn fill_rounded_rect(
+pub(crate) fn fill_rounded_rect(
     pixels: &mut [u8],
     width: u32,
     height: u32,

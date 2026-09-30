@@ -131,7 +131,72 @@ export struct MotionPathDragResolution {
     opacity: float,
 }
 
+// Eyedropper sample at a viewport point: `hit` is false over letterbox
+// bars or when no frame is available. `loupe` is an 11×11 nearest-neighbor
+// neighborhood (display with `image-rendering: pixelated`).
+export struct EyedropperSample {
+    hit: bool,
+    color: color,
+    loupe: image,
+    label: string,
+}
+
+// On-canvas mask gizmo (viewport-element logical px). Geometry from
+// `src/preview_mask_gizmo.rs`. Handle hit ids: 0=none, 1=center, 2=body,
+// 3=size-x, 4=size-y, 5=rotation, 6=feather, 7=roundness. `outline2` is the
+// second Mirror band edge (empty for other kinds). Param fields are the
+// sampled/live model values used to build the overlay (layer fractions /
+// degrees) so drag commits don't re-sample a stale projection.
+export struct MaskGizmo {
+    visible: bool,
+    kind: string,
+    outline-commands: string,
+    outline2-commands: string,
+    center-x: float,
+    center-y: float,
+    has-size-x: bool,
+    size-x-x: float,
+    size-x-y: float,
+    has-size-y: bool,
+    size-y-x: float,
+    size-y-y: float,
+    rotation-x: float,
+    rotation-y: float,
+    feather-x: float,
+    feather-y: float,
+    has-roundness: bool,
+    roundness-x: float,
+    roundness-y: float,
+    center-fx: float,
+    center-fy: float,
+    size-w: float,
+    size-h: float,
+    rotation-deg: float,
+    feather: float,
+    roundness: float,
+}
+
+// Resolved mask-handle drag: updated layer-fraction / degree params.
+export struct MaskGizmoDragResolution {
+    valid: bool,
+    center-fx: float,
+    center-fy: float,
+    size-w: float,
+    size-h: float,
+    rotation-deg: float,
+    feather: float,
+    roundness: float,
+}
+
 export global PreviewBackend {
+    // Sample the composited preview frame under the cursor (widget px →
+    // frame pixel via viewport_mapping). Letterbox → hit=false.
+    pure callback sample-preview(image  /* frame */, float  /* x */, float  /* y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, float  /* canvas-w */, float  /* canvas-h */, bool   /* enable-alpha */, ) -> EyedropperSample;
+
+    // Zero-size placeholder used to drop the eyedropper's frozen source
+    // frame on disarm (releases the SharedPixelBuffer retain).
+    pure callback empty-frame() -> image;
+
     // Topmost hit at (x, y) in viewport-element coordinates, given the
     // viewport's current size and zoom/pan. Locked lanes don't hit-test
     // (same rule as the timeline); hidden lanes aren't composited so they
@@ -149,12 +214,12 @@ export global PreviewBackend {
     // projection still holds the press-time transform, so the panel passes
     // the gesture's resolution (`gesture-active` + `gesture`) to keep the
     // box glued to the moving/scaling/rotating content.
-    pure callback selection-box(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* gesture-active */, PreviewDragResolution /* gesture */, ) -> PreviewSelectionBox;
+    pure callback selection-box(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* gesture-active */, PreviewDragResolution /* gesture */, int    /* gesture-epoch */, ) -> PreviewSelectionBox;
 
     // Sprite image placement for a zero-drift transform gesture: maps the
     // identity-transform raster to the live gesture transform using the same
     // placement math as the selection box.
-    pure callback sprite-placement(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* gesture-active */, PreviewDragResolution /* gesture */, ) -> PreviewSpritePlacement;
+    pure callback sprite-placement(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* gesture-active */, PreviewDragResolution /* gesture */, int    /* gesture-epoch */, ) -> PreviewSpritePlacement;
 
     // Motion-path overlay for a selected clip with keyframed position:
     // sampled polyline (SVG commands) + keyframe diamonds in viewport px.
@@ -177,6 +242,20 @@ export global PreviewBackend {
 
     // Commit spatial tangents on the position keyframe at `tick`.
     callback motion-path-commit-tangents(clip-id: string, tick: int, out-x: float, out-y: float, in-x: float, in-y: float);
+
+    // Mask gizmo overlay for a selected clip that has a mask. When
+    // `live-active` is true the live-* fields replace playhead samples so
+    // the handles track ParamOverride / on-canvas drags.
+    pure callback mask-gizmo(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* live-active */, float  /* live-center-x */, float  /* live-center-y */, float  /* live-size-w */, float  /* live-size-h */, float  /* live-rotation */, float  /* live-feather */, float  /* live-roundness */, ) -> MaskGizmo;
+
+    // Handle under (x, y) in viewport px (see MaskGizmo hit ids). Rebuilds
+    // layout from the same inputs as mask-gizmo.
+    pure callback hit-test-mask-gizmo(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, float  /* x */, float  /* y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, bool   /* live-active */, float  /* live-center-x */, float  /* live-center-y */, float  /* live-size-w */, float  /* live-size-h */, float  /* live-rotation */, float  /* live-feather */, float  /* live-roundness */, float  /* tolerance */, ) -> int;
+
+    // Cursor drag → updated mask params for the pressed handle. `start-*`
+    // are the params captured at press (before the drag). `keep-aspect`
+    // (Shift held) locks Circle/Rectangle X/Y size ratio while sizing.
+    pure callback resolve-mask-gizmo-drag(Sequence /* sequence */, string /* clip-id */, int    /* playhead-tick */, int    /* handle */, float  /* press-x */, float  /* press-y */, float  /* cursor-x */, float  /* cursor-y */, float  /* view-w */, float  /* view-h */, float  /* zoom */, float  /* pan-x */, float  /* pan-y */, float  /* start-center-x */, float  /* start-center-y */, float  /* start-size-w */, float  /* start-size-h */, float  /* start-rotation */, float  /* start-feather */, float  /* start-roundness */, string /* kind */, bool   /* keep-aspect */, ) -> MaskGizmoDragResolution;
 
     // Move gesture (preview roadmap Phase 3): press point + current cursor
     // (viewport-element px) → new normalized position, center-guide magnet

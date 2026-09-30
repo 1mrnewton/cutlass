@@ -5,7 +5,7 @@
 // bar that auto-hides after mouse idle (CapCut-style).
 import { AppState } from "state.slint";
 import { AppStore } from "store/index.slint";
-import { EditorStore, TimelineStore, PreviewStore, TimelineActions } from "store/index.slint";
+import { EditorStore, TimelineStore, PreviewStore, EyedropperStore, TimelineActions } from "store/index.slint";
 import { TimelineLib } from "lib/timeline-lib.slint";
 import { RationalTime } from "models/index.slint";
 import { Slider } from "std-widgets.slint";
@@ -94,15 +94,26 @@ export component FullscreenPreview inherits Rectangle {
 
         // Report the fullscreen surface so frames render at screen size;
         // leaving fullscreen recreates the docked panel, which re-reports
-        // its own (smaller) viewport.
+        // its own (smaller) viewport. Eyedropper overlay reads these bounds.
+        function sync-eyedropper-geometry() {
+            EyedropperStore.preview-x = self.absolute-position.x;
+            EyedropperStore.preview-y = self.absolute-position.y;
+            EyedropperStore.preview-w = self.width;
+            EyedropperStore.preview-h = self.height;
+            EyedropperStore.canvas-w = EditorStore.project.sequence.width / 1px;
+            EyedropperStore.canvas-h = EditorStore.project.sequence.height / 1px;
+        }
         init => {
             PreviewStore.viewport-changed(self.width, self.height);
+            self.sync-eyedropper-geometry();
         }
         changed width => {
             PreviewStore.viewport-changed(self.width, self.height);
+            self.sync-eyedropper-geometry();
         }
         changed height => {
             PreviewStore.viewport-changed(self.width, self.height);
+            self.sync-eyedropper-geometry();
         }
 
         // Live preview frames — the same worker-delivered image as the

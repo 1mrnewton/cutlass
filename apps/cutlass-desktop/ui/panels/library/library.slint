@@ -15,7 +15,7 @@ import {
 } from "../../components/index.slint";
 import { AppStore, EditorStore, TimelineStore } from "../../store/index.slint";
 import { Media, TrackKind, CatalogEntry } from "../../models/index.slint";
-import { EffectsBackend, CloudBackend, TextPresetsBackend, AiBackend, LottieBackend, SfxBackend } from "../../lib/index.slint";
+import { EffectsBackend, CloudBackend, TextPresetsBackend, AiBackend, LottieBackend, SfxBackend, CaptionBackend } from "../../lib/index.slint";
 import { MediaTile, GeneratedTile, CatalogTile, TransitionCatalogTile, StockMediaTile, TextPresetLibraryTile, AiMediaTile, SfxAudioTile } from "tiles.slint";
 import { SectionPlaceholder } from "placeholder.slint";
 import { CutlassScrollView } from "../../components/scroll-view.slint";
@@ -23,13 +23,17 @@ import { AppState } from "../../state.slint";
 
 // Active tab + per-tab section. A global rather than panel state: the panel
 // unmounts while fullscreen preview is up, and the selection should survive
-// the round trip.
-global LibraryState {
+// the round trip. Exported because the Auto captions dialog shares the caption
+// template choice with the Captions section that opens it.
+export global LibraryState {
     in-out property <string> active-tab: "media";
     in-out property <string> media-section: "local";
     in-out property <string> audio-section: "local";
     in-out property <string> text-section: "titles";
     in-out property <string> stickers-section: "shapes";
+    // Caption template the Captions section creates and imports with. Kept
+    // here (not in the panel) so it survives the panel unmounting.
+    in-out property <string> caption-template: "clean";
 }
 
 // Shared accent for active tab / section labels (same accent as AccentButton).
@@ -397,6 +401,7 @@ export component LibraryPanel inherits PanelBase {
                     width: parent.width;
                     sections: [
                         { id: "titles", label: "Add text" },
+                        { id: "captions", label: "Captions" },
                         { id: "presets", label: "Presets" },
                     ];
                     active: LibraryState.text-section;
@@ -933,6 +938,133 @@ export component LibraryPanel inherits PanelBase {
                         lane-kind: TrackKind.text;
                         seconds: 3;
                         swatch: #3A6FC8;
+                    }
+                }
+
+                // ---- Text > Captions ----------------------------------------
+                // Captions are text clips bound by a caption group: adding one
+                // starts the group at the playhead, importing a subtitle file
+                // fills it from someone else's timings. Both land as one
+                // undoable edit; the template picks the shared look.
+                if LibraryState.active-tab == "text" && LibraryState.text-section == "captions": VerticalLayout {
+                    padding: AppStore.theme.metrics.spacing.lg;
+                    spacing: AppStore.theme.metrics.spacing.lg;
+                    alignment: LayoutAlignment.start;
+
+                    CutlassText {
+                        text: "Captions";
+                        style: AppStore.theme.typography.heading-sm;
+                    }
+
+                    CutlassText {
+                        text: "Each caption line is a text clip on a text lane. Lines in one group share a style, so restyling is a single edit.";
+                        style: AppStore.theme.typography.caption;
+                        foreground: AppStore.theme.text.secondary;
+                        wrap: word-wrap;
+                    }
+
+                    CutlassText {
+                        text: "Style";
+                        style: AppStore.theme.typography.label;
+                        foreground: AppStore.theme.text.secondary;
+                    }
+
+                    // The templates come from the model's catalog, so the
+                    // chips can't drift from what the caption commands accept.
+                    CutlassScrollView {
+                        width: 100%;
+                        height: 30px + AppStore.theme.scrollbar.size;
+                        viewport-width: template-chips.preferred-width;
+                        viewport-height: 30px;
+                        show-vertical-scrollbar: false;
+
+                        template-chips := HorizontalLayout {
+                            spacing: AppStore.theme.metrics.spacing.sm;
+
+                            for template in CaptionBackend.templates: Rectangle {
+                                property <bool> selected:
+                                    template.id == LibraryState.caption-template;
+
+                                height: 30px;
+                                width: chip-label.preferred-width
+                                    + 2 * AppStore.theme.metrics.spacing.lg;
+                                border-radius: AppStore.theme.metrics.radius.sm;
+                                background: self.selected ? #ffffff14 : #ffffff08;
+                                border-width: 1px;
+                                border-color: self.selected
+                                    ? AppStore.theme.accent.primary
+                                    : #ffffff14;
+
+                                chip-label := CutlassText {
+                                    width: 100%;
+                                    height: 100%;
+                                    text: template.label;
+                                    style: AppStore.theme.typography.label;
+                                    foreground: parent.selected
+                                        ? AppStore.theme.text.primary
+                                        : AppStore.theme.text.secondary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => {
+                                        LibraryState.caption-template = template.id;
+                                        AppState.refocus-shortcuts();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: AppStore.theme.metrics.spacing.md;
+                        height: 28px;
+                        vertical-stretch: 0;
+
+                        SubtleButton {
+                            label: "Add caption";
+                            clicked => {
+                                CaptionBackend.add-caption(
+                                    "",
+                                    TimelineStore.playhead-tick,
+                                    "Caption",
+                                    LibraryState.caption-template);
+                                AppState.refocus-shortcuts();
+                            }
+                        }
+
+                        SubtleButton {
+                            label: "Import subtitles…";
+                            clicked => {
+                                CaptionBackend.import-subtitles(
+                                    TimelineStore.playhead-tick,
+                                    LibraryState.caption-template);
+                                AppState.refocus-shortcuts();
+                            }
+                        }
+
+                        SubtleButton {
+                            label: CaptionBackend.auto-running
+                                ? "Transcribing " + round(clamp(CaptionBackend.auto-progress, 0.0, 1.0) * 100) + "%"
+                                : "Auto captions…";
+                            clicked => {
+                                AppState.captions-dialog-open = true;
+                                AppState.refocus-shortcuts();
+                            }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                    }
+
+                    CutlassText {
+                        text: "Imports read SubRip (.srt) and WebVTT (.vtt) and keep the file's own timings. Auto captions transcribe a clip's speech on this machine.";
+                        style: AppStore.theme.typography.caption;
+                        foreground: AppStore.theme.text.muted;
+                        wrap: word-wrap;
                     }
                 }
 

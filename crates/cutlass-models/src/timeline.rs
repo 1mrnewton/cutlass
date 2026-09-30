@@ -1,14 +1,17 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Map;
+use crate::caption::CaptionGroup;
 use crate::clip::Clip;
 use crate::error::ModelError;
-use crate::ids::{ClipId, MarkerId, TrackId};
+use crate::ids::{CaptionGroupId, ClipId, MarkerId, TrackId};
 use crate::time::{Rational, RationalTime, resample};
 use crate::track::{Track, TrackKind};
 
-/// Fixed marker flag palette (M1 markers). Serialized by name so project
-/// files stay readable; [`rgba`](Self::rgba) gives the render color.
+/// Marker flag color (M1 markers). The eight named presets serialize as
+/// lowercase strings (`"teal"`, …) so existing projects keep working;
+/// [`Rgba`](Self::Rgba) serializes as `{"rgba":[r,g,b,a]}` (markers are
+/// UI chrome — callers should keep alpha opaque).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarkerColor {
@@ -20,6 +23,9 @@ pub enum MarkerColor {
     Orange,
     Yellow,
     Green,
+    /// Custom color. Alpha is stored for serde symmetry with other RGBA
+    /// fields; the desktop UI forces opaque (`0xFF`).
+    Rgba([u8; 4]),
 }
 
 impl MarkerColor {
@@ -40,6 +46,11 @@ impl MarkerColor {
         Self::ALL[index % Self::ALL.len()]
     }
 
+    /// Opaque custom color (alpha forced to `0xFF`).
+    pub fn custom(r: u8, g: u8, b: u8) -> Self {
+        MarkerColor::Rgba([r, g, b, 0xFF])
+    }
+
     /// Render color as `[r, g, b, a]`.
     pub fn rgba(self) -> [u8; 4] {
         match self {
@@ -51,21 +62,89 @@ impl MarkerColor {
             MarkerColor::Orange => [0xF5, 0x9A, 0x3C, 0xFF],
             MarkerColor::Yellow => [0xF0, 0xD0, 0x4A, 0xFF],
             MarkerColor::Green => [0x6F, 0xD8, 0x5E, 0xFF],
+            MarkerColor::Rgba(rgba) => rgba,
         }
     }
 
-    /// The serialized lowercase name ("teal", "blue", …).
-    pub fn name(self) -> &'static str {
+    /// The serialized lowercase name for a palette preset (`"teal"`, …).
+    /// `None` for [`Rgba`](Self::Rgba) — use [`token`](Self::token) for a
+    /// round-trippable wire string.
+    pub fn name(self) -> Option<&'static str> {
         match self {
-            MarkerColor::Teal => "teal",
-            MarkerColor::Blue => "blue",
-            MarkerColor::Purple => "purple",
-            MarkerColor::Pink => "pink",
-            MarkerColor::Red => "red",
-            MarkerColor::Orange => "orange",
-            MarkerColor::Yellow => "yellow",
-            MarkerColor::Green => "green",
+            MarkerColor::Teal => Some("teal"),
+            MarkerColor::Blue => Some("blue"),
+            MarkerColor::Purple => Some("purple"),
+            MarkerColor::Pink => Some("pink"),
+            MarkerColor::Red => Some("red"),
+            MarkerColor::Orange => Some("orange"),
+            MarkerColor::Yellow => Some("yellow"),
+            MarkerColor::Green => Some("green"),
+            MarkerColor::Rgba(_) => None,
         }
+    }
+
+    /// Desktop / command wire token: palette name, or `#RRGGBB` for custom
+    /// (opaque; alpha discarded).
+    pub fn token(self) -> String {
+        match self {
+            MarkerColor::Rgba([r, g, b, _]) => format!("#{r:02X}{g:02X}{b:02X}"),
+            preset => preset
+                .name()
+                .expect("palette colors always have a name")
+                .to_string(),
+        }
+    }
+
+    /// Inverse of [`token`](Self::token): palette names or `#RGB` /
+    /// `#RRGGBB` / `#RRGGBBAA` (leading `#` optional). Custom parses force
+    /// opaque alpha.
+    pub fn parse_token(s: &str) -> Option<Self> {
+        match s {
+            "teal" => Some(MarkerColor::Teal),
+            "blue" => Some(MarkerColor::Blue),
+            "purple" => Some(MarkerColor::Purple),
+            "pink" => Some(MarkerColor::Pink),
+            "red" => Some(MarkerColor::Red),
+            "orange" => Some(MarkerColor::Orange),
+            "yellow" => Some(MarkerColor::Yellow),
+            "green" => Some(MarkerColor::Green),
+            other => parse_marker_hex(other).map(|[r, g, b]| MarkerColor::custom(r, g, b)),
+        }
+    }
+}
+
+/// Parse `#RGB` / `#RRGGBB` / `#RRGGBBAA` (leading `#` optional) into opaque
+/// RGB. Invalid lengths / non-hex → `None`. Alpha in 8-digit form is ignored
+/// (markers are UI chrome).
+fn parse_marker_hex(input: &str) -> Option<[u8; 3]> {
+    let s = input.trim();
+    let s = s.strip_prefix('#').unwrap_or(s);
+    if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    match s.len() {
+        3 => {
+            let r = marker_nibble(s.as_bytes()[0])? * 0x11;
+            let g = marker_nibble(s.as_bytes()[1])? * 0x11;
+            let b = marker_nibble(s.as_bytes()[2])? * 0x11;
+            Some([r, g, b])
+        }
+        6 | 8 => {
+            let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+            Some([r, g, b])
+        }
+        _ => None,
+    }
+}
+
+fn marker_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -220,6 +299,21 @@ pub struct Timeline {
     /// saves stay byte-identical.
     #[serde(default, skip_serializing_if = "CanvasSettings::is_default")]
     canvas: CanvasSettings,
+    /// Caption groups keyed by id: the shared style, layout rules, and
+    /// provenance behind each batch of caption cues. The cues themselves are
+    /// ordinary text clips on the tracks above. Optional + defaulted so
+    /// pre-caption project files load unchanged and caption-free saves stay
+    /// byte-identical.
+    #[serde(
+        default,
+        skip_serializing_if = "is_empty_caption_groups",
+        with = "crate::serde_map"
+    )]
+    caption_groups: Map<CaptionGroupId, CaptionGroup>,
+}
+
+fn is_empty_caption_groups(groups: &Map<CaptionGroupId, CaptionGroup>) -> bool {
+    groups.is_empty()
 }
 
 impl Timeline {
@@ -231,6 +325,7 @@ impl Timeline {
             clip_index: Map::default(),
             markers: Vec::new(),
             canvas: CanvasSettings::default(),
+            caption_groups: Map::default(),
         }
     }
 
@@ -604,6 +699,109 @@ impl Timeline {
                 Err(e)
             }
         }
+    }
+
+    // --- caption groups -----------------------------------------------------
+
+    /// The caption group `id`, or `None`.
+    pub fn caption_group(&self, id: CaptionGroupId) -> Option<&CaptionGroup> {
+        self.caption_groups.get(&id)
+    }
+
+    pub fn caption_group_mut(&mut self, id: CaptionGroupId) -> Option<&mut CaptionGroup> {
+        self.caption_groups.get_mut(&id)
+    }
+
+    /// Caption groups in id order, so the caption list and every projection
+    /// agree on ordering across sessions.
+    pub fn caption_groups_ordered(&self) -> Vec<&CaptionGroup> {
+        let mut groups: Vec<&CaptionGroup> = self.caption_groups.values().collect();
+        groups.sort_by_key(|group| group.id);
+        groups
+    }
+
+    pub fn caption_group_count(&self) -> usize {
+        self.caption_groups.len()
+    }
+
+    /// Register a caption group. Rejects duplicate ids (an undo restore must
+    /// not double-insert) and unknown or non-text tracks.
+    pub fn add_caption_group(&mut self, group: CaptionGroup) -> Result<CaptionGroupId, ModelError> {
+        if self.caption_groups.contains_key(&group.id) {
+            return Err(ModelError::DuplicateCaptionGroup(group.id));
+        }
+        let track = self
+            .tracks
+            .get(&group.track)
+            .ok_or(ModelError::UnknownTrack(group.track))?;
+        if track.kind != TrackKind::Text {
+            return Err(ModelError::IncompatibleTrackKind {
+                track: group.track,
+                kind: track.kind,
+            });
+        }
+        group.validate()?;
+        let id = group.id;
+        self.caption_groups.insert(id, group);
+        Ok(id)
+    }
+
+    /// Remove a caption group, returning it for undo capture. The member cue
+    /// clips are *not* removed — callers decide whether to delete them or
+    /// leave them as plain titles (and must clear their `caption` metadata).
+    pub fn remove_caption_group(&mut self, id: CaptionGroupId) -> Option<CaptionGroup> {
+        self.caption_groups.remove(&id)
+    }
+
+    /// Every cue clip of `group`, in timeline order.
+    pub fn caption_cues(&self, group: CaptionGroupId) -> Vec<&Clip> {
+        let Some(track) = self.caption_group(group).and_then(|g| self.track(g.track)) else {
+            return Vec::new();
+        };
+        track
+            .clips_ordered()
+            .iter()
+            .filter(|clip| clip.caption_group() == Some(group))
+            .copied()
+            .collect()
+    }
+
+    /// Clip ids of every cue of `group`, in timeline order.
+    pub fn caption_cue_ids(&self, group: CaptionGroupId) -> Vec<ClipId> {
+        self.caption_cues(group)
+            .iter()
+            .map(|clip| clip.id)
+            .collect()
+    }
+
+    /// Renumber `group`'s cues densely in timeline order, keeping the cue list
+    /// readable as "line N" after a split, merge, or delete.
+    pub fn reindex_caption_group(&mut self, group: CaptionGroupId) {
+        for (index, clip_id) in self.caption_cue_ids(group).into_iter().enumerate() {
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
+            if let Some(cue) = self.clip_mut(clip_id).and_then(|c| c.caption.as_mut())
+                && cue.index != index
+            {
+                cue.index = index;
+            }
+        }
+    }
+
+    /// Drop caption groups that no longer have any cue clips, mirroring the
+    /// empty-lane rule: an auto-caption batch whose lines were all deleted
+    /// should not linger in the caption list. Returns the removed groups so an
+    /// undo can restore them.
+    pub fn prune_empty_caption_groups(&mut self) -> Vec<CaptionGroup> {
+        let empty: Vec<CaptionGroupId> = self
+            .caption_groups
+            .keys()
+            .copied()
+            .filter(|id| self.caption_cues(*id).is_empty())
+            .collect();
+        empty
+            .into_iter()
+            .filter_map(|id| self.caption_groups.remove(&id))
+            .collect()
     }
 
     /// Total timeline length: the end of the last-ending clip at [`frame_rate`](Self::frame_rate).

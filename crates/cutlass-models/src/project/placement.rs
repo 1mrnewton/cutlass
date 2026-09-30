@@ -171,10 +171,19 @@ impl Project {
                 kind,
             });
         }
-        self.timeline
+        let clip = self
+            .timeline
             .clip_mut(clip_id)
-            .ok_or(ModelError::UnknownClip(clip_id))?
-            .content = content;
+            .ok_or(ModelError::UnknownClip(clip_id))?;
+        clip.content = content;
+        // A caption cue's word timings are byte ranges into the text that just
+        // changed out from under them. Caption-aware edits go through
+        // `set_caption_cue`, which keeps them in step; this path drops them
+        // rather than leaving ranges describing text that no longer exists.
+        if let Some(cue) = clip.caption.as_mut() {
+            cue.words.clear();
+            cue.text_edited = true;
+        }
         Ok(())
     }
 

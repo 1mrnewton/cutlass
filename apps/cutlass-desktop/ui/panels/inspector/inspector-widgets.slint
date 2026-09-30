@@ -13,6 +13,7 @@ import {
 import { AppStore, TimelineStore } from "../../store/index.slint";
 import { AppState } from "../../state.slint";
 import { ParamRowState } from "../../lib/inspector-backend.slint";
+import { InspectorRowMetrics } from "inspector-metrics.slint";
 import { KeyframeControl } from "keyframe-control.slint";
 
 export component InspectorDivider inherits Rectangle {
@@ -203,12 +204,13 @@ export component LabelCell inherits CutlassText {
     in property <string> label;
 
     text: label;
-    width: 96px;
-    height: 28px;
+    width: InspectorRowMetrics.label-width;
+    height: InspectorRowMetrics.control-height;
     vertical-stretch: 0;
     style: AppStore.theme.typography.label;
     foreground: AppStore.theme.text.secondary;
     vertical-alignment: TextVerticalAlignment.center;
+    overflow: TextOverflow.elide;
 }
 
 // One property row: slider for coarse motion, numeric entry for precision,
@@ -233,6 +235,9 @@ export component SliderRow inherits HorizontalLayout {
 
     callback preview(value: float);
     callback commit(value: float);
+    // Drag abandoned (pointer-cancel / Escape while pressed) — parents that
+    // preview mid-drag clear overrides / gesture lanes here.
+    callback cancelled();
     callback kf-toggle();
     callback kf-set-easing(easing: int);
 
@@ -244,25 +249,33 @@ export component SliderRow inherits HorizontalLayout {
                 : Math.round(v * 100) / 100 + "");
     }
 
-    spacing: AppStore.theme.metrics.spacing.md;
-    height: 28px;
-    vertical-stretch: 0;
-
-    // The slider assigns `value` internally on drag and the box assigns
-    // `text` on typing — both would permanently drop a plain binding, so
-    // external updates (projection republish, live gestures, selection
-    // changes, playhead moves over an animated property) re-sync through
-    // this watcher instead.
-    changed value => {
+    function resync-from-value() {
         sl.value = clamp(root.value, root.minimum, root.maximum);
         if !num.has-focus {
             num.text = root.format(root.value);
         }
     }
 
+    spacing: InspectorRowMetrics.spacing;
+    height: InspectorRowMetrics.control-height;
+    vertical-stretch: 0;
+
+    // The slider assigns `value` internally on drag and the box assigns
+    // `text` on typing — both would permanently drop a plain binding, so
+    // external updates (projection republish, live gestures, selection
+    // changes, playhead moves over an animated property) re-sync through
+    // this watcher instead. Ignore while the handle is pressed so animated
+    // samples during playback can't stomp an in-flight drag.
+    changed value => {
+        if sl.handle-pressed {
+            return;
+        }
+        root.resync-from-value();
+    }
+
     TouchArea {
-        width: 96px;
-        height: 28px;
+        width: InspectorRowMetrics.label-width;
+        height: InspectorRowMetrics.control-height;
         vertical-stretch: 0;
         mouse-cursor: MouseCursor.pointer;
         clicked => {
@@ -285,7 +298,7 @@ export component SliderRow inherits HorizontalLayout {
 
     sl := CutlassSlider {
         horizontal-stretch: 1;
-        height: 28px;
+        height: InspectorRowMetrics.control-height;
         vertical-stretch: 0;
         minimum: root.minimum;
         maximum: root.maximum;
@@ -303,12 +316,18 @@ export component SliderRow inherits HorizontalLayout {
             root.commit(v);
             AppState.refocus-shortcuts();
         }
+
+        cancelled => {
+            root.resync-from-value();
+            root.cancelled();
+            AppState.refocus-shortcuts();
+        }
     }
 
     num := CutlassLineInput {
-        width: 62px;
-        minimum-field-width: 62px;
-        height: 28px;
+        width: InspectorRowMetrics.number-field;
+        minimum-field-width: InspectorRowMetrics.number-field;
+        height: InspectorRowMetrics.control-height;
         vertical-stretch: 0;
         horizontal-alignment: TextHorizontalAlignment.right;
         accessibility-label: root.label + " value";
@@ -339,8 +358,8 @@ export component SliderRow inherits HorizontalLayout {
     }
 
     CutlassText {
-        width: 20px;
-        height: 28px;
+        width: InspectorRowMetrics.suffix-width;
+        height: InspectorRowMetrics.control-height;
         vertical-stretch: 0;
         text: root.suffix;
         style: AppStore.theme.typography.label;

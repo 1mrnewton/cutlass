@@ -1,0 +1,313 @@
+import {
+    CutlassColorSwatch,
+    CutlassDropdown,
+    CutlassScrollView,
+    CutlassText,
+} from "../../components/index.slint";
+import { AppStore } from "../../store/index.slint";
+import { AppState } from "../../state.slint";
+import { CaptionBackend } from "../../lib/caption-backend.slint";
+import { CaptionGroupView } from "../../models/index.slint";
+import {
+    InspectorDivider,
+    LabelCell,
+    SectionHeader,
+    SliderRow,
+} from "inspector-widgets.slint";
+import { InspectorRowMetrics } from "inspector-metrics.slint";
+
+// A caption template chip. Text captions are styled by the template, so the
+// chip previews the two things that read at this size: the fill and whether
+// the line sits on a plate.
+component TemplateChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+
+    callback activated();
+
+    height: 46px;
+    width: 62px;
+    border-radius: AppStore.theme.metrics.radius.md;
+    background: root.selected ? #ffffff14 : #ffffff0a;
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? AppStore.theme.accent.primary : #ffffff14;
+
+    VerticalLayout {
+        padding: AppStore.theme.metrics.spacing.xs;
+        spacing: 2px;
+
+        Text {
+            text: "Aa";
+            color: AppStore.theme.text.primary;
+            font-size: 16px;
+            font-weight: 800;
+            horizontal-alignment: center;
+        }
+
+        CutlassText {
+            text: root.label;
+            style: AppStore.theme.typography.caption;
+            foreground: AppStore.theme.text.muted;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.activated();
+            AppState.refocus-shortcuts();
+        }
+    }
+}
+
+// Group-wide caption controls: which template the lines wear, how the
+// segmenter breaks them, and how the spoken word is picked out. Every row
+// commits one `CaptionBackend` edit for the whole group.
+export component CaptionGroupRows inherits VerticalLayout {
+    in property <CaptionGroupView> group;
+
+    spacing: AppStore.theme.metrics.spacing.lg;
+    alignment: LayoutAlignment.start;
+
+    function mode-label(mode: int) -> string {
+        if (mode == 1) { return "Word"; }
+        if (mode == 2) { return "Line"; }
+        return "Off";
+    }
+
+    function mode-of(label: string) -> int {
+        if (label == "Word") { return 1; }
+        if (label == "Line") { return 2; }
+        return 0;
+    }
+
+    // Highlight is a single command, so every row sends the whole block with
+    // its own field replaced — the same "full value each time" contract the
+    // text style rows use.
+    function commit-highlight(mode: int, fill: color, plate-enabled: bool, plate: color, scale: float) {
+        CaptionBackend.set-highlight(
+            root.group.id,
+            mode,
+            fill.red,
+            fill.green,
+            fill.blue,
+            plate-enabled,
+            plate.red,
+            plate.green,
+            plate.blue,
+            plate.alpha,
+            scale);
+    }
+
+    function commit-layout(chars: int, lines: int, safe-area: float, reflow: bool) {
+        CaptionBackend.set-layout(root.group.id, chars, lines, safe-area, reflow);
+    }
+
+    SectionHeader {
+        title: "Template";
+    }
+
+    // The chip strip is wider than the panel, so it scrolls sideways; the
+    // extra height leaves a gutter for the bar.
+    CutlassScrollView {
+        width: 100%;
+        height: 46px + AppStore.theme.scrollbar.size;
+        viewport-width: chips.preferred-width;
+        viewport-height: 46px;
+        show-vertical-scrollbar: false;
+
+        chips := HorizontalLayout {
+            spacing: AppStore.theme.metrics.spacing.sm;
+
+            for template in CaptionBackend.templates: TemplateChip {
+                label: template.label;
+                selected: template.id == root.group.template;
+                activated => {
+                    CaptionBackend.set-template(root.group.id, template.id);
+                }
+            }
+        }
+    }
+
+    InspectorDivider { }
+
+    SectionHeader {
+        title: "Lines";
+    }
+
+    // Re-wrapping every line is a visible, undoable edit, so it rides an
+    // explicit commit rather than firing from the slider drag.
+    SliderRow {
+        label: "Characters";
+        value: root.group.max-chars-per-line;
+        minimum: 8;
+        maximum: 64;
+        step: 1;
+        reset-value: 32;
+        commit(v) => {
+            root.commit-layout(
+                Math.round(v), root.group.max-lines, root.group.safe-area-bottom, true);
+        }
+    }
+
+    SliderRow {
+        label: "Max lines";
+        value: root.group.max-lines;
+        minimum: 1;
+        maximum: 4;
+        step: 1;
+        reset-value: 2;
+        commit(v) => {
+            root.commit-layout(
+                root.group.max-chars-per-line, Math.round(v), root.group.safe-area-bottom, true);
+        }
+    }
+
+    // Distance from the canvas bottom to the caption block: the short-form
+    // platforms cover the bottom fifth of the frame with their own UI.
+    SliderRow {
+        label: "Safe area";
+        suffix: "%";
+        value: root.group.safe-area-bottom * 100;
+        minimum: 0;
+        maximum: 45;
+        step: 1;
+        reset-value: 18;
+        commit(v) => {
+            root.commit-layout(
+                root.group.max-chars-per-line, root.group.max-lines, v / 100, false);
+        }
+    }
+
+    InspectorDivider { }
+
+    SectionHeader {
+        title: "Highlight";
+    }
+
+    HorizontalLayout {
+        spacing: InspectorRowMetrics.spacing;
+        height: InspectorRowMetrics.control-height;
+        vertical-stretch: 0;
+
+        LabelCell {
+            label: "Mode";
+        }
+
+        CutlassDropdown {
+            items: ["Off", "Word", "Line"];
+            current: root.mode-label(root.group.highlight-mode);
+            selected(value) => {
+                root.commit-highlight(
+                    root.mode-of(value),
+                    root.group.highlight-fill,
+                    root.group.highlight-plate-enabled,
+                    root.group.highlight-plate,
+                    root.group.highlight-scale);
+                AppState.refocus-shortcuts();
+            }
+        }
+    }
+
+    if root.group.highlight-mode != 0: HorizontalLayout {
+        spacing: InspectorRowMetrics.spacing;
+        height: InspectorRowMetrics.control-height;
+        vertical-stretch: 0;
+
+        LabelCell {
+            label: "Spoken word";
+        }
+
+        CutlassColorSwatch {
+            value: root.group.highlight-fill;
+            enable-alpha: false;
+            changed(c) => {
+                root.commit-highlight(
+                    root.group.highlight-mode,
+                    c,
+                    root.group.highlight-plate-enabled,
+                    root.group.highlight-plate,
+                    root.group.highlight-scale);
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+
+    if root.group.highlight-mode != 0: HorizontalLayout {
+        spacing: InspectorRowMetrics.spacing;
+        height: InspectorRowMetrics.control-height;
+        vertical-stretch: 0;
+
+        LabelCell {
+            label: "Plate";
+        }
+
+        Rectangle {
+            width: 14px;
+            height: 14px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: root.group.highlight-plate-enabled
+                ? AppStore.theme.accent.primary
+                : #ffffff2f;
+            background: root.group.highlight-plate-enabled
+                ? AppStore.theme.accent.primary
+                : #ffffff14;
+
+            TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    root.commit-highlight(
+                        root.group.highlight-mode,
+                        root.group.highlight-fill,
+                        !root.group.highlight-plate-enabled,
+                        root.group.highlight-plate.alpha > 0
+                            ? root.group.highlight-plate
+                            : #000000cc,
+                        root.group.highlight-scale);
+                    AppState.refocus-shortcuts();
+                }
+            }
+        }
+
+        if root.group.highlight-plate-enabled: CutlassColorSwatch {
+            value: root.group.highlight-plate;
+            changed(c) => {
+                root.commit-highlight(
+                    root.group.highlight-mode,
+                    root.group.highlight-fill,
+                    true,
+                    c,
+                    root.group.highlight-scale);
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+
+    if root.group.highlight-mode != 0: SliderRow {
+        label: "Emphasis";
+        suffix: "%";
+        value: root.group.highlight-scale * 100;
+        minimum: 50;
+        maximum: 200;
+        step: 1;
+        reset-value: 100;
+        commit(v) => {
+            root.commit-highlight(
+                root.group.highlight-mode,
+                root.group.highlight-fill,
+                root.group.highlight-plate-enabled,
+                root.group.highlight-plate,
+                v / 100);
+        }
+    }
+}

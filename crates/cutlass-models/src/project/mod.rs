@@ -53,6 +53,7 @@ pub struct Project {
     timeline: Timeline,
 }
 
+mod caption;
 mod edit;
 mod helpers;
 mod layout;

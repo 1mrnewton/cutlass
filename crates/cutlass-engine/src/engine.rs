@@ -8,11 +8,12 @@ use std::path::PathBuf;
 
 use cutlass_commands::{Command, ProjectCommand};
 use cutlass_models::{
-    ClipId, ClipTransform, ColorAdjustments, Filter, Generator, LayerStyles, MediaId, Project,
-    Rational, RationalTime, TrackKind,
+    AnimationRef, AnimationSlot, ClipId, ClipParam, ClipTransform, ColorAdjustments, Filter,
+    Generator, LayerStyles, MediaId, MotionBlur, ParamValue, Project, Rational, RationalTime,
+    TrackKind,
 };
 use cutlass_render::{
-    FrameSink, Renderer, ResolveOverrides, RgbaImage, SeekPolicy, export_to_file,
+    FrameSink, ParamOverrides, Renderer, ResolveOverrides, RgbaImage, SeekPolicy, export_to_file,
 };
 
 use crate::action::{ApplyContext, ApplyOutcome, EditAction, History, dispatch};
@@ -58,6 +59,16 @@ pub struct Engine {
     /// Live layer styles for one clip (inspector slider preview), same
     /// session-only semantics as `transform_override`.
     styles_override: Option<(ClipId, LayerStyles)>,
+    /// Live per-(clip, param) values (inspector slider preview), same
+    /// session-only semantics as `transform_override`. Multiple params may be
+    /// overridden on one clip at once (e.g. crop x+y during a rect drag).
+    param_overrides: ParamOverrides,
+    /// Live motion-blur settings for one clip (inspector shutter/samples drag).
+    motion_blur_override: Option<(ClipId, MotionBlur)>,
+    /// Live look-animation knobs for one clip/slot (speed/intensity/stagger).
+    animation_override: Option<(ClipId, AnimationSlot, AnimationRef)>,
+    /// Live chroma-key RGB for one clip (inspector color-well preview).
+    chroma_color_override: Option<(ClipId, [u8; 3])>,
 }
 
 impl Engine {
@@ -82,6 +93,10 @@ impl Engine {
             generator_override: None,
             look_override: None,
             styles_override: None,
+            param_overrides: ParamOverrides::new(),
+            motion_blur_override: None,
+            animation_override: None,
+            chroma_color_override: None,
         })
     }
 
@@ -173,16 +188,29 @@ impl Engine {
         self.reset_project(project);
     }
 
+    /// Drop every session-only override / live-preview lane.
+    ///
+    /// Clip ids are project-local: after a session replacement the same raw
+    /// id can name an unrelated clip, so stale overrides must never survive
+    /// `reset_project`, open/load, or apply-template.
+    fn clear_session_overrides(&mut self) {
+        self.transform_override = None;
+        self.generator_override = None;
+        self.look_override = None;
+        self.styles_override = None;
+        self.param_overrides.clear();
+        self.motion_blur_override = None;
+        self.animation_override = None;
+        self.chroma_color_override = None;
+    }
+
     /// Replace the session with `project` (e.g. the AI-agent sandbox replaying
     /// a validated plan). Clears history and the project path; rebaselines clean.
     pub fn reset_project(&mut self, project: Project) {
         self.project = project;
         self.history.clear();
         self.project_path = None;
-        self.transform_override = None;
-        self.generator_override = None;
-        self.look_override = None;
-        self.styles_override = None;
+        self.clear_session_overrides();
         // Media ids are project-local: the same id can name a different
         // file in the incoming project, so all id-keyed render state is
         // stale (open decoders and still bitmaps, not only proxies).
@@ -217,8 +245,9 @@ impl Engine {
                 if self.project.timeline().main_track().is_none() {
                     self.project.add_track(TrackKind::Video, "Main");
                 }
-                // Same media-id hazard as `reset_project`: the incoming
-                // file's ids owe nothing to the outgoing registry.
+                // Same media-id / override hazard as `reset_project`: the
+                // incoming file's ids owe nothing to the outgoing session.
+                self.clear_session_overrides();
                 self.renderer.reset_media_sources();
                 // The session now mirrors the file it came from: rebaseline as
                 // clean (revision still bumps so observers see a change).
@@ -237,8 +266,9 @@ impl Engine {
             | ApplyOutcome::Imported { .. } => self.revision += 1,
             // Unlike Open/Load, a filled template exists nowhere on disk as a
             // project file: bump without rebaselining so the session reads
-            // dirty until first saved.
+            // dirty until first saved. Overrides/ids are still project-local.
             ApplyOutcome::AppliedTemplate => {
+                self.clear_session_overrides();
                 self.renderer.reset_media_sources();
                 self.revision += 1;
             }
@@ -282,6 +312,55 @@ impl Engine {
         self.styles_override = value;
     }
 
+    /// Set (or clear with `None`) the live motion-blur settings for one clip —
+    /// the shutter/samples analogue of
+    /// [`set_transform_override`](Self::set_transform_override).
+    pub fn set_motion_blur_override(&mut self, value: Option<(ClipId, MotionBlur)>) {
+        self.motion_blur_override = value;
+    }
+
+    /// Set (or clear with `None`) the live look-animation knobs for one
+    /// clip/slot — the speed/intensity/stagger analogue of
+    /// [`set_transform_override`](Self::set_transform_override).
+    pub fn set_animation_override(&mut self, value: Option<(ClipId, AnimationSlot, AnimationRef)>) {
+        self.animation_override = value;
+    }
+
+    /// Set (or clear with `None`) the live chroma-key RGB for one clip —
+    /// the color-well analogue of
+    /// [`set_transform_override`](Self::set_transform_override).
+    pub fn set_chroma_color_override(&mut self, value: Option<(ClipId, [u8; 3])>) {
+        self.chroma_color_override = value;
+    }
+
+    /// Read-only view of the live chroma-color override (tests / diagnostics).
+    pub fn chroma_color_override(&self) -> Option<(ClipId, [u8; 3])> {
+        self.chroma_color_override
+    }
+
+    /// Set (or replace) one live param value for `clip` — the generic
+    /// inspector-slider analogue of
+    /// [`set_transform_override`](Self::set_transform_override). Uses the same
+    /// [`ClipParam`] / [`ParamValue`] addressing as `SetParamConstant`.
+    pub fn set_param_override(&mut self, clip: ClipId, param: ClipParam, value: ParamValue) {
+        self.param_overrides.set(clip, param, value);
+    }
+
+    /// Drop every live param override for `clip` (release / abandon).
+    pub fn clear_param_overrides(&mut self, clip: ClipId) {
+        self.param_overrides.clear_clip(clip);
+    }
+
+    /// Drop one live param override after that param is committed.
+    pub fn clear_param_override(&mut self, clip: ClipId, param: ClipParam) {
+        self.param_overrides.clear_param(clip, param);
+    }
+
+    /// Read-only view of the live param-override map (tests / diagnostics).
+    pub fn param_overrides(&self) -> &ParamOverrides {
+        &self.param_overrides
+    }
+
     /// True while a live preview override is set: frames rendered now show
     /// session-only state that no project revision describes.
     pub fn has_live_overrides(&self) -> bool {
@@ -289,6 +368,10 @@ impl Engine {
             || self.generator_override.is_some()
             || self.look_override.is_some()
             || self.styles_override.is_some()
+            || !self.param_overrides.is_empty()
+            || self.motion_blur_override.is_some()
+            || self.animation_override.is_some()
+            || self.chroma_color_override.is_some()
     }
 
     /// Stage timings of the most recent successful preview/export render.
@@ -329,6 +412,8 @@ impl Engine {
 
     /// Composite enabled visual layers at `time` into an RGBA preview frame.
     pub fn get_frame(&mut self, time: RationalTime) -> Result<RgbaImage, EngineError> {
+        // Field-wise construction (not a `&self` helper) so `renderer` stays
+        // disjoint from the override borrows under NLL.
         let overrides = ResolveOverrides {
             transform: self.transform_override,
             generator: self.generator_override.as_ref().map(|(id, g)| (*id, g)),
@@ -337,6 +422,13 @@ impl Engine {
                 .as_ref()
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
             styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
+            params: (!self.param_overrides.is_empty()).then_some(&self.param_overrides),
+            motion_blur: self.motion_blur_override,
+            animation: self
+                .animation_override
+                .as_ref()
+                .map(|(id, slot, anim)| (*id, *slot, anim)),
+            chroma_color: self.chroma_color_override,
         };
         Ok(self
             .renderer
@@ -361,6 +453,13 @@ impl Engine {
                 .as_ref()
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
             styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
+            params: (!self.param_overrides.is_empty()).then_some(&self.param_overrides),
+            motion_blur: self.motion_blur_override,
+            animation: self
+                .animation_override
+                .as_ref()
+                .map(|(id, slot, anim)| (*id, *slot, anim)),
+            chroma_color: self.chroma_color_override,
         };
         Ok(self.renderer.render_frame_fit_with(
             &self.project,
@@ -404,6 +503,13 @@ impl Engine {
                 .as_ref()
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
             styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
+            params: (!self.param_overrides.is_empty()).then_some(&self.param_overrides),
+            motion_blur: self.motion_blur_override,
+            animation: self
+                .animation_override
+                .as_ref()
+                .map(|(id, slot, anim)| (*id, *slot, anim)),
+            chroma_color: self.chroma_color_override,
         };
         Ok(self
             .renderer
@@ -427,6 +533,13 @@ impl Engine {
                 .as_ref()
                 .map(|(id, filter, adjust)| (*id, filter.as_ref(), adjust)),
             styles: self.styles_override.as_ref().map(|(id, s)| (*id, s)),
+            params: (!self.param_overrides.is_empty()).then_some(&self.param_overrides),
+            motion_blur: self.motion_blur_override,
+            animation: self
+                .animation_override
+                .as_ref()
+                .map(|(id, slot, anim)| (*id, *slot, anim)),
+            chroma_color: self.chroma_color_override,
         };
         Ok(self.renderer.render_frame_fit_into_with(
             &self.project,

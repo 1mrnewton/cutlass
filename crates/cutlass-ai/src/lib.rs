@@ -84,9 +84,9 @@ pub use extend::{
     AgentDir, AgentExtensions, MAX_RULES_BYTES, Skill, SlashCommand, bundled_skills, compose_rules,
     expand_slash_command, load_agent_dir, merge_skills,
 };
-pub use provider::{ImagePart, Message};
+pub use provider::{ImagePart, Message, TokenUsage};
 pub use tools::{
     HostToolSpec, NullToolHost, ToolHost, ToolOutput, ToolTier, is_host_tool_name, namespace,
 };
 pub use validate::{Rejection, validate};
-pub use wire::{TOOL_SCHEMA_VERSION, ToolSpec, WireCommand, tool_specs};
+pub use wire::{IdRemap, TOOL_SCHEMA_VERSION, ToolSpec, WireCommand, tool_specs};

@@ -160,6 +160,8 @@ pub struct StockFile {
 pub enum AssetKind {
     Template,
     TextPreset,
+    /// A caption-template pack (payload: [`CaptionTemplateCatalog`]).
+    CaptionTemplate,
     Sfx,
     Lut,
     Lottie,
@@ -257,6 +259,126 @@ pub struct TextPreset {
 }
 
 // ---------------------------------------------------------------------------
+// Caption templates (payload of a `CaptionTemplate` catalog entry's file)
+// ---------------------------------------------------------------------------
+
+/// The caption-template catalog file: caption looks served alongside the
+/// six the app embeds, so a new style ships without a client release.
+///
+/// Same **bundled-OFL-fonts-only** rule as [`TextPresetCatalog`], and the
+/// same "resolvable by the shipped editor" rule: everything here maps onto
+/// `CaptionStyle` + `CaptionLayout` + `CaptionHighlight` fields that
+/// existing builds already render.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptionTemplateCatalog {
+    pub templates: Vec<CaptionTemplate>,
+}
+
+/// One served caption look: type, treatments, segmentation rules, and the
+/// optional word highlight — the wire twin of the app's embedded
+/// `CaptionTemplateSpec`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptionTemplate {
+    /// Stable id, stored in projects that use the template.
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub category: String,
+    /// Bundled (OFL) font family name; empty = default sans.
+    #[serde(default)]
+    pub font_family: String,
+    /// Size in reference pixels on a 1080p canvas.
+    pub font_size: f32,
+    #[serde(default)]
+    pub bold: bool,
+    /// Render the cue in capitals regardless of the recognized casing.
+    #[serde(default)]
+    pub uppercase: bool,
+    /// RGBA fill.
+    pub fill: [u8; 4],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke: Option<CaptionStroke>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<CaptionShadow>,
+    /// Filled card behind the cue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plate: Option<CaptionPlate>,
+    /// Segmentation rules the look reads well at.
+    pub max_chars_per_line: u16,
+    pub max_lines: u8,
+    /// Fraction of canvas height kept clear below the cue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe_area_bottom: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlight: Option<CaptionTemplateHighlight>,
+    /// Look-animation catalog ids (must exist in the app's catalogs;
+    /// unknown ids are skipped, never errors).
+    #[serde(default)]
+    pub animation_in: Option<String>,
+    #[serde(default)]
+    pub animation_combo: Option<String>,
+    /// Sample line shown in the Library tile.
+    #[serde(default)]
+    pub sample_text: String,
+}
+
+/// Glyph outline in a served caption template.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct CaptionStroke {
+    pub rgba: [u8; 4],
+    /// Width in reference pixels.
+    pub width: f32,
+}
+
+/// Drop shadow or glow in a served caption template.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct CaptionShadow {
+    pub rgba: [u8; 4],
+    /// Blur as a fraction of the font size.
+    pub blur: f32,
+    /// Offset distance in reference pixels (`0` = a centered glow).
+    #[serde(default)]
+    pub distance: f32,
+}
+
+/// Filled card behind the cue.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct CaptionPlate {
+    pub rgba: [u8; 4],
+    /// Corner rounding, `0.0` (square) ..= `1.0` (pill).
+    #[serde(default)]
+    pub radius: f32,
+}
+
+/// What a served template highlights while the cue plays. `Other`
+/// degrades to no highlight rather than failing the whole pack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptionHighlightModeDto {
+    Off,
+    Word,
+    Line,
+    #[serde(other)]
+    Other,
+}
+
+/// The karaoke highlight a served template plays with.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct CaptionTemplateHighlight {
+    pub mode: CaptionHighlightModeDto,
+    /// Fill of the active word or line.
+    pub fill: [u8; 4],
+    /// Plate painted behind the active word; omitted = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plate: Option<[u8; 4]>,
+    #[serde(default)]
+    pub plate_radius: f32,
+    /// Scale applied to the active word (`1.0` = no pop).
+    #[serde(default)]
+    pub scale: f32,
+}
+
+// ---------------------------------------------------------------------------
 // Generation jobs (BYOK fal path; shared shape with the backend contract)
 // ---------------------------------------------------------------------------
 
@@ -344,6 +466,37 @@ mod tests {
                        "file_url": "https://cdn/x"}"#;
         let entry: CatalogEntry = serde_json::from_str(json).expect("parse");
         assert_eq!(entry.kind, AssetKind::Other);
+    }
+
+    #[test]
+    fn caption_template_pack_parses_with_only_required_fields() {
+        // The minimum a pack author must write; everything a look can add
+        // (stroke, plate, highlight, safe area) is optional.
+        let json = r#"{"templates": [{
+            "id": "neon_karaoke", "name": "Neon karaoke",
+            "font_size": 78.0, "fill": [255, 255, 255, 255],
+            "max_chars_per_line": 24, "max_lines": 1
+        }]}"#;
+        let pack: CaptionTemplateCatalog = serde_json::from_str(json).expect("parse");
+        let template = &pack.templates[0];
+        assert_eq!(template.id, "neon_karaoke");
+        assert!(template.stroke.is_none());
+        assert!(template.highlight.is_none());
+        assert_eq!(template.safe_area_bottom, None);
+    }
+
+    #[test]
+    fn unknown_caption_highlight_mode_degrades_to_other() {
+        // A future mode must cost the pack its highlight, not its parse.
+        let json = r#"{"templates": [{
+            "id": "x", "name": "X", "font_size": 60.0,
+            "fill": [255, 255, 255, 255], "max_chars_per_line": 30,
+            "max_lines": 2, "brand_new_field": 7,
+            "highlight": {"mode": "syllable", "fill": [255, 0, 0, 255]}
+        }]}"#;
+        let pack: CaptionTemplateCatalog = serde_json::from_str(json).expect("tolerant parse");
+        let highlight = pack.templates[0].highlight.expect("highlight parsed");
+        assert_eq!(highlight.mode, CaptionHighlightModeDto::Other);
     }
 
     #[test]

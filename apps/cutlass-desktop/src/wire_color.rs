@@ -1,0 +1,98 @@
+//! Wire the Slint `ColorUtil` global to [`crate::color_math`], and keep the
+//! app-wide recent-colors list in sync with `~/.cutlass/config.toml`.
+
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use slint::{Color, ComponentHandle, ModelRc, VecModel};
+
+use crate::color_math;
+use crate::{AppStore, AppWindow, ColorUtil, HsvComponents};
+
+pub(crate) fn wire_color(
+    app: &AppWindow,
+    config_path: PathBuf,
+    recent_colors: &[cutlass_settings::Rgba],
+) {
+    let util = app.global::<ColorUtil>();
+
+    util.on_hex_to_color(|hex| match color_math::parse_hex(hex.as_str()) {
+        Some([r, g, b, a]) => Color::from_argb_u8(a, r, g, b),
+        None => Color::from_argb_u8(0, 0, 0, 0),
+    });
+
+    util.on_is_valid_hex(|hex| color_math::parse_hex(hex.as_str()).is_some());
+
+    util.on_color_to_hex(|c| {
+        slint::SharedString::from(color_math::format_hex(
+            c.red(),
+            c.green(),
+            c.blue(),
+            c.alpha(),
+        ))
+    });
+
+    util.on_rgb_to_hsv_preserving(|r, g, b, prev_h, prev_s| {
+        let (h, s, v) = color_math::rgb_to_hsv_preserving(r, g, b, prev_h, prev_s);
+        HsvComponents { h, s, v }
+    });
+
+    // Seed the shell model from settings (most-recent-first). Kept in memory
+    // for the session; disk writes are skipped when order is unchanged and
+    // otherwise happen off the UI thread.
+    let initial: Vec<Color> = recent_colors
+        .iter()
+        .copied()
+        .map(|[r, g, b, a]| Color::from_argb_u8(a, r, g, b))
+        .collect();
+    let model = Rc::new(VecModel::from(initial));
+    app.global::<AppStore>()
+        .set_recent_colors(ModelRc::from(model.clone()));
+
+    let live = Rc::new(RefCell::new(recent_colors.to_vec()));
+    let app_weak = app.as_weak();
+    util.on_record_recent(move |c| {
+        let rgba = [c.red(), c.green(), c.blue(), c.alpha()];
+        let mut list = live.borrow_mut();
+        let before = list.clone();
+        cutlass_settings::push_recent(&mut list, rgba);
+        if list.as_slice() == before.as_slice() {
+            // Already most-recent — model and disk are current.
+            return;
+        }
+
+        // Refresh the Slint model in place so every bound picker updates.
+        model.set_vec(
+            list.iter()
+                .copied()
+                .map(|[r, g, b, a]| Color::from_argb_u8(a, r, g, b))
+                .collect::<Vec<_>>(),
+        );
+        if let Some(app) = app_weak.upgrade() {
+            app.global::<AppStore>()
+                .set_recent_colors(ModelRc::from(model.clone()));
+        }
+
+        let snapshot = list.clone();
+        let path = config_path.clone();
+        let _ = std::thread::Builder::new()
+            .name("recent-colors-save".into())
+            .spawn(move || {
+                if let Err(error) = persist_recent_colors_at(&path, &snapshot) {
+                    tracing::warn!(%error, "recent colors could not be saved");
+                }
+            });
+    });
+}
+
+fn persist_recent_colors_at(
+    path: &std::path::Path,
+    colors: &[cutlass_settings::Rgba],
+) -> Result<(), String> {
+    let mut settings = cutlass_settings::load(path)
+        .map_err(|error| format!("recent colors not saved; settings file unreadable: {error}"))?;
+    settings.appearance.recent_colors = colors.to_vec();
+    cutlass_settings::save(path, &settings)
+        .map_err(|error| format!("recent colors could not be written: {error}"))
+}

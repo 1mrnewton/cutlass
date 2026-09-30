@@ -3,6 +3,7 @@ import {
     HSplitGripTrail,
     VSplitGripTimeline,
     CutlassText,
+    EyedropperOverlay,
 } from "components/index.slint";
 import {
     AgentPanel,
@@ -16,6 +17,7 @@ import {
     AppStore,
     EditorStore,
     PreviewStore,
+    EyedropperStore,
     TimelineStore,
     TimelineActions,
 } from "store/index.slint";
@@ -24,12 +26,14 @@ import { LaunchScreen } from "launch.slint";
 import { FullscreenPreview } from "fullscreen-preview.slint";
 import { TitleBar } from "shell/title-bar.slint";
 import { ExportDialog } from "shell/export-dialog.slint";
+import { CaptionsDialog } from "shell/captions-dialog.slint";
 import { CanvasDialog } from "shell/canvas-dialog.slint";
 import { SettingsDialog } from "shell/settings-dialog.slint";
 import { MessageDialog } from "shell/message-dialog.slint";
 import { RelinkDialog } from "shell/relink-dialog.slint";
 import { ConfirmDeleteDialog } from "shell/confirm-delete-dialog.slint";
 import { ExportBackend } from "lib/export-backend.slint";
+import { CaptionBackend } from "lib/caption-backend.slint";
 import {
     PreviewBackend,
     PreviewDragResolution,
@@ -52,9 +56,11 @@ export {
     TimelineStore,
     TimelineActions,
     PreviewStore,
+    EyedropperStore,
 }from "store/index.slint";
 export { TimelineViewState }from "panels/timeline/index.slint";
 export { TimelineLib }from "lib/index.slint";
+export { ColorUtil, HsvComponents }from "lib/color-util.slint";
 export { RulerBackend, RulerTick }from "lib/ruler-backend.slint";
 export {
     DragBackend,
@@ -72,8 +78,10 @@ export {
     PreviewSelectionBox,
     PreviewDragResolution,
     PreviewView,
+    EyedropperSample,
 }from "lib/preview-backend.slint";
 export { InspectorBackend, SelectedClipInfo }from "lib/inspector-backend.slint";
+export { CaptionAutoSource, CaptionBackend, CaptionCueRow }from "lib/caption-backend.slint";
 export { KeyframeBackend }from "lib/keyframe-backend.slint";
 export { GraphBackend, GraphChannel, GraphDot }from "lib/graph-backend.slint";
 export { StripBackend, StripTile }from "lib/strip-backend.slint";
@@ -118,7 +126,10 @@ export component AppWindow inherits Window {
     full-screen: AppState.preview-maximized;
 
     in-out property <length> left-pane-width: 300px;
-    in-out property <length> right-pane-width: 300px;
+    // Wide enough for the inspector's intrinsic row width
+    // (`InspectorRowMetrics.min-content-width` plus the scrollbar gutter);
+    // narrower and the property sheets have to scroll sideways.
+    in-out property <length> right-pane-width: 360px;
     in-out property <length> agent-pane-width: 300px;
     in-out property <length> timeline-height: 340px;
 
@@ -421,6 +432,10 @@ export component AppWindow inherits Window {
             PreviewStore.gesture-active = false;
             PreviewStore.gesture-commit-pending = false;
         }
+        if (PreviewStore.mask-commit-pending) {
+            PreviewStore.mask-live-active = false;
+            PreviewStore.mask-commit-pending = false;
+        }
     }
 
     // Arrow keys nudge the selected visual clip by whole canvas pixels
@@ -472,6 +487,20 @@ export component AppWindow inherits Window {
 
     shortcuts := FocusScope {
         key-pressed(event) => {
+            // Eyedropper owns the keyboard while armed: Escape cancels the
+            // session; every other shortcut is swallowed so Delete / undo /
+            // new-project / dialog dismissals cannot orphan the consumer or
+            // mutate the project under a live hover-preview.
+            if (EyedropperStore.armed) {
+                if (event.text == Key.Escape) {
+                    EyedropperStore.cancel-epoch += 1;
+                    EyedropperStore.source-frame = PreviewBackend.empty-frame();
+                    EyedropperStore.armed = false;
+                    EyedropperStore.over-frame = false;
+                    EyedropperStore.label = "";
+                }
+                return accept;
+            }
             // Settings screen is modal and can sit over the launch screen or
             // the editor, so it's checked first: Escape dismisses, everything
             // else is swallowed.
@@ -534,6 +563,15 @@ export component AppWindow inherits Window {
                 if (event.text == Key.Escape && !ExportBackend.running) {
                     ExportBackend.reset-job-state();
                     AppState.export-dialog-open = false;
+                }
+                return accept;
+            }
+            // Auto captions, same rule as export: modal, and a running
+            // transcription must be stopped through its own Cancel.
+            if (AppState.captions-dialog-open) {
+                if (event.text == Key.Escape && !CaptionBackend.auto-running) {
+                    CaptionBackend.reset-auto-state();
+                    AppState.captions-dialog-open = false;
                 }
                 return accept;
             }
@@ -623,6 +661,11 @@ export component AppWindow inherits Window {
                 return accept;
             }
             if (event.text == Key.Escape) {
+                // Active mask-gizmo drag: cancel like inspector slider Escape
+                // (clear override, no commit) without deselecting the clip.
+                if (TimelineActions.cancel-mask-gizmo-drag()) {
+                    return accept;
+                }
                 TimelineActions.clear-selection();
                 return accept;
             }
@@ -907,6 +950,12 @@ export component AppWindow inherits Window {
         height: root.height;
     }
 
+    // Auto captions dialog (speech recognition), modal like the export one.
+    if AppState.captions-dialog-open: CaptionsDialog {
+        width: root.width;
+        height: root.height;
+    }
+
     // Canvas settings dialog (M1 canvas settings: ratio + background).
     if AppState.canvas-dialog-open: CanvasDialog {
         width: root.width;
@@ -939,6 +988,14 @@ export component AppWindow inherits Window {
     // Session-error dialog (save/open failures) — above even the export
     // dialog: an error must never hide behind another modal.
     if EditorStore.session-error != "": MessageDialog {
+        width: root.width;
+        height: root.height;
+    }
+
+    // Preview eyedropper — declared last so sampling wins over transform
+    // gestures *and* modals (canvas dialog hides itself while armed).
+    // Click outside the preview viewport cancels.
+    if EyedropperStore.armed: EyedropperOverlay {
         width: root.width;
         height: root.height;
     }

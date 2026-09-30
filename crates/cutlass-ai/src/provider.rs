@@ -115,6 +115,72 @@ pub enum FinishReason {
     Other,
 }
 
+/// Token usage for one completed provider turn, as reported by the API.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    /// Portion of input_tokens served from the provider's prompt cache.
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+    /// Provider-reported cost in USD (OpenRouter usage accounting), when available.
+    pub cost: Option<f64>,
+}
+
+impl TokenUsage {
+    /// Saturating sum of token counts.
+    ///
+    /// Cost is `Some` only when every accumulated non-empty turn reported a
+    /// cost. The accumulator starts empty, so the first added turn's cost
+    /// carries through; a later usage-bearing turn without cost poisons the
+    /// total to `None` permanently.
+    pub fn add(&mut self, other: &TokenUsage) {
+        let self_was_empty = self.is_empty();
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.cached_input_tokens = self
+            .cached_input_tokens
+            .saturating_add(other.cached_input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cost = if self_was_empty {
+            other.cost
+        } else {
+            match (self.cost, other.cost) {
+                (Some(a), Some(b)) => Some(a + b),
+                _ => None,
+            }
+        };
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens == 0
+            && self.cached_input_tokens == 0
+            && self.output_tokens == 0
+            && self.cost.is_none()
+    }
+}
+
+/// Parse a JSON number as a token count. Accepts integers and floats
+/// (rounded to nearest); anything else yields 0.
+pub(crate) fn json_u64(value: &serde_json::Value) -> u64 {
+    match value {
+        serde_json::Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                u
+            } else if let Some(i) = n.as_i64() {
+                u64::try_from(i).unwrap_or(0)
+            } else if let Some(f) = n.as_f64() {
+                if f.is_finite() && f >= 0.0 {
+                    f.round() as u64
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
+}
+
 /// One completed model turn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatTurn {
@@ -124,12 +190,25 @@ pub struct ChatTurn {
     pub reasoning_summary: String,
     pub tool_calls: Vec<ToolCall>,
     pub finish: FinishReason,
+    /// Token usage for this turn, when the provider reported it.
+    pub usage: Option<TokenUsage>,
+}
+
+impl ChatTurn {
+    /// Attach provider-reported usage (for scripted tests and fixtures).
+    pub fn with_usage(mut self, usage: TokenUsage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
 }
 
 /// Everything a provider needs for one completion.
 pub struct ChatRequest<'a> {
     pub messages: &'a [Message],
     pub tools: &'a [ToolSpec],
+    /// Stable id for OpenRouter sticky routing across turns of one prompt.
+    /// Providers that do not use OpenRouter prompt caching ignore this.
+    pub session_id: Option<&'a str>,
 }
 
 /// Provider failures, kept distinct so the UI can say "Ollama isn't
@@ -183,4 +262,112 @@ pub trait ChatProvider {
         cancel: &AtomicBool,
         on_event: &mut dyn FnMut(ProviderStreamEvent<'_>),
     ) -> Result<ChatTurn, ProviderError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_usage_add_and_is_empty() {
+        let mut total = TokenUsage::default();
+        assert!(total.is_empty());
+
+        total.add(&TokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 4,
+            output_tokens: 2,
+            cost: None,
+        });
+        assert!(!total.is_empty());
+        assert_eq!(total.input_tokens, 10);
+        assert_eq!(total.cached_input_tokens, 4);
+        assert_eq!(total.output_tokens, 2);
+        assert_eq!(total.cost, None);
+
+        // A later turn with cost cannot resurrect a poisoned total.
+        total.add(&TokenUsage {
+            input_tokens: 5,
+            cached_input_tokens: 1,
+            output_tokens: 3,
+            cost: Some(0.01),
+        });
+        assert_eq!(total.input_tokens, 15);
+        assert_eq!(total.cached_input_tokens, 5);
+        assert_eq!(total.output_tokens, 5);
+        assert_eq!(total.cost, None);
+    }
+
+    #[test]
+    fn token_usage_cost_empty_plus_some_carries_through() {
+        let mut total = TokenUsage::default();
+        total.add(&TokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 2,
+            cost: Some(0.01),
+        });
+        assert_eq!(total.cost, Some(0.01));
+    }
+
+    #[test]
+    fn token_usage_cost_some_plus_some_sums() {
+        let mut total = TokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 2,
+            cost: Some(0.01),
+        };
+        total.add(&TokenUsage {
+            input_tokens: 5,
+            cached_input_tokens: 0,
+            output_tokens: 1,
+            cost: Some(0.02),
+        });
+        assert_eq!(total.cost, Some(0.03));
+    }
+
+    #[test]
+    fn token_usage_cost_some_plus_none_poisons_total() {
+        let mut total = TokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 2,
+            cost: Some(0.01),
+        };
+        total.add(&TokenUsage {
+            input_tokens: 5,
+            cached_input_tokens: 0,
+            output_tokens: 1,
+            cost: None,
+        });
+        assert_eq!(total.cost, None);
+    }
+
+    #[test]
+    fn token_usage_cost_none_stays_none_when_later_turns_have_cost() {
+        let mut total = TokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 2,
+            cost: None,
+        };
+        total.add(&TokenUsage {
+            input_tokens: 5,
+            cached_input_tokens: 0,
+            output_tokens: 1,
+            cost: Some(0.02),
+        });
+        assert_eq!(total.cost, None);
+    }
+
+    #[test]
+    fn json_u64_accepts_integers_and_rounded_floats() {
+        assert_eq!(json_u64(&serde_json::json!(123)), 123);
+        assert_eq!(json_u64(&serde_json::json!(123.0)), 123);
+        assert_eq!(json_u64(&serde_json::json!(123.4)), 123);
+        assert_eq!(json_u64(&serde_json::json!(123.6)), 124);
+        assert_eq!(json_u64(&serde_json::json!("nope")), 0);
+        assert_eq!(json_u64(&serde_json::Value::Null), 0);
+    }
 }

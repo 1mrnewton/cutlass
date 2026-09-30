@@ -237,6 +237,23 @@ fn worker_loop(
                             apply_transform_override(engine, &clip, transform);
                             tick = at;
                         }
+                        WorkerMsg::ParamOverride {
+                            clip,
+                            param,
+                            value,
+                            tick: at,
+                        } => {
+                            apply_param_override(engine, &clip, param, value, Some(&ui.audio));
+                            tick = at;
+                        }
+                        WorkerMsg::PreviewChromaColor {
+                            clip,
+                            rgb,
+                            tick: at,
+                        } => {
+                            apply_chroma_color_override(engine, &clip, rgb);
+                            tick = at;
+                        }
                         other => dispatch(
                             engine,
                             &mut clipboard,
@@ -515,6 +532,67 @@ fn worker_loop(
                 pending_redraw = false;
                 settle_deadline = None;
             }
+            // Solid/shape fill color well drags — same coalesce story as size.
+            WorkerMsg::PreviewGeneratorFill {
+                mut clip,
+                mut rgba,
+                mut tick,
+            } => {
+                let mut pending = true;
+                while let Ok(next) = req_rx.try_recv() {
+                    match next {
+                        WorkerMsg::Frame(latest) => tick = latest,
+                        WorkerMsg::PreviewGeneratorFill {
+                            clip: c,
+                            rgba: color,
+                            tick: at,
+                        } => {
+                            clip = c;
+                            rgba = color;
+                            tick = at;
+                            pending = true;
+                        }
+                        other => {
+                            if std::mem::take(&mut pending)
+                                && let Some(generator) =
+                                    generator_fill_from_engine(engine, &clip, rgba)
+                            {
+                                apply_generator_override(engine, &clip, generator);
+                            }
+                            dispatch(
+                                engine,
+                                &mut clipboard,
+                                &mut main_magnet,
+                                &mut linkage,
+                                other,
+                                tl_rate,
+                                &preview_weak,
+                                &fit,
+                                &cache,
+                                &sprite_mode,
+                                &export_state,
+                                &ui,
+                            )
+                        }
+                    }
+                }
+                last_tick = tick;
+                if pending && let Some(generator) = generator_fill_from_engine(engine, &clip, rgba)
+                {
+                    apply_generator_override(engine, &clip, generator);
+                }
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+                pending_redraw = false;
+                settle_deadline = None;
+            }
             // Look drags (filter intensity / adjust sliders) carry the whole
             // grade so preview frames never mix a new adjustment with a stale
             // filter or vice versa. Coalesce to the newest value like other
@@ -579,31 +657,40 @@ fn worker_loop(
                     SeekPolicy::Exact,
                 );
             }
-            // Layer-style slider drags carry the whole styles block so preview
-            // frames never mix a new blur with a stale color. Coalesce to the
-            // newest value like look/transform/generator overrides.
-            WorkerMsg::PreviewClipStyles {
+            // Layer-style slider drags carry a single param delta; the worker
+            // rebuilds the full styles override from committed engine state +
+            // that delta. Coalesce to the newest delta (latest wins per clip)
+            // like look/transform/generator overrides.
+            WorkerMsg::PreviewClipStyleDelta {
                 mut clip,
-                mut styles,
+                mut key,
+                mut value_x,
+                mut value_y,
                 mut tick,
             } => {
                 let mut pending = true;
                 while let Ok(next) = req_rx.try_recv() {
                     match next {
                         WorkerMsg::Frame(latest) => tick = latest,
-                        WorkerMsg::PreviewClipStyles {
+                        WorkerMsg::PreviewClipStyleDelta {
                             clip: c,
-                            styles: s,
+                            key: k,
+                            value_x: x,
+                            value_y: y,
                             tick: at,
                         } => {
                             clip = c;
-                            styles = s;
+                            key = k;
+                            value_x = x;
+                            value_y = y;
                             tick = at;
                             pending = true;
                         }
                         other => {
                             if std::mem::take(&mut pending) {
-                                apply_styles_override(engine, &clip, styles.clone());
+                                apply_styles_preview_delta(
+                                    engine, &clip, &key, value_x, value_y, tick,
+                                );
                             }
                             dispatch(
                                 engine,
@@ -624,7 +711,7 @@ fn worker_loop(
                 }
                 last_tick = tick;
                 if pending {
-                    apply_styles_override(engine, &clip, styles);
+                    apply_styles_preview_delta(engine, &clip, &key, value_x, value_y, tick);
                 }
                 render_frame(
                     engine,
@@ -635,6 +722,190 @@ fn worker_loop(
                     &cache,
                     SeekPolicy::Exact,
                 );
+            }
+            // Chroma-key color-well drags: coalesce to the newest RGB.
+            WorkerMsg::PreviewChromaColor {
+                mut clip,
+                mut rgb,
+                mut tick,
+            } => {
+                let mut pending = true;
+                while let Ok(next) = req_rx.try_recv() {
+                    match next {
+                        WorkerMsg::Frame(latest) => tick = latest,
+                        WorkerMsg::PreviewChromaColor {
+                            clip: c,
+                            rgb: r,
+                            tick: at,
+                        } => {
+                            clip = c;
+                            rgb = r;
+                            tick = at;
+                            pending = true;
+                        }
+                        other => {
+                            if std::mem::take(&mut pending) {
+                                apply_chroma_color_override(engine, &clip, rgb);
+                            }
+                            dispatch(
+                                engine,
+                                &mut clipboard,
+                                &mut main_magnet,
+                                &mut linkage,
+                                other,
+                                tl_rate,
+                                &preview_weak,
+                                &fit,
+                                &cache,
+                                &sprite_mode,
+                                &export_state,
+                                &ui,
+                            )
+                        }
+                    }
+                }
+                last_tick = tick;
+                if pending {
+                    apply_chroma_color_override(engine, &clip, rgb);
+                }
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+            }
+            WorkerMsg::ClearChromaColorOverride { tick } => {
+                engine.set_chroma_color_override(None);
+                last_tick = tick;
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+            }
+            // Motion-blur shutter/samples drags: coalesce latest field delta
+            // per clip (worker merges against committed blur).
+            WorkerMsg::PreviewMotionBlurDelta {
+                clip,
+                key,
+                value,
+                tick,
+            } => {
+                let tick = coalesce_motion_blur_deltas(
+                    engine,
+                    &mut clipboard,
+                    &mut main_magnet,
+                    &mut linkage,
+                    clip,
+                    key,
+                    value,
+                    tick,
+                    &req_rx,
+                    tl_rate,
+                    &preview_weak,
+                    &fit,
+                    &cache,
+                    &sprite_mode,
+                    &export_state,
+                    &ui,
+                );
+                last_tick = tick;
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+            }
+            // Animation speed/intensity/stagger drags: same coalesce rule.
+            WorkerMsg::PreviewClipAnimationDelta {
+                clip,
+                slot,
+                key,
+                value,
+                tick,
+            } => {
+                let tick = coalesce_animation_deltas(
+                    engine,
+                    &mut clipboard,
+                    &mut main_magnet,
+                    &mut linkage,
+                    clip,
+                    slot,
+                    key,
+                    value,
+                    tick,
+                    &req_rx,
+                    tl_rate,
+                    &preview_weak,
+                    &fit,
+                    &cache,
+                    &sprite_mode,
+                    &export_state,
+                    &ui,
+                );
+                last_tick = tick;
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+            }
+            // Generic inspector param drags (crop, chroma, effect knobs, …)
+            // arrive at pointer-move rate; coalesce to the newest value per
+            // (clip, param) and render once — same queue-pressure rule as
+            // TransformOverride / look / styles.
+            WorkerMsg::ParamOverride {
+                clip,
+                param,
+                value,
+                tick,
+            } => {
+                let tick = coalesce_param_overrides(
+                    engine,
+                    &mut clipboard,
+                    &mut main_magnet,
+                    &mut linkage,
+                    clip,
+                    param,
+                    value,
+                    tick,
+                    &req_rx,
+                    tl_rate,
+                    &preview_weak,
+                    &fit,
+                    &cache,
+                    &sprite_mode,
+                    &export_state,
+                    &ui,
+                );
+                last_tick = tick;
+                render_frame(
+                    engine,
+                    tl_rate,
+                    &preview_weak,
+                    tick,
+                    &fit,
+                    &cache,
+                    SeekPolicy::Exact,
+                );
+                pending_redraw = false;
+                settle_deadline = None;
             }
             // The preview panel resized (or first laid out): renders now fit
             // the new bound. Repaint the current frame only when the bucketed
@@ -752,85 +1023,4 @@ fn next_message(
             }
         }
     }
-}
-
-/// Whether an executed mutation changes the visible composite at the current
-/// playhead and should therefore trigger a preview re-render. The only frame
-/// trigger used to be playhead movement, so edits (delete, generator/font
-/// change, …) looked stale until the user scrubbed. `SetTransform` and
-/// `ClearTransformOverride` render themselves with their own tick, so they're
-/// excluded here to avoid a redundant second composite; pure session ops
-/// (import, copy, auto-save, export, linkage, rename) don't alter the canvas.
-pub(super) fn message_invalidates_preview(msg: &WorkerMsg) -> bool {
-    matches!(
-        msg,
-        WorkerMsg::AddClip { .. }
-            | WorkerMsg::AddGenerated { .. }
-            | WorkerMsg::MoveClip { .. }
-            | WorkerMsg::MoveGroup { .. }
-            | WorkerMsg::TrimClip { .. }
-            | WorkerMsg::RemoveClips { .. }
-            | WorkerMsg::SetGenerator { .. }
-            | WorkerMsg::SetClipSpeed { .. }
-            | WorkerMsg::SetClipPitch { .. }
-            | WorkerMsg::SetSpeedCurve { .. }
-            | WorkerMsg::SetSpeedCurvePoint { .. }
-            | WorkerMsg::SetClipCrop { .. }
-            | WorkerMsg::SetBlendMode { .. }
-            | WorkerMsg::SetMotionBlur { .. }
-            | WorkerMsg::SetLayerStyles { .. }
-            | WorkerMsg::SetMask { .. }
-            | WorkerMsg::SetChroma { .. }
-            | WorkerMsg::SetClipFilter { .. }
-            | WorkerMsg::SetClipAdjust { .. }
-            | WorkerMsg::SetClipLut { .. }
-            | WorkerMsg::SetClipAnimation { .. }
-            // Effects and transitions repaint the canvas at the playhead.
-            | WorkerMsg::AddEffect { .. }
-            | WorkerMsg::RemoveEffect { .. }
-            | WorkerMsg::SetEffectParam { .. }
-            | WorkerMsg::AddTransition { .. }
-            | WorkerMsg::RemoveTransition { .. }
-            | WorkerMsg::SetTransition { .. }
-            // Aspect reshapes the composite, background recolors it.
-            | WorkerMsg::SetCanvas { .. }
-            | WorkerMsg::SetParamKeyframe { .. }
-            | WorkerMsg::SetParamKeyframeTangents { .. }
-            | WorkerMsg::SetParamConstant { .. }
-            | WorkerMsg::RemoveParamKeyframe { .. }
-            | WorkerMsg::MoveParamKeyframe { .. }
-            | WorkerMsg::ApplyEasingPreset { .. }
-            | WorkerMsg::RetimeKeyframes { .. }
-            | WorkerMsg::RemoveKeyframesAt { .. }
-            | WorkerMsg::SplitClip { .. }
-            | WorkerMsg::RippleDeleteClips { .. }
-            | WorkerMsg::ReverseClip { .. }
-            | WorkerMsg::PasteAt { .. }
-            | WorkerMsg::DuplicateClips { .. }
-            | WorkerMsg::Undo
-            | WorkerMsg::Redo
-            // A replayed agent plan can create/move/restyle any clip; repaint
-            // the canvas so the result is visible without a scrub.
-            | WorkerMsg::AgentApplyPlan { .. }
-            | WorkerMsg::SetMainMagnet(_)
-            | WorkerMsg::SetTrackFlag { .. }
-            | WorkerMsg::OpenProject { .. }
-            | WorkerMsg::OpenProjectRpc { .. }
-            | WorkerMsg::NewProject
-            | WorkerMsg::NewProjectRpc { .. }
-            // A filled template is a whole new composite.
-            | WorkerMsg::ApplyTemplate { .. }
-            | WorkerMsg::ApplyTemplateRpc { .. }
-            // Relinked media decodes again — refresh the stale composite.
-            | WorkerMsg::RelinkMedia { .. }
-            | WorkerMsg::RelinkFolder { .. }
-            | WorkerMsg::RelinkMediaRpc { .. }
-            | WorkerMsg::RelinkFolderRpc { .. }
-            // A bound proxy swaps the decode source; repaint through it so
-            // the (cleared) frame cache refills at the cheap decode cost.
-            | WorkerMsg::ProxyReady { .. }
-            // A forced library delete removes the source's clips too; an
-            // unreferenced delete touches nothing on the canvas.
-            | WorkerMsg::RemoveMedia { force: true, .. }
-    )
 }

@@ -1,13 +1,14 @@
 import { PanelBase, PanelHeader } from "../../components/index.slint";
 import { AppStore } from "../../store/index.slint";
-import { EditorStore, PreviewStore } from "../../store/index.slint";
+import { EditorStore, PreviewStore, EyedropperStore } from "../../store/index.slint";
 import { TimelineLib } from "../../lib/timeline-lib.slint";
 import { TimelineStore, TimelineActions } from "../../store/index.slint";
 import { RationalTime } from "../../models/index.slint";
 import { AppState } from "../../state.slint";
-import { PreviewBackend, PreviewHit, PreviewSelectionBox, PreviewSpritePlacement, PreviewDragResolution, PreviewView, MotionPath } from "../../lib/preview-backend.slint";
+import { PreviewBackend, PreviewHit, PreviewSelectionBox, PreviewSpritePlacement, PreviewDragResolution, PreviewView, MotionPath, MaskGizmo } from "../../lib/preview-backend.slint";
 import { SelectionBackend } from "../../lib/selection-backend.slint";
 import { MotionPathOverlay } from "motion-path.slint";
+import { MaskOverlay } from "mask-overlay.slint";
 
 export component PreviewPanel inherits PanelBase {
     private property <RationalTime> sequence-duration:
@@ -41,9 +42,19 @@ export component PreviewPanel inherits PanelBase {
                     // so renders can stop at view-sized pixels. Fired on mount
                     // and on every panel resize (see the changed-size handlers
                     // below); the worker buckets the values to keep re-renders
-                    // rare.
+                    // rare. Also publish window-space bounds for the eyedropper
+                    // overlay (which lives at app scope above clipped panels).
+                    function sync-eyedropper-geometry() {
+                        EyedropperStore.preview-x = self.absolute-position.x;
+                        EyedropperStore.preview-y = self.absolute-position.y;
+                        EyedropperStore.preview-w = self.width;
+                        EyedropperStore.preview-h = self.height;
+                        EyedropperStore.canvas-w = self.canvas-w;
+                        EyedropperStore.canvas-h = self.canvas-h;
+                    }
                     init => {
                         PreviewStore.viewport-changed(self.width, self.height);
+                        self.sync-eyedropper-geometry();
                     }
 
                     // Transform gestures (preview roadmap Phases 3–4).
@@ -126,10 +137,19 @@ export component PreviewPanel inherits PanelBase {
                     changed width => {
                         self.reclamp();
                         PreviewStore.viewport-changed(self.width, self.height);
+                        self.sync-eyedropper-geometry();
                     }
                     changed height => {
                         self.reclamp();
                         PreviewStore.viewport-changed(self.width, self.height);
+                        self.sync-eyedropper-geometry();
+                    }
+                    // absolute-position can shift when sibling panes resize.
+                    private property <length> eyedropper-geom-watch:
+                        self.absolute-position.x + self.absolute-position.y
+                        + self.width + self.height;
+                    changed eyedropper-geom-watch => {
+                        self.sync-eyedropper-geometry();
                     }
                     private property <bool> sprite-ready: PreviewStore.gesture-sprite-ready;
                     changed sprite-ready => {
@@ -156,7 +176,8 @@ export component PreviewPanel inherits PanelBase {
                         PreviewStore.gesture-active
                             && PreviewStore.gesture-clip == TimelineStore.selected-clip-id
                             && PreviewStore.gesture.valid,
-                        PreviewStore.gesture);
+                        PreviewStore.gesture,
+                        PreviewStore.gesture-epoch);
 
                     private property <PreviewSpritePlacement> sprite-placement: PreviewBackend.sprite-placement(
                         EditorStore.project.sequence,
@@ -170,7 +191,8 @@ export component PreviewPanel inherits PanelBase {
                         PreviewStore.gesture-active
                             && PreviewStore.gesture-clip == TimelineStore.selected-clip-id
                             && PreviewStore.gesture.valid,
-                        PreviewStore.gesture);
+                        PreviewStore.gesture,
+                        PreviewStore.gesture-epoch);
 
                     // Motion path for a selected clip with keyframed position.
                     // Same reactive inputs as sel-box (selection, projection
@@ -191,16 +213,45 @@ export component PreviewPanel inherits PanelBase {
                         PreviewStore.motion-path-edit-y,
                         PreviewStore.motion-path-mirror);
 
+                    // CapCut mask gizmo: shown whenever the selected clip has
+                    // a mask (MaskInspector has no separate edit-mode tab).
+                    private property <MaskGizmo> mask-gizmo: PreviewBackend.mask-gizmo(
+                        EditorStore.project.sequence,
+                        TimelineStore.selected-clip-id,
+                        TimelineStore.playhead-tick,
+                        self.width / 1px,
+                        self.height / 1px,
+                        PreviewStore.viewport-zoom,
+                        PreviewStore.viewport-pan-x / 1px,
+                        PreviewStore.viewport-pan-y / 1px,
+                        PreviewStore.mask-live-active,
+                        PreviewStore.mask-live-center-x,
+                        PreviewStore.mask-live-center-y,
+                        PreviewStore.mask-live-size-w,
+                        PreviewStore.mask-live-size-h,
+                        PreviewStore.mask-live-rotation,
+                        PreviewStore.mask-live-feather,
+                        PreviewStore.mask-live-roundness);
+
                     // Clear motion-path selection when the timeline selection
                     // changes — selection-only, never touches the project.
                     private property <string> selected-clip-watch: TimelineStore.selected-clip-id;
                     changed selected-clip-watch => {
                         PreviewStore.motion-path-selected-tick = -1;
                         PreviewStore.motion-path-edit-mode = 0;
+                        // MaskOverlay watches selection and cancels an active
+                        // gizmo drag against its press-time clip before these
+                        // flags clear. Inspector slider live state just drops.
+                        PreviewStore.mask-live-active = false;
+                        PreviewStore.mask-commit-pending = false;
+                        PreviewStore.mask-drag-handle = 0;
                     }
 
                     private property <bool> show-sprite-stack:
                         self.sprite-ready && self.sprite-hold;
+                    // Selection box / handles / mask / motion-path chrome.
+                    private property <bool> show-gizmos:
+                        PreviewStore.show-transform-controls && self.sel-box.visible;
 
                     private property <length> frame-x:
                         (self.width - self.fitted-width * PreviewStore.viewport-zoom) / 2
@@ -219,7 +270,7 @@ export component PreviewPanel inherits PanelBase {
                         return (px - qx) * (px - qx) + (py - qy) * (py - qy) <= 100;
                     }
                     function zone-at(px: float, py: float) -> int {
-                        if (!self.sel-box.visible) {
+                        if (!self.show-gizmos) {
                             return 0;
                         }
                         if (self.near(px, py, self.sel-box.hx, self.sel-box.hy)) {
@@ -549,7 +600,7 @@ export component PreviewPanel inherits PanelBase {
 
                     // Motion path: under the selection outline so gizmos stay
                     // grab-able on top. Empty when position isn't animated.
-                    MotionPathOverlay {
+                    if PreviewStore.show-transform-controls: MotionPathOverlay {
                         width: 100%;
                         height: 100%;
                         path: viewport.motion-path;
@@ -576,7 +627,7 @@ export component PreviewPanel inherits PanelBase {
 
                     // Selection outline: a stroked quad (corners arrive
                     // pre-rotated from Rust — Slint can't rotate rectangles).
-                    if viewport.sel-box.visible: Path {
+                    if viewport.show-gizmos: Path {
                         width: 100%;
                         height: 100%;
                         viewbox-width: viewport.width / 1px;
@@ -594,7 +645,7 @@ export component PreviewPanel inherits PanelBase {
 
                     // Corner scale handles: constant UI size, riding the
                     // (pre-rotated) quad corners.
-                    if viewport.sel-box.visible: Rectangle {
+                    if viewport.show-gizmos: Rectangle {
                         x: viewport.sel-box.x0 * 1px - 5px;
                         y: viewport.sel-box.y0 * 1px - 5px;
                         width: 10px;
@@ -604,7 +655,7 @@ export component PreviewPanel inherits PanelBase {
                         border-width: 1px;
                         border-color: #00000066;
                     }
-                    if viewport.sel-box.visible: Rectangle {
+                    if viewport.show-gizmos: Rectangle {
                         x: viewport.sel-box.x1 * 1px - 5px;
                         y: viewport.sel-box.y1 * 1px - 5px;
                         width: 10px;
@@ -614,7 +665,7 @@ export component PreviewPanel inherits PanelBase {
                         border-width: 1px;
                         border-color: #00000066;
                     }
-                    if viewport.sel-box.visible: Rectangle {
+                    if viewport.show-gizmos: Rectangle {
                         x: viewport.sel-box.x2 * 1px - 5px;
                         y: viewport.sel-box.y2 * 1px - 5px;
                         width: 10px;
@@ -624,7 +675,7 @@ export component PreviewPanel inherits PanelBase {
                         border-width: 1px;
                         border-color: #00000066;
                     }
-                    if viewport.sel-box.visible: Rectangle {
+                    if viewport.show-gizmos: Rectangle {
                         x: viewport.sel-box.x3 * 1px - 5px;
                         y: viewport.sel-box.y3 * 1px - 5px;
                         width: 10px;
@@ -636,7 +687,7 @@ export component PreviewPanel inherits PanelBase {
                     }
 
                     // Anchor pivot: crosshair riding the anchor point.
-                    if viewport.sel-box.visible: Path {
+                    if viewport.show-gizmos: Path {
                         width: 100%;
                         height: 100%;
                         viewbox-width: viewport.width / 1px;
@@ -650,7 +701,7 @@ export component PreviewPanel inherits PanelBase {
                         MoveTo { x: viewport.sel-box.ax; y: viewport.sel-box.ay - 8; }
                         LineTo { x: viewport.sel-box.ax; y: viewport.sel-box.ay + 8; }
                     }
-                    if viewport.sel-box.visible: Rectangle {
+                    if viewport.show-gizmos: Rectangle {
                         x: viewport.sel-box.ax * 1px - 4px;
                         y: viewport.sel-box.ay * 1px - 4px;
                         width: 8px;
@@ -663,7 +714,7 @@ export component PreviewPanel inherits PanelBase {
 
                     // Rotate affordance: a hollow ring floating below the
                     // content's bottom edge (follows the box's rotation).
-                    if viewport.sel-box.visible: Rectangle {
+                    if viewport.show-gizmos: Rectangle {
                         x: viewport.sel-box.hx * 1px - 6px;
                         y: viewport.sel-box.hy * 1px - 6px;
                         width: 12px;
@@ -691,6 +742,16 @@ export component PreviewPanel inherits PanelBase {
                             horizontal-alignment: TextHorizontalAlignment.center;
                             vertical-alignment: TextVerticalAlignment.center;
                         }
+                    }
+
+                    // Mask gizmo on top of transform grips so mask handles
+                    // win hit-testing while a mask is set.
+                    if PreviewStore.show-transform-controls: MaskOverlay {
+                        width: 100%;
+                        height: 100%;
+                        gizmo: viewport.mask-gizmo;
+                        view-w: viewport.width / 1px;
+                        view-h: viewport.height / 1px;
                     }
 
                     // Trackpad pinch-to-zoom (precision gesture). `scale` is
@@ -813,6 +874,43 @@ export component PreviewPanel inherits PanelBase {
                     HorizontalLayout {
                         alignment: LayoutAlignment.end;
                         spacing: AppStore.theme.metrics.spacing.sm;
+
+                        // Toggle on-canvas transform/mask/motion-path gizmos.
+                        // Placeholder until `box-select` SVG is wired (docs/icons.md).
+                        Rectangle {
+                            width: 24px;
+                            vertical-stretch: 1;
+
+                            Rectangle {
+                                width: 24px;
+                                height: 24px;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: 4px;
+                                background: PreviewStore.show-transform-controls ? #2A2A2A : transparent;
+                                border-width: 1px;
+                                border-color: #FFFFFF24;
+
+                                Text {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: "⬚";
+                                    color: PreviewStore.show-transform-controls ? #FFFFFF : #FFFFFF66;
+                                    font-size: 14px;
+                                    horizontal-alignment: TextHorizontalAlignment.center;
+                                    vertical-alignment: TextVerticalAlignment.center;
+                                }
+
+                                TouchArea {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => {
+                                        PreviewStore.show-transform-controls =
+                                            !PreviewStore.show-transform-controls;
+                                    }
+                                }
+                            }
+                        }
 
                         Rectangle {
                             width: 52px;

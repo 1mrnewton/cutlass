@@ -367,6 +367,39 @@ box.set_style(color="#00ffaa")
 box.animate(width=800.0, at=1.0)              # shape geometry is animatable
 ```
 
+## `Captions`
+
+A caption group is a run of cue clips sharing one look. Cues are ordinary text
+clips, so they trim, move, and animate like anything else; the group is where
+the shared style, the line-breaking rules, and the karaoke highlight live.
+
+```python
+subs = p.add_track("text", name="Captions")
+
+# Hand-written lines: (text, start, duration), or dicts with start + end.
+caps = subs.add_captions([
+    ("Cutlass edits with words", 0.0, 1.8),
+    ("and renders on the GPU", 1.8, 2.0),
+], template="karaoke_pop", label="Voiceover")
+
+# An existing subtitle file (SRT or WebVTT, sniffed by content).
+caps = subs.import_subtitles("dialogue.srt", start=0.0, rewrap=False)
+
+caps.style(size=96, fill="#ffffff", uppercase=True, position_y=0.32)
+caps.layout(max_chars_per_line=28, max_lines=2, min_duration=0.6)
+caps.highlight("word", fill="#ffd800", plate="#00000080", scale=1.12)
+
+caps.cues[0].text = "Corrected line"   # keeps the cue's word timings
+caps.to_srt("out.srt")                 # sidecar export; also .to_vtt(...)
+
+for group in p.captions:
+    print(group.label, len(group))
+```
+
+Templates come from `cutlass.caption_templates()`. Highlighting needs per-word
+timings, which imported and auto-generated captions carry; hand-written lines
+store the setting and render unhighlighted.
+
 ## Content descriptors
 
 Plain values; construct them anywhere, place them with `track.add`.
@@ -403,8 +436,9 @@ Heart(width=200, height=200, color="white")
 # Easing: "linear" | "ease_in" | "ease_out" | "ease_in_out" | (x1, y1, x2, y2)
 
 # Catalogs (from the engine, for discovery/validation):
-cutlass.effects()      # [EffectSpec(id, label, params=[ParamSpec(name, default, min, max)])]
-cutlass.transitions()  # [TransitionSpec(id, label)]
+cutlass.effects()            # [EffectSpec(id, label, params=[ParamSpec(name, default, min, max)])]
+cutlass.transitions()        # [TransitionSpec(id, label)]
+cutlass.caption_templates()  # [{id, label, highlight, max_chars_per_line, max_lines}]
 
 # Exceptions:
 cutlass.CutlassError           # base (also raised on stale handles)

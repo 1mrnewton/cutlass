@@ -29,10 +29,12 @@ use crate::{
     TransitionView,
 };
 
+mod caption;
 mod helpers;
 mod keyframes;
 mod look;
 
+use caption::*;
 use helpers::*;
 use keyframes::*;
 use look::*;
@@ -94,6 +96,7 @@ pub fn project_to_slint(
                     .map(marker_to_slint)
                     .collect::<Vec<_>>(),
             ),
+            caption_groups: caption_groups(timeline),
             aspect_index: aspect_to_index(canvas.aspect),
             background: Color::from_rgb_u8(
                 canvas.background[0],
@@ -278,6 +281,7 @@ fn clip_to_slint(
     let animation_out = clip_animation(clip.animation_out.as_ref());
     let animation_combo = clip_animation(clip.animation_combo.as_ref());
     let caps = clip_capabilities(project, clip, track_kind);
+    let cue = clip_caption(clip);
 
     Clip {
         id: clip.id.raw().to_string().into(),
@@ -303,6 +307,12 @@ fn clip_to_slint(
         has_audio,
         text_content: text_content.into(),
         text_style: clip_text_style(clip),
+        caption_group: cue.group.into(),
+        caption_index: cue.index,
+        caption_speaker: cue.speaker.into(),
+        caption_confidence: cue.confidence,
+        caption_has_words: cue.has_words,
+        caption_style_override: cue.style_override,
         generator_kind: generator_kind.into(),
         fill_color,
         shape_width,

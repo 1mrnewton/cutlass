@@ -27,6 +27,7 @@ import {
     LabelCell,
     SliderRow,
 } from "inspector-widgets.slint";
+import { InspectorRowMetrics } from "inspector-metrics.slint";
 import { AnimationInspector } from "animation-inspector.slint";
 import { TextStyleRows, IconButton, NumberBox } from "text-style-rows.slint";
 import { TextTreatmentRows } from "text-treatment-rows.slint";
@@ -62,7 +63,9 @@ component PillTab inherits Rectangle {
 }
 
 
-component MultilineTextInput inherits Rectangle {
+// Shared with the caption sheet, which edits cue text the same way (typing is
+// local, the engine edit commits on blur).
+export component MultilineTextInput inherits Rectangle {
     in-out property <string> text;
     in property <string> placeholder-text;
     in property <string> accessibility-label: root.placeholder-text;
@@ -241,8 +244,8 @@ component PositionRow inherits HorizontalLayout {
     callback kf-toggle();
     callback kf-set-easing(easing: int);
 
-    spacing: AppStore.theme.metrics.spacing.md;
-    height: 28px;
+    spacing: InspectorRowMetrics.spacing;
+    height: InspectorRowMetrics.control-height;
     vertical-stretch: 0;
 
     LabelCell {
@@ -418,6 +421,12 @@ export component TextInspector inherits VerticalLayout {
                 PreviewStore.gesture-commit-pending = true;
             }
         } else {
+            // Same begin-then-override pairing as the canvas / transform
+            // inspector — without it every slider tick pays a full re-render.
+            if (!PreviewStore.gesture-active || PreviewStore.gesture-commit-pending
+                || PreviewStore.gesture-clip != model.id) {
+                EditorStore.on-preview-gesture-started(model.id, TimelineStore.playhead-tick);
+            }
             PreviewStore.gesture-clip = model.id;
             PreviewStore.gesture = {
                 valid: true,
@@ -472,9 +481,12 @@ export component TextInspector inherits VerticalLayout {
 
     body-scroll := CutlassScrollView {
         vertical-stretch: 1;
-        viewport-width: root.width;
+        // A property row is a fixed label column plus fixed-width controls,
+        // so it can't reflow: narrower than the sheet's intrinsic width, the
+        // body scrolls sideways instead of clipping the right-hand controls
+        // (keyframe cluster, trailing toggles) off the panel edge.
+        viewport-width: content.width;
         viewport-height: content.preferred-height;
-        show-horizontal-scrollbar: false;
         interactive: false;
 
         // Same blur catcher for the property sheet: any click that no
@@ -483,7 +495,7 @@ export component TextInspector inherits VerticalLayout {
         TouchArea {
             x: 0;
             y: 0;
-            width: body-scroll.width;
+            width: max(body-scroll.width, content.width);
             height: max(body-scroll.height, content.preferred-height);
             clicked => {
                 AppState.refocus-shortcuts();
@@ -491,7 +503,10 @@ export component TextInspector inherits VerticalLayout {
         }
 
         content := VerticalLayout {
-            width: max(0px, root.width - AppStore.theme.scrollbar.size);
+            width: max(
+                root.width - AppStore.theme.scrollbar.size,
+                InspectorRowMetrics.min-content-width,
+            );
             spacing: AppStore.theme.metrics.spacing.lg;
             alignment: LayoutAlignment.start;
             padding: AppStore.theme.metrics.spacing.lg;
@@ -566,14 +581,15 @@ export component TextInspector inherits VerticalLayout {
                 foreground: AppStore.theme.text.secondary;
             }
 
+            // The chip strip is always wider than the panel, so it scrolls:
+            // drag or swipe it, or grab the bar in the 10px gutter the extra
+            // height leaves below the chips.
             CutlassScrollView {
                 width: 100%;
-                height: 50px;
+                height: 50px + AppStore.theme.scrollbar.size;
                 viewport-width: preset-styles.preferred-width;
-                viewport-height: self.height;
-                show-horizontal-scrollbar: false;
+                viewport-height: 50px;
                 show-vertical-scrollbar: false;
-                interactive: false;
 
                 preset-styles := HorizontalLayout {
                     spacing: AppStore.theme.metrics.spacing.md;
@@ -655,7 +671,7 @@ export component TextInspector inherits VerticalLayout {
             }
 
             HorizontalLayout {
-                spacing: AppStore.theme.metrics.spacing.md;
+                spacing: InspectorRowMetrics.spacing;
 
                 LabelCell {
                     label: "Uniform scale";

@@ -108,6 +108,7 @@ pub(super) fn dispatch(
         WorkerMsg::SetGenerator { clip, generator } => {
             set_generator_and_publish(engine, &clip, generator, ui)
         }
+        WorkerMsg::Caption(op) => caption_op(engine, op, ui),
         WorkerMsg::SetShapeSize {
             clip,
             width,
@@ -127,6 +128,25 @@ pub(super) fn dispatch(
             tick,
         } => {
             if let Some(generator) = shape_size_from_engine(engine, &clip, width, height) {
+                apply_generator_override(engine, &clip, generator);
+                render_frame(
+                    engine,
+                    tl_rate,
+                    preview_weak,
+                    tick,
+                    fit,
+                    cache,
+                    SeekPolicy::Exact,
+                );
+            }
+        }
+        WorkerMsg::SetGeneratorFill { clip, rgba } => {
+            if let Some(generator) = generator_fill_from_engine(engine, &clip, rgba) {
+                set_generator_and_publish(engine, &clip, generator, ui);
+            }
+        }
+        WorkerMsg::PreviewGeneratorFill { clip, rgba, tick } => {
+            if let Some(generator) = generator_fill_from_engine(engine, &clip, rgba) {
                 apply_generator_override(engine, &clip, generator);
                 render_frame(
                     engine,
@@ -185,8 +205,47 @@ pub(super) fn dispatch(
         WorkerMsg::SetLayerStyles { clip, styles } => {
             set_layer_styles_and_publish(engine, &clip, styles, ui)
         }
+        WorkerMsg::ToggleLayerStyle {
+            clip,
+            block,
+            enabled,
+        } => toggle_layer_style_and_publish(engine, &clip, &block, enabled, ui),
         WorkerMsg::SetMask { clip, mask } => set_mask_and_publish(engine, &clip, mask, ui),
+        WorkerMsg::SetMaskKind { clip, kind } => {
+            set_mask_kind_and_publish(engine, &clip, &kind, ui)
+        }
+        WorkerMsg::SetMaskInvert { clip, invert } => {
+            set_mask_invert_and_publish(engine, &clip, invert, ui)
+        }
         WorkerMsg::SetChroma { clip, chroma } => set_chroma_and_publish(engine, &clip, chroma, ui),
+        WorkerMsg::SetChromaColor { clip, rgb } => {
+            set_chroma_color_and_publish(engine, &clip, rgb, ui)
+        }
+        // Interleave fallback — the dedicated loop arm coalesces the common case.
+        WorkerMsg::PreviewChromaColor { clip, rgb, tick } => {
+            apply_chroma_color_override(engine, &clip, rgb);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        WorkerMsg::ClearChromaColorOverride { tick } => {
+            engine.set_chroma_color_override(None);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
         WorkerMsg::SetClipFilter {
             clip,
             filter_id,
@@ -243,8 +302,14 @@ pub(super) fn dispatch(
             );
         }
         // Same interleave fallback for styles preview bursts.
-        WorkerMsg::PreviewClipStyles { clip, styles, tick } => {
-            apply_styles_override(engine, &clip, styles);
+        WorkerMsg::PreviewClipStyleDelta {
+            clip,
+            key,
+            value_x,
+            value_y,
+            tick,
+        } => {
+            apply_styles_preview_delta(engine, &clip, &key, value_x, value_y, tick);
             render_frame(
                 engine,
                 tl_rate,
@@ -257,6 +322,65 @@ pub(super) fn dispatch(
         }
         WorkerMsg::ClearStylesOverride { tick } => {
             engine.set_styles_override(None);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        WorkerMsg::PreviewMotionBlurDelta {
+            clip,
+            key,
+            value,
+            tick,
+        } => {
+            apply_motion_blur_preview_delta(engine, &clip, &key, value);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        WorkerMsg::ClearMotionBlurOverride { tick } => {
+            engine.set_motion_blur_override(None);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        WorkerMsg::PreviewClipAnimationDelta {
+            clip,
+            slot,
+            key,
+            value,
+            tick,
+        } => {
+            apply_animation_preview_delta(engine, &clip, &slot, &key, value);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        WorkerMsg::ClearAnimationOverride { tick } => {
+            engine.set_animation_override(None);
             render_frame(
                 engine,
                 tl_rate,
@@ -297,6 +421,38 @@ pub(super) fn dispatch(
         }
         WorkerMsg::ClearGeneratorOverride { tick } => {
             engine.set_generator_override(None);
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        WorkerMsg::ClearParamOverride { clip, tick } => {
+            clear_param_overrides(engine, &clip, Some(&ui.audio));
+            render_frame(
+                engine,
+                tl_rate,
+                preview_weak,
+                tick,
+                fit,
+                cache,
+                SeekPolicy::Exact,
+            );
+        }
+        // Only reached if a param-override burst interleaves with another
+        // coalesced gesture's drain. The dedicated loop arm handles the
+        // common case with coalescing.
+        WorkerMsg::ParamOverride {
+            clip,
+            param,
+            value,
+            tick,
+        } => {
+            apply_param_override(engine, &clip, param, value, Some(&ui.audio));
             render_frame(
                 engine,
                 tl_rate,
@@ -572,10 +728,22 @@ pub(super) fn dispatch(
             }
         }
         WorkerMsg::SnapshotProject { reply } => {
-            let _ = reply.send(engine.project().clone());
+            let _ = reply.send((engine.project().clone(), engine.revision()));
         }
-        WorkerMsg::AgentApplyPlan { phases, reply } => {
-            let _ = reply.send(agent_apply_and_publish(engine, phases, ui));
+        WorkerMsg::ProjectRevision { reply } => {
+            let _ = reply.send(engine.revision());
+        }
+        WorkerMsg::AgentApplyPlan {
+            phases,
+            expected_seed_revision,
+            reply,
+        } => {
+            let _ = reply.send(agent_apply_and_publish(
+                engine,
+                phases,
+                expected_seed_revision,
+                ui,
+            ));
         }
         WorkerMsg::Frame(_) => unreachable!("frames are handled by the drain below"),
         WorkerMsg::TransformOverride { .. } => {

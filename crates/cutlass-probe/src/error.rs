@@ -2,6 +2,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ProbeError {
+    #[cfg(feature = "ffmpeg")]
     #[error("failed to open media")]
     Open(#[source] ffmpeg_next::Error),
 

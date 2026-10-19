@@ -1,4 +1,8 @@
 //! End-to-end decode workflows: open, sequential read, plane layout, init.
+//!
+//! These drive the FFmpeg `Decoder`, so they only build/run when the `ffmpeg`
+//! feature is on (FFmpeg-free targets use the platform-native backends instead).
+#![cfg(feature = "ffmpeg")]
 
 mod common;
 

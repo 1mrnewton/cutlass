@@ -325,7 +325,7 @@ impl Compositor {
                         &wgpu::PipelineLayoutDescriptor {
                             label: Some("rgba_to_yuv_layout"),
                             bind_group_layouts: &[&rgba_to_yuv_bind_layout],
-                            push_constant_ranges: &[],
+                            immediate_size: 0,
                         },
                     )),
                     module: &rgba_to_yuv_shader,
@@ -529,6 +529,7 @@ impl Compositor {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &target.view,
                 resolve_target: None,
+                depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(Self::clear_color(config)),
                     store: wgpu::StoreOp::Store,
@@ -537,6 +538,7 @@ impl Compositor {
             depth_stencil_attachment: None,
             occlusion_query_set: None,
             timestamp_writes: None,
+            multiview_mask: None,
         });
     }
 
@@ -561,6 +563,7 @@ impl Compositor {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &target.view,
                 resolve_target: None,
+                depth_slice: None,
                 ops: wgpu::Operations {
                     load,
                     store: wgpu::StoreOp::Store,
@@ -569,6 +572,7 @@ impl Compositor {
             depth_stencil_attachment: None,
             occlusion_query_set: None,
             timestamp_writes: None,
+            multiview_mask: None,
         });
         for layer in layers {
             self.encode_layer(&mut pass, gpu, config, layer, layer.placement.opacity);
@@ -736,6 +740,7 @@ impl Compositor {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &scratch.orig,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -744,6 +749,7 @@ impl Compositor {
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 timestamp_writes: None,
+                multiview_mask: None,
             });
             self.encode_layer(&mut pass, gpu, config, layer, 1.0);
         }
@@ -802,6 +808,7 @@ impl Compositor {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &scratch.orig,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -810,6 +817,7 @@ impl Compositor {
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 timestamp_writes: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.composite_pipeline);
             pass.set_bind_group(0, &bind, &[]);
@@ -853,6 +861,7 @@ impl Compositor {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -861,6 +870,7 @@ impl Compositor {
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 timestamp_writes: None,
+                multiview_mask: None,
             });
             self.encode_layer(&mut pass, gpu, config, sub, 1.0);
         }
@@ -912,6 +922,7 @@ impl Compositor {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &scratch.b,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -920,6 +931,7 @@ impl Compositor {
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 timestamp_writes: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.transitions.pipelines[pipeline_idx]);
             pass.set_bind_group(0, &bind, &[]);
@@ -991,6 +1003,7 @@ impl Compositor {
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: output,
                         resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                             store: wgpu::StoreOp::Store,
@@ -999,6 +1012,7 @@ impl Compositor {
                     depth_stencil_attachment: None,
                     occlusion_query_set: None,
                     timestamp_writes: None,
+                    multiview_mask: None,
                 });
                 pass.set_pipeline(&self.effects.pipelines[pipeline_idx]);
                 pass.set_bind_group(0, &bind, &[]);
@@ -1055,6 +1069,7 @@ impl Compositor {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &target.view,
                 resolve_target: None,
+                depth_slice: None,
                 ops: wgpu::Operations {
                     load,
                     store: wgpu::StoreOp::Store,
@@ -1063,6 +1078,7 @@ impl Compositor {
             depth_stencil_attachment: None,
             occlusion_query_set: None,
             timestamp_writes: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&self.composite_pipeline);
         pass.set_bind_group(0, &bind, &[]);
@@ -1382,7 +1398,7 @@ fn pipeline_layout(
         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(label),
             bind_group_layouts: &[layout],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         })
 }
 
@@ -1419,7 +1435,7 @@ fn render_pipeline(
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         })
 }
@@ -1576,7 +1592,7 @@ where
     slice.map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
     });
-    let _ = gpu.device.poll(wgpu::Maintain::Wait);
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
     rx.recv()
         .map_err(|_| CompositorError::MapFailed)?
         .map_err(|_| CompositorError::MapFailed)?;

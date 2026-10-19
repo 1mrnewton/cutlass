@@ -1,0 +1,4 @@
+module CutlassMobileFFI {
+    header "cutlass_mobile.h"
+    export *
+}

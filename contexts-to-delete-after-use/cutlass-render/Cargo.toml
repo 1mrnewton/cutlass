@@ -1,0 +1,24 @@
+[package]
+name = "cutlass-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cutlass render bridge: resolve a project timeline into composited frames and export them to video."
+
+[dependencies]
+cutlass-core = { path = "../cutlass-core" }
+cutlass-models = { path = "../cutlass-models" }
+cutlass-compositor = { path = "../cutlass-compositor" }
+cutlass-decoder = { path = "../cutlass-decoder" }
+cutlass-encoder = { path = "../cutlass-encoder" }
+cutlass-text = { path = "../cutlass-text" }
+thiserror.workspace = true
+png = "0.17"
+
+[dev-dependencies]
+tempfile = "3"
+# The zero-copy parity test inspects the adapter backend to skip on non-Metal
+# (software) hosts where the Apple import path doesn't apply.
+wgpu = { workspace = true }

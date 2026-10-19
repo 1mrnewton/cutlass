@@ -26,18 +26,16 @@ impl GpuContext {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or(CompositorError::NoAdapter)?;
+            .map_err(|_| CompositorError::NoAdapter)?;
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("cutlass-compositor"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    memory_hints: wgpu::MemoryHints::Performance,
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("cutlass-compositor"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                ..Default::default()
+            })
             .await
             .map_err(|e| CompositorError::RequestDevice(e.to_string()))?;
 

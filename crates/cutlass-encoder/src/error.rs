@@ -2,12 +2,15 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum EncodeError {
+    #[cfg(feature = "ffmpeg")]
     #[error("failed to open media")]
     Open(#[source] ffmpeg_next::Error),
 
+    #[cfg(feature = "ffmpeg")]
     #[error("muxer I/O failed")]
     Io(#[source] ffmpeg_next::Error),
 
+    #[cfg(feature = "ffmpeg")]
     #[error("encode failed")]
     Encode(#[source] ffmpeg_next::Error),
 

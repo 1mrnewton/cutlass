@@ -13,20 +13,32 @@ use crate::action::edit::restore_clip::RestoreClipAction;
 use crate::action::{ApplyContext, EditAction};
 use crate::error::EngineError;
 
+#[cfg(not(engine_native_decode))]
 use cutlass_decoder::{AUDIO_CHANNELS, AudioReader, detect_beats as detect_beats_dsp};
 
 /// Decode rate for beat analysis. 22.05 kHz resolves percussive transients
 /// well while decoding less than half the export rate — onset detection only
 /// needs to know *when* energy arrives, not reproduce full-bandwidth audio.
+#[cfg(not(engine_native_decode))]
 const ANALYSIS_RATE: u32 = 22_050;
 
 /// Detect a media clip's beats and store them. Returns a clip-snapshot inverse.
+#[cfg(not(engine_native_decode))]
 pub fn detect(
     ctx: &mut ApplyContext<'_>,
     clip: ClipId,
 ) -> Result<Box<dyn EditAction>, EngineError> {
     let beats = analyze(ctx.project, clip)?;
     commit(ctx, clip, beats)
+}
+
+/// Native build: audio decode (and thus beat analysis) isn't wired up yet.
+#[cfg(engine_native_decode)]
+pub fn detect(
+    _ctx: &mut ApplyContext<'_>,
+    _clip: ClipId,
+) -> Result<Box<dyn EditAction>, EngineError> {
+    Err(ModelError::InvalidParam("beat detection is unavailable in this build".into()).into())
 }
 
 /// Clear a clip's beats. Returns a clip-snapshot inverse.
@@ -53,6 +65,7 @@ fn commit(
 /// Decode the clip's source window and run beat detection, returning beat
 /// positions as source ticks at the media frame rate. Rejects generated clips
 /// and media without audio (nothing to analyze).
+#[cfg(not(engine_native_decode))]
 fn analyze(project: &Project, clip_id: ClipId) -> Result<Vec<i64>, EngineError> {
     let clip = project
         .clip(clip_id)
@@ -86,6 +99,7 @@ fn analyze(project: &Project, clip_id: ClipId) -> Result<Vec<i64>, EngineError> 
 
 /// Map detected beat seconds (from the window start) to source ticks at the
 /// media frame rate, anchored at the clip's source in-point. Pure.
+#[cfg(not(engine_native_decode))]
 fn beats_to_source_ticks(seconds: &[f64], source_start: i64, fps: Rational) -> Vec<i64> {
     if fps.num <= 0 || fps.den <= 0 {
         return Vec::new();
@@ -99,6 +113,7 @@ fn beats_to_source_ticks(seconds: &[f64], source_start: i64, fps: Rational) -> V
 
 /// Read `frames` output frames from `src_start` of `path` at the analysis
 /// rate, downmixed to mono. Streams in blocks so memory stays bounded.
+#[cfg(not(engine_native_decode))]
 fn read_mono(path: &std::path::Path, src_start: i64, frames: i64) -> Result<Vec<f32>, EngineError> {
     const BLOCK: usize = 16_384;
     let mut reader = AudioReader::open(path, ANALYSIS_RATE)?;
@@ -122,6 +137,7 @@ fn read_mono(path: &std::path::Path, src_start: i64, frames: i64) -> Result<Vec<
 
 /// `value` ticks at `fps` → output frames at [`ANALYSIS_RATE`] (exact i128,
 /// floored).
+#[cfg(not(engine_native_decode))]
 fn ticks_to_samples(value: i64, fps: Rational) -> i64 {
     if fps.num <= 0 || fps.den <= 0 {
         return 0;
@@ -131,7 +147,7 @@ fn ticks_to_samples(value: i64, fps: Rational) -> i64 {
     frames.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(engine_native_decode)))]
 mod tests {
     use super::*;
 

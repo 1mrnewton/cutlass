@@ -178,7 +178,7 @@ impl EffectRegistry {
                         },
                         depth_stencil: None,
                         multisample: wgpu::MultisampleState::default(),
-                        multiview: None,
+                        multiview_mask: None,
                         cache: None,
                     });
                     pipelines.push(pipeline);

@@ -1,0 +1,55 @@
+[package]
+name = "cutlass-decoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Platform-native video decoding behind the cutlass-core VideoDecoder trait. AVFoundation (VideoToolbox) backend on Apple; other platforms to follow."
+
+[dependencies]
+cutlass-core = { path = "../cutlass-core" }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Apple backend: AVFoundation reader (demux + VideoToolbox decode) producing
+# IOSurface-backed CVPixelBuffers. objc2 framework crates are pinned to the same
+# 0.3.2 / objc2 0.6 line the renderer uses so the CVPixelBuffer / Metal types
+# unify across the decode->compositor handoff. Default features are left on:
+# they pull the full class set (and the cross-framework CoreMedia/CoreVideo
+# glue the reader's CMSampleBuffer/CVPixelBuffer methods need); trim later if
+# build time warrants.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = "0.6.4"
+objc2-foundation = "0.3.2"
+# `objc2-core-media` / `objc2-core-video` features turn on the AVFoundation
+# methods that return CMSampleBuffer / CVImageBuffer (e.g. copyNextSampleBuffer),
+# which aren't in the default set.
+objc2-av-foundation = { version = "0.3.2", features = [
+    "objc2-core-media",
+    "objc2-core-video",
+] }
+objc2-core-media = "0.3.2"
+objc2-core-video = "0.3.2"
+objc2-core-foundation = "0.3.2"
+
+# Windows backend: Media Foundation Source Reader (demux + decode) producing
+# system-memory NV12 buffers on the CPU path. The `windows` crate gives COM
+# ergonomics (RAII release, `.cast()`, `Result<HRESULT>`) that raw `windows-sys`
+# lacks, which matters for the COM-heavy MF surface.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }
+
+# Android backend: NDK MediaExtractor (demux) + MediaCodec (hardware decode).
+# We use the raw `ndk-sys` FFI rather than the safe `ndk` wrapper because `ndk`
+# 0.9 exposes MediaCodec/MediaFormat but *not* MediaExtractor, so mixing the two
+# leaves a wrapper gap at the demuxer; one raw type universe is cleaner. Bindings
+# are pre-generated per-arch, so this checks without invoking bindgen.
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-sys = { version = "0.6", features = ["media"] }

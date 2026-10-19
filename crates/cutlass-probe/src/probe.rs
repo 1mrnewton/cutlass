@@ -1,12 +1,19 @@
-//! Demux-only probing via FFmpeg (no decoder, no hwaccel).
+//! Demux-only probing. Via FFmpeg on desktop; via the platform-native decoder
+//! on builds without FFmpeg (iOS/Android).
 
 use std::path::Path;
+#[cfg(feature = "ffmpeg")]
 use std::sync::OnceLock;
 
+#[cfg(feature = "ffmpeg")]
 use ffmpeg_next::codec::context::Context;
+#[cfg(feature = "ffmpeg")]
 use ffmpeg_next::format;
+#[cfg(feature = "ffmpeg")]
 use ffmpeg_next::format::stream::Disposition;
+#[cfg(feature = "ffmpeg")]
 use ffmpeg_next::media::Type;
+#[cfg(feature = "ffmpeg")]
 use ffmpeg_next::{Error as FfmpegError, Rational as FfRational};
 
 use cutlass_models::Rational;
@@ -14,8 +21,10 @@ use cutlass_models::Rational;
 use crate::error::ProbeError;
 use crate::media::MediaProbe;
 
+#[cfg(feature = "ffmpeg")]
 static FFMPEG_INIT: OnceLock<Result<(), FfmpegError>> = OnceLock::new();
 
+#[cfg(feature = "ffmpeg")]
 pub(crate) fn ensure_ffmpeg_init() -> Result<(), ProbeError> {
     match FFMPEG_INIT.get_or_init(ffmpeg_next::init) {
         Ok(()) => Ok(()),
@@ -25,6 +34,7 @@ pub(crate) fn ensure_ffmpeg_init() -> Result<(), ProbeError> {
 
 /// Tick rate for audio-only sources, which have no frame rate of their own.
 /// Millisecond ticks keep durations sample-accurate enough for timeline math.
+#[cfg(feature = "ffmpeg")]
 const AUDIO_TICK_RATE: Rational = Rational::new(1000, 1);
 
 /// Still-image extensions recognized at import (M1 scope: PNG/JPEG/WebP).
@@ -46,6 +56,7 @@ pub fn is_image_path(path: &Path) -> bool {
 /// Still images (recognized by extension) probe with `is_image == true` and
 /// the default 5s placement duration; FFmpeg demuxes them as single-frame
 /// video streams, which is where the dimensions come from.
+#[cfg(feature = "ffmpeg")]
 pub fn probe(path: &Path) -> Result<MediaProbe, ProbeError> {
     ensure_ffmpeg_init()?;
 
@@ -123,6 +134,7 @@ pub fn probe(path: &Path) -> Result<MediaProbe, ProbeError> {
 /// `webp_pipe`, …) expose one video stream whose codec parameters carry the
 /// pixel dimensions. Duration is the editor's default placement length, not
 /// a property of the file.
+#[cfg(feature = "ffmpeg")]
 fn probe_image(input: &format::context::Input) -> Result<MediaProbe, ProbeError> {
     let stream = input
         .streams()
@@ -157,6 +169,7 @@ fn probe_image(input: &format::context::Input) -> Result<MediaProbe, ProbeError>
     })
 }
 
+#[cfg(feature = "ffmpeg")]
 fn normalize_frame_rate(rate: FfRational) -> Rational {
     let frame_rate = Rational::new(rate.numerator(), rate.denominator());
     if frame_rate.is_valid() {
@@ -164,6 +177,58 @@ fn normalize_frame_rate(rate: FfRational) -> Rational {
     } else {
         Rational::FPS_24
     }
+}
+
+/// FFmpeg-free probe: read container/stream metadata from the platform-native
+/// decoder ([`cutlass_decoder::open_video_decoder`]). Audio presence and the
+/// exact codec name aren't exposed by the video decoder, so `has_audio` is
+/// reported `false` and `video_codec` as `"native"`; the preview/render path
+/// doesn't depend on either. Still images report the default placement length
+/// with unknown dimensions (no still decoder in this build).
+#[cfg(not(feature = "ffmpeg"))]
+pub fn probe(path: &Path) -> Result<MediaProbe, ProbeError> {
+    if is_image_path(path) {
+        return Ok(MediaProbe {
+            width: 0,
+            height: 0,
+            frame_rate: cutlass_models::STILL_TICK_RATE,
+            duration_ticks: cutlass_models::STILL_DEFAULT_DURATION_TICKS,
+            has_audio: false,
+            video_codec: "image".into(),
+            is_image: true,
+        });
+    }
+
+    let decoder = cutlass_decoder::open_video_decoder(path, cutlass_decoder::OutputMode::Cpu)
+        .map_err(|e| ProbeError::unsupported(e.to_string()))?;
+    let info = decoder.info();
+
+    let (width, height) = info.display_size;
+    if width == 0 || height == 0 {
+        return Err(ProbeError::unsupported("zero video dimensions"));
+    }
+
+    let frame_rate = Rational::new(info.frame_rate.num, info.frame_rate.den);
+    let frame_rate = if frame_rate.is_valid() {
+        frame_rate
+    } else {
+        Rational::FPS_24
+    };
+
+    let duration_ticks = match info.duration {
+        Some(d) => (d.seconds() * frame_rate.as_f64()).round().max(0.0) as i64,
+        None => 0,
+    };
+
+    Ok(MediaProbe {
+        width,
+        height,
+        frame_rate,
+        duration_ticks,
+        has_audio: false,
+        video_codec: "native".into(),
+        is_image: false,
+    })
 }
 
 /// Map container duration (microseconds) to frame ticks at `frame_rate`.
@@ -190,6 +255,7 @@ mod tests {
         assert_eq!(duration_ticks_from_micros(Rational::FPS_24, 0), 0);
     }
 
+    #[cfg(feature = "ffmpeg")]
     #[test]
     fn normalize_frame_rate_falls_back_to_24() {
         assert_eq!(
@@ -209,6 +275,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "ffmpeg")]
     #[test]
     fn image_file_probes_with_default_still_duration() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -236,6 +303,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "ffmpeg")]
     #[test]
     fn audio_only_file_probes_with_zero_dimensions() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

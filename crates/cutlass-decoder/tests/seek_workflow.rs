@@ -1,4 +1,8 @@
 //! Timeline scrub and keyframe-seek integration workflows.
+//!
+//! These drive the FFmpeg `Decoder`, so they only build/run when the `ffmpeg`
+//! feature is on (FFmpeg-free targets use the platform-native backends instead).
+#![cfg(feature = "ffmpeg")]
 
 mod common;
 

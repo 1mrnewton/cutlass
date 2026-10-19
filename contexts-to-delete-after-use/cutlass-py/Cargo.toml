@@ -1,0 +1,22 @@
+[package]
+name = "cutlass-py"
+version = "0.5.3-alpha.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/1mrnewton/cutlass"
+description = "Python bindings for the Cutlass video engine: a MoviePy-style API over the Rust timeline/render/export pipeline."
+publish = false
+
+[lib]
+# Python import name is `cutlass`. cdylib for the extension module; rlib so the
+# crate can also be checked/tested with plain `cargo`.
+name = "cutlass"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cutlass-core = { path = "../cutlass-core" }
+cutlass-models = { path = "../cutlass-models" }
+cutlass-render = { path = "../cutlass-render" }
+numpy = "0.29.0"
+pyo3 = { version = "0.29.0", features = ["extension-module"] }

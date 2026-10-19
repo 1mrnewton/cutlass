@@ -5,6 +5,14 @@ edition.workspace = true
 license.workspace = true
 description = "Cutlass structured editor commands (import, trim, split, …)"
 
+[features]
+# Opt-in serde derives on the command enums so non-Rust front ends (the mobile
+# FFI, the future AI agent) can ship edits as JSON. Off by default so the desktop
+# UI link is undisturbed; the command payload types in cutlass-models are already
+# serde unconditionally, so this only adds derives to the command wrappers.
+serde = ["dep:serde"]
+
 [dependencies]
 cutlass-models = { path = "../cutlass-models" }
+serde = { workspace = true, optional = true }
 tracing.workspace = true

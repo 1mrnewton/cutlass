@@ -46,6 +46,7 @@ pub enum ApplyOutcome {
     Opened,
     Loaded,
     Relinked { media: cutlass_models::MediaId },
+    #[cfg(not(engine_native_decode))]
     Exported { stats: cutlass_encoder::ExportStats },
     Edited(EditOutcome),
 }

@@ -14,7 +14,14 @@ pub use probe::{duration_ticks_from_micros, is_image_path, probe};
 
 use tracing::info;
 
+#[cfg(feature = "ffmpeg")]
 pub fn init() {
     let _ = probe::ensure_ffmpeg_init();
     info!("cutlass-probe ready");
+}
+
+/// FFmpeg-free build: probing opens the native decoder per-file; nothing global.
+#[cfg(not(feature = "ffmpeg"))]
+pub fn init() {
+    info!("cutlass-probe ready (native probe, no FFmpeg)");
 }

@@ -2,12 +2,15 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum DecodeError {
+    #[cfg(feature = "ffmpeg")]
     #[error("failed to open media")]
     Open(#[source] ffmpeg_next::Error),
 
+    #[cfg(feature = "ffmpeg")]
     #[error("demuxer read failed")]
     Io(#[source] ffmpeg_next::Error),
 
+    #[cfg(feature = "ffmpeg")]
     #[error("decode failed")]
     Decode(#[source] ffmpeg_next::Error),
 

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "cutlass"
+description = "MoviePy-style Python bindings for the Cutlass video engine."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT OR Apache-2.0" }
+keywords = ["video", "editing", "ffmpeg-alternative", "moviepy", "rust"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Video",
+]
+dynamic = ["version"]
+dependencies = ["numpy>=1.21"]
+
+[project.urls]
+Repository = "https://github.com/1mrnewton/cutlass"
+
+# Build the `cutlass` extension module from this crate. The Rust library name
+# (`cutlass`) is the import name; the version is read from Cargo.toml.
+[tool.maturin]
+module-name = "cutlass"

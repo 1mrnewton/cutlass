@@ -5,19 +5,36 @@ edition.workspace = true
 license.workspace = true
 description = "Cutlass editing engine"
 
+[features]
+# Decode video through the platform-native `cutlass_core::VideoDecoder` backend
+# (e.g. AVFoundation on Apple) instead of FFmpeg. Implied on iOS/Android by
+# `build.rs`; expose it as a feature so the native path is testable on a desktop
+# host. Desktop default keeps the tuned FFmpeg path.
+native-decode = []
+
 [dependencies]
 cutlass-cache = { path = "../cutlass-cache" }
 cutlass-commands = { path = "../cutlass-commands" }
+cutlass-core = { path = "../cutlass-core", default-features = false }
 cutlass-compositor = { path = "../cutlass-compositor" }
-cutlass-decoder = { path = "../cutlass-decoder" }
-cutlass-encoder = { path = "../cutlass-encoder" }
+# FFmpeg-free by default; desktop turns it back on via the target table below.
+# Mobile (iOS/Android) can't link libav*, so those targets keep FFmpeg off and
+# decode/encode/probe through the platform-native backends.
+cutlass-decoder = { path = "../cutlass-decoder", default-features = false }
+cutlass-encoder = { path = "../cutlass-encoder", default-features = false }
 cutlass-models = { path = "../cutlass-models" }
-cutlass-probe = { path = "../cutlass-probe" }
+cutlass-probe = { path = "../cutlass-probe", default-features = false }
 pollster.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 cosmic-text.workspace = true
 tiny-skia.workspace = true
+
+# Desktop (everything that isn't iOS/Android) links the FFmpeg backends.
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+cutlass-decoder = { path = "../cutlass-decoder", features = ["ffmpeg"] }
+cutlass-encoder = { path = "../cutlass-encoder", features = ["ffmpeg"] }
+cutlass-probe = { path = "../cutlass-probe", features = ["ffmpeg"] }
 
 [dev-dependencies]
 criterion.workspace = true

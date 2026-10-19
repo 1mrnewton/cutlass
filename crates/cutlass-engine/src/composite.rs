@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use cutlass_cache::{FrameCache, SourceFingerprint};
 use cutlass_compositor::{CompositeLayer, CompositorConfig, LayerEffect, LayerPlacement};
-use cutlass_decoder::DecodedFrame;
+use cutlass_core::{ColorRange, Rotation, VideoFrame};
 use cutlass_models::{
     Clip, ClipId, ClipTransform, CropRect, Generator, ModelError, Project, RationalTime, TrackKind,
 };
@@ -530,13 +530,23 @@ fn resolve_clip_layer(
                 && let Some(media) = project.media(media_id)
                 && media.is_image
             {
-                let (bytes, width, height) = pool.still(media_id, media.path())?;
-                let placement = cropped_layer_placement(transform, width, height, crop, canvas);
-                return Ok(Some(
-                    CompositeLayer::rgba(bytes, width, height, placement)
-                        .with_uv(uv)
-                        .with_effects(effects),
-                ));
+                #[cfg(not(engine_native_decode))]
+                {
+                    let (bytes, width, height) = pool.still(media_id, media.path())?;
+                    let placement = cropped_layer_placement(transform, width, height, crop, canvas);
+                    return Ok(Some(
+                        CompositeLayer::rgba(bytes, width, height, placement)
+                            .with_uv(uv)
+                            .with_effects(effects),
+                    ));
+                }
+                // The native (mobile) build has no still-image decoder yet; skip
+                // the layer rather than feeding an image to the video decoder.
+                #[cfg(engine_native_decode)]
+                {
+                    let _ = (media_id, media);
+                    return Ok(None);
+                }
             }
             let layer = match color_convert {
                 ColorConvertPath::Gpu => {
@@ -654,7 +664,7 @@ fn decode_media_frame(
     pool: &mut DecoderPool,
     clip: &Clip,
     time: RationalTime,
-) -> Result<DecodedFrame, EngineError> {
+) -> Result<VideoFrame, EngineError> {
     let source_time = clip
         .source_time_at(time)?
         .ok_or_else(|| EngineError::Preview("timeline position outside clip".into()))?;
@@ -666,6 +676,27 @@ fn decode_media_frame(
         .media(media_id)
         .ok_or(ModelError::UnknownMedia(media_id))?;
 
+    // Platform-native (FFmpeg-free) decode: the AVFoundation/MediaCodec backend
+    // seeks + decodes to a `cutlass_core::VideoFrame` (NV12/I420 CPU planes),
+    // which the compositor's `decoded_to_yuv_layer` ingests directly. No
+    // keyframe index or swscale downscale — the codec engine handles seeking and
+    // the GPU scales the source layer onto the preview canvas. The per-frame
+    // sample range is detected by the decoder, so no `stamp_range` is needed.
+    #[cfg(engine_native_decode)]
+    {
+        let _ = cache;
+        // The timeline speaks `cutlass_models::RationalTime`; the decode trait
+        // speaks `cutlass_core::RationalTime`. Same (value, rate) shape — rebuild
+        // it for the native call.
+        let source_time = cutlass_core::RationalTime::new(
+            source_time.value,
+            cutlass_core::Rational::new(source_time.rate.num, source_time.rate.den),
+        );
+        pool.native_frame_at(clip.id, media.path(), source_time)
+    }
+
+    #[cfg(not(engine_native_decode))]
+    {
     let fingerprint = SourceFingerprint::from_path(media.path())?;
     let source_id = fingerprint.id();
 
@@ -674,6 +705,10 @@ fn decode_media_frame(
     // re-stamp it onto every frame (hit or miss) — full-range `yuvj420p`
     // composites correctly on the GPU without a per-frame CPU rewrite.
     let full_range = decoder.info().full_range;
+    // Core PTS time base for the DecodedFrame → VideoFrame conversion below.
+    // Captured by value so it doesn't pin the immutable `info()` borrow across
+    // the upcoming `&mut` decode call.
+    let time_base = cutlass_decoder::core_time_base(decoder.info());
     // Exact rational → stream-tick conversion. The old `RationalTime →
     // Duration → ticks` path truncated twice, landing rate-matched targets
     // one tick below the frame's stored PTS — a guaranteed cache miss on
@@ -704,7 +739,7 @@ fn decode_media_frame(
             "preview frame cache hit"
         );
         let mut frame = crate::frame::unpack_yuv420p(&packed, preview_w, preview_h)?;
-        frame.full_range = full_range;
+        stamp_range(&mut frame, full_range);
         return Ok(frame);
     }
 
@@ -719,14 +754,16 @@ fn decode_media_frame(
 
     // Downscale once on the decode miss (native → preview height) so every
     // later cache hit, GPU upload, composite, and readback is the small size.
-    let mut decoded =
-        if cache.is_some() && (decoded.width, decoded.height) != (preview_w, preview_h) {
-            cutlass_decoder::scale_yuv420p(&decoded, preview_w, preview_h)?
-        } else {
-            decoded
-        };
+    // Scaling stays on the FFmpeg `DecodedFrame` (swscale), then the frame
+    // crosses into the `cutlass_core::VideoFrame` currency.
+    let decoded = if cache.is_some() && (decoded.width, decoded.height) != (preview_w, preview_h) {
+        cutlass_decoder::scale_yuv420p(&decoded, preview_w, preview_h)?
+    } else {
+        decoded
+    };
+    let mut frame = cutlass_decoder::video_frame_from_decoded(decoded, time_base, Rotation::None);
     // Keep the range in lock-step with cache hits (both come from the source).
-    decoded.full_range = full_range;
+    stamp_range(&mut frame, full_range);
 
     // Cache under the *requested* `target_ticks`, not the decoded frame's
     // PTS. The reader looks up by `target_ticks`, and a target rarely lands
@@ -737,12 +774,24 @@ fn decode_media_frame(
     // re-decoded as a backward seek (≈3fps, plus the `mmco` warning flood).
     // Same key on both sides ⇒ prefetch warms exactly what the render reads.
     if let Some(cache) = cache
-        && let Ok(packed) = crate::frame::pack_yuv420p(&decoded)
+        && let Ok(packed) = crate::frame::pack_yuv420p(&frame)
     {
         cache.cache_frame(source_id, target_ticks, packed);
     }
 
-    Ok(decoded)
+    Ok(frame)
+    }
+}
+
+/// Stamp the source's stable sample range onto a frame (cache hits unpack with
+/// the default; misses carry the decoder's, but we re-stamp both from the
+/// source so they stay identical).
+fn stamp_range(frame: &mut VideoFrame, full_range: bool) {
+    frame.color.range = if full_range {
+        ColorRange::Full
+    } else {
+        ColorRange::Limited
+    };
 }
 
 fn decode_media_rgba_legacy(

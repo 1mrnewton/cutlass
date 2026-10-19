@@ -255,6 +255,9 @@ impl Engine {
 
     /// Apply a wire command. On success, pushes the inverse action onto the undo stack.
     pub fn apply(&mut self, command: Command) -> Result<ApplyOutcome, EngineError> {
+        // Export rides the FFmpeg encoder; on the native-decode (mobile) build it
+        // falls through to `dispatch`, which returns an `Unsupported`-style error.
+        #[cfg(not(engine_native_decode))]
         if let Command::Project(ProjectCommand::Export { path }) = command {
             let stats = crate::export::export_timeline(
                 &self.project,
@@ -292,6 +295,7 @@ impl Engine {
             // Relink dirties the session: the repaired path needs saving.
             ApplyOutcome::Imported { .. } | ApplyOutcome::Relinked { .. } => self.revision += 1,
             // Export is handled by the early return above.
+            #[cfg(not(engine_native_decode))]
             ApplyOutcome::Exported { .. } => {}
         }
         if let Some(inverse) = inverse {

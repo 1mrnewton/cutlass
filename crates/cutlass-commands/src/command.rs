@@ -11,6 +11,7 @@ use cutlass_models::{
 };
 
 /// A project-level action (media pool, not timeline placement).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectCommand {
     /// Register a file in the media pool.
@@ -38,6 +39,7 @@ pub enum ProjectCommand {
 }
 
 /// A single structured edit against the timeline.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditCommand {
     /// Add a track to the timeline stack.
@@ -295,6 +297,7 @@ pub enum EditCommand {
 }
 
 /// Top-level command surface: media registration or a timeline edit.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Project(ProjectCommand),
@@ -302,6 +305,7 @@ pub enum Command {
 }
 
 /// What an applied edit produced, for callers to act on (e.g. select the new clip).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditOutcome {
     Created(ClipId),

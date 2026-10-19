@@ -10,8 +10,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg(not(engine_native_decode))]
 use std::sync::Arc;
 
+#[cfg(not(engine_native_decode))]
 use cutlass_decoder::{DecodeOptions, Decoder, HwAccel, KeyframeIndex, STILL_MAX_DIM};
 use cutlass_models::{ClipId, MediaId};
 
@@ -25,8 +27,10 @@ use crate::error::EngineError;
 /// no edit in between to trigger reconciliation. Each software decoder holds
 /// tens of MB of FFmpeg buffers, so the cap trades a re-open on the rare
 /// scroll-back for a firm memory ceiling.
+#[cfg(not(engine_native_decode))]
 const MAX_DECODERS: usize = 64;
 
+#[cfg(not(engine_native_decode))]
 struct Entry {
     path: PathBuf,
     decoder: Decoder,
@@ -38,6 +42,7 @@ struct Entry {
 /// One decoded still image, shared by every composite that shows it.
 /// The `Arc` is what `CompositeLayer::rgba` wants, so re-showing a still
 /// is a refcount bump — no copy, no re-decode.
+#[cfg(not(engine_native_decode))]
 struct StillEntry {
     path: PathBuf,
     bytes: Arc<Vec<u8>>,
@@ -46,18 +51,46 @@ struct StillEntry {
 }
 
 pub struct DecoderPool {
+    #[cfg(not(engine_native_decode))]
     entries: HashMap<ClipId, Entry>,
+    #[cfg(not(engine_native_decode))]
     indices: HashMap<MediaId, Arc<KeyframeIndex>>,
+    #[cfg(not(engine_native_decode))]
     stills: HashMap<MediaId, StillEntry>,
+    #[cfg(not(engine_native_decode))]
     options: DecodeOptions,
     /// Monotonic counter stamped onto an entry's `last_used` on every access,
     /// so the smallest stamp is the least-recently-used decoder to evict.
+    #[cfg(not(engine_native_decode))]
     use_tick: u64,
+    /// Per-clip platform-native decoders (FFmpeg-free path). Populated only
+    /// when the engine is built with native decode; keyed by clip like the
+    /// FFmpeg `entries` so overlapping clips of one source keep separate read
+    /// cursors.
+    #[cfg(engine_native_decode)]
+    native: HashMap<ClipId, NativeEntry>,
+}
+
+/// One per-clip platform-native decoder behind [`cutlass_core::VideoDecoder`].
+#[cfg(engine_native_decode)]
+struct NativeEntry {
+    path: PathBuf,
+    decoder: Box<dyn cutlass_core::VideoDecoder>,
 }
 
 impl DecoderPool {
+    #[cfg(not(engine_native_decode))]
     pub fn new() -> Self {
         Self::with_hw_accel(HwAccel::None)
+    }
+
+    /// Native-decode (mobile) pool: only the per-clip native decoder map; no
+    /// FFmpeg decoders, keyframe indices, or still cache.
+    #[cfg(engine_native_decode)]
+    pub fn new() -> Self {
+        Self {
+            native: HashMap::new(),
+        }
     }
 
     /// Pool that decodes through `hw_accel` (e.g. [`HwAccel::Auto`] to probe the
@@ -68,6 +101,7 @@ impl DecoderPool {
     /// Used by export so big 4K renders offload decode off the CPU. Preview
     /// stays on [`HwAccel::None`] ([`Self::new`]): its YUV scrub cache packs
     /// YUV420P planes and isn't fed NV12.
+    #[cfg(not(engine_native_decode))]
     pub fn with_hw_accel(hw_accel: HwAccel) -> Self {
         Self {
             entries: HashMap::new(),
@@ -79,9 +113,14 @@ impl DecoderPool {
     }
 
     pub fn clear(&mut self) {
-        self.entries.clear();
-        self.indices.clear();
-        self.stills.clear();
+        #[cfg(not(engine_native_decode))]
+        {
+            self.entries.clear();
+            self.indices.clear();
+            self.stills.clear();
+        }
+        #[cfg(engine_native_decode)]
+        self.native.clear();
     }
 
     /// Drop the decoder of every clip no longer on the timeline. Decoders are
@@ -93,13 +132,50 @@ impl DecoderPool {
     /// edit that can remove a clip. Keyframe indices are keyed by media (cheap,
     /// bounded by distinct sources) and left untouched.
     pub fn retain_clips(&mut self, live: &HashSet<ClipId>) {
+        #[cfg(not(engine_native_decode))]
         self.entries.retain(|clip_id, _| live.contains(clip_id));
+        #[cfg(engine_native_decode)]
+        self.native.retain(|clip_id, _| live.contains(clip_id));
+    }
+
+    /// The next video frame at (or after) `time` for `clip`, decoded through the
+    /// platform-native backend ([`cutlass_decoder::open_video_decoder`]). The
+    /// decoder is opened once per clip and reused — `frame_at` seeks within it,
+    /// so scrubbing one clip doesn't reopen the file. CPU output so the existing
+    /// `decoded_to_yuv_layer` (NV12/I420 → YUV420P) path composites it.
+    #[cfg(engine_native_decode)]
+    pub fn native_frame_at(
+        &mut self,
+        clip_id: ClipId,
+        path: &Path,
+        time: cutlass_core::RationalTime,
+    ) -> Result<cutlass_core::VideoFrame, EngineError> {
+        let stale = self.native.get(&clip_id).is_none_or(|e| e.path != path);
+        if stale {
+            let decoder =
+                cutlass_decoder::open_video_decoder(path, cutlass_decoder::OutputMode::Cpu)
+                    .map_err(|e| EngineError::Preview(format!("native decoder open: {e}")))?;
+            self.native.insert(
+                clip_id,
+                NativeEntry {
+                    path: path.to_path_buf(),
+                    decoder,
+                },
+            );
+        }
+        let entry = self.native.get_mut(&clip_id).expect("just inserted");
+        entry
+            .decoder
+            .frame_at(time)
+            .map_err(|e| EngineError::Preview(format!("native decode: {e}")))?
+            .ok_or_else(|| EngineError::Preview("native decoder returned no frame".into()))
     }
 
     /// The decoder dedicated to `clip` and the keyframe index for its backing
     /// `media`. The decoder is per clip (so overlapping clips of one source
     /// don't fight over a single read cursor); the index is built once per
     /// media and shared.
+    #[cfg(not(engine_native_decode))]
     pub fn decoder_and_index(
         &mut self,
         clip_id: ClipId,
@@ -145,6 +221,7 @@ impl DecoderPool {
     /// never evicting `keep` (the clip whose decoder the caller is about to
     /// use). O(n) per drop with n ≤ [`MAX_DECODERS`]; only runs when the cap is
     /// already exceeded, so it's off every steady-state hot path.
+    #[cfg(not(engine_native_decode))]
     fn evict_over_cap(&mut self, keep: ClipId) {
         while self.entries.len() > MAX_DECODERS {
             let victim = self
@@ -165,6 +242,7 @@ impl DecoderPool {
     /// The decoded RGBA for a still-image media, decoding on first use
     /// (capped to [`STILL_MAX_DIM`] per side; the GPU scales into place).
     /// Returns `(bytes, width, height)`.
+    #[cfg(not(engine_native_decode))]
     pub fn still(
         &mut self,
         media_id: MediaId,
@@ -190,13 +268,13 @@ impl DecoderPool {
     }
 
     /// Number of open video decoders (one per distinct clip seen).
-    #[cfg(test)]
+    #[cfg(all(test, not(engine_native_decode)))]
     pub(crate) fn decoder_count(&self) -> usize {
         self.entries.len()
     }
 
     /// Number of keyframe indices held (one per distinct media seen).
-    #[cfg(test)]
+    #[cfg(all(test, not(engine_native_decode)))]
     pub(crate) fn index_count(&self) -> usize {
         self.indices.len()
     }
@@ -208,7 +286,7 @@ impl Default for DecoderPool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(engine_native_decode)))]
 mod tests {
     use super::*;
     use cutlass_models::MediaId;

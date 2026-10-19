@@ -1,0 +1,36 @@
+[package]
+name = "cutlass-encoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Platform-native video encoding behind the cutlass-core VideoEncoder trait. AVFoundation (VideoToolbox) H.264/mp4 backend on Apple; other platforms to follow."
+
+[dependencies]
+cutlass-core = { path = "../cutlass-core" }
+
+# Apple backend: AVAssetWriter (VideoToolbox H.264 encode + mp4 mux). objc2
+# framework crates are pinned to the same line the decoder/compositor use so the
+# CVPixelBuffer / CoreMedia types unify across the encode handoff.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = "0.6.4"
+objc2-foundation = "0.3.2"
+objc2-av-foundation = { version = "0.3.2", features = [
+    "objc2-core-media",
+    "objc2-core-video",
+] }
+objc2-core-media = "0.3.2"
+objc2-core-video = "0.3.2"
+objc2-core-foundation = "0.3.2"
+
+# Android backend: MediaCodec (H.264 + AAC encode) + AMediaMuxer (mp4 mux),
+# pinned to the same ndk-sys line the decoder uses so the MediaCodec/format
+# types unify across the decode→encode handoff.
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-sys = { version = "0.6", features = ["media"] }
+
+[dev-dependencies]
+# Round-trip encoder tests decode the written file back through the platform
+# decoder — hermetic, no external asset needed.
+cutlass-decoder = { path = "../cutlass-decoder" }

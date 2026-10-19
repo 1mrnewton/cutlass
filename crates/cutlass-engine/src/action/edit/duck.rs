@@ -13,13 +13,14 @@
 //! with synthetic input; [`duck`] supplies the real decode (an
 //! [`AudioReader`] at a reduced analysis rate) and commits the plan.
 
+#[cfg(not(engine_native_decode))]
 use cutlass_decoder::{
     AUDIO_CHANNELS, AudioReader, CONTROL_HZ, DuckSettings, duck_gain, reduce_curve,
     speech_band_energy,
 };
-use cutlass_models::{
-    Clip, ClipId, Easing, Keyframe, MAX_CLIP_VOLUME, ModelError, Param, Project, Rational,
-};
+#[cfg(not(engine_native_decode))]
+use cutlass_models::{Clip, Easing, Keyframe, MAX_CLIP_VOLUME, Param, Rational};
+use cutlass_models::{ClipId, ModelError, Project};
 
 use crate::action::edit::restore_clip::RestoreClipAction;
 use crate::action::{ApplyContext, CompoundAction, EditAction};
@@ -40,9 +41,25 @@ const KEYFRAME_TOLERANCE: f32 = 0.02;
 /// flat-unity envelope or burning an undo slot.
 const MIN_DUCK_DEPTH: f32 = 1.0e-3;
 
+/// Native build: ducking decodes audio, which isn't wired up yet.
+#[cfg(engine_native_decode)]
+#[allow(clippy::too_many_arguments)]
+pub fn duck(
+    _ctx: &mut ApplyContext<'_>,
+    _voice: &[ClipId],
+    _music: &[ClipId],
+    _threshold: f32,
+    _amount: f32,
+    _attack: f32,
+    _release: f32,
+) -> Result<(ClipId, Box<dyn EditAction>), EngineError> {
+    Err(ModelError::InvalidParam("audio ducking is unavailable in this build".into()).into())
+}
+
 /// Analyze the `voice` clips and write ducking volume keyframes onto the
 /// `music` clips. Returns the first music clip (for the edit outcome) and a
 /// compound inverse restoring every clip the pass actually changed.
+#[cfg(not(engine_native_decode))]
 pub fn duck(
     ctx: &mut ApplyContext<'_>,
     voice: &[ClipId],
@@ -102,6 +119,7 @@ pub fn duck(
 /// ([`CONTROL_HZ`]) speech-band energy envelope for a clip, in the clip's own
 /// (source) time; placement onto the timeline, the ducker, and keyframe
 /// thinning all live here so the decode stays swappable for tests.
+#[cfg(not(engine_native_decode))]
 pub(crate) fn plan_ducking(
     project: &Project,
     voice: &[ClipId],
@@ -221,6 +239,7 @@ fn sample_linear(samples: &[f32], x: f32) -> f32 {
 /// Decode a clip's source window at [`ANALYSIS_RATE`] and reduce it to a
 /// speech-band energy envelope. Empty (skipped) for clips with no audio media;
 /// fail-loud on a decode error, like export.
+#[cfg(not(engine_native_decode))]
 fn clip_energy(clip: &Clip, project: &Project) -> Result<Vec<f32>, EngineError> {
     let Some(media_id) = clip.media() else {
         return Ok(Vec::new());
@@ -253,6 +272,7 @@ fn clip_energy(clip: &Clip, project: &Project) -> Result<Vec<f32>, EngineError> 
 
 /// Read `frames` output frames from `src_start` of `path` at the analysis
 /// rate, downmixed to mono. Streams in blocks so memory stays bounded.
+#[cfg(not(engine_native_decode))]
 fn read_mono(path: &std::path::Path, src_start: i64, frames: i64) -> Result<Vec<f32>, EngineError> {
     const BLOCK: usize = 16_384;
     let mut reader = AudioReader::open(path, ANALYSIS_RATE)?;
@@ -275,6 +295,7 @@ fn read_mono(path: &std::path::Path, src_start: i64, frames: i64) -> Result<Vec<
 }
 
 /// `tick` (timeline rate `fps`) → analysis control step at [`CONTROL_HZ`].
+#[cfg(not(engine_native_decode))]
 fn tick_to_step(tick: i64, fps: Rational) -> i64 {
     if fps.num <= 0 || fps.den <= 0 {
         return 0;
@@ -284,6 +305,7 @@ fn tick_to_step(tick: i64, fps: Rational) -> i64 {
 }
 
 /// Control step → timeline `tick` (inverse of [`tick_to_step`]).
+#[cfg(not(engine_native_decode))]
 fn step_to_tick(step: i64, fps: Rational) -> i64 {
     if fps.num <= 0 || fps.den <= 0 {
         return 0;
@@ -302,7 +324,7 @@ fn ticks_to_samples(value: i64, num: i32, den: i32) -> i64 {
     frames.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(engine_native_decode)))]
 mod tests {
     use super::*;
     use cutlass_models::{MediaSource, RationalTime, TimeRange, TrackKind};

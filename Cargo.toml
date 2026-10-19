@@ -4,11 +4,13 @@ members = [
     "crates/cutlass-app",
     "crates/cutlass-cache",
     "crates/cutlass-commands",
+    "crates/cutlass-core",
     "crates/cutlass-decoder",
     "crates/cutlass-encoder",
     "crates/cutlass-compositor",
     "crates/cutlass-download",
     "crates/cutlass-engine",
+    "crates/cutlass-mobile",
     "crates/cutlass-models",
     "crates/cutlass-probe",
     "crates/cutlass-settings",
@@ -35,7 +37,7 @@ serde_json = "1.0.150"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-wgpu = "24"
+wgpu = "28"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 criterion = { version = "0.5", features = ["html_reports"] }

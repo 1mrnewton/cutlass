@@ -1,8 +1,8 @@
 # Cutlass
 
-Visual prototype of the editor. One React app draws a desktop shell and a phone shell over the same mock timeline.
+Visual prototype of the desktop editor. Decisions live in `docs/`.
 
-The desktop product will be Rust, eframe, and egui. Phones will be native shells. This repo is only the picture.
+The desktop product will be Rust, eframe, and egui. The phone UI will be a separate app. This repo is only the picture.
 
 ```bash
 npm install

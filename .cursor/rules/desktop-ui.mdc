@@ -1,0 +1,31 @@
+---
+description: Desktop editor layout, gray chrome, and Hugeicons
+globs: src/**/*.{tsx,css}
+alwaysApply: false
+---
+
+# Desktop UI
+
+The editor is one column: head, then a row, then the timeline.
+
+```tsx
+<div className="desktop">
+  <header className="head">{/* project bar only */}</header>
+  <div className="workspace">
+    <div className="library">{/* rail + assets */}</div>
+    <div className="center">{/* preview + transport */}</div>
+    <aside className="inspector" />
+  </div>
+  <Timeline />
+</div>
+```
+
+Separate panels with a dark gap (`#141414`), not a border. The gap is the drag handle. A `#141414` hairline may split a region inside a panel. It is not a drag handle. `#1c1c1c` is the library, preview, inspector, and timeline. `#262626` is the project bar. Editor text does not select. Fields still do.
+
+Keep those gaps. The preview absorbs the leftover space.
+
+Icons come from `@hugeicons/core-free-icons` through `src/editor/icons.tsx`. Do not draw new UI icons, and do not import a Hugeicons Pro package. The blade mark in that file is the only custom glyph.
+
+A slider is a 4px track and a plain white round thumb. No border, box, or focus outline on the control. A color grade may paint the track. The thumb stays white.
+
+Hovering a tool, a clip, a marker, a library card, or an icon button shows its name in a tooltip. A clip also shows its time span. The tip sits above the control.

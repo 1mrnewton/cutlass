@@ -1,13 +1,7 @@
 import { useState } from "react"
 import { suggestions } from "./model"
 
-export function CommandBox({
-  layout,
-  onCommand,
-}: {
-  layout: "bar" | "stack"
-  onCommand: (command: string) => void
-}) {
+export function CommandBox({ onCommand }: { onCommand: (command: string) => void }) {
   const [draft, setDraft] = useState("")
 
   const submit = (command: string) => {
@@ -19,7 +13,7 @@ export function CommandBox({
 
   return (
     <form
-      className={layout === "bar" ? "command-bar" : "command-stack"}
+      className="command-bar"
       onSubmit={(event) => {
         event.preventDefault()
         submit(draft)

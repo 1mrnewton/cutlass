@@ -1,18 +1,32 @@
-import { useEffect, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { DesktopEditor } from "./editor/DesktopEditor"
-import { PhoneEditor } from "./editor/PhoneEditor"
-import { DURATION, applyCommand, initialProject, type EditorApi, type ToolId } from "./editor/model"
-
-type Shell = "desktop" | "phone"
+import { applyCommand, deleteSelection, formatTime, initialProject, timelineDuration, type EditorApi, type ProjectState, type ToolId } from "./editor/model"
 
 export default function App() {
-  const [shell, setShell] = useState<Shell>("desktop")
   const [project, setProject] = useState(initialProject)
-  const [time, setTime] = useState(32)
+  const [time, setTime] = useState(0)
   const [playing, setPlaying] = useState(false)
-  const [selectedId, setSelectedId] = useState<string | null>("vows")
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const selectedId = selectedIds.at(-1) ?? null
   const [tool, setTool] = useState<ToolId>("media")
   const [note, setNote] = useState<string | null>(null)
+  const past = useRef<{ project: ProjectState; selectedIds: string[] }[]>([])
+  const future = useRef<{ project: ProjectState; selectedIds: string[] }[]>([])
+  const [canUndo, setCanUndo] = useState(false)
+  const [canRedo, setCanRedo] = useState(false)
+  const duration = timelineDuration(project.clips)
+  const durationRef = useRef(duration)
+  useLayoutEffect(() => {
+    durationRef.current = duration
+  }, [duration])
+
+  useEffect(() => {
+    if (!note) return
+    const timer = window.setTimeout(() => setNote(null), 2000)
+    return () => window.clearTimeout(timer)
+  }, [note])
+
+  if (project.clips.length === 0 && playing) setPlaying(false)
 
   useEffect(() => {
     if (!playing) return
@@ -23,7 +37,7 @@ export default function App() {
       last = now
       setTime((current) => {
         const next = current + delta
-        return next >= DURATION ? 0 : next
+        return next >= durationRef.current ? 0 : next
       })
       frame = requestAnimationFrame(tick)
     }
@@ -31,64 +45,113 @@ export default function App() {
     return () => cancelAnimationFrame(frame)
   }, [playing])
 
+  const remember = (next: ProjectState) => {
+    if (next === project) return
+    past.current.push({ project, selectedIds })
+    if (past.current.length > 100) past.current.shift()
+    future.current = []
+    setCanUndo(true)
+    setCanRedo(false)
+  }
+
+  const undo = () => {
+    const step = past.current.pop()
+    if (!step) return
+    future.current.push({ project, selectedIds })
+    setProject(step.project)
+    setSelectedIds(step.selectedIds)
+    setCanUndo(past.current.length > 0)
+    setCanRedo(true)
+  }
+
+  const redo = () => {
+    const step = future.current.pop()
+    if (!step) return
+    past.current.push({ project, selectedIds })
+    setProject(step.project)
+    setSelectedIds(step.selectedIds)
+    setCanUndo(true)
+    setCanRedo(future.current.length > 0)
+  }
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return
-      if (event.code !== "Space") return
-      event.preventDefault()
-      setPlaying((value) => !value)
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault()
+        if (event.shiftKey) redo()
+        else undo()
+        return
+      }
+      if (event.ctrlKey && event.key.toLowerCase() === "y") {
+        event.preventDefault()
+        redo()
+        return
+      }
+      if (event.code === "Space") {
+        event.preventDefault()
+        if (project.clips.length === 0) return
+        setPlaying((value) => !value)
+        return
+      }
+      if ((event.key === "Backspace" || event.key === "Delete") && selectedIds.length > 0) {
+        event.preventDefault()
+        const result = deleteSelection(project, selectedIds)
+        remember(result.state)
+        setProject(result.state)
+        if (result.note !== undefined) setNote(result.note)
+        setSelectedIds(result.selectIds)
+      }
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [])
+  }, [project, selectedIds])
 
   const api: EditorApi = {
     time,
-    duration: DURATION,
+    duration,
     playing,
     project,
     selectedId,
+    selectedIds,
     tool,
     note,
-    onTogglePlay: () => setPlaying((value) => !value),
-    onSeek: (next) => setTime(Math.min(DURATION, Math.max(0, next))),
-    onSelect: setSelectedId,
+    onTogglePlay: () => {
+      if (project.clips.length === 0) return
+      setPlaying((value) => !value)
+    },
+    onSeek: (next) => setTime(Math.min(duration, Math.max(0, next))),
+    onStill: () => {
+      if (project.clips.length === 0) return
+      setNote(`Still at ${formatTime(time)}`)
+    },
+    onSelect: (id) => setSelectedIds([id]),
+    onSelectIds: setSelectedIds,
     onTool: setTool,
     onCommand: (command) => {
       const result = applyCommand(project, command)
+      remember(result.state)
       setProject(result.state)
       setNote(result.note)
-      if (result.selectId) setSelectedId(result.selectId)
+      if (result.selectId) setSelectedIds([result.selectId])
       if (result.seek !== undefined) setTime(result.seek)
     },
-    onExport: () => setNote("Export isn't part of this prototype."),
+    onProject: (next, nextNote, selectId) => {
+      remember(next)
+      setProject(next)
+      if (nextNote !== undefined) setNote(nextNote)
+      if (selectId) setSelectedIds([selectId])
+    },
+    canUndo,
+    canRedo,
+    onUndo: undo,
+    onRedo: redo,
   }
 
   return (
     <div className="app">
-      <header className="proto">
-        <span className="proto-mark">Cutlass rewrite</span>
-        <span>Prototype</span>
-        <div className="seg" role="group" aria-label="Editor shell">
-          <button type="button" data-active={shell === "desktop" ? "true" : "false"} onClick={() => setShell("desktop")}>
-            Desktop
-          </button>
-          <button type="button" data-active={shell === "phone" ? "true" : "false"} onClick={() => setShell("phone")}>
-            Phone
-          </button>
-        </div>
-        <span className="hint">Space plays and pauses</span>
-      </header>
-      <div className="stage" data-shell={shell}>
-        {shell === "desktop" ? (
-          <DesktopEditor api={api} />
-        ) : (
-          <div className="phone-stage">
-            <PhoneEditor api={api} />
-          </div>
-        )}
-      </div>
+      <DesktopEditor api={api} />
     </div>
   )
 }

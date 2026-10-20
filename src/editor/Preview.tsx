@@ -1,19 +1,22 @@
-import { clipAt, formatTime, scenes, type Clip } from "./model"
+import { clipAt, formatTimecode, scenes, type Clip, type FrameRate } from "./model"
 import { Icon } from "./icons"
+import { Tip } from "./Tooltip"
 
 export function Preview({
   clips,
   time,
-  note,
+  rate,
+  dropFrame,
 }: {
   clips: Clip[]
   time: number
-  note: string | null
+  rate: FrameRate
+  dropFrame: boolean
 }) {
   const picture = clipAt(clips, time, "picture")
   const title = clipAt(clips, time, "title")
   const generated = clipAt(clips, time, "generated")
-  const wash = scenes[picture?.id ?? "ceremony"] ?? scenes.ceremony
+  const wash = scenes[picture?.scene ?? picture?.id ?? "ceremony"] ?? scenes.ceremony
   const lower = Boolean(title && title.name.includes("·"))
 
   return (
@@ -23,7 +26,7 @@ export function Preview({
         style={{ background: `linear-gradient(155deg, ${wash[0]}, ${wash[1]} 46%, ${wash[2]})` }}
       >
         <div className="shot-label">
-          {picture?.name ?? "Empty"} · {formatTime(time)}
+          {picture?.name ?? "Empty"} · {formatTimecode(time, rate, dropFrame)}
         </div>
         {generated && <div className="pip">Generated shot</div>}
         {title && !lower && (
@@ -35,7 +38,6 @@ export function Preview({
           </div>
         )}
         {title && lower && <div className="lower-third">{title.name}</div>}
-        {note && <div className="toast">{note}</div>}
       </div>
     </div>
   )
@@ -44,40 +46,38 @@ export function Preview({
 export function Transport({
   time,
   duration,
+  rate,
+  dropFrame,
   playing,
+  empty,
   onTogglePlay,
-  onSeek,
+  onStill,
 }: {
   time: number
   duration: number
+  rate: FrameRate
+  dropFrame: boolean
   playing: boolean
+  empty: boolean
   onTogglePlay: () => void
-  onSeek: (time: number) => void
+  onStill: () => void
 }) {
+  const timecode = (seconds: number) => formatTimecode(seconds, rate, dropFrame)
   return (
     <div className="transport">
-      <button
-        type="button"
-        className="icon-btn"
-        aria-label="Back 5 seconds"
-        onClick={() => onSeek(Math.max(0, time - 5))}
-      >
-        <Icon name="back" />
-      </button>
-      <button type="button" className="play" aria-label={playing ? "Pause" : "Play"} onClick={onTogglePlay}>
-        <Icon name={playing ? "pause" : "play"} />
-      </button>
-      <button
-        type="button"
-        className="icon-btn"
-        aria-label="Forward 5 seconds"
-        onClick={() => onSeek(Math.min(duration, time + 5))}
-      >
-        <Icon name="forward" />
-      </button>
       <span className="transport-time">
-        {formatTime(time)} <span>/ {formatTime(duration)}</span>
+        {timecode(time)} <span>/ {timecode(duration)}</span>
       </span>
+      <Tip label={playing ? "Pause" : "Play"}>
+        <button type="button" className="play" aria-label={playing ? "Pause" : "Play"} disabled={empty} onClick={onTogglePlay}>
+          <Icon name={playing ? "pause" : "play"} />
+        </button>
+      </Tip>
+      <Tip label="Export still frame">
+        <button type="button" className="icon-btn" aria-label="Export still frame" disabled={empty} onClick={onStill}>
+          <Icon name="camera" />
+        </button>
+      </Tip>
     </div>
   )
 }

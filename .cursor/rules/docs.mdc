@@ -1,0 +1,26 @@
+---
+description: Keep docs/ current when a Cutlass decision changes
+globs: docs/**/*.md
+alwaysApply: true
+---
+
+# Docs
+
+`docs/` is the record of decisions. Update it in the same change that makes the decision.
+
+- `docs/product.md` — what this repo is and is not
+- `docs/desktop-layout.md` — the editor stack, and the index of the topic notes
+- `docs/header.md` — the project bar
+- `docs/export.md` — the export dialog
+- `docs/library.md` — the icon rail and the asset panel
+- `docs/preview.md` — the frame and the transport
+- `docs/inspector.md` — the clip and project panels
+- `docs/timeline.md` — the toolbar, tracks, and edits
+- `docs/ruler.md` — ruler steps and tick drawing
+- `docs/playhead.md` — the playhead mark and line
+- `docs/time.md` — frame rate, timecode, and drop frame
+- `docs/icons.md` — Hugeicons free set and the icon map
+- `docs/decisions.md` — short log of choices already made
+- `docs/capcut-desktop-re.md` — CapCut desktop track kinds, from the installed app
+
+Add a new file when a topic does not fit these. Keep each file short. Do not paste chat history into docs.

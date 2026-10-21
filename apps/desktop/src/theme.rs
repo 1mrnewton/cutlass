@@ -9,6 +9,13 @@ pub const INK: Color32 = Color32::from_rgb(0xf3, 0xf3, 0xf3);
 pub const MUTED: Color32 = Color32::from_rgb(0xa3, 0xa3, 0xa3);
 pub const LANE: Color32 = Color32::from_rgb(0x24, 0x24, 0x24);
 pub const LANE_LINE: Color32 = Color32::from_rgb(0x2e, 0x2e, 0x2e);
+pub const VIDEO: Color32 = Color32::from_rgb(0x5b, 0x8a, 0xa3);
+pub const AUDIO: Color32 = Color32::from_rgb(0x4e, 0x8f, 0x7c);
+pub const TEXT: Color32 = Color32::from_rgb(0x9a, 0x86, 0xb0);
+pub const STICKER: Color32 = Color32::from_rgb(0xc4, 0xa1, 0x5a);
+pub const EFFECT: Color32 = Color32::from_rgb(0xc4, 0x7a, 0x5a);
+pub const FILTER: Color32 = Color32::from_rgb(0x6a, 0x8f, 0x72);
+pub const ADJUST: Color32 = Color32::from_rgb(0x8a, 0x7e, 0x9a);
 pub const EXPORT: Color32 = Color32::from_rgb(0x00, 0xc8, 0xd7);
 pub const EXPORT_INK: Color32 = Color32::from_rgb(0x06, 0x22, 0x26);
 

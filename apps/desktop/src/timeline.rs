@@ -28,7 +28,16 @@ pub fn show(ui: &mut egui::Ui, project: &Project, playhead: &mut i64) {
     let tracks = Rect::from_min_max(ruler_rect.left_bottom(), full.max);
     paint_ruler(ui, ruler_rect, project);
     if tracks.height() > 0.0 {
-        for lane in layout(project.timeline().tracks(), tracks) {
+        let pixel_size = ruler::opening_pixel_size(
+            (tracks.right() - lane_left(tracks)).max(0.0),
+            project.duration().value,
+        );
+        for (track, lane) in project
+            .timeline()
+            .tracks()
+            .iter()
+            .zip(layout(project.timeline().tracks(), tracks))
+        {
             let lane_rect = Rect::from_min_size(
                 pos2(lane_left(tracks), lane.top),
                 vec2((tracks.right() - lane_left(tracks)).max(0.0), lane.height),
@@ -60,6 +69,7 @@ pub fn show(ui: &mut egui::Ui, project: &Project, playhead: &mut i64) {
                 FontId::new(12.0, FontFamily::Proportional),
                 theme::MUTED,
             );
+            paint_segments(ui, project, track, lane_rect, lane.main, pixel_size);
         }
     }
     paint_playhead(ui, ruler_rect, tracks, project, playhead);
@@ -67,6 +77,69 @@ pub fn show(ui: &mut egui::Ui, project: &Project, playhead: &mut i64) {
 
 fn lane_left(area: Rect) -> f32 {
     area.left() + HEAD + COVER
+}
+
+fn paint_segments(
+    ui: &mut egui::Ui,
+    project: &Project,
+    track: &Track,
+    lane: Rect,
+    main: bool,
+    pixel_size: f64,
+) {
+    for segment in track.segments() {
+        let range = segment.timeline();
+        let rect = clip_rect(
+            lane,
+            main,
+            range.start().value,
+            range.duration().value,
+            pixel_size,
+        );
+        if rect.left() > lane.right() || rect.right() < lane.left() {
+            continue;
+        }
+        ui.painter()
+            .rect_filled(rect, 7.0, clip_color(track.kind()));
+        let name = project
+            .asset(segment.asset_id())
+            .map(|asset| file_name(asset.source()))
+            .unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        ui.painter().with_clip_rect(rect.shrink(6.0)).text(
+            rect.left_center() + vec2(8.0, 0.0),
+            Align2::LEFT_CENTER,
+            name,
+            FontId::new(11.0, FontFamily::Proportional),
+            Color32::WHITE,
+        );
+    }
+}
+
+fn clip_rect(lane: Rect, main: bool, start_us: i64, duration_us: i64, pixel_size: f64) -> Rect {
+    let (inset, height) = if main { (8.0, 48.0) } else { (6.0, 28.0) };
+    let width = (duration_us.max(0) as f64 * pixel_size).max(8.0) as f32;
+    let x = lane.left() + (start_us.max(0) as f64 * pixel_size) as f32;
+    Rect::from_min_size(pos2(x, lane.top() + inset), vec2(width, height))
+}
+
+fn file_name(source: &str) -> &str {
+    let trimmed = source.trim_end_matches(['/', '\\']);
+    trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
+}
+
+fn clip_color(kind: TrackKind) -> Color32 {
+    match kind {
+        TrackKind::Video => theme::VIDEO,
+        TrackKind::Audio => theme::AUDIO,
+        TrackKind::Text => theme::TEXT,
+        TrackKind::Sticker => theme::STICKER,
+        TrackKind::Effect | TrackKind::PluginEffect => theme::EFFECT,
+        TrackKind::Filter => theme::FILTER,
+        TrackKind::Adjust => theme::ADJUST,
+    }
 }
 
 fn paint_ruler(ui: &mut egui::Ui, ruler_rect: Rect, project: &Project) {
@@ -302,5 +375,19 @@ mod tests {
         assert!(audio.top > main.top);
         assert!(overlay.top < main.top);
         assert!(main.empty);
+    }
+
+    #[test]
+    fn a_one_second_clip_fills_three_hundred_pixels_at_the_one_second_step() {
+        let lane = Rect::from_min_size(pos2(202.0, 100.0), vec2(900.0, 64.0));
+        let rect = super::clip_rect(lane, true, 0, 1_000_000, 3e-4);
+        assert!((rect.left() - 202.0).abs() < 0.01);
+        assert!((rect.width() - 300.0).abs() < 0.01);
+        assert!((rect.top() - 108.0).abs() < f32::EPSILON);
+        assert!((rect.height() - 48.0).abs() < f32::EPSILON);
+        let short = super::clip_rect(lane, false, 0, 1, 3e-4);
+        assert!((short.width() - 8.0).abs() < f32::EPSILON);
+        assert!((short.height() - 28.0).abs() < f32::EPSILON);
+        assert_eq!(super::file_name("file:///cuts/v.mp4"), "v.mp4");
     }
 }

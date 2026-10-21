@@ -5,8 +5,10 @@
 
 #![deny(unsafe_code)]
 
+mod ahead;
 mod queue;
 mod seek;
 
+pub use ahead::{Ahead, Decode, FillError};
 pub use queue::{PushError, Queue};
 pub use seek::keyframe_before;

@@ -6,6 +6,7 @@ use eframe::egui::{self, Align2, Button, Rect, RichText, TextStyle, Vec2};
 
 use cutlass_project::{AssetId, History, Project, ProjectId, SegmentId};
 
+mod icons;
 mod inspector;
 mod library;
 mod preview;
@@ -48,6 +49,7 @@ struct CutlassApp {
 impl CutlassApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
+        icons::install(&cc.egui_ctx);
         let id = ProjectId::from_bytes(uuid::Uuid::new_v4().into_bytes());
         Self {
             history: History::new(),

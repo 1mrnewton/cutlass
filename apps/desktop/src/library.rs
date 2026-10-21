@@ -1,12 +1,13 @@
 //! The library rail and the project's media bin. `docs/library.md`.
 
 use eframe::egui::{
-    self, Align, Align2, Color32, FontFamily, FontId, Label, Layout, Rect, RichText, ScrollArea,
-    Sense, Stroke, UiBuilder, pos2, vec2,
+    self, Align2, Color32, FontFamily, FontId, Rect, ScrollArea, Sense, Stroke, UiBuilder, pos2,
+    vec2,
 };
 
 use cutlass_project::{Asset, AssetId, AssetKind, Project};
 
+use crate::icons::{self, Icon};
 use crate::theme;
 use crate::timeline::file_name;
 
@@ -55,6 +56,20 @@ impl Shelf {
             Self::Templates => "Templates",
         }
     }
+
+    const fn icon(self) -> Icon {
+        match self {
+            Self::Media => Icon::Media,
+            Self::Audio => Icon::Audio,
+            Self::Text => Icon::Text,
+            Self::Stickers => Icon::Stickers,
+            Self::Effects => Icon::Effects,
+            Self::Transitions => Icon::Transitions,
+            Self::Filters => Icon::Filters,
+            Self::Adjustments => Icon::Adjustments,
+            Self::Templates => Icon::Templates,
+        }
+    }
 }
 
 pub fn show(
@@ -90,26 +105,21 @@ fn paint_rail(ui: &mut egui::Ui, rect: Rect, shelf: &mut Shelf) {
             ui.add_space(8.0);
             ui.spacing_mut().item_spacing.y = 2.0;
             for tool in Shelf::ALL {
-                if rail_button(ui, tool.label(), *shelf == tool).clicked() {
+                if rail_button(ui, tool, *shelf == tool).clicked() {
                     *shelf = tool;
                 }
             }
         });
 }
 
-fn rail_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
+fn rail_button(ui: &mut egui::Ui, shelf: Shelf, active: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
     if active {
         ui.painter().rect_filled(rect, 10.0, theme::ACTIVE);
     }
     let color = if active { theme::INK } else { theme::FAINT };
-    let mut text = ui.new_child(
-        UiBuilder::new()
-            .max_rect(rect.shrink(4.0))
-            .layout(Layout::top_down(Align::Center)),
-    );
-    text.add(Label::new(RichText::new(label).size(10.0).color(color)).wrap());
-    response
+    icons::paint(ui.painter(), rect.center(), shelf.icon(), 20.0, color);
+    response.on_hover_text(shelf.label())
 }
 
 fn paint_bin(ui: &mut egui::Ui, rect: Rect, project: &Project, selected: &mut Option<AssetId>) {

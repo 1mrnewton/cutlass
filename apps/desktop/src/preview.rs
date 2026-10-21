@@ -4,6 +4,7 @@ use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, Sense, Vec2,
 
 use cutlass_project::Project;
 
+use crate::icons::{self, Icon};
 use crate::ruler;
 use crate::theme;
 use crate::timeline::file_name;
@@ -55,32 +56,28 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
 
     let dim = if live { 1.0 } else { 0.35 };
     let play = Rect::from_center_size(rect.center(), Vec2::splat(36.0));
+    let play_response = ui.interact(play, ui.scope_id().with("play"), Sense::hover());
     ui.painter()
         .circle_filled(play.center(), 18.0, theme::INK.gamma_multiply(dim));
     let mark = Color32::from_rgb(0x12, 0x13, 0x0f).gamma_multiply(dim);
-    let triangle = Rect::from_center_size(play.center() + vec2(1.0, 0.0), vec2(9.0, 11.0));
-    ui.painter().add(egui::Shape::convex_polygon(
-        vec![
-            pos2(triangle.left(), triangle.top()),
-            pos2(triangle.right(), triangle.center().y),
-            pos2(triangle.left(), triangle.bottom()),
-        ],
-        mark,
-        egui::Stroke::NONE,
-    ));
+    icons::paint(ui.painter(), play.center(), Icon::Play, 16.0, mark);
+    play_response.on_hover_text("Play");
 
     let still = Rect::from_center_size(
         pos2(rect.right() - 28.0, rect.center().y),
         Vec2::splat(32.0),
     );
+    let still_response = ui.interact(still, ui.scope_id().with("still"), Sense::hover());
     ui.painter()
         .circle_filled(still.center(), 16.0, theme::BAR.gamma_multiply(dim));
-    ui.painter().rect_stroke(
-        Rect::from_center_size(still.center(), vec2(12.0, 9.0)),
-        2.0,
-        egui::Stroke::new(1.0, theme::MUTED.gamma_multiply(dim)),
-        egui::StrokeKind::Middle,
+    icons::paint(
+        ui.painter(),
+        still.center(),
+        Icon::Camera,
+        16.0,
+        theme::MUTED.gamma_multiply(dim),
     );
+    still_response.on_hover_text("Still");
 }
 
 /// The topmost segment that covers `us`, named from its file.

@@ -1,0 +1,173 @@
+//! Free Hugeicons stroke-rounded face. A button's text color paints the glyph.
+//! Names are `docs/icons.md`. The face is `assets/fonts/hgi-stroke-rounded.ttf`.
+
+use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Pos2};
+
+const FAMILY: &str = "icons";
+
+pub fn install(ctx: &egui::Context) {
+    ctx.add_font(egui::FontInsert::new(
+        "hugeicons-stroke-rounded",
+        egui::FontData::from_static(include_bytes!(
+            "../../../assets/fonts/hgi-stroke-rounded.ttf"
+        )),
+        vec![egui::InsertFontFamily {
+            family: FontFamily::Name(FAMILY.into()),
+            priority: egui::FontPriority::Highest,
+        }],
+    ));
+}
+
+/// Glyphs from `docs/icons.md`. Controls that are not drawn yet still have a name here.
+#[expect(
+    dead_code,
+    reason = "the remaining glyphs are drawn when their controls exist"
+)]
+#[derive(Clone, Copy)]
+pub enum Icon {
+    Media,
+    Audio,
+    Text,
+    Stickers,
+    Effects,
+    Transitions,
+    Filters,
+    Folder,
+    Adjustments,
+    Templates,
+    Video,
+    TextVideo,
+    Composition,
+    Plugin,
+    Ad,
+    Mixed,
+    Play,
+    Plus,
+    Pause,
+    Camera,
+    Chevron,
+    ChevronLeft,
+    AlignLeft,
+    AlignCenter,
+    AlignRight,
+    AlignTop,
+    AlignMiddle,
+    AlignBottom,
+    Keyframe,
+    Reset,
+    Rotate,
+    Search,
+    Star,
+    Bold,
+    Italic,
+    Underline,
+    TextLeft,
+    TextCenter,
+    TextRight,
+    JustifyLeft,
+    JustifyCenter,
+    JustifyRight,
+    Unavailable,
+    Undo,
+    Redo,
+    Select,
+    Split,
+    Delete,
+    Freeze,
+    Reverse,
+    Mirror,
+    Crop,
+    Transcribe,
+    SplitScenes,
+    Snap,
+    Magnet,
+    Linkage,
+    Marker,
+    Beat,
+    ZoomIn,
+    ZoomOut,
+    ZoomFit,
+    Guides,
+    Lock,
+}
+
+impl Icon {
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Media => "\u{F1E85}",
+            Self::Audio => "\u{F1669}",
+            Self::Text => "\u{F280B}",
+            Self::Stickers => "\u{F26E4}",
+            Self::Effects => "\u{F266B}",
+            Self::Transitions => "\u{F2892}",
+            Self::Filters => "\u{F1CC6}",
+            Self::Folder => "\u{F1D01}",
+            Self::Adjustments => "\u{F261E}",
+            Self::Templates => "\u{F31F4}",
+            Self::Video => "\u{F2964}",
+            Self::TextVideo => "\u{F31D0}",
+            Self::Composition => "\u{F1F63}",
+            Self::Plugin => "\u{F2054}",
+            Self::Ad => "\u{F1AB3}",
+            Self::Mixed => "\u{F1735}",
+            Self::Play => "\u{F2348}",
+            Self::Plus => "\u{F235A}",
+            Self::Pause => "\u{F22D7}",
+            Self::Camera => "\u{F18A4}",
+            Self::Chevron => "\u{F1623}",
+            Self::ChevronLeft => "\u{F1612}",
+            Self::AlignLeft => "\u{F159C}",
+            Self::AlignCenter => "\u{F1594}",
+            Self::AlignRight => "\u{F159D}",
+            Self::AlignTop => "\u{F159F}",
+            Self::AlignMiddle => "\u{F15A0}",
+            Self::AlignBottom => "\u{F158A}",
+            Self::Keyframe => "\u{F1F0C}",
+            Self::Reset => "\u{F244E}",
+            Self::Rotate => "\u{F24A8}",
+            Self::Search => "\u{F2546}",
+            Self::Star => "\u{F26D7}",
+            Self::Bold => "\u{F27E9}",
+            Self::Italic => "\u{F27FC}",
+            Self::Underline => "\u{F2807}",
+            Self::TextLeft => "\u{F27E5}",
+            Self::TextCenter => "\u{F27E0}",
+            Self::TextRight => "\u{F27E7}",
+            Self::JustifyLeft => "\u{F27E2}",
+            Self::JustifyCenter => "\u{F27E1}",
+            Self::JustifyRight => "\u{F27E3}",
+            Self::Unavailable => "\u{F28E2}",
+            Self::Undo => "\u{F28E7}",
+            Self::Redo => "\u{F2444}",
+            Self::Select => "\u{F1ABA}",
+            Self::Split => "\u{F338B}",
+            Self::Delete => "\u{F1B35}",
+            Self::Freeze => "\u{F3358}",
+            Self::Reverse => "\u{F32FF}",
+            Self::Mirror => "\u{F1CEE}",
+            Self::Crop => "\u{F1AA6}",
+            Self::Transcribe => "\u{F2670}",
+            Self::SplitScenes => "\u{F2533}",
+            Self::Snap => "\u{F159E}",
+            Self::Magnet => "\u{F205B}",
+            Self::Linkage => "\u{F1FA5}",
+            Self::Marker => "\u{F1CE3}",
+            Self::Beat => "\u{F21E0}",
+            Self::ZoomIn => "\u{F2A58}",
+            Self::ZoomOut => "\u{F2A59}",
+            Self::ZoomFit => "\u{F1CDF}",
+            Self::Guides => "\u{F24CD}",
+            Self::Lock => "\u{F26B0}",
+        }
+    }
+}
+
+pub fn paint(painter: &egui::Painter, pos: Pos2, icon: Icon, size: f32, color: Color32) {
+    painter.text(
+        pos,
+        Align2::CENTER_CENTER,
+        icon.glyph(),
+        FontId::new(size, FontFamily::Name(FAMILY.into())),
+        color,
+    );
+}

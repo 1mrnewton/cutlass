@@ -1,0 +1,21 @@
+[package]
+name = "cutlass-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.95"
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The desktop editor."
+
+[[bin]]
+name = "cutlass"
+path = "src/main.rs"
+
+[dependencies]
+cutlass-project.workspace = true
+eframe.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

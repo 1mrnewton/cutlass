@@ -25,6 +25,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+
       - name: Format
         run: cargo fmt --all --check
 
@@ -57,7 +60,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Clippy (iOS)
-        run: cargo clippy --workspace --target aarch64-apple-ios -- -D warnings
+        run: cargo clippy --workspace --exclude cutlass-desktop --target aarch64-apple-ios -- -D warnings
 
       - name: Test
         run: cargo test --workspace
@@ -96,7 +99,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy
-        run: cargo clippy --workspace --target aarch64-linux-android -- -D warnings
+        run: cargo clippy --workspace --exclude cutlass-desktop --target aarch64-linux-android -- -D warnings
 
   software-codecs:
     name: software codecs / build with no OS

@@ -12,6 +12,7 @@ members = [
     "crates/playback",
     "crates/project",
     "crates/testing/*",
+    "apps/desktop",
 ]
 
 [workspace.package]
@@ -31,6 +32,15 @@ cutlass-output = { path = "crates/output" }
 cutlass-playback = { path = "crates/playback" }
 cutlass-mp4 = { path = "crates/containers/mp4" }
 cutlass-project = { path = "crates/project" }
+eframe = { version = "0.37.0", default-features = false, features = [
+    "clipboard",
+    "links",
+    "system_fonts",
+    "wayland",
+    "wgpu",
+    "x11",
+] }
+uuid = { version = "1.11.0", features = ["v4"] }
 cutlass-test-fixtures = { path = "crates/testing/fixtures" }
 cutlass-videotoolbox = { path = "crates/codecs/native/videotoolbox" }
 

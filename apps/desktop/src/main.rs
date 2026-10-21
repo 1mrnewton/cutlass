@@ -221,7 +221,12 @@ impl eframe::App for CutlassApp {
         egui::CentralPanel::default()
             .frame(theme::panel())
             .show(ui, |ui| {
-                preview::show(ui, &self.project, self.playhead_us);
+                preview::show(
+                    ui,
+                    &self.project,
+                    self.playhead_us,
+                    &mut self.selected_segments,
+                );
             });
         gaps::show(ui, body, &self.panes);
 

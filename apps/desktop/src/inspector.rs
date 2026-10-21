@@ -1,31 +1,48 @@
-//! The project panel. Clip panels come later. `docs/inspector.md`.
+//! The inspector. A selected clip shows its own rows. Otherwise the project. `docs/inspector.md`.
 
 use eframe::egui::{self, RichText, ScrollArea, Sense, UiBuilder, vec2};
 
-use cutlass_project::{AspectRatio, ColorSpace, FrameRate, Project};
+use cutlass_project::{
+    AspectRatio, Channels, ColorSpace, FrameRate, Project, SegmentId, TrackKind,
+};
 
+use crate::library::card_time;
 use crate::theme;
+use crate::timeline::file_name;
 
-pub fn show(ui: &mut egui::Ui, project: &Project) {
+pub fn show(ui: &mut egui::Ui, project: &Project, selected: Option<SegmentId>) {
+    if let Some(panel) = selected.and_then(|id| clip_panel(project, id)) {
+        paint(ui, panel.title, &panel.rows, "clip");
+        return;
+    }
+    paint(ui, "Details", &facts(project), "project");
+}
+
+struct Panel {
+    title: &'static str,
+    rows: Vec<(&'static str, String)>,
+}
+
+fn paint(ui: &mut egui::Ui, title: &str, rows: &[(&str, String)], salt: &str) {
     let full = ui.max_rect();
     ui.allocate_rect(full, Sense::hover());
     let padded = full.shrink2(vec2(16.0, 0.0));
     let mut details = ui.new_child(UiBuilder::new().max_rect(padded));
     details.set_clip_rect(padded);
     ScrollArea::vertical()
-        .id_salt("project-details")
+        .id_salt(("inspector", salt))
         .show(&mut details, |ui| {
             ui.set_min_width(ui.available_width());
             ui.add_space(14.0);
             ui.label(
-                RichText::new("Details")
+                RichText::new(title)
                     .size(15.0)
                     .strong()
                     .color(theme::EXPORT),
             );
             ui.add_space(14.0);
-            for (label, value) in facts(project) {
-                fact(ui, label, &value);
+            for (label, value) in rows {
+                fact(ui, label, value);
             }
         });
 }
@@ -45,6 +62,66 @@ fn fact(ui: &mut egui::Ui, label: &str, value: &str) {
         });
     });
     ui.add_space(4.0);
+}
+
+fn clip_panel(project: &Project, id: SegmentId) -> Option<Panel> {
+    let track = project
+        .timeline()
+        .tracks()
+        .iter()
+        .find(|track| track.segments().iter().any(|segment| segment.id() == id))?;
+    let segment = track.segments().iter().find(|segment| segment.id() == id)?;
+    let asset = project.asset(segment.asset_id())?;
+    let range = segment.timeline();
+    let speed = segment.speed();
+    let mut rows = vec![
+        ("Name", file_name(asset.source()).to_string()),
+        (
+            "Start",
+            card_time(range.start().value, range.start().timescale.get()),
+        ),
+        (
+            "Duration",
+            card_time(range.duration().value, range.duration().timescale.get()),
+        ),
+        (
+            "Speed",
+            format!("{}/{}", speed.numerator(), speed.denominator().get()),
+        ),
+    ];
+    if segment.channels() != Channels::Picture {
+        rows.push(("Volume", number(segment.volume())));
+    }
+    if segment.channels() != Channels::Sound {
+        let (x, y) = segment.transform().position();
+        let (width, height) = segment.transform().scale();
+        rows.push(("Position", format!("{}, {}", number(x), number(y))));
+        rows.push(("Size", format!("{} × {}", number(width), number(height))));
+    }
+    Some(Panel {
+        title: kind_title(track.kind()),
+        rows,
+    })
+}
+
+fn number(value: f64) -> String {
+    if value.is_finite() && value.fract() == 0.0 && value.abs() < 1e6 {
+        format!("{}", value as i64)
+    } else {
+        format!("{value}")
+    }
+}
+
+fn kind_title(kind: TrackKind) -> &'static str {
+    match kind {
+        TrackKind::Video => "Video",
+        TrackKind::Audio => "Audio",
+        TrackKind::Text => "Text",
+        TrackKind::Sticker => "Sticker",
+        TrackKind::Effect | TrackKind::PluginEffect => "Effect",
+        TrackKind::Filter => "Filter",
+        TrackKind::Adjust => "Adjust",
+    }
 }
 
 fn facts(project: &Project) -> Vec<(&'static str, String)> {
@@ -108,9 +185,15 @@ fn frame_rate(rate: FrameRate) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use cutlass_project::{Command, FrameRate, History, Project, ProjectId, SequenceRate};
+    use std::num::NonZeroU32;
 
-    use super::facts;
+    use cutlass_core::Timestamp;
+    use cutlass_project::{
+        Asset, Channels, Command, FrameRate, History, Outcome, Project, ProjectId, Segment,
+        SequenceRate, Speed, TimeRange,
+    };
+
+    use super::{clip_panel, facts};
 
     fn project() -> Project {
         Project::new(ProjectId::from_bytes([1; 16]), "Untitled")
@@ -161,5 +244,66 @@ mod tests {
             .apply(&mut cut, &[Command::SetRate(FrameRate::Fps24.sequence())])
             .expect("24");
         assert!(!labels(&cut).contains(&"Drop frame"));
+    }
+
+    #[test]
+    fn a_selected_clip_shows_its_file_time_speed_volume_and_placement() {
+        let mut history = History::new();
+        let mut cut = project();
+        let video = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let asset = match history
+            .apply(&mut cut, &[Command::AddAsset(video)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let segment = {
+            let stored = cut.asset(asset).expect("asset");
+            let duration = stored.duration().expect("duration");
+            let source = TimeRange::new(
+                Timestamp::new(0, duration.timescale),
+                Timestamp::new(duration.value, duration.timescale),
+            )
+            .expect("source");
+            Segment::media(stored, source, 0, Channels::Both, Speed::ONE).expect("segment")
+        };
+        let main = cut.timeline().main_track().id();
+        let id = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Segment(id)] => *id,
+            other => panic!("expected a segment, got {other:?}"),
+        };
+        let panel = clip_panel(&cut, id).expect("panel");
+        assert_eq!(panel.title, "Video");
+        assert_eq!(
+            panel.rows,
+            vec![
+                ("Name", "v.mp4".to_string()),
+                ("Start", "0:00.0".to_string()),
+                ("Duration", "0:01.0".to_string()),
+                ("Speed", "1/1".to_string()),
+                ("Volume", "1".to_string()),
+                ("Position", "0, 0".to_string()),
+                ("Size", "1 × 1".to_string()),
+            ]
+        );
     }
 }

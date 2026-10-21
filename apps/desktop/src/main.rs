@@ -102,7 +102,7 @@ impl eframe::App for CutlassApp {
             .frame(theme::gap_left())
             .show_separator_line(false)
             .show(ui, |ui| {
-                inspector::show(ui, &self.project);
+                inspector::show(ui, &self.project, self.selected_segment);
             });
 
         egui::CentralPanel::default()

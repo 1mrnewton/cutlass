@@ -230,7 +230,7 @@ fn ink_on(swatch: Color32) -> Color32 {
 }
 
 /// `M:SS.t`, floored to a tenth of a second.
-fn card_time(value: i64, timescale: u32) -> String {
+pub(crate) fn card_time(value: i64, timescale: u32) -> String {
     let scale = i128::from(timescale);
     let tenths = i128::from(value).max(0) * 10 / scale;
     let Ok(tenths) = i64::try_from(tenths) else {

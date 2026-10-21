@@ -661,6 +661,7 @@ pub fn show(
         marker = false;
         beat = false;
     }
+    project_switches(ui, ruler_rect, project, &lanes, &mut commands);
     mark_switches(ui, ruler_rect, live, &mut marker, &mut beat, split);
     ui.data_mut(|data| data.insert_temp(snap_id, snap));
     ui.data_mut(|data| data.insert_temp(guides_id, guides.clone()));
@@ -1354,6 +1355,7 @@ fn on_tools(ruler: Rect, point: egui::Pos2) -> bool {
     switch_rects(ruler)
         .into_iter()
         .chain(zoom_rects(ruler))
+        .chain(project_rects(ruler))
         .chain(mark_rects(ruler))
         .any(|button| button.contains(point))
 }
@@ -1367,11 +1369,6 @@ fn mark_switches(
     split: &mut bool,
 ) {
     let [marker_rect, beat_rect] = mark_rects(ruler);
-    let cover = Rect::from_min_max(
-        pos2(marker_rect.left() - 4.0, ruler.top()),
-        ruler.right_bottom(),
-    );
-    ui.painter().rect_filled(cover, 0.0, theme::PANEL);
     if mode_switch(
         ui,
         marker_rect,
@@ -1420,6 +1417,117 @@ fn mode_switch(
     icons::paint(ui.painter(), button.center(), icon, 16.0, color);
     response.on_hover_text(tip);
     *on && !was
+}
+
+fn project_rects(ruler: Rect) -> [Rect; 2] {
+    let [marker, _] = mark_rects(ruler);
+    let linkage = Rect::from_min_size(pos2(marker.left() - 30.0, marker.top()), vec2(26.0, 26.0));
+    let magnet = Rect::from_min_size(pos2(linkage.left() - 30.0, marker.top()), vec2(26.0, 26.0));
+    [magnet, linkage]
+}
+
+fn main_locked(project: &Project, lanes: &Lanes) -> bool {
+    lane_row(lanes, project.timeline().main_track().id()).locked
+}
+
+/// A locked lane holds a clip that follows one main clip, so packing would move it.
+fn locked_follower(project: &Project, lanes: &Lanes) -> bool {
+    let mains: Vec<_> = project
+        .timeline()
+        .main_track()
+        .segments()
+        .iter()
+        .map(|segment| (segment.id(), segment.timeline()))
+        .collect();
+    project.timeline().tracks().iter().any(|track| {
+        !track.is_main()
+            && lane_row(lanes, track.id()).locked
+            && track
+                .segments()
+                .iter()
+                .any(|segment| sole_owner(segment.timeline(), &mains).is_some())
+    })
+}
+
+fn magnet_toggle(project: &Project, lanes: &Lanes) -> Option<Command> {
+    let on = !project.settings().magnet();
+    if main_locked(project, lanes)
+        || (on && project.settings().linkage() && locked_follower(project, lanes))
+    {
+        return None;
+    }
+    Some(Command::SetMagnet(on))
+}
+
+fn linkage_toggle(project: &Project) -> Command {
+    Command::SetLinkage(!project.settings().linkage())
+}
+
+fn project_switches(
+    ui: &mut egui::Ui,
+    ruler: Rect,
+    project: &Project,
+    lanes: &Lanes,
+    commands: &mut Vec<Command>,
+) {
+    let [magnet_rect, linkage_rect] = project_rects(ruler);
+    let cover = Rect::from_min_max(
+        pos2(magnet_rect.left() - 4.0, ruler.top()),
+        ruler.right_bottom(),
+    );
+    ui.painter().rect_filled(cover, 0.0, theme::PANEL);
+    let magnet_on = project.settings().magnet();
+    let magnet_tip = if main_locked(project, lanes) {
+        "Main track is locked"
+    } else if magnet_on {
+        "Main track magnet on"
+    } else {
+        "Main track magnet off"
+    };
+    if setting_switch(
+        ui,
+        magnet_rect,
+        Icon::Magnet,
+        magnet_tip,
+        "magnet-switch",
+        magnet_on,
+    ) && let Some(command) = magnet_toggle(project, lanes)
+    {
+        commands.push(command);
+    }
+    let linkage_on = project.settings().linkage();
+    let linkage_tip = if linkage_on {
+        "Linkage on"
+    } else {
+        "Linkage off"
+    };
+    if setting_switch(
+        ui,
+        linkage_rect,
+        Icon::Linkage,
+        linkage_tip,
+        "linkage-switch",
+        linkage_on,
+    ) {
+        commands.push(linkage_toggle(project));
+    }
+}
+
+fn setting_switch(
+    ui: &mut egui::Ui,
+    button: Rect,
+    icon: Icon,
+    tip: &str,
+    salt: &str,
+    on: bool,
+) -> bool {
+    let response = ui.interact(button, ui.scope_id().with(salt), Sense::click());
+    if on {
+        ui.painter().rect_filled(button, 6.0, theme::ACTIVE);
+    }
+    let color = if on { theme::EXPORT } else { theme::INK };
+    icons::paint(ui.painter(), button.center(), icon, 16.0, color);
+    response.on_hover_text(tip).clicked()
 }
 
 fn split_command(
@@ -2014,7 +2122,7 @@ fn paint_stamps(
     view: View,
 ) {
     let left = lane_left(ruler);
-    let covered = mark_rects(ruler)[0].left() - 4.0;
+    let covered = project_rects(ruler)[0].left() - 4.0;
     for (index, us) in stamps.ruler.iter().enumerate() {
         if view.x(left, *us) >= covered {
             continue;
@@ -3258,5 +3366,109 @@ mod tests {
         assert!(cut.timeline().segment(video).is_some());
         assert!(cut.timeline().segment(audio).is_none());
         assert_eq!(selected, vec![video]);
+    }
+
+    #[test]
+    fn a_locked_main_refuses_the_magnet_and_linkage_still_toggles() {
+        let mut history = History::new();
+        let mut cut = project();
+        let open = super::Lanes::default();
+        let main = cut.timeline().main_track().id();
+        let locked_main = super::Lanes {
+            rows: vec![super::LaneFlag {
+                track: main,
+                locked: true,
+                hidden: false,
+                muted: false,
+            }],
+        };
+        assert!(super::magnet_toggle(&cut, &locked_main).is_none());
+        assert_eq!(super::linkage_toggle(&cut), Command::SetLinkage(false));
+        let off = super::magnet_toggle(&cut, &open).expect("off");
+        assert_eq!(off, Command::SetMagnet(false));
+        history.apply(&mut cut, &[off]).expect("magnet");
+        assert!(!cut.settings().magnet());
+        assert!(cut.settings().linkage());
+
+        let picture = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            false,
+        )
+        .expect("video");
+        let sound = Asset::audio(
+            "file:///cuts/a.wav",
+            Timestamp::new(48_000, NonZeroU32::new(48_000).expect("scale")),
+        )
+        .expect("audio");
+        let (video_asset, audio_asset) = match history
+            .apply(
+                &mut cut,
+                &[Command::AddAsset(picture), Command::AddAsset(sound)],
+            )
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(video), Outcome::Asset(audio)] => (*video, *audio),
+            other => panic!("expected two assets, got {other:?}"),
+        };
+        let stored = cut.asset(video_asset).expect("asset");
+        let duration = stored.duration().expect("duration");
+        let source = TimeRange::new(
+            Timestamp::new(0, duration.timescale),
+            Timestamp::new(duration.value, duration.timescale),
+        )
+        .expect("source");
+        let segment =
+            Segment::media(stored, source, 0, Channels::Picture, Speed::ONE).expect("segment");
+        history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .expect("place");
+        let stored = cut.asset(audio_asset).expect("asset");
+        let duration = stored.duration().expect("duration");
+        let source = TimeRange::new(
+            Timestamp::new(0, duration.timescale),
+            Timestamp::new(duration.value, duration.timescale),
+        )
+        .expect("source");
+        let segment =
+            Segment::media(stored, source, 0, Channels::Sound, Speed::ONE).expect("segment");
+        let audio_track = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: None,
+                    segment,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Opened { track, .. }] => *track,
+            other => panic!("expected a new track, got {other:?}"),
+        };
+        let locked_audio = super::Lanes {
+            rows: vec![super::LaneFlag {
+                track: audio_track,
+                locked: true,
+                hidden: false,
+                muted: false,
+            }],
+        };
+        assert!(super::magnet_toggle(&cut, &locked_audio).is_none());
+        let unlink = super::linkage_toggle(&cut);
+        history.apply(&mut cut, &[unlink]).expect("linkage");
+        assert_eq!(
+            super::magnet_toggle(&cut, &locked_audio),
+            Some(Command::SetMagnet(true))
+        );
     }
 }

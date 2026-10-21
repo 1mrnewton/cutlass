@@ -12,6 +12,7 @@ use crate::timeline::file_name;
 const TRANSPORT: f32 = 52.0;
 
 pub fn show(ui: &mut egui::Ui, project: &Project, playhead_us: i64) {
+    crate::tip::region(ui, "Preview");
     let full = ui.max_rect();
     ui.allocate_rect(full, Sense::hover());
     let transport = Rect::from_min_max(pos2(full.left(), full.bottom() - TRANSPORT), full.max);
@@ -30,9 +31,15 @@ pub fn show(ui: &mut egui::Ui, project: &Project, playhead_us: i64) {
         ui.painter().text(
             frame.left_top() + vec2(12.0, 12.0),
             Align2::LEFT_TOP,
-            label,
+            &label,
             FontId::new(11.0, FontFamily::Monospace),
             theme::INK,
+        );
+        crate::tip::read(
+            ui,
+            Rect::from_min_size(frame.left_top() + vec2(12.0, 8.0), vec2(280.0, 18.0)),
+            ui.scope_id().with("preview-label"),
+            &label,
         );
     }
     paint_transport(ui, transport, project, playhead_us);
@@ -50,9 +57,18 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
     ui.painter().text(
         pos2(rect.left() + 16.0, rect.center().y),
         Align2::LEFT_CENTER,
-        time,
+        &time,
         FontId::new(12.0, FontFamily::Monospace),
         ink,
+    );
+    crate::tip::read(
+        ui,
+        Rect::from_min_max(
+            pos2(rect.left() + 12.0, rect.top()),
+            pos2(rect.center().x - 28.0, rect.bottom()),
+        ),
+        ui.scope_id().with("transport-time"),
+        &time,
     );
 
     let dim = if live { 1.0 } else { 0.35 };
@@ -62,7 +78,7 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
         .circle_filled(play.center(), 18.0, theme::INK.gamma_multiply(dim));
     let mark = Color32::from_rgb(0x12, 0x13, 0x0f).gamma_multiply(dim);
     icons::paint(ui.painter(), play.center(), Icon::Play, 16.0, mark);
-    crate::tip::show(&play_response, "Play");
+    crate::tip::show_enabled(&play_response, "Play", live);
 
     let still = Rect::from_center_size(
         pos2(rect.right() - 28.0, rect.center().y),
@@ -78,7 +94,7 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
         16.0,
         theme::MUTED.gamma_multiply(dim),
     );
-    crate::tip::show(&still_response, "Still");
+    crate::tip::show_enabled(&still_response, "Still", live);
 }
 
 /// The topmost segment that covers `us`, named from its file. A hidden lane is skipped.

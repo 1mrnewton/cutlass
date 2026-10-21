@@ -2,7 +2,7 @@
 
 #![deny(unsafe_code)]
 
-use eframe::egui::{self, Align2, Button, Rect, RichText, Sense, TextStyle, Vec2};
+use eframe::egui::{self, Align2, Button, Rect, RichText, Sense, TextStyle, Vec2, pos2};
 
 use cutlass_project::{AssetId, History, Project, ProjectId, SegmentId};
 
@@ -222,6 +222,7 @@ impl eframe::App for CutlassApp {
 
 /// Project bar. The Mac close, minimize, and maximize buttons are the window's.
 fn header(ui: &mut egui::Ui, name: &str) -> bool {
+    crate::tip::region(ui, "Project");
     ui.take_available_height();
     let rect = ui.max_rect();
     let size = Vec2::new(72.0, 26.0);
@@ -239,6 +240,13 @@ fn header(ui: &mut egui::Ui, name: &str) -> bool {
         TextStyle::Button.resolve(ui.style()),
         theme::INK,
     );
+    let name_rect = Rect::from_min_max(
+        pos2(rect.left() + 80.0, rect.center().y - 12.0),
+        pos2(button.left() - 8.0, rect.center().y + 12.0),
+    );
+    if name_rect.is_positive() {
+        crate::tip::read(ui, name_rect, ui.scope_id().with("project-name"), name);
+    }
 
     ui.put(
         button,

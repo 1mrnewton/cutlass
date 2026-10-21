@@ -472,6 +472,8 @@ pub(crate) fn show(ui: &egui::Ui, sheet: &mut Sheet, duration: &str) -> bool {
         .movable(false)
         .constrain(false)
         .fade_in(false)
+        .accessible_name("Export")
+        .role(egui::accesskit::Role::Dialog)
         .show(ui.ctx(), |ui| {
             ui.set_clip_rect(screen);
             ui.set_min_size(screen.size());
@@ -543,7 +545,18 @@ fn paint_foot(ui: &mut egui::Ui, foot: Rect, duration: &str) -> bool {
         pos2(export.left() - 8.0 - 32.0, foot.center().y),
         vec2(64.0, 26.0),
     );
+    let duration_rect =
+        Rect::from_min_max(foot.left_top(), pos2(cancel.left() - 8.0, foot.bottom()));
+    if duration_rect.is_positive() {
+        crate::tip::read(
+            ui,
+            duration_rect,
+            ui.scope_id().with("export-duration"),
+            duration,
+        );
+    }
     let cancel_response = ui.interact(cancel, ui.scope_id().with("cancel"), Sense::click());
+    crate::tip::name(&cancel_response, "Cancel");
     ui.painter().text(
         cancel.center(),
         Align2::CENTER_CENTER,
@@ -556,6 +569,7 @@ fn paint_foot(ui: &mut egui::Ui, foot: Rect, duration: &str) -> bool {
         },
     );
     let export_response = ui.interact(export, ui.scope_id().with("export"), Sense::click());
+    crate::tip::name(&export_response, "Export");
     ui.painter().rect_filled(export, 8.0, theme::EXPORT);
     ui.painter().text(
         export.center(),
@@ -827,6 +841,7 @@ fn section(ui: &mut egui::Ui, title: &str, open: &mut bool, enabled: &mut bool) 
     if fold_response.clicked() {
         *open = !*open;
     }
+    crate::tip::disclosure(&fold_response, title, *open);
     chevron(
         ui.painter(),
         pos2(rect.left() + 4.0, rect.center().y),
@@ -867,7 +882,7 @@ fn section(ui: &mut egui::Ui, title: &str, open: &mut bool, enabled: &mut bool) 
     } else {
         format!("{title} off")
     };
-    crate::tip::show(&switch_response, &tip);
+    crate::tip::show_switch(&switch_response, &tip, *enabled, true);
 }
 
 fn chevron(painter: &egui::Painter, center: egui::Pos2, open: bool) {
@@ -887,11 +902,11 @@ fn labeled(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui, f32))
     ui.horizontal(|ui| {
         ui.set_min_width(width);
         ui.spacing_mut().item_spacing.x = 16.0;
-        ui.add_sized(
+        let name = ui.add_sized(
             vec2(108.0, 32.0),
             egui::Label::new(RichText::new(label).size(12.0).color(theme::MUTED)),
         );
-        add(ui, field);
+        ui.label_inputs_by(name.id, |ui| add(ui, field));
     });
     ui.add_space(8.0);
 }

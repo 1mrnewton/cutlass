@@ -33,6 +33,7 @@ cutlass-playback = { path = "crates/playback" }
 cutlass-mp4 = { path = "crates/containers/mp4" }
 cutlass-project = { path = "crates/project" }
 eframe = { version = "0.37.0", default-features = false, features = [
+    "accesskit",
     "clipboard",
     "links",
     "system_fonts",

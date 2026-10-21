@@ -306,6 +306,7 @@ pub fn show(
     trim: &mut Option<TrimDrag>,
     split: &mut bool,
 ) -> Vec<Command> {
+    crate::tip::region(ui, "Timeline");
     // The panel stores the height this ui claims. Painting the lanes does not
     // claim it, so a drag would snap back to the minimum on release.
     ui.take_available_height();
@@ -826,8 +827,8 @@ pub fn show(
     }
     ui.data_mut(|data| data.insert_temp(lane_id(), lanes));
     paint_stamps(ui, project, tracks, ruler_rect, &stamps, view);
-    for (response, text) in clip_tips {
-        crate::tip::show(&response, &text);
+    for (response, text, picked) in clip_tips {
+        crate::tip::show_selected(&response, &text, picked);
     }
     ui.data_mut(|data| data.insert_temp(stamps_id, stamps));
     paint_guides(ui, tracks, project, &guides, pointer, view);
@@ -944,6 +945,8 @@ fn paint_note(ui: &egui::Ui, ruler: Rect) {
         galley,
         ink,
     );
+    let response = ui.interact(rect, ui.scope_id().with("toast"), egui::Sense::hover());
+    crate::tip::alert(&response, note.text);
 }
 
 fn lane_left(area: Rect) -> f32 {
@@ -1068,7 +1071,7 @@ fn zoom_controls(ui: &mut egui::Ui, ruler: Rect, live: bool) -> Option<ZoomStep>
             ui.scope_id().with(salts[index]),
             Sense::click(),
         );
-        crate::tip::show(&response, names[index]);
+        crate::tip::show_enabled(&response, names[index], live);
         if live && response.clicked() {
             chosen = Some(steps[index]);
         }
@@ -1509,6 +1512,7 @@ fn ruler_switch(
         FontId::new(12.0, FontFamily::Proportional),
         color,
     );
+    crate::tip::name_switch(&response, label, *on, live);
     *on && !was
 }
 
@@ -1583,7 +1587,7 @@ fn mode_switch(
         theme::INK
     };
     icons::paint(ui.painter(), button.center(), icon, 16.0, color);
-    crate::tip::show(&response, tip);
+    crate::tip::show_switch(&response, tip, *on, live);
     *on && !was
 }
 
@@ -1774,7 +1778,7 @@ fn setting_switch(
     }
     let color = if on { theme::EXPORT } else { theme::INK };
     icons::paint(ui.painter(), button.center(), icon, 16.0, color);
-    crate::tip::show(&response, tip);
+    crate::tip::show_switch(&response, tip, on, true);
     response.clicked()
 }
 
@@ -1856,7 +1860,7 @@ struct ClipPaint<'a> {
     marks: &'a [i64],
     dim: bool,
     lanes: &'a Lanes,
-    tips: &'a mut Vec<(egui::Response, String)>,
+    tips: &'a mut Vec<(egui::Response, String, bool)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2008,7 +2012,9 @@ fn paint_segments(
             ui.scope_id().with(("clip-menu", segment.id())),
             Sense::click(),
         );
-        if response.secondary_clicked() && !chosen(paint.selected, segment.id()) {
+        let activated = response.clicked() && !response.clicked_by(egui::PointerButton::Primary);
+        let from_menu = response.secondary_clicked() && !chosen(paint.selected, segment.id());
+        if activated || from_menu {
             choose(paint.selected, Some(segment.id()));
         }
         let refused = blocks_edit(paint.project, paint.lanes, segment.id());
@@ -2021,15 +2027,14 @@ fn paint_segments(
             .asset(segment.asset_id())
             .map(|asset| file_name(asset.source()))
             .unwrap_or("");
-        paint.tips.push((
-            response,
-            crate::tip::span(
-                name,
-                range.start().value,
-                range.end().value,
-                range.start().timescale.get(),
-            ),
-        ));
+        let text = crate::tip::span(
+            name,
+            range.start().value,
+            range.end().value,
+            range.start().timescale.get(),
+        );
+        let picked = chosen(paint.selected, segment.id());
+        paint.tips.push((response, text, picked));
     }
 }
 
@@ -2511,7 +2516,7 @@ fn paint_stamps(
             ui.scope_id().with(("ruler-mark", index)),
             Sense::hover(),
         );
-        crate::tip::show(
+        crate::tip::show_image(
             &response,
             &crate::tip::mark(false, *us, SEQUENCE_TIMESCALE.get()),
         );
@@ -2617,7 +2622,7 @@ fn paint_bound(
             )),
             Sense::hover(),
         );
-        crate::tip::show(
+        crate::tip::show_image(
             &response,
             &crate::tip::mark(beat, us, SEQUENCE_TIMESCALE.get()),
         );
@@ -2702,6 +2707,7 @@ fn paint_playhead(
         {
             *playhead = ruler::seek(view.us_at(left, pointer.x), rate, duration);
         }
+        crate::tip::image(&response, "Playhead");
     }
     let x = x_of(*playhead);
     let mark = Rect::from_center_size(pos2(x, bottom - 6.0), vec2(11.0, 12.0));
@@ -2812,7 +2818,7 @@ fn lane_button(
     let response = ui.interact(rect, id, Sense::click());
     let color = if engaged { theme::INK } else { theme::FAINT };
     icons::paint(ui.painter(), rect.center(), icon, 14.0, color);
-    crate::tip::show(&response, tip);
+    crate::tip::show_switch(&response, tip, engaged, true);
     response.clicked()
 }
 

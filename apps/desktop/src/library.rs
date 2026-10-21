@@ -78,6 +78,7 @@ pub fn show(
     shelf: &mut Shelf,
     selected: &mut Option<AssetId>,
 ) {
+    crate::tip::region(ui, "Library");
     if selected.is_some_and(|id| project.asset(id).is_none()) {
         *selected = None;
     }
@@ -119,7 +120,7 @@ fn rail_button(ui: &mut egui::Ui, shelf: Shelf, active: bool) -> egui::Response 
     }
     let color = if active { theme::INK } else { theme::FAINT };
     icons::paint(ui.painter(), rect.center(), shelf.icon(), 20.0, color);
-    crate::tip::show(&response, shelf.label());
+    crate::tip::show_radio(&response, shelf.label(), active);
     response
 }
 
@@ -144,7 +145,11 @@ fn paint_bin(ui: &mut egui::Ui, rect: Rect, project: &Project, selected: &mut Op
                     *selected = Some(asset.id());
                     picked = true;
                 }
-                crate::tip::show(&response, file_name(asset.source()));
+                crate::tip::show_selected(
+                    &response,
+                    file_name(asset.source()),
+                    *selected == Some(asset.id()),
+                );
                 paint_card(
                     ui,
                     card,

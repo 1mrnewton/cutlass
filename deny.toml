@@ -4,6 +4,11 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2026-0370", reason = "AccessKit's Linux adapter still uses zvariant 5. It was folded into zbus 6, and no upgrade builds." },
+    { id = "RUSTSEC-2026-0371", reason = "AccessKit's Linux adapter still uses zbus_names 4. It was folded into zbus 6, and no upgrade builds." },
+    { id = "RUSTSEC-2026-0372", reason = "AccessKit's Linux adapter still uses zvariant_derive 5. It was folded into zbus 6, and no upgrade builds." },
+]
 
 [licenses]
 version = 2

@@ -11,6 +11,7 @@ use crate::theme;
 use crate::timeline::file_name;
 
 pub fn show(ui: &mut egui::Ui, project: &Project, selected: Option<SegmentId>) {
+    crate::tip::region(ui, "Inspector");
     if let Some(panel) = selected.and_then(|id| clip_panel(project, id)) {
         paint(ui, panel.title, &panel.rows, "clip");
         return;

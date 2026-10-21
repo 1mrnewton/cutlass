@@ -22,7 +22,7 @@ jobs:
         # To bring back an Intel/universal build, cross-compile x86_64 here on the
         # arm64 runner rather than depending on a macos-13 runner.
         include:
-          - runner: macos-14   # Apple Silicon
+          - runner: blacksmith-6vcpu-macos-15   # Apple Silicon
             arch: arm64
     steps:
       - uses: actions/checkout@v4
@@ -49,10 +49,10 @@ jobs:
   # backends aren't implemented on these platforms yet (see packaging/README).
   build-linux:
     name: linux / x86_64
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: useblacksmith/checkout@v1
 
       - name: Install system development libraries
         run: |
@@ -85,9 +85,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: windows-latest
+          - runner: blacksmith-4vcpu-windows-2025
             arch: x86_64
-          - runner: windows-11-arm
+          - runner: blacksmith-4vcpu-windows-2025
             arch: arm64
     steps:
       - uses: actions/checkout@v4
@@ -116,12 +116,12 @@ jobs:
   publish:
     name: github release
     needs: [build-macos, build-linux, build-windows]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: useblacksmith/checkout@v1
 
       - uses: actions/download-artifact@v4
         with:

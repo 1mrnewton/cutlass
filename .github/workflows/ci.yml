@@ -18,10 +18,10 @@ env:
 jobs:
   check:
     name: build / test / clippy
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: useblacksmith/checkout@v1
 
       # No media libraries: decode/encode is platform-native (none on Linux
       # yet). fontconfig/alsa feed Slint text and cpal audio output; Vulkan
@@ -59,7 +59,7 @@ jobs:
   # lean; packaging is still validated by the Release workflow on tag.
   build-macos:
     name: release build / macos arm64
-    runs-on: macos-14
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -73,7 +73,7 @@ jobs:
 
   build-windows:
     name: release build / windows x86_64
-    runs-on: windows-latest
+    runs-on: blacksmith-4vcpu-windows-2025
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4

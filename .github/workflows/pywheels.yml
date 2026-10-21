@@ -40,8 +40,8 @@ jobs:
         # here when one lands. Intel macOS / arm64 Windows are possible
         # follow-ups via `target:` cross builds.
         platform:
-          - { name: macos-arm64, runner: macos-14 }
-          - { name: windows-x64, runner: windows-latest }
+          - { name: macos-arm64, runner: blacksmith-6vcpu-macos-15 }
+          - { name: windows-x64, runner: blacksmith-4vcpu-windows-2025 }
         # Non-abi3 pyo3 ⇒ one wheel per CPython minor: 3.9 is the oldest we
         # support (requires-python in pyproject.toml), 3.14 the newest
         # stable that pyo3 0.29 covers.
@@ -97,10 +97,10 @@ jobs:
 
   sdist:
     name: sdist
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: useblacksmith/checkout@v1
 
       # maturin bundles the local path dependencies (cutlass-core, -render,
       # …) into the sdist, so a source install works from the archive alone
@@ -127,7 +127,7 @@ jobs:
     name: publish to testpypi
     if: github.event_name == 'workflow_dispatch' && inputs.publish == 'testpypi'
     needs: [wheels, sdist]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     environment: testpypi
     permissions:
@@ -148,7 +148,7 @@ jobs:
     name: publish to pypi
     if: startsWith(github.ref, 'refs/tags/py-v') || (github.event_name == 'workflow_dispatch' && inputs.publish == 'pypi')
     needs: [wheels, sdist]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     environment: pypi
     permissions:

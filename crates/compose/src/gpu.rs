@@ -150,6 +150,47 @@ impl Gpu {
             },
         )?;
         let coefficients = Coefficients::new(planes.format, planes.range, planes.matrix);
+        self.draw(&y, &chroma, width, height, coefficients)
+    }
+
+    /// Samples an IOSurface-backed frame. The GPU reads the surface, so the
+    /// pixels are not copied on the CPU. This returns once the GPU has
+    /// finished, and the caller may then reuse the buffer.
+    #[cfg(target_vendor = "apple")]
+    pub fn render_pixel_buffer(
+        &self,
+        buffer: &cutlass_videotoolbox::PixelBuffer,
+        matrix: cutlass_color::Matrix,
+    ) -> Result<RgbImage, Error> {
+        let Some((format, range)) = buffer.format() else {
+            return Err(Error::UnsupportedFormat);
+        };
+        if matches!(format, PixelFormat::P010)
+            && !self
+                .device
+                .features()
+                .contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
+        {
+            return Err(Error::NoP010);
+        }
+        let width = u32::try_from(buffer.width()).map_err(|_| cutlass_color::Error::TooLarge)?;
+        let height = u32::try_from(buffer.height()).map_err(|_| cutlass_color::Error::TooLarge)?;
+        check_size(width, height)?;
+        let (y_format, chroma_format, _, _) = formats(format);
+        let imported =
+            crate::import::import(&self.device, buffer, y_format, chroma_format, width, height)?;
+        let coefficients = Coefficients::new(format, range, matrix);
+        self.draw(&imported.y, &imported.chroma, width, height, coefficients)
+    }
+
+    fn draw(
+        &self,
+        y: &wgpu::Texture,
+        chroma: &wgpu::Texture,
+        width: u32,
+        height: u32,
+        coefficients: Coefficients,
+    ) -> Result<RgbImage, Error> {
         let uniform = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {

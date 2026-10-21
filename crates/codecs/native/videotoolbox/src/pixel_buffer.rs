@@ -12,15 +12,17 @@ use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddress,
     CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRow,
     CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane,
-    CVPixelBufferGetPixelFormatType, CVPixelBufferGetPlaneCount, CVPixelBufferGetWidth,
-    CVPixelBufferGetWidthOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
-    CVPixelBufferUnlockBaseAddress, kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
-    kCVPixelBufferMetalCompatibilityKey, kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
+    CVPixelBufferGetIOSurface, CVPixelBufferGetPixelFormatType, CVPixelBufferGetPlaneCount,
+    CVPixelBufferGetWidth, CVPixelBufferGetWidthOfPlane, CVPixelBufferLockBaseAddress,
+    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVPixelBufferHeightKey,
+    kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
+    kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
     kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
     kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
     kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
     kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
 };
+use objc2_io_surface::IOSurfaceRef;
 
 use crate::cf::{dictionary, owned};
 use crate::error::{Error, check};
@@ -123,6 +125,14 @@ impl PixelBuffer {
 
     pub fn height(&self) -> usize {
         CVPixelBufferGetHeight(&self.buffer)
+    }
+
+    /// The IOSurface behind this buffer. `None` when the buffer has none.
+    ///
+    /// The GPU samples this instead of copying the pixels. The returned value
+    /// retains the surface.
+    pub fn io_surface(&self) -> Option<CFRetained<IOSurfaceRef>> {
+        CVPixelBufferGetIOSurface(Some(&self.buffer))
     }
 
     /// `None` for Core Video formats Cutlass doesn't use.

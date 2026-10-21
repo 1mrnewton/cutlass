@@ -15,5 +15,11 @@ pollster.workspace = true
 thiserror.workspace = true
 wgpu.workspace = true
 
+[target.'cfg(target_vendor = "apple")'.dependencies]
+cutlass-videotoolbox.workspace = true
+objc2.workspace = true
+objc2-io-surface.workspace = true
+objc2-metal.workspace = true
+
 [lints]
 workspace = true

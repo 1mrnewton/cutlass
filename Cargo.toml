@@ -34,6 +34,14 @@ objc2-core-foundation = "0.3.2"
 objc2-core-media = "0.3.2"
 objc2-core-video = "0.3.2"
 objc2-io-surface = "0.3.2"
+objc2-metal = { version = "0.3.2", default-features = false, features = [
+    "MTLAllocation",
+    "MTLDevice",
+    "MTLPixelFormat",
+    "MTLResource",
+    "MTLTexture",
+    "objc2-io-surface",
+] }
 objc2-video-toolbox = "0.3.2"
 pollster = "0.4.0"
 thiserror = "2.0.21"

@@ -15,4 +15,20 @@ pub enum Error {
     Wait(String),
     #[error("reading the frame back failed: {0}")]
     Readback(String),
+    /// The device is not the Metal device that can wrap an IOSurface.
+    #[cfg(target_vendor = "apple")]
+    #[error("this GPU is not Metal")]
+    NotMetal,
+    /// The pixel buffer has no IOSurface to sample.
+    #[cfg(target_vendor = "apple")]
+    #[error("the frame has no IOSurface")]
+    NoSurface,
+    /// Core Video returned a format this compositor does not sample.
+    #[cfg(target_vendor = "apple")]
+    #[error("the frame format is not NV12 or P010")]
+    UnsupportedFormat,
+    /// Metal refused to wrap a plane.
+    #[cfg(target_vendor = "apple")]
+    #[error("importing the frame failed: {0}")]
+    Import(String),
 }

@@ -68,6 +68,7 @@ pub fn show(
     selected: &mut Option<SegmentId>,
     drag: &mut Option<ClipDrag>,
     trim: &mut Option<TrimDrag>,
+    split: &mut bool,
 ) -> Vec<Command> {
     let full = ui.max_rect();
     let ruler_rect = Rect::from_min_size(full.min, vec2(full.width(), RULER_HEIGHT));
@@ -93,7 +94,11 @@ pub fn show(
         let pressed = ui.input(|input| input.pointer.primary_pressed());
         let released = ui.input(|input| input.pointer.primary_released());
         if pressed && let Some(point) = pointer.filter(|point| tracks.contains(*point)) {
-            if let Some(active) = trim_from(project, tracks, point) {
+            if *split {
+                *drag = None;
+                *trim = None;
+                *selected = segment_at(project, tracks, point);
+            } else if let Some(active) = trim_from(project, tracks, point) {
                 *selected = Some(active.segment);
                 *drag = None;
                 *trim = Some(active);
@@ -104,7 +109,16 @@ pub fn show(
             }
         }
         if released {
-            if let Some(active) = trim.take() {
+            if *split {
+                drag.take();
+                trim.take();
+                if ui.input(|input| input.pointer.primary_clicked())
+                    && let Some(point) = pointer.filter(|point| tracks.contains(*point))
+                    && let Some(command) = split_command(project, tracks, point)
+                {
+                    commands.push(command);
+                }
+            } else if let Some(active) = trim.take() {
                 commands = trim_commands(project, tracks, &active, pointer);
             } else if let Some(active) = drag.take()
                 && let Some(command) = move_command(project, tracks, &active, pointer)
@@ -114,6 +128,10 @@ pub fn show(
         }
     }
     paint_ruler(ui, ruler_rect, project);
+    split_blade(ui, ruler_rect, project.duration().value > 0, split);
+    if *split && pointer.is_some_and(|point| tracks.contains(point)) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
     if tracks.height() > 0.0 {
         let pixel_size = ruler::opening_pixel_size(
             (tracks.right() - lane_left(tracks)).max(0.0),
@@ -178,6 +196,61 @@ pub fn show(
 
 fn lane_left(area: Rect) -> f32 {
     area.left() + HEAD + COVER
+}
+
+fn split_blade(ui: &mut egui::Ui, ruler: Rect, live: bool, on: &mut bool) {
+    if !live {
+        *on = false;
+    }
+    let button = Rect::from_center_size(
+        pos2(ruler.left() + HEAD / 2.0, ruler.center().y),
+        vec2(72.0, 26.0),
+    );
+    let response = ui.interact(button, ui.scope_id().with("split-blade"), Sense::click());
+    if live && response.clicked() {
+        *on = !*on;
+    }
+    if *on {
+        ui.painter().rect_filled(button, 6.0, theme::ACTIVE);
+    }
+    let color = if !live {
+        theme::FAINT
+    } else if *on {
+        theme::EXPORT
+    } else {
+        theme::INK
+    };
+    ui.painter().text(
+        button.center(),
+        Align2::CENTER_CENTER,
+        "Split",
+        FontId::new(12.0, FontFamily::Proportional),
+        color,
+    );
+}
+
+fn split_command(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<Command> {
+    let id = segment_at(project, tracks, point)?;
+    let range = project.timeline().segment(id)?.timeline();
+    let width = (tracks.right() - lane_left(tracks)).max(0.0);
+    let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
+    if !(pixel_size.is_finite() && pixel_size > 0.0) {
+        return None;
+    }
+    let raw = f64::from(point.x - lane_left(tracks)) / pixel_size;
+    if !raw.is_finite() {
+        return None;
+    }
+    let us = raw.round().clamp(0.0, i64::MAX as f64) as i64;
+    let at = ruler::seek(
+        us,
+        project.settings().rate().rate(),
+        project.duration().value,
+    );
+    if at <= range.start().value || at >= range.end().value {
+        return None;
+    }
+    Some(Command::Split { segment: id, at })
 }
 
 struct ClipPaint<'a> {
@@ -1051,5 +1124,88 @@ mod tests {
         let after = cut.timeline().segment(id).expect("segment").timeline();
         assert_eq!(after.start().value, 0);
         assert!(after.duration().value < before);
+    }
+
+    #[test]
+    fn a_click_in_the_middle_splits_and_a_click_on_the_edge_does_not() {
+        let mut history = History::new();
+        let mut cut = project();
+        let video = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let asset = match history
+            .apply(&mut cut, &[Command::AddAsset(video)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let segment = {
+            let stored = cut.asset(asset).expect("asset");
+            let duration = stored.duration().expect("duration");
+            let source = TimeRange::new(
+                Timestamp::new(0, duration.timescale),
+                Timestamp::new(duration.value, duration.timescale),
+            )
+            .expect("source");
+            Segment::media(stored, source, 0, Channels::Both, Speed::ONE).expect("segment")
+        };
+        let id = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: None,
+                    segment,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Opened { segment, .. }] => *segment,
+            other => panic!("expected a new lane, got {other:?}"),
+        };
+        let tracks = Rect::from_min_size(pos2(0.0, 0.0), vec2(602.0, 400.0));
+        let lane = layout(cut.timeline().tracks(), tracks)
+            .into_iter()
+            .find(|lane| !lane.main)
+            .expect("overlay");
+        let width = (tracks.right() - lane_left(tracks)).max(0.0);
+        let pixel_size = crate::ruler::opening_pixel_size(width, cut.duration().value);
+        let range = cut.timeline().segment(id).expect("segment").timeline();
+        let rect = clip_rect(
+            Rect::from_min_size(pos2(lane_left(tracks), lane.top), vec2(width, lane.height)),
+            false,
+            range.start().value,
+            range.duration().value,
+            pixel_size,
+        );
+        assert!(super::split_command(&cut, tracks, rect.left_center()).is_none());
+        let command = super::split_command(&cut, tracks, rect.center()).expect("split");
+        let Command::Split { segment, at } = command else {
+            panic!("expected a split, got {command:?}");
+        };
+        assert_eq!(segment, id);
+        assert!(at > range.start().value && at < range.end().value);
+        history.apply(&mut cut, &[command]).expect("apply");
+        let left = cut.timeline().segment(id).expect("left").timeline();
+        let right = cut
+            .timeline()
+            .tracks()
+            .iter()
+            .find(|track| !track.is_main())
+            .expect("overlay")
+            .segments()
+            .iter()
+            .find(|piece| piece.id() != id)
+            .expect("right");
+        assert!(left.duration().value < range.duration().value);
+        assert_eq!(right.timeline().start().value, left.end().value);
+        assert_eq!(left.start().value, 0);
     }
 }

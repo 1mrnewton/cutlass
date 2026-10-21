@@ -42,6 +42,7 @@ struct CutlassApp {
     selected_segment: Option<SegmentId>,
     clip_drag: Option<timeline::ClipDrag>,
     trim_drag: Option<timeline::TrimDrag>,
+    split: bool,
 }
 
 impl CutlassApp {
@@ -57,6 +58,7 @@ impl CutlassApp {
             selected_segment: None,
             clip_drag: None,
             trim_drag: None,
+            split: false,
         }
     }
 
@@ -107,6 +109,7 @@ impl eframe::App for CutlassApp {
                     &mut self.selected_segment,
                     &mut self.clip_drag,
                     &mut self.trim_drag,
+                    &mut self.split,
                 );
                 if !commands.is_empty() {
                     let _ = self.history.apply(&mut self.project, &commands);

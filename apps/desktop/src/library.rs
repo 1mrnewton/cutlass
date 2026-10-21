@@ -119,7 +119,8 @@ fn rail_button(ui: &mut egui::Ui, shelf: Shelf, active: bool) -> egui::Response 
     }
     let color = if active { theme::INK } else { theme::FAINT };
     icons::paint(ui.painter(), rect.center(), shelf.icon(), 20.0, color);
-    response.on_hover_text(shelf.label())
+    crate::tip::show(&response, shelf.label());
+    response
 }
 
 fn paint_bin(ui: &mut egui::Ui, rect: Rect, project: &Project, selected: &mut Option<AssetId>) {
@@ -143,6 +144,7 @@ fn paint_bin(ui: &mut egui::Ui, rect: Rect, project: &Project, selected: &mut Op
                     *selected = Some(asset.id());
                     picked = true;
                 }
+                crate::tip::show(&response, file_name(asset.source()));
                 paint_card(
                     ui,
                     card,

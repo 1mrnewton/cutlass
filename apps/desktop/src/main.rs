@@ -16,6 +16,7 @@ mod preview;
 mod ruler;
 mod theme;
 mod timeline;
+mod tip;
 
 fn main() -> eframe::Result {
     let viewport = egui::ViewportBuilder::default()

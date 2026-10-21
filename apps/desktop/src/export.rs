@@ -523,7 +523,8 @@ fn paint_head(ui: &mut egui::Ui, head: Rect) -> bool {
     let hit = Rect::from_center_size(pos2(head.left() + 20.0, head.center().y), vec2(24.0, 24.0));
     let response = ui.interact(hit, ui.scope_id().with("close"), Sense::click());
     ui.painter().circle_filled(hit.center(), 6.0, CLOSE);
-    response.on_hover_text("Close").clicked()
+    crate::tip::show(&response, "Close");
+    response.clicked()
 }
 
 fn paint_foot(ui: &mut egui::Ui, foot: Rect, duration: &str) -> bool {
@@ -866,7 +867,7 @@ fn section(ui: &mut egui::Ui, title: &str, open: &mut bool, enabled: &mut bool) 
     } else {
         format!("{title} off")
     };
-    switch_response.on_hover_text(tip);
+    crate::tip::show(&switch_response, &tip);
 }
 
 fn chevron(painter: &egui::Painter, center: egui::Pos2, open: bool) {

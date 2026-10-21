@@ -62,7 +62,7 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
         .circle_filled(play.center(), 18.0, theme::INK.gamma_multiply(dim));
     let mark = Color32::from_rgb(0x12, 0x13, 0x0f).gamma_multiply(dim);
     icons::paint(ui.painter(), play.center(), Icon::Play, 16.0, mark);
-    play_response.on_hover_text("Play");
+    crate::tip::show(&play_response, "Play");
 
     let still = Rect::from_center_size(
         pos2(rect.right() - 28.0, rect.center().y),
@@ -78,7 +78,7 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
         16.0,
         theme::MUTED.gamma_multiply(dim),
     );
-    still_response.on_hover_text("Still");
+    crate::tip::show(&still_response, "Still");
 }
 
 /// The topmost segment that covers `us`, named from its file. A hidden lane is skipped.

@@ -2,7 +2,9 @@
 
 use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, Sense, Stroke, pos2, vec2};
 
-use cutlass_project::{Command, FrameRate, History, Project, SegmentId, Track, TrackId, TrackKind};
+use cutlass_project::{
+    Command, FrameRate, History, Project, SEQUENCE_TIMESCALE, SegmentId, Track, TrackId, TrackKind,
+};
 
 use crate::icons::{self, Icon};
 use crate::ruler;
@@ -747,6 +749,7 @@ pub fn show(
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
     let mut remove = None;
+    let mut clip_tips = Vec::new();
     if tracks.height() > 0.0 {
         for (track, lane) in project
             .timeline()
@@ -809,6 +812,7 @@ pub fn show(
                     marks: &mark_times,
                     dim,
                     lanes: &lanes,
+                    tips: &mut clip_tips,
                 },
             );
         }
@@ -822,6 +826,9 @@ pub fn show(
     }
     ui.data_mut(|data| data.insert_temp(lane_id(), lanes));
     paint_stamps(ui, project, tracks, ruler_rect, &stamps, view);
+    for (response, text) in clip_tips {
+        crate::tip::show(&response, &text);
+    }
     ui.data_mut(|data| data.insert_temp(stamps_id, stamps));
     paint_guides(ui, tracks, project, &guides, pointer, view);
     paint_playhead(ui, ruler_rect, tracks, project, playhead, view);
@@ -1052,6 +1059,7 @@ fn zoom_controls(ui: &mut egui::Ui, ruler: Rect, live: bool) -> Option<ZoomStep>
     let rects = zoom_rects(ruler);
     let steps = [ZoomStep::Out, ZoomStep::Fit, ZoomStep::In];
     let labels = ["−", "Fit", "+"];
+    let names = ["Zoom out", "Zoom to fit", "Zoom in"];
     let salts = ["zoom-out", "zoom-fit", "zoom-in"];
     let mut chosen = None;
     for index in 0..rects.len() {
@@ -1060,6 +1068,7 @@ fn zoom_controls(ui: &mut egui::Ui, ruler: Rect, live: bool) -> Option<ZoomStep>
             ui.scope_id().with(salts[index]),
             Sense::click(),
         );
+        crate::tip::show(&response, names[index]);
         if live && response.clicked() {
             chosen = Some(steps[index]);
         }
@@ -1574,7 +1583,7 @@ fn mode_switch(
         theme::INK
     };
     icons::paint(ui.painter(), button.center(), icon, 16.0, color);
-    response.on_hover_text(tip);
+    crate::tip::show(&response, tip);
     *on && !was
 }
 
@@ -1765,7 +1774,8 @@ fn setting_switch(
     }
     let color = if on { theme::EXPORT } else { theme::INK };
     icons::paint(ui.painter(), button.center(), icon, 16.0, color);
-    response.on_hover_text(tip).clicked()
+    crate::tip::show(&response, tip);
+    response.clicked()
 }
 
 fn split_command(
@@ -1846,6 +1856,7 @@ struct ClipPaint<'a> {
     marks: &'a [i64],
     dim: bool,
     lanes: &'a Lanes,
+    tips: &'a mut Vec<(egui::Response, String)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2004,6 +2015,21 @@ fn paint_segments(
         let kind = track.kind();
         let id = segment.id();
         response.context_menu(|ui| paint_clip_menu(ui, kind, refused, id, remove));
+        let range = segment.timeline();
+        let name = paint
+            .project
+            .asset(segment.asset_id())
+            .map(|asset| file_name(asset.source()))
+            .unwrap_or("");
+        paint.tips.push((
+            response,
+            crate::tip::span(
+                name,
+                range.start().value,
+                range.end().value,
+                range.start().timescale.get(),
+            ),
+        ));
     }
 }
 
@@ -2459,7 +2485,7 @@ fn clip_color(kind: TrackKind) -> Color32 {
 }
 
 fn paint_stamps(
-    ui: &egui::Ui,
+    ui: &mut egui::Ui,
     project: &Project,
     tracks: Rect,
     ruler: Rect,
@@ -2477,12 +2503,17 @@ fn paint_stamps(
         } else {
             theme::STICKER
         };
-        icons::paint(
-            ui.painter(),
-            pos2(view.x(left, *us), ruler.top() + 14.0),
-            Icon::Marker,
-            14.0,
-            color,
+        let at = pos2(view.x(left, *us), ruler.top() + 14.0);
+        icons::paint(ui.painter(), at, Icon::Marker, 14.0, color);
+        let hit = Rect::from_center_size(at, vec2(16.0, 16.0));
+        let response = ui.interact(
+            hit,
+            ui.scope_id().with(("ruler-mark", index)),
+            Sense::hover(),
+        );
+        crate::tip::show(
+            &response,
+            &crate::tip::mark(false, *us, SEQUENCE_TIMESCALE.get()),
         );
     }
     if tracks.height() <= 0.0 {
@@ -2547,7 +2578,7 @@ fn paint_stamps(
 }
 
 fn paint_bound(
-    ui: &egui::Ui,
+    ui: &mut egui::Ui,
     stamps: &[ClipStamp],
     selected: Option<PickedStamp>,
     segment: SegmentId,
@@ -2573,7 +2604,23 @@ fn paint_bound(
         } else {
             place.idle
         };
-        icons::paint(ui.painter(), pos2(x, place.y), place.icon, 13.0, color);
+        let at = pos2(x, place.y);
+        icons::paint(ui.painter(), at, place.icon, 13.0, color);
+        let beat = matches!(place.icon, Icon::Beat);
+        let hit = Rect::from_center_size(at, vec2(16.0, 16.0));
+        let response = ui.interact(
+            hit,
+            ui.scope_id().with((
+                if beat { "beat-mark" } else { "clip-mark" },
+                segment,
+                stamp.offset,
+            )),
+            Sense::hover(),
+        );
+        crate::tip::show(
+            &response,
+            &crate::tip::mark(beat, us, SEQUENCE_TIMESCALE.get()),
+        );
     }
 }
 
@@ -2765,7 +2812,8 @@ fn lane_button(
     let response = ui.interact(rect, id, Sense::click());
     let color = if engaged { theme::INK } else { theme::FAINT };
     icons::paint(ui.painter(), rect.center(), icon, 14.0, color);
-    response.on_hover_text(tip).clicked()
+    crate::tip::show(&response, tip);
+    response.clicked()
 }
 
 fn layout(tracks: &[Track], area: Rect) -> Vec<Lane> {

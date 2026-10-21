@@ -37,6 +37,8 @@ pub fn install(ctx: &egui::Context) {
     ctx.set_theme(egui::ThemePreference::Dark);
     ctx.style_mut_of(egui::Theme::Dark, |style| {
         style.interaction.selectable_labels = false;
+        // A hover name waits until the pointer has been still. `docs/desktop-layout.md`.
+        style.interaction.tooltip_delay = 0.32;
         style.visuals.override_text_color = Some(INK);
         style.visuals.panel_fill = PANEL;
         style.visuals.window_fill = PANEL;

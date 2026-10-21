@@ -72,11 +72,19 @@ fn chosen(selected: &[SegmentId], id: SegmentId) -> bool {
 
 const BOX_SLOP: f32 = 4.0;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Picked {
+    Vertical(usize),
+    Horizontal(usize),
+}
+
 #[derive(Clone, Default)]
 struct Guides {
     vertical: Vec<i64>,
-    selected: Option<usize>,
+    horizontal: Vec<f32>,
+    selected: Option<Picked>,
     pull: Option<egui::Pos2>,
+    row: Option<egui::Pos2>,
 }
 
 #[derive(Clone)]
@@ -150,44 +158,73 @@ pub fn show(
         let box_id = ui.scope_id().with("box-select");
         if pressed && let Some(point) = pointer {
             let mark = playhead_mark(ruler_rect, project, *playhead);
+            let on_buttons = switch_rects(ruler_rect)
+                .iter()
+                .any(|button| button.contains(point));
             let on_ruler = ruler_rect.contains(point)
                 && point.x >= lane_left(ruler_rect)
                 && !mark.is_some_and(|mark| mark.contains(point));
+            let on_corner =
+                ruler_rect.contains(point) && point.x < lane_left(ruler_rect) && !on_buttons;
             if on_ruler {
                 guides.pull = Some(point);
+                guides.row = None;
+                *drag = None;
+                *trim = None;
+            } else if on_corner {
+                guides.row = Some(point);
+                guides.pull = None;
                 *drag = None;
                 *trim = None;
             }
         }
-        let from_ruler = released && guides.pull.is_some();
+        let from_ruler = released && (guides.pull.is_some() || guides.row.is_some());
         if released
             && let Some(origin) = guides.pull.take()
             && pointer.is_some_and(|point| point.y > ruler_rect.bottom() + 8.0)
         {
             let time = time_at(ruler_rect, project, origin.x);
-            guides.selected = Some(keep_line(&mut guides.vertical, time));
+            guides.selected = Some(Picked::Vertical(keep_line(&mut guides.vertical, time)));
+            selected.clear();
+        }
+        if released
+            && guides.row.take().is_some()
+            && let Some(point) = pointer.filter(|point| point.y > ruler_rect.bottom() + 8.0)
+        {
+            let fraction = row_fraction(tracks, point.y);
+            guides.selected = Some(Picked::Horizontal(keep_row(
+                &mut guides.horizontal,
+                fraction,
+                tracks.height(),
+            )));
             selected.clear();
         }
         let typing = ui.memory(|memory| memory.focused().is_some());
         let delete_line = ui.input(|input| {
             input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace)
         });
-        if !typing
-            && delete_line
-            && let Some(index) = guides.selected
-            && index < guides.vertical.len()
-        {
-            guides.vertical.remove(index);
-            guides.selected = None;
+        if !typing && delete_line {
+            match guides.selected {
+                Some(Picked::Vertical(index)) if index < guides.vertical.len() => {
+                    guides.vertical.remove(index);
+                    guides.selected = None;
+                }
+                Some(Picked::Horizontal(index)) if index < guides.horizontal.len() => {
+                    guides.horizontal.remove(index);
+                    guides.selected = None;
+                }
+                _ => {}
+            }
         }
         if pressed && let Some(point) = pointer.filter(|point| tracks.contains(*point)) {
             ui.data_mut(|data| data.remove::<BoxSelect>(box_id));
             guides.selected = None;
-            if let Some(index) = line_at(&guides.vertical, tracks, project, point) {
-                guides.selected = Some(index);
+            if let Some(picked) = picked_guide(&guides, tracks, project, point) {
+                guides.selected = Some(picked);
                 *drag = None;
                 *trim = None;
                 guides.pull = None;
+                guides.row = None;
                 choose(selected, None);
             } else if *split {
                 *drag = None;
@@ -432,7 +469,12 @@ fn playhead_mark(ruler: Rect, project: &Project, playhead: i64) -> Option<Rect> 
     ))
 }
 
-fn line_at(lines: &[i64], tracks: Rect, project: &Project, point: egui::Pos2) -> Option<usize> {
+fn line_gap(
+    lines: &[i64],
+    tracks: Rect,
+    project: &Project,
+    point: egui::Pos2,
+) -> Option<(usize, f32)> {
     let left = lane_left(tracks);
     let width = (tracks.right() - left).max(0.0);
     let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
@@ -441,8 +483,61 @@ fn line_at(lines: &[i64], tracks: Rect, project: &Project, point: egui::Pos2) ->
     }
     lines.iter().enumerate().find_map(|(index, time)| {
         let x = left + (*time as f64 * pixel_size) as f32;
-        ((point.x - x).abs() <= 4.0).then_some(index)
+        let gap = (point.x - x).abs();
+        (gap <= 4.0).then_some((index, gap))
     })
+}
+
+fn row_fraction(tracks: Rect, y: f32) -> f32 {
+    let height = tracks.height();
+    if height <= 0.0 {
+        return 0.0;
+    }
+    ((y - tracks.top()) / height).clamp(0.0, 1.0)
+}
+
+fn keep_row(lines: &mut Vec<f32>, fraction: f32, height: f32) -> usize {
+    if height > 0.0
+        && let Some(index) = lines
+            .iter()
+            .position(|line| (*line - fraction).abs() * height <= 1.0)
+    {
+        return index;
+    }
+    lines.push(fraction);
+    lines.len() - 1
+}
+
+fn row_gap(lines: &[f32], tracks: Rect, point: egui::Pos2) -> Option<(usize, f32)> {
+    let height = tracks.height();
+    if height <= 0.0 {
+        return None;
+    }
+    lines.iter().enumerate().find_map(|(index, fraction)| {
+        let y = tracks.top() + fraction * height;
+        let gap = (point.y - y).abs();
+        (gap <= 4.0).then_some((index, gap))
+    })
+}
+
+fn picked_guide(
+    guides: &Guides,
+    tracks: Rect,
+    project: &Project,
+    point: egui::Pos2,
+) -> Option<Picked> {
+    let vertical = line_gap(&guides.vertical, tracks, project, point);
+    let horizontal = row_gap(&guides.horizontal, tracks, point);
+    match (vertical, horizontal) {
+        (Some((index, across)), Some((row, down))) => Some(if down < across {
+            Picked::Horizontal(row)
+        } else {
+            Picked::Vertical(index)
+        }),
+        (Some((index, _)), None) => Some(Picked::Vertical(index)),
+        (None, Some((row, _))) => Some(Picked::Horizontal(row)),
+        (None, None) => None,
+    }
 }
 
 fn paint_guides(
@@ -455,26 +550,44 @@ fn paint_guides(
     let left = lane_left(tracks);
     let width = (tracks.right() - left).max(0.0);
     let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
-    if !(pixel_size.is_finite() && pixel_size > 0.0) || tracks.bottom() < tracks.top() {
+    if tracks.height() <= 0.0 {
         return;
     }
-    let draw = |time: i64, color: Color32| {
-        let x = left + (time as f64 * pixel_size) as f32;
+    if pixel_size.is_finite() && pixel_size > 0.0 {
+        let draw = |time: i64, color: Color32| {
+            let x = left + (time as f64 * pixel_size) as f32;
+            ui.painter()
+                .vline(x, tracks.top()..=tracks.bottom(), Stroke::new(1.0, color));
+        };
+        for (index, time) in guides.vertical.iter().enumerate() {
+            let color = if guides.selected == Some(Picked::Vertical(index)) {
+                theme::INK
+            } else {
+                theme::FAINT
+            };
+            draw(*time, color);
+        }
+        if let Some(origin) = guides.pull
+            && pointer.is_some_and(|point| point.y > tracks.top())
+        {
+            draw(time_at(tracks, project, origin.x), theme::EXPORT);
+        }
+    }
+    let draw_row = |fraction: f32, color: Color32| {
+        let y = tracks.top() + fraction * tracks.height();
         ui.painter()
-            .vline(x, tracks.top()..=tracks.bottom(), Stroke::new(1.0, color));
+            .hline(tracks.left()..=tracks.right(), y, Stroke::new(1.0, color));
     };
-    for (index, time) in guides.vertical.iter().enumerate() {
-        let color = if guides.selected == Some(index) {
+    for (index, fraction) in guides.horizontal.iter().enumerate() {
+        let color = if guides.selected == Some(Picked::Horizontal(index)) {
             theme::INK
         } else {
             theme::FAINT
         };
-        draw(*time, color);
+        draw_row(*fraction, color);
     }
-    if let Some(origin) = guides.pull
-        && pointer.is_some_and(|point| point.y > tracks.top())
-    {
-        draw(time_at(tracks, project, origin.x), theme::EXPORT);
+    if let Some(point) = pointer.filter(|point| guides.row.is_some() && point.y > tracks.top()) {
+        draw_row(row_fraction(tracks, point.y), theme::EXPORT);
     }
 }
 
@@ -485,23 +598,17 @@ fn ruler_switches(
     split: &mut bool,
     snap: &mut bool,
 ) {
+    let [split_button, snap_button] = switch_rects(ruler);
+    ruler_switch(ui, split_button, "Split", "split-blade", split_live, split);
+    ruler_switch(ui, snap_button, "Snap", "snap-switch", true, snap);
+}
+
+fn switch_rects(ruler: Rect) -> [Rect; 2] {
     let top = ruler.center().y - 13.0;
-    ruler_switch(
-        ui,
+    [
         Rect::from_min_size(pos2(ruler.left() + 6.0, top), vec2(58.0, 26.0)),
-        "Split",
-        "split-blade",
-        split_live,
-        split,
-    );
-    ruler_switch(
-        ui,
         Rect::from_min_size(pos2(ruler.left() + 68.0, top), vec2(56.0, 26.0)),
-        "Snap",
-        "snap-switch",
-        true,
-        snap,
-    );
+    ]
 }
 
 fn ruler_switch(
@@ -1825,12 +1932,37 @@ mod tests {
         assert_eq!(super::keep_line(&mut lines, 0), 0);
         assert_eq!(lines, vec![0]);
         assert_eq!(
-            super::line_at(&lines, tracks, &cut, pos2(left, 80.0)),
+            super::line_gap(&lines, tracks, &cut, pos2(left, 80.0)).map(|(index, _)| index),
             Some(0)
         );
         assert_eq!(
-            super::line_at(&lines, tracks, &cut, pos2(left + 20.0, 80.0)),
+            super::line_gap(&lines, tracks, &cut, pos2(left + 20.0, 80.0)),
             None
+        );
+    }
+
+    #[test]
+    fn a_horizontal_line_keeps_its_fraction_of_the_tracks() {
+        let tracks = Rect::from_min_size(pos2(0.0, 44.0), vec2(600.0, 200.0));
+        assert_eq!(super::row_fraction(tracks, 44.0), 0.0);
+        assert_eq!(super::row_fraction(tracks, 144.0), 0.5);
+        assert_eq!(super::row_fraction(tracks, 1_000.0), 1.0);
+        let mut rows = Vec::new();
+        assert_eq!(super::keep_row(&mut rows, 0.5, tracks.height()), 0);
+        assert_eq!(super::keep_row(&mut rows, 0.502, tracks.height()), 0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            super::row_gap(&rows, tracks, pos2(10.0, 144.0)),
+            Some((0, 0.0))
+        );
+        assert_eq!(super::row_gap(&rows, tracks, pos2(10.0, 160.0)), None);
+        let ruler = Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 44.0));
+        let cover = pos2(super::HEAD + 10.0, 22.0);
+        assert!(cover.x < super::lane_left(ruler));
+        assert!(
+            super::switch_rects(ruler)
+                .iter()
+                .all(|button| !button.contains(cover))
         );
     }
 }

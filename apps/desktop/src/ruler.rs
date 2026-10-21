@@ -373,6 +373,20 @@ fn drop_frame(frame: i64, nominal: i64) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02};{frames:02}")
 }
 
+/// `HH:MM:SS:FF`, or `HH:MM:SS;FF` when drop frame is on.
+pub(crate) fn timecode(us: i64, rate: SequenceRate) -> String {
+    let frame = frame_at(us, rate.rate());
+    let nominal = i64::from(rate.rate().nominal_fps());
+    if rate.drop_frame() {
+        return drop_frame(frame, nominal);
+    }
+    let frames = frame.rem_euclid(nominal);
+    let seconds = frame.div_euclid(nominal).rem_euclid(60);
+    let minutes = frame.div_euclid(nominal * 60).rem_euclid(60);
+    let hours = frame.div_euclid(nominal * 60 * 60);
+    format!("{hours:02}:{minutes:02}:{seconds:02}:{frames:02}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,6 +513,22 @@ mod tests {
         assert_eq!(seek(2_000_000, FrameRate::Fps30, 1_000_000), 1_000_000);
         assert_eq!(seek(66_666, FrameRate::Fps30, 0), 0);
         assert_eq!(seek(-1, FrameRate::Fps30, 10_000_000), 0);
+    }
+
+    #[test]
+    fn the_transport_shows_hours_minutes_seconds_and_frames() {
+        let rate = sequence(FrameRate::Fps30);
+        assert_eq!(timecode(0, rate), "00:00:00:00");
+        assert_eq!(timecode(33_333, rate), "00:00:00:01");
+        assert_eq!(timecode(1_000_000, rate), "00:00:01:00");
+        assert_eq!(
+            timecode(66_733, sequence(FrameRate::Fps2997)),
+            "00:00:00;02"
+        );
+        assert_eq!(
+            timecode(60_060_000, sequence(FrameRate::Fps2997)),
+            "00:01:00;02"
+        );
     }
 
     #[test]

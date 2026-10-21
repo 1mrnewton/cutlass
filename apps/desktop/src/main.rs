@@ -7,6 +7,7 @@ use eframe::egui::{self, Align2, Button, Rect, RichText, TextStyle, Vec2};
 use cutlass_project::{AssetId, Project, ProjectId};
 
 mod library;
+mod preview;
 mod ruler;
 mod theme;
 mod timeline;
@@ -98,7 +99,9 @@ impl eframe::App for CutlassApp {
 
         egui::CentralPanel::default()
             .frame(theme::panel())
-            .show(ui, |_| {});
+            .show(ui, |ui| {
+                preview::show(ui, &self.project, self.playhead_us);
+            });
     }
 }
 

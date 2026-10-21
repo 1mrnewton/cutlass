@@ -39,3 +39,4 @@
 - Icons are Hugeicons free icons. The blade mark stays custom.
 - Tailwind is allowed and not currently used.
 - This prototype lives on the `prototype` branch of `1mrnewton/cutlass`. `ui-design` is the other checkout. Do not push over `main` or the other branches already in that repo.
+- Install and run the prototype with Bun. `bun install`, then `bun dev`.

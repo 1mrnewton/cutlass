@@ -128,6 +128,21 @@ pub fn timeline_duration(source: Timestamp, speed: Speed) -> Result<Timestamp, E
     Ok(Timestamp::new(value, SEQUENCE_TIMESCALE))
 }
 
+/// Source ticks that play for `timeline_us` at `speed`, rounded like [`timeline_duration`].
+pub(crate) fn source_ticks(
+    timeline_us: i64,
+    source_scale: NonZeroU32,
+    speed: Speed,
+) -> Result<i64, Error> {
+    if timeline_us < 0 {
+        return Err(Error::NegativeTime);
+    }
+    let numer =
+        i128::from(timeline_us) * i128::from(source_scale.get()) * i128::from(speed.numerator());
+    let denom = i128::from(SEQUENCE_TIMESCALE.get()) * i128::from(speed.denominator().get());
+    round_half_away(numer, denom)
+}
+
 fn round_half_away(numer: i128, denom: i128) -> Result<i64, Error> {
     if denom <= 0 {
         return Err(Error::ZeroSpeed);
@@ -220,6 +235,12 @@ mod tests {
         assert_eq!(Speed::new(1, 0).unwrap_err(), Error::ZeroSpeed);
         assert_eq!(Speed::ONE.numerator(), 1);
         assert_eq!(Speed::ONE.denominator().get(), 1);
+    }
+
+    #[test]
+    fn one_second_on_the_sequence_is_the_source_timescale() {
+        let ticks = source_ticks(1_000_000, NonZeroU32::new(30_000).unwrap(), Speed::ONE).unwrap();
+        assert_eq!(ticks, 30_000);
     }
 
     #[test]

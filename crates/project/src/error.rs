@@ -43,6 +43,8 @@ pub enum Error {
     EmptyTrack,
     #[error("segments overlap")]
     Overlap,
+    #[error("the split is not inside the segment")]
+    SplitOutside,
     #[error("unknown asset {0}")]
     UnknownAsset(AssetId),
     #[error("unknown track {0}")]

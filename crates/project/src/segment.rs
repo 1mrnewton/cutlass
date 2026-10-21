@@ -261,6 +261,30 @@ impl Segment {
         Ok(())
     }
 
+    pub(crate) fn set_timeline_duration(&mut self, duration: i64) -> Result<(), Error> {
+        self.finish_duration(Timestamp::new(duration, SEQUENCE_TIMESCALE))
+    }
+
+    /// Keyframes at or before `at_offset` stay. Later ones are returned, measured
+    /// from `at_offset`.
+    pub(crate) fn split_keyframes(&mut self, at_offset: i64) -> Result<Vec<Keyframe>, Error> {
+        let mut right = Vec::new();
+        let mut left = Vec::new();
+        for key in self.keyframes.drain(..) {
+            if key.offset.value <= at_offset {
+                left.push(key);
+            } else {
+                right.push(Keyframe::new(key.offset.value - at_offset, key.value)?);
+            }
+        }
+        self.keyframes = left;
+        Ok(right)
+    }
+
+    pub(crate) fn replace_keyframes(&mut self, keyframes: Vec<Keyframe>) {
+        self.keyframes = keyframes;
+    }
+
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
     }

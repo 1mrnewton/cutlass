@@ -986,3 +986,194 @@ fn leaving_the_main_track_packs_what_remains_and_moves_its_follower() -> Result<
     assert_eq!(start(&cut, follower)?, 5_000_100);
     Ok(())
 }
+
+#[test]
+fn split_keeps_the_left_piece_and_returns_the_right() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let left = place_main(&mut cut, asset, 0, 30_000)?;
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: left,
+            at: 500_000,
+        },
+    )?);
+    assert_ne!(left, right);
+    assert_eq!(on_track(&cut, right), cut.main);
+    let left_segment = cut
+        .project
+        .timeline()
+        .segment(left)
+        .ok_or(Error::UnknownSegment(left))?;
+    let right_segment = cut
+        .project
+        .timeline()
+        .segment(right)
+        .ok_or(Error::UnknownSegment(right))?;
+    assert_eq!(left_segment.timeline().duration().value, 500_000);
+    assert_eq!(right_segment.timeline().start().value, 500_000);
+    assert_eq!(right_segment.timeline().duration().value, 500_000);
+    assert_eq!(
+        left_segment
+            .source()
+            .ok_or(Error::ImageSource)?
+            .duration()
+            .value,
+        15_000
+    );
+    assert_eq!(
+        right_segment
+            .source()
+            .ok_or(Error::ImageSource)?
+            .start()
+            .value,
+        15_000
+    );
+    assert_eq!(
+        right_segment
+            .source()
+            .ok_or(Error::ImageSource)?
+            .duration()
+            .value,
+        15_000
+    );
+    Ok(())
+}
+
+#[test]
+fn a_split_on_the_edge_changes_nothing() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    expect_err(
+        run(&mut cut, Command::Split { segment: id, at: 0 }),
+        Error::SplitOutside,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::Split {
+                segment: id,
+                at: 1_000_000,
+            },
+        ),
+        Error::SplitOutside,
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .timeline()
+            .duration()
+            .value,
+        1_000_000
+    );
+    assert_eq!(cut.project.timeline().main_track().segments().len(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_keyframe_past_the_cut_moves_to_the_right_piece() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let mut segment = media(&cut.project, asset, 0, 30_000, Channels::Both)?;
+    segment.push_keyframe(Keyframe::new(200_000, KeyframeValue::Opacity(0.25))?)?;
+    segment.push_keyframe(Keyframe::new(700_000, KeyframeValue::Opacity(0.5))?)?;
+    let main = cut.main;
+    let left = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment,
+        },
+    )?);
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: left,
+            at: 500_000,
+        },
+    )?);
+    let left_keys = cut
+        .project
+        .timeline()
+        .segment(left)
+        .ok_or(Error::UnknownSegment(left))?
+        .keyframes();
+    let right_keys = cut
+        .project
+        .timeline()
+        .segment(right)
+        .ok_or(Error::UnknownSegment(right))?
+        .keyframes();
+    assert_eq!(left_keys.len(), 1);
+    assert_eq!(left_keys[0].offset().value, 200_000);
+    assert_eq!(right_keys.len(), 1);
+    assert_eq!(right_keys[0].offset().value, 200_000);
+    Ok(())
+}
+
+#[test]
+fn splitting_the_main_clip_leaves_the_next_one_packed_against_it() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let left = place_main(&mut cut, asset, 0, 30_000)?;
+    let next = place_main(&mut cut, asset, 1_000_000, 30_000)?;
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: left,
+            at: 500_000,
+        },
+    )?);
+    assert_eq!(start(&cut, right)?, 500_000);
+    assert_eq!(start(&cut, next)?, 1_000_000);
+    assert_eq!(cut.project.timeline().main_track().segments().len(), 3);
+    Ok(())
+}
+
+#[test]
+fn an_image_splits_on_the_timeline_without_a_source() -> Result<(), Error> {
+    let mut cut = bare();
+    run(&mut cut, Command::SetMagnet(false))?;
+    let image = asset_id(run(
+        &mut cut,
+        Command::AddAsset(Asset::image("content://media/still", 8, 8)?),
+    )?);
+    let segment = {
+        let asset = cut.project.asset(image).ok_or(Error::UnknownAsset(image))?;
+        Segment::image(asset, 1_000_000, 4_000_000)?
+    };
+    let main = cut.main;
+    let left = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment,
+        },
+    )?);
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: left,
+            at: 2_000_000,
+        },
+    )?);
+    let left = cut
+        .project
+        .timeline()
+        .segment(left)
+        .ok_or(Error::UnknownSegment(left))?;
+    let right = cut
+        .project
+        .timeline()
+        .segment(right)
+        .ok_or(Error::UnknownSegment(right))?;
+    assert!(left.source().is_none());
+    assert!(right.source().is_none());
+    assert_eq!(left.timeline().duration().value, 1_000_000);
+    assert_eq!(right.timeline().start().value, 2_000_000);
+    assert_eq!(right.timeline().duration().value, 3_000_000);
+    Ok(())
+}

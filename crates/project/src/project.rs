@@ -1,12 +1,14 @@
 //! The project: settings, assets, and one timeline.
 
+use cutlass_core::Timestamp;
+
 use crate::Error;
 use crate::asset::Asset;
 use crate::command::{Command, Outcome};
 use crate::id::{AssetId, ProjectId, SegmentId, TimelineId, TrackId};
 use crate::segment::{Channels, Segment};
 use crate::settings::{AspectRatio, Canvas, Settings};
-use crate::time::TimeRange;
+use crate::time::{TimeRange, source_ticks, timeline_duration};
 use crate::timeline::Timeline;
 use crate::track::{Track, TrackKind};
 
@@ -129,6 +131,7 @@ impl Project {
                 self.move_now(segment, track, start)?;
                 Ok(Outcome::Unchanged)
             }
+            Command::Split { segment, at } => Ok(Outcome::Segment(self.split_now(segment, at)?)),
         }
     }
 
@@ -333,6 +336,119 @@ impl Project {
             self.shift_followers(&old_main, &[(id, delta)])?;
         }
         Ok(())
+    }
+
+    fn split_now(&mut self, id: SegmentId, at: i64) -> Result<SegmentId, Error> {
+        let segment = self.timeline.segment(id).ok_or(Error::UnknownSegment(id))?;
+        let range = segment.timeline();
+        if at <= range.start().value || at >= range.end().value {
+            return Err(Error::SplitOutside);
+        }
+        let from = self
+            .timeline
+            .track_of(id)
+            .ok_or(Error::UnknownSegment(id))?;
+        let on_main = self.timeline.track(from).is_some_and(Track::is_main);
+        let asset_id = segment.asset_id();
+        let speed = segment.speed();
+        let (left_source, left_dur, right_source, right_dur) = match segment.source() {
+            None => {
+                let left = at
+                    .checked_sub(range.start().value)
+                    .ok_or(Error::DurationOverflow)?;
+                let right = range
+                    .end()
+                    .value
+                    .checked_sub(at)
+                    .ok_or(Error::DurationOverflow)?;
+                (None, left, None, right)
+            }
+            Some(source) => {
+                let left_us = at
+                    .checked_sub(range.start().value)
+                    .ok_or(Error::DurationOverflow)?;
+                let ticks = source_ticks(left_us, source.duration().timescale, speed)?;
+                if ticks < 1 || ticks >= source.duration().value {
+                    return Err(Error::SplitOutside);
+                }
+                let scale = source.duration().timescale;
+                let left_source = TimeRange::new(source.start(), Timestamp::new(ticks, scale))?;
+                let right_start = source
+                    .start()
+                    .value
+                    .checked_add(ticks)
+                    .ok_or(Error::DurationOverflow)?;
+                let right_ticks = source
+                    .duration()
+                    .value
+                    .checked_sub(ticks)
+                    .ok_or(Error::DurationOverflow)?;
+                let right_source = TimeRange::new(
+                    Timestamp::new(right_start, scale),
+                    Timestamp::new(right_ticks, scale),
+                )?;
+                let left_dur = timeline_duration(left_source.duration(), speed)?.value;
+                let right_dur = timeline_duration(right_source.duration(), speed)?.value;
+                (Some(left_source), left_dur, Some(right_source), right_dur)
+            }
+        };
+        let total = left_dur
+            .checked_add(right_dur)
+            .ok_or(Error::DurationOverflow)?;
+        if self
+            .timeline
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .keyframes()
+            .iter()
+            .any(|key| key.offset().value > total)
+        {
+            return Err(Error::KeyframeOutOfRange);
+        }
+        let right_start = range
+            .start()
+            .value
+            .checked_add(left_dur)
+            .ok_or(Error::DurationOverflow)?;
+        if self.collides(from, id, right_start, right_dur)? {
+            return Err(Error::Overlap);
+        }
+
+        let asset = self
+            .asset(asset_id)
+            .ok_or(Error::UnknownAsset(asset_id))?
+            .clone();
+        let right_id = SegmentId::raw(self.allocate()?);
+        let mut right = self
+            .timeline
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .clone();
+        let keys = self.timeline.segment_mut(id)?.split_keyframes(left_dur)?;
+        match left_source {
+            Some(source) => self.timeline.segment_mut(id)?.trim_source(&asset, source)?,
+            None => self
+                .timeline
+                .segment_mut(id)?
+                .set_timeline_duration(left_dur)?,
+        }
+        right.replace_keyframes(keys);
+        right.assign(right_id);
+        match right_source {
+            Some(source) => {
+                right.trim_source(&asset, source)?;
+                right.set_start(right_start)?;
+            }
+            None => {
+                right.set_timeline_duration(right_dur)?;
+                right.set_start(right_start)?;
+            }
+        }
+        self.timeline.track_mut(from)?.insert(right)?;
+        if on_main && self.settings.magnet() {
+            self.pack_main()?;
+        }
+        Ok(right_id)
     }
 
     fn collides(

@@ -44,6 +44,12 @@ pub enum Command {
         track: Option<TrackId>,
         start: i64,
     },
+    /// `at` is a sequence time strictly inside the segment. The left piece keeps
+    /// the id. The outcome is the new right piece.
+    Split {
+        segment: SegmentId,
+        at: i64,
+    },
 }
 
 /// What one applied command produced.

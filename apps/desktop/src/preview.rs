@@ -94,7 +94,14 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
         pos2(rect.right() - 28.0, rect.center().y),
         Vec2::splat(32.0),
     );
-    let still_response = ui.interact(still, ui.scope_id().with("still"), Sense::hover());
+    let still_response = ui.interact(
+        still,
+        ui.scope_id().with("still"),
+        if live { Sense::click() } else { Sense::hover() },
+    );
+    if still_response.clicked() {
+        crate::timeline::show_note(ui, still_toast(crate::words::active(ui), playhead_us));
+    }
     ui.painter()
         .circle_filled(still.center(), 16.0, theme::BAR.gamma_multiply(dim));
     icons::paint(
@@ -109,6 +116,15 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
         crate::words::of(ui, crate::words::Phrase::Still),
         live,
     );
+}
+
+/// `Still · M:SS.t`, in `language`. The clock stays `M:SS.t`.
+pub(crate) fn still_toast(language: crate::words::Language, playhead_us: i64) -> String {
+    format!(
+        "{} · {}",
+        crate::words::say(language, crate::words::Phrase::Still),
+        crate::library::card_time(playhead_us, 1_000_000)
+    )
 }
 
 /// The topmost segment that covers `us`, named from its file. A hidden lane is skipped.
@@ -187,5 +203,153 @@ mod tests {
         assert_eq!(shot(&cut, 1_000_000, &[]), None);
         assert_eq!(shot(&project(), 0, &[]), None);
         assert_eq!(shot(&cut, 0, &[main]), None);
+    }
+
+    #[test]
+    fn the_still_toast_names_the_time_in_either_language() {
+        use crate::words::Language;
+        assert_eq!(
+            super::still_toast(Language::English, 1_500_000),
+            "Still · 0:01.5"
+        );
+        assert_eq!(
+            super::still_toast(Language::French, 1_500_000),
+            "Image fixe · 0:01.5"
+        );
+    }
+
+    #[test]
+    fn the_camera_marks_a_still_when_the_cut_has_a_duration() {
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, crate::words::Language::English);
+        let cut = placed();
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(400.0, 300.0),
+        );
+        let mut time = 0.0;
+        let mut pass = |project: &Project, events: Vec<eframe::egui::Event>| {
+            time += 0.05;
+            let mut output = ctx.run_ui(
+                eframe::egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| super::show(ui, project, 1_500_000),
+            );
+            let tree = output.platform_output.accesskit_update.take();
+            output.textures_delta.clear();
+            tree.expect("the tree is built")
+        };
+        let empty = pass(&project(), vec![]);
+        let camera = bounds(&empty, "Still");
+        pass(
+            &project(),
+            vec![
+                eframe::egui::Event::PointerMoved(camera),
+                eframe::egui::Event::PointerButton {
+                    pos: camera,
+                    button: eframe::egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: eframe::egui::Modifiers::default(),
+                },
+            ],
+        );
+        pass(
+            &project(),
+            vec![eframe::egui::Event::PointerButton {
+                pos: camera,
+                button: eframe::egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: eframe::egui::Modifiers::default(),
+            }],
+        );
+        assert!(crate::timeline::note_text(&ctx).is_none());
+
+        let tree = pass(&cut, vec![]);
+        let camera = bounds(&tree, "Still");
+        pass(
+            &cut,
+            vec![
+                eframe::egui::Event::PointerMoved(camera),
+                eframe::egui::Event::PointerButton {
+                    pos: camera,
+                    button: eframe::egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: eframe::egui::Modifiers::default(),
+                },
+            ],
+        );
+        pass(
+            &cut,
+            vec![eframe::egui::Event::PointerButton {
+                pos: camera,
+                button: eframe::egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: eframe::egui::Modifiers::default(),
+            }],
+        );
+        assert_eq!(
+            crate::timeline::note_text(&ctx).as_deref(),
+            Some("Still · 0:01.5")
+        );
+    }
+
+    fn placed() -> Project {
+        let mut history = History::new();
+        let mut cut = project();
+        let video = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let id = match history
+            .apply(&mut cut, &[Command::AddAsset(video)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let segment = {
+            let stored = cut.asset(id).expect("asset");
+            let duration = stored.duration().expect("duration");
+            let source = TimeRange::new(
+                Timestamp::new(0, duration.timescale),
+                Timestamp::new(duration.value, duration.timescale),
+            )
+            .expect("source");
+            Segment::media(stored, source, 0, Channels::Both, Speed::ONE).expect("segment")
+        };
+        let main = cut.timeline().main_track().id();
+        history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .expect("place");
+        cut
+    }
+
+    fn bounds(tree: &eframe::egui::accesskit::TreeUpdate, label: &str) -> eframe::egui::Pos2 {
+        let (_, node) = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some(label))
+            .expect(label);
+        let rect = node.bounds().expect("bounds");
+        eframe::egui::pos2(
+            ((rect.x0 + rect.x1) / 2.0) as f32,
+            ((rect.y0 + rect.y1) / 2.0) as f32,
+        )
     }
 }

@@ -884,7 +884,7 @@ const TOAST_FADE: f64 = 0.6;
 
 #[derive(Clone)]
 struct Note {
-    text: &'static str,
+    text: String,
     at: f64,
 }
 
@@ -892,9 +892,22 @@ fn note_id() -> egui::Id {
     egui::Id::unique("timeline-note")
 }
 
-pub(crate) fn show_note(ui: &egui::Ui, text: &'static str) {
+pub(crate) fn show_note(ui: &egui::Ui, text: impl Into<String>) {
     let at = ui.input(|input| input.time);
-    ui.data_mut(|data| data.insert_temp(note_id(), Note { text, at }));
+    ui.data_mut(|data| {
+        data.insert_temp(
+            note_id(),
+            Note {
+                text: text.into(),
+                at,
+            },
+        );
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn note_text(ctx: &egui::Context) -> Option<String> {
+    ctx.data(|data| data.get_temp::<Note>(note_id()).map(|note| note.text))
 }
 
 pub(crate) fn apply_note(error: &cutlass_project::Error, language: Language) -> &'static str {
@@ -953,7 +966,7 @@ fn paint_note(ui: &egui::Ui, ruler: Rect) {
         ink,
     );
     let response = ui.interact(rect, ui.scope_id().with("toast"), egui::Sense::hover());
-    crate::tip::alert(&response, note.text);
+    crate::tip::alert(&response, &note.text);
 }
 
 fn lane_left(area: Rect) -> f32 {

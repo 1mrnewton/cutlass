@@ -22,7 +22,8 @@ pub fn show(ui: &mut egui::Ui, project: &Project, playhead_us: i64) {
     if frame.height() > 0.0 && frame.width() > 0.0 {
         let rate = project.settings().rate();
         let time = ruler::timecode(playhead_us, rate);
-        let label = match shot(project, playhead_us) {
+        let hidden = crate::timeline::hidden_tracks(ui);
+        let label = match shot(project, playhead_us, &hidden) {
             Some(name) => format!("{name} · {time}"),
             None => format!("Empty · {time}"),
         };
@@ -80,9 +81,12 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
     still_response.on_hover_text("Still");
 }
 
-/// The topmost segment that covers `us`, named from its file.
-fn shot(project: &Project, us: i64) -> Option<&str> {
+/// The topmost segment that covers `us`, named from its file. A hidden lane is skipped.
+fn shot<'a>(project: &'a Project, us: i64, hidden: &[cutlass_project::TrackId]) -> Option<&'a str> {
     for track in project.timeline().tracks().iter().rev() {
+        if hidden.contains(&track.id()) {
+            continue;
+        }
         for segment in track.segments() {
             let range = segment.timeline();
             if range.start().value <= us && us < range.end().value {
@@ -149,8 +153,9 @@ mod tests {
                 }],
             )
             .expect("place");
-        assert_eq!(shot(&cut, 0), Some("v.mp4"));
-        assert_eq!(shot(&cut, 1_000_000), None);
-        assert_eq!(shot(&project(), 0), None);
+        assert_eq!(shot(&cut, 0, &[]), Some("v.mp4"));
+        assert_eq!(shot(&cut, 1_000_000, &[]), None);
+        assert_eq!(shot(&project(), 0, &[]), None);
+        assert_eq!(shot(&cut, 0, &[main]), None);
     }
 }

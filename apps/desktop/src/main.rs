@@ -76,6 +76,7 @@ impl CutlassApp {
             &mut self.history,
             &mut self.project,
             &mut self.selected_segments,
+            &timeline::lane_memory(ui),
         );
     }
 }

@@ -27,12 +27,16 @@ pub fn delete_selected(
     history: &mut History,
     project: &mut Project,
     selected: &mut Vec<SegmentId>,
+    lanes: &Lanes,
 ) -> bool {
     if selected.is_empty() {
         return false;
     }
     let mut commands = Vec::new();
     for id in selected.iter().copied() {
+        if blocks_edit(project, lanes, id) {
+            continue;
+        }
         let on_main = project
             .timeline()
             .main_track()
@@ -45,10 +49,13 @@ pub fn delete_selected(
             commands.insert(0, Command::RemoveSegment(id));
         }
     }
+    if commands.is_empty() {
+        return false;
+    }
     if history.apply(project, &commands).is_err() {
         return false;
     }
-    selected.clear();
+    selected.retain(|id| project.timeline().segment(*id).is_some());
     true
 }
 
@@ -100,6 +107,151 @@ enum PickedStamp {
     Ruler(usize),
     Clip(usize),
     Beat(usize),
+}
+
+/// Hide, mute, and lock for one lane. View state, until the project stores them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct LaneFlag {
+    track: TrackId,
+    locked: bool,
+    hidden: bool,
+    muted: bool,
+}
+
+/// Lane flags for this session. A missing lane is shown, heard, and open.
+#[derive(Clone, Default)]
+pub(crate) struct Lanes {
+    rows: Vec<LaneFlag>,
+}
+
+fn lane_id() -> egui::Id {
+    egui::Id::unique("timeline-lanes")
+}
+
+pub(crate) fn lane_memory(ui: &egui::Ui) -> Lanes {
+    ui.data(|data| data.get_temp(lane_id())).unwrap_or_default()
+}
+
+pub(crate) fn hidden_tracks(ui: &egui::Ui) -> Vec<TrackId> {
+    lane_memory(ui)
+        .rows
+        .into_iter()
+        .filter(|row| row.hidden)
+        .map(|row| row.track)
+        .collect()
+}
+
+fn retain_lanes(project: &Project, lanes: &mut Lanes) {
+    lanes
+        .rows
+        .retain(|row| project.timeline().track(row.track).is_some());
+}
+
+fn lane_row(lanes: &Lanes, track: TrackId) -> LaneFlag {
+    lanes
+        .rows
+        .iter()
+        .copied()
+        .find(|row| row.track == track)
+        .unwrap_or(LaneFlag {
+            track,
+            locked: false,
+            hidden: false,
+            muted: false,
+        })
+}
+
+fn remember_lane(lanes: &mut Lanes, row: LaneFlag) {
+    lanes.rows.retain(|item| item.track != row.track);
+    if row.locked || row.hidden || row.muted {
+        lanes.rows.push(row);
+    }
+}
+
+fn segment_track(project: &Project, id: SegmentId) -> Option<TrackId> {
+    project.timeline().tracks().iter().find_map(|track| {
+        track
+            .segments()
+            .iter()
+            .any(|segment| segment.id() == id)
+            .then_some(track.id())
+    })
+}
+
+fn segment_lane_locked(project: &Project, lanes: &Lanes, id: SegmentId) -> bool {
+    segment_track(project, id).is_some_and(|track| lane_row(lanes, track).locked)
+}
+
+/// The one main clip this range sits on. Two owners, or none, do not follow.
+fn sole_owner(
+    range: cutlass_project::TimeRange,
+    mains: &[(SegmentId, cutlass_project::TimeRange)],
+) -> Option<SegmentId> {
+    let mut found = None;
+    for (id, main) in mains {
+        if range.overlaps(*main) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(*id);
+        }
+    }
+    found
+}
+
+/// A main edit can slide a clip on a locked lane when linkage or the magnet is on.
+fn ripples_locked(project: &Project, lanes: &Lanes, id: SegmentId) -> bool {
+    let on_main = project
+        .timeline()
+        .main_track()
+        .segments()
+        .iter()
+        .any(|segment| segment.id() == id);
+    if !on_main {
+        return false;
+    }
+    let magnet = project.settings().magnet();
+    let linkage = project.settings().linkage();
+    if !magnet && !linkage {
+        return false;
+    }
+    let mains: Vec<_> = project
+        .timeline()
+        .main_track()
+        .segments()
+        .iter()
+        .map(|segment| (segment.id(), segment.timeline()))
+        .collect();
+    for track in project.timeline().tracks() {
+        if track.is_main() || !lane_row(lanes, track.id()).locked {
+            continue;
+        }
+        for segment in track.segments() {
+            let owner = sole_owner(segment.timeline(), &mains);
+            if (magnet && owner.is_some()) || (linkage && owner == Some(id)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn blocks_edit(project: &Project, lanes: &Lanes, id: SegmentId) -> bool {
+    segment_lane_locked(project, lanes, id) || ripples_locked(project, lanes, id)
+}
+
+fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
+    match command {
+        Command::Move { segment, track, .. } => {
+            blocks_edit(project, lanes, *segment)
+                || track.is_some_and(|id| lane_row(lanes, id).locked)
+        }
+        Command::Split { segment, .. }
+        | Command::RemoveSegment(segment)
+        | Command::Trim { segment, .. }
+        | Command::SetSpeed { segment, .. } => blocks_edit(project, lanes, *segment),
+        _ => false,
+    }
 }
 
 /// Marker flags and beat notes. View state, until the project stores them.
@@ -233,6 +385,8 @@ pub fn show(
         beat = false;
     }
     let mark_times = stamp_times(project, &stamps);
+    let mut lanes = lane_memory(ui);
+    retain_lanes(project, &mut lanes);
     if tracks.height() > 0.0 {
         let pressed = ui.input(|input| input.pointer.primary_pressed());
         let released = ui.input(|input| input.pointer.primary_released());
@@ -323,7 +477,10 @@ pub fn show(
                 },
             }
         }
-        if pressed && let Some(point) = pointer.filter(|point| tracks.contains(*point)) {
+        if pressed
+            && let Some(point) =
+                pointer.filter(|point| tracks.contains(*point) && point.x >= lane_left(tracks))
+        {
             ui.data_mut(|data| data.remove::<BoxSelect>(box_id));
             guides.selected = None;
             stamps.selected = None;
@@ -362,7 +519,11 @@ pub fn show(
             } else if !shift && let Some(active) = trim_from(project, tracks, point, view) {
                 choose(selected, Some(active.segment));
                 *drag = None;
-                *trim = Some(active);
+                *trim = if blocks_edit(project, &lanes, active.segment) {
+                    None
+                } else {
+                    Some(active)
+                };
             } else {
                 *trim = None;
                 let hit = if shift {
@@ -388,7 +549,9 @@ pub fn show(
                     });
                 } else {
                     choose(selected, hit);
-                    *drag = hit.and_then(|id| drag_from(project, id, point));
+                    *drag = hit
+                        .filter(|id| !blocks_edit(project, &lanes, *id))
+                        .and_then(|id| drag_from(project, id, point));
                 }
             }
         }
@@ -414,8 +577,13 @@ pub fn show(
         }
         if released {
             let clicked = ui.input(|input| input.pointer.primary_clicked());
+            let on_locked_clip = pointer.is_some_and(|point| {
+                segment_at(project, tracks, point, view)
+                    .is_some_and(|id| segment_lane_locked(project, &lanes, id))
+            });
             if clicked
                 && marker
+                && !on_locked_clip
                 && let Some(point) = pointer.filter(|point| !on_tools(ruler_rect, *point))
                 && drop_marker(
                     project,
@@ -431,6 +599,7 @@ pub fn show(
                 selected.clear();
             } else if clicked
                 && beat
+                && !on_locked_clip
                 && let Some(point) = pointer.filter(|point| on_audio(project, tracks, *point, view))
                 && drop_beat(project, tracks, point, view, &mut stamps)
             {
@@ -442,11 +611,12 @@ pub fn show(
                 if ui.input(|input| input.pointer.primary_clicked())
                     && let Some(point) = pointer.filter(|point| tracks.contains(*point))
                     && let Some(command) = split_command(project, tracks, point, view)
+                    && !blocks_command(project, &lanes, &command)
                 {
                     commands.push(command);
                 }
             } else if let Some(active) = trim.take() {
-                commands = trim_commands(
+                let next = trim_commands(
                     project,
                     tracks,
                     &active,
@@ -459,6 +629,12 @@ pub fn show(
                         view,
                     },
                 );
+                if next
+                    .iter()
+                    .all(|command| !blocks_command(project, &lanes, command))
+                {
+                    commands = next;
+                }
             } else if let Some(active) = drag.take()
                 && let Some(command) = move_command(
                     project,
@@ -473,6 +649,7 @@ pub fn show(
                         view,
                     },
                 )
+                && !blocks_command(project, &lanes, &command)
             {
                 commands.push(command);
             }
@@ -489,9 +666,12 @@ pub fn show(
     ui.data_mut(|data| data.insert_temp(guides_id, guides.clone()));
     ui.data_mut(|data| data.insert_temp(marker_id, marker));
     ui.data_mut(|data| data.insert_temp(beat_id, beat));
-    if *split && pointer.is_some_and(|point| tracks.contains(point))
+    if *split && pointer.is_some_and(|point| tracks.contains(point) && point.x >= lane_left(tracks))
         || marker
-            && pointer.is_some_and(|point| ruler_rect.contains(point) || tracks.contains(point))
+            && pointer.is_some_and(|point| {
+                ruler_rect.contains(point) && point.x >= lane_left(ruler_rect)
+                    || tracks.contains(point) && point.x >= lane_left(tracks)
+            })
         || beat && pointer.is_some_and(|point| on_audio(project, tracks, point, view))
     {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -527,13 +707,15 @@ pub fn show(
                     theme::MUTED,
                 );
             }
-            ui.painter().text(
-                pos2(tracks.left() + 12.0, lane_rect.center().y),
-                Align2::LEFT_CENTER,
-                lane.label,
-                FontId::new(12.0, FontFamily::Proportional),
-                theme::MUTED,
+            let head = Rect::from_min_max(
+                pos2(tracks.left(), lane.top),
+                pos2(tracks.left() + HEAD, lane.top + lane.height),
             );
+            let mut row = lane_row(&lanes, track.id());
+            paint_lane_label(ui, head, lane.label);
+            paint_lane_flags(ui, head, track.id(), &mut row);
+            let dim = row.hidden || (row.muted && track.kind() == TrackKind::Audio);
+            remember_lane(&mut lanes, row);
             paint_segments(
                 ui,
                 track,
@@ -551,10 +733,12 @@ pub fn show(
                     playhead: *playhead,
                     guides: &guides.vertical,
                     marks: &mark_times,
+                    dim,
                 },
             );
         }
     }
+    ui.data_mut(|data| data.insert_temp(lane_id(), lanes));
     paint_stamps(ui, project, tracks, ruler_rect, &stamps, view);
     ui.data_mut(|data| data.insert_temp(stamps_id, stamps));
     paint_guides(ui, tracks, project, &guides, pointer, view);
@@ -1314,6 +1498,7 @@ struct ClipPaint<'a> {
     playhead: i64,
     guides: &'a [i64],
     marks: &'a [i64],
+    dim: bool,
 }
 
 fn paint_segments(ui: &mut egui::Ui, track: &Track, lane: Rect, main: bool, paint: &ClipPaint<'_>) {
@@ -1333,7 +1518,7 @@ fn paint_segments(ui: &mut egui::Ui, track: &Track, lane: Rect, main: bool, pain
         let dragging = paint.drag.is_some_and(|drag| drag.segment == segment.id());
         let trimming = paint.trim.is_some_and(|trim| trim.segment == segment.id());
         let color = clip_color(track.kind());
-        let resting = if dragging || trimming {
+        let resting = if dragging || trimming || paint.dim {
             color.gamma_multiply(0.35)
         } else {
             color
@@ -2027,6 +2212,97 @@ fn paint_playhead(
     }
 }
 
+fn paint_lane_label(ui: &mut egui::Ui, head: Rect, label: &str) {
+    let hide = flag_rects(head)[0];
+    let max_width = hide.left() - 8.0 - (head.left() + 12.0);
+    if max_width <= 8.0 {
+        return;
+    }
+    let mut job = egui::text::LayoutJob::simple(
+        label.to_owned(),
+        FontId::new(12.0, FontFamily::Proportional),
+        theme::MUTED,
+        max_width,
+    );
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(
+        pos2(head.left() + 12.0, head.center().y - galley.size().y * 0.5),
+        galley,
+        theme::MUTED,
+    );
+}
+
+fn flag_rects(head: Rect) -> [Rect; 3] {
+    let y = head.center().y;
+    let lock = Rect::from_center_size(pos2(head.right() - 16.0, y), vec2(22.0, 22.0));
+    let mute = Rect::from_center_size(pos2(lock.center().x - 24.0, y), vec2(22.0, 22.0));
+    let hide = Rect::from_center_size(pos2(mute.center().x - 24.0, y), vec2(22.0, 22.0));
+    [hide, mute, lock]
+}
+
+fn paint_lane_flags(ui: &mut egui::Ui, head: Rect, track: TrackId, row: &mut LaneFlag) {
+    let [hide, mute, lock] = flag_rects(head);
+    let hide_icon = if row.hidden {
+        Icon::ViewOff
+    } else {
+        Icon::View
+    };
+    let hide_tip = if row.hidden { "Hidden" } else { "Hide" };
+    if lane_button(
+        ui,
+        hide,
+        hide_icon,
+        hide_tip,
+        ui.scope_id().with(("hide", track)),
+        row.hidden,
+    ) {
+        row.hidden = !row.hidden;
+    }
+    let mute_icon = if row.muted {
+        Icon::VolumeOff
+    } else {
+        Icon::Volume
+    };
+    let mute_tip = if row.muted { "Muted" } else { "Mute" };
+    if lane_button(
+        ui,
+        mute,
+        mute_icon,
+        mute_tip,
+        ui.scope_id().with(("mute", track)),
+        row.muted,
+    ) {
+        row.muted = !row.muted;
+    }
+    let lock_tip = if row.locked { "Locked" } else { "Lock" };
+    if lane_button(
+        ui,
+        lock,
+        Icon::Lock,
+        lock_tip,
+        ui.scope_id().with(("lock", track)),
+        row.locked,
+    ) {
+        row.locked = !row.locked;
+    }
+}
+
+fn lane_button(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    icon: Icon,
+    tip: &str,
+    id: egui::Id,
+    engaged: bool,
+) -> bool {
+    let response = ui.interact(rect, id, Sense::click());
+    let color = if engaged { theme::INK } else { theme::FAINT };
+    icons::paint(ui.painter(), rect.center(), icon, 14.0, color);
+    response.on_hover_text(tip).clicked()
+}
+
 fn layout(tracks: &[Track], area: Rect) -> Vec<Lane> {
     let Some(main) = tracks.iter().position(Track::is_main) else {
         return Vec::new();
@@ -2348,7 +2624,8 @@ mod tests {
         assert!(super::delete_selected(
             &mut history,
             &mut cut,
-            &mut selected
+            &mut selected,
+            &super::Lanes::default(),
         ));
         assert!(selected.is_empty());
         assert!(cut.timeline().segment(id).is_none());
@@ -2357,7 +2634,8 @@ mod tests {
         assert!(!super::delete_selected(
             &mut history,
             &mut cut,
-            &mut selected
+            &mut selected,
+            &super::Lanes::default(),
         ));
     }
 
@@ -2856,5 +3134,129 @@ mod tests {
         assert_eq!(super::keep_clip(&mut beats, audio, 100), 0);
         assert_eq!(beats.len(), 1);
         assert_eq!(super::clip_us(&cut, beats[0]), Some(100));
+    }
+
+    #[test]
+    fn a_locked_lane_refuses_the_edit() {
+        let mut history = History::new();
+        let mut cut = project();
+        let sound = Asset::audio(
+            "file:///cuts/a.wav",
+            Timestamp::new(48_000, NonZeroU32::new(48_000).expect("scale")),
+        )
+        .expect("audio");
+        let picture = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            false,
+        )
+        .expect("video");
+        let (audio_asset, video_asset) = match history
+            .apply(
+                &mut cut,
+                &[Command::AddAsset(sound), Command::AddAsset(picture)],
+            )
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(audio), Outcome::Asset(video)] => (*audio, *video),
+            other => panic!("expected two assets, got {other:?}"),
+        };
+        let main = cut.timeline().main_track().id();
+        let video = {
+            let stored = cut.asset(video_asset).expect("asset");
+            let duration = stored.duration().expect("duration");
+            let source = TimeRange::new(
+                Timestamp::new(0, duration.timescale),
+                Timestamp::new(duration.value, duration.timescale),
+            )
+            .expect("source");
+            let segment =
+                Segment::media(stored, source, 0, Channels::Picture, Speed::ONE).expect("segment");
+            match history
+                .apply(
+                    &mut cut,
+                    &[Command::Place {
+                        track: Some(main),
+                        segment,
+                    }],
+                )
+                .expect("place")
+                .as_slice()
+            {
+                [Outcome::Segment(id)] => *id,
+                other => panic!("expected a segment, got {other:?}"),
+            }
+        };
+        let (audio, audio_track) = {
+            let stored = cut.asset(audio_asset).expect("asset");
+            let duration = stored.duration().expect("duration");
+            let source = TimeRange::new(
+                Timestamp::new(0, duration.timescale),
+                Timestamp::new(duration.value, duration.timescale),
+            )
+            .expect("source");
+            let segment =
+                Segment::media(stored, source, 0, Channels::Sound, Speed::ONE).expect("segment");
+            match history
+                .apply(
+                    &mut cut,
+                    &[Command::Place {
+                        track: None,
+                        segment,
+                    }],
+                )
+                .expect("place")
+                .as_slice()
+            {
+                [Outcome::Opened { segment, track }] => (*segment, *track),
+                other => panic!("expected a new track, got {other:?}"),
+            }
+        };
+        let locked_audio = super::Lanes {
+            rows: vec![super::LaneFlag {
+                track: audio_track,
+                locked: true,
+                hidden: false,
+                muted: false,
+            }],
+        };
+        assert!(super::blocks_edit(&cut, &locked_audio, video));
+        let mut selected = vec![video];
+        assert!(!super::delete_selected(
+            &mut history,
+            &mut cut,
+            &mut selected,
+            &locked_audio,
+        ));
+        assert!(cut.timeline().segment(video).is_some());
+        assert!(cut.timeline().segment(audio).is_some());
+        let onto_main = Command::Move {
+            segment: audio,
+            track: Some(main),
+            start: 0,
+        };
+        assert!(super::blocks_command(&cut, &locked_audio, &onto_main));
+        let locked_main_only = super::Lanes {
+            rows: vec![super::LaneFlag {
+                track: main,
+                locked: true,
+                hidden: false,
+                muted: false,
+            }],
+        };
+        assert!(super::blocks_command(&cut, &locked_main_only, &onto_main));
+        selected = vec![video, audio];
+        assert!(super::delete_selected(
+            &mut history,
+            &mut cut,
+            &mut selected,
+            &locked_main_only,
+        ));
+        assert!(cut.timeline().segment(video).is_some());
+        assert!(cut.timeline().segment(audio).is_none());
+        assert_eq!(selected, vec![video]);
     }
 }

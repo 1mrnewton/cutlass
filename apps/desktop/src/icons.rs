@@ -88,6 +88,10 @@ pub enum Icon {
     ZoomOut,
     ZoomFit,
     Guides,
+    View,
+    ViewOff,
+    Volume,
+    VolumeOff,
     Lock,
 }
 
@@ -157,6 +161,10 @@ impl Icon {
             Self::ZoomOut => "\u{F2A59}",
             Self::ZoomFit => "\u{F1CDF}",
             Self::Guides => "\u{F24CD}",
+            Self::View => "\u{F2971}",
+            Self::ViewOff => "\u{F296E}",
+            Self::Volume => "\u{F2981}",
+            Self::VolumeOff => "\u{F2986}",
             Self::Lock => "\u{F26B0}",
         }
     }

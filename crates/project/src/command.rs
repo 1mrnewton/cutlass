@@ -38,6 +38,12 @@ pub enum Command {
         segment: SegmentId,
         speed: Speed,
     },
+    /// `track: None` keeps the segment on its track. `start` is microseconds.
+    Move {
+        segment: SegmentId,
+        track: Option<TrackId>,
+        start: i64,
+    },
 }
 
 /// What one applied command produced.

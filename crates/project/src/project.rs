@@ -121,6 +121,14 @@ impl Project {
                 self.set_speed_now(segment, speed)?;
                 Ok(Outcome::Unchanged)
             }
+            Command::Move {
+                segment,
+                track,
+                start,
+            } => {
+                self.move_now(segment, track, start)?;
+                Ok(Outcome::Unchanged)
+            }
         }
     }
 
@@ -270,6 +278,81 @@ impl Project {
         self.reflow(id, on_main)
     }
 
+    fn move_now(&mut self, id: SegmentId, track: Option<TrackId>, start: i64) -> Result<(), Error> {
+        if start < 0 {
+            return Err(Error::NegativeTime);
+        }
+        let from = self
+            .timeline
+            .track_of(id)
+            .ok_or(Error::UnknownSegment(id))?;
+        let to = track.unwrap_or(from);
+        let segment = self.timeline.segment(id).ok_or(Error::UnknownSegment(id))?;
+        let channels = segment.channels();
+        let duration = segment.timeline().duration().value;
+        let old_start = segment.timeline().start().value;
+        let dest = self.timeline.track(to).ok_or(Error::UnknownTrack(to))?;
+        if !accepts(dest.kind(), channels) {
+            return Err(Error::WrongTrack);
+        }
+        let to_main = dest.is_main();
+        let from_main = self.timeline.track(from).is_some_and(Track::is_main);
+        if start.checked_add(duration).is_none() {
+            return Err(Error::DurationOverflow);
+        }
+
+        if to_main && self.settings.magnet() {
+            let old = self.timeline.main_track().ranges();
+            let segment = self.timeline.take_segment(id)?;
+            self.timeline.drop_empty();
+            let index = magnet_index(self.timeline.main_track().segments(), start);
+            self.timeline.main_mut().insert_at(index, segment);
+            return self.pack_from(&old);
+        }
+
+        if self.collides(to, id, start, duration)? {
+            return Err(Error::Overlap);
+        }
+        let delta = start
+            .checked_sub(old_start)
+            .ok_or(Error::DurationOverflow)?;
+        let old_main = self.timeline.main_track().ranges();
+        if from == to {
+            self.timeline.track_mut(from)?.set_start(id, start)?;
+            self.timeline.track_mut(from)?.sort_by_start();
+        } else {
+            let mut segment = self.timeline.take_segment(id)?;
+            self.timeline.drop_empty();
+            if from_main && self.settings.magnet() {
+                self.pack_from(&old_main)?;
+            }
+            segment.set_start(start)?;
+            self.timeline.track_mut(to)?.insert(segment)?;
+        }
+        if from_main && self.settings.linkage() && delta != 0 {
+            self.shift_followers(&old_main, &[(id, delta)])?;
+        }
+        Ok(())
+    }
+
+    fn collides(
+        &self,
+        track: TrackId,
+        id: SegmentId,
+        start: i64,
+        duration: i64,
+    ) -> Result<bool, Error> {
+        let range = TimeRange::sequence(start, duration)?;
+        let track = self
+            .timeline
+            .track(track)
+            .ok_or(Error::UnknownTrack(track))?;
+        Ok(track
+            .segments()
+            .iter()
+            .any(|segment| segment.id() != id && segment.timeline().overlaps(range)))
+    }
+
     fn reflow(&mut self, id: SegmentId, on_main: bool) -> Result<(), Error> {
         if on_main && self.settings.magnet() {
             return self.pack_main();
@@ -334,6 +417,9 @@ impl Project {
                 continue;
             }
             for segment in track.segments() {
+                if deltas.iter().any(|(owner, _)| *owner == segment.id()) {
+                    continue;
+                }
                 let Some(owner) = sole_owner(segment.timeline(), old_main) else {
                     continue;
                 };

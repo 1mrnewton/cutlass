@@ -205,6 +205,16 @@ fn start(cut: &Cut, id: SegmentId) -> Result<i64, Error> {
         .value)
 }
 
+fn on_track(cut: &Cut, id: SegmentId) -> TrackId {
+    cut.project
+        .timeline()
+        .tracks()
+        .iter()
+        .find(|track| track.segments().iter().any(|segment| segment.id() == id))
+        .expect("segment is on a track")
+        .id()
+}
+
 fn kinds(cut: &Cut) -> Vec<TrackKind> {
     cut.project
         .timeline()
@@ -832,5 +842,147 @@ fn two_creates_receive_different_ids() -> Result<(), Error> {
     assert_ne!(first, second);
     assert_ne!(first.get(), first_asset.get());
     assert_eq!(cut.project.timeline().main_track().segments().len(), 2);
+    Ok(())
+}
+
+#[test]
+fn magnet_off_moves_a_clip_to_the_new_start() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    assert_eq!(
+        run(
+            &mut cut,
+            Command::Move {
+                segment: id,
+                track: None,
+                start: 2_000_000,
+            },
+        )?,
+        Outcome::Unchanged
+    );
+    assert_eq!(start(&cut, id)?, 2_000_000);
+    Ok(())
+}
+
+#[test]
+fn magnet_uses_the_start_to_choose_the_order() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let first = place_main(&mut cut, asset, 0, 30_000)?;
+    let second = place_main(&mut cut, asset, 1_000_000, 30_000)?;
+    run(
+        &mut cut,
+        Command::Move {
+            segment: second,
+            track: None,
+            start: 0,
+        },
+    )?;
+    assert_eq!(start(&cut, second)?, 0);
+    assert_eq!(start(&cut, first)?, 1_000_000);
+    Ok(())
+}
+
+#[test]
+fn moving_a_main_clip_moves_the_segment_that_sits_on_it() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let main = place_main(&mut cut, asset, 1_000_000, 30_000)?;
+    let (overlay, _) = open_picture(&mut cut, asset, 1_000_500, 30_000)?;
+    run(
+        &mut cut,
+        Command::Move {
+            segment: main,
+            track: None,
+            start: 3_000_000,
+        },
+    )?;
+    assert_eq!(start(&cut, main)?, 3_000_000);
+    assert_eq!(start(&cut, overlay)?, 3_000_500);
+    Ok(())
+}
+
+#[test]
+fn a_move_onto_a_taken_time_changes_nothing() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let first = place_main(&mut cut, asset, 0, 30_000)?;
+    let second = place_main(&mut cut, asset, 2_000_000, 30_000)?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Move {
+                segment: first,
+                track: None,
+                start: 2_000_000,
+            },
+        ),
+        Error::Overlap,
+    );
+    assert_eq!(start(&cut, first)?, 0);
+    assert_eq!(start(&cut, second)?, 2_000_000);
+    Ok(())
+}
+
+#[test]
+fn a_sound_segment_cannot_move_onto_the_main_track() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let (sound, track) = open_sound(&mut cut, asset, 0)?;
+    let main = cut.main;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Move {
+                segment: sound,
+                track: Some(main),
+                start: 0,
+            },
+        ),
+        Error::WrongTrack,
+    );
+    assert_eq!(on_track(&cut, sound), track);
+    Ok(())
+}
+
+#[test]
+fn a_main_clip_can_move_onto_an_overlay() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let main_clip = place_main(&mut cut, asset, 0, 30_000)?;
+    let (overlay, track) = open_picture(&mut cut, asset, 5_000_000, 30_000)?;
+    run(
+        &mut cut,
+        Command::Move {
+            segment: main_clip,
+            track: Some(track),
+            start: 0,
+        },
+    )?;
+    assert_eq!(on_track(&cut, main_clip), track);
+    assert_eq!(start(&cut, main_clip)?, 0);
+    assert_eq!(start(&cut, overlay)?, 5_000_000);
+    assert!(cut.project.timeline().main_track().segments().is_empty());
+    Ok(())
+}
+
+#[test]
+fn leaving_the_main_track_packs_what_remains_and_moves_its_follower() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let first = place_main(&mut cut, asset, 0, 30_000)?;
+    let second = place_main(&mut cut, asset, 1_000_000, 30_000)?;
+    let (follower, _) = open_picture(&mut cut, asset, 100, 15_000)?;
+    let (_, destination) = open_picture(&mut cut, asset, 8_000_000, 30_000)?;
+    run(
+        &mut cut,
+        Command::Move {
+            segment: first,
+            track: Some(destination),
+            start: 5_000_000,
+        },
+    )?;
+    assert_eq!(on_track(&cut, first), destination);
+    assert_eq!(start(&cut, first)?, 5_000_000);
+    assert_eq!(start(&cut, second)?, 0);
+    assert_eq!(start(&cut, follower)?, 5_000_100);
     Ok(())
 }

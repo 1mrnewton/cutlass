@@ -106,6 +106,25 @@ impl Timeline {
         Ok(())
     }
 
+    pub(crate) fn track_of(&self, id: SegmentId) -> Option<TrackId> {
+        self.tracks.iter().find_map(|track| {
+            track
+                .segments()
+                .iter()
+                .any(|segment| segment.id() == id)
+                .then_some(track.id())
+        })
+    }
+
+    pub(crate) fn take_segment(&mut self, id: SegmentId) -> Result<Segment, Error> {
+        for track in &mut self.tracks {
+            if let Some(segment) = track.take(id) {
+                return Ok(segment);
+            }
+        }
+        Err(Error::UnknownSegment(id))
+    }
+
     pub(crate) fn remove_segment(&mut self, id: SegmentId) -> Result<(), Error> {
         for track in &mut self.tracks {
             if track.remove(id) {

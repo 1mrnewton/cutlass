@@ -110,11 +110,15 @@ impl Track {
     }
 
     pub(crate) fn remove(&mut self, id: SegmentId) -> bool {
-        let Some(index) = self.segments.iter().position(|segment| segment.id() == id) else {
-            return false;
-        };
-        self.segments.remove(index);
-        true
+        self.take(id).is_some()
+    }
+
+    pub(crate) fn take(&mut self, id: SegmentId) -> Option<Segment> {
+        let index = self
+            .segments
+            .iter()
+            .position(|segment| segment.id() == id)?;
+        Some(self.segments.remove(index))
     }
 
     pub(crate) fn set_start(&mut self, id: SegmentId, start: i64) -> Result<(), Error> {

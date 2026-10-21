@@ -11,6 +11,7 @@ mod chrome;
 mod export;
 mod gaps;
 mod icons;
+mod import;
 mod inspector;
 mod keys;
 mod library;
@@ -141,6 +142,39 @@ impl CutlassApp {
             );
         }
     }
+
+    fn import_chosen(&mut self, ui: &egui::Ui) {
+        let paths = import::pick();
+        let (assets, failed) = import::chosen(&paths);
+        if !assets.is_empty() {
+            let commands: Vec<_> = assets
+                .into_iter()
+                .map(cutlass_project::Command::AddAsset)
+                .collect();
+            match self.history.apply(&mut self.project, &commands) {
+                Ok(outcomes) => {
+                    let folder = self.bin.open();
+                    for outcome in outcomes {
+                        if let cutlass_project::Outcome::Asset(id) = outcome {
+                            self.bin.move_file(id, folder);
+                        }
+                    }
+                }
+                Err(error) => {
+                    timeline::show_note(ui, timeline::apply_note(&error, words::active(ui)));
+                    return;
+                }
+            }
+        }
+        let Some(failed) = failed else {
+            return;
+        };
+        let phrase = match failed {
+            import::ImportError::Unread => words::Phrase::ImportUnread,
+            import::ImportError::Empty => words::Phrase::ImportEmpty,
+        };
+        timeline::show_note(ui, words::of(ui, phrase));
+    }
 }
 
 impl eframe::App for CutlassApp {
@@ -203,13 +237,14 @@ impl eframe::App for CutlassApp {
                 }
             });
 
+        let mut import = false;
         egui::Panel::left("library")
             .resizable(false)
             .exact_size(self.panes.library())
             .frame(theme::gap_right())
             .show_separator_line(false)
             .show(ui, |ui| {
-                library::show(
+                import = library::show(
                     ui,
                     &self.project,
                     &mut self.shelf,
@@ -217,6 +252,9 @@ impl eframe::App for CutlassApp {
                     &mut self.bin,
                 );
             });
+        if import && self.export.is_none() && self.modify.is_none() && self.app_dialog.is_none() {
+            self.import_chosen(ui);
+        }
 
         egui::Panel::right("inspector")
             .resizable(false)

@@ -161,6 +161,9 @@ pub(crate) enum Phrase {
     InTheApp,
     InTheCloud,
     ApiKey,
+    Import,
+    ImportUnread,
+    ImportEmpty,
 }
 
 #[cfg(test)]
@@ -308,6 +311,9 @@ impl Phrase {
         Self::InTheApp,
         Self::InTheCloud,
         Self::ApiKey,
+        Self::Import,
+        Self::ImportUnread,
+        Self::ImportEmpty,
     ];
 }
 
@@ -454,6 +460,9 @@ const ENGLISH: &[&str] = &[
     "In the app",
     "In the cloud",
     "API key",
+    "Import",
+    "This file could not be read.",
+    "This file has no picture or sound.",
 ];
 
 const FRENCH: &[&str] = &[
@@ -599,6 +608,9 @@ const FRENCH: &[&str] = &[
     "Dans l'application",
     "Dans le nuage",
     "Clé API",
+    "Importer",
+    "Ce fichier n'a pas pu être lu.",
+    "Ce fichier n'a ni image ni son.",
 ];
 
 /// The word for `phrase` in `language`.
@@ -751,7 +763,17 @@ mod tests {
         assert_eq!(say(Language::French, Phrase::InTheCloud), "Dans le nuage");
         assert_eq!(say(Language::English, Phrase::ApiKey), "API key");
         assert_eq!(say(Language::French, Phrase::ApiKey), "Clé API");
-        assert_eq!(Phrase::ApiKey as usize, super::ENGLISH.len() - 1);
+        assert_eq!(say(Language::English, Phrase::Import), "Import");
+        assert_eq!(say(Language::French, Phrase::Import), "Importer");
+        assert_eq!(
+            say(Language::English, Phrase::ImportEmpty),
+            "This file has no picture or sound."
+        );
+        assert_eq!(
+            say(Language::French, Phrase::ImportUnread),
+            "Ce fichier n'a pas pu être lu."
+        );
+        assert_eq!(Phrase::ImportEmpty as usize, super::ENGLISH.len() - 1);
         for phrase in Phrase::ALL {
             let english = say(Language::English, *phrase);
             let french = say(Language::French, *phrase);

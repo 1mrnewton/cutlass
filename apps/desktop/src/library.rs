@@ -89,7 +89,7 @@ pub fn show(
     shelf: &mut Shelf,
     source: &mut MediaSource,
     bin: &mut Bin,
-) {
+) -> bool {
     crate::tip::region(ui, words::of(ui, Phrase::RegionLibrary));
     let full = ui.max_rect();
     ui.allocate_rect(full, Sense::hover());
@@ -100,14 +100,20 @@ pub fn show(
     let assets = Rect::from_min_max(hairline.right_top(), full.max).shrink(12.0);
     match *shelf {
         Shelf::Media => paint_media(ui, assets, project, bin, source),
-        Shelf::Audio => paint_audio(ui, assets, project, bin),
+        Shelf::Audio => {
+            paint_audio(ui, assets, project, bin);
+            false
+        }
         Shelf::Text
         | Shelf::Stickers
         | Shelf::Effects
         | Shelf::Transitions
         | Shelf::Filters
         | Shelf::Adjustments
-        | Shelf::Templates => paint_empty(ui, assets),
+        | Shelf::Templates => {
+            paint_empty(ui, assets);
+            false
+        }
     }
 }
 
@@ -147,17 +153,20 @@ fn paint_media(
     project: &Project,
     bin: &mut Bin,
     source: &mut MediaSource,
-) {
+) -> bool {
     let switch = Rect::from_min_size(rect.min, vec2(rect.width(), f32::min(32.0, rect.height())));
     paint_source(ui, switch, source);
     let top = switch.bottom() + 8.0;
     if top >= rect.bottom() {
-        return;
+        return false;
     }
     let rest = Rect::from_min_max(pos2(rect.left(), top), rect.max);
     match *source {
         MediaSource::Project => paint_bin(ui, rest, project, bin),
-        MediaSource::Stock => paint_empty(ui, rest),
+        MediaSource::Stock => {
+            paint_empty(ui, rest);
+            false
+        }
     }
 }
 
@@ -217,15 +226,42 @@ fn source_button(
     response
 }
 
-fn paint_bin(ui: &mut egui::Ui, rect: Rect, project: &Project, bin: &mut Bin) {
-    let path = Rect::from_min_size(rect.min, vec2(rect.width(), f32::min(32.0, rect.height())));
-    paint_path(ui, path, bin);
+fn paint_bin(ui: &mut egui::Ui, rect: Rect, project: &Project, bin: &mut Bin) -> bool {
+    let row = f32::min(32.0, rect.height());
+    let label = words::of(ui, Phrase::Import);
+    let width = words::control_width(
+        ui,
+        label,
+        FontId::new(12.0, FontFamily::Proportional),
+        20.0,
+        72.0,
+    );
+    let button = Rect::from_min_size(pos2(rect.right() - width, rect.top()), vec2(width, row));
+    let path = Rect::from_min_max(
+        rect.min,
+        pos2((button.left() - 8.0).max(rect.left()), rect.top() + row),
+    );
+    if path.width() > 0.0 {
+        paint_path(ui, path, bin);
+    }
+    let clicked = import_button(ui, button, label);
     let top = path.bottom() + 8.0;
     if top < rect.bottom() {
         let grid = Rect::from_min_max(pos2(rect.left(), top), rect.max);
         paint_grid(ui, grid, project, bin);
     }
     paint_ghost(ui, project);
+    clicked
+}
+
+fn import_button(ui: &mut egui::Ui, rect: Rect, label: &str) -> bool {
+    ui.put(
+        rect,
+        egui::Button::new(egui::RichText::new(label).size(12.0).color(theme::INK))
+            .fill(theme::BAR)
+            .corner_radius(8),
+    )
+    .clicked()
 }
 
 fn paint_path(ui: &mut egui::Ui, rect: Rect, bin: &mut Bin) {
@@ -953,7 +989,9 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |ui| super::show(ui, &cut, &mut shelf, &mut source, &mut bin),
+                |ui| {
+                    super::show(ui, &cut, &mut shelf, &mut source, &mut bin);
+                },
             );
             let tree = output.platform_output.accesskit_update.take();
             output.textures_delta.clear();
@@ -1050,7 +1088,9 @@ mod tests {
                     time: Some(time),
                     ..Default::default()
                 },
-                |ui| super::show(ui, &cut, shelf, &mut source, &mut bin),
+                |ui| {
+                    super::show(ui, &cut, shelf, &mut source, &mut bin);
+                },
             );
             let tree = output.platform_output.accesskit_update.take();
             output.textures_delta.clear();
@@ -1098,7 +1138,9 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |ui| super::show(ui, &cut, &mut shelf, &mut source, &mut bin),
+                |ui| {
+                    super::show(ui, &cut, &mut shelf, &mut source, &mut bin);
+                },
             );
             let tree = output.platform_output.accesskit_update.take();
             output.textures_delta.clear();
@@ -1106,6 +1148,7 @@ mod tests {
         };
         let tree = pass(vec![]);
         assert!(tree.nodes.iter().any(|(_, node)| named(node, "All")));
+        assert!(tree.nodes.iter().any(|(_, node)| named(node, "Import")));
         let row = tree
             .nodes
             .iter()
@@ -1134,5 +1177,6 @@ mod tests {
         assert!(source == super::MediaSource::Stock);
         assert!(stock.nodes.iter().any(|(_, node)| named(node, "Empty")));
         assert!(stock.nodes.iter().all(|(_, node)| !named(node, "All")));
+        assert!(stock.nodes.iter().all(|(_, node)| !named(node, "Import")));
     }
 }

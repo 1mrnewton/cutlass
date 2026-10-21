@@ -25,19 +25,49 @@ struct Lane {
 pub fn delete_selected(
     history: &mut History,
     project: &mut Project,
-    selected: &mut Option<SegmentId>,
+    selected: &mut Vec<SegmentId>,
 ) -> bool {
-    let Some(id) = *selected else {
-        return false;
-    };
-    if history
-        .apply(project, &[Command::RemoveSegment(id)])
-        .is_err()
-    {
+    if selected.is_empty() {
         return false;
     }
-    *selected = None;
+    let mut commands = Vec::new();
+    for id in selected.iter().copied() {
+        let on_main = project
+            .timeline()
+            .main_track()
+            .segments()
+            .iter()
+            .any(|segment| segment.id() == id);
+        if on_main {
+            commands.push(Command::RemoveSegment(id));
+        } else {
+            commands.insert(0, Command::RemoveSegment(id));
+        }
+    }
+    if history.apply(project, &commands).is_err() {
+        return false;
+    }
+    selected.clear();
     true
+}
+
+fn choose(selected: &mut Vec<SegmentId>, hit: Option<SegmentId>) {
+    selected.clear();
+    if let Some(id) = hit {
+        selected.push(id);
+    }
+}
+
+fn toggle_selected(selected: &mut Vec<SegmentId>, id: SegmentId) {
+    if let Some(index) = selected.iter().position(|kept| *kept == id) {
+        selected.remove(index);
+    } else {
+        selected.push(id);
+    }
+}
+
+fn chosen(selected: &[SegmentId], id: SegmentId) -> bool {
+    selected.contains(&id)
 }
 
 /// A clip following the pointer. The move is written when the pointer goes up.
@@ -65,7 +95,7 @@ pub fn show(
     ui: &mut egui::Ui,
     project: &Project,
     playhead: &mut i64,
-    selected: &mut Option<SegmentId>,
+    selected: &mut Vec<SegmentId>,
     drag: &mut Option<ClipDrag>,
     trim: &mut Option<TrimDrag>,
     split: &mut bool,
@@ -73,9 +103,7 @@ pub fn show(
     let full = ui.max_rect();
     let ruler_rect = Rect::from_min_size(full.min, vec2(full.width(), RULER_HEIGHT));
     let tracks = Rect::from_min_max(ruler_rect.left_bottom(), full.max);
-    if selected.is_some_and(|id| project.timeline().segment(id).is_none()) {
-        *selected = None;
-    }
+    selected.retain(|id| project.timeline().segment(*id).is_some());
     if drag
         .as_ref()
         .is_some_and(|drag| project.timeline().segment(drag.segment).is_none())
@@ -93,19 +121,27 @@ pub fn show(
     if tracks.height() > 0.0 {
         let pressed = ui.input(|input| input.pointer.primary_pressed());
         let released = ui.input(|input| input.pointer.primary_released());
+        let shift = ui.input(|input| input.modifiers.shift);
         if pressed && let Some(point) = pointer.filter(|point| tracks.contains(*point)) {
             if *split {
                 *drag = None;
                 *trim = None;
-                *selected = segment_at(project, tracks, point);
+                choose(selected, segment_at(project, tracks, point));
+            } else if shift {
+                *drag = None;
+                *trim = None;
+                if let Some(id) = segment_at(project, tracks, point) {
+                    toggle_selected(selected, id);
+                }
             } else if let Some(active) = trim_from(project, tracks, point) {
-                *selected = Some(active.segment);
+                choose(selected, Some(active.segment));
                 *drag = None;
                 *trim = Some(active);
             } else {
                 *trim = None;
-                *selected = segment_at(project, tracks, point);
-                *drag = selected.and_then(|id| drag_from(project, id, point));
+                let hit = segment_at(project, tracks, point);
+                choose(selected, hit);
+                *drag = hit.and_then(|id| drag_from(project, id, point));
             }
         }
         if released {
@@ -182,7 +218,7 @@ pub fn show(
                 &ClipPaint {
                     project,
                     pixel_size,
-                    selected: *selected,
+                    selected,
                     drag: drag.as_ref(),
                     trim: trim.as_ref(),
                     pointer,
@@ -256,7 +292,7 @@ fn split_command(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<C
 struct ClipPaint<'a> {
     project: &'a Project,
     pixel_size: f64,
-    selected: Option<SegmentId>,
+    selected: &'a [SegmentId],
     drag: Option<&'a ClipDrag>,
     trim: Option<&'a TrimDrag>,
     pointer: Option<egui::Pos2>,
@@ -284,7 +320,7 @@ fn paint_segments(ui: &mut egui::Ui, track: &Track, lane: Rect, main: bool, pain
             color
         };
         ui.painter().rect_filled(rect, 7.0, resting);
-        if !dragging && !trimming && paint.selected == Some(segment.id()) {
+        if !dragging && !trimming && chosen(paint.selected, segment.id()) {
             stroke_clip(ui, rect);
         }
         if dragging {
@@ -929,13 +965,19 @@ mod tests {
             [Outcome::Segment(id)] => *id,
             other => panic!("expected a segment, got {other:?}"),
         };
-        let mut selected = Some(id);
+        let mut selected = Vec::new();
+        super::choose(&mut selected, Some(id));
+        assert_eq!(selected, vec![id]);
+        super::toggle_selected(&mut selected, id);
+        assert!(selected.is_empty());
+        super::toggle_selected(&mut selected, id);
+        assert_eq!(selected, vec![id]);
         assert!(super::delete_selected(
             &mut history,
             &mut cut,
             &mut selected
         ));
-        assert!(selected.is_none());
+        assert!(selected.is_empty());
         assert!(cut.timeline().segment(id).is_none());
         assert!(cut.timeline().main_track().is_main());
         assert!(cut.timeline().main_track().segments().is_empty());

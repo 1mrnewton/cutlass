@@ -39,7 +39,7 @@ struct CutlassApp {
     playhead_us: i64,
     shelf: library::Shelf,
     selected_asset: Option<AssetId>,
-    selected_segment: Option<SegmentId>,
+    selected_segments: Vec<SegmentId>,
     clip_drag: Option<timeline::ClipDrag>,
     trim_drag: Option<timeline::TrimDrag>,
     split: bool,
@@ -55,7 +55,7 @@ impl CutlassApp {
             playhead_us: 0,
             shelf: library::Shelf::Media,
             selected_asset: None,
-            selected_segment: None,
+            selected_segments: Vec::new(),
             clip_drag: None,
             trim_drag: None,
             split: false,
@@ -73,7 +73,7 @@ impl CutlassApp {
         timeline::delete_selected(
             &mut self.history,
             &mut self.project,
-            &mut self.selected_segment,
+            &mut self.selected_segments,
         );
     }
 }
@@ -106,7 +106,7 @@ impl eframe::App for CutlassApp {
                     ui,
                     &self.project,
                     &mut self.playhead_us,
-                    &mut self.selected_segment,
+                    &mut self.selected_segments,
                     &mut self.clip_drag,
                     &mut self.trim_drag,
                     &mut self.split,
@@ -133,7 +133,11 @@ impl eframe::App for CutlassApp {
             .frame(theme::gap_left())
             .show_separator_line(false)
             .show(ui, |ui| {
-                inspector::show(ui, &self.project, self.selected_segment);
+                let shown = match self.selected_segments.as_slice() {
+                    [id] => Some(*id),
+                    _ => None,
+                };
+                inspector::show(ui, &self.project, shown);
             });
 
         egui::CentralPanel::default()

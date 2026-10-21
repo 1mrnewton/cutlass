@@ -1,0 +1,9 @@
+# Product
+
+Cutlass is a free, open-source editor in the spirit of CapCut. AI edits the timeline: remove silences, insert a generated shot at a time, or assemble a film from a bin of footage.
+
+This repository is the desktop prototype. It is a React picture of the editor, on the `prototype` branch of [1mrnewton/cutlass](https://github.com/1mrnewton/cutlass).
+
+The shipping desktop app will be Rust, eframe, and egui. iOS and Android will be native shells. The phone UI will be designed in its own React app, not in this one.
+
+The prototype shares one mock project across the head, the workspace, and the timeline. The timeline starts empty. Library cards are placeholders you drag onto it. Commands mutate that mock. A grade tints the mock wash and a volume meter moves. Nothing here renders video or plays a file. Export opens a dialog and does not write a file.

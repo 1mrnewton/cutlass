@@ -2,32 +2,21 @@ name: CI
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, development]
   pull_request:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: build / test / clippy
+  linux:
+    name: linux / fmt, clippy, docs, test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system development libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config clang \
-            libavcodec-dev libavformat-dev libavutil-dev \
-            libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev \
-            libfontconfig1-dev libasound2-dev \
-            mesa-vulkan-drivers libvulkan1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
@@ -39,64 +28,99 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Build
-        run: cargo build --workspace --all-targets
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
 
       - name: Test
         run: cargo test --workspace
 
-  # Compile the release binary on the platforms that break most often (and that the
-  # Linux job above never exercises), so Windows/macOS-specific breakage surfaces on
-  # the PR in minutes instead of ~40 min into a tagged Release. Compile-only keeps it
-  # lean; packaging is still validated by the Release workflow on tag.
-  build-macos:
-    name: release build / macos arm64
+  macos:
+    name: macos and ios / clippy, test
     runs-on: macos-14
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install FFmpeg
-        run: brew install ffmpeg pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build cutlass-ui (release)
-        run: cargo build --release -p cutlass-ui
-
-  build-windows:
-    name: release build / windows x86_64
-    runs-on: windows-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install LLVM (bindgen)
-        uses: KyleMayes/install-llvm-action@v2
         with:
-          version: "18.1"
-          directory: ${{ github.workspace }}/llvm
-
-      - name: Fetch prebuilt FFmpeg
-        shell: pwsh
-        run: ./scripts/fetch-ffmpeg-windows.ps1 -Arch x86_64
-
-      - uses: dtolnay/rust-toolchain@stable
+          components: clippy
+          targets: aarch64-apple-ios
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build cutlass-ui (release)
-        env:
-          LIBCLANG_PATH: ${{ github.workspace }}/llvm/bin
-        run: cargo build --release -p cutlass-ui
+      - name: Clippy (macOS)
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Exercise the full Windows packaging path on PRs too: it's broken releases
-      # before (e.g. the -Arch splatting bug) while compile-only CI stayed green.
-      - name: Install Inno Setup
-        run: choco install innosetup --no-progress -y
+      - name: Clippy (iOS)
+        run: cargo clippy --workspace --target aarch64-apple-ios -- -D warnings
 
-      - name: Package zip + installer
-        shell: pwsh
-        run: ./scripts/package-windows-installer.ps1 -Arch x86_64
+      - name: Test
+        run: cargo test --workspace
+
+  windows:
+    name: windows / clippy, test
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  android:
+    name: android / clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --target aarch64-linux-android -- -D warnings
+
+  software-codecs:
+    name: software codecs / build with no OS
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (wasm32)
+        shell: bash
+        run: |
+          mapfile -t packages < <(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.manifest_path | contains("/crates/codecs/software/")) | "--package=" + .name')
+          cargo clippy --target wasm32-unknown-unknown "${packages[@]}" -- -D warnings
+
+  deny:
+    name: dependencies / licenses, bans, advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v2

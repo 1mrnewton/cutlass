@@ -1,0 +1,21 @@
+---
+description: How to write docs and READMEs - plain, short, and accurate
+globs: **/*.md
+alwaysApply: false
+---
+
+# Docs
+
+- Write plain English in short, complete sentences. Say what something is and
+  what to do, not how it came to be.
+- Lead with the answer. Background comes after, for readers who want it.
+- Use one term per thing. If the code says `software/` and `native/`, the docs do
+  too.
+- Use tables for short facts that line up, like the codec matrix. Explanations go
+  in sentences around the table, not inside the cells.
+- No marketing words and no emoji.
+- Keep docs true. When a change makes a doc wrong, fix the doc in the same commit.
+- `docs/codecs.md` is the codec plan. A change to what we decode or encode starts
+  there.
+- `docs/project.md` is the project model. A change to the project, a timeline,
+  a track, or a segment starts there.

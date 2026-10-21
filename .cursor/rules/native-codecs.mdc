@@ -1,0 +1,60 @@
+---
+description: Rules for the OS codec wrappers - OS gates, FFI safety, runtime capability checks, zero-copy frames
+globs: crates/codecs/native/**
+alwaysApply: false
+---
+
+# Native codecs
+
+There is one crate per OS codec API: VideoToolbox, AudioToolbox, MediaCodec,
+Media Foundation, VA-API, and NVDEC/NVENC. They are thin. They turn our packets
+into OS calls, and OS output into our frames.
+
+## Structure
+
+- Gate the whole crate in `lib.rs`, for example `#![cfg(target_vendor = "apple")]`,
+  so it builds empty everywhere else. Put OS bindings under
+  `[target.'cfg(...)'.dependencies]`.
+- Split by direction, then by codec. `decode/mod.rs` holds the one session path.
+  `decode/<codec>.rs` holds only what differs per codec: the format description,
+  the config record, the properties. `encode/` works the same way.
+- Shared pieces live at the crate root: `caps.rs` for what the device supports,
+  `error.rs` for OS status codes, and the frame handoff module.
+
+## FFI
+
+- Wrap every OS object in an owning Rust type that releases it in `Drop`. No raw
+  pointers or OS handles in the public API.
+- Use `unsafe` only around the FFI call, and give each block a `// SAFETY:`
+  comment.
+- Check every status code. Keep the OS code in our error so a bug report shows it.
+- OS callbacks, such as VideoToolbox's output callback, run on OS threads. Do the
+  minimum there: take ownership of the output and push it to a queue. Never block.
+
+## Capabilities
+
+- Never assume support from the OS name or version. Ask the device at startup
+  (`VTIsHardwareDecodeSupported`, `VTCopyVideoEncoderList`, `MediaCodecList`,
+  `MFTEnumEx`, `vaQueryConfigProfiles`, `cuvidGetDecoderCaps`), and return the
+  answer as data.
+- Report whether a session runs on hardware or on an OS software path. The
+  caller decides what to do with that.
+- When the device can't do something, return "unsupported". Don't fall back to a
+  software codec inside this crate.
+- Check availability at runtime before any call newer than our minimum OS version.
+
+## Frames
+
+- Decoded frames go to wgpu without a CPU copy: IOSurface on Apple,
+  AHardwareBuffer on Android, a shared D3D texture on Windows, DMA-BUF or CUDA
+  interop on Linux.
+- CPU readback is an explicit opt-in path, never a silent fallback.
+- Hardware encoders are scarce, often one per GPU. Don't open sessions
+  speculatively. The caller controls how many run at once.
+
+## Tests
+
+- Tests run only on the matching OS, gated like the crate.
+- A test that needs hardware the machine lacks skips with a printed reason. It
+  never fails for that.
+- Compare native decode output with the software decoder on the same stream.

@@ -54,8 +54,7 @@ Download a build from the [releases page](https://github.com/1Mr-Newton/cutlass/
 - **macOS** (Apple Silicon) — unzip and drag `Cutlass.app` to Applications.
   On first launch, right-click the app and choose **Open** (builds aren't
   notarized yet).
-- **Linux** (x86_64) — extract the `.tar.gz` and run `./cutlass-ui`. You'll need
-  FFmpeg installed.
+- **Linux** (x86_64) — extract the `.tar.gz` and run `./cutlass-ui`.
 
 ## Setting up the AI assistant
 
@@ -89,43 +88,25 @@ disk, so importing a project from another machine may ask you to relink media.
 
 ## Build from source
 
-You need a recent stable Rust toolchain and FFmpeg.
-
-```bash
-# macOS
-brew install ffmpeg pkg-config
-
-# Debian / Ubuntu
-sudo apt-get install -y pkg-config clang \
-  libavcodec-dev libavformat-dev libavutil-dev \
-  libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev
-```
-
-Then run the editor:
-
-```bash
-cargo run -p cutlass-ui
-# or open straight into a file:
-cargo run -p cutlass-ui -- path/to/video.mp4
-```
-
-To build and test the whole workspace:
+You need a recent stable Rust toolchain (edition 2024, MSRV 1.85).
 
 ```bash
 cargo build --workspace
 cargo test --workspace
 ```
 
+The codecs live under `crates/codecs/`: Rust codecs in `software/`, and the
+operating-system codec APIs in `native/`. Which codec each platform covers is
+in [docs/codecs.md](docs/codecs.md).
+
 ## Roadmap
 
-See the [v1 roadmap](docs/v1-roadmap.md) for what's planned, in progress, and
-already done.
+Codec coverage for decode and encode is in [docs/codecs.md](docs/codecs.md).
 
 ## Contributing
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the
-project layout, and the commit/PR style. Each crate also has its own README
-under `crates/`, and packaging notes live in [packaging/](packaging/README.md).
+project layout, and the commit/PR style.
 
 A lot of Cutlass is written with AI coding tools and then reviewed by
 maintainers. Contributions are welcome on the same footing whether they come
@@ -135,8 +116,3 @@ from a person or an assistant, as long as they're solid and meet the bar.
 
 Dual-licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT),
 at your option.
-
-Cutlass links FFmpeg (via [`ffmpeg-next`](https://crates.io/crates/ffmpeg-next)),
-which is LGPL-2.1-or-later by default and may be GPL depending on how the FFmpeg
-you link was built. If you distribute builds that link FFmpeg, check the terms of
-the FFmpeg build you ship.

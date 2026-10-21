@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = []
+members = [
+    "crates/codecs/native/*",
+    "crates/codecs/software/*",
+    "crates/core",
+    "crates/testing/*",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,3 +13,33 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/1mrnewton/cutlass"
+
+[workspace.dependencies]
+cutlass-core = { path = "crates/core" }
+cutlass-test-fixtures = { path = "crates/testing/fixtures" }
+
+objc2 = "0.6.5"
+objc2-core-foundation = "0.3.2"
+objc2-core-media = "0.3.2"
+objc2-core-video = "0.3.2"
+objc2-io-surface = "0.3.2"
+objc2-video-toolbox = "0.3.2"
+thiserror = "2.0.21"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+dbg_macro = "deny"
+exit = "deny"
+mem_forget = "deny"
+missing_safety_doc = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+self_named_module_files = "deny"
+todo = "deny"
+undocumented_unsafe_blocks = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"

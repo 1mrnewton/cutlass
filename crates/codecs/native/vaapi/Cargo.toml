@@ -1,0 +1,12 @@
+[package]
+name = "cutlass-vaapi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "VA-API video decode and encode for Intel and AMD GPUs on Linux."
+
+[lints]
+workspace = true

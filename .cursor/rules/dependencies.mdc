@@ -1,0 +1,37 @@
+---
+description: Rules for adding or changing dependencies - workspace versions, licenses, banned crates, features
+globs: **/Cargo.toml,deny.toml
+alwaysApply: false
+---
+
+# Dependencies
+
+## Versions
+
+- Declare every third-party version once, in the root `[workspace.dependencies]`.
+  Crates use `name.workspace = true`. That keeps one version of each crate. For
+  example, the `objc2-*` crates must match across VideoToolbox and AudioToolbox.
+- OS bindings go under `[target.'cfg(...)'.dependencies]`, so other targets never
+  build them.
+- Every crate sets `[lints] workspace = true` and `publish = false`.
+- Once code uses a large binding crate (`objc2-*`, `windows`, `ndk`), turn off its
+  default features and list only what the code uses.
+
+## What's allowed
+
+CI enforces this with `cargo deny check`, configured in `deny.toml`.
+
+- Permissive licenses only: MIT, Apache-2.0, BSD, ISC, Zlib, and the others listed
+  in `deny.toml`. No GPL, LGPL, or AGPL. Anything not on the list needs a
+  maintainer's approval.
+- No FFmpeg, no GStreamer, and no C codec libraries (libx264, libvpx, dav1d,
+  libopus, fdk-aac, LAME). Codecs come from the OS or from
+  `crates/codecs/software/`.
+- Only crates.io. No git dependencies.
+
+## Before adding one
+
+In the PR, say what the dependency does and why the standard library or an
+existing dependency can't do it. Also give its license and how well it is
+maintained. Prefer a small, focused crate over a framework. Don't add a
+dependency to save a few lines.

@@ -1,0 +1,12 @@
+[package]
+name = "cutlass-mpeg2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Software MPEG-2 decoder."
+
+[lints]
+workspace = true

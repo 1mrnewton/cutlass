@@ -1,0 +1,12 @@
+[package]
+name = "cutlass-mediafoundation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Media Foundation video and audio decode and encode for Windows."
+
+[lints]
+workspace = true

@@ -1,0 +1,42 @@
+---
+description: How to write tests, media fixtures, fuzz targets, and benchmarks
+globs: **/tests/**,**/benches/**,**/fuzz/**
+alwaysApply: false
+---
+
+# Testing
+
+## Where tests go
+
+- Unit tests sit next to the code in `#[cfg(test)] mod tests`.
+- Behavior across modules goes in the crate's `tests/`.
+- Fuzz targets go in the crate's `fuzz/`. They use cargo-fuzz, need nightly, and
+  stay out of the workspace.
+- Benchmarks for hot paths (decode, encode, color conversion) go in `benches/`.
+
+## Rules
+
+- Tests are deterministic. No network, no sleeps, and no dependence on test order.
+- Timing belongs in benchmarks, never in test asserts.
+- A test checks one behavior, and its name says which:
+  `rejects_sps_with_zero_width`, not `test_sps_2`.
+- Every bug fix comes with a test that failed before the fix.
+- A test that needs hardware the machine lacks skips with a printed reason. It
+  never passes by silently doing nothing.
+
+## Media fixtures
+
+- Keep committed fixtures small, under 1 MB each. Larger conformance suites are
+  downloaded by a script that checks each file's SHA-256.
+- Shared fixtures live in `fixtures/` at the repo root, and
+  `crates/testing/fixtures` loads them. Note the source and license of every
+  fixture in `fixtures/README.md`. Only commit files we may redistribute.
+- Reference checksums come from the codec's reference decoder (JM, HM, libvpx,
+  libaom, and so on). Record the tool and version next to the checksums.
+- FFmpeg may generate reference data offline. Tests never call FFmpeg or any
+  other external tool.
+
+## Fuzzing
+
+Every software decoder and container parser has a fuzz target. Each crash it
+finds becomes a regression test in `tests/`.

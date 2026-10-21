@@ -1,0 +1,12 @@
+[package]
+name = "cutlass-pcm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Software PCM decoder and encoder for WAV and AIFF."
+
+[lints]
+workspace = true

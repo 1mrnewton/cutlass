@@ -1,0 +1,12 @@
+[package]
+name = "cutlass-hevc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Software HEVC decoder."
+
+[lints]
+workspace = true

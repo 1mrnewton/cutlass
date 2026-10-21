@@ -49,18 +49,7 @@ just gives reviewers helpful context.
 ## Development Setup
 
 Cutlass is a Rust workspace. You need a recent stable Rust toolchain (the repo
-pins `stable` via `rust-toolchain.toml`, edition 2024, MSRV 1.85) and FFmpeg
-development libraries.
-
-```bash
-# macOS
-brew install ffmpeg pkg-config
-
-# Debian / Ubuntu
-sudo apt-get install -y pkg-config clang \
-  libavcodec-dev libavformat-dev libavutil-dev \
-  libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev
-```
+pins `stable` via `rust-toolchain.toml`, edition 2024, MSRV 1.85).
 
 Build and test the whole workspace:
 
@@ -69,66 +58,68 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-Run the desktop editor (optionally with a media file):
-
-```bash
-cargo run -p cutlass-ui
-cargo run -p cutlass-ui -- path/to/video.mp4
-```
-
-`cutlass-app` is a headless smoke-test CLI that drives the engine end to end
-(import, edit, preview, save, export) without the UI — handy for quick checks:
-
-```bash
-cargo run -p cutlass-app
-```
-
 ## Project Layout
 
-The workspace is split into focused crates, layered from data up to UI:
+Codec support is listed in [`docs/codecs.md`](docs/codecs.md). The project
+model is [`docs/project.md`](docs/project.md).
 
-- `cutlass-models` — shared project/timeline data model, time math, and the
-  `.cutlass` file schema. UI-, decode-, and render-agnostic.
-- `cutlass-commands` — the structured command vocabulary every edit goes through.
-- `cutlass-probe` — reads media metadata before import.
-- `cutlass-decoder` — FFmpeg-backed video/image decode, thumbnails, waveforms,
-  and audio playback.
-- `cutlass-cache` — on-disk decoded-frame cache for preview.
-- `cutlass-compositor` — WGPU GPU compositor that combines layers into RGBA frames.
-- `cutlass-encoder` — FFmpeg encode/mux for exported MP4 and proxy media.
-- `cutlass-engine` — the headless editing engine: applies commands, records
-  undo/redo, produces preview frames, and exports timelines. Main integration
-  point for non-UI callers.
-- `cutlass-ai` — prompt-to-edit layer that turns model responses into validated
-  commands applied through the normal engine path.
-- `cutlass-ui` — the Slint desktop editor (timeline, preview, inspector,
-  library, export dialog, AI panel).
-- `cutlass-app` — end-to-end smoke-test CLI for the engine.
+- `crates/core` (`cutlass-core`) holds the types codecs share: timestamps,
+  packets, frames, pixel formats.
+- `crates/codecs/software/` holds the Rust codecs, which run on any device.
+- `crates/codecs/native/` holds one crate per operating-system codec API.
+- `fixtures/` holds the small media files the tests decode, and
+  `crates/testing/fixtures` loads them. `scripts/make-video-fixtures.py`
+  regenerates the video ones.
 
-Each crate has its own `README.md` describing its responsibilities and what
-does and does not belong there. Read the relevant one before adding code.
+Rust codecs, under `crates/codecs/software/`:
 
-Two boundaries matter:
+- `cutlass-h264` — H.264 decode and encode.
+- `cutlass-hevc` — HEVC decode. Encode stays on the hardware backends.
+- `cutlass-vp9`, `cutlass-vp8`, `cutlass-av1` — decode.
+- `cutlass-mpeg4` — MPEG-4 Part 2 decode.
+- `cutlass-mpeg2`, `cutlass-mjpeg` — decode.
+- `cutlass-prores` — decode. Encode stays on Apple silicon.
+- `cutlass-aac` — AAC decode and encode.
+- `cutlass-mp3`, `cutlass-flac`, `cutlass-opus`, `cutlass-vorbis`, `cutlass-ac3` — decode.
+- `cutlass-pcm` — PCM decode and encode (WAV and AIFF).
+- `cutlass-alac` — decode. Encode stays on Apple.
 
-- **Keep the engine UI-agnostic.** Slint models, widgets, file dialogs, and
-  interaction state belong in `cutlass-ui`, not `cutlass-engine`.
-- **Keep `cutlass-models` pure data.** No file I/O, FFmpeg, GPU work, Slint
-  bindings, LLM prompts, or undo/redo dispatch — those live in higher crates.
+Operating-system codecs, under `crates/codecs/native/`:
 
-## Coding Conventions
+- `cutlass-videotoolbox` — video on macOS and iOS.
+- `cutlass-audiotoolbox` — audio on macOS and iOS.
+- `cutlass-mediacodec` — video and audio on Android.
+- `cutlass-mediafoundation` — video and audio on Windows.
+- `cutlass-vaapi` — video on Intel and AMD GPUs on Linux.
+- `cutlass-nvcodec` — video on NVIDIA GPUs (NVDEC and NVENC).
 
-- **Performance is a correctness concern** on interactive paths (timeline
-  scrubbing, preview, per-frame and per-sample work, export). Know the
-  asymptotic cost of hot loops, avoid accidental O(n²), and profile or
-  benchmark before rewriting hot code. Prioritize clarity on cold paths. See
-  [`.cursor/rules/perf.mdc`](.cursor/rules/perf.mdc).
-- **Comments explain intent, not mechanics.** Skip comments that just narrate
-  what the code does; document non-obvious trade-offs and constraints.
-- **Icons in the Slint UI**: never block a feature on missing art. Ship a short
-  text/char placeholder, register it in [`docs/icons.md`](docs/icons.md), and
-  move on. See [`.cursor/rules/icons.mdc`](.cursor/rules/icons.mdc).
-- **Do not commit ignored paths**: build artifacts (`/target`, `/dist`), media
-  scratch dirs (`frames/`, `proxy/`, `local-assets/`), `.env`, or `.cutlass/`.
+One boundary matters: a crate in `software/` never links an operating-system
+SDK. Anything that calls the OS lives in `native/`.
+
+## Rules
+
+The codebase rules live in [`.cursor/rules/`](.cursor/rules/). Cursor loads
+them automatically. For everyone else they are plain Markdown.
+
+- `overview.mdc` — what Cutlass is, and the media policy.
+- `architecture.mdc` — crate layout, boundaries, and dependency direction.
+- `rust.mdc` — errors, panics, unsafe, API shape, and comments.
+- `software-codecs.mdc` — untrusted input, following the spec, exact output.
+- `native-codecs.mdc` — OS gates, FFI safety, capability checks, zero-copy frames.
+- `testing.mdc` — tests, media fixtures, fuzzing, and benchmarks.
+- `dependencies.mdc` — versions, licenses, and banned crates.
+- `perf.mdc` — performance on hot paths.
+- `docs.mdc` and `commits.mdc` — writing docs, commits, and PRs.
+
+Tools enforce the mechanical parts:
+
+- The lints in the root `Cargo.toml` and `clippy.toml`. For example: no
+  `unwrap()` outside tests, no `#[allow]` without a reason, and a `// SAFETY:`
+  comment on every `unsafe` block.
+- `deny.toml`, which allows only permissive licenses and bans the FFmpeg crates.
+- CI, which runs clippy on Linux, macOS, iOS, Windows, and Android. It also
+  builds the software codecs for `wasm32-unknown-unknown` to prove they use no
+  OS APIs.
 
 ## Commits
 
@@ -147,6 +138,8 @@ one giant change.
   trade-offs, and deliberate gaps.
 - Use an author identity that matches your GitHub account so your contributions
   are attributed correctly.
+- Don't commit build output (`/target`, `/dist`), media scratch, `.env`, or
+  large media files.
 
 ## Submitting a Pull Request
 
@@ -157,18 +150,14 @@ one giant change.
    ```bash
    cargo fmt --all
    cargo clippy --workspace --all-targets -- -D warnings
-   cargo build --workspace --all-targets
    cargo test --workspace
+   cargo deny check
    ```
 
-   CI enforces clippy with `-D warnings`, a workspace build, and the test
-   suite. Running `cargo fmt` keeps formatting consistent.
-4. Add or update tests. Engine and model changes should cover invariants and
-   behavior; for undoable edits, test both the forward edit and its inverse.
-   Run a single crate's tests with `cargo test -p <crate>` and benchmarks with
-   `cargo bench -p cutlass-engine --bench preview` (or `--bench export`).
-5. Update docs (crate `README.md`, `docs/`, the icon registry) when behavior or
-   structure changes.
+   Install `cargo-deny` once with `cargo install cargo-deny --locked`.
+4. Add or update tests as described in `.cursor/rules/testing.mdc`. Run a
+   single crate's tests with `cargo test -p <crate>`.
+5. Update `docs/` when behavior or structure changes.
 6. Open the PR with a clear description of what changed and why, and link any
    related issue. Keep PRs focused; unrelated drive-by changes should land
    separately.

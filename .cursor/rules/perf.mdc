@@ -1,5 +1,5 @@
 ---
-description: Performance mindset—algorithms, asymptotics, profiling, hot paths for editor/media/GPU work
+description: Performance mindset - algorithms, asymptotics, profiling, hot paths for editor, media, and GPU work
 alwaysApply: true
 ---
 
@@ -20,10 +20,8 @@ Cutlass is interactive (timeline scrubbing, preview, export). **Performance is a
 ## Measurement
 
 - **Profile or benchmark** before rewriting hot code (CPU flamegraphs, allocation counts, GPU timings where relevant). Use results to pick one change at a time and verify wins.
-- After changes, **guard regressions** where practical (benchmarks, coarse timing assertions in CI only when stable).
+- After changes, **guard regressions** with benchmarks in `benches/`. Timing never goes in test asserts.
 
 ## Media, UI, and GPU
 
-- Treat **I/O, decode, and GPU submission** as expensive: batch work, avoid redundant uploads/decodes, and keep UI-thread work bounded (defer heavy work; prefer incremental updates where Slint/engine architecture allows).---
-alwaysApply: true
----
+- Treat **I/O, decode, and GPU submission** as expensive: batch work, avoid redundant uploads/decodes, and keep UI-thread work bounded (defer heavy work; prefer incremental updates where Slint/engine architecture allows).

@@ -1,0 +1,23 @@
+---
+description: Commit and pull request rules. Read before committing, opening a PR, or splitting work into PRs.
+alwaysApply: false
+---
+
+# Commits and PRs
+
+- One logical change per commit. Every commit builds and passes its tests.
+- The subject is imperative, says what changed and why it matters, and ends with
+  a period. `Add VideoToolbox H.264 decode.`, not `wip` or `update files`.
+- The body explains intent, trade-offs, and what is deliberately left out.
+- Before pushing, run what CI runs:
+
+  ```bash
+  cargo fmt --all
+  cargo clippy --workspace --all-targets -- -D warnings
+  cargo test --workspace
+  cargo deny check
+  ```
+
+- Don't commit build output, media scratch, `.env`, or large media. See
+  `.gitignore` and the fixture rules in `testing.mdc`.
+- Keep PRs focused. Unrelated cleanup goes in its own PR.

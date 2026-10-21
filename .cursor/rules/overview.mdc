@@ -1,27 +1,39 @@
 ---
-description: Cutlass vision, stack, scope, AI agent architecture, Slint/Rust shared types
+description: What Cutlass is, the stack, and the media policy every change follows
 alwaysApply: true
 ---
 
 # Cutlass
 
-Open-source **AI-first, prompt-to-edit** video editing (CapCut-inspired): users describe edits; an agent turns that into executable editor commands.
+Open-source, AI-first video editor, inspired by CapCut. Users describe an edit,
+an agent turns it into structured commands, and Rust applies those commands to
+the project. Edits are deterministic and undoable.
+
+Cutlass is being rebuilt from scratch. Codecs come first.
 
 ## Stack
 
-- **Slint**: UI layers, timelines, layout, declarative UX.
-- **WGPU**: GPU work (preview, compositing/effects/export paths driven from Rust as the engine grows).
+- Rust everywhere. One engine for desktop (macOS, Windows, Linux) and mobile
+  (iOS, Android).
+- Slint for the desktop UI. wgpu for preview, compositing, and export.
 
-## Scope
+## Media policy
 
-Ship a **small but real** editor: cut, trim, and other **basic timeline editing**. On top sits an **AI agent** that emits **structured commands**; Rust **executes** those commands against project/timeline state (deterministic edits, auditable undo-friendly actions).
+- No FFmpeg, GStreamer, or C codec libraries in the build. `deny.toml` bans the
+  FFmpeg crates.
+- Decode and encode with the OS codec first (`crates/codecs/native/`). Use the
+  Rust codec (`crates/codecs/software/`) when the device has none.
+- Export H.264 and AAC everywhere. HEVC only on a hardware encoder, otherwise
+  H.264. ProRes encode on Apple silicon only.
+- `docs/codecs.md` is the source of truth for codecs, platforms, and export.
+  Change it before adding or dropping a codec.
+- `docs/project.md` is the source of truth for the project, the timeline, a
+  track, and a segment. Change it before adding a field.
 
-## Planned: Python bindings (side feature)
+## Planned: Python bindings
 
-A **MoviePy-style Python library** so the engine can be scripted from Python. This is a **side feature** — the editor, AI agent, and all core stay pure Rust; Python only wraps the existing `Engine`.
-
-- **Shape**: separate optional crate `cutlass-py` (`crate-type = ["cdylib"]`, PyO3 + `maturin`), depending on `cutlass-engine`/`-compositor`/`-models`. Kept off the default workspace build and shipped to PyPI on its own.
-- **API**: thin, Pythonic wrapper over `Engine` (`add_clip`, `split`, `export`, `get_frame`) — do **not** expose the raw `EditCommand` enum to Python.
-- **Prerequisite (do first, in Rust)**: a **timeline → video file exporter**. The pieces exist but aren't joined — `composite()` → `RgbaImage` (`cutlass-compositor`) and the FFmpeg H.264 encoder (`cutlass-encoder`, currently only transcodes an input file into a proxy). Need a "composite every frame `0..duration` → mux to mp4" path, landed in Rust so the future Rust export reuses it.
-- **`get_frame(t) -> numpy`**: easy given `RgbaImage` is already `width/height/Vec<u8>`.
-- **Gap to close**: `CompositeLayer` only handles `Frame`/`Solid` today; text/shape/adjustment generators aren't composited yet, so they'd be dropped on export until filled in.
+A MoviePy-style Python package is a side feature. It is a separate crate,
+`cutlass-py` (PyO3 and maturin), kept out of the default workspace build. It
+wraps the engine with a small Pythonic API (`add_clip`, `split`, `export`,
+`get_frame`) and never exposes raw command enums. It needs the Rust exporter
+first.

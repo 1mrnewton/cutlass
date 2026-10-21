@@ -1,6 +1,7 @@
 /target
 /dist
 local-assets/
+local-files/
 .env
 .DS_Store
 frames/

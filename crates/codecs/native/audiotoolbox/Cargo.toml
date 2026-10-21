@@ -1,0 +1,12 @@
+[package]
+name = "cutlass-audiotoolbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "AudioToolbox audio decode and encode for macOS and iOS."
+
+[lints]
+workspace = true

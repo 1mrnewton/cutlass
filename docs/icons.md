@@ -1,158 +1,74 @@
-# Icon registry
+# Icons
 
-The single place that tracks every icon the UI wants. The editor is
-CapCut-shaped and icon-heavy, but a lot of controls still ship a **text or
-single-character placeholder** (`"Split"`, `"B"`, `"✕"`, `"^"`, …) where a
-real glyph belongs. This file is the to-do list that turns those into art.
+UI icons are the free Hugeicons set: `@hugeicons/react` and `@hugeicons/core-free-icons`. Do not install a `@hugeicons-pro` package.
 
-## Workflow
+Add an icon by importing it in `src/editor/icons.tsx` and putting it on the `icons` map. Render it with `Icon`. The blade in that file is the only custom mark.
 
-When you build UI and reach for an icon that doesn't exist yet, **don't
-block on it**:
+| Name | Free icon | Where |
+| --- | --- | --- |
+| media | `Image01Icon` | Library rail |
+| audio | `AudioWave01Icon` | Library rail, audio tracks |
+| text | `TextIcon` | Library rail, text tracks |
+| stickers | `StickerIcon` | Library rail, sticker tracks |
+| effects | `SparklesIcon` | Library rail, effect tracks |
+| transitions | `TransitionLeftIcon` | Library rail |
+| filters | `FilterIcon` | Library rail, filter tracks |
+| folder | `Folder01Icon` | Project bin folders |
+| adjustments | `SlidersHorizontalIcon` | Library rail, adjust tracks |
+| templates | `LayoutTemplateIcon` | Library rail |
+| video | `Video01Icon` | Video tracks |
+| textVideo | `ImageToVideoIcon` | Text-to-video tracks |
+| composition | `LayerIcon` | Composition tracks |
+| plugin | `MagicWand01Icon` | Plugin-effect tracks |
+| ad | `CubeIcon` | Ad tracks |
+| mixed | `BlendIcon` | Mixed tracks |
+| play | `PlayIcon` | Transport |
+| plus | `PlusSignIcon` | Library card, add to the timeline |
+| pause | `PauseIcon` | Transport |
+| camera | `Camera01Icon` | Transport, still frame |
+| chevron | `ArrowRight01Icon` | Clip menu submenu, inspector sections |
+| chevronLeft | `ArrowLeft01Icon` | Inspector keyframe step |
+| alignLeft | `AlignLeftIcon` | Video inspector |
+| alignCenter | `AlignHorizontalCenterIcon` | Video inspector |
+| alignRight | `AlignRightIcon` | Video inspector |
+| alignTop | `AlignTopIcon` | Video inspector |
+| alignMiddle | `AlignVerticalCenterIcon` | Video inspector |
+| alignBottom | `AlignBottomIcon` | Video inspector |
+| keyframe | `KeyframeIcon` | Video inspector |
+| reset | `RefreshIcon` | Video inspector |
+| rotate | `RotateClockwiseIcon` | Video inspector, timeline toolbar |
+| search | `Search01Icon` | Animation search |
+| star | `StarIcon` | Text to speech, favorite a voice |
+| bold | `TextBoldIcon` | Text inspector |
+| italic | `TextItalicIcon` | Text inspector |
+| underline | `TextUnderlineIcon` | Text inspector |
+| textLeft | `TextAlignLeftIcon` | Text inspector |
+| textCenter | `TextAlignCenterIcon` | Text inspector |
+| textRight | `TextAlignRightIcon` | Text inspector |
+| justifyLeft | `TextAlignJustifyLeftIcon` | Text inspector |
+| justifyCenter | `TextAlignJustifyCenterIcon` | Text inspector |
+| justifyRight | `TextAlignJustifyRightIcon` | Text inspector |
+| unavailable | `UnavailableIcon` | Animation none |
+| undo | `Undo03Icon` | Timeline toolbar |
+| redo | `Redo03Icon` | Timeline toolbar |
+| select | `Cursor02Icon` | Timeline toolbar |
+| split | `SquareSplitHorizontalIcon` | Timeline toolbar |
+| delete | `Delete02Icon` | Timeline toolbar |
+| freeze | `SnowflakeIcon` | Timeline toolbar |
+| reverse | `RewindIcon` | Timeline toolbar |
+| mirror | `FlipHorizontalIcon` | Timeline toolbar |
+| crop | `CropIcon` | Timeline toolbar |
+| transcribe | `SpeechToTextIcon` | Timeline toolbar |
+| splitScenes | `ScissorRectangleIcon` | Timeline toolbar, split scenes |
+| snap | `AlignSelectionIcon` | Timeline toolbar |
+| magnet | `MagnetIcon` | Timeline toolbar, main-track magnet |
+| linkage | `Link01Icon` | Timeline toolbar |
+| marker | `Flag01Icon` | Timeline toolbar |
+| beat | `MusicNote01Icon` | Timeline toolbar |
+| zoomIn | `ZoomInAreaIcon` | Timeline toolbar |
+| zoomOut | `ZoomOutAreaIcon` | Timeline toolbar |
+| zoomFit | `FitToScreenIcon` | Timeline toolbar, zoom to fit |
+| guides | `RulerIcon` | Timeline toolbar, show or hide reference lines |
+| lock | `SquareLock01Icon` | Timeline toolbar and track labels |
 
-1. Ship the control now with a short text/char placeholder, matching the
-   existing pattern for that widget (`ToolButton { label: "Split" }`,
-   `HeadToggle { label: "L" }`, a `CutlassText { text: "✕" }`, …).
-2. **Register it here** under the right section, newest first, in the
-   registry format below.
-3. Later, someone fetches the SVG, drops it in the icon folder, and swaps
-   the placeholder for an `Image` — then flips the entry to `[x]`.
-
-This keeps features moving while leaving a precise, fetchable shopping list
-behind. The same loop is codified for the agent in
-`.cursor/rules/icons.mdc`.
-
-### Registry format
-
-```
-- [ ] `lucide-name` — placeholder `"X"` — `path/to/file.slint` — what it does.
-```
-
-- `[ ]` = needed (placeholder live in the UI) · `[x]` = fetched + wired in.
-- `lucide-name` is the intended icon (see *Source* below). If unsure, give
-  the closest name and a note.
-- Always include the **placeholder string** and the **file** so it's
-  trivial to find and replace.
-
-## Where icons live
-
-All UI icons live under the **single** tracked root
-`assets/icon/` (transport in `icon/`, library glyphs in
-`icon/library/`). Reference them from Slint with `@image-url` paths
-relative to each `.slint` file (see `app.slint` and panel files).
-Media scratch files for local dev and tests live in gitignored
-`local-assets/assets/` (`frames/`, `proxy/` stay ignored too). The dock
-icon is also loaded from `assets/icon/` via `include_bytes!` in
-`src/main.rs`.
-
-Loaded via `@image-url(...)` relative to the `.slint` file, then tinted with
-`colorize:` so one SVG works across themes.
-
-## Source
-
-Primary: **[Lucide](https://lucide.dev)** (MIT, single-stroke, matches the
-existing line look — keep the 2px default stroke). Fallback for the few it
-lacks cleanly (`letter-spacing`, `line-height`): **[Tabler](https://tabler.io/icons)** (MIT).
-
-## Already shipped
-
-`play`, `pause`, `fullscreen` (preview transport) · library tabs/sections
-`media`, `audio`, `text`, `stickers`, `effects`, `transitions`, `stock`,
-`ai`, `sfx`, `filters`, `adjustment` · logo `cutlass.png` /
-`cutlass-in-app.png`.
-
----
-
-## Registry
-
-### Window controls — `shell/title-bar.slint`
-
-- [ ] `minus` — placeholder `"─"` — `shell/title-bar.slint` — minimize.
-- [ ] `square` — placeholder `"□"` — `shell/title-bar.slint` — maximize.
-- [ ] `copy` — placeholder `"❐"` — `shell/title-bar.slint` — restore (when maximized).
-- [ ] `x` — placeholder `"✕"` — `shell/title-bar.slint` — close.
-- [ ] `sparkles` — placeholder `"Assistant"` — `shell/title-bar.slint` — AI assistant dock toggle.
-- [ ] `upload` — placeholder `"Export"` — `shell/title-bar.slint` — export action (AccentButton).
-- [ ] (logo) — placeholder `"C"` — `shell/title-bar.slint` — brand mark; use the existing logo, not a letter.
-
-### Start screen — `launch.slint`
-
-- [ ] `plus` — placeholder `"+"` — `launch.slint` — New project tile mark.
-- [ ] `folder-open` — placeholder (drawn folder silhouette) — `launch.slint` — Open project tile mark.
-- [ ] `clapperboard` / `film` — placeholder `"▶"` — `launch.slint` — recent-project thumb chip.
-- [ ] window controls — placeholders `"─" "□" "❐" "✕"` — `launch.slint` — frameless min/max/restore/close (mirrors `shell/title-bar.slint`).
-
-### Timeline toolbar — `panels/timeline/toolbar.slint`
-
-- [ ] `undo-2` — placeholder `"Undo"` — `panels/timeline/toolbar.slint`.
-- [ ] `redo-2` — placeholder `"Redo"` — `panels/timeline/toolbar.slint`.
-- [ ] `scissors` — placeholder `"Split"` — `panels/timeline/toolbar.slint` — split at playhead.
-- [ ] `flag` — placeholder `"Marker"` — `panels/timeline/toolbar.slint` — add marker.
-- [ ] `trash-2` — placeholder `"Delete"` — `panels/timeline/toolbar.slint`.
-- [ ] `repeat` — placeholder `"Loop"` — `panels/timeline/toolbar.slint`.
-- [ ] `magnet` — placeholder `"Magnet"` — `panels/timeline/toolbar.slint` — main-track gapless magnet.
-- [ ] `magnet` (variant — must read different from Magnet) — placeholder `"Snap"` — `panels/timeline/toolbar.slint` — auto-snap toggle.
-- [ ] `link` — placeholder `"Link"` — `panels/timeline/toolbar.slint`.
-- [ ] `unlink` — placeholder `"Unlink"` — `panels/timeline/toolbar.slint`.
-- [ ] `scan` — placeholder `"Fit"` — `panels/timeline/toolbar.slint` — zoom to fit.
-- [ ] `zoom-out` — placeholder `"−"` — `panels/timeline/toolbar.slint`.
-- [ ] `zoom-in` — placeholder `"+"` — `panels/timeline/toolbar.slint`.
-
-### Track headers — `panels/timeline/track-head.slint`
-
-- [ ] `eye` / `eye-off` — placeholder `"V"` — `panels/timeline/track-head.slint` — visibility (visual lanes).
-- [ ] `volume-2` / `volume-x` — placeholder `"M"` — `panels/timeline/track-head.slint` — mute (audio lanes).
-- [ ] `mic` — placeholder `"V"` — `panels/timeline/track-head.slint` — voice / duck source tag (audio lanes).
-- [ ] `lock` / `lock-open` — placeholder `"L"` — `panels/timeline/track-head.slint` — lock lane.
-
-### Text inspector — `panels/inspector/text-inspector.slint`
-
-- [ ] `bold` — placeholder `"B"` — text bold.
-- [ ] `underline` — placeholder `"U"` — text underline.
-- [ ] `italic` — placeholder `"I"` — text italic.
-- [ ] `case-upper` — placeholder `"TT"` — uppercase.
-- [ ] `case-lower` — placeholder `"tt"` — lowercase.
-- [ ] `case-sensitive` — placeholder `"Tt"` — title case.
-- [ ] `align-left` — placeholder `"|<"` — horizontal align left.
-- [ ] `align-center` — placeholder `"-"` — horizontal align center.
-- [ ] `align-right` — placeholder `">|"` — horizontal align right.
-- [ ] `vertical-align-top` — placeholder `"T"` — vertical align top.
-- [ ] `vertical-align-middle` — placeholder `"M"` — vertical align middle.
-- [ ] `vertical-align-bottom` — placeholder `"B"` — vertical align bottom.
-- [ ] `wrap-text` — placeholder `"On"/"Off"` — wrap toggle.
-- [ ] `letter-spacing` (Tabler) — placeholder `"C"` — letter spacing prefix.
-- [ ] `line-height` (Tabler) — placeholder `"L"` — line spacing prefix.
-- [ ] keyframe in/out icons — placeholder `"|<" "+" ">|" "T" "B"` — disabled animation row (lower priority).
-
-### Inspector (general)
-
-- [ ] `chevron-up` / `chevron-down` — placeholder `"^"` — section collapse caret (`inspector/inspector-widgets.slint`, `inspector/transform-inspector.slint`).
-- [ ] `spline` — placeholder `"~"` — keyframe easing trigger (`inspector/keyframe-control.slint`).
-- [ ] `scan` + `expand` — placeholder `"Fit"` / `"Fill"` — transform fit/fill (`inspector/transform-inspector.slint`).
-- [ ] `trash-2` — placeholder `"Remove"` — remove effect (`inspector/effects-inspector.slint`).
-- [ ] `flip-horizontal` — placeholder `"Flip H"` — crop mirror (`inspector/crop-inspector.slint`).
-- [ ] `flip-vertical` — placeholder `"Flip V"` — crop mirror (`inspector/crop-inspector.slint`).
-
-### Dropdowns & pickers
-
-- [ ] `chevron-down` — placeholder `"v"` — dropdown chevron (`components/dropdown.slint`).
-- [ ] `chevron-down` — placeholder `"v"` — color-swatch chevron (`components/color-swatch.slint`).
-
-### Library & tiles
-
-- [ ] `plus` / `folder-plus` — placeholder `"+  Import"` — import button (`panels/library/library.slint`).
-- [ ] `wand-2` / `sparkles` — placeholder `"fx"` — effect/transition tile glyph (`panels/library/tiles.slint`).
-- [ ] `image` — placeholder `"IMG"` — still-image badge (`panels/library/tiles.slint`).
-- [ ] `alert-triangle` / `unlink` — placeholder `"Missing"` — missing-media badge (`panels/library/tiles.slint`).
-
-### Misc
-
-- [ ] `x` — placeholder `"×"` — transition remove (`panels/timeline/transition-pill.slint`).
-- [ ] `check` — placeholder `"✓"` — agent dry-run checkbox (`panels/agent/agent.slint`).
-- [x] `send` — `assets/icon/chat/send.svg` — agent submit (`panels/agent/agent.slint`).
-- [x] `circle-stop` — `assets/icon/chat/stop.svg` — agent cancel (`panels/agent/agent.slint`).
-
-### Fine as text (no icon needed)
-
-Timecode `/` separators, the zoom `%` readout, and word buttons in dialogs
-(Browse… / Cancel / Export / Done / OK / Locate… / New project / etc.).
+Stroke weight is `1.5`. Color is `currentColor`, so a button's text color paints the icon.

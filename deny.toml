@@ -1,0 +1,44 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+unused-allowed-license = "allow"
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    { name = "ffmpeg-next", reason = "FFmpeg is not part of the build. See docs/codecs.md." },
+    { name = "ffmpeg-sys-next", reason = "FFmpeg is not part of the build. See docs/codecs.md." },
+    { name = "ffmpeg-sys", reason = "FFmpeg is not part of the build. See docs/codecs.md." },
+    { name = "rsmpeg", reason = "FFmpeg is not part of the build. See docs/codecs.md." },
+    { name = "rusty_ffmpeg", reason = "FFmpeg is not part of the build. See docs/codecs.md." },
+    { name = "ac-ffmpeg", reason = "FFmpeg is not part of the build. See docs/codecs.md." },
+    { name = "gstreamer", reason = "Codecs come from the OS or from crates/codecs/software." },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

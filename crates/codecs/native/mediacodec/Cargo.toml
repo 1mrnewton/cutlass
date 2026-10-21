@@ -1,0 +1,12 @@
+[package]
+name = "cutlass-mediacodec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "MediaCodec video and audio decode and encode for Android."
+
+[lints]
+workspace = true

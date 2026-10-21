@@ -134,6 +134,10 @@ pub(crate) fn lane_memory(ui: &egui::Ui) -> Lanes {
     ui.data(|data| data.get_temp(lane_id())).unwrap_or_default()
 }
 
+pub(crate) fn segment_locked(ui: &egui::Ui, project: &Project, id: SegmentId) -> bool {
+    segment_lane_locked(project, &lane_memory(ui), id)
+}
+
 pub(crate) fn hidden_tracks(ui: &egui::Ui) -> Vec<TrackId> {
     lane_memory(ui)
         .rows
@@ -256,6 +260,7 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::RemoveSegment(segment)
         | Command::Trim { segment, .. }
         | Command::SetSpeed { segment, .. } => blocks_edit(project, lanes, *segment),
+        Command::SetTransform { segment, .. } => segment_lane_locked(project, lanes, *segment),
         _ => false,
     }
 }

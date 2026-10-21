@@ -1,5 +1,6 @@
 //! The preview frame and the transport. The frame shows the project canvas.
-//! A decoded picture is not drawn yet. `docs/preview.md`.
+//! One selected layer can be moved, scaled, and rotated. A decoded picture is
+//! not drawn yet. `docs/preview.md`.
 
 use eframe::egui::{
     self, Align2, Color32, FontFamily, FontId, Pos2, Rect, Sense, Stroke, Vec2, pos2, vec2,
@@ -14,7 +15,12 @@ use crate::timeline::file_name;
 
 const TRANSPORT: f32 = 52.0;
 
-pub fn show(ui: &mut egui::Ui, project: &Project, playhead_us: i64, selected: &mut Vec<SegmentId>) {
+pub fn show(
+    ui: &mut egui::Ui,
+    project: &Project,
+    playhead_us: i64,
+    selected: &mut Vec<SegmentId>,
+) -> Vec<cutlass_project::Command> {
     crate::tip::region(
         ui,
         crate::words::of(ui, crate::words::Phrase::RegionPreview),
@@ -26,6 +32,7 @@ pub fn show(ui: &mut egui::Ui, project: &Project, playhead_us: i64, selected: &m
         full.min + vec2(16.0, 16.0),
         pos2(full.right() - 16.0, transport.top() - 8.0),
     );
+    let mut commands = Vec::new();
     if frame.height() > 0.0 && frame.width() > 0.0 {
         let hidden = crate::timeline::hidden_tracks(ui);
         let plate = fitted_canvas(
@@ -33,11 +40,52 @@ pub fn show(ui: &mut egui::Ui, project: &Project, playhead_us: i64, selected: &m
             project.settings().width(),
             project.settings().height(),
         );
+        let canvas = ui.interact(
+            frame,
+            ui.scope_id().with("preview-canvas"),
+            Sense::click_and_drag(),
+        );
+        let drag = plate.map(|plate| {
+            gesture(
+                ui,
+                project,
+                &Canvas {
+                    playhead_us,
+                    frame,
+                    plate,
+                },
+                &canvas,
+                selected,
+                &mut commands,
+            )
+        });
+        let drag = drag.flatten();
         if let Some(plate) = plate {
             let (red, green, blue) = project.settings().background().channels();
             ui.painter()
                 .rect_filled(plate, 0.0, Color32::from_rgb(red, green, blue));
-            paint_selected(ui, project, playhead_us, &hidden, plate, selected);
+            paint_selected(
+                ui,
+                project,
+                playhead_us,
+                &hidden,
+                plate,
+                selected,
+                drag.as_ref(),
+            );
+            paint_guides(ui, plate, drag.as_ref());
+            paint_handles(
+                ui,
+                project,
+                &Canvas {
+                    playhead_us,
+                    frame,
+                    plate,
+                },
+                &hidden,
+                selected,
+                drag.as_ref(),
+            );
         }
         let rate = project.settings().rate();
         let time = ruler::timecode(playhead_us, rate);
@@ -61,7 +109,6 @@ pub fn show(ui: &mut egui::Ui, project: &Project, playhead_us: i64, selected: &m
             ui.scope_id().with("preview-label"),
             &label,
         );
-        let canvas = ui.interact(frame, ui.scope_id().with("preview-canvas"), Sense::click());
         let top = plate.and_then(|plate| top_layer(project, playhead_us, &hidden, plate));
         canvas.widget_info(|| {
             egui::WidgetInfo::selected(
@@ -71,19 +118,9 @@ pub fn show(ui: &mut egui::Ui, project: &Project, playhead_us: i64, selected: &m
                 &label,
             )
         });
-        if canvas.clicked()
-            && let Some(plate) = plate
-            && let Some(point) = canvas.interact_pointer_pos()
-        {
-            let shift = ui.input(|input| input.modifiers.shift);
-            pick(
-                selected,
-                layer_at(project, playhead_us, &hidden, plate, point),
-                shift,
-            );
-        }
     }
     paint_transport(ui, transport, project, playhead_us);
+    commands
 }
 
 fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us: i64) {
@@ -173,10 +210,47 @@ fn fitted_canvas(frame: Rect, width: u32, height: u32) -> Option<Rect> {
 }
 
 /// A picture on the canvas. `rotation` is degrees, clockwise, because y points down.
+#[derive(Clone, Copy)]
 struct LayerBox {
     center: Pos2,
     size: Vec2,
     rotation: f32,
+}
+
+const GUIDE_PX: f32 = 6.0;
+const HANDLE_PX: f32 = 6.0;
+const ROTATE_GAP: f32 = 20.0;
+const MIN_SCALE: f32 = 0.01;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Grab {
+    Move,
+    Scale { x: i8, y: i8 },
+    Rotate,
+}
+
+/// The placement under the pointer, written when the pointer goes up.
+#[derive(Clone, Copy)]
+struct Drag {
+    segment: SegmentId,
+    grab: Grab,
+    position: (f64, f64),
+    scale: (f64, f64),
+    rotation: f64,
+    opacity: f64,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    origin: Pos2,
+    start_position: (f64, f64),
+    start_rotation: f64,
+    base: Vec2,
+    start_box: LayerBox,
+    guide_x: bool,
+    guide_y: bool,
+}
+
+fn drag_id() -> egui::Id {
+    egui::Id::unique("preview-drag")
 }
 
 /// The fitted picture, scaled, then moved from the canvas center. `docs/project.md`.
@@ -244,19 +318,30 @@ fn picture_box(
     project: &Project,
     segment: &cutlass_project::Segment,
     plate: Rect,
+    drag: Option<&Drag>,
 ) -> Option<LayerBox> {
     if segment.channels() == Channels::Sound {
         return None;
     }
     let media = project.asset(segment.asset_id())?.visual_size()?;
     let transform = segment.transform();
+    let (position, scale, rotation) = drag
+        .filter(|drag| drag.segment == segment.id())
+        .map(|drag| (drag.position, drag.scale, drag.rotation))
+        .unwrap_or_else(|| {
+            (
+                transform.position(),
+                transform.scale(),
+                transform.rotation(),
+            )
+        });
     layer_box(
         plate,
         (project.settings().width(), project.settings().height()),
         media,
-        transform.position(),
-        transform.scale(),
-        transform.rotation(),
+        position,
+        scale,
+        rotation,
     )
 }
 
@@ -301,7 +386,7 @@ fn layers<'a>(
                 if skipped || !covers(segment, playhead_us) {
                     return None;
                 }
-                picture_box(project, segment, plate).map(|layer| (segment.id(), layer))
+                picture_box(project, segment, plate, None).map(|layer| (segment.id(), layer))
             })
         })
 }
@@ -331,6 +416,7 @@ fn paint_selected(
     hidden: &[TrackId],
     plate: Rect,
     selected: &[SegmentId],
+    drag: Option<&Drag>,
 ) {
     let stroke = Stroke::new(1.5, Color32::WHITE);
     for track in project.timeline().tracks() {
@@ -341,7 +427,7 @@ fn paint_selected(
             if !selected.contains(&segment.id()) || !covers(segment, playhead_us) {
                 continue;
             }
-            if let Some(layer) = picture_box(project, segment, plate) {
+            if let Some(layer) = picture_box(project, segment, plate, drag) {
                 paint_edge(ui.painter(), &layer, stroke);
             }
         }
@@ -369,6 +455,391 @@ fn paint_edge(painter: &egui::Painter, layer: &LayerBox, stroke: Stroke) {
     ];
     for index in 0..4 {
         painter.line_segment([points[index], points[(index + 1) % 4]], stroke);
+    }
+}
+
+struct Canvas {
+    playhead_us: i64,
+    frame: Rect,
+    plate: Rect,
+}
+
+fn gesture(
+    ui: &mut egui::Ui,
+    project: &Project,
+    canvas: &Canvas,
+    response: &egui::Response,
+    selected: &mut Vec<SegmentId>,
+    commands: &mut Vec<cutlass_project::Command>,
+) -> Option<Drag> {
+    let hidden = crate::timeline::hidden_tracks(ui);
+    let mut live = ui.data(|data| data.get_temp::<Drag>(drag_id()));
+    if response.drag_started()
+        && !ui.input(|input| input.modifiers.shift)
+        && let Some(origin) = ui.input(|input| input.pointer.press_origin())
+    {
+        match begin_drag(ui, project, canvas, &hidden, selected, origin) {
+            Begin::Drag(drag) => {
+                live = Some(drag);
+                ui.data_mut(|data| data.insert_temp(drag_id(), drag));
+            }
+            Begin::Locked => {
+                crate::timeline::show_note(
+                    ui,
+                    crate::words::of(ui, crate::words::Phrase::TrackIsLocked),
+                );
+            }
+            Begin::None => {}
+        }
+    }
+    if response.dragged()
+        && let Some(point) = response.interact_pointer_pos()
+        && let Some(drag) = live.as_mut()
+    {
+        follow(drag, canvas.plate, point);
+        ui.data_mut(|data| data.insert_temp(drag_id(), *drag));
+    }
+    if response.drag_stopped()
+        && let Some(drag) = live
+    {
+        if let Some(command) = finish(project, &drag) {
+            commands.push(command);
+        }
+        ui.data_mut(|data| data.remove::<Drag>(drag_id()));
+        return Some(drag);
+    }
+    if response.clicked()
+        && let Some(point) = response.interact_pointer_pos()
+    {
+        let on_handle =
+            chosen_layer(project, canvas, &hidden, selected, None).is_some_and(|(_, layer)| {
+                matches!(
+                    grab_at(&layer, canvas.frame, point),
+                    Some(Grab::Scale { .. } | Grab::Rotate)
+                )
+            });
+        if !on_handle {
+            let shift = ui.input(|input| input.modifiers.shift);
+            pick(
+                selected,
+                layer_at(project, canvas.playhead_us, &hidden, canvas.plate, point),
+                shift,
+            );
+        }
+    }
+    live
+}
+
+enum Begin {
+    Drag(Drag),
+    Locked,
+    None,
+}
+
+fn begin_drag(
+    ui: &egui::Ui,
+    project: &Project,
+    canvas: &Canvas,
+    hidden: &[TrackId],
+    selected: &[SegmentId],
+    origin: Pos2,
+) -> Begin {
+    let Some((id, layer)) = chosen_layer(project, canvas, hidden, selected, None) else {
+        return Begin::None;
+    };
+    let Some(grab) = grab_at(&layer, canvas.frame, origin) else {
+        return Begin::None;
+    };
+    if crate::timeline::segment_locked(ui, project, id) {
+        return Begin::Locked;
+    }
+    let Some(segment) = project.timeline().segment(id) else {
+        return Begin::None;
+    };
+    let Some(base) = unit_size(project, segment, canvas.plate) else {
+        return Begin::None;
+    };
+    let transform = segment.transform();
+    let (flip_horizontal, flip_vertical) = transform.flips();
+    Begin::Drag(Drag {
+        segment: id,
+        grab,
+        position: transform.position(),
+        scale: transform.scale(),
+        rotation: transform.rotation(),
+        opacity: transform.opacity(),
+        flip_horizontal,
+        flip_vertical,
+        origin,
+        start_position: transform.position(),
+        start_rotation: transform.rotation(),
+        base,
+        start_box: layer,
+        guide_x: false,
+        guide_y: false,
+    })
+}
+
+fn follow(drag: &mut Drag, plate: Rect, pointer: Pos2) {
+    match drag.grab {
+        Grab::Move => {
+            let (position, guide_x, guide_y) =
+                moved(drag.start_position, plate, drag.origin, pointer);
+            drag.position = position;
+            drag.guide_x = guide_x;
+            drag.guide_y = guide_y;
+        }
+        Grab::Scale { x, y } => {
+            if let Some((position, scale)) =
+                scaled(plate, &drag.start_box, drag.base, (x, y), pointer)
+            {
+                drag.position = position;
+                drag.scale = scale;
+            }
+        }
+        Grab::Rotate => {
+            drag.rotation = turned(
+                drag.start_rotation,
+                drag.start_box.center,
+                drag.origin,
+                pointer,
+            );
+        }
+    }
+}
+
+fn finish(project: &Project, drag: &Drag) -> Option<cutlass_project::Command> {
+    let current = project.timeline().segment(drag.segment)?.transform();
+    let next = cutlass_project::Transform::new(
+        drag.position,
+        drag.scale,
+        drag.rotation,
+        drag.opacity,
+        drag.flip_horizontal,
+        drag.flip_vertical,
+    )
+    .ok()?;
+    if next == current {
+        None
+    } else {
+        Some(cutlass_project::Command::SetTransform {
+            segment: drag.segment,
+            transform: next,
+        })
+    }
+}
+
+fn chosen_layer(
+    project: &Project,
+    canvas: &Canvas,
+    hidden: &[TrackId],
+    selected: &[SegmentId],
+    drag: Option<&Drag>,
+) -> Option<(SegmentId, LayerBox)> {
+    let [id] = *selected else {
+        return None;
+    };
+    for track in project.timeline().tracks() {
+        if hidden.contains(&track.id()) {
+            continue;
+        }
+        for segment in track.segments() {
+            if segment.id() != id || !covers(segment, canvas.playhead_us) {
+                continue;
+            }
+            return picture_box(project, segment, canvas.plate, drag).map(|layer| (id, layer));
+        }
+    }
+    None
+}
+
+fn unit_size(project: &Project, segment: &cutlass_project::Segment, plate: Rect) -> Option<Vec2> {
+    let media = project.asset(segment.asset_id())?.visual_size()?;
+    layer_box(
+        plate,
+        (project.settings().width(), project.settings().height()),
+        media,
+        (0.0, 0.0),
+        (1.0, 1.0),
+        0.0,
+    )
+    .map(|layer| layer.size)
+}
+
+/// Position after a move. An axis within [`GUIDE_PX`] of the canvas center snaps there.
+fn moved(start: (f64, f64), plate: Rect, from: Pos2, to: Pos2) -> ((f64, f64), bool, bool) {
+    if plate.width() <= 0.0 || plate.height() <= 0.0 {
+        return (start, false, false);
+    }
+    let x = start.0 + f64::from(to.x - from.x) / f64::from(plate.width());
+    let y = start.1 + f64::from(to.y - from.y) / f64::from(plate.height());
+    let guide_x = (x * f64::from(plate.width())).abs() <= f64::from(GUIDE_PX);
+    let guide_y = (y * f64::from(plate.height())).abs() <= f64::from(GUIDE_PX);
+    (
+        (if guide_x { 0.0 } else { x }, if guide_y { 0.0 } else { y }),
+        guide_x,
+        guide_y,
+    )
+}
+
+/// Scale from the opposite side. The pointer sets the moving edges. Scale stays positive.
+fn scaled(
+    plate: Rect,
+    layer: &LayerBox,
+    base: Vec2,
+    handle: (i8, i8),
+    pointer: Pos2,
+) -> Option<((f64, f64), (f64, f64))> {
+    if base.x <= 0.0 || base.y <= 0.0 || plate.width() <= 0.0 || plate.height() <= 0.0 {
+        return None;
+    }
+    let anchor = local_point(
+        layer,
+        -f32::from(handle.0) * layer.size.x / 2.0,
+        -f32::from(handle.1) * layer.size.y / 2.0,
+    );
+    let (sin, cos) = (-layer.rotation).to_radians().sin_cos();
+    let dx = pointer.x - anchor.x;
+    let dy = pointer.y - anchor.y;
+    let local_x = dx * cos - dy * sin;
+    let local_y = dx * sin + dy * cos;
+    let mut width = layer.size.x;
+    let mut height = layer.size.y;
+    if handle.0 != 0 {
+        width = local_x * f32::from(handle.0);
+    }
+    if handle.1 != 0 {
+        height = local_y * f32::from(handle.1);
+    }
+    width = width.max(base.x * MIN_SCALE);
+    height = height.max(base.y * MIN_SCALE);
+    let toward_x = f32::from(handle.0) * width / 2.0;
+    let toward_y = f32::from(handle.1) * height / 2.0;
+    let (sin, cos) = layer.rotation.to_radians().sin_cos();
+    let center = pos2(
+        anchor.x + toward_x * cos - toward_y * sin,
+        anchor.y + toward_x * sin + toward_y * cos,
+    );
+    Some((
+        (
+            f64::from((center.x - plate.center().x) / plate.width()),
+            f64::from((center.y - plate.center().y) / plate.height()),
+        ),
+        (f64::from(width / base.x), f64::from(height / base.y)),
+    ))
+}
+
+fn turned(start: f64, center: Pos2, from: Pos2, to: Pos2) -> f64 {
+    start + pointer_angle(center, to) - pointer_angle(center, from)
+}
+
+fn pointer_angle(center: Pos2, point: Pos2) -> f64 {
+    f64::from(point.y - center.y)
+        .atan2(f64::from(point.x - center.x))
+        .to_degrees()
+}
+
+fn local_point(layer: &LayerBox, x: f32, y: f32) -> Pos2 {
+    let (sin, cos) = layer.rotation.to_radians().sin_cos();
+    pos2(
+        layer.center.x + x * cos - y * sin,
+        layer.center.y + x * sin + y * cos,
+    )
+}
+
+fn rotate_point(layer: &LayerBox, frame: Rect) -> Pos2 {
+    let outside = local_point(layer, 0.0, -layer.size.y / 2.0 - ROTATE_GAP);
+    if frame.contains(outside) {
+        outside
+    } else {
+        local_point(layer, 0.0, -layer.size.y / 2.0 + ROTATE_GAP)
+    }
+}
+
+fn handle_points(layer: &LayerBox, frame: Rect) -> Vec<(Grab, Pos2)> {
+    let mut points = Vec::with_capacity(9);
+    for y in [-1_i8, 0, 1] {
+        for x in [-1_i8, 0, 1] {
+            if x == 0 && y == 0 {
+                continue;
+            }
+            points.push((
+                Grab::Scale { x, y },
+                local_point(
+                    layer,
+                    f32::from(x) * layer.size.x / 2.0,
+                    f32::from(y) * layer.size.y / 2.0,
+                ),
+            ));
+        }
+    }
+    points.push((Grab::Rotate, rotate_point(layer, frame)));
+    points
+}
+
+fn grab_at(layer: &LayerBox, frame: Rect, point: Pos2) -> Option<Grab> {
+    let mut best: Option<(f32, Grab)> = None;
+    for (grab, at) in handle_points(layer, frame) {
+        let distance = at.distance(point);
+        if distance <= HANDLE_PX && best.is_none_or(|(was, _)| distance < was) {
+            best = Some((distance, grab));
+        }
+    }
+    if let Some((_, grab)) = best {
+        return Some(grab);
+    }
+    layer_contains(layer, point).then_some(Grab::Move)
+}
+
+fn paint_guides(ui: &egui::Ui, plate: Rect, drag: Option<&Drag>) {
+    let Some(drag) = drag else {
+        return;
+    };
+    let stroke = Stroke::new(1.0, theme::EXPORT);
+    if drag.guide_x {
+        ui.painter().line_segment(
+            [
+                pos2(plate.center().x, plate.top()),
+                pos2(plate.center().x, plate.bottom()),
+            ],
+            stroke,
+        );
+    }
+    if drag.guide_y {
+        ui.painter().line_segment(
+            [
+                pos2(plate.left(), plate.center().y),
+                pos2(plate.right(), plate.center().y),
+            ],
+            stroke,
+        );
+    }
+}
+
+fn paint_handles(
+    ui: &egui::Ui,
+    project: &Project,
+    canvas: &Canvas,
+    hidden: &[TrackId],
+    selected: &[SegmentId],
+    drag: Option<&Drag>,
+) {
+    let Some((_, layer)) = chosen_layer(project, canvas, hidden, selected, drag) else {
+        return;
+    };
+    let rotate = rotate_point(&layer, canvas.frame);
+    let top = local_point(&layer, 0.0, -layer.size.y / 2.0);
+    ui.painter()
+        .line_segment([top, rotate], Stroke::new(1.0, Color32::WHITE));
+    ui.painter().circle_filled(rotate, 5.0, Color32::WHITE);
+    for (grab, at) in handle_points(&layer, canvas.frame) {
+        if matches!(grab, Grab::Scale { .. }) {
+            ui.painter().rect_filled(
+                Rect::from_center_size(at, Vec2::splat(7.0)),
+                0.0,
+                Color32::WHITE,
+            );
+        }
     }
 }
 
@@ -560,6 +1031,61 @@ mod tests {
     }
 
     #[test]
+    fn a_move_snaps_to_the_center_and_a_side_sets_the_scale() {
+        let plate = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(320.0, 180.0),
+        );
+        let (position, guide_x, guide_y) = super::moved(
+            (0.0, 0.0),
+            plate,
+            eframe::egui::pos2(160.0, 90.0),
+            eframe::egui::pos2(164.0, 90.0),
+        );
+        assert_eq!(position, (0.0, 0.0));
+        assert!(guide_x && guide_y);
+
+        let (position, guide_x, guide_y) = super::moved(
+            (0.0, 0.0),
+            plate,
+            eframe::egui::pos2(0.0, 90.0),
+            eframe::egui::pos2(40.0, 90.0),
+        );
+        assert!((position.0 - 40.0 / 320.0).abs() < 1.0e-6);
+        assert!(!guide_x && guide_y);
+
+        let layer = super::layer_box(
+            plate,
+            (1920, 1080),
+            (1920, 1080),
+            (0.0, 0.0),
+            (1.0, 1.0),
+            0.0,
+        )
+        .expect("layer");
+        let (position, scale) = super::scaled(
+            plate,
+            &layer,
+            layer.size,
+            (1, 0),
+            eframe::egui::pos2(340.0, 90.0),
+        )
+        .expect("scale");
+        assert!((scale.0 - 340.0 / 320.0).abs() < 1.0e-4);
+        assert!((scale.1 - 1.0).abs() < 1.0e-4);
+        assert!((position.0 - 10.0 / 320.0).abs() < 1.0e-4);
+        assert!(position.1.abs() < 1.0e-4);
+
+        let quarter = super::turned(
+            0.0,
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::pos2(0.0, -10.0),
+            eframe::egui::pos2(10.0, 0.0),
+        );
+        assert!((quarter - 90.0).abs() < 0.01);
+    }
+
+    #[test]
     fn a_click_selects_the_topmost_layer_and_a_miss_clears_it() {
         let ctx = eframe::egui::Context::default();
         ctx.enable_accesskit();
@@ -571,7 +1097,7 @@ mod tests {
         );
         let mut selected = Vec::new();
         let mut time = 0.0;
-        let tree = frame(&ctx, &cut, &mut selected, &mut time, screen, vec![]);
+        let (tree, _) = frame(&ctx, &cut, &mut selected, &mut time, screen, vec![]);
         let canvas = node_bounds(&tree, "v.mp4 · 00:00:00:00");
         let center = eframe::egui::pos2((canvas.0 + canvas.2) / 2.0, (canvas.1 + canvas.3) / 2.0);
         press(&ctx, &cut, &mut selected, &mut time, screen, center, false);
@@ -599,6 +1125,50 @@ mod tests {
             false,
         );
         assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn dragging_the_layer_writes_its_new_place() {
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, crate::words::Language::English);
+        let cut = placed();
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(400.0, 300.0),
+        );
+        let mut selected = Vec::new();
+        let mut time = 0.0;
+        let (tree, _) = frame(&ctx, &cut, &mut selected, &mut time, screen, vec![]);
+        let canvas = node_bounds(&tree, "v.mp4 · 00:00:00:00");
+        let center = eframe::egui::pos2((canvas.0 + canvas.2) / 2.0, (canvas.1 + canvas.3) / 2.0);
+        press(&ctx, &cut, &mut selected, &mut time, screen, center, false);
+        assert_eq!(selected.len(), 1);
+        let commands = pull(
+            &ctx,
+            &cut,
+            &mut selected,
+            &mut time,
+            screen,
+            center,
+            center + eframe::egui::vec2(40.0, 0.0),
+        );
+        let frame_rect = eframe::egui::Rect::from_min_max(
+            screen.min + eframe::egui::vec2(16.0, 16.0),
+            eframe::egui::pos2(screen.right() - 16.0, screen.bottom() - 52.0 - 8.0),
+        );
+        let plate =
+            super::fitted_canvas(frame_rect, cut.settings().width(), cut.settings().height())
+                .expect("plate");
+        match commands.as_slice() {
+            [Command::SetTransform { transform, .. }] => {
+                let (x, y) = transform.position();
+                assert!((x - f64::from(40.0 / plate.width())).abs() < 1.0e-3);
+                assert!(y.abs() < 1.0e-3);
+                assert_eq!(transform.scale(), (1.0, 1.0));
+            }
+            other => panic!("expected a transform, got {other:?}"),
+        }
     }
 
     #[test]
@@ -766,7 +1336,9 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |ui| super::show(ui, project, 1_500_000, &mut Vec::new()),
+                |ui| {
+                    super::show(ui, project, 1_500_000, &mut Vec::new());
+                },
             );
             let tree = output.platform_output.accesskit_update.take();
             output.textures_delta.clear();
@@ -906,8 +1478,12 @@ mod tests {
         time: &mut f64,
         screen: eframe::egui::Rect,
         events: Vec<eframe::egui::Event>,
-    ) -> eframe::egui::accesskit::TreeUpdate {
+    ) -> (
+        eframe::egui::accesskit::TreeUpdate,
+        Vec<cutlass_project::Command>,
+    ) {
         *time += 0.05;
+        let mut commands = Vec::new();
         let mut output = ctx.run_ui(
             eframe::egui::RawInput {
                 screen_rect: Some(screen),
@@ -915,11 +1491,63 @@ mod tests {
                 events,
                 ..Default::default()
             },
-            |ui| super::show(ui, cut, 0, selected),
+            |ui| {
+                commands.clone_from(&super::show(ui, cut, 0, selected));
+            },
         );
         let tree = output.platform_output.accesskit_update.take();
         output.textures_delta.clear();
-        tree.expect("the tree is built")
+        (tree.expect("the tree is built"), commands)
+    }
+
+    fn pull(
+        ctx: &eframe::egui::Context,
+        cut: &Project,
+        selected: &mut Vec<cutlass_project::SegmentId>,
+        time: &mut f64,
+        screen: eframe::egui::Rect,
+        from: eframe::egui::Pos2,
+        to: eframe::egui::Pos2,
+    ) -> Vec<cutlass_project::Command> {
+        let modifiers = eframe::egui::Modifiers::default();
+        frame(
+            ctx,
+            cut,
+            selected,
+            time,
+            screen,
+            vec![
+                eframe::egui::Event::PointerMoved(from),
+                eframe::egui::Event::PointerButton {
+                    pos: from,
+                    button: eframe::egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers,
+                },
+            ],
+        );
+        frame(
+            ctx,
+            cut,
+            selected,
+            time,
+            screen,
+            vec![eframe::egui::Event::PointerMoved(to)],
+        );
+        frame(
+            ctx,
+            cut,
+            selected,
+            time,
+            screen,
+            vec![eframe::egui::Event::PointerButton {
+                pos: to,
+                button: eframe::egui::PointerButton::Primary,
+                pressed: false,
+                modifiers,
+            }],
+        )
+        .1
     }
 
     fn press(

@@ -221,12 +221,17 @@ impl eframe::App for CutlassApp {
         egui::CentralPanel::default()
             .frame(theme::panel())
             .show(ui, |ui| {
-                preview::show(
+                let commands = preview::show(
                     ui,
                     &self.project,
                     self.playhead_us,
                     &mut self.selected_segments,
                 );
+                if !commands.is_empty()
+                    && let Err(error) = self.history.apply(&mut self.project, &commands)
+                {
+                    timeline::show_note(ui, timeline::apply_note(&error, words::active(ui)));
+                }
             });
         gaps::show(ui, body, &self.panes);
 

@@ -70,6 +70,15 @@ fn chosen(selected: &[SegmentId], id: SegmentId) -> bool {
     selected.contains(&id)
 }
 
+const BOX_SLOP: f32 = 4.0;
+
+#[derive(Clone)]
+struct BoxSelect {
+    origin: egui::Pos2,
+    additive: bool,
+    kept: Vec<SegmentId>,
+}
+
 /// A clip following the pointer. The move is written when the pointer goes up.
 pub struct ClipDrag {
     segment: SegmentId,
@@ -117,32 +126,70 @@ pub fn show(
         *trim = None;
     }
     let mut commands = Vec::new();
+    let mut box_rect = None;
     let pointer = ui.input(|input| input.pointer.interact_pos());
     if tracks.height() > 0.0 {
         let pressed = ui.input(|input| input.pointer.primary_pressed());
         let released = ui.input(|input| input.pointer.primary_released());
         let shift = ui.input(|input| input.modifiers.shift);
+        let box_id = ui.scope_id().with("box-select");
         if pressed && let Some(point) = pointer.filter(|point| tracks.contains(*point)) {
+            ui.data_mut(|data| data.remove::<BoxSelect>(box_id));
             if *split {
                 *drag = None;
                 *trim = None;
                 choose(selected, segment_at(project, tracks, point));
-            } else if shift {
+            } else if let Some(id) = shift.then(|| segment_at(project, tracks, point)).flatten() {
                 *drag = None;
                 *trim = None;
-                if let Some(id) = segment_at(project, tracks, point) {
-                    toggle_selected(selected, id);
-                }
-            } else if let Some(active) = trim_from(project, tracks, point) {
+                toggle_selected(selected, id);
+            } else if !shift && let Some(active) = trim_from(project, tracks, point) {
                 choose(selected, Some(active.segment));
                 *drag = None;
                 *trim = Some(active);
             } else {
                 *trim = None;
-                let hit = segment_at(project, tracks, point);
-                choose(selected, hit);
-                *drag = hit.and_then(|id| drag_from(project, id, point));
+                let hit = if shift {
+                    None
+                } else {
+                    segment_at(project, tracks, point)
+                };
+                if hit.is_none() {
+                    let kept = selected.clone();
+                    if !shift {
+                        selected.clear();
+                    }
+                    *drag = None;
+                    ui.data_mut(|data| {
+                        data.insert_temp(
+                            box_id,
+                            BoxSelect {
+                                origin: point,
+                                additive: shift,
+                                kept,
+                            },
+                        );
+                    });
+                } else {
+                    choose(selected, hit);
+                    *drag = hit.and_then(|id| drag_from(project, id, point));
+                }
             }
+        }
+        if let Some(boxing) = ui.data(|data| data.get_temp::<BoxSelect>(box_id))
+            && let Some(point) = pointer
+            && boxing.origin.distance(point) >= BOX_SLOP
+        {
+            let hits = clips_in(project, tracks, Rect::from_two_pos(boxing.origin, point));
+            *selected = if boxing.additive {
+                unite(&boxing.kept, hits)
+            } else {
+                hits
+            };
+            box_rect = Some(Rect::from_two_pos(boxing.origin, point));
+        }
+        if !ui.input(|input| input.pointer.primary_down()) {
+            ui.data_mut(|data| data.remove::<BoxSelect>(box_id));
         }
         if released {
             if *split {
@@ -227,6 +274,16 @@ pub fn show(
         }
     }
     paint_playhead(ui, ruler_rect, tracks, project, playhead);
+    if let Some(rect) = box_rect {
+        ui.painter()
+            .rect_filled(rect, 0.0, Color32::from_white_alpha(28));
+        ui.painter().rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0, Color32::WHITE),
+            egui::StrokeKind::Outside,
+        );
+    }
     commands
 }
 
@@ -287,6 +344,51 @@ fn split_command(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<C
         return None;
     }
     Some(Command::Split { segment: id, at })
+}
+
+fn clips_in(project: &Project, tracks: Rect, area: Rect) -> Vec<SegmentId> {
+    if tracks.height() <= 0.0 {
+        return Vec::new();
+    }
+    let pixel_size = ruler::opening_pixel_size(
+        (tracks.right() - lane_left(tracks)).max(0.0),
+        project.duration().value,
+    );
+    let width = (tracks.right() - lane_left(tracks)).max(0.0);
+    let mut hits = Vec::new();
+    for (track, lane) in project
+        .timeline()
+        .tracks()
+        .iter()
+        .zip(layout(project.timeline().tracks(), tracks))
+    {
+        let lane_rect =
+            Rect::from_min_size(pos2(lane_left(tracks), lane.top), vec2(width, lane.height));
+        for segment in track.segments() {
+            let range = segment.timeline();
+            let rect = clip_rect(
+                lane_rect,
+                lane.main,
+                range.start().value,
+                range.duration().value,
+                pixel_size,
+            );
+            if rect.intersects(area) {
+                hits.push(segment.id());
+            }
+        }
+    }
+    hits
+}
+
+fn unite(kept: &[SegmentId], hits: Vec<SegmentId>) -> Vec<SegmentId> {
+    let mut out = kept.to_vec();
+    for id in hits {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
 }
 
 struct ClipPaint<'a> {
@@ -1228,6 +1330,16 @@ mod tests {
             pixel_size,
         );
         assert!(super::split_command(&cut, tracks, rect.left_center()).is_none());
+        assert_eq!(super::clips_in(&cut, tracks, rect), vec![id]);
+        assert!(
+            super::clips_in(
+                &cut,
+                tracks,
+                Rect::from_min_size(pos2(0.0, 0.0), vec2(12.0, 12.0)),
+            )
+            .is_empty()
+        );
+        assert_eq!(super::unite(&[id], vec![id]), vec![id]);
         let command = super::split_command(&cut, tracks, rect.center()).expect("split");
         let Command::Split { segment, at } = command else {
             panic!("expected a split, got {command:?}");

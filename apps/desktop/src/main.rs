@@ -8,6 +8,7 @@ use cutlass_project::{AssetId, History, Project, ProjectId, SegmentId};
 
 mod chrome;
 mod export;
+mod gaps;
 mod icons;
 mod inspector;
 mod keys;
@@ -51,6 +52,7 @@ struct CutlassApp {
     split: bool,
     export: Option<export::Sheet>,
     language: words::Language,
+    panes: gaps::Panes,
 }
 
 impl CutlassApp {
@@ -70,6 +72,7 @@ impl CutlassApp {
             split: false,
             export: None,
             language: words::language_from_tag(&words::system_tag()),
+            panes: gaps::Panes::new(),
         }
     }
 
@@ -159,13 +162,12 @@ impl eframe::App for CutlassApp {
             ));
         }
 
-        let timeline_max =
-            (ui.available_height() - theme::TIMELINE_RESERVE).max(theme::TIMELINE_MIN);
+        let body = ui.available_rect_before_wrap();
+        gaps::drag(ui, &mut self.panes, body);
 
         egui::Panel::bottom("timeline")
-            .resizable(true)
-            .default_size(420.0)
-            .size_range(theme::TIMELINE_MIN..=timeline_max)
+            .resizable(false)
+            .exact_size(self.panes.timeline())
             .frame(theme::gap_above())
             .show_separator_line(false)
             .show(ui, |ui| {
@@ -186,9 +188,8 @@ impl eframe::App for CutlassApp {
             });
 
         egui::Panel::left("library")
-            .resizable(true)
-            .default_size(368.0)
-            .min_size(220.0)
+            .resizable(false)
+            .exact_size(self.panes.library())
             .frame(theme::gap_right())
             .show_separator_line(false)
             .show(ui, |ui| {
@@ -196,9 +197,8 @@ impl eframe::App for CutlassApp {
             });
 
         egui::Panel::right("inspector")
-            .resizable(true)
-            .default_size(300.0)
-            .min_size(240.0)
+            .resizable(false)
+            .exact_size(self.panes.inspector())
             .frame(theme::gap_left())
             .show_separator_line(false)
             .show(ui, |ui| {
@@ -214,6 +214,7 @@ impl eframe::App for CutlassApp {
             .show(ui, |ui| {
                 preview::show(ui, &self.project, self.playhead_us);
             });
+        gaps::show(ui, body, &self.panes);
 
         let span = self.project.duration();
         let label = export::duration_label(span.value, span.timescale.get());

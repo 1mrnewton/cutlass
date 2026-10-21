@@ -126,6 +126,9 @@ pub(crate) enum Phrase {
     Crop,
     Transcribe,
     SplitScenes,
+    ResizeLibrary,
+    ResizeInspector,
+    ResizeTimeline,
 }
 
 #[cfg(test)]
@@ -238,6 +241,9 @@ impl Phrase {
         Self::Crop,
         Self::Transcribe,
         Self::SplitScenes,
+        Self::ResizeLibrary,
+        Self::ResizeInspector,
+        Self::ResizeTimeline,
     ];
 }
 
@@ -349,6 +355,9 @@ const ENGLISH: &[&str] = &[
     "Crop",
     "Transcribe",
     "Split scenes",
+    "Resize library",
+    "Resize inspector",
+    "Resize timeline",
 ];
 
 const FRENCH: &[&str] = &[
@@ -459,6 +468,9 @@ const FRENCH: &[&str] = &[
     "Rogner",
     "Transcrire",
     "Couper les scènes",
+    "Redimensionner la bibliothèque",
+    "Redimensionner l'inspecteur",
+    "Redimensionner le montage",
 ];
 
 /// The word for `phrase` in `language`.
@@ -582,7 +594,11 @@ mod tests {
         assert_eq!(say(Language::English, Phrase::BurnIn), "Burn in");
         assert_eq!(say(Language::French, Phrase::BurnIn), "Incrusté");
         assert_eq!(say(Language::English, Phrase::SplitScenes), "Split scenes");
-        assert_eq!(Phrase::SplitScenes as usize, super::ENGLISH.len() - 1);
+        assert_eq!(
+            say(Language::English, Phrase::ResizeTimeline),
+            "Resize timeline"
+        );
+        assert_eq!(Phrase::ResizeTimeline as usize, super::ENGLISH.len() - 1);
         for phrase in Phrase::ALL {
             let english = say(Language::English, *phrase);
             let french = say(Language::French, *phrase);

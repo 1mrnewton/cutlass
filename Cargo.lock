@@ -70,6 +70,14 @@ name = "cutlass-mp3"
 version = "0.1.0"
 
 [[package]]
+name = "cutlass-mp4"
+version = "0.1.0"
+dependencies = [
+ "cutlass-core",
+ "thiserror",
+]
+
+[[package]]
 name = "cutlass-mpeg2"
 version = "0.1.0"
 

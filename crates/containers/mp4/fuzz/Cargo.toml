@@ -1,0 +1,19 @@
+[package]
+name = "cutlass-mp4-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+cutlass-mp4 = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false

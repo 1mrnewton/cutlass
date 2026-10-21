@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/codecs/native/*",
     "crates/codecs/software/*",
+    "crates/containers/*",
     "crates/core",
     "crates/project",
     "crates/testing/*",
@@ -17,6 +18,7 @@ repository = "https://github.com/1mrnewton/cutlass"
 
 [workspace.dependencies]
 cutlass-core = { path = "crates/core" }
+cutlass-mp4 = { path = "crates/containers/mp4" }
 cutlass-project = { path = "crates/project" }
 cutlass-test-fixtures = { path = "crates/testing/fixtures" }
 

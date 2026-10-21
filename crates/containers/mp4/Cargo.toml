@@ -1,0 +1,16 @@
+[package]
+name = "cutlass-mp4"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "MP4 and MOV reader."
+
+[dependencies]
+cutlass-core.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

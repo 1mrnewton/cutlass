@@ -4,6 +4,7 @@ use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, Sense, Strok
 
 use cutlass_project::{Command, FrameRate, History, Project, SegmentId, Track, TrackId, TrackKind};
 
+use crate::icons::{self, Icon};
 use crate::ruler;
 use crate::theme;
 
@@ -85,6 +86,29 @@ struct Guides {
     selected: Option<Picked>,
     pull: Option<egui::Pos2>,
     row: Option<egui::Pos2>,
+}
+
+/// A mark on a clip, measured from that clip's start so a move carries it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ClipStamp {
+    segment: SegmentId,
+    offset: i64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PickedStamp {
+    Ruler(usize),
+    Clip(usize),
+    Beat(usize),
+}
+
+/// Marker flags and beat notes. View state, until the project stores them.
+#[derive(Clone, Default)]
+struct Stamps {
+    ruler: Vec<i64>,
+    clips: Vec<ClipStamp>,
+    beats: Vec<ClipStamp>,
+    selected: Option<PickedStamp>,
 }
 
 #[derive(Clone)]
@@ -191,6 +215,24 @@ pub fn show(
     } else {
         let _ = zoom_controls(ui, ruler_rect, false);
     }
+    let stamps_id = ui.scope_id().with("timeline-marks");
+    let mut stamps = ui
+        .data(|data| data.get_temp::<Stamps>(stamps_id))
+        .unwrap_or_default();
+    retain_stamps(project, &mut stamps);
+    let marker_id = ui.scope_id().with("marker-mode");
+    let beat_id = ui.scope_id().with("beat-mode");
+    let mut marker = ui
+        .data(|data| data.get_temp::<bool>(marker_id))
+        .unwrap_or(false);
+    let mut beat = ui
+        .data(|data| data.get_temp::<bool>(beat_id))
+        .unwrap_or(false);
+    if duration == 0 {
+        marker = false;
+        beat = false;
+    }
+    let mark_times = stamp_times(project, &stamps);
     if tracks.height() > 0.0 {
         let pressed = ui.input(|input| input.pointer.primary_pressed());
         let released = ui.input(|input| input.pointer.primary_released());
@@ -198,20 +240,30 @@ pub fn show(
         let box_id = ui.scope_id().with("box-select");
         if pressed && let Some(point) = pointer {
             let mark = playhead_mark(ruler_rect, project, *playhead, view);
-            let on_buttons = switch_rects(ruler_rect)
-                .iter()
-                .chain(zoom_rects(ruler_rect).iter())
-                .any(|button| button.contains(point));
+            let on_buttons = on_tools(ruler_rect, point);
             let on_ruler = ruler_rect.contains(point)
                 && point.x >= lane_left(ruler_rect)
                 && !mark.is_some_and(|mark| mark.contains(point));
             let on_corner =
                 ruler_rect.contains(point) && point.x < lane_left(ruler_rect) && !on_buttons;
             if on_ruler {
-                guides.pull = Some(point);
-                guides.row = None;
-                *drag = None;
-                *trim = None;
+                if let Some(index) = near_us(view, lane_left(ruler_rect), &stamps.ruler, point.x) {
+                    stamps.selected = Some(PickedStamp::Ruler(index));
+                    guides.selected = None;
+                    selected.clear();
+                    guides.pull = None;
+                    guides.row = None;
+                } else if !marker {
+                    guides.pull = Some(point);
+                    guides.row = None;
+                    *drag = None;
+                    *trim = None;
+                } else {
+                    guides.pull = None;
+                    guides.row = None;
+                    *drag = None;
+                    *trim = None;
+                }
             } else if on_corner {
                 guides.row = Some(point);
                 guides.pull = None;
@@ -245,21 +297,36 @@ pub fn show(
             input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace)
         });
         if !typing && delete_line {
-            match guides.selected {
-                Some(Picked::Vertical(index)) if index < guides.vertical.len() => {
-                    guides.vertical.remove(index);
-                    guides.selected = None;
+            match stamps.selected {
+                Some(PickedStamp::Ruler(index)) if index < stamps.ruler.len() => {
+                    stamps.ruler.remove(index);
+                    stamps.selected = None;
                 }
-                Some(Picked::Horizontal(index)) if index < guides.horizontal.len() => {
-                    guides.horizontal.remove(index);
-                    guides.selected = None;
+                Some(PickedStamp::Clip(index)) if index < stamps.clips.len() => {
+                    stamps.clips.remove(index);
+                    stamps.selected = None;
                 }
-                _ => {}
+                Some(PickedStamp::Beat(index)) if index < stamps.beats.len() => {
+                    stamps.beats.remove(index);
+                    stamps.selected = None;
+                }
+                _ => match guides.selected {
+                    Some(Picked::Vertical(index)) if index < guides.vertical.len() => {
+                        guides.vertical.remove(index);
+                        guides.selected = None;
+                    }
+                    Some(Picked::Horizontal(index)) if index < guides.horizontal.len() => {
+                        guides.horizontal.remove(index);
+                        guides.selected = None;
+                    }
+                    _ => {}
+                },
             }
         }
         if pressed && let Some(point) = pointer.filter(|point| tracks.contains(*point)) {
             ui.data_mut(|data| data.remove::<BoxSelect>(box_id));
             guides.selected = None;
+            stamps.selected = None;
             if let Some(picked) = picked_guide(&guides, tracks, point, view) {
                 guides.selected = Some(picked);
                 *drag = None;
@@ -267,10 +334,24 @@ pub fn show(
                 guides.pull = None;
                 guides.row = None;
                 choose(selected, None);
-            } else if *split {
+            } else if let Some(picked) = picked_stamp(project, &stamps, tracks, point, view) {
+                stamps.selected = Some(picked);
+                *drag = None;
+                *trim = None;
+                guides.pull = None;
+                guides.row = None;
+                choose(selected, None);
+            } else if *split || marker {
                 *drag = None;
                 *trim = None;
                 choose(selected, segment_at(project, tracks, point, view));
+            } else if beat
+                && let Some(id) = segment_at(project, tracks, point, view)
+                && segment_kind(project, id) == Some(TrackKind::Audio)
+            {
+                *drag = None;
+                *trim = None;
+                choose(selected, Some(id));
             } else if let Some(id) = shift
                 .then(|| segment_at(project, tracks, point, view))
                 .flatten()
@@ -332,7 +413,30 @@ pub fn show(
             ui.data_mut(|data| data.remove::<BoxSelect>(box_id));
         }
         if released {
-            if *split && !from_ruler {
+            let clicked = ui.input(|input| input.pointer.primary_clicked());
+            if clicked
+                && marker
+                && let Some(point) = pointer.filter(|point| !on_tools(ruler_rect, *point))
+                && drop_marker(
+                    project,
+                    tracks,
+                    ruler_rect,
+                    point,
+                    *playhead,
+                    view,
+                    &mut stamps,
+                )
+            {
+                guides.selected = None;
+                selected.clear();
+            } else if clicked
+                && beat
+                && let Some(point) = pointer.filter(|point| on_audio(project, tracks, *point, view))
+                && drop_beat(project, tracks, point, view, &mut stamps)
+            {
+                guides.selected = None;
+                selected.clear();
+            } else if *split && !from_ruler {
                 drag.take();
                 trim.take();
                 if ui.input(|input| input.pointer.primary_clicked())
@@ -351,6 +455,7 @@ pub fn show(
                         snap,
                         playhead: *playhead,
                         guides: &guides.vertical,
+                        marks: &mark_times,
                         view,
                     },
                 );
@@ -364,6 +469,7 @@ pub fn show(
                         snap,
                         playhead: *playhead,
                         guides: &guides.vertical,
+                        marks: &mark_times,
                         view,
                     },
                 )
@@ -373,16 +479,21 @@ pub fn show(
         }
     }
     paint_ruler(ui, ruler_rect, project, view);
-    ruler_switches(
-        ui,
-        ruler_rect,
-        project.duration().value > 0,
-        split,
-        &mut snap,
-    );
+    let live = project.duration().value > 0;
+    if ruler_switches(ui, ruler_rect, live, split, &mut snap) {
+        marker = false;
+        beat = false;
+    }
+    mark_switches(ui, ruler_rect, live, &mut marker, &mut beat, split);
     ui.data_mut(|data| data.insert_temp(snap_id, snap));
     ui.data_mut(|data| data.insert_temp(guides_id, guides.clone()));
-    if *split && pointer.is_some_and(|point| tracks.contains(point)) {
+    ui.data_mut(|data| data.insert_temp(marker_id, marker));
+    ui.data_mut(|data| data.insert_temp(beat_id, beat));
+    if *split && pointer.is_some_and(|point| tracks.contains(point))
+        || marker
+            && pointer.is_some_and(|point| ruler_rect.contains(point) || tracks.contains(point))
+        || beat && pointer.is_some_and(|point| on_audio(project, tracks, point, view))
+    {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
     if tracks.height() > 0.0 {
@@ -439,10 +550,13 @@ pub fn show(
                     snap,
                     playhead: *playhead,
                     guides: &guides.vertical,
+                    marks: &mark_times,
                 },
             );
         }
     }
+    paint_stamps(ui, project, tracks, ruler_rect, &stamps, view);
+    ui.data_mut(|data| data.insert_temp(stamps_id, stamps));
     paint_guides(ui, tracks, project, &guides, pointer, view);
     paint_playhead(ui, ruler_rect, tracks, project, playhead, view);
     if snap
@@ -456,6 +570,7 @@ pub fn show(
                 snap,
                 playhead: *playhead,
                 guides: &guides.vertical,
+                marks: &mark_times,
                 view,
             },
         )
@@ -522,6 +637,7 @@ struct Align<'a> {
     snap: bool,
     playhead: i64,
     guides: &'a [i64],
+    marks: &'a [i64],
     view: View,
 }
 
@@ -627,6 +743,236 @@ fn time_at(area: Rect, project: &Project, x: f32, view: View) -> i64 {
     let us = view.us_at(lane_left(area), x);
     let end = project.duration().value.max(us);
     ruler::seek(us, project.settings().rate().rate(), end)
+}
+
+const MARK_PX: f32 = 6.0;
+
+fn shown_us(start: i64, offset: i64, duration: i64) -> Option<i64> {
+    if offset < 0 || duration <= 0 || offset >= duration {
+        return None;
+    }
+    Some(start.saturating_add(offset))
+}
+
+fn offset_in_span(at: i64, start: i64, end: i64, rate: FrameRate) -> Option<i64> {
+    if end <= start {
+        return None;
+    }
+    let snapped = ruler::seek(at.clamp(start, end - 1), rate, end - 1).max(start);
+    (snapped < end).then_some(snapped - start)
+}
+
+fn clip_us(project: &Project, stamp: ClipStamp) -> Option<i64> {
+    let range = project.timeline().segment(stamp.segment)?.timeline();
+    shown_us(range.start().value, stamp.offset, range.duration().value)
+}
+
+fn segment_kind(project: &Project, id: SegmentId) -> Option<TrackKind> {
+    project.timeline().tracks().iter().find_map(|track| {
+        track
+            .segments()
+            .iter()
+            .any(|segment| segment.id() == id)
+            .then_some(track.kind())
+    })
+}
+
+fn on_audio(project: &Project, tracks: Rect, point: egui::Pos2, view: View) -> bool {
+    segment_at(project, tracks, point, view)
+        .is_some_and(|id| segment_kind(project, id) == Some(TrackKind::Audio))
+}
+
+fn retain_stamps(project: &Project, stamps: &mut Stamps) {
+    let duration = project.duration().value;
+    if duration <= 0 {
+        stamps.ruler.clear();
+    } else {
+        stamps.ruler.retain(|us| (0..=duration).contains(us));
+    }
+    stamps
+        .clips
+        .retain(|stamp| clip_us(project, *stamp).is_some());
+    stamps.beats.retain(|stamp| {
+        clip_us(project, *stamp).is_some()
+            && segment_kind(project, stamp.segment) == Some(TrackKind::Audio)
+    });
+    let live = match stamps.selected {
+        Some(PickedStamp::Ruler(index)) => index < stamps.ruler.len(),
+        Some(PickedStamp::Clip(index)) => index < stamps.clips.len(),
+        Some(PickedStamp::Beat(index)) => index < stamps.beats.len(),
+        None => true,
+    };
+    if !live {
+        stamps.selected = None;
+    }
+}
+
+fn stamp_times(project: &Project, stamps: &Stamps) -> Vec<i64> {
+    let mut times = stamps.ruler.clone();
+    for stamp in stamps.clips.iter().chain(stamps.beats.iter()) {
+        if let Some(us) = clip_us(project, *stamp) {
+            times.push(us);
+        }
+    }
+    times
+}
+
+fn keep_time(times: &mut Vec<i64>, time: i64) -> usize {
+    if let Some(index) = times.iter().position(|us| *us == time) {
+        return index;
+    }
+    times.push(time);
+    times.len() - 1
+}
+
+fn keep_clip(stamps: &mut Vec<ClipStamp>, segment: SegmentId, offset: i64) -> usize {
+    if let Some(index) = stamps
+        .iter()
+        .position(|stamp| stamp.segment == segment && stamp.offset == offset)
+    {
+        return index;
+    }
+    stamps.push(ClipStamp { segment, offset });
+    stamps.len() - 1
+}
+
+fn near_us(view: View, left: f32, times: &[i64], x: f32) -> Option<usize> {
+    if !(view.pixel_size.is_finite() && view.pixel_size > 0.0) {
+        return None;
+    }
+    let mut best: Option<(usize, f32)> = None;
+    for (index, time) in times.iter().enumerate() {
+        let gap = (x - view.x(left, *time)).abs();
+        if gap <= MARK_PX && best.is_none_or(|(_, best_gap)| gap < best_gap) {
+            best = Some((index, gap));
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
+fn picked_stamp(
+    project: &Project,
+    stamps: &Stamps,
+    tracks: Rect,
+    point: egui::Pos2,
+    view: View,
+) -> Option<PickedStamp> {
+    let id = segment_at(project, tracks, point, view)?;
+    let left = lane_left(tracks);
+    let mut best: Option<(PickedStamp, f32)> = None;
+    let mut consider = |kind_index: PickedStamp, us: i64| {
+        let gap = (point.x - view.x(left, us)).abs();
+        if gap <= MARK_PX && best.is_none_or(|(_, best_gap)| gap < best_gap) {
+            best = Some((kind_index, gap));
+        }
+    };
+    for (index, stamp) in stamps.clips.iter().enumerate() {
+        if stamp.segment == id
+            && let Some(us) = clip_us(project, *stamp)
+        {
+            consider(PickedStamp::Clip(index), us);
+        }
+    }
+    for (index, stamp) in stamps.beats.iter().enumerate() {
+        if stamp.segment == id
+            && let Some(us) = clip_us(project, *stamp)
+        {
+            consider(PickedStamp::Beat(index), us);
+        }
+    }
+    best.map(|(picked, _)| picked)
+}
+
+fn drop_marker(
+    project: &Project,
+    tracks: Rect,
+    ruler: Rect,
+    point: egui::Pos2,
+    playhead: i64,
+    view: View,
+    stamps: &mut Stamps,
+) -> bool {
+    let head = playhead_mark(ruler, project, playhead, view);
+    let on_ruler = ruler.contains(point)
+        && point.x >= lane_left(ruler)
+        && !head.is_some_and(|mark| mark.contains(point));
+    if on_ruler {
+        let left = lane_left(ruler);
+        if let Some(index) = near_us(view, left, &stamps.ruler, point.x) {
+            stamps.selected = Some(PickedStamp::Ruler(index));
+        } else if project.duration().value > 0 {
+            let time = ruler::seek(
+                view.us_at(left, point.x),
+                project.settings().rate().rate(),
+                project.duration().value,
+            );
+            let index = keep_time(&mut stamps.ruler, time);
+            stamps.selected = Some(PickedStamp::Ruler(index));
+        } else {
+            return false;
+        }
+        return true;
+    }
+    let Some(id) = segment_at(project, tracks, point, view) else {
+        return false;
+    };
+    let Some(index) = place_clip(project, tracks, id, point, view, &mut stamps.clips) else {
+        return false;
+    };
+    stamps.selected = Some(PickedStamp::Clip(index));
+    true
+}
+
+fn drop_beat(
+    project: &Project,
+    tracks: Rect,
+    point: egui::Pos2,
+    view: View,
+    stamps: &mut Stamps,
+) -> bool {
+    let Some(id) = segment_at(project, tracks, point, view) else {
+        return false;
+    };
+    if segment_kind(project, id) != Some(TrackKind::Audio) {
+        return false;
+    }
+    let Some(index) = place_clip(project, tracks, id, point, view, &mut stamps.beats) else {
+        return false;
+    };
+    stamps.selected = Some(PickedStamp::Beat(index));
+    true
+}
+
+fn place_clip(
+    project: &Project,
+    tracks: Rect,
+    id: SegmentId,
+    point: egui::Pos2,
+    view: View,
+    stamps: &mut Vec<ClipStamp>,
+) -> Option<usize> {
+    let segment = project.timeline().segment(id)?;
+    let range = segment.timeline();
+    let own: Vec<i64> = stamps
+        .iter()
+        .filter(|stamp| stamp.segment == id)
+        .filter_map(|stamp| clip_us(project, *stamp))
+        .collect();
+    if let Some(local) = near_us(view, lane_left(tracks), &own, point.x) {
+        return stamps
+            .iter()
+            .enumerate()
+            .filter(|(_, stamp)| stamp.segment == id)
+            .nth(local)
+            .map(|(index, _)| index);
+    }
+    let offset = offset_in_span(
+        time_at(tracks, project, point.x, view),
+        range.start().value,
+        range.end().value,
+        project.settings().rate().rate(),
+    )?;
+    Some(keep_clip(stamps, id, offset))
 }
 
 fn playhead_mark(ruler: Rect, project: &Project, playhead: i64, view: View) -> Option<Rect> {
@@ -762,10 +1108,11 @@ fn ruler_switches(
     split_live: bool,
     split: &mut bool,
     snap: &mut bool,
-) {
+) -> bool {
     let [split_button, snap_button] = switch_rects(ruler);
-    ruler_switch(ui, split_button, "Split", "split-blade", split_live, split);
+    let armed = ruler_switch(ui, split_button, "Split", "split-blade", split_live, split);
     ruler_switch(ui, snap_button, "Snap", "snap-switch", true, snap);
+    armed
 }
 
 fn switch_rects(ruler: Rect) -> [Rect; 2] {
@@ -783,11 +1130,12 @@ fn ruler_switch(
     salt: &str,
     live: bool,
     on: &mut bool,
-) {
+) -> bool {
     if !live {
         *on = false;
     }
     let response = ui.interact(button, ui.scope_id().with(salt), Sense::click());
+    let was = *on;
     if live && response.clicked() {
         *on = !*on;
     }
@@ -808,6 +1156,86 @@ fn ruler_switch(
         FontId::new(12.0, FontFamily::Proportional),
         color,
     );
+    *on && !was
+}
+
+fn mark_rects(ruler: Rect) -> [Rect; 2] {
+    let top = ruler.center().y - 13.0;
+    let beat = Rect::from_min_size(pos2(ruler.right() - 32.0, top), vec2(26.0, 26.0));
+    let marker = Rect::from_min_size(pos2(beat.left() - 30.0, top), vec2(26.0, 26.0));
+    [marker, beat]
+}
+
+fn on_tools(ruler: Rect, point: egui::Pos2) -> bool {
+    switch_rects(ruler)
+        .into_iter()
+        .chain(zoom_rects(ruler))
+        .chain(mark_rects(ruler))
+        .any(|button| button.contains(point))
+}
+
+fn mark_switches(
+    ui: &mut egui::Ui,
+    ruler: Rect,
+    live: bool,
+    marker: &mut bool,
+    beat: &mut bool,
+    split: &mut bool,
+) {
+    let [marker_rect, beat_rect] = mark_rects(ruler);
+    let cover = Rect::from_min_max(
+        pos2(marker_rect.left() - 4.0, ruler.top()),
+        ruler.right_bottom(),
+    );
+    ui.painter().rect_filled(cover, 0.0, theme::PANEL);
+    if mode_switch(
+        ui,
+        marker_rect,
+        Icon::Marker,
+        "Marker",
+        "marker-mode",
+        live,
+        marker,
+    ) {
+        *beat = false;
+        *split = false;
+    }
+    if mode_switch(ui, beat_rect, Icon::Beat, "Beat", "beat-mode", live, beat) {
+        *marker = false;
+        *split = false;
+    }
+}
+
+fn mode_switch(
+    ui: &mut egui::Ui,
+    button: Rect,
+    icon: Icon,
+    tip: &str,
+    salt: &str,
+    live: bool,
+    on: &mut bool,
+) -> bool {
+    if !live {
+        *on = false;
+    }
+    let response = ui.interact(button, ui.scope_id().with(salt), Sense::click());
+    let was = *on;
+    if live && response.clicked() {
+        *on = !*on;
+    }
+    if *on {
+        ui.painter().rect_filled(button, 6.0, theme::ACTIVE);
+    }
+    let color = if !live {
+        theme::FAINT
+    } else if *on {
+        theme::EXPORT
+    } else {
+        theme::INK
+    };
+    icons::paint(ui.painter(), button.center(), icon, 16.0, color);
+    response.on_hover_text(tip);
+    *on && !was
 }
 
 fn split_command(
@@ -885,6 +1313,7 @@ struct ClipPaint<'a> {
     snap: bool,
     playhead: i64,
     guides: &'a [i64],
+    marks: &'a [i64],
 }
 
 fn paint_segments(ui: &mut egui::Ui, track: &Track, lane: Rect, main: bool, paint: &ClipPaint<'_>) {
@@ -984,9 +1413,10 @@ fn drag_from(project: &Project, id: SegmentId, origin: egui::Pos2) -> Option<Cli
 
 const SNAP_PX: f32 = 10.0;
 
-fn snap_targets(project: &Project, playhead: i64, guides: &[i64]) -> Vec<i64> {
+fn snap_targets(project: &Project, playhead: i64, guides: &[i64], marks: &[i64]) -> Vec<i64> {
     let mut targets = vec![0, project.duration().value.max(0), playhead.max(0)];
     targets.extend(guides);
+    targets.extend(marks);
     for track in project.timeline().tracks() {
         for segment in track.segments() {
             let range = segment.timeline();
@@ -1084,7 +1514,7 @@ fn snap_guide(
     if !(pixel_size.is_finite() && pixel_size > 0.0) {
         return None;
     }
-    let targets = snap_targets(project, align.playhead, align.guides);
+    let targets = snap_targets(project, align.playhead, align.guides, align.marks);
     let line = if let Some(drag) = drag {
         let duration = project
             .timeline()
@@ -1120,7 +1550,7 @@ fn drag_offset(paint: &ClipPaint<'_>, drag: &ClipDrag, point: egui::Pos2) -> egu
     let (start, line) = snap_span(
         raw_start,
         segment.timeline().duration().value,
-        &snap_targets(paint.project, paint.playhead, paint.guides),
+        &snap_targets(paint.project, paint.playhead, paint.guides, paint.marks),
         paint.pixel_size,
     );
     if line.is_none() {
@@ -1146,7 +1576,7 @@ fn trim_offset(paint: &ClipPaint<'_>, trim: &TrimDrag, pointer_x: f32) -> f32 {
     };
     let (snapped, line) = snap_point(
         edge,
-        &snap_targets(paint.project, paint.playhead, paint.guides),
+        &snap_targets(paint.project, paint.playhead, paint.guides, paint.marks),
         paint.pixel_size,
     );
     if line.is_none() {
@@ -1184,7 +1614,7 @@ fn move_command(
         start = snap_span(
             start,
             segment.timeline().duration().value,
-            &snap_targets(project, align.playhead, align.guides),
+            &snap_targets(project, align.playhead, align.guides, align.marks),
             pixel_size,
         )
         .0;
@@ -1318,7 +1748,7 @@ fn trim_commands(
         };
         let snapped = snap_point(
             edge,
-            &snap_targets(project, align.playhead, align.guides),
+            &snap_targets(project, align.playhead, align.guides, align.marks),
             pixel_size,
         )
         .0;
@@ -1388,6 +1818,136 @@ fn clip_color(kind: TrackKind) -> Color32 {
         TrackKind::Filter => theme::FILTER,
         TrackKind::Adjust => theme::ADJUST,
     }
+}
+
+fn paint_stamps(
+    ui: &egui::Ui,
+    project: &Project,
+    tracks: Rect,
+    ruler: Rect,
+    stamps: &Stamps,
+    view: View,
+) {
+    let left = lane_left(ruler);
+    let covered = mark_rects(ruler)[0].left() - 4.0;
+    for (index, us) in stamps.ruler.iter().enumerate() {
+        if view.x(left, *us) >= covered {
+            continue;
+        }
+        let color = if stamps.selected == Some(PickedStamp::Ruler(index)) {
+            theme::INK
+        } else {
+            theme::STICKER
+        };
+        icons::paint(
+            ui.painter(),
+            pos2(view.x(left, *us), ruler.top() + 14.0),
+            Icon::Marker,
+            14.0,
+            color,
+        );
+    }
+    if tracks.height() <= 0.0 {
+        return;
+    }
+    let lanes = layout(project.timeline().tracks(), tracks);
+    for (track, lane) in project.timeline().tracks().iter().zip(lanes) {
+        let lane_rect = Rect::from_min_size(
+            pos2(lane_left(tracks), lane.top),
+            vec2((tracks.right() - lane_left(tracks)).max(0.0), lane.height),
+        );
+        for segment in track.segments() {
+            let range = segment.timeline();
+            let rect = clip_rect(
+                lane_rect,
+                lane.main,
+                range.start().value,
+                range.duration().value,
+                view.pixel_size,
+                view.origin_us,
+            );
+            paint_bound(
+                ui,
+                &stamps.clips,
+                stamps.selected,
+                segment.id(),
+                range.start().value,
+                range.duration().value,
+                StampPlace {
+                    rect,
+                    left,
+                    view,
+                    icon: Icon::Marker,
+                    y: rect.top() + 10.0,
+                    idle: theme::STICKER,
+                    chosen: theme::INK,
+                    pick: PickedStamp::Clip,
+                },
+            );
+            if track.kind() == TrackKind::Audio {
+                paint_bound(
+                    ui,
+                    &stamps.beats,
+                    stamps.selected,
+                    segment.id(),
+                    range.start().value,
+                    range.duration().value,
+                    StampPlace {
+                        rect,
+                        left,
+                        view,
+                        icon: Icon::Beat,
+                        y: rect.bottom() - 10.0,
+                        idle: theme::INK,
+                        chosen: theme::EXPORT,
+                        pick: PickedStamp::Beat,
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn paint_bound(
+    ui: &egui::Ui,
+    stamps: &[ClipStamp],
+    selected: Option<PickedStamp>,
+    segment: SegmentId,
+    start: i64,
+    duration: i64,
+    place: StampPlace,
+) {
+    for (index, stamp) in stamps.iter().enumerate() {
+        if stamp.segment != segment {
+            continue;
+        }
+        let Some(us) = shown_us(start, stamp.offset, duration) else {
+            continue;
+        };
+        let x = place.view.x(place.left, us);
+        let x = if place.rect.width() <= 16.0 {
+            place.rect.center().x
+        } else {
+            x.clamp(place.rect.left() + 8.0, place.rect.right() - 8.0)
+        };
+        let color = if selected == Some((place.pick)(index)) {
+            place.chosen
+        } else {
+            place.idle
+        };
+        icons::paint(ui.painter(), pos2(x, place.y), place.icon, 13.0, color);
+    }
+}
+
+struct StampPlace {
+    rect: Rect,
+    left: f32,
+    view: View,
+    icon: Icon,
+    y: f32,
+    idle: Color32,
+    chosen: Color32,
+    pick: fn(usize) -> PickedStamp,
 }
 
 fn paint_ruler(ui: &mut egui::Ui, ruler_rect: Rect, project: &Project, view: View) {
@@ -1544,6 +2104,7 @@ mod tests {
             snap: false,
             playhead: 0,
             guides: &[],
+            marks: &[],
             view: fitted(tracks, duration),
         }
     }
@@ -2122,7 +2683,10 @@ mod tests {
         assert_eq!(line, Some(1_000_000));
         assert_eq!(super::snap_point(10, &targets, pixel_size), (0, Some(0)));
         let cut = project();
-        assert_eq!(super::snap_targets(&cut, 0, &[250_000]), vec![0, 250_000]);
+        assert_eq!(
+            super::snap_targets(&cut, 0, &[250_000], &[400_000]),
+            vec![0, 250_000, 400_000]
+        );
     }
 
     #[test]
@@ -2201,5 +2765,96 @@ mod tests {
                 .iter()
                 .all(|button| !button.contains(cover))
         );
+    }
+
+    #[test]
+    fn a_mark_keeps_its_distance_from_the_clip_start() {
+        assert_eq!(
+            super::shown_us(1_000_000, 250_000, 500_000),
+            Some(1_250_000)
+        );
+        assert_eq!(super::shown_us(0, 500_000, 500_000), None);
+        let frame = super::offset_in_span(500_000, 0, 1_000_000, cutlass_project::FrameRate::Fps30)
+            .expect("frame");
+        assert!(frame < 1_000_000);
+        assert_eq!(
+            super::offset_in_span(frame, 0, 1_000_000, cutlass_project::FrameRate::Fps30),
+            Some(frame)
+        );
+        assert!(super::offset_in_span(0, 5, 5, cutlass_project::FrameRate::Fps30).is_none());
+        let mut times = Vec::new();
+        assert_eq!(super::keep_time(&mut times, 10), 0);
+        assert_eq!(super::keep_time(&mut times, 10), 0);
+        assert_eq!(times, vec![10]);
+    }
+
+    #[test]
+    fn a_beat_is_audio_and_a_repeated_offset_is_the_same_mark() {
+        let mut history = History::new();
+        let mut cut = project();
+        let sound = Asset::audio(
+            "file:///cuts/a.wav",
+            Timestamp::new(48_000, NonZeroU32::new(48_000).expect("scale")),
+        )
+        .expect("audio");
+        let picture = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            false,
+        )
+        .expect("video");
+        let (audio_id, video_id) = match history
+            .apply(
+                &mut cut,
+                &[Command::AddAsset(sound), Command::AddAsset(picture)],
+            )
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(audio), Outcome::Asset(video)] => (*audio, *video),
+            other => panic!("expected two assets, got {other:?}"),
+        };
+        let place = |cut: &mut Project, history: &mut History, asset| {
+            let stored = cut.asset(asset).expect("asset");
+            let duration = stored.duration().expect("duration");
+            let source = TimeRange::new(
+                Timestamp::new(0, duration.timescale),
+                Timestamp::new(duration.value, duration.timescale),
+            )
+            .expect("source");
+            let segment = Segment::media(stored, source, 0, stored.default_channels(), Speed::ONE)
+                .expect("segment");
+            match history
+                .apply(
+                    cut,
+                    &[Command::Place {
+                        track: None,
+                        segment,
+                    }],
+                )
+                .expect("place")
+                .as_slice()
+            {
+                [Outcome::Segment(id) | Outcome::Opened { segment: id, .. }] => *id,
+                other => panic!("expected a segment, got {other:?}"),
+            }
+        };
+        let audio = place(&mut cut, &mut history, audio_id);
+        let video = place(&mut cut, &mut history, video_id);
+        assert_eq!(
+            super::segment_kind(&cut, audio),
+            Some(cutlass_project::TrackKind::Audio)
+        );
+        assert_ne!(
+            super::segment_kind(&cut, video),
+            Some(cutlass_project::TrackKind::Audio)
+        );
+        let mut beats = Vec::new();
+        assert_eq!(super::keep_clip(&mut beats, audio, 100), 0);
+        assert_eq!(super::keep_clip(&mut beats, audio, 100), 0);
+        assert_eq!(beats.len(), 1);
+        assert_eq!(super::clip_us(&cut, beats[0]), Some(100));
     }
 }

@@ -151,6 +151,20 @@ impl Bin {
         cards
     }
 
+    /// Files with no folders. A file inside a folder still shows. A hidden
+    /// file stays out. The bin's sort still applies.
+    pub(crate) fn flat(&self, files: &[FileInfo<'_>]) -> Vec<CardId> {
+        let mut rows: Vec<&FileInfo<'_>> = files
+            .iter()
+            .filter(|file| !self.hidden.contains(&file.id))
+            .collect();
+        match self.sort {
+            Sort::Name => rows.sort_by(|left, right| cmp_name(left.name, right.name)),
+            Sort::Duration => rows.sort_by(|left, right| cmp_duration(left, right)),
+        }
+        rows.into_iter().map(|file| CardId::File(file.id)).collect()
+    }
+
     /// Shift extends from the last plain click. Command toggles. Both together
     /// add that range to the selection.
     pub(crate) fn choose(&mut self, order: &[CardId], id: CardId, shift: bool, toggle: bool) {
@@ -561,14 +575,17 @@ mod tests {
         bin.move_file(file(1), Some(folder));
         bin.hide_file(file(2));
         let files = [
-            info(1, "inside", None),
-            info(2, "gone", None),
-            info(3, "here", None),
+            info(1, "inside", Some(500_000)),
+            info(2, "gone", Some(1)),
+            info(3, "here", Some(2_000_000)),
         ];
         assert_eq!(bin.visible(&files), vec![CardId::Folder(folder), card(3)]);
         bin.open_folder(folder);
         assert_eq!(bin.visible(&files), vec![card(1)]);
         assert_eq!(bin.trail(), vec![folder]);
+        assert_eq!(bin.flat(&files), vec![card(3), card(1)]);
+        bin.set_sort(Sort::Duration);
+        assert_eq!(bin.flat(&files), vec![card(1), card(3)]);
     }
 
     #[test]

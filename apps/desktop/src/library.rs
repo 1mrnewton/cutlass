@@ -1,4 +1,4 @@
-//! The library rail and the project's media bin. `docs/library.md`.
+//! The library rail, the project bin, and the other shelves. `docs/library.md`.
 
 use eframe::egui::{
     self, Align2, Color32, FontFamily, FontId, Rect, ScrollArea, Sense, Stroke, UiBuilder, pos2,
@@ -18,7 +18,8 @@ const CARD_W: f32 = 144.0;
 const CARD_H: f32 = 96.0;
 const CARD_GAP: f32 = 8.0;
 
-/// One shelf on the rail. Media is the project bin. The others are later.
+/// One shelf on the rail. Media is the project bin. Audio lists sound files.
+/// The other shelves have no project items yet.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Shelf {
     Media,
@@ -82,9 +83,17 @@ pub fn show(ui: &mut egui::Ui, project: &Project, shelf: &mut Shelf, bin: &mut B
     let hairline = Rect::from_min_size(rail.right_top(), vec2(1.0, full.height()));
     ui.painter().rect_filled(hairline, 0.0, theme::GAP);
     paint_rail(ui, rail, shelf);
-    if *shelf == Shelf::Media {
-        let assets = Rect::from_min_max(hairline.right_top(), full.max).shrink(12.0);
-        paint_bin(ui, assets, project, bin);
+    let assets = Rect::from_min_max(hairline.right_top(), full.max).shrink(12.0);
+    match *shelf {
+        Shelf::Media => paint_bin(ui, assets, project, bin),
+        Shelf::Audio => paint_audio(ui, assets, project, bin),
+        Shelf::Text
+        | Shelf::Stickers
+        | Shelf::Effects
+        | Shelf::Transitions
+        | Shelf::Filters
+        | Shelf::Adjustments
+        | Shelf::Templates => paint_empty(ui, assets),
     }
 }
 
@@ -189,16 +198,40 @@ fn path_crumb(
     }
 }
 
+fn paint_audio(ui: &mut egui::Ui, rect: Rect, project: &Project, bin: &mut Bin) {
+    let order = {
+        let infos = audio_infos(project);
+        bin.flat(&infos)
+    };
+    paint_cards(ui, rect, project, bin, &order, "library-audio", false);
+}
+
+fn paint_empty(ui: &mut egui::Ui, rect: Rect) {
+    paint_empty_word(ui, rect);
+}
+
 fn paint_grid(ui: &mut egui::Ui, rect: Rect, project: &Project, bin: &mut Bin) {
+    let order = {
+        let infos = file_infos(project);
+        bin.visible(&infos)
+    };
+    paint_cards(ui, rect, project, bin, &order, "library-cards", true);
+}
+
+fn paint_cards(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    project: &Project,
+    bin: &mut Bin,
+    order: &[CardId],
+    salt: &'static str,
+    media: bool,
+) {
     let mut column = ui.new_child(UiBuilder::new().max_rect(rect));
     ScrollArea::vertical()
-        .id_salt("library-cards")
+        .id_salt(salt)
         .auto_shrink([false, false])
         .show(&mut column, |ui| {
-            let order = {
-                let infos = file_infos(project);
-                bin.visible(&infos)
-            };
             let width = ui.available_width();
             let cols = columns(width);
             let rows = order.len().div_ceil(cols).max(1);
@@ -213,10 +246,17 @@ fn paint_grid(ui: &mut egui::Ui, rect: Rect, project: &Project, bin: &mut Bin) {
                 rects.push((id, card));
                 match id {
                     CardId::Folder(folder) => {
-                        handle_folder(ui, bin, &order, card, folder, &mut picked);
+                        handle_folder(ui, bin, order, card, folder, &mut picked);
                     }
                     CardId::File(asset) => {
-                        handle_file(ui, project, bin, &order, card, asset, &mut picked);
+                        let response =
+                            handle_file(ui, project, bin, order, card, asset, &mut picked);
+                        if media {
+                            let modifiers = ui.input(|input| input.modifiers);
+                            if !modifiers.shift && !modifiers.command && !modifiers.ctrl {
+                                response.dnd_set_drag_payload(asset);
+                            }
+                        }
                     }
                 }
             }
@@ -224,14 +264,43 @@ fn paint_grid(ui: &mut egui::Ui, rect: Rect, project: &Project, bin: &mut Bin) {
             if background.clicked() && !picked && !boxed {
                 bin.clear();
             }
-            background.context_menu(|ui| empty_menu(ui, bin));
+            if !media && order.is_empty() {
+                paint_empty_word(ui, area);
+            }
+            background.context_menu(|ui| empty_menu(ui, bin, media));
         });
 }
 
+fn paint_empty_word(ui: &mut egui::Ui, rect: Rect) {
+    let label = words::of(ui, Phrase::Empty);
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::new(13.0, FontFamily::Proportional),
+        theme::MUTED,
+    );
+    crate::tip::read(
+        ui,
+        Rect::from_center_size(rect.center(), vec2(96.0, 24.0)),
+        ui.scope_id().with("shelf-empty"),
+        label,
+    );
+}
+
 fn file_infos(project: &Project) -> Vec<FileInfo<'_>> {
+    listed(project, |_| true)
+}
+
+fn audio_infos(project: &Project) -> Vec<FileInfo<'_>> {
+    listed(project, |asset| matches!(asset.kind(), AssetKind::Audio))
+}
+
+fn listed(project: &Project, keep: impl Fn(&Asset) -> bool) -> Vec<FileInfo<'_>> {
     project
         .assets()
         .iter()
+        .filter(|asset| keep(asset))
         .map(|asset| FileInfo {
             id: asset.id(),
             name: file_name(asset.source()),
@@ -340,9 +409,13 @@ fn handle_file(
     rect: Rect,
     asset_id: AssetId,
     picked: &mut bool,
-) {
+) -> egui::Response {
     let Some(asset) = project.asset(asset_id) else {
-        return;
+        return ui.interact(
+            rect,
+            ui.scope_id().with(CardId::File(asset_id)),
+            Sense::hover(),
+        );
     };
     let name = file_name(asset.source()).to_owned();
     let placed = on_timeline(project, asset_id);
@@ -361,10 +434,6 @@ fn handle_file(
     if response.secondary_clicked() && !bin.is_selected(id) {
         bin.select_only(id);
     }
-    let modifiers = ui.input(|input| input.modifiers);
-    if !modifiers.shift && !modifiers.command && !modifiers.ctrl {
-        response.dnd_set_drag_payload(asset_id);
-    }
     response.context_menu(|ui| file_menu(ui, bin, asset_id));
     crate::tip::show_selected(&response, &name, bin.is_selected(id));
     paint_picture(
@@ -377,6 +446,7 @@ fn handle_file(
     if bin.is_selected(id) {
         selected_edge(ui, rect);
     }
+    response
 }
 
 fn rename_field(ui: &mut egui::Ui, bin: &mut Bin, id: u64, rect: Rect) {
@@ -402,8 +472,8 @@ fn rename_field(ui: &mut egui::Ui, bin: &mut Bin, id: u64, rect: Rect) {
     }
 }
 
-fn empty_menu(ui: &mut egui::Ui, bin: &mut Bin) {
-    if menu_row(ui, words::of(ui, Phrase::NewFolder), true) {
+fn empty_menu(ui: &mut egui::Ui, bin: &mut Bin, folders: bool) {
+    if folders && menu_row(ui, words::of(ui, Phrase::NewFolder), true) {
         bin.add_folder(words::of(ui, Phrase::UntitledFolder));
     }
     sort_menu(ui, bin);
@@ -841,5 +911,75 @@ mod tests {
             modifiers: eframe::egui::Modifiers::default(),
         }]);
         assert!(matches!(bin.visible(&[]).as_slice(), [CardId::Folder(_)]));
+    }
+
+    #[test]
+    fn the_audio_shelf_lists_sound_and_a_text_shelf_says_empty() {
+        let mut history = History::new();
+        let mut cut = project();
+        let picture = Asset::video(
+            "file:///cuts/picture.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let sound = Asset::audio(
+            "file:///cuts/boat.wav",
+            Timestamp::new(48_000, NonZeroU32::new(48_000).expect("scale")),
+        )
+        .expect("audio");
+        history
+            .apply(
+                &mut cut,
+                &[Command::AddAsset(picture), Command::AddAsset(sound)],
+            )
+            .expect("add");
+        let listed = super::audio_infos(&cut);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "boat.wav");
+
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, crate::words::Language::English);
+        let mut bin = crate::media_bin::Bin::new();
+        let mut shelf = super::Shelf::Audio;
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(400.0, 500.0),
+        );
+        let mut time = 0.0;
+        let mut pass = |shelf: &mut super::Shelf| {
+            time += 0.05;
+            let mut output = ctx.run_ui(
+                eframe::egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| super::show(ui, &cut, shelf, &mut bin),
+            );
+            let tree = output.platform_output.accesskit_update.take();
+            output.textures_delta.clear();
+            tree.expect("the tree is built")
+        };
+        let audio = pass(&mut shelf);
+        assert!(audio.nodes.iter().any(|(_, node)| named(node, "boat.wav")));
+        assert!(
+            audio
+                .nodes
+                .iter()
+                .all(|(_, node)| !named(node, "picture.mp4"))
+        );
+        assert!(audio.nodes.iter().all(|(_, node)| !named(node, "Empty")));
+        shelf = super::Shelf::Text;
+        let text = pass(&mut shelf);
+        assert!(text.nodes.iter().any(|(_, node)| named(node, "Empty")));
+        assert!(text.nodes.iter().all(|(_, node)| !named(node, "boat.wav")));
+    }
+
+    fn named(node: &eframe::egui::accesskit::Node, text: &str) -> bool {
+        node.label() == Some(text) || node.value() == Some(text)
     }
 }

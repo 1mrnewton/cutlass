@@ -1,6 +1,6 @@
 //! Sample descriptions for video and audio.
 
-use cutlass_core::{ColorTags, VideoCodec, VideoStreamConfig};
+use cutlass_core::{AudioCodec, ColorTags, VideoCodec, VideoStreamConfig};
 
 use crate::read::{self, Atom, Reader};
 use crate::{Error, Fourcc};
@@ -8,16 +8,23 @@ use crate::{Error, Fourcc};
 /// An audio track, as the sample description states it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Audio {
-    codec: AudioCodec,
+    codec: Option<AudioCodec>,
+    sample_entry: Fourcc,
     sample_rate: u32,
     channels: u16,
     config_record: Vec<u8>,
 }
 
 impl Audio {
-    /// The codec named by the sample entry.
-    pub fn codec(&self) -> AudioCodec {
+    /// The codec named by the sample entry. `None` when this reader does not
+    /// name that entry.
+    pub fn codec(&self) -> Option<AudioCodec> {
         self.codec
+    }
+
+    /// The sample-entry code, such as `mp4a`.
+    pub fn sample_entry(&self) -> Fourcc {
+        self.sample_entry
     }
 
     /// Samples per second.
@@ -35,27 +42,6 @@ impl Audio {
     pub fn config_record(&self) -> &[u8] {
         &self.config_record
     }
-}
-
-/// An audio codec a sample entry can name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AudioCodec {
-    /// AAC, including the `mp4a` sample entry.
-    Aac,
-    /// MPEG-1 or MPEG-2 audio inside an `mp4a` entry.
-    Mp3,
-    /// Apple Lossless.
-    Alac,
-    /// Dolby Digital.
-    Ac3,
-    /// Integer or floating PCM.
-    Pcm,
-    /// FLAC.
-    Flac,
-    /// Opus.
-    Opus,
-    /// A sample entry this reader does not name.
-    Other(Fourcc),
 }
 
 pub(crate) struct VideoEntry {
@@ -217,6 +203,7 @@ fn audio(entry: &Atom<'_>) -> Result<Audio, Error> {
     };
     Ok(Audio {
         codec: audio_codec(entry.kind, object_type),
+        sample_entry: Fourcc::new(entry.kind),
         sample_rate: header.sample_rate,
         channels: header.channels,
         config_record,
@@ -306,8 +293,8 @@ fn rate_f64(rate: f64) -> Result<u32, Error> {
     }
 }
 
-fn audio_codec(kind: [u8; 4], object_type: Option<u8>) -> AudioCodec {
-    match &kind {
+fn audio_codec(kind: [u8; 4], object_type: Option<u8>) -> Option<AudioCodec> {
+    Some(match &kind {
         b"mp4a" => match object_type {
             Some(0x69 | 0x6b) => AudioCodec::Mp3,
             _ => AudioCodec::Aac,
@@ -319,8 +306,8 @@ fn audio_codec(kind: [u8; 4], object_type: Option<u8>) -> AudioCodec {
         }
         b"fLaC" | b"flac" => AudioCodec::Flac,
         b"Opus" => AudioCodec::Opus,
-        other => AudioCodec::Other(Fourcc::new(*other)),
-    }
+        _ => return None,
+    })
 }
 
 fn find_esds(atoms: &[Atom<'_>]) -> Result<Option<Vec<u8>>, Error> {

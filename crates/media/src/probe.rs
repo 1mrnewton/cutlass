@@ -2,8 +2,8 @@
 
 use std::num::NonZeroU32;
 
-use cutlass_core::{ColorTags, Packet, VideoStreamConfig};
-use cutlass_mp4::{AudioCodec, Fourcc, Kind, Movie, Rotation, Track};
+use cutlass_core::{AudioStreamConfig, ColorTags, Packet, VideoStreamConfig};
+use cutlass_mp4::{Fourcc, Kind, Movie, Rotation, Track};
 
 use crate::{DecoderKind, Error, VideoSession, choose_video_decoder};
 
@@ -80,7 +80,7 @@ impl TrackInfo {
     pub fn hdr(&self) -> Option<bool> {
         match &self.content {
             Content::Video { color, .. } => color.map(ColorTags::is_hdr),
-            Content::Audio { .. } | Content::Other(_) => None,
+            Content::Audio(_) | Content::Other(_) => None,
         }
     }
 
@@ -118,12 +118,8 @@ pub enum Content {
         config: VideoStreamConfig,
         color: Option<ColorTags>,
     },
-    Audio {
-        codec: AudioCodec,
-        sample_rate: u32,
-        channels: u16,
-        config_record: Vec<u8>,
-    },
+    /// A named audio codec and its stream config.
+    Audio(AudioStreamConfig),
     /// A track this reader does not demux, such as timecode.
     Other(Fourcc),
 }
@@ -144,11 +140,14 @@ fn content(track: &Track) -> Content {
             config: config.clone(),
             color: track.color(),
         },
-        Kind::Audio(audio) => Content::Audio {
-            codec: audio.codec(),
-            sample_rate: audio.sample_rate(),
-            channels: audio.channels(),
-            config_record: audio.config_record().to_vec(),
+        Kind::Audio(audio) => match audio.codec() {
+            Some(codec) => Content::Audio(AudioStreamConfig {
+                codec,
+                sample_rate: audio.sample_rate(),
+                channels: audio.channels(),
+                config_record: audio.config_record().to_vec(),
+            }),
+            None => Content::Other(audio.sample_entry()),
         },
         Kind::Other(fourcc) => Content::Other(*fourcc),
     }

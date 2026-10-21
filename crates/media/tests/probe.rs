@@ -1,8 +1,8 @@
 //! Probe reads an MP4 and reports streams, timing, size, rotation, and HDR.
 
-use cutlass_core::{ColorTags, VideoCodec};
+use cutlass_core::{AudioCodec, ColorTags, VideoCodec};
 use cutlass_media::{Content, Error, FrameTiming, Probe};
-use cutlass_mp4::{AudioCodec, Fourcc, Rotation};
+use cutlass_mp4::{Fourcc, Rotation};
 
 #[test]
 fn a_file_reports_streams_timing_size_rotation_and_hdr() {
@@ -42,15 +42,12 @@ fn a_file_reports_streams_timing_size_rotation_and_hdr() {
     let audio = &tracks[1];
     assert_eq!(audio.timing, FrameTiming::Constant(1024));
     assert_eq!(audio.hdr(), None);
-    assert!(matches!(
-        audio.content,
-        Content::Audio {
-            codec: AudioCodec::Aac,
-            sample_rate: 48_000,
-            channels: 2,
-            ..
-        }
-    ));
+    let Content::Audio(config) = &audio.content else {
+        panic!("track 2 is audio");
+    };
+    assert_eq!(config.codec, AudioCodec::Aac);
+    assert_eq!(config.sample_rate, 48_000);
+    assert_eq!(config.channels, 2);
     assert_eq!(probe.samples(1).expect("audio samples").len(), 2);
 
     assert_eq!(tracks[2].timing, FrameTiming::Empty);

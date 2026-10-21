@@ -134,12 +134,25 @@ fn audio_keeps_its_rate_channels_and_decoder_config() {
     let Kind::Audio(described) = audio.kind() else {
         panic!("audio track");
     };
-    assert_eq!(described.codec(), AudioCodec::Aac);
+    assert_eq!(described.codec(), Some(AudioCodec::Aac));
+    assert_eq!(described.sample_entry().bytes(), *b"mp4a");
     assert_eq!(described.sample_rate(), 48_000);
     assert_eq!(described.channels(), 2);
     assert_eq!(described.config_record(), [0x12, 0x10]);
     assert_eq!(audio.samples().len(), 2);
     assert!(audio.samples().iter().all(|sample| sample.keyframe));
+}
+
+#[test]
+fn an_unnamed_audio_sample_entry_has_no_codec() {
+    let mut entry = mp4a(48_000, 2, &[0x12, 0x10]);
+    entry[4..8].copy_from_slice(b"samr");
+    let movie = Movie::parse(&audio_file(&entry)).expect("unnamed audio");
+    let Kind::Audio(described) = movie.tracks()[0].kind() else {
+        panic!("audio track");
+    };
+    assert_eq!(described.codec(), None);
+    assert_eq!(described.sample_entry().bytes(), *b"samr");
 }
 
 #[test]

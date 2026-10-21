@@ -13,7 +13,8 @@ mod movie;
 mod read;
 mod tables;
 
-pub use entry::{Audio, AudioCodec};
+pub use cutlass_core::AudioCodec;
+pub use entry::Audio;
 pub use error::Error;
 pub use fourcc::Fourcc;
 pub use movie::{Edit, Kind, Movie, Rotation, Track};

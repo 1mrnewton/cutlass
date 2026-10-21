@@ -9,6 +9,7 @@ members = [
     "crates/core",
     "crates/media",
     "crates/output",
+    "crates/playback",
     "crates/project",
     "crates/testing/*",
 ]
@@ -27,6 +28,7 @@ cutlass-compose = { path = "crates/compose" }
 cutlass-core = { path = "crates/core" }
 cutlass-media = { path = "crates/media" }
 cutlass-output = { path = "crates/output" }
+cutlass-playback = { path = "crates/playback" }
 cutlass-mp4 = { path = "crates/containers/mp4" }
 cutlass-project = { path = "crates/project" }
 cutlass-test-fixtures = { path = "crates/testing/fixtures" }

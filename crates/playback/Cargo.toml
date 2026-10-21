@@ -1,0 +1,15 @@
+[package]
+name = "cutlass-playback"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Chooses the video frame to show for a playhead."
+
+[dependencies]
+cutlass-core.workspace = true
+
+[lints]
+workspace = true

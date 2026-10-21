@@ -252,6 +252,13 @@ name = "cutlass-pcm"
 version = "0.1.0"
 
 [[package]]
+name = "cutlass-playback"
+version = "0.1.0"
+dependencies = [
+ "cutlass-core",
+]
+
+[[package]]
 name = "cutlass-project"
 version = "0.1.0"
 dependencies = [

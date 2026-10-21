@@ -256,6 +256,31 @@ fn frame_us(frame: i64, rate: FrameRate) -> Option<i64> {
     i64::try_from(us).ok()
 }
 
+/// The frame that contains `us`. Tick times use `frame_us`, so a time that is
+/// itself a tick maps back to that tick.
+fn frame_at(us: i64, rate: FrameRate) -> i64 {
+    if us <= 0 {
+        return 0;
+    }
+    let numer = i128::from(rate.numerator());
+    let denom = i128::from(rate.denominator());
+    let raw = i128::from(us) * numer / (1_000_000 * denom);
+    let Ok(frame) = i64::try_from(raw) else {
+        return i64::MAX;
+    };
+    match frame_us(frame.saturating_add(1), rate) {
+        Some(next) if next <= us => frame.saturating_add(1),
+        _ => frame,
+    }
+}
+
+/// Sequence time of the frame under `us`, clamped to the cut.
+pub fn seek(us: i64, rate: FrameRate, duration_us: i64) -> i64 {
+    let end = duration_us.max(0);
+    let snapped = frame_us(frame_at(us.clamp(0, end), rate), rate).unwrap_or(0);
+    snapped.min(end)
+}
+
 /// Pixels per microsecond for the opening view.
 ///
 /// A cut with a length fills three quarters of the lanes. An empty cut treats
@@ -463,6 +488,17 @@ mod tests {
         assert!((opening_pixel_size(1000.0, 10_000_000) - 7.5e-5).abs() < 1e-15);
         assert_eq!(opening_pixel_size(0.0, 0), 0.0);
         assert!(marks(sequence(FrameRate::Fps30), 0.0, 300.0).is_empty());
+    }
+
+    #[test]
+    fn the_playhead_lands_on_the_frame_tick() {
+        assert_eq!(seek(0, FrameRate::Fps30, 10_000_000), 0);
+        assert_eq!(seek(33_333, FrameRate::Fps30, 10_000_000), 33_333);
+        assert_eq!(seek(66_666, FrameRate::Fps30, 10_000_000), 66_666);
+        assert_eq!(seek(1_000_000, FrameRate::Fps30, 10_000_000), 1_000_000);
+        assert_eq!(seek(2_000_000, FrameRate::Fps30, 1_000_000), 1_000_000);
+        assert_eq!(seek(66_666, FrameRate::Fps30, 0), 0);
+        assert_eq!(seek(-1, FrameRate::Fps30, 10_000_000), 0);
     }
 
     #[test]

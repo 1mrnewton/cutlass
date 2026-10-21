@@ -1,6 +1,6 @@
 //! The project's tracks, drawn bottom to top, with the ruler above them.
 
-use eframe::egui::{self, Align2, FontFamily, FontId, Rect, Stroke, pos2, vec2};
+use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, Sense, Stroke, pos2, vec2};
 
 use cutlass_project::{Project, Track, TrackKind};
 
@@ -22,47 +22,47 @@ struct Lane {
     height: f32,
 }
 
-pub fn show(ui: &mut egui::Ui, project: &Project) {
+pub fn show(ui: &mut egui::Ui, project: &Project, playhead: &mut i64) {
     let full = ui.max_rect();
     let ruler_rect = Rect::from_min_size(full.min, vec2(full.width(), RULER_HEIGHT));
     let tracks = Rect::from_min_max(ruler_rect.left_bottom(), full.max);
     paint_ruler(ui, ruler_rect, project);
-    if tracks.height() <= 0.0 {
-        return;
-    }
-    for lane in layout(project.timeline().tracks(), tracks) {
-        let lane_rect = Rect::from_min_size(
-            pos2(lane_left(tracks), lane.top),
-            vec2((tracks.right() - lane_left(tracks)).max(0.0), lane.height),
-        );
-        ui.painter().rect_filled(
-            lane_rect,
-            0,
-            if lane.main { theme::LANE } else { theme::PANEL },
-        );
-        if lane.empty {
-            ui.painter().rect_stroke(
+    if tracks.height() > 0.0 {
+        for lane in layout(project.timeline().tracks(), tracks) {
+            let lane_rect = Rect::from_min_size(
+                pos2(lane_left(tracks), lane.top),
+                vec2((tracks.right() - lane_left(tracks)).max(0.0), lane.height),
+            );
+            ui.painter().rect_filled(
                 lane_rect,
                 0,
-                Stroke::new(1.0, theme::LANE_LINE),
-                egui::StrokeKind::Inside,
+                if lane.main { theme::LANE } else { theme::PANEL },
             );
+            if lane.empty {
+                ui.painter().rect_stroke(
+                    lane_rect,
+                    0,
+                    Stroke::new(1.0, theme::LANE_LINE),
+                    egui::StrokeKind::Inside,
+                );
+                ui.painter().text(
+                    lane_rect.left_center() + vec2(14.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    "Drag a clip here",
+                    FontId::new(12.0, FontFamily::Proportional),
+                    theme::MUTED,
+                );
+            }
             ui.painter().text(
-                lane_rect.left_center() + vec2(14.0, 0.0),
+                pos2(tracks.left() + 12.0, lane_rect.center().y),
                 Align2::LEFT_CENTER,
-                "Drag a clip here",
+                lane.label,
                 FontId::new(12.0, FontFamily::Proportional),
                 theme::MUTED,
             );
         }
-        ui.painter().text(
-            pos2(tracks.left() + 12.0, lane_rect.center().y),
-            Align2::LEFT_CENTER,
-            lane.label,
-            FontId::new(12.0, FontFamily::Proportional),
-            theme::MUTED,
-        );
     }
+    paint_playhead(ui, ruler_rect, tracks, project, playhead);
 }
 
 fn lane_left(area: Rect) -> f32 {
@@ -91,6 +91,61 @@ fn paint_ruler(ui: &mut egui::Ui, ruler_rect: Rect, project: &Project) {
                 theme::MUTED,
             );
         }
+    }
+}
+
+fn paint_playhead(
+    ui: &mut egui::Ui,
+    ruler_rect: Rect,
+    tracks: Rect,
+    project: &Project,
+    playhead: &mut i64,
+) {
+    let left = lane_left(ruler_rect);
+    let width = (ruler_rect.right() - left).max(0.0);
+    let duration = project.duration().value;
+    let live = duration > 0;
+    let rate = project.settings().rate().rate();
+    let pixel_size = ruler::opening_pixel_size(width, duration);
+    if !live {
+        *playhead = 0;
+    }
+    *playhead = ruler::seek(*playhead, rate, duration);
+    let color = if live {
+        Color32::WHITE
+    } else {
+        Color32::from_white_alpha(96)
+    };
+    let bottom = ruler_rect.bottom();
+    let x_of = |us: i64| {
+        if pixel_size > 0.0 {
+            let drawn = left + (us as f64 * pixel_size) as f32;
+            drawn.clamp(left, left + width)
+        } else {
+            left
+        }
+    };
+    if live && pixel_size > 0.0 {
+        let mark = Rect::from_center_size(pos2(x_of(*playhead), bottom - 6.0), vec2(11.0, 12.0));
+        let response = ui.interact(mark, ui.scope_id().with("playhead"), Sense::drag());
+        if response.dragged()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let raw = f64::from(pointer.x - left) / pixel_size;
+            let us = if raw.is_finite() {
+                raw.round().clamp(0.0, i64::MAX as f64) as i64
+            } else {
+                0
+            };
+            *playhead = ruler::seek(us, rate, duration);
+        }
+    }
+    let x = x_of(*playhead);
+    let mark = Rect::from_center_size(pos2(x, bottom - 6.0), vec2(11.0, 12.0));
+    ui.painter().rect_filled(mark, 2.0, color);
+    if tracks.bottom() >= bottom {
+        ui.painter()
+            .vline(x, bottom..=tracks.bottom(), Stroke::new(1.0, color));
     }
 }
 

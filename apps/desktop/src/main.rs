@@ -32,6 +32,7 @@ fn main() -> eframe::Result {
 
 struct CutlassApp {
     project: Project,
+    playhead_us: i64,
 }
 
 impl CutlassApp {
@@ -40,6 +41,7 @@ impl CutlassApp {
         let id = ProjectId::from_bytes(uuid::Uuid::new_v4().into_bytes());
         Self {
             project: Project::new(id, "Untitled"),
+            playhead_us: 0,
         }
     }
 }
@@ -66,7 +68,7 @@ impl eframe::App for CutlassApp {
             .frame(theme::gap_above())
             .show_separator_line(false)
             .show(ui, |ui| {
-                timeline::show(ui, &self.project);
+                timeline::show(ui, &self.project, &mut self.playhead_us);
             });
 
         egui::Panel::left("library")

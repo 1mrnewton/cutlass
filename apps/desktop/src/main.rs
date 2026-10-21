@@ -6,6 +6,7 @@ use eframe::egui::{self, Align2, Button, Rect, RichText, Sense, TextStyle, Vec2,
 
 use cutlass_project::{History, Project, ProjectId, SegmentId};
 
+mod app_settings;
 mod chrome;
 mod export;
 mod gaps;
@@ -55,6 +56,8 @@ struct CutlassApp {
     split: bool,
     export: Option<export::Sheet>,
     modify: Option<modify::Draft>,
+    app: app_settings::AppSettings,
+    app_dialog: Option<app_settings::Draft>,
     language: words::Language,
     panes: gaps::Panes,
 }
@@ -77,6 +80,8 @@ impl CutlassApp {
             split: false,
             export: None,
             modify: None,
+            app: app_settings::AppSettings::default(),
+            app_dialog: None,
             language: words::language_from_tag(&words::system_tag()),
             panes: gaps::Panes::new(),
         }
@@ -146,22 +151,26 @@ impl eframe::App for CutlassApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         words::install(ui.ctx(), self.language);
         chrome::pass_clicks(frame);
-        let dialog = self.export.is_some() || self.modify.is_some();
+        let dialog = self.export.is_some() || self.modify.is_some() || self.app_dialog.is_some();
         keys::set_blocked(ui, dialog);
         if !dialog {
             self.history_shortcut(ui);
             self.delete_pressed(ui);
         }
 
-        let mut open_export = false;
+        let mut bar = Bar {
+            export: false,
+            settings: false,
+        };
         egui::Panel::top("head")
             .exact_size(theme::HEADER_HEIGHT)
             .frame(theme::bar())
             .show_separator_line(false)
             .show(ui, |ui| {
-                open_export = header(ui, self.project.name());
+                bar = header(ui, self.project.name());
             });
-        let opened = open_export && self.export.is_none() && self.modify.is_none();
+        let busy = self.export.is_some() || self.modify.is_some() || self.app_dialog.is_some();
+        let opened = bar.export && !busy;
         if opened {
             self.export = Some(export::Sheet::open(
                 self.project.name(),
@@ -255,7 +264,7 @@ impl eframe::App for CutlassApp {
         }
 
         let asked = modify::take_ask(ui.ctx());
-        if asked && self.export.is_none() && self.modify.is_none() {
+        if asked && self.export.is_none() && self.modify.is_none() && self.app_dialog.is_none() {
             self.modify = Some(modify::Draft::open(&self.project));
         }
         let outcome = self
@@ -274,50 +283,87 @@ impl eframe::App for CutlassApp {
             Some(modify::Outcome::Closed) => self.modify = None,
             Some(modify::Outcome::Open) | None => {}
         }
+
+        let mut opened_settings = false;
+        if bar.settings
+            && self.export.is_none()
+            && self.modify.is_none()
+            && self.app_dialog.is_none()
+        {
+            self.app_dialog = Some(app_settings::Draft::open(&self.app));
+            opened_settings = true;
+        }
+        let outcome = self
+            .app_dialog
+            .as_mut()
+            .map(|draft| app_settings::show(ui, draft));
+        match outcome {
+            Some(app_settings::Outcome::Saved(settings)) if !opened_settings => {
+                self.app = settings;
+                self.app_dialog = None;
+            }
+            Some(app_settings::Outcome::Closed) if !opened_settings => self.app_dialog = None,
+            _ => {}
+        }
     }
 }
 
+struct Bar {
+    export: bool,
+    settings: bool,
+}
+
 /// Project bar. The Mac close, minimize, and maximize buttons are the window's.
-fn header(ui: &mut egui::Ui, name: &str) -> bool {
+fn header(ui: &mut egui::Ui, name: &str) -> Bar {
     crate::tip::region(ui, words::of(ui, words::Phrase::RegionProject));
     ui.take_available_height();
     let rect = ui.max_rect();
+    let font = TextStyle::Button.resolve(ui.style());
     let export = words::of(ui, words::Phrase::Export);
-    let width = words::control_width(
-        ui,
-        export,
-        TextStyle::Button.resolve(ui.style()),
-        20.0,
-        72.0,
+    let settings = words::of(ui, words::Phrase::Settings);
+    let export_w = words::control_width(ui, export, font.clone(), 20.0, 72.0);
+    let settings_w = words::control_width(ui, settings, font.clone(), 20.0, 72.0);
+    let export_rect = Rect::from_min_size(
+        rect.right_center() - Vec2::new(12.0 + export_w, 13.0),
+        Vec2::new(export_w, 26.0),
     );
-    let size = Vec2::new(width, 26.0);
-    let origin = rect.right_center() - Vec2::new(12.0 + size.x, size.y / 2.0);
-    let button = Rect::from_min_size(origin, size);
+    let settings_rect = Rect::from_min_size(
+        pos2(export_rect.left() - 8.0 - settings_w, export_rect.top()),
+        Vec2::new(settings_w, 26.0),
+    );
     let drag = ui.interact(rect, ui.scope_id().with("project-bar"), Sense::drag());
     let pointer = ui.input(|input| input.pointer.interact_pos());
-    if drag.drag_started() && pointer.is_none_or(|point| !button.contains(point)) {
+    let on_control =
+        pointer.is_some_and(|point| export_rect.contains(point) || settings_rect.contains(point));
+    if drag.drag_started() && !on_control {
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        name,
-        TextStyle::Button.resolve(ui.style()),
-        theme::INK,
-    );
+    ui.painter()
+        .text(rect.center(), Align2::CENTER_CENTER, name, font, theme::INK);
     let name_rect = Rect::from_min_max(
         pos2(rect.left() + 80.0, rect.center().y - 12.0),
-        pos2(button.left() - 8.0, rect.center().y + 12.0),
+        pos2(settings_rect.left() - 8.0, rect.center().y + 12.0),
     );
     if name_rect.is_positive() {
         crate::tip::read(ui, name_rect, ui.scope_id().with("project-name"), name);
     }
 
-    ui.put(
-        button,
-        Button::new(RichText::new(export).color(theme::EXPORT_INK).strong())
-            .fill(theme::EXPORT)
-            .corner_radius(8),
-    )
-    .clicked()
+    let settings_clicked = ui
+        .put(
+            settings_rect,
+            Button::new(RichText::new(settings).color(theme::INK)).fill(theme::BAR),
+        )
+        .clicked();
+    let export_clicked = ui
+        .put(
+            export_rect,
+            Button::new(RichText::new(export).color(theme::EXPORT_INK).strong())
+                .fill(theme::EXPORT)
+                .corner_radius(8),
+        )
+        .clicked();
+    Bar {
+        export: export_clicked,
+        settings: settings_clicked,
+    }
 }

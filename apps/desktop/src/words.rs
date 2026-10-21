@@ -155,6 +155,12 @@ pub(crate) enum Phrase {
     Modify,
     Save,
     InvalidSettings,
+    Settings,
+    Provider,
+    OnThisDevice,
+    InTheApp,
+    InTheCloud,
+    ApiKey,
 }
 
 #[cfg(test)]
@@ -296,6 +302,12 @@ impl Phrase {
         Self::Modify,
         Self::Save,
         Self::InvalidSettings,
+        Self::Settings,
+        Self::Provider,
+        Self::OnThisDevice,
+        Self::InTheApp,
+        Self::InTheCloud,
+        Self::ApiKey,
     ];
 }
 
@@ -436,6 +448,12 @@ const ENGLISH: &[&str] = &[
     "Modify",
     "Save",
     "Width and height have to be above zero, and color channels run from 0 to 255.",
+    "Settings",
+    "AI provider",
+    "On this device",
+    "In the app",
+    "In the cloud",
+    "API key",
 ];
 
 const FRENCH: &[&str] = &[
@@ -575,6 +593,12 @@ const FRENCH: &[&str] = &[
     "Modifier",
     "Enregistrer",
     "La largeur et la hauteur doivent être supérieures à zéro, et les canaux vont de 0 à 255.",
+    "Réglages",
+    "Fournisseur IA",
+    "Sur cet appareil",
+    "Dans l'application",
+    "Dans le nuage",
+    "Clé API",
 ];
 
 /// The word for `phrase` in `language`.
@@ -721,7 +745,13 @@ mod tests {
         assert_eq!(say(Language::French, Phrase::Save), "Enregistrer");
         assert_eq!(say(Language::English, Phrase::Width), "Width");
         assert_eq!(say(Language::French, Phrase::Background), "Arrière-plan");
-        assert_eq!(Phrase::InvalidSettings as usize, super::ENGLISH.len() - 1);
+        assert_eq!(say(Language::English, Phrase::Settings), "Settings");
+        assert_eq!(say(Language::French, Phrase::Settings), "Réglages");
+        assert_eq!(say(Language::English, Phrase::Provider), "AI provider");
+        assert_eq!(say(Language::French, Phrase::InTheCloud), "Dans le nuage");
+        assert_eq!(say(Language::English, Phrase::ApiKey), "API key");
+        assert_eq!(say(Language::French, Phrase::ApiKey), "Clé API");
+        assert_eq!(Phrase::ApiKey as usize, super::ENGLISH.len() - 1);
         for phrase in Phrase::ALL {
             let english = say(Language::English, *phrase);
             let french = say(Language::French, *phrase);

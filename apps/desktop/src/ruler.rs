@@ -297,8 +297,36 @@ pub fn opening_pixel_size(lane_width: f32, duration_us: i64) -> f64 {
     f64::from(lane_width) * fraction / seconds / 1_000_000.0
 }
 
-/// Ticks from time zero across `width` pixels. The loop stops at 1001 marks.
-pub fn marks(rate: SequenceRate, pixel_size: f64, width: f32) -> Vec<Mark> {
+/// The finest pixels-per-microsecond in the step table for `rate`.
+///
+/// That is the two-frame step, except 25 fps, which stops at five frames.
+pub fn finest_pixel_size(rate: FrameRate) -> f64 {
+    let index = rate_index(rate);
+    let mut finest = 0.0;
+    for step in FRAMES {
+        let threshold = step.threshold[index];
+        if threshold > finest {
+            finest = threshold;
+        }
+    }
+    finest
+}
+
+/// Pixels per microsecond when the cut fills a quarter of the lanes.
+pub fn quarter_pixel_size(lane_width: f32, duration_us: i64) -> f64 {
+    if lane_width <= 0.0 {
+        return 0.0;
+    }
+    let span = if duration_us > 0 {
+        duration_us as f64
+    } else {
+        1_000_000.0
+    };
+    f64::from(lane_width) * 0.25 / span
+}
+
+/// Ticks across `width` pixels, starting at `origin_us`. The loop stops at 1001 marks.
+pub fn marks(rate: SequenceRate, pixel_size: f64, width: f32, origin_us: i64) -> Vec<Mark> {
     if !(pixel_size.is_finite() && pixel_size > 0.0 && width.is_finite() && width > 0.0) {
         return Vec::new();
     }
@@ -307,23 +335,29 @@ pub fn marks(rate: SequenceRate, pixel_size: f64, width: f32) -> Vec<Mark> {
     if spacing <= 0 {
         return Vec::new();
     }
+    let origin = origin_us.max(0);
     let mut out = Vec::new();
-    let mut index = 0i64;
+    let mut index = frame_at(origin, rate.rate()) / spacing;
+    if index < 0 {
+        index = 0;
+    }
     while out.len() < MARK_CAP {
         let Some(us) = frame_us(index * spacing, rate.rate()) else {
             break;
         };
-        let x = us as f64 * pixel_size;
+        let x = (us - origin) as f64 * pixel_size;
         if x > f64::from(width) {
             break;
         }
-        let major = index.rem_euclid(step.minors()) == 0;
-        let frame = index * spacing;
-        out.push(Mark {
-            us,
-            major,
-            label: major.then(|| label(frame, rate, step)),
-        });
+        if x >= 0.0 {
+            let major = index.rem_euclid(step.minors()) == 0;
+            let frame = index * spacing;
+            out.push(Mark {
+                us,
+                major,
+                label: major.then(|| label(frame, rate, step)),
+            });
+        }
         index += 1;
     }
     out
@@ -481,7 +515,7 @@ mod tests {
 
     #[test]
     fn visible_ticks_use_sequence_microseconds() {
-        let marks = marks(sequence(FrameRate::Fps30), 3e-4, 300.0);
+        let marks = marks(sequence(FrameRate::Fps30), 3e-4, 300.0, 0);
         assert_eq!(marks[0].label.as_deref(), Some("00:00"));
         let second = marks
             .iter()
@@ -501,7 +535,7 @@ mod tests {
         assert!((opening_pixel_size(900.0, 0) - 3e-4).abs() < 1e-12);
         assert!((opening_pixel_size(1000.0, 10_000_000) - 7.5e-5).abs() < 1e-15);
         assert_eq!(opening_pixel_size(0.0, 0), 0.0);
-        assert!(marks(sequence(FrameRate::Fps30), 0.0, 300.0).is_empty());
+        assert!(marks(sequence(FrameRate::Fps30), 0.0, 300.0, 0).is_empty());
     }
 
     #[test]
@@ -533,7 +567,16 @@ mod tests {
 
     #[test]
     fn the_painter_stops_at_the_cap() {
-        let marks = marks(sequence(FrameRate::Fps30), 1e-9, 20_000.0);
+        let marks = marks(sequence(FrameRate::Fps30), 1e-9, 20_000.0, 0);
         assert_eq!(marks.len(), 1001);
+    }
+
+    #[test]
+    fn zoom_stops_at_the_finest_step_and_a_quarter_of_the_lanes() {
+        assert!((finest_pixel_size(FrameRate::Fps30) - 0.006).abs() < 1e-12);
+        assert!((finest_pixel_size(FrameRate::Fps25) - 0.005).abs() < 1e-12);
+        assert!((quarter_pixel_size(400.0, 1_000_000) - 0.0001).abs() < 1e-12);
+        let shifted = marks(sequence(FrameRate::Fps30), 3e-4, 300.0, 1_000_000);
+        assert_eq!(shifted.first().map(|mark| mark.us), Some(1_000_000));
     }
 }

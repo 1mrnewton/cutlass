@@ -2,7 +2,7 @@
 
 use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, Sense, Stroke, pos2, vec2};
 
-use cutlass_project::{Command, History, Project, SegmentId, Track, TrackId, TrackKind};
+use cutlass_project::{Command, FrameRate, History, Project, SegmentId, Track, TrackId, TrackKind};
 
 use crate::ruler;
 use crate::theme;
@@ -151,15 +151,53 @@ pub fn show(
     let mut guides = ui
         .data(|data| data.get_temp::<Guides>(guides_id))
         .unwrap_or_default();
+    let lane = lane_left(ruler_rect);
+    let lane_width = (ruler_rect.right() - lane).max(0.0);
+    let duration = project.duration().value;
+    let rate = project.settings().rate().rate();
+    let zoom_id = ui.scope_id().with("timeline-zoom");
+    let mut view = if duration > 0 {
+        ui.data(|data| data.get_temp::<View>(zoom_id))
+            .filter(|stored| stored.pixel_size.is_finite() && stored.pixel_size > 0.0)
+            .unwrap_or_else(|| View::fit(lane_width, duration))
+    } else {
+        ui.data_mut(|data| data.remove::<View>(zoom_id));
+        View::fit(lane_width, duration)
+    };
+    if duration > 0 && lane_width > 0.0 {
+        clamp_view(&mut view, lane_width, duration, rate);
+        let factor = f64::from(ui.input(|input| input.zoom_delta()));
+        if let Some(point) = pointer.filter(|point| full.contains(*point)) {
+            zoom_around(&mut view, lane, point.x, factor, lane_width, duration, rate);
+        }
+        let anchor = view.x(lane, *playhead).clamp(lane, lane + lane_width);
+        match zoom_controls(ui, ruler_rect, true) {
+            Some(ZoomStep::In) => {
+                zoom_around(&mut view, lane, anchor, 2.0, lane_width, duration, rate);
+            }
+            Some(ZoomStep::Out) => {
+                zoom_around(&mut view, lane, anchor, 0.5, lane_width, duration, rate);
+            }
+            Some(ZoomStep::Fit) => {
+                view = View::fit(lane_width, duration);
+                clamp_view(&mut view, lane_width, duration, rate);
+            }
+            None => {}
+        }
+        ui.data_mut(|data| data.insert_temp(zoom_id, view));
+    } else {
+        let _ = zoom_controls(ui, ruler_rect, false);
+    }
     if tracks.height() > 0.0 {
         let pressed = ui.input(|input| input.pointer.primary_pressed());
         let released = ui.input(|input| input.pointer.primary_released());
         let shift = ui.input(|input| input.modifiers.shift);
         let box_id = ui.scope_id().with("box-select");
         if pressed && let Some(point) = pointer {
-            let mark = playhead_mark(ruler_rect, project, *playhead);
+            let mark = playhead_mark(ruler_rect, project, *playhead, view);
             let on_buttons = switch_rects(ruler_rect)
                 .iter()
+                .chain(zoom_rects(ruler_rect).iter())
                 .any(|button| button.contains(point));
             let on_ruler = ruler_rect.contains(point)
                 && point.x >= lane_left(ruler_rect)
@@ -183,7 +221,7 @@ pub fn show(
             && let Some(origin) = guides.pull.take()
             && pointer.is_some_and(|point| point.y > ruler_rect.bottom() + 8.0)
         {
-            let time = time_at(ruler_rect, project, origin.x);
+            let time = time_at(ruler_rect, project, origin.x, view);
             guides.selected = Some(Picked::Vertical(keep_line(&mut guides.vertical, time)));
             selected.clear();
         }
@@ -219,7 +257,7 @@ pub fn show(
         if pressed && let Some(point) = pointer.filter(|point| tracks.contains(*point)) {
             ui.data_mut(|data| data.remove::<BoxSelect>(box_id));
             guides.selected = None;
-            if let Some(picked) = picked_guide(&guides, tracks, project, point) {
+            if let Some(picked) = picked_guide(&guides, tracks, point, view) {
                 guides.selected = Some(picked);
                 *drag = None;
                 *trim = None;
@@ -229,12 +267,15 @@ pub fn show(
             } else if *split {
                 *drag = None;
                 *trim = None;
-                choose(selected, segment_at(project, tracks, point));
-            } else if let Some(id) = shift.then(|| segment_at(project, tracks, point)).flatten() {
+                choose(selected, segment_at(project, tracks, point, view));
+            } else if let Some(id) = shift
+                .then(|| segment_at(project, tracks, point, view))
+                .flatten()
+            {
                 *drag = None;
                 *trim = None;
                 toggle_selected(selected, id);
-            } else if !shift && let Some(active) = trim_from(project, tracks, point) {
+            } else if !shift && let Some(active) = trim_from(project, tracks, point, view) {
                 choose(selected, Some(active.segment));
                 *drag = None;
                 *trim = Some(active);
@@ -243,7 +284,7 @@ pub fn show(
                 let hit = if shift {
                     None
                 } else {
-                    segment_at(project, tracks, point)
+                    segment_at(project, tracks, point, view)
                 };
                 if hit.is_none() {
                     let kept = selected.clone();
@@ -271,7 +312,12 @@ pub fn show(
             && let Some(point) = pointer
             && boxing.origin.distance(point) >= BOX_SLOP
         {
-            let hits = clips_in(project, tracks, Rect::from_two_pos(boxing.origin, point));
+            let hits = clips_in(
+                project,
+                tracks,
+                Rect::from_two_pos(boxing.origin, point),
+                view,
+            );
             *selected = if boxing.additive {
                 unite(&boxing.kept, hits)
             } else {
@@ -288,7 +334,7 @@ pub fn show(
                 trim.take();
                 if ui.input(|input| input.pointer.primary_clicked())
                     && let Some(point) = pointer.filter(|point| tracks.contains(*point))
-                    && let Some(command) = split_command(project, tracks, point)
+                    && let Some(command) = split_command(project, tracks, point, view)
                 {
                     commands.push(command);
                 }
@@ -298,9 +344,12 @@ pub fn show(
                     tracks,
                     &active,
                     pointer,
-                    snap,
-                    *playhead,
-                    &guides.vertical,
+                    &Align {
+                        snap,
+                        playhead: *playhead,
+                        guides: &guides.vertical,
+                        view,
+                    },
                 );
             } else if let Some(active) = drag.take()
                 && let Some(command) = move_command(
@@ -308,16 +357,19 @@ pub fn show(
                     tracks,
                     &active,
                     pointer,
-                    snap,
-                    *playhead,
-                    &guides.vertical,
+                    &Align {
+                        snap,
+                        playhead: *playhead,
+                        guides: &guides.vertical,
+                        view,
+                    },
                 )
             {
                 commands.push(command);
             }
         }
     }
-    paint_ruler(ui, ruler_rect, project);
+    paint_ruler(ui, ruler_rect, project, view);
     ruler_switches(
         ui,
         ruler_rect,
@@ -331,10 +383,6 @@ pub fn show(
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
     if tracks.height() > 0.0 {
-        let pixel_size = ruler::opening_pixel_size(
-            (tracks.right() - lane_left(tracks)).max(0.0),
-            project.duration().value,
-        );
         for (track, lane) in project
             .timeline()
             .tracks()
@@ -379,7 +427,8 @@ pub fn show(
                 lane.main,
                 &ClipPaint {
                     project,
-                    pixel_size,
+                    pixel_size: view.pixel_size,
+                    origin_us: view.origin_us,
                     selected,
                     drag: drag.as_ref(),
                     trim: trim.as_ref(),
@@ -391,17 +440,21 @@ pub fn show(
             );
         }
     }
-    paint_guides(ui, tracks, project, &guides, pointer);
-    paint_playhead(ui, ruler_rect, tracks, project, playhead);
+    paint_guides(ui, tracks, project, &guides, pointer, view);
+    paint_playhead(ui, ruler_rect, tracks, project, playhead, view);
     if snap
         && let Some(x) = snap_guide(
             project,
             tracks,
-            *playhead,
             drag.as_ref(),
             trim.as_ref(),
             pointer,
-            &guides.vertical,
+            &Align {
+                snap,
+                playhead: *playhead,
+                guides: &guides.vertical,
+                view,
+            },
         )
     {
         let bottom = tracks.bottom().max(ruler_rect.bottom());
@@ -428,6 +481,137 @@ fn lane_left(area: Rect) -> f32 {
     area.left() + HEAD + COVER
 }
 
+#[derive(Clone, Copy)]
+struct View {
+    pixel_size: f64,
+    origin_us: i64,
+}
+
+impl View {
+    fn fit(width: f32, duration_us: i64) -> Self {
+        Self {
+            pixel_size: ruler::opening_pixel_size(width, duration_us),
+            origin_us: 0,
+        }
+    }
+
+    fn x(self, left: f32, us: i64) -> f32 {
+        if !(self.pixel_size.is_finite() && self.pixel_size > 0.0) {
+            return left;
+        }
+        left + ((us - self.origin_us) as f64 * self.pixel_size) as f32
+    }
+
+    fn us_at(self, left: f32, x: f32) -> i64 {
+        if !(self.pixel_size.is_finite() && self.pixel_size > 0.0) {
+            return self.origin_us.max(0);
+        }
+        let raw = f64::from(x - left) / self.pixel_size;
+        if !raw.is_finite() {
+            return self.origin_us.max(0);
+        }
+        let delta = raw.round().clamp(i64::MIN as f64, i64::MAX as f64) as i64;
+        self.origin_us.saturating_add(delta).max(0)
+    }
+}
+
+struct Align<'a> {
+    snap: bool,
+    playhead: i64,
+    guides: &'a [i64],
+    view: View,
+}
+
+fn clamp_view(view: &mut View, width: f32, duration_us: i64, rate: FrameRate) {
+    let min = ruler::quarter_pixel_size(width, duration_us);
+    let max = ruler::finest_pixel_size(rate);
+    if view.pixel_size.is_finite() && max >= min && max > 0.0 {
+        view.pixel_size = view.pixel_size.clamp(min, max);
+    }
+    if !(view.pixel_size.is_finite() && view.pixel_size > 0.0) {
+        view.origin_us = 0;
+        return;
+    }
+    let visible = (f64::from(width) / view.pixel_size).round();
+    let visible = if visible.is_finite() && visible >= 0.0 {
+        visible.min(i64::MAX as f64) as i64
+    } else {
+        0
+    };
+    let max_origin = duration_us.max(0).saturating_sub(visible).max(0);
+    view.origin_us = view.origin_us.clamp(0, max_origin);
+}
+
+fn zoom_around(
+    view: &mut View,
+    left: f32,
+    x: f32,
+    factor: f64,
+    width: f32,
+    duration_us: i64,
+    rate: FrameRate,
+) {
+    let old = view.pixel_size;
+    if !(old.is_finite() && old > 0.0 && factor.is_finite() && factor > 0.0 && factor != 1.0) {
+        return;
+    }
+    let time = view.us_at(left, x);
+    view.pixel_size = old * factor;
+    clamp_view(view, width, duration_us, rate);
+    let delta = f64::from(x - left) / view.pixel_size;
+    let delta = if delta.is_finite() {
+        delta.round().clamp(i64::MIN as f64, i64::MAX as f64) as i64
+    } else {
+        0
+    };
+    view.origin_us = time.saturating_sub(delta).max(0);
+    clamp_view(view, width, duration_us, rate);
+}
+
+#[derive(Clone, Copy)]
+enum ZoomStep {
+    Out,
+    Fit,
+    In,
+}
+
+fn zoom_rects(ruler: Rect) -> [Rect; 3] {
+    let top = ruler.center().y - 13.0;
+    let x = ruler.left() + HEAD + 2.0;
+    [
+        Rect::from_min_size(pos2(x, top), vec2(18.0, 26.0)),
+        Rect::from_min_size(pos2(x + 20.0, top), vec2(28.0, 26.0)),
+        Rect::from_min_size(pos2(x + 50.0, top), vec2(18.0, 26.0)),
+    ]
+}
+
+fn zoom_controls(ui: &mut egui::Ui, ruler: Rect, live: bool) -> Option<ZoomStep> {
+    let rects = zoom_rects(ruler);
+    let steps = [ZoomStep::Out, ZoomStep::Fit, ZoomStep::In];
+    let labels = ["−", "Fit", "+"];
+    let salts = ["zoom-out", "zoom-fit", "zoom-in"];
+    let mut chosen = None;
+    for index in 0..rects.len() {
+        let response = ui.interact(
+            rects[index],
+            ui.scope_id().with(salts[index]),
+            Sense::click(),
+        );
+        if live && response.clicked() {
+            chosen = Some(steps[index]);
+        }
+        let color = if live { theme::INK } else { theme::FAINT };
+        ui.painter().text(
+            rects[index].center(),
+            Align2::CENTER_CENTER,
+            labels[index],
+            FontId::new(11.0, FontFamily::Proportional),
+            color,
+        );
+    }
+    chosen
+}
+
 fn keep_line(lines: &mut Vec<i64>, time: i64) -> usize {
     if let Some(index) = lines.iter().position(|line| *line == time) {
         return index;
@@ -436,53 +620,35 @@ fn keep_line(lines: &mut Vec<i64>, time: i64) -> usize {
     lines.len() - 1
 }
 
-fn time_at(area: Rect, project: &Project, x: f32) -> i64 {
-    let left = lane_left(area);
-    let width = (area.right() - left).max(0.0);
-    let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
-    if !(pixel_size.is_finite() && pixel_size > 0.0) {
-        return 0;
-    }
-    let raw = f64::from(x - left) / pixel_size;
-    if !raw.is_finite() {
-        return 0;
-    }
-    let us = raw.round().clamp(0.0, i64::MAX as f64) as i64;
+fn time_at(area: Rect, project: &Project, x: f32, view: View) -> i64 {
+    let us = view.us_at(lane_left(area), x);
     let end = project.duration().value.max(us);
     ruler::seek(us, project.settings().rate().rate(), end)
 }
 
-fn playhead_mark(ruler: Rect, project: &Project, playhead: i64) -> Option<Rect> {
+fn playhead_mark(ruler: Rect, project: &Project, playhead: i64, view: View) -> Option<Rect> {
     if project.duration().value <= 0 {
         return None;
     }
     let left = lane_left(ruler);
     let width = (ruler.right() - left).max(0.0);
-    let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
-    if !(pixel_size.is_finite() && pixel_size > 0.0) {
+    if !(view.pixel_size.is_finite() && view.pixel_size > 0.0) {
         return None;
     }
-    let x = (left + (playhead.max(0) as f64 * pixel_size) as f32).clamp(left, left + width);
+    let x = view.x(left, playhead.max(0)).clamp(left, left + width);
     Some(Rect::from_center_size(
         pos2(x, ruler.bottom() - 6.0),
         vec2(11.0, 12.0),
     ))
 }
 
-fn line_gap(
-    lines: &[i64],
-    tracks: Rect,
-    project: &Project,
-    point: egui::Pos2,
-) -> Option<(usize, f32)> {
-    let left = lane_left(tracks);
-    let width = (tracks.right() - left).max(0.0);
-    let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
-    if !(pixel_size.is_finite() && pixel_size > 0.0) {
+fn line_gap(lines: &[i64], tracks: Rect, point: egui::Pos2, view: View) -> Option<(usize, f32)> {
+    if !(view.pixel_size.is_finite() && view.pixel_size > 0.0) {
         return None;
     }
+    let left = lane_left(tracks);
     lines.iter().enumerate().find_map(|(index, time)| {
-        let x = left + (*time as f64 * pixel_size) as f32;
+        let x = view.x(left, *time);
         let gap = (point.x - x).abs();
         (gap <= 4.0).then_some((index, gap))
     })
@@ -520,13 +686,8 @@ fn row_gap(lines: &[f32], tracks: Rect, point: egui::Pos2) -> Option<(usize, f32
     })
 }
 
-fn picked_guide(
-    guides: &Guides,
-    tracks: Rect,
-    project: &Project,
-    point: egui::Pos2,
-) -> Option<Picked> {
-    let vertical = line_gap(&guides.vertical, tracks, project, point);
+fn picked_guide(guides: &Guides, tracks: Rect, point: egui::Pos2, view: View) -> Option<Picked> {
+    let vertical = line_gap(&guides.vertical, tracks, point, view);
     let horizontal = row_gap(&guides.horizontal, tracks, point);
     match (vertical, horizontal) {
         (Some((index, across)), Some((row, down))) => Some(if down < across {
@@ -546,18 +707,19 @@ fn paint_guides(
     project: &Project,
     guides: &Guides,
     pointer: Option<egui::Pos2>,
+    view: View,
 ) {
     let left = lane_left(tracks);
-    let width = (tracks.right() - left).max(0.0);
-    let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
     if tracks.height() <= 0.0 {
         return;
     }
-    if pixel_size.is_finite() && pixel_size > 0.0 {
+    if view.pixel_size.is_finite() && view.pixel_size > 0.0 {
         let draw = |time: i64, color: Color32| {
-            let x = left + (time as f64 * pixel_size) as f32;
-            ui.painter()
-                .vline(x, tracks.top()..=tracks.bottom(), Stroke::new(1.0, color));
+            ui.painter().vline(
+                view.x(left, time),
+                tracks.top()..=tracks.bottom(),
+                Stroke::new(1.0, color),
+            );
         };
         for (index, time) in guides.vertical.iter().enumerate() {
             let color = if guides.selected == Some(Picked::Vertical(index)) {
@@ -570,7 +732,7 @@ fn paint_guides(
         if let Some(origin) = guides.pull
             && pointer.is_some_and(|point| point.y > tracks.top())
         {
-            draw(time_at(tracks, project, origin.x), theme::EXPORT);
+            draw(time_at(tracks, project, origin.x, view), theme::EXPORT);
         }
     }
     let draw_row = |fraction: f32, color: Color32| {
@@ -645,21 +807,19 @@ fn ruler_switch(
     );
 }
 
-fn split_command(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<Command> {
-    let id = segment_at(project, tracks, point)?;
+fn split_command(
+    project: &Project,
+    tracks: Rect,
+    point: egui::Pos2,
+    view: View,
+) -> Option<Command> {
+    let id = segment_at(project, tracks, point, view)?;
     let range = project.timeline().segment(id)?.timeline();
-    let width = (tracks.right() - lane_left(tracks)).max(0.0);
-    let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
-    if !(pixel_size.is_finite() && pixel_size > 0.0) {
+    if !(view.pixel_size.is_finite() && view.pixel_size > 0.0) {
         return None;
     }
-    let raw = f64::from(point.x - lane_left(tracks)) / pixel_size;
-    if !raw.is_finite() {
-        return None;
-    }
-    let us = raw.round().clamp(0.0, i64::MAX as f64) as i64;
     let at = ruler::seek(
-        us,
+        view.us_at(lane_left(tracks), point.x),
         project.settings().rate().rate(),
         project.duration().value,
     );
@@ -669,14 +829,10 @@ fn split_command(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<C
     Some(Command::Split { segment: id, at })
 }
 
-fn clips_in(project: &Project, tracks: Rect, area: Rect) -> Vec<SegmentId> {
+fn clips_in(project: &Project, tracks: Rect, area: Rect, view: View) -> Vec<SegmentId> {
     if tracks.height() <= 0.0 {
         return Vec::new();
     }
-    let pixel_size = ruler::opening_pixel_size(
-        (tracks.right() - lane_left(tracks)).max(0.0),
-        project.duration().value,
-    );
     let width = (tracks.right() - lane_left(tracks)).max(0.0);
     let mut hits = Vec::new();
     for (track, lane) in project
@@ -694,7 +850,8 @@ fn clips_in(project: &Project, tracks: Rect, area: Rect) -> Vec<SegmentId> {
                 lane.main,
                 range.start().value,
                 range.duration().value,
-                pixel_size,
+                view.pixel_size,
+                view.origin_us,
             );
             if rect.intersects(area) {
                 hits.push(segment.id());
@@ -717,6 +874,7 @@ fn unite(kept: &[SegmentId], hits: Vec<SegmentId>) -> Vec<SegmentId> {
 struct ClipPaint<'a> {
     project: &'a Project,
     pixel_size: f64,
+    origin_us: i64,
     selected: &'a [SegmentId],
     drag: Option<&'a ClipDrag>,
     trim: Option<&'a TrimDrag>,
@@ -735,6 +893,7 @@ fn paint_segments(ui: &mut egui::Ui, track: &Track, lane: Rect, main: bool, pain
             range.start().value,
             range.duration().value,
             paint.pixel_size,
+            paint.origin_us,
         );
         if rect.left() > lane.right() || rect.right() < lane.left() {
             continue;
@@ -912,19 +1071,17 @@ fn consider(
 fn snap_guide(
     project: &Project,
     tracks: Rect,
-    playhead: i64,
     drag: Option<&ClipDrag>,
     trim: Option<&TrimDrag>,
     pointer: Option<egui::Pos2>,
-    guides: &[i64],
+    align: &Align<'_>,
 ) -> Option<f32> {
     let point = pointer?;
-    let width = (tracks.right() - lane_left(tracks)).max(0.0);
-    let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
+    let pixel_size = align.view.pixel_size;
     if !(pixel_size.is_finite() && pixel_size > 0.0) {
         return None;
     }
-    let targets = snap_targets(project, playhead, guides);
+    let targets = snap_targets(project, align.playhead, align.guides);
     let line = if let Some(drag) = drag {
         let duration = project
             .timeline()
@@ -945,7 +1102,7 @@ fn snap_guide(
     } else {
         None
     }?;
-    Some(lane_left(tracks) + (line as f64 * pixel_size) as f32)
+    Some(align.view.x(lane_left(tracks), line))
 }
 
 fn drag_offset(paint: &ClipPaint<'_>, drag: &ClipDrag, point: egui::Pos2) -> egui::Vec2 {
@@ -1013,19 +1170,18 @@ fn move_command(
     tracks: Rect,
     drag: &ClipDrag,
     pointer: Option<egui::Pos2>,
-    snap: bool,
-    playhead: i64,
-    guides: &[i64],
+    align: &Align<'_>,
 ) -> Option<Command> {
     let point = pointer?;
-    let width = (tracks.right() - lane_left(tracks)).max(0.0);
-    let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
+    let pixel_size = align.view.pixel_size;
     let mut start = moved_start(drag.start_us, point.x - drag.origin.x, pixel_size);
-    if snap && let Some(segment) = project.timeline().segment(drag.segment) {
+    if align.snap
+        && let Some(segment) = project.timeline().segment(drag.segment)
+    {
         start = snap_span(
             start,
             segment.timeline().duration().value,
-            &snap_targets(project, playhead, guides),
+            &snap_targets(project, align.playhead, align.guides),
             pixel_size,
         )
         .0;
@@ -1061,14 +1217,10 @@ fn lane_under(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<Trac
 
 const EDGE_PX: f32 = 6.0;
 
-fn trim_from(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<TrimDrag> {
+fn trim_from(project: &Project, tracks: Rect, point: egui::Pos2, view: View) -> Option<TrimDrag> {
     if tracks.height() <= 0.0 {
         return None;
     }
-    let pixel_size = ruler::opening_pixel_size(
-        (tracks.right() - lane_left(tracks)).max(0.0),
-        project.duration().value,
-    );
     let width = (tracks.right() - lane_left(tracks)).max(0.0);
     for (track, lane) in project
         .timeline()
@@ -1086,7 +1238,8 @@ fn trim_from(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<TrimD
                 lane.main,
                 range.start().value,
                 range.duration().value,
-                pixel_size,
+                view.pixel_size,
+                view.origin_us,
             );
             if !rect.contains(point) {
                 continue;
@@ -1138,12 +1291,10 @@ fn delta_us(delta_px: f32, pixel_size: f64) -> i64 {
 
 fn trim_commands(
     project: &Project,
-    tracks: Rect,
+    _tracks: Rect,
     trim: &TrimDrag,
     pointer: Option<egui::Pos2>,
-    snap: bool,
-    playhead: i64,
-    guides: &[i64],
+    align: &Align<'_>,
 ) -> Vec<Command> {
     let Some(point) = pointer else {
         return Vec::new();
@@ -1154,16 +1305,20 @@ fn trim_commands(
     let Some(asset) = project.asset(segment.asset_id()) else {
         return Vec::new();
     };
-    let width = (tracks.right() - lane_left(tracks)).max(0.0);
-    let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
+    let pixel_size = align.view.pixel_size;
     let mut delta = delta_us(point.x - trim.origin_x, pixel_size);
-    if snap {
+    if align.snap {
         let range = segment.timeline();
         let edge = match trim.edge {
             Edge::End => range.end().value.saturating_add(delta),
             Edge::Start => range.start().value.saturating_add(delta),
         };
-        let snapped = snap_point(edge, &snap_targets(project, playhead, guides), pixel_size).0;
+        let snapped = snap_point(
+            edge,
+            &snap_targets(project, align.playhead, align.guides),
+            pixel_size,
+        )
+        .0;
         delta = delta.saturating_add(snapped.saturating_sub(edge));
     }
     let edge = match trim.edge {
@@ -1173,14 +1328,10 @@ fn trim_commands(
     cutlass_project::commands_for_trim(segment, asset, edge, delta).unwrap_or_default()
 }
 
-fn segment_at(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<SegmentId> {
+fn segment_at(project: &Project, tracks: Rect, point: egui::Pos2, view: View) -> Option<SegmentId> {
     if tracks.height() <= 0.0 {
         return None;
     }
-    let pixel_size = ruler::opening_pixel_size(
-        (tracks.right() - lane_left(tracks)).max(0.0),
-        project.duration().value,
-    );
     let lanes = layout(project.timeline().tracks(), tracks);
     for (track, lane) in project.timeline().tracks().iter().zip(lanes).rev() {
         let lane_rect = Rect::from_min_size(
@@ -1194,7 +1345,8 @@ fn segment_at(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<Segm
                 lane.main,
                 range.start().value,
                 range.duration().value,
-                pixel_size,
+                view.pixel_size,
+                view.origin_us,
             );
             if rect.contains(point) {
                 return Some(segment.id());
@@ -1204,10 +1356,17 @@ fn segment_at(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<Segm
     None
 }
 
-fn clip_rect(lane: Rect, main: bool, start_us: i64, duration_us: i64, pixel_size: f64) -> Rect {
+fn clip_rect(
+    lane: Rect,
+    main: bool,
+    start_us: i64,
+    duration_us: i64,
+    pixel_size: f64,
+    origin_us: i64,
+) -> Rect {
     let (inset, height) = if main { (8.0, 48.0) } else { (6.0, 28.0) };
     let width = (duration_us.max(0) as f64 * pixel_size).max(8.0) as f32;
-    let x = lane.left() + (start_us.max(0) as f64 * pixel_size) as f32;
+    let x = lane.left() + ((start_us.max(0) - origin_us) as f64 * pixel_size) as f32;
     Rect::from_min_size(pos2(x, lane.top() + inset), vec2(width, height))
 }
 
@@ -1228,13 +1387,17 @@ fn clip_color(kind: TrackKind) -> Color32 {
     }
 }
 
-fn paint_ruler(ui: &mut egui::Ui, ruler_rect: Rect, project: &Project) {
+fn paint_ruler(ui: &mut egui::Ui, ruler_rect: Rect, project: &Project, view: View) {
     let left = lane_left(ruler_rect);
     let width = (ruler_rect.right() - left).max(0.0);
-    let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
     let bottom = ruler_rect.bottom();
-    for mark in ruler::marks(project.settings().rate(), pixel_size, width) {
-        let x = left + (mark.us as f64 * pixel_size) as f32;
+    for mark in ruler::marks(
+        project.settings().rate(),
+        view.pixel_size,
+        width,
+        view.origin_us,
+    ) {
+        let x = view.x(left, mark.us);
         let height = if mark.major { 12.0 } else { 6.0 };
         ui.painter().vline(
             x,
@@ -1259,13 +1422,13 @@ fn paint_playhead(
     tracks: Rect,
     project: &Project,
     playhead: &mut i64,
+    view: View,
 ) {
     let left = lane_left(ruler_rect);
     let width = (ruler_rect.right() - left).max(0.0);
     let duration = project.duration().value;
     let live = duration > 0;
     let rate = project.settings().rate().rate();
-    let pixel_size = ruler::opening_pixel_size(width, duration);
     if !live {
         *playhead = 0;
     }
@@ -1277,26 +1440,19 @@ fn paint_playhead(
     };
     let bottom = ruler_rect.bottom();
     let x_of = |us: i64| {
-        if pixel_size > 0.0 {
-            let drawn = left + (us as f64 * pixel_size) as f32;
-            drawn.clamp(left, left + width)
+        if view.pixel_size > 0.0 {
+            view.x(left, us).clamp(left, left + width)
         } else {
             left
         }
     };
-    if live && pixel_size > 0.0 {
+    if live && view.pixel_size > 0.0 {
         let mark = Rect::from_center_size(pos2(x_of(*playhead), bottom - 6.0), vec2(11.0, 12.0));
         let response = ui.interact(mark, ui.scope_id().with("playhead"), Sense::drag());
         if response.dragged()
             && let Some(pointer) = response.interact_pointer_pos()
         {
-            let raw = f64::from(pointer.x - left) / pixel_size;
-            let us = if raw.is_finite() {
-                raw.round().clamp(0.0, i64::MAX as f64) as i64
-            } else {
-                0
-            };
-            *playhead = ruler::seek(us, rate, duration);
+            *playhead = ruler::seek(view.us_at(left, pointer.x), rate, duration);
         }
     }
     let x = x_of(*playhead);
@@ -1374,6 +1530,19 @@ mod tests {
 
     fn project() -> Project {
         Project::new(ProjectId::from_bytes([1; 16]), "Untitled")
+    }
+
+    fn fitted(tracks: Rect, duration: i64) -> super::View {
+        super::View::fit((tracks.right() - lane_left(tracks)).max(0.0), duration)
+    }
+
+    fn loose(tracks: Rect, duration: i64) -> super::Align<'static> {
+        super::Align {
+            snap: false,
+            playhead: 0,
+            guides: &[],
+            view: fitted(tracks, duration),
+        }
     }
 
     #[test]
@@ -1466,12 +1635,12 @@ mod tests {
     #[test]
     fn a_one_second_clip_fills_three_hundred_pixels_at_the_one_second_step() {
         let lane = Rect::from_min_size(pos2(202.0, 100.0), vec2(900.0, 64.0));
-        let rect = super::clip_rect(lane, true, 0, 1_000_000, 3e-4);
+        let rect = super::clip_rect(lane, true, 0, 1_000_000, 3e-4, 0);
         assert!((rect.left() - 202.0).abs() < 0.01);
         assert!((rect.width() - 300.0).abs() < 0.01);
         assert!((rect.top() - 108.0).abs() < f32::EPSILON);
         assert!((rect.height() - 48.0).abs() < f32::EPSILON);
-        let short = super::clip_rect(lane, false, 0, 1, 3e-4);
+        let short = super::clip_rect(lane, false, 0, 1, 3e-4, 0);
         assert!((short.width() - 8.0).abs() < f32::EPSILON);
         assert!((short.height() - 28.0).abs() < f32::EPSILON);
         assert_eq!(super::file_name("file:///cuts/v.mp4"), "v.mp4");
@@ -1538,9 +1707,26 @@ mod tests {
             range.start().value,
             range.duration().value,
             pixel_size,
+            0,
         );
-        assert_eq!(segment_at(&cut, tracks, rect.center()), Some(id));
-        assert_eq!(segment_at(&cut, tracks, pos2(12.0, rect.center().y)), None);
+        assert_eq!(
+            segment_at(
+                &cut,
+                tracks,
+                rect.center(),
+                fitted(tracks, cut.duration().value)
+            ),
+            Some(id)
+        );
+        assert_eq!(
+            segment_at(
+                &cut,
+                tracks,
+                pos2(12.0, rect.center().y),
+                fitted(tracks, cut.duration().value)
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1667,7 +1853,16 @@ mod tests {
             start_us: 0,
             from,
         };
-        assert!(super::move_command(&cut, tracks, &drag, Some(origin), false, 0, &[]).is_none());
+        assert!(
+            super::move_command(
+                &cut,
+                tracks,
+                &drag,
+                Some(origin),
+                &loose(tracks, cut.duration().value)
+            )
+            .is_none()
+        );
         let pixel_size = crate::ruler::opening_pixel_size(400.0, cut.duration().value);
         let landed = super::moved_start(0, 150.0, pixel_size);
         let command = super::move_command(
@@ -1675,9 +1870,7 @@ mod tests {
             tracks,
             &drag,
             Some(pos2(origin.x + 150.0, origin.y)),
-            false,
-            0,
-            &[],
+            &loose(tracks, cut.duration().value),
         )
         .expect("move");
         assert_eq!(
@@ -1714,9 +1907,7 @@ mod tests {
                 from,
             },
             Some(pos2(origin.x, main.top + 10.0)),
-            false,
-            0,
-            &[],
+            &loose(tracks, cut.duration().value),
         )
         .expect("lane");
         let main_id = cut.timeline().main_track().id();
@@ -1788,19 +1979,27 @@ mod tests {
             range.start().value,
             range.duration().value,
             pixel_size,
+            0,
         );
         let edge = pos2(rect.right() - 2.0, rect.center().y);
-        let trim = super::trim_from(&cut, tracks, edge).expect("edge");
-        assert!(super::trim_from(&cut, tracks, rect.center()).is_none());
+        let trim = super::trim_from(&cut, tracks, edge, fitted(tracks, cut.duration().value))
+            .expect("edge");
+        assert!(
+            super::trim_from(
+                &cut,
+                tracks,
+                rect.center(),
+                fitted(tracks, cut.duration().value)
+            )
+            .is_none()
+        );
         let before = range.duration().value;
         let commands = super::trim_commands(
             &cut,
             tracks,
             &trim,
             Some(pos2(edge.x - 80.0, edge.y)),
-            false,
-            0,
-            &[],
+            &loose(tracks, cut.duration().value),
         );
         assert!(!commands.is_empty());
         history.apply(&mut cut, &commands).expect("trim");
@@ -1867,19 +2066,22 @@ mod tests {
             range.start().value,
             range.duration().value,
             pixel_size,
+            0,
         );
-        assert!(super::split_command(&cut, tracks, rect.left_center()).is_none());
-        assert_eq!(super::clips_in(&cut, tracks, rect), vec![id]);
+        let view = fitted(tracks, cut.duration().value);
+        assert!(super::split_command(&cut, tracks, rect.left_center(), view).is_none());
+        assert_eq!(super::clips_in(&cut, tracks, rect, view), vec![id]);
         assert!(
             super::clips_in(
                 &cut,
                 tracks,
                 Rect::from_min_size(pos2(0.0, 0.0), vec2(12.0, 12.0)),
+                view,
             )
             .is_empty()
         );
         assert_eq!(super::unite(&[id], vec![id]), vec![id]);
-        let command = super::split_command(&cut, tracks, rect.center()).expect("split");
+        let command = super::split_command(&cut, tracks, rect.center(), view).expect("split");
         let Command::Split { segment, at } = command else {
             panic!("expected a split, got {command:?}");
         };
@@ -1925,20 +2127,52 @@ mod tests {
         let cut = project();
         let tracks = Rect::from_min_size(pos2(0.0, 44.0), vec2(600.0, 200.0));
         let left = super::lane_left(tracks);
-        assert_eq!(super::time_at(tracks, &cut, left), 0);
-        assert!(super::time_at(tracks, &cut, left + 40.0) > 0);
-        assert!(super::playhead_mark(tracks, &cut, 0).is_none());
+        let view = fitted(tracks, cut.duration().value);
+        assert_eq!(super::time_at(tracks, &cut, left, view), 0);
+        assert!(super::time_at(tracks, &cut, left + 40.0, view) > 0);
+        assert!(super::playhead_mark(tracks, &cut, 0, view).is_none());
         let mut lines = vec![0];
         assert_eq!(super::keep_line(&mut lines, 0), 0);
         assert_eq!(lines, vec![0]);
         assert_eq!(
-            super::line_gap(&lines, tracks, &cut, pos2(left, 80.0)).map(|(index, _)| index),
+            super::line_gap(&lines, tracks, pos2(left, 80.0), view).map(|(index, _)| index),
             Some(0)
         );
         assert_eq!(
-            super::line_gap(&lines, tracks, &cut, pos2(left + 20.0, 80.0)),
+            super::line_gap(&lines, tracks, pos2(left + 20.0, 80.0), view),
             None
         );
+    }
+
+    #[test]
+    fn zooming_keeps_the_time_under_the_pointer() {
+        let mut view = super::View {
+            pixel_size: 0.0002,
+            origin_us: 0,
+        };
+        super::zoom_around(
+            &mut view,
+            0.0,
+            100.0,
+            2.0,
+            400.0,
+            2_000_000,
+            cutlass_project::FrameRate::Fps30,
+        );
+        assert!((view.pixel_size - 0.0004).abs() < 1e-12);
+        assert_eq!(view.us_at(0.0, 100.0), 500_000);
+        super::zoom_around(
+            &mut view,
+            0.0,
+            100.0,
+            0.01,
+            400.0,
+            2_000_000,
+            cutlass_project::FrameRate::Fps30,
+        );
+        let quarter = crate::ruler::quarter_pixel_size(400.0, 2_000_000);
+        assert!((view.pixel_size - quarter).abs() < 1e-12);
+        assert_eq!(view.origin_us, 0);
     }
 
     #[test]

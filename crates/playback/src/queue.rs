@@ -78,10 +78,15 @@ impl<I> Queue<I> {
     /// A frame that has not started stays queued. The frame on screen stays
     /// until a later frame is due.
     pub fn at(&mut self, time: Timestamp) -> Option<&VideoFrame<I>> {
+        self.discard_until(time);
+        self.frames.front().filter(|frame| frame.pts <= time)
+    }
+
+    /// Drops frames a later one has already replaced at `time`.
+    pub(crate) fn discard_until(&mut self, time: Timestamp) {
         while self.frames.len() >= 2 && self.frames[1].pts <= time {
             self.frames.pop_front();
         }
-        self.frames.front().filter(|frame| frame.pts <= time)
     }
 
     /// Drops every frame. The next [`Self::push`] may start at any time.

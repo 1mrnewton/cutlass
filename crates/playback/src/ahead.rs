@@ -19,6 +19,9 @@ pub trait Decode {
 
     /// Tells the decoder no more packets are coming.
     fn flush(&mut self) -> Result<(), Self::Error>;
+
+    /// Drops decoded frames so the next packet starts a new span.
+    fn reset(&mut self) -> Result<(), Self::Error>;
 }
 
 /// Why [`Ahead::fill`] stopped.
@@ -85,8 +88,7 @@ impl<I> Ahead<I> {
     /// Sends from `pending` until the queue is full or the decoder is drained.
     ///
     /// `pending` keeps the packets the decoder has not taken. Call this again
-    /// after [`Self::at`] drops a frame. [`Self::seek`] starts a new span of
-    /// packets; the caller also resets the decoder.
+    /// after [`Self::at`] drops a frame. [`Self::seek_to`] starts a new span.
     pub fn fill<D>(
         &mut self,
         decoder: &mut D,
@@ -123,12 +125,46 @@ impl<I> Ahead<I> {
         self.queue.at(time)
     }
 
-    /// Drops every frame. The caller resets the decoder and passes the packets
-    /// that start at [`crate::keyframe_before`].
+    /// Drops every frame. [`Self::seek_to`] also resets the decoder.
     pub fn seek(&mut self) {
         self.queue.seek();
         self.held = None;
         self.flushed = false;
+    }
+
+    /// Seeks to `time` and decodes from the keyframe that frame depends on.
+    ///
+    /// Frames the playhead has already passed are dropped while decoding, so
+    /// a short queue still reaches `time`. Decoding stops once that frame is
+    /// queued and the queue is full, or the span ends. The returned slice is
+    /// what the decoder has not taken. There is nothing to show when no
+    /// keyframe can produce `time`.
+    pub fn seek_to<'a, D>(
+        &mut self,
+        decoder: &mut D,
+        packets: &'a [Packet],
+        time: Timestamp,
+    ) -> Result<&'a [Packet], FillError<I, D::Error>>
+    where
+        D: Decode<Image = I>,
+    {
+        self.seek();
+        decoder.reset().map_err(FillError::Decode)?;
+        let Some(start) = crate::keyframe_before(packets, time) else {
+            return Ok(&[]);
+        };
+        let mut pending = &packets[start..];
+        loop {
+            self.fill(decoder, &mut pending)?;
+            self.queue.discard_until(time);
+            if self.held.is_some() && !self.queue.is_full() {
+                continue;
+            }
+            let drained = pending.is_empty() && self.flushed && self.held.is_none();
+            if drained || self.held.is_some() || self.queue.is_full() {
+                return Ok(pending);
+            }
+        }
     }
 
     fn accept<E>(&mut self, frame: VideoFrame<I>) -> Result<(), FillError<I, E>> {
@@ -175,9 +211,12 @@ mod tests {
     }
 
     /// Emits a frame only once a later packet is in, then the rest on flush.
+    #[derive(Default)]
     struct Lag {
         waiting: VecDeque<VideoFrame<i64>>,
         flushing: bool,
+        sent: Vec<i64>,
+        resets: u32,
     }
 
     impl Decode for Lag {
@@ -185,6 +224,7 @@ mod tests {
         type Error = &'static str;
 
         fn send(&mut self, packet: &Packet) -> Result<(), Self::Error> {
+            self.sent.push(packet.pts.value);
             self.waiting.push_back(frame(packet.pts.value));
             Ok(())
         }
@@ -199,6 +239,13 @@ mod tests {
 
         fn flush(&mut self) -> Result<(), Self::Error> {
             self.flushing = true;
+            Ok(())
+        }
+
+        fn reset(&mut self) -> Result<(), Self::Error> {
+            self.waiting.clear();
+            self.flushing = false;
+            self.resets += 1;
             Ok(())
         }
     }
@@ -222,6 +269,11 @@ mod tests {
         fn flush(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
+
+        fn reset(&mut self) -> Result<(), Self::Error> {
+            self.frames.clear();
+            Ok(())
+        }
     }
 
     #[test]
@@ -229,15 +281,7 @@ mod tests {
         let packets = [packet(0), packet(10), packet(20), packet(30)];
         let mut pending = packets.as_slice();
         let mut ahead = Ahead::new(NonZeroUsize::new(2).expect("limit"));
-        ahead
-            .fill(
-                &mut Lag {
-                    waiting: VecDeque::new(),
-                    flushing: false,
-                },
-                &mut pending,
-            )
-            .expect("fill");
+        ahead.fill(&mut Lag::default(), &mut pending).expect("fill");
         assert!(ahead.is_full());
         assert_eq!(pending.len(), 1);
         let shown = ahead.at(time(0)).expect("frame");
@@ -249,15 +293,7 @@ mod tests {
         let packets = [packet(0), packet(10), packet(20)];
         let mut pending = packets.as_slice();
         let mut ahead = Ahead::new(NonZeroUsize::new(4).expect("limit"));
-        ahead
-            .fill(
-                &mut Lag {
-                    waiting: VecDeque::new(),
-                    flushing: false,
-                },
-                &mut pending,
-            )
-            .expect("fill");
+        ahead.fill(&mut Lag::default(), &mut pending).expect("fill");
         assert!(pending.is_empty());
         assert_eq!(ahead.len(), 3);
         assert_eq!(ahead.at(time(20)).expect("frame").image, 20);
@@ -284,23 +320,59 @@ mod tests {
         let packets = [packet(0), packet(10)];
         let mut pending = packets.as_slice();
         let mut ahead = Ahead::new(NonZeroUsize::new(4).expect("limit"));
-        let mut lag = Lag {
-            waiting: VecDeque::new(),
-            flushing: false,
-        };
+        let mut lag = Lag::default();
         ahead.fill(&mut lag, &mut pending).expect("fill");
         ahead.seek();
         let again = [packet(0)];
         let mut pending = again.as_slice();
         ahead
-            .fill(
-                &mut Lag {
-                    waiting: VecDeque::new(),
-                    flushing: false,
-                },
-                &mut pending,
-            )
+            .fill(&mut Lag::default(), &mut pending)
             .expect("fill after seek");
         assert_eq!(ahead.at(time(0)).expect("frame").image, 0);
+    }
+
+    fn sample(ms: i64, keyframe: bool) -> Packet {
+        let mut packet = packet(ms);
+        packet.keyframe = keyframe;
+        packet
+    }
+
+    #[test]
+    fn seek_decodes_from_the_keyframe_and_drops_what_it_passed() {
+        let packets = [
+            sample(0, true),
+            sample(10, false),
+            sample(20, false),
+            sample(30, true),
+            sample(40, false),
+            sample(50, false),
+            sample(60, false),
+            sample(70, false),
+        ];
+        let mut ahead = Ahead::new(NonZeroUsize::new(2).expect("limit"));
+        let mut lag = Lag::default();
+        let pending = ahead.seek_to(&mut lag, &packets, time(40)).expect("seek");
+        assert_eq!(lag.resets, 1);
+        assert_eq!(lag.sent.first(), Some(&30));
+        assert!(!lag.sent.contains(&0));
+        assert_eq!(pending.len(), 1);
+        assert_eq!(ahead.at(time(40)).expect("frame").image, 40);
+
+        ahead
+            .seek_to(&mut lag, &packets, time(0))
+            .expect("seek back");
+        assert_eq!(lag.resets, 2);
+        assert_eq!(ahead.at(time(0)).expect("frame").image, 0);
+    }
+
+    #[test]
+    fn seek_without_a_keyframe_shows_nothing() {
+        let packets = [sample(10, false)];
+        let mut ahead = Ahead::new(NonZeroUsize::new(2).expect("limit"));
+        let pending = ahead
+            .seek_to(&mut Lag::default(), &packets, time(10))
+            .expect("seek");
+        assert!(pending.is_empty());
+        assert!(ahead.at(time(10)).is_none());
     }
 }

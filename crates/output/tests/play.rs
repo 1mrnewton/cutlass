@@ -15,14 +15,22 @@ fn silence_is_handed_to_the_device() {
     };
     let frames = 4_800usize;
     let samples = AudioSamples::new(48_000, 2, vec![0.0; frames * 2]).expect("silence");
+    assert!(output.clock().expect("clock").is_none());
     output.play(&samples).expect("play");
+    let mut clock = None;
     let deadline = Instant::now() + Duration::from_secs(2);
     while output.enqueued_frames() < frames {
+        if let Some(time) = output.clock().expect("clock") {
+            clock = Some(time);
+        }
         if Instant::now() > deadline {
             panic!("enqueued {} of {frames} frames", output.enqueued_frames());
         }
         thread::sleep(Duration::from_millis(20));
     }
+    let time = clock.expect("sample time");
+    assert_eq!(time.timescale.get(), 48_000);
+    assert!(time.value >= 0);
 }
 
 #[test]

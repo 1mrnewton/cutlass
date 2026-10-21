@@ -4,18 +4,19 @@
 //! `play` is called from the owner thread.
 
 use std::ffi::c_void;
+use std::num::NonZeroU32;
 use std::ptr::{self, NonNull};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use cutlass_core::AudioSamples;
+use cutlass_core::{AudioSamples, Timestamp};
 use objc2_audio_toolbox::{
     AudioQueueAllocateBuffer, AudioQueueBufferRef, AudioQueueDispose, AudioQueueEnqueueBuffer,
-    AudioQueueNewOutput, AudioQueueRef, AudioQueueStart, AudioQueueStop,
-    kAudioQueueErr_InvalidRunState,
+    AudioQueueGetCurrentTime, AudioQueueNewOutput, AudioQueueRef, AudioQueueStart, AudioQueueStop,
+    AudioQueueTimelineRef, kAudioQueueErr_InvalidRunState,
 };
 use objc2_core_audio_types::{
-    AudioStreamBasicDescription, kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked,
-    kAudioFormatLinearPCM,
+    AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags, SMPTETime, SMPTETimeFlags,
+    SMPTETimeType, kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
 };
 
 use crate::error::{self, Error};
@@ -153,6 +154,27 @@ impl Output {
         self.lock().map(|shared| shared.played).unwrap_or(0)
     }
 
+    /// Sample time since [`Self::play`] started, at this device's rate.
+    ///
+    /// `None` when the queue is stopped or the device has not published a
+    /// sample time. The value is a whole sample frame, rounded down.
+    pub fn clock(&self) -> Result<Option<Timestamp>, Error> {
+        let mut stamp = blank_stamp();
+        // SAFETY: `queue` is the queue this value owns. A null timeline asks
+        // for the current time without discontinuity reporting.
+        let status = unsafe {
+            AudioQueueGetCurrentTime(self.queue, no_timeline(), &mut stamp, ptr::null_mut())
+        };
+        if status == kAudioQueueErr_InvalidRunState {
+            return Ok(None);
+        }
+        error::check("AudioQueueGetCurrentTime", status)?;
+        if !stamp.mFlags.contains(AudioTimeStampFlags::SampleTimeValid) {
+            return Ok(None);
+        }
+        sample_time(stamp.mSampleTime, self.sample_rate)
+    }
+
     fn enqueue(&mut self, buffer: AudioQueueBufferRef) -> Result<(), Error> {
         let give = {
             let mut shared = self.lock()?;
@@ -280,6 +302,45 @@ fn copy_into(buffer: AudioQueueBufferRef, shared: &mut Shared) -> usize {
     give
 }
 
+fn no_timeline() -> AudioQueueTimelineRef {
+    ptr::null_mut()
+}
+
+fn blank_stamp() -> AudioTimeStamp {
+    AudioTimeStamp {
+        mSampleTime: 0.0,
+        mHostTime: 0,
+        mRateScalar: 0.0,
+        mWordClockTime: 0,
+        mSMPTETime: SMPTETime {
+            mSubframes: 0,
+            mSubframeDivisor: 0,
+            mCounter: 0,
+            mType: SMPTETimeType(0),
+            mFlags: SMPTETimeFlags(0),
+            mHours: 0,
+            mMinutes: 0,
+            mSeconds: 0,
+            mFrames: 0,
+        },
+        mFlags: AudioTimeStampFlags(0),
+        mReserved: 0,
+    }
+}
+
+fn sample_time(frames: f64, sample_rate: u32) -> Result<Option<Timestamp>, Error> {
+    let frames = frames.floor();
+    // 2^53 is the last integer f64 stores exactly, and it fits in i64.
+    if !(0.0..9_007_199_254_740_992.0).contains(&frames) {
+        return Ok(None);
+    }
+    let value = frames as i64;
+    let Some(timescale) = NonZeroU32::new(sample_rate) else {
+        return Err(Error::InvalidInput("audio sample rate is zero"));
+    };
+    Ok(Some(Timestamp::new(value, timescale)))
+}
+
 fn check_layout(sample_rate: u32, channels: u16) -> Result<(), Error> {
     if sample_rate == 0 {
         return Err(Error::InvalidInput("audio sample rate is zero"));
@@ -302,5 +363,22 @@ fn pcm(sample_rate: u32, channels: u16) -> AudioStreamBasicDescription {
         mChannelsPerFrame: channels,
         mBitsPerChannel: 32,
         mReserved: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sample_time;
+
+    #[test]
+    fn a_fractional_sample_time_rounds_down() {
+        let time = sample_time(10.9, 48_000).expect("time").expect("frames");
+        assert_eq!(time.value, 10);
+        assert_eq!(time.timescale.get(), 48_000);
+    }
+
+    #[test]
+    fn a_negative_sample_time_is_absent() {
+        assert!(sample_time(-0.1, 48_000).expect("time").is_none());
     }
 }

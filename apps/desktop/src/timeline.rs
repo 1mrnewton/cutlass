@@ -124,6 +124,9 @@ pub fn show(
     trim: &mut Option<TrimDrag>,
     split: &mut bool,
 ) -> Vec<Command> {
+    // The panel stores the height this ui claims. Painting the lanes does not
+    // claim it, so a drag would snap back to the minimum on release.
+    ui.take_available_height();
     let full = ui.max_rect();
     let ruler_rect = Rect::from_min_size(full.min, vec2(full.width(), RULER_HEIGHT));
     let tracks = Rect::from_min_max(ruler_rect.left_bottom(), full.max);

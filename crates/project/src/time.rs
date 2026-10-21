@@ -129,7 +129,7 @@ pub fn timeline_duration(source: Timestamp, speed: Speed) -> Result<Timestamp, E
 }
 
 /// Source ticks that play for `timeline_us` at `speed`, rounded like [`timeline_duration`].
-pub(crate) fn source_ticks(
+pub fn source_ticks(
     timeline_us: i64,
     source_scale: NonZeroU32,
     speed: Speed,

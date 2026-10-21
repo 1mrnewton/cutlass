@@ -20,7 +20,7 @@ mod timeline;
 mod track;
 
 pub use asset::{Asset, AssetKind};
-pub use command::{Command, Outcome};
+pub use command::{Command, Outcome, TrimEdge, commands_for_trim};
 pub use error::Error;
 pub use history::History;
 pub use id::{AssetId, ProjectId, SegmentId, TimelineId, TrackId};
@@ -28,7 +28,7 @@ pub use project::Project;
 pub use rate::{FrameRate, SequenceRate};
 pub use segment::{Channels, Keyframe, KeyframeValue, Segment, Transform};
 pub use settings::{AspectRatio, Canvas, Color, ColorSpace, Settings};
-pub use time::{SEQUENCE_TIMESCALE, Speed, TimeRange, timeline_duration};
+pub use time::{SEQUENCE_TIMESCALE, Speed, TimeRange, source_ticks, timeline_duration};
 pub use timeline::Timeline;
 pub use track::{Track, TrackKind};
 

@@ -48,13 +48,27 @@ pub struct ClipDrag {
     from: TrackId,
 }
 
+/// An edge following the pointer. The trim is written when the pointer goes up.
+pub struct TrimDrag {
+    segment: SegmentId,
+    edge: Edge,
+    origin_x: f32,
+}
+
+#[derive(Clone, Copy)]
+enum Edge {
+    Start,
+    End,
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     project: &Project,
     playhead: &mut i64,
     selected: &mut Option<SegmentId>,
     drag: &mut Option<ClipDrag>,
-) -> Option<Command> {
+    trim: &mut Option<TrimDrag>,
+) -> Vec<Command> {
     let full = ui.max_rect();
     let ruler_rect = Rect::from_min_size(full.min, vec2(full.width(), RULER_HEIGHT));
     let tracks = Rect::from_min_max(ruler_rect.left_bottom(), full.max);
@@ -67,17 +81,36 @@ pub fn show(
     {
         *drag = None;
     }
-    let mut command = None;
+    if trim
+        .as_ref()
+        .is_some_and(|trim| project.timeline().segment(trim.segment).is_none())
+    {
+        *trim = None;
+    }
+    let mut commands = Vec::new();
     let pointer = ui.input(|input| input.pointer.interact_pos());
     if tracks.height() > 0.0 {
         let pressed = ui.input(|input| input.pointer.primary_pressed());
         let released = ui.input(|input| input.pointer.primary_released());
         if pressed && let Some(point) = pointer.filter(|point| tracks.contains(*point)) {
-            *selected = segment_at(project, tracks, point);
-            *drag = selected.and_then(|id| drag_from(project, id, point));
+            if let Some(active) = trim_from(project, tracks, point) {
+                *selected = Some(active.segment);
+                *drag = None;
+                *trim = Some(active);
+            } else {
+                *trim = None;
+                *selected = segment_at(project, tracks, point);
+                *drag = selected.and_then(|id| drag_from(project, id, point));
+            }
         }
-        if released && let Some(active) = drag.take() {
-            command = move_command(project, tracks, &active, pointer);
+        if released {
+            if let Some(active) = trim.take() {
+                commands = trim_commands(project, tracks, &active, pointer);
+            } else if let Some(active) = drag.take()
+                && let Some(command) = move_command(project, tracks, &active, pointer)
+            {
+                commands.push(command);
+            }
         }
     }
     paint_ruler(ui, ruler_rect, project);
@@ -133,13 +166,14 @@ pub fn show(
                     pixel_size,
                     selected: *selected,
                     drag: drag.as_ref(),
+                    trim: trim.as_ref(),
                     pointer,
                 },
             );
         }
     }
     paint_playhead(ui, ruler_rect, tracks, project, playhead);
-    command
+    commands
 }
 
 fn lane_left(area: Rect) -> f32 {
@@ -151,6 +185,7 @@ struct ClipPaint<'a> {
     pixel_size: f64,
     selected: Option<SegmentId>,
     drag: Option<&'a ClipDrag>,
+    trim: Option<&'a TrimDrag>,
     pointer: Option<egui::Pos2>,
 }
 
@@ -168,14 +203,15 @@ fn paint_segments(ui: &mut egui::Ui, track: &Track, lane: Rect, main: bool, pain
             continue;
         }
         let dragging = paint.drag.is_some_and(|drag| drag.segment == segment.id());
+        let trimming = paint.trim.is_some_and(|trim| trim.segment == segment.id());
         let color = clip_color(track.kind());
-        let resting = if dragging {
+        let resting = if dragging || trimming {
             color.gamma_multiply(0.35)
         } else {
             color
         };
         ui.painter().rect_filled(rect, 7.0, resting);
-        if !dragging && paint.selected == Some(segment.id()) {
+        if !dragging && !trimming && paint.selected == Some(segment.id()) {
             stroke_clip(ui, rect);
         }
         if dragging {
@@ -188,6 +224,17 @@ fn paint_segments(ui: &mut egui::Ui, track: &Track, lane: Rect, main: bool, pain
             ui.painter().rect_filled(moved, 7.0, color);
             stroke_clip(ui, moved);
             paint_name(ui, paint.project, segment, moved);
+        } else if trimming {
+            let delta = paint
+                .trim
+                .zip(paint.pointer)
+                .map(|(trim, point)| point.x - trim.origin_x)
+                .unwrap_or(0.0);
+            let edge = paint.trim.map(|trim| trim.edge).unwrap_or(Edge::End);
+            let resized = trimmed_rect(rect, edge, delta);
+            ui.painter().rect_filled(resized, 7.0, color);
+            stroke_clip(ui, resized);
+            paint_name(ui, paint.project, segment, resized);
         } else {
             paint_name(ui, paint.project, segment, rect);
         }
@@ -285,6 +332,113 @@ fn lane_under(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<Trac
         }
     }
     None
+}
+
+const EDGE_PX: f32 = 6.0;
+
+fn trim_from(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<TrimDrag> {
+    if tracks.height() <= 0.0 {
+        return None;
+    }
+    let pixel_size = ruler::opening_pixel_size(
+        (tracks.right() - lane_left(tracks)).max(0.0),
+        project.duration().value,
+    );
+    let width = (tracks.right() - lane_left(tracks)).max(0.0);
+    for (track, lane) in project
+        .timeline()
+        .tracks()
+        .iter()
+        .zip(layout(project.timeline().tracks(), tracks))
+        .rev()
+    {
+        let lane_rect =
+            Rect::from_min_size(pos2(lane_left(tracks), lane.top), vec2(width, lane.height));
+        for segment in track.segments().iter().rev() {
+            let range = segment.timeline();
+            let rect = clip_rect(
+                lane_rect,
+                lane.main,
+                range.start().value,
+                range.duration().value,
+                pixel_size,
+            );
+            if !rect.contains(point) {
+                continue;
+            }
+            if rect.width() <= 16.0 {
+                return None;
+            }
+            let edge = if point.x <= rect.left() + EDGE_PX {
+                Some(Edge::Start)
+            } else if point.x >= rect.right() - EDGE_PX {
+                Some(Edge::End)
+            } else {
+                None
+            };
+            return edge.map(|edge| TrimDrag {
+                segment: segment.id(),
+                edge,
+                origin_x: point.x,
+            });
+        }
+    }
+    None
+}
+
+fn trimmed_rect(rect: Rect, edge: Edge, delta_px: f32) -> Rect {
+    let min_width = 8.0;
+    match edge {
+        Edge::Start => {
+            let left = (rect.left() + delta_px).min(rect.right() - min_width);
+            Rect::from_min_max(pos2(left, rect.top()), rect.max)
+        }
+        Edge::End => {
+            let right = (rect.right() + delta_px).max(rect.left() + min_width);
+            Rect::from_min_max(rect.min, pos2(right, rect.bottom()))
+        }
+    }
+}
+
+fn delta_us(delta_px: f32, pixel_size: f64) -> i64 {
+    if !(pixel_size.is_finite() && pixel_size > 0.0 && delta_px.is_finite()) {
+        return 0;
+    }
+    let delta = f64::from(delta_px) / pixel_size;
+    if !delta.is_finite() {
+        return 0;
+    }
+    delta.round().clamp(i64::MIN as f64, i64::MAX as f64) as i64
+}
+
+fn trim_commands(
+    project: &Project,
+    tracks: Rect,
+    trim: &TrimDrag,
+    pointer: Option<egui::Pos2>,
+) -> Vec<Command> {
+    let Some(point) = pointer else {
+        return Vec::new();
+    };
+    let Some(segment) = project.timeline().segment(trim.segment) else {
+        return Vec::new();
+    };
+    let Some(asset) = project.asset(segment.asset_id()) else {
+        return Vec::new();
+    };
+    let width = (tracks.right() - lane_left(tracks)).max(0.0);
+    let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
+    let edge = match trim.edge {
+        Edge::Start => cutlass_project::TrimEdge::Start,
+        Edge::End => cutlass_project::TrimEdge::End,
+    };
+    cutlass_project::commands_for_trim(
+        segment,
+        asset,
+        edge,
+        delta_us(point.x - trim.origin_x, pixel_size),
+    )
+    .unwrap_or_default()
 }
 
 fn segment_at(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<SegmentId> {
@@ -826,5 +980,76 @@ mod tests {
                 start: landed,
             }
         );
+    }
+
+    #[test]
+    fn dragging_the_right_edge_shortens_the_clip() {
+        let mut history = History::new();
+        let mut cut = project();
+        let video = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let asset = match history
+            .apply(&mut cut, &[Command::AddAsset(video)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let segment = {
+            let stored = cut.asset(asset).expect("asset");
+            let duration = stored.duration().expect("duration");
+            let source = TimeRange::new(
+                Timestamp::new(0, duration.timescale),
+                Timestamp::new(duration.value, duration.timescale),
+            )
+            .expect("source");
+            Segment::media(stored, source, 0, Channels::Both, Speed::ONE).expect("segment")
+        };
+        let id = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: None,
+                    segment,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Opened { segment, .. }] => *segment,
+            other => panic!("expected a new lane, got {other:?}"),
+        };
+        let tracks = Rect::from_min_size(pos2(0.0, 0.0), vec2(602.0, 400.0));
+        let lane = layout(cut.timeline().tracks(), tracks)
+            .into_iter()
+            .find(|lane| !lane.main)
+            .expect("overlay");
+        let width = (tracks.right() - lane_left(tracks)).max(0.0);
+        let pixel_size = crate::ruler::opening_pixel_size(width, cut.duration().value);
+        let range = cut.timeline().segment(id).expect("segment").timeline();
+        let rect = clip_rect(
+            Rect::from_min_size(pos2(lane_left(tracks), lane.top), vec2(width, lane.height)),
+            false,
+            range.start().value,
+            range.duration().value,
+            pixel_size,
+        );
+        let edge = pos2(rect.right() - 2.0, rect.center().y);
+        let trim = super::trim_from(&cut, tracks, edge).expect("edge");
+        assert!(super::trim_from(&cut, tracks, rect.center()).is_none());
+        let before = range.duration().value;
+        let commands = super::trim_commands(&cut, tracks, &trim, Some(pos2(edge.x - 80.0, edge.y)));
+        assert!(!commands.is_empty());
+        history.apply(&mut cut, &commands).expect("trim");
+        let after = cut.timeline().segment(id).expect("segment").timeline();
+        assert_eq!(after.start().value, 0);
+        assert!(after.duration().value < before);
     }
 }

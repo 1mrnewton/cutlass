@@ -41,6 +41,7 @@ struct CutlassApp {
     selected_asset: Option<AssetId>,
     selected_segment: Option<SegmentId>,
     clip_drag: Option<timeline::ClipDrag>,
+    trim_drag: Option<timeline::TrimDrag>,
 }
 
 impl CutlassApp {
@@ -55,6 +56,7 @@ impl CutlassApp {
             selected_asset: None,
             selected_segment: None,
             clip_drag: None,
+            trim_drag: None,
         }
     }
 
@@ -98,14 +100,16 @@ impl eframe::App for CutlassApp {
             .frame(theme::gap_above())
             .show_separator_line(false)
             .show(ui, |ui| {
-                if let Some(command) = timeline::show(
+                let commands = timeline::show(
                     ui,
                     &self.project,
                     &mut self.playhead_us,
                     &mut self.selected_segment,
                     &mut self.clip_drag,
-                ) {
-                    let _ = self.history.apply(&mut self.project, &[command]);
+                    &mut self.trim_drag,
+                );
+                if !commands.is_empty() {
+                    let _ = self.history.apply(&mut self.project, &commands);
                 }
             });
 

@@ -2,7 +2,7 @@
 
 use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, Sense, Stroke, pos2, vec2};
 
-use cutlass_project::{Project, SegmentId, Track, TrackKind};
+use cutlass_project::{Command, History, Project, SegmentId, Track, TrackKind};
 
 use crate::ruler;
 use crate::theme;
@@ -20,6 +20,24 @@ struct Lane {
     empty: bool,
     top: f32,
     height: f32,
+}
+
+pub fn delete_selected(
+    history: &mut History,
+    project: &mut Project,
+    selected: &mut Option<SegmentId>,
+) -> bool {
+    let Some(id) = *selected else {
+        return false;
+    };
+    if history
+        .apply(project, &[Command::RemoveSegment(id)])
+        .is_err()
+    {
+        return false;
+    }
+    *selected = None;
+    true
 }
 
 pub fn show(
@@ -512,5 +530,67 @@ mod tests {
         );
         assert_eq!(segment_at(&cut, tracks, rect.center()), Some(id));
         assert_eq!(segment_at(&cut, tracks, pos2(12.0, rect.center().y)), None);
+    }
+
+    #[test]
+    fn delete_removes_the_selected_clip_and_keeps_main() {
+        let mut history = History::new();
+        let mut cut = project();
+        let video = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let asset = match history
+            .apply(&mut cut, &[Command::AddAsset(video)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let segment = {
+            let stored = cut.asset(asset).expect("asset");
+            let duration = stored.duration().expect("duration");
+            let source = TimeRange::new(
+                Timestamp::new(0, duration.timescale),
+                Timestamp::new(duration.value, duration.timescale),
+            )
+            .expect("source");
+            Segment::media(stored, source, 0, Channels::Both, Speed::ONE).expect("segment")
+        };
+        let main = cut.timeline().main_track().id();
+        let id = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Segment(id)] => *id,
+            other => panic!("expected a segment, got {other:?}"),
+        };
+        let mut selected = Some(id);
+        assert!(super::delete_selected(
+            &mut history,
+            &mut cut,
+            &mut selected
+        ));
+        assert!(selected.is_none());
+        assert!(cut.timeline().segment(id).is_none());
+        assert!(cut.timeline().main_track().is_main());
+        assert!(cut.timeline().main_track().segments().is_empty());
+        assert!(!super::delete_selected(
+            &mut history,
+            &mut cut,
+            &mut selected
+        ));
     }
 }

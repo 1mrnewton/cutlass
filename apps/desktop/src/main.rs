@@ -4,7 +4,7 @@
 
 use eframe::egui::{self, Align2, Button, Rect, RichText, TextStyle, Vec2};
 
-use cutlass_project::{AssetId, Project, ProjectId, SegmentId};
+use cutlass_project::{AssetId, History, Project, ProjectId, SegmentId};
 
 mod inspector;
 mod library;
@@ -34,6 +34,7 @@ fn main() -> eframe::Result {
 }
 
 struct CutlassApp {
+    history: History,
     project: Project,
     playhead_us: i64,
     shelf: library::Shelf,
@@ -46,12 +47,28 @@ impl CutlassApp {
         theme::install(&cc.egui_ctx);
         let id = ProjectId::from_bytes(uuid::Uuid::new_v4().into_bytes());
         Self {
+            history: History::new(),
             project: Project::new(id, "Untitled"),
             playhead_us: 0,
             shelf: library::Shelf::Media,
             selected_asset: None,
             selected_segment: None,
         }
+    }
+
+    fn delete_pressed(&mut self, ui: &egui::Ui) {
+        let typing = ui.memory(|memory| memory.focused().is_some());
+        let pressed = ui.input(|input| {
+            input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace)
+        });
+        if typing || !pressed {
+            return;
+        }
+        timeline::delete_selected(
+            &mut self.history,
+            &mut self.project,
+            &mut self.selected_segment,
+        );
     }
 }
 
@@ -61,6 +78,8 @@ impl eframe::App for CutlassApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.delete_pressed(ui);
+
         egui::Panel::top("head")
             .exact_size(theme::HEADER_HEIGHT)
             .frame(theme::bar())

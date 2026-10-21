@@ -1,0 +1,836 @@
+//! Edits that cross the project, the timeline, and the segments.
+
+use std::num::NonZeroU32;
+
+use cutlass_core::Timestamp;
+use cutlass_project::{
+    AspectRatio, Asset, AssetId, Channels, Color, ColorSpace, Command, Error, FrameRate, History,
+    Keyframe, KeyframeValue, Outcome, Project, ProjectId, Segment, SegmentId, SequenceRate, Speed,
+    TimeRange, TrackId, TrackKind,
+};
+
+fn scale(value: u32) -> NonZeroU32 {
+    match NonZeroU32::new(value) {
+        Some(scale) => scale,
+        None => panic!("timescale is non-zero"),
+    }
+}
+
+fn expect_err<T>(result: Result<T, Error>, expected: Error) {
+    match result {
+        Err(error) if error == expected => {}
+        Err(error) => panic!("expected {expected}, got {error}"),
+        Ok(_) => panic!("expected {expected}"),
+    }
+}
+
+struct Cut {
+    history: History,
+    project: Project,
+    main: TrackId,
+}
+
+fn bare() -> Cut {
+    let project = Project::new(ProjectId::from_bytes([1; 16]), "cut");
+    let main = project.timeline().main_track().id();
+    Cut {
+        history: History::new(),
+        project,
+        main,
+    }
+}
+
+fn run(cut: &mut Cut, command: Command) -> Result<Outcome, Error> {
+    let mut outcomes = cut.history.apply(&mut cut.project, &[command])?;
+    if outcomes.len() != 1 {
+        panic!("expected one outcome, got {}", outcomes.len());
+    }
+    match outcomes.pop() {
+        Some(outcome) => Ok(outcome),
+        None => panic!("expected one outcome"),
+    }
+}
+
+fn asset_id(outcome: Outcome) -> AssetId {
+    match outcome {
+        Outcome::Asset(id) => id,
+        other => panic!("expected an asset, got {other:?}"),
+    }
+}
+
+fn segment_id(outcome: Outcome) -> SegmentId {
+    match outcome {
+        Outcome::Segment(id) | Outcome::Opened { segment: id, .. } => id,
+        other => panic!("expected a segment, got {other:?}"),
+    }
+}
+
+fn same_track(outcome: Outcome) -> SegmentId {
+    match outcome {
+        Outcome::Segment(id) => id,
+        other => panic!("expected the same track, got {other:?}"),
+    }
+}
+
+fn opened(outcome: Outcome) -> (SegmentId, TrackId) {
+    match outcome {
+        Outcome::Opened { segment, track } => (segment, track),
+        other => panic!("expected a new track, got {other:?}"),
+    }
+}
+
+fn video(seconds: i64, width: u32, height: u32) -> Result<Asset, Error> {
+    Asset::video(
+        format!("file:///v{seconds}.mp4"),
+        Timestamp::new(seconds * 30_000, scale(30_000)),
+        width,
+        height,
+        true,
+    )
+}
+
+fn add_video(cut: &mut Cut, seconds: i64, width: u32, height: u32) -> Result<AssetId, Error> {
+    Ok(asset_id(run(
+        cut,
+        Command::AddAsset(video(seconds, width, height)?),
+    )?))
+}
+
+fn load() -> Result<(Cut, AssetId), Error> {
+    let mut cut = bare();
+    let asset = add_video(&mut cut, 10, 1280, 720)?;
+    Ok((cut, asset))
+}
+
+fn media(
+    project: &Project,
+    asset: AssetId,
+    start_us: i64,
+    source_ticks: i64,
+    channels: Channels,
+) -> Result<Segment, Error> {
+    let asset = project.asset(asset).ok_or(Error::UnknownAsset(asset))?;
+    let stored = asset.duration().ok_or(Error::ImageSource)?;
+    let source = TimeRange::new(
+        Timestamp::new(0, stored.timescale),
+        Timestamp::new(source_ticks, stored.timescale),
+    )?;
+    Segment::media(asset, source, start_us, channels, Speed::ONE)
+}
+
+fn place_main(
+    cut: &mut Cut,
+    asset: AssetId,
+    start_us: i64,
+    ticks: i64,
+) -> Result<SegmentId, Error> {
+    let channels = cut
+        .project
+        .asset(asset)
+        .ok_or(Error::UnknownAsset(asset))?
+        .default_channels();
+    let segment = media(&cut.project, asset, start_us, ticks, channels)?;
+    let main = cut.main;
+    Ok(segment_id(run(
+        cut,
+        Command::Place {
+            track: Some(main),
+            segment,
+        },
+    )?))
+}
+
+fn place_on(
+    cut: &mut Cut,
+    track: TrackId,
+    asset: AssetId,
+    start_us: i64,
+    ticks: i64,
+) -> Result<Outcome, Error> {
+    let channels = cut
+        .project
+        .asset(asset)
+        .ok_or(Error::UnknownAsset(asset))?
+        .default_channels();
+    let segment = media(&cut.project, asset, start_us, ticks, channels)?;
+    run(
+        cut,
+        Command::Place {
+            track: Some(track),
+            segment,
+        },
+    )
+}
+
+fn open_picture(
+    cut: &mut Cut,
+    asset: AssetId,
+    start_us: i64,
+    ticks: i64,
+) -> Result<(SegmentId, TrackId), Error> {
+    let channels = cut
+        .project
+        .asset(asset)
+        .ok_or(Error::UnknownAsset(asset))?
+        .default_channels();
+    let segment = media(&cut.project, asset, start_us, ticks, channels)?;
+    Ok(opened(run(
+        cut,
+        Command::Place {
+            track: None,
+            segment,
+        },
+    )?))
+}
+
+fn open_sound(cut: &mut Cut, asset: AssetId, start_us: i64) -> Result<(SegmentId, TrackId), Error> {
+    let segment = media(&cut.project, asset, start_us, 30_000, Channels::Sound)?;
+    Ok(opened(run(
+        cut,
+        Command::Place {
+            track: None,
+            segment,
+        },
+    )?))
+}
+
+fn start(cut: &Cut, id: SegmentId) -> Result<i64, Error> {
+    Ok(cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?
+        .timeline()
+        .start()
+        .value)
+}
+
+fn kinds(cut: &Cut) -> Vec<TrackKind> {
+    cut.project
+        .timeline()
+        .tracks()
+        .iter()
+        .map(cutlass_project::Track::kind)
+        .collect()
+}
+
+#[test]
+fn magnet_packs_a_main_clip_to_the_start() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 5_000_000, 30_000)?;
+    assert_eq!(start(&cut, id)?, 0);
+    assert_eq!(cut.project.duration().value, 1_000_000);
+    assert_eq!(cut.project.timeline().tracks().len(), 1);
+    let segment = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(
+        segment
+            .source()
+            .ok_or(Error::ImageSource)?
+            .start()
+            .timescale
+            .get(),
+        30_000
+    );
+    assert_eq!(segment.timeline().duration().timescale.get(), 1_000_000);
+    Ok(())
+}
+
+#[test]
+fn magnet_off_keeps_the_gap() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let id = place_main(&mut cut, asset, 5_000_000, 30_000)?;
+    assert_eq!(start(&cut, id)?, 5_000_000);
+    assert_eq!(cut.project.duration().value, 6_000_000);
+    Ok(())
+}
+
+#[test]
+fn magnet_does_not_pack_an_overlay() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let (id, _) = open_picture(&mut cut, asset, 5_000_000, 30_000)?;
+    assert_eq!(start(&cut, id)?, 5_000_000);
+    assert_eq!(cut.project.duration().value, 6_000_000);
+    assert!(cut.project.timeline().main_track().segments().is_empty());
+    assert_eq!(kinds(&cut), vec![TrackKind::Video, TrackKind::Video]);
+    assert!(!cut.project.timeline().tracks()[1].is_main());
+    Ok(())
+}
+
+#[test]
+fn turning_magnet_on_packs_and_linkage_keeps_the_offset() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let main = place_main(&mut cut, asset, 1_000_000, 30_000)?;
+    let (overlay, _) = open_picture(&mut cut, asset, 1_000_500, 30_000)?;
+    run(&mut cut, Command::SetMagnet(true))?;
+    assert_eq!(start(&cut, main)?, 0);
+    assert_eq!(start(&cut, overlay)?, 500);
+    Ok(())
+}
+
+#[test]
+fn turning_magnet_off_leaves_the_packed_clips() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 5_000_000, 30_000)?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    assert_eq!(start(&cut, id)?, 0);
+    assert!(!cut.project.settings().magnet());
+    Ok(())
+}
+
+#[test]
+fn linkage_off_does_not_move_the_overlay() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    run(&mut cut, Command::SetLinkage(false))?;
+    let main = place_main(&mut cut, asset, 1_000_000, 30_000)?;
+    let (overlay, _) = open_picture(&mut cut, asset, 1_000_500, 30_000)?;
+    run(&mut cut, Command::SetMagnet(true))?;
+    assert_eq!(start(&cut, main)?, 0);
+    assert_eq!(start(&cut, overlay)?, 1_000_500);
+    Ok(())
+}
+
+#[test]
+fn an_existing_link_survives_a_new_main_clip() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let first = place_main(&mut cut, asset, 0, 30_000)?;
+    let (overlay, _) = open_picture(&mut cut, asset, 100, 30_000)?;
+    let second = place_main(&mut cut, asset, 0, 30_000)?;
+    assert_eq!(start(&cut, second)?, 0);
+    assert_eq!(start(&cut, first)?, 1_000_000);
+    assert_eq!(start(&cut, overlay)?, 1_000_100);
+    assert_eq!(cut.project.timeline().tracks().len(), 2);
+    Ok(())
+}
+
+#[test]
+fn overlap_opens_another_track_of_the_same_kind() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let first = place_main(&mut cut, asset, 0, 30_000)?;
+    let main = cut.main;
+    let (second, track) = opened(place_on(&mut cut, main, asset, 0, 30_000)?);
+    assert_ne!(track, cut.main);
+    assert_eq!(kinds(&cut), vec![TrackKind::Video, TrackKind::Video]);
+    assert!(cut.project.timeline().tracks()[0].is_main());
+    assert!(!cut.project.timeline().tracks()[1].is_main());
+    assert_eq!(start(&cut, first)?, 0);
+    assert_eq!(start(&cut, second)?, 0);
+    Ok(())
+}
+
+#[test]
+fn a_free_time_stays_on_the_same_track() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    place_main(&mut cut, asset, 0, 30_000)?;
+    let main = cut.main;
+    let second = same_track(place_on(&mut cut, main, asset, 2_000_000, 30_000)?);
+    assert_eq!(cut.project.timeline().tracks().len(), 1);
+    assert_eq!(start(&cut, second)?, 2_000_000);
+    Ok(())
+}
+
+#[test]
+fn linkage_deletes_a_segment_that_sits_on_one_main_segment() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let main = place_main(&mut cut, asset, 0, 30_000)?;
+    let (overlay, _) = open_picture(&mut cut, asset, 100, 30_000)?;
+    run(&mut cut, Command::RemoveSegment(main))?;
+    assert!(cut.project.timeline().segment(overlay).is_none());
+    assert_eq!(cut.project.timeline().tracks().len(), 1);
+    assert!(cut.project.timeline().main_track().segments().is_empty());
+    assert_eq!(cut.project.duration().value, 0);
+    Ok(())
+}
+
+#[test]
+fn linkage_keeps_a_segment_that_sits_on_two_main_segments() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let first = place_main(&mut cut, asset, 0, 30_000)?;
+    let second = place_main(&mut cut, asset, 1_000_000, 30_000)?;
+    let (overlay, _) = open_picture(&mut cut, asset, 500_000, 30_000)?;
+    run(&mut cut, Command::RemoveSegment(first))?;
+    assert_eq!(start(&cut, overlay)?, 500_000);
+    assert_eq!(start(&cut, second)?, 1_000_000);
+    Ok(())
+}
+
+#[test]
+fn linkage_off_keeps_the_segment_when_the_main_segment_is_deleted() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetLinkage(false))?;
+    let main = place_main(&mut cut, asset, 0, 30_000)?;
+    let (overlay, _) = open_picture(&mut cut, asset, 0, 30_000)?;
+    run(&mut cut, Command::RemoveSegment(main))?;
+    assert_eq!(start(&cut, overlay)?, 0);
+    assert!(cut.project.timeline().main_track().segments().is_empty());
+    assert_eq!(cut.project.timeline().tracks().len(), 2);
+    Ok(())
+}
+
+#[test]
+fn deleting_a_main_clip_packs_the_rest_and_moves_what_follows_it() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let main = place_main(&mut cut, asset, 0, 30_000)?;
+    let next = place_main(&mut cut, asset, 1_000_000, 30_000)?;
+    let (sound, _) = open_sound(&mut cut, asset, 1_000_100)?;
+    run(&mut cut, Command::RemoveSegment(main))?;
+    assert!(cut.project.timeline().segment(main).is_none());
+    assert_eq!(start(&cut, next)?, 0);
+    assert_eq!(start(&cut, sound)?, 100);
+    assert_eq!(kinds(&cut), vec![TrackKind::Audio, TrackKind::Video]);
+    Ok(())
+}
+
+#[test]
+fn magnet_off_delete_leaves_the_gap() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let main = place_main(&mut cut, asset, 0, 30_000)?;
+    let next = place_main(&mut cut, asset, 2_000_000, 30_000)?;
+    let (overlay, _) = open_picture(&mut cut, asset, 2_000_000, 30_000)?;
+    run(&mut cut, Command::RemoveSegment(main))?;
+    assert_eq!(start(&cut, next)?, 2_000_000);
+    assert_eq!(start(&cut, overlay)?, 2_000_000);
+    assert_eq!(cut.project.duration().value, 3_000_000);
+    Ok(())
+}
+
+#[test]
+fn removing_the_last_overlay_segment_removes_the_track() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let (overlay, _) = open_picture(&mut cut, asset, 0, 30_000)?;
+    run(&mut cut, Command::RemoveSegment(overlay))?;
+    assert_eq!(cut.project.timeline().tracks().len(), 1);
+    assert!(cut.project.timeline().main_track().is_main());
+    Ok(())
+}
+
+#[test]
+fn duration_is_the_end_of_the_latest_segment() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    place_main(&mut cut, asset, 0, 30_000)?;
+    open_picture(&mut cut, asset, 2_000_000, 30_000)?;
+    assert_eq!(cut.project.duration().value, 3_000_000);
+    assert_eq!(cut.project.duration().timescale.get(), 1_000_000);
+    Ok(())
+}
+
+#[test]
+fn the_first_video_replaces_an_original_canvas() -> Result<(), Error> {
+    let mut cut = bare();
+    let image = Asset::image("file:///s.png", 100, 50)?;
+    run(&mut cut, Command::AddAsset(image))?;
+    assert_eq!(cut.project.settings().width(), 1920);
+    assert_eq!(cut.project.settings().height(), 1080);
+
+    run(
+        &mut cut,
+        Command::SetCanvas {
+            width: 100,
+            height: 80,
+            ratio: AspectRatio::Original,
+        },
+    )?;
+    add_video(&mut cut, 10, 1280, 720)?;
+    assert_eq!(cut.project.settings().width(), 1280);
+    assert_eq!(cut.project.settings().height(), 720);
+    assert_eq!(cut.project.settings().ratio(), AspectRatio::Original);
+
+    add_video(&mut cut, 12, 640, 360)?;
+    assert_eq!(cut.project.settings().width(), 1280);
+    assert_eq!(cut.project.settings().height(), 720);
+    Ok(())
+}
+
+#[test]
+fn a_fixed_ratio_keeps_the_canvas_size() -> Result<(), Error> {
+    let mut cut = bare();
+    run(
+        &mut cut,
+        Command::SetCanvas {
+            width: 1080,
+            height: 1920,
+            ratio: AspectRatio::R9x16,
+        },
+    )?;
+    add_video(&mut cut, 10, 1280, 720)?;
+    assert_eq!(cut.project.settings().width(), 1080);
+    assert_eq!(cut.project.settings().height(), 1920);
+    assert_eq!(cut.project.settings().ratio(), AspectRatio::R9x16);
+    Ok(())
+}
+
+#[test]
+fn a_zero_canvas_is_rejected_and_the_size_stays() -> Result<(), Error> {
+    let mut cut = bare();
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetCanvas {
+                width: 0,
+                height: 10,
+                ratio: AspectRatio::Square,
+            },
+        ),
+        Error::ZeroCanvas,
+    );
+    assert_eq!(cut.project.settings().width(), 1920);
+    assert_eq!(cut.project.settings().ratio(), AspectRatio::Original);
+    assert_eq!(
+        cut.history.undo(&mut cut.project).unwrap_err(),
+        Error::NothingToUndo
+    );
+    Ok(())
+}
+
+#[test]
+fn rate_color_and_background_are_stored() -> Result<(), Error> {
+    let mut cut = bare();
+    run(
+        &mut cut,
+        Command::SetRate(SequenceRate::new(FrameRate::Fps2997, false)?),
+    )?;
+    run(&mut cut, Command::SetColorSpace(ColorSpace::Rec2100Pq))?;
+    run(&mut cut, Command::SetBackground(Color::new(1, 2, 3)))?;
+    assert_eq!(cut.project.settings().rate().rate(), FrameRate::Fps2997);
+    assert!(!cut.project.settings().rate().drop_frame());
+    assert_eq!(cut.project.settings().color_space(), ColorSpace::Rec2100Pq);
+    assert_eq!(cut.project.settings().background().channels(), (1, 2, 3));
+    Ok(())
+}
+
+#[test]
+fn double_speed_halves_the_packed_duration() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    run(
+        &mut cut,
+        Command::SetSpeed {
+            segment: id,
+            speed: Speed::new(2, 1)?,
+        },
+    )?;
+    let segment = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(segment.speed().numerator(), 2);
+    assert_eq!(segment.timeline().duration().value, 500_000);
+    assert_eq!(start(&cut, id)?, 0);
+    Ok(())
+}
+
+#[test]
+fn trim_pulls_the_next_main_clip_and_its_follower_in() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let first = place_main(&mut cut, asset, 0, 30_000)?;
+    let second = place_main(&mut cut, asset, 1_000_000, 30_000)?;
+    let (overlay, _) = open_picture(&mut cut, asset, 1_000_100, 30_000)?;
+    let source = TimeRange::new(
+        Timestamp::new(0, scale(30_000)),
+        Timestamp::new(15_000, scale(30_000)),
+    )?;
+    run(
+        &mut cut,
+        Command::Trim {
+            segment: first,
+            source,
+        },
+    )?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(first)
+            .ok_or(Error::UnknownSegment(first))?
+            .timeline()
+            .duration()
+            .value,
+        500_000
+    );
+    assert_eq!(start(&cut, second)?, 500_000);
+    assert_eq!(start(&cut, overlay)?, 500_100);
+    let kept = cut
+        .project
+        .timeline()
+        .segment(first)
+        .ok_or(Error::UnknownSegment(first))?;
+    assert_eq!(
+        kept.source().ok_or(Error::ImageSource)?.duration().value,
+        15_000
+    );
+    assert_eq!(
+        kept.source()
+            .ok_or(Error::ImageSource)?
+            .duration()
+            .timescale
+            .get(),
+        30_000
+    );
+    Ok(())
+}
+
+#[test]
+fn a_trim_that_would_drop_a_keyframe_changes_nothing() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let mut segment = media(&cut.project, asset, 0, 30_000, Channels::Both)?;
+    segment.push_keyframe(Keyframe::new(1_000_000, KeyframeValue::Opacity(0.0))?)?;
+    let main = cut.main;
+    let id = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment,
+        },
+    )?);
+    let source = TimeRange::new(
+        Timestamp::new(0, scale(30_000)),
+        Timestamp::new(15_000, scale(30_000)),
+    )?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Trim {
+                segment: id,
+                source,
+            },
+        ),
+        Error::KeyframeOutOfRange,
+    );
+    let kept = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(kept.timeline().duration().value, 1_000_000);
+    assert_eq!(kept.keyframes().len(), 1);
+    assert_eq!(kept.keyframes()[0].offset().value, 1_000_000);
+    Ok(())
+}
+
+#[test]
+fn a_trim_that_would_overlap_changes_nothing_when_magnet_is_off() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let first = place_main(&mut cut, asset, 0, 30_000)?;
+    let second = place_main(&mut cut, asset, 1_500_000, 30_000)?;
+    let source = TimeRange::new(
+        Timestamp::new(0, scale(30_000)),
+        Timestamp::new(60_000, scale(30_000)),
+    )?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Trim {
+                segment: first,
+                source,
+            },
+        ),
+        Error::Overlap,
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(first)
+            .ok_or(Error::UnknownSegment(first))?
+            .timeline()
+            .duration()
+            .value,
+        1_000_000
+    );
+    assert_eq!(start(&cut, second)?, 1_500_000);
+    Ok(())
+}
+
+#[test]
+fn an_image_keeps_its_timeline_duration_and_has_no_speed() -> Result<(), Error> {
+    let mut cut = bare();
+    let image = Asset::image("content://media/still", 400, 300)?;
+    let image = asset_id(run(&mut cut, Command::AddAsset(image))?);
+    let segment = {
+        let asset = cut.project.asset(image).ok_or(Error::UnknownAsset(image))?;
+        Segment::image(asset, 5_000_000, 5_000_000)?
+    };
+    let main = cut.main;
+    let id = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment,
+        },
+    )?);
+    let segment = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert!(segment.source().is_none());
+    assert_eq!(segment.timeline().duration().value, 5_000_000);
+    assert_eq!(start(&cut, id)?, 0);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetSpeed {
+                segment: id,
+                speed: Speed::new(2, 1)?,
+            },
+        ),
+        Error::ImageSource,
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .timeline()
+            .duration()
+            .value,
+        5_000_000
+    );
+    assert_eq!(cut.project.settings().width(), 1920);
+    Ok(())
+}
+
+#[test]
+fn sound_opens_an_audio_track_below_main_and_follows_it() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let main = place_main(&mut cut, asset, 1_000_000, 30_000)?;
+    let (sound, _) = open_sound(&mut cut, asset, 1_000_200)?;
+    assert_eq!(kinds(&cut), vec![TrackKind::Audio, TrackKind::Video]);
+    run(&mut cut, Command::SetMagnet(true))?;
+    assert_eq!(start(&cut, main)?, 0);
+    assert_eq!(start(&cut, sound)?, 200);
+    assert_eq!(kinds(&cut), vec![TrackKind::Audio, TrackKind::Video]);
+    Ok(())
+}
+
+#[test]
+fn a_segment_refuses_the_wrong_track() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let wav = Asset::audio("file:///a.wav", Timestamp::new(30_000, scale(30_000)))?;
+    let wav = asset_id(run(&mut cut, Command::AddAsset(wav))?);
+    let (_, audio_track) = open_sound(&mut cut, asset, 0)?;
+    let before = cut.project.next_id();
+    let sound = media(&cut.project, wav, 0, 30_000, Channels::Sound)?;
+    let main = cut.main;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Place {
+                track: Some(main),
+                segment: sound,
+            },
+        ),
+        Error::WrongTrack,
+    );
+    let picture = media(&cut.project, asset, 0, 30_000, Channels::Both)?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Place {
+                track: Some(audio_track),
+                segment: picture,
+            },
+        ),
+        Error::WrongTrack,
+    );
+    assert_eq!(cut.project.timeline().main_track().segments().len(), 0);
+    assert_eq!(cut.project.timeline().tracks().len(), 2);
+    assert_eq!(cut.project.next_id(), before);
+    Ok(())
+}
+
+#[test]
+fn a_linked_move_that_would_overlap_changes_nothing() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let first = place_main(&mut cut, asset, 0, 30_000)?;
+    let second = place_main(&mut cut, asset, 2_000_000, 30_000)?;
+    let (held, track) = open_picture(&mut cut, asset, 1_000_000, 30_000)?;
+    let moved = same_track(place_on(&mut cut, track, asset, 2_000_000, 30_000)?);
+    expect_err(
+        run(&mut cut, Command::SetMagnet(true)),
+        Error::LinkageOverlap(moved),
+    );
+    assert_eq!(start(&cut, first)?, 0);
+    assert_eq!(start(&cut, second)?, 2_000_000);
+    assert_eq!(start(&cut, moved)?, 2_000_000);
+    assert_eq!(start(&cut, held)?, 1_000_000);
+    assert!(!cut.project.settings().magnet());
+    Ok(())
+}
+
+#[test]
+fn a_linked_move_past_zero_changes_nothing() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let main = place_main(&mut cut, asset, 1_000_000, 30_000)?;
+    let (overlay, _) = open_picture(&mut cut, asset, 100_000, 30_000)?;
+    expect_err(run(&mut cut, Command::SetMagnet(true)), Error::NegativeTime);
+    assert_eq!(start(&cut, main)?, 1_000_000);
+    assert_eq!(start(&cut, overlay)?, 100_000);
+    assert!(!cut.project.settings().magnet());
+    Ok(())
+}
+
+#[test]
+fn an_unknown_asset_or_track_refuses_the_place() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let other = video(11, 320, 180)?;
+    let segment = {
+        let stored = other.duration().ok_or(Error::ImageSource)?;
+        let source = TimeRange::new(
+            Timestamp::new(0, stored.timescale),
+            Timestamp::new(30_000, stored.timescale),
+        )?;
+        Segment::media(&other, source, 0, Channels::Both, Speed::ONE)?
+    };
+    let main = cut.main;
+    match run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment,
+        },
+    ) {
+        Err(Error::UnknownAsset(id)) if id.get() == 0 => {}
+        other => panic!("expected an unknown asset, got {other:?}"),
+    }
+    let missing = TrackId::new(99)?;
+    let segment = media(&cut.project, asset, 0, 30_000, Channels::Both)?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Place {
+                track: Some(missing),
+                segment,
+            },
+        ),
+        Error::UnknownTrack(missing),
+    );
+    assert!(cut.project.timeline().main_track().segments().is_empty());
+    Ok(())
+}
+
+#[test]
+fn two_creates_receive_different_ids() -> Result<(), Error> {
+    let (mut cut, first_asset) = load()?;
+    let second_asset = add_video(&mut cut, 4, 320, 180)?;
+    assert_ne!(first_asset, second_asset);
+    let first = place_main(&mut cut, first_asset, 0, 30_000)?;
+    let second = place_main(&mut cut, first_asset, 1_000_000, 30_000)?;
+    assert_ne!(first, second);
+    assert_ne!(first.get(), first_asset.get());
+    assert_eq!(cut.project.timeline().main_track().segments().len(), 2);
+    Ok(())
+}

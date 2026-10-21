@@ -90,6 +90,14 @@ name = "cutlass-pcm"
 version = "0.1.0"
 
 [[package]]
+name = "cutlass-project"
+version = "0.1.0"
+dependencies = [
+ "cutlass-core",
+ "thiserror",
+]
+
+[[package]]
 name = "cutlass-prores"
 version = "0.1.0"
 

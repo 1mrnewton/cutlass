@@ -1,5 +1,7 @@
 /target
 /dist
+/docs/
+/.cursor/
 local-assets/
 local-files/
 .env

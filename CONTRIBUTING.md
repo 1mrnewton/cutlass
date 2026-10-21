@@ -27,9 +27,7 @@ just gives reviewers helpful context.
 
 ## Before You Start
 
-- Read the [README](README.md) to understand what Cutlass is and how to run it.
-- Check the [Cutlass v1 roadmap](docs/v1-roadmap.md) and the topic roadmaps in
-  [`docs/`](docs/) to see what is planned, in progress, or already done.
+- Read the [README](README.md) to understand what Cutlass is.
 - Search [open issues](https://github.com/1Mr-Newton/cutlass/issues) before
   filing a new one or starting work, so effort is not duplicated.
 - For anything larger than a small fix, open an issue first to discuss the
@@ -60,11 +58,10 @@ cargo test --workspace
 
 ## Project Layout
 
-Codec support is listed in [`docs/codecs.md`](docs/codecs.md). The project
-model is [`docs/project.md`](docs/project.md).
-
 - `crates/core` (`cutlass-core`) holds the types codecs share: timestamps,
   packets, frames, pixel formats.
+- `crates/project` (`cutlass-project`) holds the project, the timeline, tracks,
+  and segments. It does no I/O.
 - `crates/codecs/software/` holds the Rust codecs, which run on any device.
 - `crates/codecs/native/` holds one crate per operating-system codec API.
 - `fixtures/` holds the small media files the tests decode, and
@@ -97,19 +94,6 @@ One boundary matters: a crate in `software/` never links an operating-system
 SDK. Anything that calls the OS lives in `native/`.
 
 ## Rules
-
-The codebase rules live in [`.cursor/rules/`](.cursor/rules/). Cursor loads
-them automatically. For everyone else they are plain Markdown.
-
-- `overview.mdc` — what Cutlass is, and the media policy.
-- `architecture.mdc` — crate layout, boundaries, and dependency direction.
-- `rust.mdc` — errors, panics, unsafe, API shape, and comments.
-- `software-codecs.mdc` — untrusted input, following the spec, exact output.
-- `native-codecs.mdc` — OS gates, FFI safety, capability checks, zero-copy frames.
-- `testing.mdc` — tests, media fixtures, fuzzing, and benchmarks.
-- `dependencies.mdc` — versions, licenses, and banned crates.
-- `perf.mdc` — performance on hot paths.
-- `docs.mdc` and `commits.mdc` — writing docs, commits, and PRs.
 
 Tools enforce the mechanical parts:
 
@@ -155,10 +139,8 @@ one giant change.
    ```
 
    Install `cargo-deny` once with `cargo install cargo-deny --locked`.
-4. Add or update tests as described in `.cursor/rules/testing.mdc`. Run a
-   single crate's tests with `cargo test -p <crate>`.
-5. Update `docs/` when behavior or structure changes.
-6. Open the PR with a clear description of what changed and why, and link any
+4. Add or update tests. Run a single crate's tests with `cargo test -p <crate>`.
+5. Open the PR with a clear description of what changed and why, and link any
    related issue. Keep PRs focused; unrelated drive-by changes should land
    separately.
 

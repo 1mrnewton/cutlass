@@ -4,6 +4,7 @@ members = [
     "crates/codecs/native/*",
     "crates/codecs/software/*",
     "crates/core",
+    "crates/project",
     "crates/testing/*",
 ]
 
@@ -16,6 +17,7 @@ repository = "https://github.com/1mrnewton/cutlass"
 
 [workspace.dependencies]
 cutlass-core = { path = "crates/core" }
+cutlass-project = { path = "crates/project" }
 cutlass-test-fixtures = { path = "crates/testing/fixtures" }
 
 objc2 = "0.6.5"

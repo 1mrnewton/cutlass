@@ -44,9 +44,17 @@ pub fn install(ctx: &egui::Context) {
         style.visuals.faint_bg_color = BAR;
         style.visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
         // A panel draws its resize line from these strokes. Width 0 leaves the
-        // gap with no color. The color stays, because text and scrollbars read it.
+        // gap with no color. The color is the scroll bar, so it stays faint.
+        style.visuals.widgets.inactive.fg_stroke.color = FAINT;
+        style.visuals.widgets.hovered.fg_stroke.color = FAINT;
+        style.visuals.widgets.active.fg_stroke.color = FAINT;
         style.visuals.widgets.hovered.fg_stroke.width = 0.0;
         style.visuals.widgets.active.fg_stroke.width = 0.0;
+        let scroll = &mut style.spacing.scroll;
+        scroll.bar_width = 3.0;
+        scroll.floating_width = 3.0;
+        scroll.active_background_opacity = 0.0;
+        scroll.interact_background_opacity = 0.0;
     });
 }
 

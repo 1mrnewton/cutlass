@@ -132,6 +132,10 @@ impl Project {
                 Ok(Outcome::Unchanged)
             }
             Command::Split { segment, at } => Ok(Outcome::Segment(self.split_now(segment, at)?)),
+            Command::SetTransform { segment, transform } => {
+                self.timeline.segment_mut(segment)?.set_transform(transform);
+                Ok(Outcome::Unchanged)
+            }
         }
     }
 

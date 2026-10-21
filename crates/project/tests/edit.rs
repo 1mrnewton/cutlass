@@ -6,7 +6,7 @@ use cutlass_core::Timestamp;
 use cutlass_project::{
     AspectRatio, Asset, AssetId, Channels, Color, ColorSpace, Command, Error, FrameRate, History,
     Keyframe, KeyframeValue, Outcome, Project, ProjectId, Segment, SegmentId, SequenceRate, Speed,
-    TimeRange, TrackId, TrackKind,
+    TimeRange, TrackId, TrackKind, Transform,
 };
 
 fn scale(value: u32) -> NonZeroU32 {
@@ -1175,5 +1175,55 @@ fn an_image_splits_on_the_timeline_without_a_source() -> Result<(), Error> {
     assert_eq!(left.timeline().duration().value, 1_000_000);
     assert_eq!(right.timeline().start().value, 2_000_000);
     assert_eq!(right.timeline().duration().value, 3_000_000);
+    Ok(())
+}
+
+#[test]
+fn transform_moves_the_picture_and_undo_puts_it_back() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    let transform = Transform::new((0.25, -0.1), (2.0, 0.5), 15.0, 0.4, true, false)?;
+    assert_eq!(
+        run(
+            &mut cut,
+            Command::SetTransform {
+                segment: id,
+                transform,
+            },
+        )?,
+        Outcome::Unchanged
+    );
+    let placed = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(placed.transform(), transform);
+    assert_eq!(placed.timeline().start().value, 0);
+    cut.history.undo(&mut cut.project)?;
+    let restored = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(restored.transform(), Transform::IDENTITY);
+    cut.history.redo(&mut cut.project)?;
+    let again = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(again.transform(), transform);
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetTransform {
+                segment: missing,
+                transform: Transform::IDENTITY,
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
     Ok(())
 }

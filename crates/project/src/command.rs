@@ -8,7 +8,7 @@ use crate::Error;
 use crate::asset::Asset;
 use crate::id::{AssetId, SegmentId, TrackId};
 use crate::rate::SequenceRate;
-use crate::segment::Segment;
+use crate::segment::{Segment, Transform};
 use crate::settings::{AspectRatio, Color, ColorSpace};
 use crate::time::{self, Speed, TimeRange};
 
@@ -52,6 +52,11 @@ pub enum Command {
     Split {
         segment: SegmentId,
         at: i64,
+    },
+    /// Placement on the canvas. It does not move the segment in time.
+    SetTransform {
+        segment: SegmentId,
+        transform: Transform,
     },
 }
 

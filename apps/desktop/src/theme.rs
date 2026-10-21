@@ -43,6 +43,10 @@ pub fn install(ctx: &egui::Context) {
         style.visuals.extreme_bg_color = GAP;
         style.visuals.faint_bg_color = BAR;
         style.visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
+        // A panel draws its resize line from these strokes. Width 0 leaves the
+        // gap with no color. The color stays, because text and scrollbars read it.
+        style.visuals.widgets.hovered.fg_stroke.width = 0.0;
+        style.visuals.widgets.active.fg_stroke.width = 0.0;
     });
 }
 

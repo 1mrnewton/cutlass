@@ -4,6 +4,7 @@ members = [
     "crates/codecs/native/*",
     "crates/codecs/software/*",
     "crates/containers/*",
+    "crates/color",
     "crates/core",
     "crates/media",
     "crates/project",
@@ -18,6 +19,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/1mrnewton/cutlass"
 
 [workspace.dependencies]
+cutlass-color = { path = "crates/color" }
 cutlass-core = { path = "crates/core" }
 cutlass-media = { path = "crates/media" }
 cutlass-mp4 = { path = "crates/containers/mp4" }

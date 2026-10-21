@@ -1,0 +1,16 @@
+[package]
+name = "cutlass-color"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Converts NV12 and P010 to RGB using the frame's range and matrix."
+
+[dependencies]
+cutlass-core.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,4 +1,5 @@
-//! The preview frame and the transport. The picture is not drawn yet. `docs/preview.md`.
+//! The preview frame and the transport. The frame shows the project canvas.
+//! A decoded picture is not drawn yet. `docs/preview.md`.
 
 use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, Sense, Vec2, pos2, vec2};
 
@@ -24,6 +25,15 @@ pub fn show(ui: &mut egui::Ui, project: &Project, playhead_us: i64) {
         pos2(full.right() - 16.0, transport.top() - 8.0),
     );
     if frame.height() > 0.0 && frame.width() > 0.0 {
+        if let Some(plate) = fitted_canvas(
+            frame,
+            project.settings().width(),
+            project.settings().height(),
+        ) {
+            let (red, green, blue) = project.settings().background().channels();
+            ui.painter()
+                .rect_filled(plate, 0.0, Color32::from_rgb(red, green, blue));
+        }
         let rate = project.settings().rate();
         let time = ruler::timecode(playhead_us, rate);
         let hidden = crate::timeline::hidden_tracks(ui);
@@ -118,6 +128,25 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
     );
 }
 
+/// The canvas, fitted inside `frame` and centered. The aspect is `width`/`height`.
+fn fitted_canvas(frame: Rect, width: u32, height: u32) -> Option<Rect> {
+    if width == 0 || height == 0 || frame.width() <= 0.0 || frame.height() <= 0.0 {
+        return None;
+    }
+    let picture = width as f32 / height as f32;
+    let (plate_width, plate_height) = if frame.width() / frame.height() > picture {
+        let plate_height = frame.height();
+        (plate_height * picture, plate_height)
+    } else {
+        let plate_width = frame.width();
+        (plate_width, plate_width / picture)
+    };
+    Some(Rect::from_center_size(
+        frame.center(),
+        vec2(plate_width, plate_height),
+    ))
+}
+
 /// `Still · M:SS.t`, in `language`. The clock stays `M:SS.t`.
 pub(crate) fn still_toast(language: crate::words::Language, playhead_us: i64) -> String {
     format!(
@@ -203,6 +232,36 @@ mod tests {
         assert_eq!(shot(&cut, 1_000_000, &[]), None);
         assert_eq!(shot(&project(), 0, &[]), None);
         assert_eq!(shot(&cut, 0, &[main]), None);
+    }
+
+    #[test]
+    fn the_canvas_fits_inside_the_frame_and_keeps_its_shape() {
+        let wide = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(400.0, 200.0),
+        );
+        let plate = super::fitted_canvas(wide, 1920, 1080).expect("plate");
+        assert!((plate.height() - 200.0).abs() < 0.01);
+        assert!((plate.width() - 200.0 * 16.0 / 9.0).abs() < 0.01);
+        assert!((plate.center().y - 100.0).abs() < 0.01);
+
+        let tall = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(10.0, 20.0),
+            eframe::egui::vec2(200.0, 400.0),
+        );
+        let plate = super::fitted_canvas(tall, 1080, 1920).expect("plate");
+        assert!((plate.width() - 200.0).abs() < 0.01);
+        assert!((plate.height() - 200.0 * 16.0 / 9.0).abs() < 0.01);
+        assert!((plate.center().x - 110.0).abs() < 0.01);
+
+        let exact = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(320.0, 180.0),
+        );
+        let plate = super::fitted_canvas(exact, 1920, 1080).expect("plate");
+        assert!((plate.width() - 320.0).abs() < 0.01);
+        assert!((plate.height() - 180.0).abs() < 0.01);
+        assert!(super::fitted_canvas(exact, 0, 1080).is_none());
     }
 
     #[test]

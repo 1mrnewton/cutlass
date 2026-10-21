@@ -8,8 +8,10 @@ use eframe::egui::{
 use cutlass_project::{Asset, AssetId, AssetKind, Project};
 
 use crate::icons::{self, Icon};
+use crate::media_bin::{Bin, CardId, FileInfo, Sort};
 use crate::theme;
 use crate::timeline::file_name;
+use crate::words::{self, Phrase};
 
 const RAIL: f32 = 76.0;
 const CARD_W: f32 = 144.0;
@@ -72,19 +74,8 @@ impl Shelf {
     }
 }
 
-pub fn show(
-    ui: &mut egui::Ui,
-    project: &Project,
-    shelf: &mut Shelf,
-    selected: &mut Option<AssetId>,
-) {
-    crate::tip::region(
-        ui,
-        crate::words::of(ui, crate::words::Phrase::RegionLibrary),
-    );
-    if selected.is_some_and(|id| project.asset(id).is_none()) {
-        *selected = None;
-    }
+pub fn show(ui: &mut egui::Ui, project: &Project, shelf: &mut Shelf, bin: &mut Bin) {
+    crate::tip::region(ui, words::of(ui, Phrase::RegionLibrary));
     let full = ui.max_rect();
     ui.allocate_rect(full, Sense::hover());
     let rail = Rect::from_min_size(full.min, vec2(RAIL, full.height()));
@@ -93,7 +84,7 @@ pub fn show(
     paint_rail(ui, rail, shelf);
     if *shelf == Shelf::Media {
         let assets = Rect::from_min_max(hairline.right_top(), full.max).shrink(12.0);
-        paint_bin(ui, assets, project, selected);
+        paint_bin(ui, assets, project, bin);
     }
 }
 
@@ -123,53 +114,425 @@ fn rail_button(ui: &mut egui::Ui, shelf: Shelf, active: bool) -> egui::Response 
     }
     let color = if active { theme::INK } else { theme::FAINT };
     icons::paint(ui.painter(), rect.center(), shelf.icon(), 20.0, color);
-    crate::tip::show_radio(&response, crate::words::of(ui, shelf.phrase()), active);
+    crate::tip::show_radio(&response, words::of(ui, shelf.phrase()), active);
     response
 }
 
-fn paint_bin(ui: &mut egui::Ui, rect: Rect, project: &Project, selected: &mut Option<AssetId>) {
+fn paint_bin(ui: &mut egui::Ui, rect: Rect, project: &Project, bin: &mut Bin) {
+    let path = Rect::from_min_size(rect.min, vec2(rect.width(), f32::min(32.0, rect.height())));
+    paint_path(ui, path, bin);
+    let top = path.bottom() + 8.0;
+    if top < rect.bottom() {
+        let grid = Rect::from_min_max(pos2(rect.left(), top), rect.max);
+        paint_grid(ui, grid, project, bin);
+    }
+    paint_ghost(ui, project);
+}
+
+fn paint_path(ui: &mut egui::Ui, rect: Rect, bin: &mut Bin) {
+    let trail = bin.trail();
+    let open = bin.open();
+    let mut row = ui.new_child(UiBuilder::new().max_rect(rect));
+    ScrollArea::horizontal()
+        .id_salt("library-path")
+        .auto_shrink([false, true])
+        .show(&mut row, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.add_space(2.0);
+                path_crumb(ui, bin, open, None, words::of(ui, Phrase::All));
+                for id in trail {
+                    ui.label(egui::RichText::new("/").size(12.0).color(theme::FAINT));
+                    let name = bin.folder_name(id).unwrap_or("").to_owned();
+                    path_crumb(ui, bin, open, Some(id), &name);
+                }
+            });
+        });
+}
+
+fn path_crumb(
+    ui: &mut egui::Ui,
+    bin: &mut Bin,
+    open: Option<u64>,
+    place: Option<u64>,
+    label: &str,
+) {
+    let current = open == place;
+    let text = egui::RichText::new(label).size(12.0).color(if current {
+        theme::INK
+    } else {
+        theme::MUTED
+    });
+    let response = ui.add(egui::Button::new(text).fill(if current {
+        theme::ACTIVE
+    } else {
+        Color32::TRANSPARENT
+    }));
+    if response.clicked() {
+        bin.open_place(place);
+    }
+    let hovering = response
+        .dnd_hover_payload::<AssetId>()
+        .is_some_and(|drag| bin.place_of(*drag) != place);
+    if hovering {
+        ui.painter().rect_stroke(
+            response.rect,
+            6.0,
+            Stroke::new(1.5, theme::EXPORT),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if let Some(drag) = response.dnd_release_payload::<AssetId>()
+        && bin.place_of(*drag) != place
+    {
+        bin.move_file(*drag, place);
+    }
+}
+
+fn paint_grid(ui: &mut egui::Ui, rect: Rect, project: &Project, bin: &mut Bin) {
     let mut column = ui.new_child(UiBuilder::new().max_rect(rect));
     ScrollArea::vertical()
         .id_salt("library-cards")
         .auto_shrink([false, false])
         .show(&mut column, |ui| {
+            let order = {
+                let infos = file_infos(project);
+                bin.visible(&infos)
+            };
             let width = ui.available_width();
             let cols = columns(width);
-            let assets = project.assets();
-            let rows = assets.len().div_ceil(cols).max(1);
+            let rows = order.len().div_ceil(cols).max(1);
             let height = (rows as f32 * (CARD_H + CARD_GAP)).max(ui.available_height());
-            let (area, background) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+            let (area, background) =
+                ui.allocate_exact_size(vec2(width, height), Sense::click_and_drag());
             let mut picked = false;
-            for (index, asset) in assets.iter().enumerate() {
-                let origin = card_origin(area.min, index, cols);
-                let card = Rect::from_min_size(origin, vec2(CARD_W, CARD_H));
-                let response = ui.interact(card, ui.scope_id().with(asset.id()), Sense::click());
-                if response.clicked() {
-                    *selected = Some(asset.id());
-                    picked = true;
+            let mut rects = Vec::with_capacity(order.len());
+            for (index, id) in order.iter().copied().enumerate() {
+                let card =
+                    Rect::from_min_size(card_origin(area.min, index, cols), vec2(CARD_W, CARD_H));
+                rects.push((id, card));
+                match id {
+                    CardId::Folder(folder) => {
+                        handle_folder(ui, bin, &order, card, folder, &mut picked);
+                    }
+                    CardId::File(asset) => {
+                        handle_file(ui, project, bin, &order, card, asset, &mut picked);
+                    }
                 }
-                crate::tip::show_selected(
-                    &response,
-                    file_name(asset.source()),
-                    *selected == Some(asset.id()),
-                );
-                paint_card(
-                    ui,
-                    card,
-                    asset,
-                    *selected == Some(asset.id()),
-                    on_timeline(project, asset.id()),
-                );
             }
-            if background.clicked() && !picked {
-                *selected = None;
+            let boxed = handle_box(ui, bin, &background, &rects);
+            if background.clicked() && !picked && !boxed {
+                bin.clear();
             }
+            background.context_menu(|ui| empty_menu(ui, bin));
         });
 }
 
-fn paint_card(ui: &egui::Ui, rect: Rect, asset: &Asset, selected: bool, placed: bool) {
-    let swatch = swatch(asset.kind());
+fn file_infos(project: &Project) -> Vec<FileInfo<'_>> {
+    project
+        .assets()
+        .iter()
+        .map(|asset| FileInfo {
+            id: asset.id(),
+            name: file_name(asset.source()),
+            duration_us: asset
+                .duration()
+                .and_then(|time| crate::media_bin::duration_us(time.value, time.timescale.get())),
+        })
+        .collect()
+}
+
+fn handle_box(
+    ui: &mut egui::Ui,
+    bin: &mut Bin,
+    background: &egui::Response,
+    cards: &[(CardId, Rect)],
+) -> bool {
+    let primary = ui.input(|input| {
+        input.pointer.primary_down() || input.pointer.button_released(egui::PointerButton::Primary)
+    });
+    if background.drag_started()
+        && primary
+        && let Some(pos) = background.interact_pointer_pos()
+    {
+        bin.begin_box(pos, ui.input(|input| input.modifiers.shift));
+    }
+    let pointer = background
+        .interact_pointer_pos()
+        .or_else(|| ui.input(|input| input.pointer.latest_pos()));
+    if let Some(pos) = pointer
+        && let Some(rect) = bin.box_rect(pos)
+    {
+        let hits = crate::media_bin::cards_touching(cards, rect);
+        bin.apply_box(&hits);
+        ui.painter()
+            .rect_filled(rect, 0.0, Color32::from_white_alpha(28));
+        ui.painter().rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0, Color32::WHITE),
+            egui::StrokeKind::Outside,
+        );
+    }
+    if background.drag_stopped() {
+        bin.finish_box()
+    } else {
+        false
+    }
+}
+
+fn handle_folder(
+    ui: &mut egui::Ui,
+    bin: &mut Bin,
+    order: &[CardId],
+    rect: Rect,
+    folder: u64,
+    picked: &mut bool,
+) {
+    let name = bin.folder_name(folder).unwrap_or("").to_owned();
+    let id = CardId::Folder(folder);
+    let response = ui.interact(rect, ui.scope_id().with(id), Sense::click());
+    if response.clicked() {
+        *picked = true;
+        let modifiers = ui.input(|input| input.modifiers);
+        let toggle = modifiers.command || modifiers.ctrl;
+        if modifiers.shift || toggle {
+            bin.choose(order, id, modifiers.shift, toggle);
+        } else if !bin.is_renaming(folder) {
+            bin.open_folder(folder);
+        }
+    }
+    if response.secondary_clicked() && !bin.is_selected(id) {
+        bin.select_only(id);
+    }
+    let drop_here = response
+        .dnd_hover_payload::<AssetId>()
+        .is_some_and(|drag| bin.place_of(*drag) != Some(folder));
+    if let Some(drag) = response.dnd_release_payload::<AssetId>()
+        && bin.place_of(*drag) != Some(folder)
+    {
+        bin.move_file(*drag, Some(folder));
+    }
+    response.context_menu(|ui| folder_menu(ui, bin, folder));
+    crate::tip::show_selected(&response, &name, bin.is_selected(id));
+    paint_folder(
+        ui,
+        rect,
+        &name,
+        bin.is_selected(id),
+        drop_here,
+        bin.is_renaming(folder),
+    );
+    if bin.is_renaming(folder) {
+        let field = Rect::from_min_max(
+            pos2(rect.left() + 8.0, rect.bottom() - 28.0),
+            pos2(rect.right() - 8.0, rect.bottom() - 6.0),
+        );
+        rename_field(ui, bin, folder, field);
+    }
+}
+
+fn handle_file(
+    ui: &mut egui::Ui,
+    project: &Project,
+    bin: &mut Bin,
+    order: &[CardId],
+    rect: Rect,
+    asset_id: AssetId,
+    picked: &mut bool,
+) {
+    let Some(asset) = project.asset(asset_id) else {
+        return;
+    };
+    let name = file_name(asset.source()).to_owned();
+    let placed = on_timeline(project, asset_id);
+    let id = CardId::File(asset_id);
+    let response = ui.interact(rect, ui.scope_id().with(id), Sense::click_and_drag());
+    if response.clicked() {
+        *picked = true;
+        let modifiers = ui.input(|input| input.modifiers);
+        bin.choose(
+            order,
+            id,
+            modifiers.shift,
+            modifiers.command || modifiers.ctrl,
+        );
+    }
+    if response.secondary_clicked() && !bin.is_selected(id) {
+        bin.select_only(id);
+    }
+    let modifiers = ui.input(|input| input.modifiers);
+    if !modifiers.shift && !modifiers.command && !modifiers.ctrl {
+        response.dnd_set_drag_payload(asset_id);
+    }
+    response.context_menu(|ui| file_menu(ui, bin, asset_id));
+    crate::tip::show_selected(&response, &name, bin.is_selected(id));
+    paint_picture(
+        ui.painter(),
+        rect,
+        asset,
+        placed,
+        words::of(ui, Phrase::OnTimeline),
+    );
+    if bin.is_selected(id) {
+        selected_edge(ui, rect);
+    }
+}
+
+fn rename_field(ui: &mut egui::Ui, bin: &mut Bin, id: u64, rect: Rect) {
+    let response = {
+        let text = bin.rename_text_mut();
+        ui.put(
+            rect,
+            egui::TextEdit::singleline(text)
+                .id(ui.scope_id().with(("folder-rename", id)))
+                .font(FontId::new(12.0, FontFamily::Proportional))
+                .text_color(Color32::WHITE)
+                .background_color(theme::ACTIVE),
+        )
+    };
+    if bin.focus_rename(id) {
+        response.request_focus();
+    }
+    let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
+    if escape && (response.has_focus() || response.lost_focus()) {
+        bin.cancel_rename();
+    } else if response.lost_focus() {
+        bin.commit_rename();
+    }
+}
+
+fn empty_menu(ui: &mut egui::Ui, bin: &mut Bin) {
+    if menu_row(ui, words::of(ui, Phrase::NewFolder), true) {
+        bin.add_folder(words::of(ui, Phrase::UntitledFolder));
+    }
+    sort_menu(ui, bin);
+}
+
+fn folder_menu(ui: &mut egui::Ui, bin: &mut Bin, id: u64) {
+    if menu_row(ui, words::of(ui, Phrase::Delete), true) {
+        bin.delete_folder(id);
+    }
+    menu_row(ui, words::of(ui, Phrase::OpenLocation), false);
+    menu_row(ui, words::of(ui, Phrase::NewFolderWith), false);
+    if menu_row(ui, words::of(ui, Phrase::Rename), true) {
+        bin.begin_rename(id);
+    }
+    menu_row(ui, words::of(ui, Phrase::LinkMedia), false);
+    if menu_row(ui, words::of(ui, Phrase::ExportClips), true) {
+        crate::timeline::show_note(ui, words::of(ui, Phrase::ExportWritesNothing));
+    }
+}
+
+fn file_menu(ui: &mut egui::Ui, bin: &mut Bin, id: AssetId) {
+    if menu_row(ui, words::of(ui, Phrase::OpenLocation), true) {
+        crate::timeline::show_note(ui, words::of(ui, Phrase::DoesNotOpenFile));
+    }
+    if menu_row(ui, words::of(ui, Phrase::Delete), true) {
+        bin.hide_file(id);
+    }
+    if menu_row(ui, words::of(ui, Phrase::NewFolderWith), true) {
+        bin.add_folder_with(id, words::of(ui, Phrase::UntitledFolder));
+    }
+    menu_row(ui, words::of(ui, Phrase::LinkMedia), false);
+    if split_row(ui) {
+        crate::timeline::show_note(ui, words::of(ui, Phrase::SplitScenes));
+    }
+    if menu_row(ui, words::of(ui, Phrase::ExportClips), true) {
+        crate::timeline::show_note(ui, words::of(ui, Phrase::ExportWritesNothing));
+    }
+}
+
+fn sort_menu(ui: &mut egui::Ui, bin: &mut Bin) {
+    ui.menu_button(words::of(ui, Phrase::Sort), |ui| {
+        if menu_row(ui, words::of(ui, Phrase::Name), true) {
+            bin.set_sort(Sort::Name);
+            crate::timeline::show_note(ui, words::of(ui, Phrase::SortedByName));
+        }
+        if menu_row(ui, words::of(ui, Phrase::Duration), true) {
+            bin.set_sort(Sort::Duration);
+            crate::timeline::show_note(ui, words::of(ui, Phrase::SortedByDuration));
+        }
+    });
+}
+
+fn menu_row(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
+    let color = if enabled { theme::INK } else { theme::FAINT };
+    let clicked = ui
+        .add_enabled(
+            enabled,
+            egui::Button::new(egui::RichText::new(label).color(color)),
+        )
+        .clicked();
+    if clicked {
+        ui.close();
+    }
+    clicked
+}
+
+fn split_row(ui: &mut egui::Ui) -> bool {
+    let clicked = ui
+        .add(
+            egui::Button::new(
+                egui::RichText::new(words::of(ui, Phrase::SplitScenes)).color(theme::INK),
+            )
+            .shortcut_text(words::of(ui, Phrase::Free)),
+        )
+        .clicked();
+    if clicked {
+        ui.close();
+    }
+    clicked
+}
+
+fn paint_folder(
+    ui: &egui::Ui,
+    rect: Rect,
+    name: &str,
+    selected: bool,
+    drop_here: bool,
+    renaming: bool,
+) {
     let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, 12.0, theme::BAR);
+    icons::paint(
+        &painter,
+        pos2(rect.center().x, rect.top() + 36.0),
+        Icon::Folder,
+        28.0,
+        theme::INK,
+    );
+    if !renaming {
+        painter.text(
+            rect.left_bottom() + vec2(8.0, -8.0),
+            Align2::LEFT_BOTTOM,
+            name,
+            FontId::new(12.0, FontFamily::Proportional),
+            theme::INK,
+        );
+    }
+    if selected {
+        selected_edge(ui, rect);
+    }
+    if drop_here {
+        ui.painter().rect_stroke(
+            rect,
+            12.0,
+            Stroke::new(1.5, theme::EXPORT),
+            egui::StrokeKind::Outside,
+        );
+    }
+}
+
+fn paint_picture(
+    painter: &egui::Painter,
+    rect: Rect,
+    asset: &Asset,
+    placed: bool,
+    on_timeline: &str,
+) {
+    let swatch = swatch(asset.kind());
+    let painter = painter.with_clip_rect(rect);
     painter.rect_filled(rect, 12.0, swatch);
     let ink = ink_on(swatch);
     painter.text(
@@ -200,19 +563,44 @@ fn paint_card(ui: &egui::Ui, rect: Rect, asset: &Asset, selected: bool, placed: 
         painter.text(
             rect.left_top() + vec2(8.0, 8.0),
             Align2::LEFT_TOP,
-            crate::words::of(ui, crate::words::Phrase::OnTimeline),
+            on_timeline,
             FontId::new(10.0, FontFamily::Proportional),
             ink,
         );
     }
-    if selected {
-        ui.painter().rect_stroke(
-            rect,
-            12.0,
-            Stroke::new(1.5, Color32::WHITE),
-            egui::StrokeKind::Inside,
-        );
-    }
+}
+
+fn selected_edge(ui: &egui::Ui, rect: Rect) {
+    ui.painter().rect_stroke(
+        rect,
+        12.0,
+        Stroke::new(1.5, Color32::WHITE),
+        egui::StrokeKind::Inside,
+    );
+}
+
+fn paint_ghost(ui: &egui::Ui, project: &Project) {
+    let Some(id) = egui::DragAndDrop::payload::<AssetId>(ui.ctx()) else {
+        return;
+    };
+    let Some(asset) = project.asset(*id) else {
+        return;
+    };
+    let Some(pos) = ui.input(|input| input.pointer.hover_pos()) else {
+        return;
+    };
+    let rect = Rect::from_center_size(pos, vec2(CARD_W, CARD_H));
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("bin-ghost"),
+    ));
+    paint_picture(
+        &painter,
+        rect,
+        asset,
+        on_timeline(project, *id),
+        words::of(ui, Phrase::OnTimeline),
+    );
 }
 
 /// How many 144px cards fit. One column does not stretch the card.
@@ -282,6 +670,7 @@ mod tests {
     use eframe::egui::pos2;
 
     use super::{card_origin, card_time, columns, on_timeline, swatch};
+    use crate::media_bin::CardId;
     use crate::theme;
 
     fn project() -> Project {
@@ -378,5 +767,79 @@ mod tests {
             swatch(cut.asset(unused).expect("audio").kind()),
             theme::AUDIO
         );
+    }
+
+    #[test]
+    fn a_right_click_on_empty_space_opens_a_folder() {
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, crate::words::Language::English);
+        let mut bin = crate::media_bin::Bin::new();
+        let mut shelf = super::Shelf::Media;
+        let cut = project();
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(400.0, 500.0),
+        );
+        let spot = eframe::egui::pos2(160.0, 180.0);
+        let mut time = 0.0;
+        let mut pass = |events: Vec<eframe::egui::Event>| {
+            time += 0.05;
+            let mut output = ctx.run_ui(
+                eframe::egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| super::show(ui, &cut, &mut shelf, &mut bin),
+            );
+            let tree = output.platform_output.accesskit_update.take();
+            output.textures_delta.clear();
+            tree
+        };
+        pass(vec![]);
+        pass(vec![
+            eframe::egui::Event::PointerMoved(spot),
+            eframe::egui::Event::PointerButton {
+                pos: spot,
+                button: eframe::egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: eframe::egui::Modifiers::default(),
+            },
+        ]);
+        pass(vec![eframe::egui::Event::PointerButton {
+            pos: spot,
+            button: eframe::egui::PointerButton::Secondary,
+            pressed: false,
+            modifiers: eframe::egui::Modifiers::default(),
+        }]);
+        let tree = pass(vec![]).expect("the tree is built");
+        let row = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some("New folder"))
+            .expect("new folder row");
+        let bounds = row.1.bounds().expect("row bounds");
+        let at = eframe::egui::pos2(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        );
+        pass(vec![
+            eframe::egui::Event::PointerMoved(at),
+            eframe::egui::Event::PointerButton {
+                pos: at,
+                button: eframe::egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: eframe::egui::Modifiers::default(),
+            },
+        ]);
+        pass(vec![eframe::egui::Event::PointerButton {
+            pos: at,
+            button: eframe::egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: eframe::egui::Modifiers::default(),
+        }]);
+        assert!(matches!(bin.visible(&[]).as_slice(), [CardId::Folder(_)]));
     }
 }

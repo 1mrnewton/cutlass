@@ -4,7 +4,7 @@
 
 use eframe::egui::{self, Align2, Button, Rect, RichText, Sense, TextStyle, Vec2, pos2};
 
-use cutlass_project::{AssetId, History, Project, ProjectId, SegmentId};
+use cutlass_project::{History, Project, ProjectId, SegmentId};
 
 mod chrome;
 mod export;
@@ -13,6 +13,7 @@ mod icons;
 mod inspector;
 mod keys;
 mod library;
+mod media_bin;
 mod preview;
 mod ruler;
 mod theme;
@@ -45,7 +46,7 @@ struct CutlassApp {
     project: Project,
     playhead_us: i64,
     shelf: library::Shelf,
-    selected_asset: Option<AssetId>,
+    bin: media_bin::Bin,
     selected_segments: Vec<SegmentId>,
     clip_drag: Option<timeline::ClipDrag>,
     trim_drag: Option<timeline::TrimDrag>,
@@ -65,7 +66,7 @@ impl CutlassApp {
             project: Project::new(id, "Untitled"),
             playhead_us: 0,
             shelf: library::Shelf::Media,
-            selected_asset: None,
+            bin: media_bin::Bin::new(),
             selected_segments: Vec::new(),
             clip_drag: None,
             trim_drag: None,
@@ -193,7 +194,7 @@ impl eframe::App for CutlassApp {
             .frame(theme::gap_right())
             .show_separator_line(false)
             .show(ui, |ui| {
-                library::show(ui, &self.project, &mut self.shelf, &mut self.selected_asset);
+                library::show(ui, &self.project, &mut self.shelf, &mut self.bin);
             });
 
         egui::Panel::right("inspector")

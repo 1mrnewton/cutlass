@@ -129,6 +129,20 @@ pub(crate) enum Phrase {
     ResizeLibrary,
     ResizeInspector,
     ResizeTimeline,
+    All,
+    NewFolder,
+    Sort,
+    UntitledFolder,
+    OpenLocation,
+    NewFolderWith,
+    Rename,
+    LinkMedia,
+    ExportClips,
+    ExportWritesNothing,
+    DoesNotOpenFile,
+    Free,
+    SortedByName,
+    SortedByDuration,
 }
 
 #[cfg(test)]
@@ -244,6 +258,20 @@ impl Phrase {
         Self::ResizeLibrary,
         Self::ResizeInspector,
         Self::ResizeTimeline,
+        Self::All,
+        Self::NewFolder,
+        Self::Sort,
+        Self::UntitledFolder,
+        Self::OpenLocation,
+        Self::NewFolderWith,
+        Self::Rename,
+        Self::LinkMedia,
+        Self::ExportClips,
+        Self::ExportWritesNothing,
+        Self::DoesNotOpenFile,
+        Self::Free,
+        Self::SortedByName,
+        Self::SortedByDuration,
     ];
 }
 
@@ -358,6 +386,20 @@ const ENGLISH: &[&str] = &[
     "Resize library",
     "Resize inspector",
     "Resize timeline",
+    "All",
+    "New folder",
+    "Sort",
+    "Untitled folder",
+    "Open file location",
+    "New folder with selected item",
+    "Rename",
+    "Link to media",
+    "Export selected clips",
+    "Export does not write a file.",
+    "Does not open the file.",
+    "Free",
+    "Sorted by name",
+    "Sorted by duration",
 ];
 
 const FRENCH: &[&str] = &[
@@ -471,6 +513,20 @@ const FRENCH: &[&str] = &[
     "Redimensionner la bibliothèque",
     "Redimensionner l'inspecteur",
     "Redimensionner le montage",
+    "Tout",
+    "Nouveau dossier",
+    "Trier",
+    "Dossier sans titre",
+    "Ouvrir l'emplacement du fichier",
+    "Nouveau dossier avec la sélection",
+    "Renommer",
+    "Lier au média",
+    "Exporter les éléments sélectionnés",
+    "L'export n'écrit pas de fichier.",
+    "N'ouvre pas le fichier.",
+    "Gratuit",
+    "Trié par nom",
+    "Trié par durée",
 ];
 
 /// The word for `phrase` in `language`.
@@ -598,7 +654,11 @@ mod tests {
             say(Language::English, Phrase::ResizeTimeline),
             "Resize timeline"
         );
-        assert_eq!(Phrase::ResizeTimeline as usize, super::ENGLISH.len() - 1);
+        assert_eq!(
+            say(Language::English, Phrase::SortedByDuration),
+            "Sorted by duration"
+        );
+        assert_eq!(Phrase::SortedByDuration as usize, super::ENGLISH.len() - 1);
         for phrase in Phrase::ALL {
             let english = say(Language::English, *phrase);
             let french = say(Language::French, *phrase);

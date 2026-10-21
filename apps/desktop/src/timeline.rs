@@ -2,7 +2,7 @@
 
 use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, Sense, Stroke, pos2, vec2};
 
-use cutlass_project::{Command, History, Project, SegmentId, Track, TrackKind};
+use cutlass_project::{Command, History, Project, SegmentId, Track, TrackId, TrackKind};
 
 use crate::ruler;
 use crate::theme;
@@ -40,24 +40,45 @@ pub fn delete_selected(
     true
 }
 
+/// A clip following the pointer. The move is written when the pointer goes up.
+pub struct ClipDrag {
+    segment: SegmentId,
+    origin: egui::Pos2,
+    start_us: i64,
+    from: TrackId,
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     project: &Project,
     playhead: &mut i64,
     selected: &mut Option<SegmentId>,
-) {
+    drag: &mut Option<ClipDrag>,
+) -> Option<Command> {
     let full = ui.max_rect();
     let ruler_rect = Rect::from_min_size(full.min, vec2(full.width(), RULER_HEIGHT));
     let tracks = Rect::from_min_max(ruler_rect.left_bottom(), full.max);
     if selected.is_some_and(|id| project.timeline().segment(id).is_none()) {
         *selected = None;
     }
-    if tracks.height() > 0.0
-        && ui.input(|input| input.pointer.primary_clicked())
-        && let Some(pointer) = ui.input(|input| input.pointer.interact_pos())
-        && tracks.contains(pointer)
+    if drag
+        .as_ref()
+        .is_some_and(|drag| project.timeline().segment(drag.segment).is_none())
     {
-        *selected = segment_at(project, tracks, pointer);
+        *drag = None;
+    }
+    let mut command = None;
+    let pointer = ui.input(|input| input.pointer.interact_pos());
+    if tracks.height() > 0.0 {
+        let pressed = ui.input(|input| input.pointer.primary_pressed());
+        let released = ui.input(|input| input.pointer.primary_released());
+        if pressed && let Some(point) = pointer.filter(|point| tracks.contains(*point)) {
+            *selected = segment_at(project, tracks, point);
+            *drag = selected.and_then(|id| drag_from(project, id, point));
+        }
+        if released && let Some(active) = drag.take() {
+            command = move_command(project, tracks, &active, pointer);
+        }
     }
     paint_ruler(ui, ruler_rect, project);
     if tracks.height() > 0.0 {
@@ -103,26 +124,37 @@ pub fn show(
                 theme::MUTED,
             );
             paint_segments(
-                ui, project, track, lane_rect, lane.main, pixel_size, *selected,
+                ui,
+                track,
+                lane_rect,
+                lane.main,
+                &ClipPaint {
+                    project,
+                    pixel_size,
+                    selected: *selected,
+                    drag: drag.as_ref(),
+                    pointer,
+                },
             );
         }
     }
     paint_playhead(ui, ruler_rect, tracks, project, playhead);
+    command
 }
 
 fn lane_left(area: Rect) -> f32 {
     area.left() + HEAD + COVER
 }
 
-fn paint_segments(
-    ui: &mut egui::Ui,
-    project: &Project,
-    track: &Track,
-    lane: Rect,
-    main: bool,
+struct ClipPaint<'a> {
+    project: &'a Project,
     pixel_size: f64,
     selected: Option<SegmentId>,
-) {
+    drag: Option<&'a ClipDrag>,
+    pointer: Option<egui::Pos2>,
+}
+
+fn paint_segments(ui: &mut egui::Ui, track: &Track, lane: Rect, main: bool, paint: &ClipPaint<'_>) {
     for segment in track.segments() {
         let range = segment.timeline();
         let rect = clip_rect(
@@ -130,36 +162,129 @@ fn paint_segments(
             main,
             range.start().value,
             range.duration().value,
-            pixel_size,
+            paint.pixel_size,
         );
         if rect.left() > lane.right() || rect.right() < lane.left() {
             continue;
         }
-        ui.painter()
-            .rect_filled(rect, 7.0, clip_color(track.kind()));
-        if selected == Some(segment.id()) {
-            ui.painter().rect_stroke(
-                rect,
-                7.0,
-                Stroke::new(1.5, Color32::WHITE),
-                egui::StrokeKind::Inside,
-            );
+        let dragging = paint.drag.is_some_and(|drag| drag.segment == segment.id());
+        let color = clip_color(track.kind());
+        let resting = if dragging {
+            color.gamma_multiply(0.35)
+        } else {
+            color
+        };
+        ui.painter().rect_filled(rect, 7.0, resting);
+        if !dragging && paint.selected == Some(segment.id()) {
+            stroke_clip(ui, rect);
         }
-        let name = project
-            .asset(segment.asset_id())
-            .map(|asset| file_name(asset.source()))
-            .unwrap_or("");
-        if name.is_empty() {
-            continue;
+        if dragging {
+            let offset = paint
+                .drag
+                .zip(paint.pointer)
+                .map(|(drag, point)| point - drag.origin)
+                .unwrap_or_default();
+            let moved = rect.translate(offset);
+            ui.painter().rect_filled(moved, 7.0, color);
+            stroke_clip(ui, moved);
+            paint_name(ui, paint.project, segment, moved);
+        } else {
+            paint_name(ui, paint.project, segment, rect);
         }
-        ui.painter().with_clip_rect(rect.shrink(6.0)).text(
-            rect.left_center() + vec2(8.0, 0.0),
-            Align2::LEFT_CENTER,
-            name,
-            FontId::new(11.0, FontFamily::Proportional),
-            Color32::WHITE,
-        );
     }
+}
+
+fn stroke_clip(ui: &egui::Ui, rect: Rect) {
+    ui.painter().rect_stroke(
+        rect,
+        7.0,
+        Stroke::new(1.5, Color32::WHITE),
+        egui::StrokeKind::Inside,
+    );
+}
+
+fn paint_name(ui: &egui::Ui, project: &Project, segment: &cutlass_project::Segment, rect: Rect) {
+    let name = project
+        .asset(segment.asset_id())
+        .map(|asset| file_name(asset.source()))
+        .unwrap_or("");
+    if name.is_empty() {
+        return;
+    }
+    ui.painter().with_clip_rect(rect.shrink(6.0)).text(
+        rect.left_center() + vec2(8.0, 0.0),
+        Align2::LEFT_CENTER,
+        name,
+        FontId::new(11.0, FontFamily::Proportional),
+        Color32::WHITE,
+    );
+}
+
+fn drag_from(project: &Project, id: SegmentId, origin: egui::Pos2) -> Option<ClipDrag> {
+    let segment = project.timeline().segment(id)?;
+    let from = project
+        .timeline()
+        .tracks()
+        .iter()
+        .find(|track| track.segments().iter().any(|segment| segment.id() == id))?
+        .id();
+    Some(ClipDrag {
+        segment: id,
+        origin,
+        start_us: segment.timeline().start().value,
+        from,
+    })
+}
+
+fn moved_start(start_us: i64, delta_px: f32, pixel_size: f64) -> i64 {
+    if !(pixel_size.is_finite() && pixel_size > 0.0 && delta_px.is_finite()) {
+        return start_us.max(0);
+    }
+    let delta = f64::from(delta_px) / pixel_size;
+    if !delta.is_finite() {
+        return start_us.max(0);
+    }
+    let delta = delta.round().clamp(i64::MIN as f64, i64::MAX as f64) as i64;
+    start_us.saturating_add(delta).max(0)
+}
+
+fn move_command(
+    project: &Project,
+    tracks: Rect,
+    drag: &ClipDrag,
+    pointer: Option<egui::Pos2>,
+) -> Option<Command> {
+    let point = pointer?;
+    let width = (tracks.right() - lane_left(tracks)).max(0.0);
+    let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
+    let start = moved_start(drag.start_us, point.x - drag.origin.x, pixel_size);
+    let track = lane_under(project, tracks, point).filter(|id| *id != drag.from);
+    if start == drag.start_us && track.is_none() {
+        return None;
+    }
+    Some(Command::Move {
+        segment: drag.segment,
+        track,
+        start,
+    })
+}
+
+fn lane_under(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<TrackId> {
+    let width = (tracks.right() - lane_left(tracks)).max(0.0);
+    for (track, lane) in project
+        .timeline()
+        .tracks()
+        .iter()
+        .zip(layout(project.timeline().tracks(), tracks))
+        .rev()
+    {
+        let lane_rect =
+            Rect::from_min_size(pos2(lane_left(tracks), lane.top), vec2(width, lane.height));
+        if lane_rect.contains(point) {
+            return Some(track.id());
+        }
+    }
+    None
 }
 
 fn segment_at(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<SegmentId> {
@@ -592,5 +717,114 @@ mod tests {
             &mut cut,
             &mut selected
         ));
+    }
+
+    #[test]
+    fn a_drag_writes_the_move_and_a_still_pointer_does_not() {
+        let mut history = History::new();
+        let mut cut = project();
+        let video = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let asset = match history
+            .apply(&mut cut, &[Command::AddAsset(video)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let segment = {
+            let stored = cut.asset(asset).expect("asset");
+            let duration = stored.duration().expect("duration");
+            let source = TimeRange::new(
+                Timestamp::new(0, duration.timescale),
+                Timestamp::new(duration.value, duration.timescale),
+            )
+            .expect("source");
+            Segment::media(stored, source, 0, Channels::Both, Speed::ONE).expect("segment")
+        };
+        let (id, from) = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: None,
+                    segment,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Opened { segment, track }] => (*segment, *track),
+            other => panic!("expected a new lane, got {other:?}"),
+        };
+        let tracks = Rect::from_min_size(pos2(0.0, 0.0), vec2(602.0, 400.0));
+        let lane = layout(cut.timeline().tracks(), tracks)
+            .into_iter()
+            .find(|lane| !lane.main)
+            .expect("overlay");
+        let origin = pos2(lane_left(tracks) + 40.0, lane.top + 10.0);
+        let drag = super::ClipDrag {
+            segment: id,
+            origin,
+            start_us: 0,
+            from,
+        };
+        assert!(super::move_command(&cut, tracks, &drag, Some(origin)).is_none());
+        let pixel_size = crate::ruler::opening_pixel_size(400.0, cut.duration().value);
+        let landed = super::moved_start(0, 150.0, pixel_size);
+        let command =
+            super::move_command(&cut, tracks, &drag, Some(pos2(origin.x + 150.0, origin.y)))
+                .expect("move");
+        assert_eq!(
+            command,
+            Command::Move {
+                segment: id,
+                track: None,
+                start: landed,
+            }
+        );
+        history.apply(&mut cut, &[command]).expect("apply");
+        assert_eq!(
+            cut.timeline()
+                .segment(id)
+                .expect("segment")
+                .timeline()
+                .start()
+                .value,
+            landed
+        );
+        assert_eq!(super::moved_start(100, -10_000.0, pixel_size), 0);
+
+        let main = layout(cut.timeline().tracks(), tracks)
+            .into_iter()
+            .find(|lane| lane.main)
+            .expect("main");
+        let onto_main = super::move_command(
+            &cut,
+            tracks,
+            &super::ClipDrag {
+                segment: id,
+                origin,
+                start_us: landed,
+                from,
+            },
+            Some(pos2(origin.x, main.top + 10.0)),
+        )
+        .expect("lane");
+        let main_id = cut.timeline().main_track().id();
+        assert_eq!(
+            onto_main,
+            Command::Move {
+                segment: id,
+                track: Some(main_id),
+                start: landed,
+            }
+        );
     }
 }

@@ -215,7 +215,12 @@ impl eframe::App for CutlassApp {
                     [id] => Some(*id),
                     _ => None,
                 };
-                inspector::show(ui, &self.project, shown);
+                let commands = inspector::show(ui, &self.project, shown);
+                if !commands.is_empty()
+                    && let Err(error) = self.history.apply(&mut self.project, &commands)
+                {
+                    timeline::show_note(ui, timeline::apply_note(&error, words::active(ui)));
+                }
             });
 
         egui::CentralPanel::default()

@@ -145,6 +145,9 @@ pub(crate) enum Phrase {
     SortedByDuration,
     ProjectMedia,
     FreeStock,
+    Basic,
+    Rotation,
+    Opacity,
 }
 
 #[cfg(test)]
@@ -276,6 +279,9 @@ impl Phrase {
         Self::SortedByDuration,
         Self::ProjectMedia,
         Self::FreeStock,
+        Self::Basic,
+        Self::Rotation,
+        Self::Opacity,
     ];
 }
 
@@ -406,6 +412,9 @@ const ENGLISH: &[&str] = &[
     "Sorted by duration",
     "Project",
     "Free stock",
+    "Basic",
+    "Rotation",
+    "Opacity",
 ];
 
 const FRENCH: &[&str] = &[
@@ -535,6 +544,9 @@ const FRENCH: &[&str] = &[
     "Trié par durée",
     "Projet",
     "Stock libre",
+    "Basique",
+    "Rotation",
+    "Opacité",
 ];
 
 /// The word for `phrase` in `language`.
@@ -631,6 +643,7 @@ mod tests {
         Phrase::Ratio,
         Phrase::Volume,
         Phrase::Position,
+        Phrase::Rotation,
         Phrase::Original,
         Phrase::Format,
         Phrase::Codec,
@@ -668,7 +681,11 @@ mod tests {
         );
         assert_eq!(say(Language::English, Phrase::FreeStock), "Free stock");
         assert_eq!(say(Language::French, Phrase::FreeStock), "Stock libre");
-        assert_eq!(Phrase::FreeStock as usize, super::ENGLISH.len() - 1);
+        assert_eq!(say(Language::English, Phrase::Basic), "Basic");
+        assert_eq!(say(Language::French, Phrase::Basic), "Basique");
+        assert_eq!(say(Language::English, Phrase::Opacity), "Opacity");
+        assert_eq!(say(Language::French, Phrase::Opacity), "Opacité");
+        assert_eq!(Phrase::Opacity as usize, super::ENGLISH.len() - 1);
         for phrase in Phrase::ALL {
             let english = say(Language::English, *phrase);
             let french = say(Language::French, *phrase);

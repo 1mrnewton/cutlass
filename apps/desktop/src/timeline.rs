@@ -392,6 +392,41 @@ pub fn show(
     let mut lanes = lane_memory(ui);
     retain_lanes(project, &mut lanes);
     let mut note = None;
+    if let Some(key) = crate::keys::tool(ui) {
+        let mut modes = Modes {
+            split,
+            snap: &mut snap,
+            marker: &mut marker,
+            beat: &mut beat,
+        };
+        let (command, refusal, zoom) =
+            apply_shortcut(key, duration > 0, project, &lanes, &mut modes);
+        if let Some(command) = command {
+            commands.push(command);
+        }
+        if let Some(text) = refusal {
+            note = Some(text);
+        }
+        if duration > 0
+            && lane_width > 0.0
+            && let Some(step) = zoom
+        {
+            let anchor = view.x(lane, *playhead).clamp(lane, lane + lane_width);
+            match step {
+                ZoomStep::In => {
+                    zoom_around(&mut view, lane, anchor, 2.0, lane_width, duration, rate);
+                }
+                ZoomStep::Out => {
+                    zoom_around(&mut view, lane, anchor, 0.5, lane_width, duration, rate);
+                }
+                ZoomStep::Fit => {
+                    view = View::fit(lane_width, duration);
+                    clamp_view(&mut view, lane_width, duration, rate);
+                }
+            }
+            ui.data_mut(|data| data.insert_temp(zoom_id, view));
+        }
+    }
     if tracks.height() > 0.0 {
         let held_id = ui.scope_id().with("held-locked");
         let mut held_locked = ui.data(|data| data.get_temp(held_id)).unwrap_or(false);
@@ -996,7 +1031,7 @@ fn zoom_around(
     clamp_view(view, width, duration_us, rate);
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ZoomStep {
     Out,
     Fit,
@@ -1586,6 +1621,68 @@ fn magnet_refusal(project: &Project, lanes: &Lanes) -> Option<&'static str> {
         return Some("A locked lane would move. Couldn't turn on main track magnet.");
     }
     None
+}
+
+struct Modes<'a> {
+    split: &'a mut bool,
+    snap: &'a mut bool,
+    marker: &'a mut bool,
+    beat: &'a mut bool,
+}
+
+fn apply_shortcut(
+    key: crate::keys::Shortcut,
+    live: bool,
+    project: &Project,
+    lanes: &Lanes,
+    modes: &mut Modes<'_>,
+) -> (Option<Command>, Option<&'static str>, Option<ZoomStep>) {
+    use crate::keys::Shortcut;
+    match key {
+        Shortcut::Undo | Shortcut::Redo => (None, None, None),
+        Shortcut::Select => {
+            *modes.split = false;
+            *modes.marker = false;
+            *modes.beat = false;
+            (None, None, None)
+        }
+        Shortcut::Split if live => {
+            *modes.split = !*modes.split;
+            if *modes.split {
+                *modes.marker = false;
+                *modes.beat = false;
+            }
+            (None, None, None)
+        }
+        Shortcut::Snap => {
+            *modes.snap = !*modes.snap;
+            (None, None, None)
+        }
+        Shortcut::Magnet => {
+            if let Some(command) = magnet_toggle(project, lanes) {
+                (Some(command), None, None)
+            } else {
+                (None, magnet_refusal(project, lanes), None)
+            }
+        }
+        Shortcut::Linkage => (Some(linkage_toggle(project)), None, None),
+        Shortcut::Marker if live => {
+            *modes.marker = !*modes.marker;
+            if *modes.marker {
+                *modes.beat = false;
+                *modes.split = false;
+            }
+            (None, None, None)
+        }
+        Shortcut::ZoomIn if live => (None, None, Some(ZoomStep::In)),
+        Shortcut::ZoomOut if live => (None, None, Some(ZoomStep::Out)),
+        Shortcut::ZoomFit if live => (None, None, Some(ZoomStep::Fit)),
+        Shortcut::Split
+        | Shortcut::Marker
+        | Shortcut::ZoomIn
+        | Shortcut::ZoomOut
+        | Shortcut::ZoomFit => (None, None, None),
+    }
 }
 
 fn magnet_toggle(project: &Project, lanes: &Lanes) -> Option<Command> {
@@ -3823,6 +3920,147 @@ mod tests {
         assert_eq!(
             super::apply_note(&cutlass_project::Error::NothingToUndo),
             "That edit did not land."
+        );
+    }
+
+    #[test]
+    fn a_tool_key_does_what_its_button_does() {
+        use crate::keys::Shortcut;
+        let cut = project();
+        let open = super::Lanes::default();
+        let mut split = false;
+        let mut snap = true;
+        let mut marker = true;
+        let mut beat = true;
+        let press = |key,
+                     live,
+                     lanes: &super::Lanes,
+                     split: &mut bool,
+                     snap: &mut bool,
+                     marker: &mut bool,
+                     beat: &mut bool| {
+            let mut modes = super::Modes {
+                split,
+                snap,
+                marker,
+                beat,
+            };
+            super::apply_shortcut(key, live, &cut, lanes, &mut modes)
+        };
+        let (command, note, zoom) = press(
+            Shortcut::Select,
+            true,
+            &open,
+            &mut split,
+            &mut snap,
+            &mut marker,
+            &mut beat,
+        );
+        assert!(command.is_none() && note.is_none() && zoom.is_none());
+        assert!(!split && !marker && !beat && snap);
+
+        let _ = press(
+            Shortcut::Split,
+            true,
+            &open,
+            &mut split,
+            &mut snap,
+            &mut marker,
+            &mut beat,
+        );
+        assert!(split && !marker && !beat);
+        let _ = press(
+            Shortcut::Split,
+            false,
+            &open,
+            &mut split,
+            &mut snap,
+            &mut marker,
+            &mut beat,
+        );
+        assert!(split);
+
+        let _ = press(
+            Shortcut::Snap,
+            true,
+            &open,
+            &mut split,
+            &mut snap,
+            &mut marker,
+            &mut beat,
+        );
+        assert!(!snap);
+        let _ = press(
+            Shortcut::Marker,
+            true,
+            &open,
+            &mut split,
+            &mut snap,
+            &mut marker,
+            &mut beat,
+        );
+        assert!(marker && !split && !beat);
+
+        let (command, note, _) = press(
+            Shortcut::Linkage,
+            true,
+            &open,
+            &mut split,
+            &mut snap,
+            &mut marker,
+            &mut beat,
+        );
+        assert_eq!(command, Some(Command::SetLinkage(false)));
+        assert!(note.is_none());
+        assert_eq!(
+            press(
+                Shortcut::ZoomIn,
+                true,
+                &open,
+                &mut split,
+                &mut snap,
+                &mut marker,
+                &mut beat
+            )
+            .2,
+            Some(super::ZoomStep::In)
+        );
+        assert!(
+            press(
+                Shortcut::ZoomFit,
+                false,
+                &open,
+                &mut split,
+                &mut snap,
+                &mut marker,
+                &mut beat
+            )
+            .2
+            .is_none()
+        );
+
+        let main = cut.timeline().main_track().id();
+        let locked = super::Lanes {
+            rows: vec![super::LaneFlag {
+                track: main,
+                locked: true,
+                hidden: false,
+                muted: false,
+            }],
+        };
+        let (command, note, _) = press(
+            Shortcut::Magnet,
+            true,
+            &locked,
+            &mut split,
+            &mut snap,
+            &mut marker,
+            &mut beat,
+        );
+        assert!(command.is_none());
+        assert_eq!(
+            note,
+            Some("Main track is locked. Couldn't turn off main track magnet.")
         );
     }
 }

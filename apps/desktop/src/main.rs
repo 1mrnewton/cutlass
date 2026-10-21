@@ -8,6 +8,7 @@ use cutlass_project::{AssetId, History, Project, ProjectId, SegmentId};
 
 mod icons;
 mod inspector;
+mod keys;
 mod library;
 mod preview;
 mod ruler;
@@ -93,6 +94,28 @@ impl CutlassApp {
             timeline::show_note(ui, text);
         }
     }
+
+    fn history_shortcut(&mut self, ui: &egui::Ui) {
+        let Some(step) = keys::history(ui) else {
+            return;
+        };
+        let undo = step == keys::Shortcut::Undo;
+        let result = if undo {
+            self.history.undo(&mut self.project)
+        } else {
+            self.history.redo(&mut self.project)
+        };
+        if result.is_err() {
+            timeline::show_note(
+                ui,
+                if undo {
+                    "Nothing to undo."
+                } else {
+                    "Nothing to redo."
+                },
+            );
+        }
+    }
 }
 
 impl eframe::App for CutlassApp {
@@ -101,6 +124,7 @@ impl eframe::App for CutlassApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.history_shortcut(ui);
         self.delete_pressed(ui);
 
         egui::Panel::top("head")

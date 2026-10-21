@@ -128,6 +128,10 @@ pub fn show(
     let mut commands = Vec::new();
     let mut box_rect = None;
     let pointer = ui.input(|input| input.pointer.interact_pos());
+    let snap_id = ui.scope_id().with("snap-on");
+    let mut snap = ui
+        .data(|data| data.get_temp::<bool>(snap_id))
+        .unwrap_or(true);
     if tracks.height() > 0.0 {
         let pressed = ui.input(|input| input.pointer.primary_pressed());
         let released = ui.input(|input| input.pointer.primary_released());
@@ -202,16 +206,24 @@ pub fn show(
                     commands.push(command);
                 }
             } else if let Some(active) = trim.take() {
-                commands = trim_commands(project, tracks, &active, pointer);
+                commands = trim_commands(project, tracks, &active, pointer, snap, *playhead);
             } else if let Some(active) = drag.take()
-                && let Some(command) = move_command(project, tracks, &active, pointer)
+                && let Some(command) =
+                    move_command(project, tracks, &active, pointer, snap, *playhead)
             {
                 commands.push(command);
             }
         }
     }
     paint_ruler(ui, ruler_rect, project);
-    split_blade(ui, ruler_rect, project.duration().value > 0, split);
+    ruler_switches(
+        ui,
+        ruler_rect,
+        project.duration().value > 0,
+        split,
+        &mut snap,
+    );
+    ui.data_mut(|data| data.insert_temp(snap_id, snap));
     if *split && pointer.is_some_and(|point| tracks.contains(point)) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
@@ -269,11 +281,29 @@ pub fn show(
                     drag: drag.as_ref(),
                     trim: trim.as_ref(),
                     pointer,
+                    snap,
+                    playhead: *playhead,
                 },
             );
         }
     }
     paint_playhead(ui, ruler_rect, tracks, project, playhead);
+    if let Some(x) = snap_guide(
+        project,
+        tracks,
+        *playhead,
+        drag.as_ref(),
+        trim.as_ref(),
+        pointer,
+        snap,
+    ) {
+        let bottom = tracks.bottom().max(ruler_rect.bottom());
+        ui.painter().vline(
+            x,
+            ruler_rect.bottom()..=bottom,
+            Stroke::new(1.0, theme::EXPORT),
+        );
+    }
     if let Some(rect) = box_rect {
         ui.painter()
             .rect_filled(rect, 0.0, Color32::from_white_alpha(28));
@@ -291,15 +321,44 @@ fn lane_left(area: Rect) -> f32 {
     area.left() + HEAD + COVER
 }
 
-fn split_blade(ui: &mut egui::Ui, ruler: Rect, live: bool, on: &mut bool) {
+fn ruler_switches(
+    ui: &mut egui::Ui,
+    ruler: Rect,
+    split_live: bool,
+    split: &mut bool,
+    snap: &mut bool,
+) {
+    let top = ruler.center().y - 13.0;
+    ruler_switch(
+        ui,
+        Rect::from_min_size(pos2(ruler.left() + 6.0, top), vec2(58.0, 26.0)),
+        "Split",
+        "split-blade",
+        split_live,
+        split,
+    );
+    ruler_switch(
+        ui,
+        Rect::from_min_size(pos2(ruler.left() + 68.0, top), vec2(56.0, 26.0)),
+        "Snap",
+        "snap-switch",
+        true,
+        snap,
+    );
+}
+
+fn ruler_switch(
+    ui: &mut egui::Ui,
+    button: Rect,
+    label: &str,
+    salt: &str,
+    live: bool,
+    on: &mut bool,
+) {
     if !live {
         *on = false;
     }
-    let button = Rect::from_center_size(
-        pos2(ruler.left() + HEAD / 2.0, ruler.center().y),
-        vec2(72.0, 26.0),
-    );
-    let response = ui.interact(button, ui.scope_id().with("split-blade"), Sense::click());
+    let response = ui.interact(button, ui.scope_id().with(salt), Sense::click());
     if live && response.clicked() {
         *on = !*on;
     }
@@ -316,7 +375,7 @@ fn split_blade(ui: &mut egui::Ui, ruler: Rect, live: bool, on: &mut bool) {
     ui.painter().text(
         button.center(),
         Align2::CENTER_CENTER,
-        "Split",
+        label,
         FontId::new(12.0, FontFamily::Proportional),
         color,
     );
@@ -398,6 +457,8 @@ struct ClipPaint<'a> {
     drag: Option<&'a ClipDrag>,
     trim: Option<&'a TrimDrag>,
     pointer: Option<egui::Pos2>,
+    snap: bool,
+    playhead: i64,
 }
 
 fn paint_segments(ui: &mut egui::Ui, track: &Track, lane: Rect, main: bool, paint: &ClipPaint<'_>) {
@@ -429,7 +490,7 @@ fn paint_segments(ui: &mut egui::Ui, track: &Track, lane: Rect, main: bool, pain
             let offset = paint
                 .drag
                 .zip(paint.pointer)
-                .map(|(drag, point)| point - drag.origin)
+                .map(|(drag, point)| drag_offset(paint, drag, point))
                 .unwrap_or_default();
             let moved = rect.translate(offset);
             ui.painter().rect_filled(moved, 7.0, color);
@@ -439,7 +500,7 @@ fn paint_segments(ui: &mut egui::Ui, track: &Track, lane: Rect, main: bool, pain
             let delta = paint
                 .trim
                 .zip(paint.pointer)
-                .map(|(trim, point)| point.x - trim.origin_x)
+                .map(|(trim, point)| trim_offset(paint, trim, point.x))
                 .unwrap_or(0.0);
             let edge = paint.trim.map(|trim| trim.edge).unwrap_or(Edge::End);
             let resized = trimmed_rect(rect, edge, delta);
@@ -494,6 +555,184 @@ fn drag_from(project: &Project, id: SegmentId, origin: egui::Pos2) -> Option<Cli
     })
 }
 
+const SNAP_PX: f32 = 10.0;
+
+fn snap_targets(project: &Project, playhead: i64) -> Vec<i64> {
+    let mut targets = vec![0, project.duration().value.max(0), playhead.max(0)];
+    for track in project.timeline().tracks() {
+        for segment in track.segments() {
+            let range = segment.timeline();
+            targets.push(range.start().value);
+            targets.push(range.end().value);
+        }
+    }
+    targets.sort_unstable();
+    targets.dedup();
+    targets
+}
+
+fn gap(left: i64, right: i64) -> i64 {
+    i64::try_from(left.abs_diff(right)).unwrap_or(i64::MAX)
+}
+
+fn snap_limit_us(pixel_size: f64) -> i64 {
+    if !(pixel_size.is_finite() && pixel_size > 0.0) {
+        return 0;
+    }
+    let limit = (f64::from(SNAP_PX) / pixel_size).round();
+    if !limit.is_finite() || limit < 0.0 {
+        return 0;
+    }
+    limit.min(i64::MAX as f64) as i64
+}
+
+/// The time to land on, and the guide time when a target is inside the pull.
+fn snap_point(time: i64, targets: &[i64], pixel_size: f64) -> (i64, Option<i64>) {
+    let limit = snap_limit_us(pixel_size);
+    let mut best: Option<(i64, i64)> = None;
+    for &target in targets {
+        let distance = gap(time, target);
+        let closer = best.is_none_or(|(best_distance, best_target)| {
+            distance < best_distance || (distance == best_distance && target < best_target)
+        });
+        if distance <= limit && closer {
+            best = Some((distance, target));
+        }
+    }
+    match best {
+        Some((_, target)) => (target, Some(target)),
+        None => (time, None),
+    }
+}
+
+/// A moved clip keeps its length. Either edge can pull, and the start is what moves.
+fn snap_span(start: i64, duration: i64, targets: &[i64], pixel_size: f64) -> (i64, Option<i64>) {
+    let limit = snap_limit_us(pixel_size);
+    let mut best: Option<(i64, i64, i64, i64)> = None;
+    for &target in targets {
+        if target >= 0 {
+            let distance = gap(start, target);
+            consider(distance, target, target, start, &mut best);
+        }
+        if let Some(new_start) = target.checked_sub(duration).filter(|start| *start >= 0) {
+            let end = start.saturating_add(duration);
+            consider(gap(end, target), new_start, target, start, &mut best);
+        }
+    }
+    match best {
+        Some((distance, _, line, new_start)) if distance <= limit => (new_start, Some(line)),
+        _ => (start, None),
+    }
+}
+
+fn consider(
+    distance: i64,
+    new_start: i64,
+    line: i64,
+    raw: i64,
+    best: &mut Option<(i64, i64, i64, i64)>,
+) {
+    let shift = gap(new_start, raw);
+    let replace = best.is_none_or(|(best_distance, best_shift, best_line, _)| {
+        distance < best_distance
+            || (distance == best_distance && shift < best_shift)
+            || (distance == best_distance && shift == best_shift && line < best_line)
+    });
+    if replace {
+        *best = Some((distance, shift, line, new_start));
+    }
+}
+
+fn snap_guide(
+    project: &Project,
+    tracks: Rect,
+    playhead: i64,
+    drag: Option<&ClipDrag>,
+    trim: Option<&TrimDrag>,
+    pointer: Option<egui::Pos2>,
+    snap: bool,
+) -> Option<f32> {
+    if !snap {
+        return None;
+    }
+    let point = pointer?;
+    let width = (tracks.right() - lane_left(tracks)).max(0.0);
+    let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
+    if !(pixel_size.is_finite() && pixel_size > 0.0) {
+        return None;
+    }
+    let targets = snap_targets(project, playhead);
+    let line = if let Some(drag) = drag {
+        let duration = project
+            .timeline()
+            .segment(drag.segment)?
+            .timeline()
+            .duration()
+            .value;
+        let raw = moved_start(drag.start_us, point.x - drag.origin.x, pixel_size);
+        snap_span(raw, duration, &targets, pixel_size).1
+    } else if let Some(trim) = trim {
+        let range = project.timeline().segment(trim.segment)?.timeline();
+        let delta = delta_us(point.x - trim.origin_x, pixel_size);
+        let edge = match trim.edge {
+            Edge::End => range.end().value.saturating_add(delta),
+            Edge::Start => range.start().value.saturating_add(delta),
+        };
+        snap_point(edge, &targets, pixel_size).1
+    } else {
+        None
+    }?;
+    Some(lane_left(tracks) + (line as f64 * pixel_size) as f32)
+}
+
+fn drag_offset(paint: &ClipPaint<'_>, drag: &ClipDrag, point: egui::Pos2) -> egui::Vec2 {
+    let raw = point - drag.origin;
+    if !(paint.snap && paint.pixel_size.is_finite() && paint.pixel_size > 0.0) {
+        return raw;
+    }
+    let Some(segment) = paint.project.timeline().segment(drag.segment) else {
+        return raw;
+    };
+    let raw_start = moved_start(drag.start_us, raw.x, paint.pixel_size);
+    let (start, line) = snap_span(
+        raw_start,
+        segment.timeline().duration().value,
+        &snap_targets(paint.project, paint.playhead),
+        paint.pixel_size,
+    );
+    if line.is_none() {
+        return raw;
+    }
+    let x = ((start - drag.start_us) as f64 * paint.pixel_size) as f32;
+    vec2(x, raw.y)
+}
+
+fn trim_offset(paint: &ClipPaint<'_>, trim: &TrimDrag, pointer_x: f32) -> f32 {
+    let raw = pointer_x - trim.origin_x;
+    if !(paint.snap && paint.pixel_size.is_finite() && paint.pixel_size > 0.0) {
+        return raw;
+    }
+    let Some(segment) = paint.project.timeline().segment(trim.segment) else {
+        return raw;
+    };
+    let range = segment.timeline();
+    let delta = delta_us(raw, paint.pixel_size);
+    let edge = match trim.edge {
+        Edge::End => range.end().value.saturating_add(delta),
+        Edge::Start => range.start().value.saturating_add(delta),
+    };
+    let (snapped, line) = snap_point(
+        edge,
+        &snap_targets(paint.project, paint.playhead),
+        paint.pixel_size,
+    );
+    if line.is_none() {
+        return raw;
+    }
+    let adjust = snapped.saturating_sub(edge);
+    raw + (adjust as f64 * paint.pixel_size) as f32
+}
+
 fn moved_start(start_us: i64, delta_px: f32, pixel_size: f64) -> i64 {
     if !(pixel_size.is_finite() && pixel_size > 0.0 && delta_px.is_finite()) {
         return start_us.max(0);
@@ -511,11 +750,22 @@ fn move_command(
     tracks: Rect,
     drag: &ClipDrag,
     pointer: Option<egui::Pos2>,
+    snap: bool,
+    playhead: i64,
 ) -> Option<Command> {
     let point = pointer?;
     let width = (tracks.right() - lane_left(tracks)).max(0.0);
     let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
-    let start = moved_start(drag.start_us, point.x - drag.origin.x, pixel_size);
+    let mut start = moved_start(drag.start_us, point.x - drag.origin.x, pixel_size);
+    if snap && let Some(segment) = project.timeline().segment(drag.segment) {
+        start = snap_span(
+            start,
+            segment.timeline().duration().value,
+            &snap_targets(project, playhead),
+            pixel_size,
+        )
+        .0;
+    }
     let track = lane_under(project, tracks, point).filter(|id| *id != drag.from);
     if start == drag.start_us && track.is_none() {
         return None;
@@ -627,6 +877,8 @@ fn trim_commands(
     tracks: Rect,
     trim: &TrimDrag,
     pointer: Option<egui::Pos2>,
+    snap: bool,
+    playhead: i64,
 ) -> Vec<Command> {
     let Some(point) = pointer else {
         return Vec::new();
@@ -639,17 +891,21 @@ fn trim_commands(
     };
     let width = (tracks.right() - lane_left(tracks)).max(0.0);
     let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
+    let mut delta = delta_us(point.x - trim.origin_x, pixel_size);
+    if snap {
+        let range = segment.timeline();
+        let edge = match trim.edge {
+            Edge::End => range.end().value.saturating_add(delta),
+            Edge::Start => range.start().value.saturating_add(delta),
+        };
+        let snapped = snap_point(edge, &snap_targets(project, playhead), pixel_size).0;
+        delta = delta.saturating_add(snapped.saturating_sub(edge));
+    }
     let edge = match trim.edge {
         Edge::Start => cutlass_project::TrimEdge::Start,
         Edge::End => cutlass_project::TrimEdge::End,
     };
-    cutlass_project::commands_for_trim(
-        segment,
-        asset,
-        edge,
-        delta_us(point.x - trim.origin_x, pixel_size),
-    )
-    .unwrap_or_default()
+    cutlass_project::commands_for_trim(segment, asset, edge, delta).unwrap_or_default()
 }
 
 fn segment_at(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<SegmentId> {
@@ -1146,12 +1402,18 @@ mod tests {
             start_us: 0,
             from,
         };
-        assert!(super::move_command(&cut, tracks, &drag, Some(origin)).is_none());
+        assert!(super::move_command(&cut, tracks, &drag, Some(origin), false, 0).is_none());
         let pixel_size = crate::ruler::opening_pixel_size(400.0, cut.duration().value);
         let landed = super::moved_start(0, 150.0, pixel_size);
-        let command =
-            super::move_command(&cut, tracks, &drag, Some(pos2(origin.x + 150.0, origin.y)))
-                .expect("move");
+        let command = super::move_command(
+            &cut,
+            tracks,
+            &drag,
+            Some(pos2(origin.x + 150.0, origin.y)),
+            false,
+            0,
+        )
+        .expect("move");
         assert_eq!(
             command,
             Command::Move {
@@ -1186,6 +1448,8 @@ mod tests {
                 from,
             },
             Some(pos2(origin.x, main.top + 10.0)),
+            false,
+            0,
         )
         .expect("lane");
         let main_id = cut.timeline().main_track().id();
@@ -1262,7 +1526,14 @@ mod tests {
         let trim = super::trim_from(&cut, tracks, edge).expect("edge");
         assert!(super::trim_from(&cut, tracks, rect.center()).is_none());
         let before = range.duration().value;
-        let commands = super::trim_commands(&cut, tracks, &trim, Some(pos2(edge.x - 80.0, edge.y)));
+        let commands = super::trim_commands(
+            &cut,
+            tracks,
+            &trim,
+            Some(pos2(edge.x - 80.0, edge.y)),
+            false,
+            0,
+        );
         assert!(!commands.is_empty());
         history.apply(&mut cut, &commands).expect("trim");
         let after = cut.timeline().segment(id).expect("segment").timeline();
@@ -1361,5 +1632,23 @@ mod tests {
         assert!(left.duration().value < range.duration().value);
         assert_eq!(right.timeline().start().value, left.end().value);
         assert_eq!(left.start().value, 0);
+    }
+
+    #[test]
+    fn a_near_edge_snaps_and_a_far_one_stays_put() {
+        let pixel_size = 0.0003;
+        let targets = [0, 500_000, 1_000_000];
+        let (start, line) = super::snap_span(480_000, 200_000, &targets, pixel_size);
+        assert_eq!(start, 500_000);
+        assert_eq!(line, Some(500_000));
+        let (start, line) = super::snap_span(400_000, 200_000, &targets, pixel_size);
+        assert_eq!(start, 400_000);
+        assert!(line.is_none());
+        let (start, line) = super::snap_span(790_000, 200_000, &targets, pixel_size);
+        assert_eq!(start, 800_000);
+        assert_eq!(line, Some(1_000_000));
+        assert_eq!(super::snap_point(10, &targets, pixel_size), (0, Some(0)));
+        let cut = project();
+        assert_eq!(super::snap_targets(&cut, 0), vec![0]);
     }
 }

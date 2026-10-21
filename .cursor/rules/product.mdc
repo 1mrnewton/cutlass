@@ -9,6 +9,6 @@ This repo is the desktop editor prototype only. The real desktop app will be Rus
 
 The prototype is a picture of the editor. AI commands change a mock timeline. They do not render video.
 
-Repo: private GitHub `cutlass-rewrite`, branch `prototype`. Do not make it public. Do not read or clone other Cutlass projects.
+Repo: GitHub `1mrnewton/cutlass`, branch `prototype`. `ui-design` is the other checkout. Do not push over `main` or the other branches already in that repo.
 
 Read `docs/` before changing the editor. When a decision is made, update the matching file in `docs/` in the same change.

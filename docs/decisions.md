@@ -38,4 +38,4 @@
 - Shift-click adds or removes a clip. A click on empty space clears the selection. A drag across empty timeline space selects the clips inside the box. Delete removes every selected clip, including the last clip on Main. The Main lane stays.
 - Icons are Hugeicons free icons. The blade mark stays custom.
 - Tailwind is allowed and not currently used.
-- The GitHub repo `cutlass-rewrite` stays private. Work stays on `prototype`.
+- This prototype lives on the `prototype` branch of `1mrnewton/cutlass`. `ui-design` is the other checkout. Do not push over `main` or the other branches already in that repo.

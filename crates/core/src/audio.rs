@@ -97,6 +97,22 @@ impl AudioSamples {
         let start = usize::from(channel) * frames;
         Some(&self.samples[start..start + frames])
     }
+
+    /// Interleaved samples, one frame at a time. Stereo is left, then right.
+    ///
+    /// A device and an encoder take this layout. Mix and resample keep the planes.
+    pub fn interleaved(&self) -> Vec<f32> {
+        let frames = self.frames();
+        let channels = usize::from(self.channels);
+        let mut out = vec![0f32; self.samples.len()];
+        for channel in 0..channels {
+            let plane = &self.samples[channel * frames..(channel + 1) * frames];
+            for (frame, sample) in plane.iter().enumerate() {
+                out[frame * channels + channel] = *sample;
+            }
+        }
+        out
+    }
 }
 
 /// Why [`AudioSamples::new`] rejected a buffer.
@@ -144,6 +160,7 @@ mod tests {
         assert_eq!(samples.plane(0), Some(&[0.0, 1.0][..]));
         assert_eq!(samples.plane(1), Some(&[-1.0, 0.5][..]));
         assert_eq!(samples.plane(2), None);
+        assert_eq!(samples.interleaved(), vec![0.0, -1.0, 1.0, 0.5]);
     }
 
     #[test]

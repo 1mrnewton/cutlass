@@ -260,7 +260,9 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::RemoveSegment(segment)
         | Command::Trim { segment, .. }
         | Command::SetSpeed { segment, .. } => blocks_edit(project, lanes, *segment),
-        Command::SetTransform { segment, .. } => segment_lane_locked(project, lanes, *segment),
+        Command::SetTransform { segment, .. }
+        | Command::AddKeyframe { segment, .. }
+        | Command::RemoveKeyframe { segment, .. } => segment_lane_locked(project, lanes, *segment),
         _ => false,
     }
 }

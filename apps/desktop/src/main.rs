@@ -215,7 +215,7 @@ impl eframe::App for CutlassApp {
                     [id] => Some(*id),
                     _ => None,
                 };
-                let commands = inspector::show(ui, &self.project, shown);
+                let commands = inspector::show(ui, &self.project, shown, self.playhead_us);
                 if !commands.is_empty()
                     && let Err(error) = self.history.apply(&mut self.project, &commands)
                 {

@@ -1,29 +1,33 @@
 //! The inspector. Nothing selected shows the project. A video clip edits its
-//! placement. An audio clip lists its sound. `docs/inspector.md`.
+//! placement. A mark stores a keyframe at the playhead. `docs/inspector.md`.
 
 use eframe::egui::{self, Key, RichText, ScrollArea, Sense, TextEdit, UiBuilder, WidgetInfo, vec2};
 
 use cutlass_project::{
-    AspectRatio, Channels, ColorSpace, Command, FrameRate, Project, SegmentId, TrackKind, Transform,
+    AspectRatio, Channels, ColorSpace, Command, FrameRate, Keyframe, KeyframeProperty,
+    KeyframeValue, Project, SegmentId, TrackKind, Transform,
 };
 
+use crate::icons::{self, Icon};
 use crate::library::card_time;
 use crate::theme;
 use crate::timeline::{file_name, kind_name};
 use crate::words::{self, Language, Phrase};
 
-pub fn show(ui: &mut egui::Ui, project: &Project, selected: Option<SegmentId>) -> Vec<Command> {
+pub fn show(
+    ui: &mut egui::Ui,
+    project: &Project,
+    selected: Option<SegmentId>,
+    playhead_us: i64,
+) -> Vec<Command> {
     crate::tip::region(ui, words::of(ui, Phrase::RegionInspector));
     let language = words::active(ui);
     if let Some(id) = selected
         && let Some(kind) = track_kind(project, id)
     {
         return match kind {
-            TrackKind::Video => video(ui, project, id, language),
-            TrackKind::Audio => {
-                audio(ui, project, id, language);
-                Vec::new()
-            }
+            TrackKind::Video => video(ui, project, id, language, playhead_us),
+            TrackKind::Audio => audio(ui, project, id, language, playhead_us),
             _ => {
                 readout(ui, project, id, language);
                 Vec::new()
@@ -51,6 +55,22 @@ struct Draft {
     opacity: Option<f64>,
 }
 
+struct Sample {
+    transform: Transform,
+    volume: f64,
+    start: i64,
+    duration: i64,
+    keys: Vec<Keyframe>,
+}
+
+struct Mark {
+    property: KeyframeProperty,
+    label: &'static str,
+    name: String,
+    on: bool,
+    enabled: bool,
+}
+
 struct Field {
     salt: &'static str,
     value: f64,
@@ -67,11 +87,17 @@ enum Slot {
     Opacity,
 }
 
-fn video(ui: &mut egui::Ui, project: &Project, id: SegmentId, language: Language) -> Vec<Command> {
+fn video(
+    ui: &mut egui::Ui,
+    project: &Project,
+    id: SegmentId,
+    language: Language,
+    playhead_us: i64,
+) -> Vec<Command> {
     let Some(panel) = describe(project, id, language, false) else {
         return Vec::new();
     };
-    let Some(transform) = transform_of(project, id) else {
+    let Some(sample) = sample_of(project, id) else {
         return Vec::new();
     };
     let mut draft = Draft {
@@ -82,31 +108,77 @@ fn video(ui: &mut egui::Ui, project: &Project, id: SegmentId, language: Language
         rotation: None,
         opacity: None,
     };
+    let mut hits = Vec::new();
     paint(ui, panel.title, "video", |ui| {
-        rows_of(ui, &panel.rows);
+        hits.extend(marked_rows(
+            ui,
+            id,
+            &panel.rows,
+            &sample,
+            playhead_us,
+            language,
+        ));
         section(ui, words::say(language, Phrase::Basic));
-        draft = basic(ui, id, transform, language);
+        let (next, more) = basic(ui, id, &sample, playhead_us, language);
+        draft = next;
+        hits.extend(more);
     });
-    let Some(next) = committed(transform, &draft) else {
-        return Vec::new();
-    };
-    if crate::timeline::segment_locked(ui, project, id) {
-        crate::timeline::show_note(ui, words::of(ui, Phrase::TrackIsLocked));
-        return Vec::new();
+    let mut commands = Vec::new();
+    let live = committed(sample.transform, &draft).unwrap_or(sample.transform);
+    if let Some(next) = committed(sample.transform, &draft) {
+        commands.push(Command::SetTransform {
+            segment: id,
+            transform: next,
+        });
     }
-    vec![Command::SetTransform {
-        segment: id,
-        transform: next,
-    }]
+    commands.extend(key_commands(
+        id,
+        &hits,
+        live,
+        sample.volume,
+        sample_offset(sample.start, sample.duration, playhead_us),
+        &sample.keys,
+    ));
+    guard(ui, project, id, commands)
 }
 
-fn audio(ui: &mut egui::Ui, project: &Project, id: SegmentId, language: Language) {
+fn audio(
+    ui: &mut egui::Ui,
+    project: &Project,
+    id: SegmentId,
+    language: Language,
+    playhead_us: i64,
+) -> Vec<Command> {
     let Some(panel) = describe(project, id, language, false) else {
-        return;
+        return Vec::new();
     };
+    let Some(sample) = sample_of(project, id) else {
+        return Vec::new();
+    };
+    let mut hits = Vec::new();
     paint(ui, panel.title, "audio", |ui| {
-        rows_of(ui, &panel.rows);
+        hits.extend(marked_rows(
+            ui,
+            id,
+            &panel.rows,
+            &sample,
+            playhead_us,
+            language,
+        ));
     });
+    guard(
+        ui,
+        project,
+        id,
+        key_commands(
+            id,
+            &hits,
+            sample.transform,
+            sample.volume,
+            sample_offset(sample.start, sample.duration, playhead_us),
+            &sample.keys,
+        ),
+    )
 }
 
 fn readout(ui: &mut egui::Ui, project: &Project, id: SegmentId, language: Language) {
@@ -169,15 +241,27 @@ fn fact(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.add_space(4.0);
 }
 
-fn basic(ui: &mut egui::Ui, id: SegmentId, transform: Transform, language: Language) -> Draft {
-    let (x, y) = transform.position();
-    let (width, height) = transform.scale();
+fn basic(
+    ui: &mut egui::Ui,
+    id: SegmentId,
+    sample: &Sample,
+    playhead_us: i64,
+    language: Language,
+) -> (Draft, Vec<KeyframeProperty>) {
+    let (x, y) = sample.transform.position();
+    let (width, height) = sample.transform.scale();
     let position = words::say(language, Phrase::Position);
     let size = words::say(language, Phrase::Size);
-    let (x, y) = pair(
+    let (x, y, position_hit) = pair(
         ui,
         id,
-        position,
+        &make_mark(
+            sample,
+            playhead_us,
+            KeyframeProperty::Position,
+            position,
+            language,
+        ),
         Field {
             salt: "px",
             value: x,
@@ -189,10 +273,10 @@ fn basic(ui: &mut egui::Ui, id: SegmentId, transform: Transform, language: Langu
             name: format!("{position} y"),
         },
     );
-    let (width, height) = pair(
+    let (width, height, size_hit) = pair(
         ui,
         id,
-        size,
+        &make_mark(sample, playhead_us, KeyframeProperty::Scale, size, language),
         Field {
             salt: "sx",
             value: width,
@@ -204,47 +288,74 @@ fn basic(ui: &mut egui::Ui, id: SegmentId, transform: Transform, language: Langu
             name: format!("{size} y"),
         },
     );
-    Draft {
-        x,
-        y,
-        width,
-        height,
-        rotation: line(
-            ui,
-            id,
-            "rot",
-            transform.rotation(),
-            Phrase::Rotation,
+    let (rotation, rotation_hit) = line(
+        ui,
+        id,
+        "rot",
+        sample.transform.rotation(),
+        &make_mark(
+            sample,
+            playhead_us,
+            KeyframeProperty::Rotation,
+            words::say(language, Phrase::Rotation),
             language,
         ),
-        opacity: line(
-            ui,
-            id,
-            "opacity",
-            transform.opacity(),
-            Phrase::Opacity,
+    );
+    let (opacity, opacity_hit) = line(
+        ui,
+        id,
+        "opacity",
+        sample.transform.opacity(),
+        &make_mark(
+            sample,
+            playhead_us,
+            KeyframeProperty::Opacity,
+            words::say(language, Phrase::Opacity),
             language,
         ),
+    );
+    let mut hits = Vec::new();
+    for (hit, property) in [
+        (position_hit, KeyframeProperty::Position),
+        (size_hit, KeyframeProperty::Scale),
+        (rotation_hit, KeyframeProperty::Rotation),
+        (opacity_hit, KeyframeProperty::Opacity),
+    ] {
+        if hit {
+            hits.push(property);
+        }
     }
+    (
+        Draft {
+            x,
+            y,
+            width,
+            height,
+            rotation,
+            opacity,
+        },
+        hits,
+    )
 }
 
 fn pair(
     ui: &mut egui::Ui,
     id: SegmentId,
-    label: &str,
+    mark: &Mark,
     left: Field,
     right: Field,
-) -> (Option<f64>, Option<f64>) {
+) -> (Option<f64>, Option<f64>, bool) {
     let width = ui.available_width();
-    let field = ((width - 128.0) / 2.0).max(36.0);
+    let field = ((width - 150.0) / 2.0).max(24.0);
     let mut left_edit = None;
     let mut right_edit = None;
+    let mut hit = false;
     ui.horizontal(|ui| {
         ui.set_max_width(width);
         ui.spacing_mut().item_spacing.x = 8.0;
         ui.add_sized(
             [108.0, 18.0],
-            egui::Label::new(RichText::new(label).size(13.0).color(theme::MUTED)),
+            egui::Label::new(RichText::new(mark.label).size(13.0).color(theme::MUTED)),
         );
         left_edit = edit(
             ui,
@@ -260,9 +371,10 @@ fn pair(
             &right.name,
             field,
         );
+        hit = mark_button(ui, id, mark);
     });
     ui.add_space(4.0);
-    (left_edit, right_edit)
+    (left_edit, right_edit, hit)
 }
 
 fn line(
@@ -270,24 +382,24 @@ fn line(
     id: SegmentId,
     salt: &str,
     value: f64,
-    phrase: Phrase,
-    language: Language,
-) -> Option<f64> {
-    let label = words::say(language, phrase);
+    mark: &Mark,
+) -> (Option<f64>, bool) {
     let width = ui.available_width();
-    let field = (width - 120.0).max(48.0);
+    let field = (width - 142.0).max(36.0);
     let mut edited = None;
+    let mut hit = false;
     ui.horizontal(|ui| {
         ui.set_max_width(width);
-        ui.spacing_mut().item_spacing.x = 12.0;
+        ui.spacing_mut().item_spacing.x = 8.0;
         ui.add_sized(
             [108.0, 18.0],
-            egui::Label::new(RichText::new(label).size(13.0).color(theme::MUTED)),
+            egui::Label::new(RichText::new(mark.label).size(13.0).color(theme::MUTED)),
         );
-        edited = edit(ui, ui.scope_id().with((id, salt)), value, label, field);
+        edited = edit(ui, ui.scope_id().with((id, salt)), value, mark.label, field);
+        hit = mark_button(ui, id, mark);
     });
     ui.add_space(4.0);
-    edited
+    (edited, hit)
 }
 
 fn edit(ui: &mut egui::Ui, id: egui::Id, value: f64, name: &str, width: f32) -> Option<f64> {
@@ -324,6 +436,197 @@ fn field_frame() -> egui::Frame {
         .fill(theme::BAR)
         .corner_radius(6)
         .inner_margin(egui::Margin::symmetric(8, 4))
+}
+
+fn marked_rows(
+    ui: &mut egui::Ui,
+    id: SegmentId,
+    rows: &[(&str, String)],
+    sample: &Sample,
+    playhead_us: i64,
+    language: Language,
+) -> Vec<KeyframeProperty> {
+    let volume = words::say(language, Phrase::Volume);
+    let mut hits = Vec::new();
+    for (label, value) in rows {
+        if *label == volume {
+            let mark = make_mark(
+                sample,
+                playhead_us,
+                KeyframeProperty::Volume,
+                volume,
+                language,
+            );
+            if mark_row(ui, id, label, value, &mark) {
+                hits.push(KeyframeProperty::Volume);
+            }
+        } else {
+            fact(ui, label, value);
+        }
+    }
+    hits
+}
+
+fn mark_row(ui: &mut egui::Ui, id: SegmentId, label: &str, value: &str, mark: &Mark) -> bool {
+    let width = ui.available_width();
+    let mut hit = false;
+    ui.horizontal(|ui| {
+        ui.set_max_width(width);
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.add_sized(
+            [90.0, 18.0],
+            egui::Label::new(RichText::new(label).size(13.0).color(theme::MUTED)),
+        );
+        ui.vertical(|ui| {
+            ui.set_width((width - 128.0).max(40.0));
+            ui.add(egui::Label::new(RichText::new(value).size(13.0).color(theme::INK)).wrap());
+        });
+        hit = mark_button(ui, id, mark);
+    });
+    ui.add_space(4.0);
+    hit
+}
+
+fn make_mark(
+    sample: &Sample,
+    playhead_us: i64,
+    property: KeyframeProperty,
+    label: &'static str,
+    language: Language,
+) -> Mark {
+    let offset = sample_offset(sample.start, sample.duration, playhead_us);
+    Mark {
+        property,
+        label,
+        name: format!("{label} {}", words::say(language, Phrase::Keyframe)),
+        on: sampled(&sample.keys, property, offset),
+        enabled: offset.is_some(),
+    }
+}
+
+fn mark_button(ui: &mut egui::Ui, id: SegmentId, mark: &Mark) -> bool {
+    let sense = if mark.enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+    let response = ui.interact(
+        rect,
+        ui.scope_id().with((id, mark_salt(mark.property))),
+        sense,
+    );
+    let color = if !mark.enabled {
+        theme::FAINT
+    } else if mark.on {
+        theme::EXPORT
+    } else {
+        theme::INK
+    };
+    icons::paint(ui.painter(), rect.center(), Icon::Keyframe, 14.0, color);
+    crate::tip::show_switch(&response, &mark.name, mark.on, mark.enabled);
+    mark.enabled && response.clicked()
+}
+
+fn mark_salt(property: KeyframeProperty) -> &'static str {
+    match property {
+        KeyframeProperty::Position => "pos",
+        KeyframeProperty::Scale => "scale",
+        KeyframeProperty::Rotation => "turn",
+        KeyframeProperty::Opacity => "fade",
+        KeyframeProperty::Volume => "vol",
+    }
+}
+
+fn guard(
+    ui: &mut egui::Ui,
+    project: &Project,
+    id: SegmentId,
+    commands: Vec<Command>,
+) -> Vec<Command> {
+    if commands.is_empty() || !crate::timeline::segment_locked(ui, project, id) {
+        return commands;
+    }
+    crate::timeline::show_note(ui, words::of(ui, Phrase::TrackIsLocked));
+    Vec::new()
+}
+
+fn key_commands(
+    id: SegmentId,
+    hits: &[KeyframeProperty],
+    transform: Transform,
+    volume: f64,
+    offset: Option<i64>,
+    keys: &[Keyframe],
+) -> Vec<Command> {
+    let Some(offset) = offset else {
+        return Vec::new();
+    };
+    let mut commands = Vec::new();
+    for property in hits {
+        if sampled(keys, *property, Some(offset)) {
+            commands.push(Command::RemoveKeyframe {
+                segment: id,
+                offset_us: offset,
+                property: *property,
+            });
+            continue;
+        }
+        let Some(keyframe) = Keyframe::new(offset, sample_value(*property, transform, volume)).ok()
+        else {
+            continue;
+        };
+        commands.push(Command::AddKeyframe {
+            segment: id,
+            keyframe,
+        });
+    }
+    commands
+}
+
+fn sample_value(property: KeyframeProperty, transform: Transform, volume: f64) -> KeyframeValue {
+    match property {
+        KeyframeProperty::Position => {
+            let (x, y) = transform.position();
+            KeyframeValue::Position { x, y }
+        }
+        KeyframeProperty::Scale => {
+            let (x, y) = transform.scale();
+            KeyframeValue::Scale { x, y }
+        }
+        KeyframeProperty::Rotation => KeyframeValue::Rotation(transform.rotation()),
+        KeyframeProperty::Opacity => KeyframeValue::Opacity(transform.opacity()),
+        KeyframeProperty::Volume => KeyframeValue::Volume(volume),
+    }
+}
+
+fn sample_offset(start: i64, duration: i64, playhead_us: i64) -> Option<i64> {
+    let offset = playhead_us.checked_sub(start)?;
+    (0..=duration).contains(&offset).then_some(offset)
+}
+
+fn sampled(keys: &[Keyframe], property: KeyframeProperty, offset: Option<i64>) -> bool {
+    let Some(offset) = offset else {
+        return false;
+    };
+    keys.iter()
+        .any(|key| key.property() == property && key.offset().value == offset)
+}
+
+fn sample_of(project: &Project, id: SegmentId) -> Option<Sample> {
+    let segment = project
+        .timeline()
+        .tracks()
+        .iter()
+        .find_map(|track| track.segments().iter().find(|segment| segment.id() == id))?;
+    let range = segment.timeline();
+    Some(Sample {
+        transform: segment.transform(),
+        volume: segment.volume(),
+        start: range.start().value,
+        duration: range.duration().value,
+        keys: segment.keyframes().to_vec(),
+    })
 }
 
 fn committed(transform: Transform, draft: &Draft) -> Option<Transform> {
@@ -405,16 +708,6 @@ fn track_kind(project: &Project, id: SegmentId) -> Option<TrackKind> {
         .iter()
         .find(|track| track.segments().iter().any(|segment| segment.id() == id))
         .map(|track| track.kind())
-}
-
-fn transform_of(project: &Project, id: SegmentId) -> Option<Transform> {
-    project.timeline().tracks().iter().find_map(|track| {
-        track
-            .segments()
-            .iter()
-            .find(|segment| segment.id() == id)
-            .map(|segment| segment.transform())
-    })
 }
 
 fn describe(
@@ -549,8 +842,8 @@ mod tests {
 
     use cutlass_core::Timestamp;
     use cutlass_project::{
-        Asset, Channels, Command, FrameRate, History, Outcome, Project, ProjectId, Segment,
-        SequenceRate, Speed, TimeRange, Transform,
+        Asset, Channels, Command, FrameRate, History, KeyframeProperty, KeyframeValue, Outcome,
+        Project, ProjectId, Segment, SequenceRate, Speed, TimeRange, Transform,
     };
 
     use super::{Slot, describe, edited_value, facts, parse_number};
@@ -782,7 +1075,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    commands.clone_from(&super::show(ui, &cut, Some(id)));
+                    commands.clone_from(&super::show(ui, &cut, Some(id), 0));
                 },
             );
             let tree = output.platform_output.accesskit_update.take();
@@ -831,6 +1124,92 @@ mod tests {
         assert_eq!(*segment, id);
         assert_eq!(transform.position(), (0.25, 0.0));
         assert_eq!(transform.scale(), (1.0, 1.0));
+    }
+
+    #[test]
+    fn the_playhead_offset_includes_the_end_of_the_clip() {
+        assert_eq!(super::sample_offset(1_000, 500, 1_000), Some(0));
+        assert_eq!(super::sample_offset(1_000, 500, 1_500), Some(500));
+        assert_eq!(super::sample_offset(1_000, 500, 1_501), None);
+        assert_eq!(super::sample_offset(1_000, 500, 999), None);
+    }
+
+    #[test]
+    fn a_keyframe_mark_stores_the_current_value_and_a_second_click_removes_it() {
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, Language::English);
+        let (mut cut, id) = video_cut();
+        let mut history = History::new();
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(320.0, 800.0),
+        );
+        let mut time = 0.0;
+        let mut pass = |cut: &Project, playhead: i64, events: Vec<eframe::egui::Event>| {
+            time += 0.05;
+            let mut commands = Vec::new();
+            let mut output = ctx.run_ui(
+                eframe::egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    commands.clone_from(&super::show(ui, cut, Some(id), playhead));
+                },
+            );
+            let tree = output.platform_output.accesskit_update.take();
+            output.textures_delta.clear();
+            (tree.expect("the tree is built"), commands)
+        };
+        let (tree, _) = pass(&cut, 0, vec![]);
+        let mark = center(&tree, "Position Keyframe");
+        let press = |at, down| eframe::egui::Event::PointerButton {
+            pos: at,
+            button: eframe::egui::PointerButton::Primary,
+            pressed: down,
+            modifiers: eframe::egui::Modifiers::default(),
+        };
+        pass(
+            &cut,
+            0,
+            vec![eframe::egui::Event::PointerMoved(mark), press(mark, true)],
+        );
+        let (_, commands) = pass(&cut, 0, vec![press(mark, false)]);
+        let Command::AddKeyframe { segment, keyframe } = commands.first().expect("a sample") else {
+            panic!("expected a keyframe, got {commands:?}");
+        };
+        assert_eq!(*segment, id);
+        assert_eq!(keyframe.offset().value, 0);
+        assert_eq!(keyframe.value(), KeyframeValue::Position { x: 0.0, y: 0.0 });
+        history.apply(&mut cut, &commands).expect("store");
+        let (tree, _) = pass(&cut, 0, vec![]);
+        let mark = center(&tree, "Position Keyframe");
+        pass(
+            &cut,
+            0,
+            vec![eframe::egui::Event::PointerMoved(mark), press(mark, true)],
+        );
+        let (_, commands) = pass(&cut, 0, vec![press(mark, false)]);
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::RemoveKeyframe {
+                offset_us: 0,
+                property: KeyframeProperty::Position,
+                ..
+            }]
+        ));
+        let (tree, _) = pass(&cut, 2_000_000, vec![]);
+        let mark = center(&tree, "Position Keyframe");
+        pass(
+            &cut,
+            2_000_000,
+            vec![eframe::egui::Event::PointerMoved(mark), press(mark, true)],
+        );
+        let (_, commands) = pass(&cut, 2_000_000, vec![press(mark, false)]);
+        assert!(commands.is_empty());
     }
 
     fn center(tree: &eframe::egui::accesskit::TreeUpdate, label: &str) -> eframe::egui::Pos2 {

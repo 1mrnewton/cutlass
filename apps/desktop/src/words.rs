@@ -148,6 +148,7 @@ pub(crate) enum Phrase {
     Basic,
     Rotation,
     Opacity,
+    Keyframe,
 }
 
 #[cfg(test)]
@@ -282,6 +283,7 @@ impl Phrase {
         Self::Basic,
         Self::Rotation,
         Self::Opacity,
+        Self::Keyframe,
     ];
 }
 
@@ -415,6 +417,7 @@ const ENGLISH: &[&str] = &[
     "Basic",
     "Rotation",
     "Opacity",
+    "Keyframe",
 ];
 
 const FRENCH: &[&str] = &[
@@ -547,6 +550,7 @@ const FRENCH: &[&str] = &[
     "Basique",
     "Rotation",
     "Opacité",
+    "Image clé",
 ];
 
 /// The word for `phrase` in `language`.
@@ -685,7 +689,9 @@ mod tests {
         assert_eq!(say(Language::French, Phrase::Basic), "Basique");
         assert_eq!(say(Language::English, Phrase::Opacity), "Opacity");
         assert_eq!(say(Language::French, Phrase::Opacity), "Opacité");
-        assert_eq!(Phrase::Opacity as usize, super::ENGLISH.len() - 1);
+        assert_eq!(say(Language::English, Phrase::Keyframe), "Keyframe");
+        assert_eq!(say(Language::French, Phrase::Keyframe), "Image clé");
+        assert_eq!(Phrase::Keyframe as usize, super::ENGLISH.len() - 1);
         for phrase in Phrase::ALL {
             let english = say(Language::English, *phrase);
             let french = say(Language::French, *phrase);

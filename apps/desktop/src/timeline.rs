@@ -240,6 +240,10 @@ fn blocks_edit(project: &Project, lanes: &Lanes, id: SegmentId) -> bool {
     segment_lane_locked(project, lanes, id) || ripples_locked(project, lanes, id)
 }
 
+pub(crate) fn edit_refused(project: &Project, lanes: &Lanes, id: SegmentId) -> bool {
+    blocks_edit(project, lanes, id)
+}
+
 fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
     match command {
         Command::Move { segment, track, .. } => {
@@ -387,12 +391,16 @@ pub fn show(
     let mark_times = stamp_times(project, &stamps);
     let mut lanes = lane_memory(ui);
     retain_lanes(project, &mut lanes);
+    let mut note = None;
     if tracks.height() > 0.0 {
+        let held_id = ui.scope_id().with("held-locked");
+        let mut held_locked = ui.data(|data| data.get_temp(held_id)).unwrap_or(false);
         let pressed = ui.input(|input| input.pointer.primary_pressed());
         let released = ui.input(|input| input.pointer.primary_released());
         let shift = ui.input(|input| input.modifiers.shift);
         let box_id = ui.scope_id().with("box-select");
         if pressed && let Some(point) = pointer {
+            held_locked = false;
             let mark = playhead_mark(ruler_rect, project, *playhead, view);
             let on_buttons = on_tools(ruler_rect, point);
             let on_ruler = ruler_rect.contains(point)
@@ -520,6 +528,7 @@ pub fn show(
                 choose(selected, Some(active.segment));
                 *drag = None;
                 *trim = if blocks_edit(project, &lanes, active.segment) {
+                    held_locked = true;
                     None
                 } else {
                     Some(active)
@@ -550,7 +559,14 @@ pub fn show(
                 } else {
                     choose(selected, hit);
                     *drag = hit
-                        .filter(|id| !blocks_edit(project, &lanes, *id))
+                        .filter(|id| {
+                            if blocks_edit(project, &lanes, *id) {
+                                held_locked = true;
+                                false
+                            } else {
+                                true
+                            }
+                        })
                         .and_then(|id| drag_from(project, id, point));
                 }
             }
@@ -581,7 +597,9 @@ pub fn show(
                 segment_at(project, tracks, point, view)
                     .is_some_and(|id| segment_lane_locked(project, &lanes, id))
             });
-            if clicked
+            if clicked && on_locked_clip && (marker || beat) {
+                note = Some("This track is locked.");
+            } else if clicked
                 && marker
                 && !on_locked_clip
                 && let Some(point) = pointer.filter(|point| !on_tools(ruler_rect, *point))
@@ -608,12 +626,16 @@ pub fn show(
             } else if *split && !from_ruler {
                 drag.take();
                 trim.take();
-                if ui.input(|input| input.pointer.primary_clicked())
-                    && let Some(point) = pointer.filter(|point| tracks.contains(*point))
-                    && let Some(command) = split_command(project, tracks, point, view)
-                    && !blocks_command(project, &lanes, &command)
-                {
-                    commands.push(command);
+                if clicked && let Some(point) = pointer.filter(|point| tracks.contains(*point)) {
+                    if let Some(command) = split_command(project, tracks, point, view) {
+                        if blocks_command(project, &lanes, &command) {
+                            note = Some("This track is locked.");
+                        } else {
+                            commands.push(command);
+                        }
+                    } else if segment_at(project, tracks, point, view).is_some() {
+                        note = Some("That cut is too close to the edge.");
+                    }
                 }
             } else if let Some(active) = trim.take() {
                 let next = trim_commands(
@@ -634,6 +656,8 @@ pub fn show(
                     .all(|command| !blocks_command(project, &lanes, command))
                 {
                     commands = next;
+                } else {
+                    note = Some("This track is locked.");
                 }
             } else if let Some(active) = drag.take()
                 && let Some(command) = move_command(
@@ -649,11 +673,19 @@ pub fn show(
                         view,
                     },
                 )
-                && !blocks_command(project, &lanes, &command)
             {
-                commands.push(command);
+                if blocks_command(project, &lanes, &command) {
+                    note = Some("This track is locked.");
+                } else {
+                    commands.push(command);
+                }
             }
+            if !clicked && held_locked && note.is_none() {
+                note = Some("This track is locked.");
+            }
+            held_locked = false;
         }
+        ui.data_mut(|data| data.insert_temp(held_id, held_locked));
     }
     paint_ruler(ui, ruler_rect, project, view);
     let live = project.duration().value > 0;
@@ -661,7 +693,9 @@ pub fn show(
         marker = false;
         beat = false;
     }
-    project_switches(ui, ruler_rect, project, &lanes, &mut commands);
+    if let Some(text) = project_switches(ui, ruler_rect, project, &lanes, &mut commands) {
+        note = Some(text);
+    }
     mark_switches(ui, ruler_rect, live, &mut marker, &mut beat, split);
     ui.data_mut(|data| data.insert_temp(snap_id, snap));
     ui.data_mut(|data| data.insert_temp(guides_id, guides.clone()));
@@ -715,7 +749,9 @@ pub fn show(
             );
             let mut row = lane_row(&lanes, track.id());
             paint_lane_label(ui, head, lane.label);
-            paint_lane_flags(ui, head, track.id(), &mut row);
+            if let Some(text) = paint_lane_flags(ui, head, track.id(), &mut row) {
+                note = Some(text);
+            }
             let dim = row.hidden || (row.muted && track.kind() == TrackKind::Audio);
             remember_lane(&mut lanes, row);
             paint_segments(
@@ -741,8 +777,12 @@ pub fn show(
                 },
             );
         }
-        if let Some(id) = remove.filter(|id| !blocks_edit(project, &lanes, *id)) {
-            commands.push(Command::RemoveSegment(id));
+        if let Some(id) = remove {
+            if blocks_edit(project, &lanes, id) {
+                note = Some("This track is locked.");
+            } else {
+                commands.push(Command::RemoveSegment(id));
+            }
         }
     }
     ui.data_mut(|data| data.insert_temp(lane_id(), lanes));
@@ -783,7 +823,85 @@ pub fn show(
             egui::StrokeKind::Outside,
         );
     }
+    if let Some(text) = note {
+        show_note(ui, text);
+    }
+    paint_note(ui, ruler_rect);
     commands
+}
+
+const TOAST_HOLD: f64 = 1.2;
+const TOAST_FADE: f64 = 0.6;
+
+#[derive(Clone)]
+struct Note {
+    text: &'static str,
+    at: f64,
+}
+
+fn note_id() -> egui::Id {
+    egui::Id::unique("timeline-note")
+}
+
+pub(crate) fn show_note(ui: &egui::Ui, text: &'static str) {
+    let at = ui.input(|input| input.time);
+    ui.data_mut(|data| data.insert_temp(note_id(), Note { text, at }));
+}
+
+pub(crate) fn apply_note(error: &cutlass_project::Error) -> &'static str {
+    match error {
+        cutlass_project::Error::Overlap | cutlass_project::Error::LinkageOverlap(_) => {
+            "That spot is taken."
+        }
+        cutlass_project::Error::WrongTrack => "That lane can't hold this clip.",
+        cutlass_project::Error::SplitOutside => "That cut is too close to the edge.",
+        cutlass_project::Error::SourceOutsideAsset | cutlass_project::Error::RoundsToZero => {
+            "That trim leaves the file."
+        }
+        _ => "That edit did not land.",
+    }
+}
+
+fn toast_alpha(age: f64) -> Option<u8> {
+    if !(0.0..TOAST_HOLD + TOAST_FADE).contains(&age) {
+        return None;
+    }
+    if age < TOAST_HOLD {
+        return Some(255);
+    }
+    let faded = (TOAST_HOLD + TOAST_FADE - age) / TOAST_FADE * 255.0;
+    let rounded = faded.round();
+    if !(0.0..=255.0).contains(&rounded) {
+        return None;
+    }
+    Some(rounded as u8)
+}
+
+fn paint_note(ui: &egui::Ui, ruler: Rect) {
+    let Some(note) = ui.data(|data| data.get_temp::<Note>(note_id())) else {
+        return;
+    };
+    let age = ui.input(|input| input.time) - note.at;
+    let Some(alpha) = toast_alpha(age) else {
+        return;
+    };
+    let ink =
+        Color32::from_rgba_unmultiplied(theme::GAP.r(), theme::GAP.g(), theme::GAP.b(), alpha);
+    let galley = ui.painter().layout_no_wrap(
+        note.text.to_owned(),
+        FontId::new(12.0, FontFamily::Proportional),
+        ink,
+    );
+    let size = galley.size() + vec2(24.0, 12.0);
+    let center = pos2(ruler.center().x, ruler.bottom() + 18.0 + size.y * 0.5);
+    let rect = Rect::from_center_size(center, size);
+    ui.painter()
+        .rect_filled(rect, 99.0, Color32::from_white_alpha(alpha));
+    ui.painter().galley(
+        pos2(rect.left() + 12.0, rect.center().y - galley.size().y * 0.5),
+        galley,
+        ink,
+    );
 }
 
 fn lane_left(area: Rect) -> f32 {
@@ -1455,14 +1573,26 @@ fn locked_follower(project: &Project, lanes: &Lanes) -> bool {
     })
 }
 
+fn magnet_refusal(project: &Project, lanes: &Lanes) -> Option<&'static str> {
+    let turning_on = !project.settings().magnet();
+    if main_locked(project, lanes) {
+        return Some(if turning_on {
+            "Main track is locked. Couldn't turn on main track magnet."
+        } else {
+            "Main track is locked. Couldn't turn off main track magnet."
+        });
+    }
+    if turning_on && project.settings().linkage() && locked_follower(project, lanes) {
+        return Some("A locked lane would move. Couldn't turn on main track magnet.");
+    }
+    None
+}
+
 fn magnet_toggle(project: &Project, lanes: &Lanes) -> Option<Command> {
-    let on = !project.settings().magnet();
-    if main_locked(project, lanes)
-        || (on && project.settings().linkage() && locked_follower(project, lanes))
-    {
+    if magnet_refusal(project, lanes).is_some() {
         return None;
     }
-    Some(Command::SetMagnet(on))
+    Some(Command::SetMagnet(!project.settings().magnet()))
 }
 
 fn linkage_toggle(project: &Project) -> Command {
@@ -1475,7 +1605,7 @@ fn project_switches(
     project: &Project,
     lanes: &Lanes,
     commands: &mut Vec<Command>,
-) {
+) -> Option<&'static str> {
     let [magnet_rect, linkage_rect] = project_rects(ruler);
     let cover = Rect::from_min_max(
         pos2(magnet_rect.left() - 4.0, ruler.top()),
@@ -1490,6 +1620,7 @@ fn project_switches(
     } else {
         "Main track magnet off"
     };
+    let mut refused = None;
     if setting_switch(
         ui,
         magnet_rect,
@@ -1497,9 +1628,12 @@ fn project_switches(
         magnet_tip,
         "magnet-switch",
         magnet_on,
-    ) && let Some(command) = magnet_toggle(project, lanes)
-    {
-        commands.push(command);
+    ) {
+        if let Some(command) = magnet_toggle(project, lanes) {
+            commands.push(command);
+        } else {
+            refused = magnet_refusal(project, lanes);
+        }
     }
     let linkage_on = project.settings().linkage();
     let linkage_tip = if linkage_on {
@@ -1517,6 +1651,7 @@ fn project_switches(
     ) {
         commands.push(linkage_toggle(project));
     }
+    refused
 }
 
 fn setting_switch(
@@ -2463,7 +2598,12 @@ fn flag_rects(head: Rect) -> [Rect; 3] {
     [hide, mute, lock]
 }
 
-fn paint_lane_flags(ui: &mut egui::Ui, head: Rect, track: TrackId, row: &mut LaneFlag) {
+fn paint_lane_flags(
+    ui: &mut egui::Ui,
+    head: Rect,
+    track: TrackId,
+    row: &mut LaneFlag,
+) -> Option<&'static str> {
     let [hide, mute, lock] = flag_rects(head);
     let hide_icon = if row.hidden {
         Icon::ViewOff
@@ -2498,6 +2638,7 @@ fn paint_lane_flags(ui: &mut egui::Ui, head: Rect, track: TrackId, row: &mut Lan
         row.muted = !row.muted;
     }
     let lock_tip = if row.locked { "Locked" } else { "Lock" };
+    let mut locked_note = None;
     if lane_button(
         ui,
         lock,
@@ -2507,7 +2648,13 @@ fn paint_lane_flags(ui: &mut egui::Ui, head: Rect, track: TrackId, row: &mut Lan
         row.locked,
     ) {
         row.locked = !row.locked;
+        locked_note = Some(if row.locked {
+            "Track locked"
+        } else {
+            "Track unlocked"
+        });
     }
+    locked_note
 }
 
 fn lane_button(
@@ -3496,12 +3643,20 @@ mod tests {
             }],
         };
         assert!(super::magnet_toggle(&cut, &locked_main).is_none());
+        assert_eq!(
+            super::magnet_refusal(&cut, &locked_main),
+            Some("Main track is locked. Couldn't turn off main track magnet.")
+        );
         assert_eq!(super::linkage_toggle(&cut), Command::SetLinkage(false));
         let off = super::magnet_toggle(&cut, &open).expect("off");
         assert_eq!(off, Command::SetMagnet(false));
         history.apply(&mut cut, &[off]).expect("magnet");
         assert!(!cut.settings().magnet());
         assert!(cut.settings().linkage());
+        assert_eq!(
+            super::magnet_refusal(&cut, &locked_main),
+            Some("Main track is locked. Couldn't turn on main track magnet.")
+        );
 
         let picture = Asset::video(
             "file:///cuts/v.mp4",
@@ -3577,6 +3732,10 @@ mod tests {
             }],
         };
         assert!(super::magnet_toggle(&cut, &locked_audio).is_none());
+        assert_eq!(
+            super::magnet_refusal(&cut, &locked_audio),
+            Some("A locked lane would move. Couldn't turn on main track magnet.")
+        );
         let unlink = super::linkage_toggle(&cut);
         history.apply(&mut cut, &[unlink]).expect("linkage");
         assert_eq!(
@@ -3629,5 +3788,41 @@ mod tests {
         assert!(super::action_runs(super::ClipAction::Delete));
         assert!(!super::action_runs(super::ClipAction::Copy));
         assert!(!super::action_runs(super::ClipAction::Freeze));
+    }
+
+    #[test]
+    fn a_toast_holds_then_fades_and_names_the_refusal() {
+        assert_eq!(super::toast_alpha(0.0), Some(255));
+        assert_eq!(super::toast_alpha(1.0), Some(255));
+        assert_eq!(super::toast_alpha(1.2), Some(255));
+        let fading = super::toast_alpha(1.5).expect("fading");
+        let later = super::toast_alpha(1.7).expect("later");
+        assert!(later < fading && fading < 255, "{later} {fading}");
+        assert_eq!(super::toast_alpha(1.8), None);
+        assert_eq!(super::toast_alpha(-0.1), None);
+        assert_eq!(
+            super::apply_note(&cutlass_project::Error::Overlap),
+            "That spot is taken."
+        );
+        assert_eq!(
+            super::apply_note(&cutlass_project::Error::WrongTrack),
+            "That lane can't hold this clip."
+        );
+        assert_eq!(
+            super::apply_note(&cutlass_project::Error::SplitOutside),
+            "That cut is too close to the edge."
+        );
+        assert_eq!(
+            super::apply_note(&cutlass_project::Error::SourceOutsideAsset),
+            "That trim leaves the file."
+        );
+        assert_eq!(
+            super::apply_note(&cutlass_project::Error::RoundsToZero),
+            "That trim leaves the file."
+        );
+        assert_eq!(
+            super::apply_note(&cutlass_project::Error::NothingToUndo),
+            "That edit did not land."
+        );
     }
 }

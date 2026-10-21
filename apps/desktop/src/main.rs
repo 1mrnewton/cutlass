@@ -72,12 +72,26 @@ impl CutlassApp {
         if typing || !pressed {
             return;
         }
-        timeline::delete_selected(
+        let lanes = timeline::lane_memory(ui);
+        let had = !self.selected_segments.is_empty();
+        let removed = timeline::delete_selected(
             &mut self.history,
             &mut self.project,
             &mut self.selected_segments,
-            &timeline::lane_memory(ui),
+            &lanes,
         );
+        if had && !removed {
+            let text = if self
+                .selected_segments
+                .iter()
+                .all(|id| timeline::edit_refused(&self.project, &lanes, *id))
+            {
+                "This track is locked."
+            } else {
+                "That edit did not land."
+            };
+            timeline::show_note(ui, text);
+        }
     }
 }
 
@@ -114,8 +128,10 @@ impl eframe::App for CutlassApp {
                     &mut self.trim_drag,
                     &mut self.split,
                 );
-                if !commands.is_empty() {
-                    let _ = self.history.apply(&mut self.project, &commands);
+                if !commands.is_empty()
+                    && let Err(error) = self.history.apply(&mut self.project, &commands)
+                {
+                    timeline::show_note(ui, timeline::apply_note(&error));
                 }
             });
 

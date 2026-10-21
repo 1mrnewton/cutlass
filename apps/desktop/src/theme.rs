@@ -6,6 +6,9 @@ pub const GAP: Color32 = Color32::from_rgb(0x14, 0x14, 0x14);
 pub const PANEL: Color32 = Color32::from_rgb(0x1c, 0x1c, 0x1c);
 pub const BAR: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
 pub const INK: Color32 = Color32::from_rgb(0xf3, 0xf3, 0xf3);
+pub const MUTED: Color32 = Color32::from_rgb(0xa3, 0xa3, 0xa3);
+pub const LANE: Color32 = Color32::from_rgb(0x24, 0x24, 0x24);
+pub const LANE_LINE: Color32 = Color32::from_rgb(0x2e, 0x2e, 0x2e);
 pub const EXPORT: Color32 = Color32::from_rgb(0x00, 0xc8, 0xd7);
 pub const EXPORT_INK: Color32 = Color32::from_rgb(0x06, 0x22, 0x26);
 

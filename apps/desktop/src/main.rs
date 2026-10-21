@@ -7,6 +7,7 @@ use eframe::egui::{self, Align2, Button, Rect, RichText, TextStyle, Vec2};
 use cutlass_project::{Project, ProjectId};
 
 mod theme;
+mod timeline;
 
 fn main() -> eframe::Result {
     let viewport = egui::ViewportBuilder::default()
@@ -64,7 +65,7 @@ impl eframe::App for CutlassApp {
             .frame(theme::gap_above())
             .show_separator_line(false)
             .show(ui, |ui| {
-                ui.painter().rect_filled(ui.max_rect(), 0.0, theme::PANEL);
+                timeline::show(ui, self.project.timeline().tracks());
             });
 
         egui::Panel::left("library")

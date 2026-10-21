@@ -17,5 +17,8 @@ cutlass-project.workspace = true
 eframe.workspace = true
 uuid.workspace = true
 
+[dev-dependencies]
+cutlass-core.workspace = true
+
 [lints]
 workspace = true

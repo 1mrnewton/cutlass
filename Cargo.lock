@@ -462,6 +462,7 @@ version = "0.1.0"
 name = "cutlass-desktop"
 version = "0.1.0"
 dependencies = [
+ "cutlass-core",
  "cutlass-project",
  "eframe",
  "uuid",

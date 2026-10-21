@@ -238,6 +238,16 @@ name = "cutlass-opus"
 version = "0.1.0"
 
 [[package]]
+name = "cutlass-output"
+version = "0.1.0"
+dependencies = [
+ "cutlass-core",
+ "objc2-audio-toolbox",
+ "objc2-core-audio-types",
+ "thiserror",
+]
+
+[[package]]
 name = "cutlass-pcm"
 version = "0.1.0"
 
@@ -617,6 +627,7 @@ dependencies = [
  "bitflags",
  "objc2",
  "objc2-core-audio-types",
+ "objc2-core-foundation",
  "objc2-foundation",
 ]
 

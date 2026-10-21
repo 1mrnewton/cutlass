@@ -1,0 +1,21 @@
+[package]
+name = "cutlass-output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Plays planar PCM on the output device."
+
+[lints]
+workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+cutlass-core.workspace = true
+objc2-audio-toolbox = { workspace = true, features = [
+    "AudioQueue",
+    "objc2-core-foundation",
+] }
+objc2-core-audio-types.workspace = true
+thiserror.workspace = true

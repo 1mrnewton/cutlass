@@ -1,0 +1,58 @@
+//! Silence handed to the output device comes back as enqueued frames.
+
+#![cfg(target_vendor = "apple")]
+
+use std::thread;
+use std::time::{Duration, Instant};
+
+use cutlass_core::AudioSamples;
+use cutlass_output::Output;
+
+#[test]
+fn silence_is_handed_to_the_device() {
+    let Some(mut output) = open() else {
+        return;
+    };
+    let frames = 4_800usize;
+    let samples = AudioSamples::new(48_000, 2, vec![0.0; frames * 2]).expect("silence");
+    output.play(&samples).expect("play");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while output.enqueued_frames() < frames {
+        if Instant::now() > deadline {
+            panic!("enqueued {} of {frames} frames", output.enqueued_frames());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_mismatched_stream_is_rejected() {
+    let Some(mut output) = open() else {
+        return;
+    };
+    let samples = AudioSamples::new(44_100, 2, vec![0.0; 4]).expect("samples");
+    let error = match output.play(&samples) {
+        Ok(()) => panic!("a 44.1 kHz buffer should be rejected"),
+        Err(error) => error,
+    };
+    assert!(!error.is_unsupported());
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "a missing output device is reported instead of a silent pass"
+)]
+fn report_missing_device() {
+    eprintln!("skipping: no audio output device");
+}
+
+fn open() -> Option<Output> {
+    match Output::new(48_000, 2) {
+        Ok(output) => Some(output),
+        Err(error) if error.is_unsupported() => {
+            report_missing_device();
+            None
+        }
+        Err(error) => panic!("opening audio output failed: {error}"),
+    }
+}

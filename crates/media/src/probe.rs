@@ -75,6 +75,25 @@ pub struct TrackInfo {
 }
 
 impl TrackInfo {
+    /// The display size, or the encoded size turned by the track matrix when that size is missing.
+    pub fn picture_size(&self) -> Option<(u32, u32)> {
+        if self.display_width > 0 && self.display_height > 0 {
+            return Some((self.display_width, self.display_height));
+        }
+        let Content::Video { config, .. } = &self.content else {
+            return None;
+        };
+        if config.width == 0 || config.height == 0 {
+            return None;
+        }
+        Some(match self.rotation {
+            Rotation::Clockwise90 | Rotation::Clockwise270 => (config.height, config.width),
+            Rotation::Zero | Rotation::Clockwise180 | Rotation::Other => {
+                (config.width, config.height)
+            }
+        })
+    }
+
     /// `Some(true)` for PQ or HLG, `Some(false)` for another named transfer.
     /// `None` when the file has no colour tags, which is not the same as SDR.
     pub fn hdr(&self) -> Option<bool> {
@@ -185,6 +204,25 @@ mod tests {
             .hdr(),
             Some(true)
         );
+    }
+
+    #[test]
+    fn the_display_size_wins_and_a_missing_one_follows_the_rotation() {
+        assert_eq!(video_info(None).picture_size(), Some((1, 1)));
+        let mut turned = video_info(None);
+        turned.display_width = 0;
+        turned.display_height = 0;
+        turned.rotation = Rotation::Clockwise90;
+        turned.content = Content::Video {
+            config: VideoStreamConfig {
+                codec: VideoCodec::H264,
+                width: 320,
+                height: 180,
+                config_record: Vec::new(),
+            },
+            color: None,
+        };
+        assert_eq!(turned.picture_size(), Some((180, 320)));
     }
 
     fn video_info(color: Option<ColorTags>) -> TrackInfo {

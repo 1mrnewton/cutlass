@@ -256,6 +256,9 @@ name = "cutlass-playback"
 version = "0.1.0"
 dependencies = [
  "cutlass-core",
+ "cutlass-media",
+ "cutlass-test-fixtures",
+ "cutlass-videotoolbox",
 ]
 
 [[package]]

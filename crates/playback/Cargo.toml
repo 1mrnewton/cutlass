@@ -11,5 +11,10 @@ description = "Chooses the video frame to show for a playhead."
 [dependencies]
 cutlass-core.workspace = true
 
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+cutlass-media.workspace = true
+cutlass-test-fixtures.workspace = true
+cutlass-videotoolbox.workspace = true
+
 [lints]
 workspace = true

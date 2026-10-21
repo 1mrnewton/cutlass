@@ -46,6 +46,7 @@ struct CutlassApp {
     project: Project,
     playhead_us: i64,
     shelf: library::Shelf,
+    media: library::MediaSource,
     bin: media_bin::Bin,
     selected_segments: Vec<SegmentId>,
     clip_drag: Option<timeline::ClipDrag>,
@@ -66,6 +67,7 @@ impl CutlassApp {
             project: Project::new(id, "Untitled"),
             playhead_us: 0,
             shelf: library::Shelf::Media,
+            media: library::MediaSource::Project,
             bin: media_bin::Bin::new(),
             selected_segments: Vec::new(),
             clip_drag: None,
@@ -194,7 +196,13 @@ impl eframe::App for CutlassApp {
             .frame(theme::gap_right())
             .show_separator_line(false)
             .show(ui, |ui| {
-                library::show(ui, &self.project, &mut self.shelf, &mut self.bin);
+                library::show(
+                    ui,
+                    &self.project,
+                    &mut self.shelf,
+                    &mut self.media,
+                    &mut self.bin,
+                );
             });
 
         egui::Panel::right("inspector")

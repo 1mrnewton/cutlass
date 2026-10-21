@@ -143,6 +143,8 @@ pub(crate) enum Phrase {
     Free,
     SortedByName,
     SortedByDuration,
+    ProjectMedia,
+    FreeStock,
 }
 
 #[cfg(test)]
@@ -272,6 +274,8 @@ impl Phrase {
         Self::Free,
         Self::SortedByName,
         Self::SortedByDuration,
+        Self::ProjectMedia,
+        Self::FreeStock,
     ];
 }
 
@@ -400,6 +404,8 @@ const ENGLISH: &[&str] = &[
     "Free",
     "Sorted by name",
     "Sorted by duration",
+    "Project",
+    "Free stock",
 ];
 
 const FRENCH: &[&str] = &[
@@ -527,6 +533,8 @@ const FRENCH: &[&str] = &[
     "Gratuit",
     "Trié par nom",
     "Trié par durée",
+    "Projet",
+    "Stock libre",
 ];
 
 /// The word for `phrase` in `language`.
@@ -658,7 +666,9 @@ mod tests {
             say(Language::English, Phrase::SortedByDuration),
             "Sorted by duration"
         );
-        assert_eq!(Phrase::SortedByDuration as usize, super::ENGLISH.len() - 1);
+        assert_eq!(say(Language::English, Phrase::FreeStock), "Free stock");
+        assert_eq!(say(Language::French, Phrase::FreeStock), "Stock libre");
+        assert_eq!(Phrase::FreeStock as usize, super::ENGLISH.len() - 1);
         for phrase in Phrase::ALL {
             let english = say(Language::English, *phrase);
             let french = say(Language::French, *phrase);

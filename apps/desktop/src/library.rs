@@ -75,7 +75,21 @@ impl Shelf {
     }
 }
 
-pub fn show(ui: &mut egui::Ui, project: &Project, shelf: &mut Shelf, bin: &mut Bin) {
+/// Project is the bin. Free stock is the other side of the media shelf.
+/// The choice is view state.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MediaSource {
+    Project,
+    Stock,
+}
+
+pub fn show(
+    ui: &mut egui::Ui,
+    project: &Project,
+    shelf: &mut Shelf,
+    source: &mut MediaSource,
+    bin: &mut Bin,
+) {
     crate::tip::region(ui, words::of(ui, Phrase::RegionLibrary));
     let full = ui.max_rect();
     ui.allocate_rect(full, Sense::hover());
@@ -85,7 +99,7 @@ pub fn show(ui: &mut egui::Ui, project: &Project, shelf: &mut Shelf, bin: &mut B
     paint_rail(ui, rail, shelf);
     let assets = Rect::from_min_max(hairline.right_top(), full.max).shrink(12.0);
     match *shelf {
-        Shelf::Media => paint_bin(ui, assets, project, bin),
+        Shelf::Media => paint_media(ui, assets, project, bin, source),
         Shelf::Audio => paint_audio(ui, assets, project, bin),
         Shelf::Text
         | Shelf::Stickers
@@ -124,6 +138,82 @@ fn rail_button(ui: &mut egui::Ui, shelf: Shelf, active: bool) -> egui::Response 
     let color = if active { theme::INK } else { theme::FAINT };
     icons::paint(ui.painter(), rect.center(), shelf.icon(), 20.0, color);
     crate::tip::show_radio(&response, words::of(ui, shelf.phrase()), active);
+    response
+}
+
+fn paint_media(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    project: &Project,
+    bin: &mut Bin,
+    source: &mut MediaSource,
+) {
+    let switch = Rect::from_min_size(rect.min, vec2(rect.width(), f32::min(32.0, rect.height())));
+    paint_source(ui, switch, source);
+    let top = switch.bottom() + 8.0;
+    if top >= rect.bottom() {
+        return;
+    }
+    let rest = Rect::from_min_max(pos2(rect.left(), top), rect.max);
+    match *source {
+        MediaSource::Project => paint_bin(ui, rest, project, bin),
+        MediaSource::Stock => paint_empty(ui, rest),
+    }
+}
+
+fn paint_source(ui: &mut egui::Ui, rect: Rect, source: &mut MediaSource) {
+    ui.painter().rect_filled(rect, 10.0, theme::BAR);
+    let inner = rect.shrink(3.0);
+    let width = ((inner.width() - 4.0) / 2.0).max(0.0);
+    let project = Rect::from_min_size(inner.min, vec2(width, inner.height()));
+    let stock = Rect::from_min_size(
+        pos2(inner.right() - width, inner.top()),
+        vec2(width, inner.height()),
+    );
+    if source_button(
+        ui,
+        project,
+        "media-project",
+        words::of(ui, Phrase::ProjectMedia),
+        *source == MediaSource::Project,
+    )
+    .clicked()
+    {
+        *source = MediaSource::Project;
+    }
+    if source_button(
+        ui,
+        stock,
+        "media-stock",
+        words::of(ui, Phrase::FreeStock),
+        *source == MediaSource::Stock,
+    )
+    .clicked()
+    {
+        *source = MediaSource::Stock;
+    }
+}
+
+fn source_button(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    salt: &str,
+    label: &str,
+    active: bool,
+) -> egui::Response {
+    let response = ui.interact(rect, ui.scope_id().with(salt), Sense::click());
+    if active {
+        ui.painter().rect_filled(rect, 8.0, theme::ACTIVE);
+    }
+    let color = if active { theme::INK } else { theme::MUTED };
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::new(12.0, FontFamily::Proportional),
+        color,
+    );
+    crate::tip::show_radio(&response, label, active);
     response
 }
 
@@ -846,6 +936,7 @@ mod tests {
         crate::words::install(&ctx, crate::words::Language::English);
         let mut bin = crate::media_bin::Bin::new();
         let mut shelf = super::Shelf::Media;
+        let mut source = super::MediaSource::Project;
         let cut = project();
         let screen = eframe::egui::Rect::from_min_size(
             eframe::egui::pos2(0.0, 0.0),
@@ -862,7 +953,7 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |ui| super::show(ui, &cut, &mut shelf, &mut bin),
+                |ui| super::show(ui, &cut, &mut shelf, &mut source, &mut bin),
             );
             let tree = output.platform_output.accesskit_update.take();
             output.textures_delta.clear();
@@ -944,6 +1035,7 @@ mod tests {
         ctx.enable_accesskit();
         crate::words::install(&ctx, crate::words::Language::English);
         let mut bin = crate::media_bin::Bin::new();
+        let mut source = super::MediaSource::Project;
         let mut shelf = super::Shelf::Audio;
         let screen = eframe::egui::Rect::from_min_size(
             eframe::egui::pos2(0.0, 0.0),
@@ -958,7 +1050,7 @@ mod tests {
                     time: Some(time),
                     ..Default::default()
                 },
-                |ui| super::show(ui, &cut, shelf, &mut bin),
+                |ui| super::show(ui, &cut, shelf, &mut source, &mut bin),
             );
             let tree = output.platform_output.accesskit_update.take();
             output.textures_delta.clear();
@@ -981,5 +1073,66 @@ mod tests {
 
     fn named(node: &eframe::egui::accesskit::Node, text: &str) -> bool {
         node.label() == Some(text) || node.value() == Some(text)
+    }
+
+    #[test]
+    fn free_stock_replaces_the_bin_and_lists_no_shots() {
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, crate::words::Language::English);
+        let mut bin = crate::media_bin::Bin::new();
+        let mut shelf = super::Shelf::Media;
+        let mut source = super::MediaSource::Project;
+        let cut = project();
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(400.0, 500.0),
+        );
+        let mut time = 0.0;
+        let mut pass = |events: Vec<eframe::egui::Event>| {
+            time += 0.05;
+            let mut output = ctx.run_ui(
+                eframe::egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| super::show(ui, &cut, &mut shelf, &mut source, &mut bin),
+            );
+            let tree = output.platform_output.accesskit_update.take();
+            output.textures_delta.clear();
+            tree.expect("the tree is built")
+        };
+        let tree = pass(vec![]);
+        assert!(tree.nodes.iter().any(|(_, node)| named(node, "All")));
+        let row = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some("Free stock"))
+            .expect("free stock");
+        let bounds = row.1.bounds().expect("row bounds");
+        let at = eframe::egui::pos2(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        );
+        pass(vec![
+            eframe::egui::Event::PointerMoved(at),
+            eframe::egui::Event::PointerButton {
+                pos: at,
+                button: eframe::egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: eframe::egui::Modifiers::default(),
+            },
+        ]);
+        let stock = pass(vec![eframe::egui::Event::PointerButton {
+            pos: at,
+            button: eframe::egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: eframe::egui::Modifiers::default(),
+        }]);
+        assert!(source == super::MediaSource::Stock);
+        assert!(stock.nodes.iter().any(|(_, node)| named(node, "Empty")));
+        assert!(stock.nodes.iter().all(|(_, node)| !named(node, "All")));
     }
 }

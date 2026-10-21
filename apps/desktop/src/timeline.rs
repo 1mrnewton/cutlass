@@ -1,12 +1,15 @@
-//! The project's tracks, drawn bottom to top.
+//! The project's tracks, drawn bottom to top, with the ruler above them.
 
 use eframe::egui::{self, Align2, FontFamily, FontId, Rect, Stroke, pos2, vec2};
 
-use cutlass_project::{Track, TrackKind};
+use cutlass_project::{Project, Track, TrackKind};
 
+use crate::ruler;
 use crate::theme;
 
 const HEAD: f32 = 130.0;
+const COVER: f32 = 72.0;
+const RULER_HEIGHT: f32 = 44.0;
 const MAIN_HEIGHT: f32 = 64.0;
 const LANE_HEIGHT: f32 = 40.0;
 const GAP: f32 = 8.0;
@@ -19,12 +22,18 @@ struct Lane {
     height: f32,
 }
 
-pub fn show(ui: &mut egui::Ui, tracks: &[Track]) {
-    let area = ui.max_rect();
-    for lane in layout(tracks, area) {
+pub fn show(ui: &mut egui::Ui, project: &Project) {
+    let full = ui.max_rect();
+    let ruler_rect = Rect::from_min_size(full.min, vec2(full.width(), RULER_HEIGHT));
+    let tracks = Rect::from_min_max(ruler_rect.left_bottom(), full.max);
+    paint_ruler(ui, ruler_rect, project);
+    if tracks.height() <= 0.0 {
+        return;
+    }
+    for lane in layout(project.timeline().tracks(), tracks) {
         let lane_rect = Rect::from_min_size(
-            pos2(area.left() + HEAD, lane.top),
-            vec2((area.width() - HEAD).max(0.0), lane.height),
+            pos2(lane_left(tracks), lane.top),
+            vec2((tracks.right() - lane_left(tracks)).max(0.0), lane.height),
         );
         ui.painter().rect_filled(
             lane_rect,
@@ -47,12 +56,41 @@ pub fn show(ui: &mut egui::Ui, tracks: &[Track]) {
             );
         }
         ui.painter().text(
-            pos2(area.left() + 12.0, lane_rect.center().y),
+            pos2(tracks.left() + 12.0, lane_rect.center().y),
             Align2::LEFT_CENTER,
             lane.label,
             FontId::new(12.0, FontFamily::Proportional),
             theme::MUTED,
         );
+    }
+}
+
+fn lane_left(area: Rect) -> f32 {
+    area.left() + HEAD + COVER
+}
+
+fn paint_ruler(ui: &mut egui::Ui, ruler_rect: Rect, project: &Project) {
+    let left = lane_left(ruler_rect);
+    let width = (ruler_rect.right() - left).max(0.0);
+    let pixel_size = ruler::opening_pixel_size(width, project.duration().value);
+    let bottom = ruler_rect.bottom();
+    for mark in ruler::marks(project.settings().rate(), pixel_size, width) {
+        let x = left + (mark.us as f64 * pixel_size) as f32;
+        let height = if mark.major { 12.0 } else { 6.0 };
+        ui.painter().vline(
+            x,
+            (bottom - height)..=bottom,
+            Stroke::new(1.0, theme::MUTED),
+        );
+        if let Some(label) = mark.label {
+            ui.painter().text(
+                pos2(x + 4.0, bottom - height - 2.0),
+                Align2::LEFT_BOTTOM,
+                label,
+                FontId::new(10.0, FontFamily::Proportional),
+                theme::MUTED,
+            );
+        }
     }
 }
 
@@ -135,6 +173,11 @@ mod tests {
         assert_eq!(lanes[0].label, "Main");
         assert!(lanes[0].empty);
         assert!((lanes[0].top - 168.0).abs() < f32::EPSILON);
+        assert!(
+            (super::lane_left(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 400.0))) - 202.0)
+                .abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]

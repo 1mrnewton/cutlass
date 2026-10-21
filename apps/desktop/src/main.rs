@@ -6,6 +6,7 @@ use eframe::egui::{self, Align2, Button, Rect, RichText, TextStyle, Vec2};
 
 use cutlass_project::{Project, ProjectId};
 
+mod ruler;
 mod theme;
 mod timeline;
 
@@ -65,7 +66,7 @@ impl eframe::App for CutlassApp {
             .frame(theme::gap_above())
             .show_separator_line(false)
             .show(ui, |ui| {
-                timeline::show(ui, self.project.timeline().tracks());
+                timeline::show(ui, &self.project);
             });
 
         egui::Panel::left("library")

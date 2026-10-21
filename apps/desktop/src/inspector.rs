@@ -2,21 +2,26 @@
 
 use eframe::egui::{self, RichText, ScrollArea, Sense, UiBuilder, vec2};
 
-use cutlass_project::{
-    AspectRatio, Channels, ColorSpace, FrameRate, Project, SegmentId, TrackKind,
-};
+use cutlass_project::{AspectRatio, Channels, ColorSpace, FrameRate, Project, SegmentId};
 
 use crate::library::card_time;
 use crate::theme;
-use crate::timeline::file_name;
+use crate::timeline::{file_name, kind_name};
+use crate::words::{self, Language, Phrase};
 
 pub fn show(ui: &mut egui::Ui, project: &Project, selected: Option<SegmentId>) {
-    crate::tip::region(ui, "Inspector");
-    if let Some(panel) = selected.and_then(|id| clip_panel(project, id)) {
+    crate::tip::region(ui, words::of(ui, Phrase::RegionInspector));
+    let language = words::active(ui);
+    if let Some(panel) = selected.and_then(|id| clip_panel(project, id, language)) {
         paint(ui, panel.title, &panel.rows, "clip");
         return;
     }
-    paint(ui, "Details", &facts(project), "project");
+    paint(
+        ui,
+        words::say(language, Phrase::Details),
+        &facts(project, language),
+        "project",
+    );
 }
 
 struct Panel {
@@ -65,7 +70,7 @@ fn fact(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.add_space(4.0);
 }
 
-fn clip_panel(project: &Project, id: SegmentId) -> Option<Panel> {
+fn clip_panel(project: &Project, id: SegmentId, language: Language) -> Option<Panel> {
     let track = project
         .timeline()
         .tracks()
@@ -75,32 +80,39 @@ fn clip_panel(project: &Project, id: SegmentId) -> Option<Panel> {
     let asset = project.asset(segment.asset_id())?;
     let range = segment.timeline();
     let speed = segment.speed();
+    let say = |phrase| words::say(language, phrase);
     let mut rows = vec![
-        ("Name", file_name(asset.source()).to_string()),
+        (say(Phrase::Name), file_name(asset.source()).to_string()),
         (
-            "Start",
+            say(Phrase::Start),
             card_time(range.start().value, range.start().timescale.get()),
         ),
         (
-            "Duration",
+            say(Phrase::Duration),
             card_time(range.duration().value, range.duration().timescale.get()),
         ),
         (
-            "Speed",
+            say(Phrase::Speed),
             format!("{}/{}", speed.numerator(), speed.denominator().get()),
         ),
     ];
     if segment.channels() != Channels::Picture {
-        rows.push(("Volume", number(segment.volume())));
+        rows.push((say(Phrase::Volume), number(segment.volume())));
     }
     if segment.channels() != Channels::Sound {
         let (x, y) = segment.transform().position();
         let (width, height) = segment.transform().scale();
-        rows.push(("Position", format!("{}, {}", number(x), number(y))));
-        rows.push(("Size", format!("{} × {}", number(width), number(height))));
+        rows.push((
+            say(Phrase::Position),
+            format!("{}, {}", number(x), number(y)),
+        ));
+        rows.push((
+            say(Phrase::Size),
+            format!("{} × {}", number(width), number(height)),
+        ));
     }
     Some(Panel {
-        title: kind_title(track.kind()),
+        title: kind_name(track.kind(), language),
         rows,
     })
 }
@@ -113,41 +125,36 @@ fn number(value: f64) -> String {
     }
 }
 
-fn kind_title(kind: TrackKind) -> &'static str {
-    match kind {
-        TrackKind::Video => "Video",
-        TrackKind::Audio => "Audio",
-        TrackKind::Text => "Text",
-        TrackKind::Sticker => "Sticker",
-        TrackKind::Effect | TrackKind::PluginEffect => "Effect",
-        TrackKind::Filter => "Filter",
-        TrackKind::Adjust => "Adjust",
-    }
-}
-
-fn facts(project: &Project) -> Vec<(&'static str, String)> {
+fn facts(project: &Project, language: Language) -> Vec<(&'static str, String)> {
     let settings = project.settings();
+    let say = |phrase| words::say(language, phrase);
     let mut rows = vec![
-        ("Name", project.name().to_string()),
-        ("Saved", "Not saved".to_string()),
+        (say(Phrase::Name), project.name().to_string()),
+        (say(Phrase::Saved), say(Phrase::NotSaved).to_string()),
         (
-            "Color space",
+            say(Phrase::ColorSpace),
             color_space(settings.color_space()).to_string(),
         ),
-        ("Ratio", ratio(settings.ratio()).to_string()),
         (
-            "Resolution",
+            say(Phrase::Ratio),
+            ratio(settings.ratio(), language).to_string(),
+        ),
+        (
+            say(Phrase::Resolution),
             format!("{}×{}", settings.width(), settings.height()),
         ),
-        ("Frame rate", frame_rate(settings.rate().rate()).to_string()),
+        (
+            say(Phrase::FrameRate),
+            frame_rate(settings.rate().rate()).to_string(),
+        ),
     ];
     if settings.rate().rate().allows_drop_frame() {
         let value = if settings.rate().drop_frame() {
-            "On"
+            say(Phrase::On)
         } else {
-            "Off"
+            say(Phrase::Off)
         };
-        rows.push(("Drop frame", value.to_string()));
+        rows.push((say(Phrase::DropFrame), value.to_string()));
     }
     rows
 }
@@ -160,9 +167,9 @@ fn color_space(space: ColorSpace) -> &'static str {
     }
 }
 
-fn ratio(ratio: AspectRatio) -> &'static str {
+fn ratio(ratio: AspectRatio, language: Language) -> &'static str {
     match ratio {
-        AspectRatio::Original => "Original",
+        AspectRatio::Original => words::say(language, Phrase::Original),
         AspectRatio::R16x9 => "16:9",
         AspectRatio::R9x16 => "9:16",
         AspectRatio::Square => "1:1",
@@ -195,18 +202,22 @@ mod tests {
     };
 
     use super::{clip_panel, facts};
+    use crate::words::Language;
 
     fn project() -> Project {
         Project::new(ProjectId::from_bytes([1; 16]), "Untitled")
     }
 
     fn labels(project: &Project) -> Vec<&str> {
-        facts(project).into_iter().map(|(label, _)| label).collect()
+        facts(project, Language::English)
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect()
     }
 
     #[test]
     fn an_empty_cut_shows_the_starting_project() {
-        let rows = facts(&project());
+        let rows = facts(&project(), Language::English);
         assert_eq!(
             rows,
             vec![
@@ -227,7 +238,7 @@ mod tests {
         history
             .apply(&mut cut, &[Command::SetRate(FrameRate::Fps2997.sequence())])
             .expect("rate");
-        let rows = facts(&cut);
+        let rows = facts(&cut, Language::English);
         assert_eq!(rows[5].1, "29.97 fps");
         assert_eq!(rows[6], ("Drop frame", "On".to_string()));
 
@@ -239,7 +250,10 @@ mod tests {
                 )],
             )
             .expect("drop off");
-        assert_eq!(facts(&cut)[6], ("Drop frame", "Off".to_string()));
+        assert_eq!(
+            facts(&cut, Language::English)[6],
+            ("Drop frame", "Off".to_string())
+        );
 
         history
             .apply(&mut cut, &[Command::SetRate(FrameRate::Fps24.sequence())])
@@ -292,7 +306,7 @@ mod tests {
             [Outcome::Segment(id)] => *id,
             other => panic!("expected a segment, got {other:?}"),
         };
-        let panel = clip_panel(&cut, id).expect("panel");
+        let panel = clip_panel(&cut, id, Language::English).expect("panel");
         assert_eq!(panel.title, "Video");
         assert_eq!(
             panel.rows,

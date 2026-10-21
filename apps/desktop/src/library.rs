@@ -43,17 +43,17 @@ impl Shelf {
         Self::Templates,
     ];
 
-    const fn label(self) -> &'static str {
+    const fn phrase(self) -> crate::words::Phrase {
         match self {
-            Self::Media => "Media",
-            Self::Audio => "Audio",
-            Self::Text => "Text",
-            Self::Stickers => "Stickers",
-            Self::Effects => "Effects",
-            Self::Transitions => "Transitions",
-            Self::Filters => "Filters",
-            Self::Adjustments => "Adjustments",
-            Self::Templates => "Templates",
+            Self::Media => crate::words::Phrase::Media,
+            Self::Audio => crate::words::Phrase::Audio,
+            Self::Text => crate::words::Phrase::Text,
+            Self::Stickers => crate::words::Phrase::Stickers,
+            Self::Effects => crate::words::Phrase::Effects,
+            Self::Transitions => crate::words::Phrase::Transitions,
+            Self::Filters => crate::words::Phrase::Filters,
+            Self::Adjustments => crate::words::Phrase::Adjustments,
+            Self::Templates => crate::words::Phrase::Templates,
         }
     }
 
@@ -78,7 +78,10 @@ pub fn show(
     shelf: &mut Shelf,
     selected: &mut Option<AssetId>,
 ) {
-    crate::tip::region(ui, "Library");
+    crate::tip::region(
+        ui,
+        crate::words::of(ui, crate::words::Phrase::RegionLibrary),
+    );
     if selected.is_some_and(|id| project.asset(id).is_none()) {
         *selected = None;
     }
@@ -120,7 +123,7 @@ fn rail_button(ui: &mut egui::Ui, shelf: Shelf, active: bool) -> egui::Response 
     }
     let color = if active { theme::INK } else { theme::FAINT };
     icons::paint(ui.painter(), rect.center(), shelf.icon(), 20.0, color);
-    crate::tip::show_radio(&response, shelf.label(), active);
+    crate::tip::show_radio(&response, crate::words::of(ui, shelf.phrase()), active);
     response
 }
 
@@ -197,7 +200,7 @@ fn paint_card(ui: &egui::Ui, rect: Rect, asset: &Asset, selected: bool, placed: 
         painter.text(
             rect.left_top() + vec2(8.0, 8.0),
             Align2::LEFT_TOP,
-            "On timeline",
+            crate::words::of(ui, crate::words::Phrase::OnTimeline),
             FontId::new(10.0, FontFamily::Proportional),
             ink,
         );

@@ -9,6 +9,7 @@ use cutlass_project::{
 use crate::icons::{self, Icon};
 use crate::ruler;
 use crate::theme;
+use crate::words::{self, Language, Phrase};
 
 const HEAD: f32 = 130.0;
 const COVER: f32 = 72.0;
@@ -18,7 +19,6 @@ const LANE_HEIGHT: f32 = 40.0;
 const GAP: f32 = 8.0;
 
 struct Lane {
-    label: &'static str,
     main: bool,
     empty: bool,
     top: f32,
@@ -306,7 +306,7 @@ pub fn show(
     trim: &mut Option<TrimDrag>,
     split: &mut bool,
 ) -> Vec<Command> {
-    crate::tip::region(ui, "Timeline");
+    crate::tip::region(ui, words::of(ui, Phrase::RegionTimeline));
     // The panel stores the height this ui claims. Painting the lanes does not
     // claim it, so a drag would snap back to the minimum on release.
     ui.take_available_height();
@@ -402,8 +402,14 @@ pub fn show(
             marker: &mut marker,
             beat: &mut beat,
         };
-        let (command, refusal, zoom) =
-            apply_shortcut(key, duration > 0, project, &lanes, &mut modes);
+        let (command, refusal, zoom) = apply_shortcut(
+            key,
+            duration > 0,
+            project,
+            &lanes,
+            &mut modes,
+            words::active(ui),
+        );
         if let Some(command) = command {
             commands.push(command);
         }
@@ -636,7 +642,7 @@ pub fn show(
                     .is_some_and(|id| segment_lane_locked(project, &lanes, id))
             });
             if clicked && on_locked_clip && (marker || beat) {
-                note = Some("This track is locked.");
+                note = Some(words::of(ui, Phrase::TrackIsLocked));
             } else if clicked
                 && marker
                 && !on_locked_clip
@@ -667,12 +673,12 @@ pub fn show(
                 if clicked && let Some(point) = pointer.filter(|point| tracks.contains(*point)) {
                     if let Some(command) = split_command(project, tracks, point, view) {
                         if blocks_command(project, &lanes, &command) {
-                            note = Some("This track is locked.");
+                            note = Some(words::of(ui, Phrase::TrackIsLocked));
                         } else {
                             commands.push(command);
                         }
                     } else if segment_at(project, tracks, point, view).is_some() {
-                        note = Some("That cut is too close to the edge.");
+                        note = Some(words::of(ui, Phrase::CutTooClose));
                     }
                 }
             } else if let Some(active) = trim.take() {
@@ -695,7 +701,7 @@ pub fn show(
                 {
                     commands = next;
                 } else {
-                    note = Some("This track is locked.");
+                    note = Some(words::of(ui, Phrase::TrackIsLocked));
                 }
             } else if let Some(active) = drag.take()
                 && let Some(command) = move_command(
@@ -713,13 +719,13 @@ pub fn show(
                 )
             {
                 if blocks_command(project, &lanes, &command) {
-                    note = Some("This track is locked.");
+                    note = Some(words::of(ui, Phrase::TrackIsLocked));
                 } else {
                     commands.push(command);
                 }
             }
             if !clicked && held_locked && note.is_none() {
-                note = Some("This track is locked.");
+                note = Some(words::of(ui, Phrase::TrackIsLocked));
             }
             held_locked = false;
         }
@@ -777,7 +783,7 @@ pub fn show(
                 ui.painter().text(
                     lane_rect.left_center() + vec2(14.0, 0.0),
                     Align2::LEFT_CENTER,
-                    "Drag a clip here",
+                    words::of(ui, Phrase::DragClip),
                     FontId::new(12.0, FontFamily::Proportional),
                     theme::MUTED,
                 );
@@ -787,7 +793,7 @@ pub fn show(
                 pos2(tracks.left() + HEAD, lane.top + lane.height),
             );
             let mut row = lane_row(&lanes, track.id());
-            paint_lane_label(ui, head, lane.label);
+            paint_lane_label(ui, head, words::say(words::active(ui), lane_phrase(track)));
             if let Some(text) = paint_lane_flags(ui, head, track.id(), &mut row) {
                 note = Some(text);
             }
@@ -819,7 +825,7 @@ pub fn show(
         }
         if let Some(id) = remove {
             if blocks_edit(project, &lanes, id) {
-                note = Some("This track is locked.");
+                note = Some(words::of(ui, Phrase::TrackIsLocked));
             } else {
                 commands.push(Command::RemoveSegment(id));
             }
@@ -891,18 +897,19 @@ pub(crate) fn show_note(ui: &egui::Ui, text: &'static str) {
     ui.data_mut(|data| data.insert_temp(note_id(), Note { text, at }));
 }
 
-pub(crate) fn apply_note(error: &cutlass_project::Error) -> &'static str {
-    match error {
+pub(crate) fn apply_note(error: &cutlass_project::Error, language: Language) -> &'static str {
+    let phrase = match error {
         cutlass_project::Error::Overlap | cutlass_project::Error::LinkageOverlap(_) => {
-            "That spot is taken."
+            Phrase::SpotTaken
         }
-        cutlass_project::Error::WrongTrack => "That lane can't hold this clip.",
-        cutlass_project::Error::SplitOutside => "That cut is too close to the edge.",
+        cutlass_project::Error::WrongTrack => Phrase::WrongLane,
+        cutlass_project::Error::SplitOutside => Phrase::CutTooClose,
         cutlass_project::Error::SourceOutsideAsset | cutlass_project::Error::RoundsToZero => {
-            "That trim leaves the file."
+            Phrase::TrimLeaves
         }
-        _ => "That edit did not land.",
-    }
+        _ => Phrase::EditMissed,
+    };
+    words::say(language, phrase)
 }
 
 fn toast_alpha(age: f64) -> Option<u8> {
@@ -1061,8 +1068,8 @@ fn zoom_rects(ruler: Rect) -> [Rect; 3] {
 fn zoom_controls(ui: &mut egui::Ui, ruler: Rect, live: bool) -> Option<ZoomStep> {
     let rects = zoom_rects(ruler);
     let steps = [ZoomStep::Out, ZoomStep::Fit, ZoomStep::In];
-    let labels = ["−", "Fit", "+"];
-    let names = ["Zoom out", "Zoom to fit", "Zoom in"];
+    let labels = ["−", words::of(ui, Phrase::Fit), "+"];
+    let names = [Phrase::ZoomOut, Phrase::ZoomToFit, Phrase::ZoomIn];
     let salts = ["zoom-out", "zoom-fit", "zoom-in"];
     let mut chosen = None;
     for index in 0..rects.len() {
@@ -1071,7 +1078,7 @@ fn zoom_controls(ui: &mut egui::Ui, ruler: Rect, live: bool) -> Option<ZoomStep>
             ui.scope_id().with(salts[index]),
             Sense::click(),
         );
-        crate::tip::show_enabled(&response, names[index], live);
+        crate::tip::show_enabled(&response, words::of(ui, names[index]), live);
         if live && response.clicked() {
             chosen = Some(steps[index]);
         }
@@ -1466,8 +1473,22 @@ fn ruler_switches(
     snap: &mut bool,
 ) -> bool {
     let [split_button, snap_button] = switch_rects(ruler);
-    let armed = ruler_switch(ui, split_button, "Split", "split-blade", split_live, split);
-    ruler_switch(ui, snap_button, "Snap", "snap-switch", true, snap);
+    let armed = ruler_switch(
+        ui,
+        split_button,
+        words::of(ui, Phrase::Split),
+        "split-blade",
+        split_live,
+        split,
+    );
+    ruler_switch(
+        ui,
+        snap_button,
+        words::of(ui, Phrase::Snap),
+        "snap-switch",
+        true,
+        snap,
+    );
     armed
 }
 
@@ -1545,7 +1566,7 @@ fn mark_switches(
         ui,
         marker_rect,
         Icon::Marker,
-        "Marker",
+        words::of(ui, Phrase::Marker),
         "marker-mode",
         live,
         marker,
@@ -1553,7 +1574,15 @@ fn mark_switches(
         *beat = false;
         *split = false;
     }
-    if mode_switch(ui, beat_rect, Icon::Beat, "Beat", "beat-mode", live, beat) {
+    if mode_switch(
+        ui,
+        beat_rect,
+        Icon::Beat,
+        words::of(ui, Phrase::Beat),
+        "beat-mode",
+        live,
+        beat,
+    ) {
         *marker = false;
         *split = false;
     }
@@ -1621,17 +1650,20 @@ fn locked_follower(project: &Project, lanes: &Lanes) -> bool {
     })
 }
 
-fn magnet_refusal(project: &Project, lanes: &Lanes) -> Option<&'static str> {
+fn magnet_refusal(project: &Project, lanes: &Lanes, language: Language) -> Option<&'static str> {
     let turning_on = !project.settings().magnet();
     if main_locked(project, lanes) {
-        return Some(if turning_on {
-            "Main track is locked. Couldn't turn on main track magnet."
-        } else {
-            "Main track is locked. Couldn't turn off main track magnet."
-        });
+        return Some(words::say(
+            language,
+            if turning_on {
+                Phrase::MagnetLockedOn
+            } else {
+                Phrase::MagnetLockedOff
+            },
+        ));
     }
     if turning_on && project.settings().linkage() && locked_follower(project, lanes) {
-        return Some("A locked lane would move. Couldn't turn on main track magnet.");
+        return Some(words::say(language, Phrase::MagnetFollower));
     }
     None
 }
@@ -1649,6 +1681,7 @@ fn apply_shortcut(
     project: &Project,
     lanes: &Lanes,
     modes: &mut Modes<'_>,
+    language: Language,
 ) -> (Option<Command>, Option<&'static str>, Option<ZoomStep>) {
     use crate::keys::Shortcut;
     match key {
@@ -1675,7 +1708,7 @@ fn apply_shortcut(
             if let Some(command) = magnet_toggle(project, lanes) {
                 (Some(command), None, None)
             } else {
-                (None, magnet_refusal(project, lanes), None)
+                (None, magnet_refusal(project, lanes, language), None)
             }
         }
         Shortcut::Linkage => (Some(linkage_toggle(project)), None, None),
@@ -1699,7 +1732,7 @@ fn apply_shortcut(
 }
 
 fn magnet_toggle(project: &Project, lanes: &Lanes) -> Option<Command> {
-    if magnet_refusal(project, lanes).is_some() {
+    if magnet_refusal(project, lanes, Language::English).is_some() {
         return None;
     }
     Some(Command::SetMagnet(!project.settings().magnet()))
@@ -1724,11 +1757,11 @@ fn project_switches(
     ui.painter().rect_filled(cover, 0.0, theme::PANEL);
     let magnet_on = project.settings().magnet();
     let magnet_tip = if main_locked(project, lanes) {
-        "Main track is locked"
+        words::of(ui, Phrase::MagnetLocked)
     } else if magnet_on {
-        "Main track magnet on"
+        words::of(ui, Phrase::MagnetOn)
     } else {
-        "Main track magnet off"
+        words::of(ui, Phrase::MagnetOff)
     };
     let mut refused = None;
     if setting_switch(
@@ -1742,14 +1775,14 @@ fn project_switches(
         if let Some(command) = magnet_toggle(project, lanes) {
             commands.push(command);
         } else {
-            refused = magnet_refusal(project, lanes);
+            refused = magnet_refusal(project, lanes, words::active(ui));
         }
     }
     let linkage_on = project.settings().linkage();
     let linkage_tip = if linkage_on {
-        "Linkage on"
+        words::of(ui, Phrase::LinkageOn)
     } else {
-        "Linkage off"
+        words::of(ui, Phrase::LinkageOff)
     };
     if setting_switch(
         ui,
@@ -1904,19 +1937,20 @@ fn action_runs(action: ClipAction) -> bool {
     matches!(action, ClipAction::Delete)
 }
 
-fn action_label(action: ClipAction) -> &'static str {
-    match action {
-        ClipAction::Copy => "Copy",
-        ClipAction::Cut => "Cut",
-        ClipAction::Delete => "Delete",
-        ClipAction::Freeze => "Freeze",
-        ClipAction::Reverse => "Reverse",
-        ClipAction::Mirror => "Mirror",
-        ClipAction::Rotate => "Rotate",
-        ClipAction::Crop => "Crop",
-        ClipAction::Transcribe => "Transcribe",
-        ClipAction::SplitScenes => "Split scenes",
-    }
+fn action_label(action: ClipAction, language: Language) -> &'static str {
+    let phrase = match action {
+        ClipAction::Copy => Phrase::Copy,
+        ClipAction::Cut => Phrase::Cut,
+        ClipAction::Delete => Phrase::Delete,
+        ClipAction::Freeze => Phrase::Freeze,
+        ClipAction::Reverse => Phrase::Reverse,
+        ClipAction::Mirror => Phrase::Mirror,
+        ClipAction::Rotate => Phrase::Rotate,
+        ClipAction::Crop => Phrase::Crop,
+        ClipAction::Transcribe => Phrase::Transcribe,
+        ClipAction::SplitScenes => Phrase::SplitScenes,
+    };
+    words::say(language, phrase)
 }
 
 fn paint_clip_menu(
@@ -1938,7 +1972,9 @@ fn paint_clip_menu(
         if ui
             .add_enabled(
                 enabled,
-                egui::Button::new(egui::RichText::new(action_label(action)).color(color)),
+                egui::Button::new(
+                    egui::RichText::new(action_label(action, words::active(ui))).color(color),
+                ),
             )
             .clicked()
         {
@@ -2518,7 +2554,7 @@ fn paint_stamps(
         );
         crate::tip::show_image(
             &response,
-            &crate::tip::mark(false, *us, SEQUENCE_TIMESCALE.get()),
+            &crate::tip::mark(words::active(ui), false, *us, SEQUENCE_TIMESCALE.get()),
         );
     }
     if tracks.height() <= 0.0 {
@@ -2624,7 +2660,7 @@ fn paint_bound(
         );
         crate::tip::show_image(
             &response,
-            &crate::tip::mark(beat, us, SEQUENCE_TIMESCALE.get()),
+            &crate::tip::mark(words::active(ui), beat, us, SEQUENCE_TIMESCALE.get()),
         );
     }
 }
@@ -2707,7 +2743,7 @@ fn paint_playhead(
         {
             *playhead = ruler::seek(view.us_at(left, pointer.x), rate, duration);
         }
-        crate::tip::image(&response, "Playhead");
+        crate::tip::image(&response, words::of(ui, Phrase::Playhead));
     }
     let x = x_of(*playhead);
     let mark = Rect::from_center_size(pos2(x, bottom - 6.0), vec2(11.0, 12.0));
@@ -2760,7 +2796,14 @@ fn paint_lane_flags(
     } else {
         Icon::View
     };
-    let hide_tip = if row.hidden { "Hidden" } else { "Hide" };
+    let hide_tip = words::of(
+        ui,
+        if row.hidden {
+            Phrase::Hidden
+        } else {
+            Phrase::Hide
+        },
+    );
     if lane_button(
         ui,
         hide,
@@ -2776,7 +2819,14 @@ fn paint_lane_flags(
     } else {
         Icon::Volume
     };
-    let mute_tip = if row.muted { "Muted" } else { "Mute" };
+    let mute_tip = words::of(
+        ui,
+        if row.muted {
+            Phrase::Muted
+        } else {
+            Phrase::Mute
+        },
+    );
     if lane_button(
         ui,
         mute,
@@ -2787,7 +2837,14 @@ fn paint_lane_flags(
     ) {
         row.muted = !row.muted;
     }
-    let lock_tip = if row.locked { "Locked" } else { "Lock" };
+    let lock_tip = words::of(
+        ui,
+        if row.locked {
+            Phrase::Locked
+        } else {
+            Phrase::Lock
+        },
+    );
     let mut locked_note = None;
     if lane_button(
         ui,
@@ -2798,11 +2855,14 @@ fn paint_lane_flags(
         row.locked,
     ) {
         row.locked = !row.locked;
-        locked_note = Some(if row.locked {
-            "Track locked"
-        } else {
-            "Track unlocked"
-        });
+        locked_note = Some(words::of(
+            ui,
+            if row.locked {
+                Phrase::TrackLocked
+            } else {
+                Phrase::TrackUnlocked
+            },
+        ));
     }
     locked_note
 }
@@ -2850,7 +2910,6 @@ fn layout(tracks: &[Track], area: Rect) -> Vec<Lane> {
         .iter()
         .enumerate()
         .map(|(index, track)| Lane {
-            label: label(track),
             main: track.is_main(),
             empty: track.is_main() && track.segments().is_empty(),
             top: tops[index],
@@ -2859,18 +2918,28 @@ fn layout(tracks: &[Track], area: Rect) -> Vec<Lane> {
         .collect()
 }
 
-fn label(track: &Track) -> &'static str {
+fn lane_phrase(track: &Track) -> Phrase {
     if track.is_main() {
-        return "Main";
+        Phrase::Main
+    } else {
+        kind_phrase(track.kind())
     }
-    match track.kind() {
-        TrackKind::Video => "Video",
-        TrackKind::Audio => "Audio",
-        TrackKind::Text => "Text",
-        TrackKind::Sticker => "Sticker",
-        TrackKind::Effect | TrackKind::PluginEffect => "Effect",
-        TrackKind::Filter => "Filter",
-        TrackKind::Adjust => "Adjust",
+}
+
+/// The name of a lane kind. The main lane has its own short name.
+pub(crate) fn kind_name(kind: TrackKind, language: Language) -> &'static str {
+    words::say(language, kind_phrase(kind))
+}
+
+fn kind_phrase(kind: TrackKind) -> Phrase {
+    match kind {
+        TrackKind::Video => Phrase::Video,
+        TrackKind::Audio => Phrase::Audio,
+        TrackKind::Text => Phrase::Text,
+        TrackKind::Sticker => Phrase::Sticker,
+        TrackKind::Effect | TrackKind::PluginEffect => Phrase::Effect,
+        TrackKind::Filter => Phrase::Filter,
+        TrackKind::Adjust => Phrase::Adjust,
     }
 }
 
@@ -2881,10 +2950,11 @@ mod tests {
     use cutlass_core::Timestamp;
     use cutlass_project::{
         Asset, Channels, Command, History, Outcome, Project, ProjectId, Segment, Speed, TimeRange,
+        TrackKind,
     };
     use eframe::egui::{Rect, pos2, vec2};
 
-    use super::{clip_rect, lane_left, layout, segment_at};
+    use super::{Language, clip_rect, lane_left, layout, segment_at};
 
     fn project() -> Project {
         Project::new(ProjectId::from_bytes([1; 16]), "Untitled")
@@ -2912,7 +2982,7 @@ mod tests {
             Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 400.0)),
         );
         assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].label, "Main");
+        assert!(lanes[0].main);
         assert!(lanes[0].empty);
         assert!((lanes[0].top - 168.0).abs() < f32::EPSILON);
         assert!(
@@ -2970,24 +3040,27 @@ mod tests {
                 ],
             )
             .expect("place");
+        let tracks = project.timeline().tracks();
         let lanes = layout(
-            project.timeline().tracks(),
+            tracks,
             Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 400.0)),
         );
-        let main = lanes
+        let lane = |kind: TrackKind| {
+            tracks
+                .iter()
+                .zip(&lanes)
+                .find(|(track, _)| !track.is_main() && track.kind() == kind)
+                .map(|(_, lane)| lane)
+                .expect("lane")
+        };
+        let main = tracks
             .iter()
-            .find(|lane| lane.label == "Main")
+            .zip(&lanes)
+            .find(|(track, _)| track.is_main())
+            .map(|(_, lane)| lane)
             .expect("main");
-        let audio = lanes
-            .iter()
-            .find(|lane| lane.label == "Audio")
-            .expect("audio");
-        let overlay = lanes
-            .iter()
-            .find(|lane| lane.label == "Video")
-            .expect("overlay");
-        assert!(audio.top > main.top);
-        assert!(overlay.top < main.top);
+        assert!(lane(TrackKind::Audio).top > main.top);
+        assert!(lane(TrackKind::Video).top < main.top);
         assert!(main.empty);
     }
 
@@ -3795,7 +3868,7 @@ mod tests {
         };
         assert!(super::magnet_toggle(&cut, &locked_main).is_none());
         assert_eq!(
-            super::magnet_refusal(&cut, &locked_main),
+            super::magnet_refusal(&cut, &locked_main, Language::English),
             Some("Main track is locked. Couldn't turn off main track magnet.")
         );
         assert_eq!(super::linkage_toggle(&cut), Command::SetLinkage(false));
@@ -3805,7 +3878,7 @@ mod tests {
         assert!(!cut.settings().magnet());
         assert!(cut.settings().linkage());
         assert_eq!(
-            super::magnet_refusal(&cut, &locked_main),
+            super::magnet_refusal(&cut, &locked_main, Language::English),
             Some("Main track is locked. Couldn't turn on main track magnet.")
         );
 
@@ -3884,7 +3957,7 @@ mod tests {
         };
         assert!(super::magnet_toggle(&cut, &locked_audio).is_none());
         assert_eq!(
-            super::magnet_refusal(&cut, &locked_audio),
+            super::magnet_refusal(&cut, &locked_audio, Language::English),
             Some("A locked lane would move. Couldn't turn on main track magnet.")
         );
         let unlink = super::linkage_toggle(&cut);
@@ -3952,27 +4025,30 @@ mod tests {
         assert_eq!(super::toast_alpha(1.8), None);
         assert_eq!(super::toast_alpha(-0.1), None);
         assert_eq!(
-            super::apply_note(&cutlass_project::Error::Overlap),
+            super::apply_note(&cutlass_project::Error::Overlap, Language::English),
             "That spot is taken."
         );
         assert_eq!(
-            super::apply_note(&cutlass_project::Error::WrongTrack),
+            super::apply_note(&cutlass_project::Error::WrongTrack, Language::English),
             "That lane can't hold this clip."
         );
         assert_eq!(
-            super::apply_note(&cutlass_project::Error::SplitOutside),
+            super::apply_note(&cutlass_project::Error::SplitOutside, Language::English),
             "That cut is too close to the edge."
         );
         assert_eq!(
-            super::apply_note(&cutlass_project::Error::SourceOutsideAsset),
+            super::apply_note(
+                &cutlass_project::Error::SourceOutsideAsset,
+                Language::English
+            ),
             "That trim leaves the file."
         );
         assert_eq!(
-            super::apply_note(&cutlass_project::Error::RoundsToZero),
+            super::apply_note(&cutlass_project::Error::RoundsToZero, Language::English),
             "That trim leaves the file."
         );
         assert_eq!(
-            super::apply_note(&cutlass_project::Error::NothingToUndo),
+            super::apply_note(&cutlass_project::Error::NothingToUndo, Language::English),
             "That edit did not land."
         );
     }
@@ -3999,7 +4075,7 @@ mod tests {
                 marker,
                 beat,
             };
-            super::apply_shortcut(key, live, &cut, lanes, &mut modes)
+            super::apply_shortcut(key, live, &cut, lanes, &mut modes, Language::English)
         };
         let (command, note, zoom) = press(
             Shortcut::Select,

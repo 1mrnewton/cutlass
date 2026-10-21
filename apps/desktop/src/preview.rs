@@ -12,7 +12,10 @@ use crate::timeline::file_name;
 const TRANSPORT: f32 = 52.0;
 
 pub fn show(ui: &mut egui::Ui, project: &Project, playhead_us: i64) {
-    crate::tip::region(ui, "Preview");
+    crate::tip::region(
+        ui,
+        crate::words::of(ui, crate::words::Phrase::RegionPreview),
+    );
     let full = ui.max_rect();
     ui.allocate_rect(full, Sense::hover());
     let transport = Rect::from_min_max(pos2(full.left(), full.bottom() - TRANSPORT), full.max);
@@ -26,7 +29,10 @@ pub fn show(ui: &mut egui::Ui, project: &Project, playhead_us: i64) {
         let hidden = crate::timeline::hidden_tracks(ui);
         let label = match shot(project, playhead_us, &hidden) {
             Some(name) => format!("{name} · {time}"),
-            None => format!("Empty · {time}"),
+            None => format!(
+                "{} · {time}",
+                crate::words::of(ui, crate::words::Phrase::Empty)
+            ),
         };
         ui.painter().text(
             frame.left_top() + vec2(12.0, 12.0),
@@ -78,7 +84,11 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
         .circle_filled(play.center(), 18.0, theme::INK.gamma_multiply(dim));
     let mark = Color32::from_rgb(0x12, 0x13, 0x0f).gamma_multiply(dim);
     icons::paint(ui.painter(), play.center(), Icon::Play, 16.0, mark);
-    crate::tip::show_enabled(&play_response, "Play", live);
+    crate::tip::show_enabled(
+        &play_response,
+        crate::words::of(ui, crate::words::Phrase::Play),
+        live,
+    );
 
     let still = Rect::from_center_size(
         pos2(rect.right() - 28.0, rect.center().y),
@@ -94,7 +104,11 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
         16.0,
         theme::MUTED.gamma_multiply(dim),
     );
-    crate::tip::show_enabled(&still_response, "Still", live);
+    crate::tip::show_enabled(
+        &still_response,
+        crate::words::of(ui, crate::words::Phrase::Still),
+        live,
+    );
 }
 
 /// The topmost segment that covers `us`, named from its file. A hidden lane is skipped.

@@ -17,6 +17,7 @@ mod ruler;
 mod theme;
 mod timeline;
 mod tip;
+mod words;
 
 fn main() -> eframe::Result {
     let viewport = egui::ViewportBuilder::default()
@@ -49,6 +50,7 @@ struct CutlassApp {
     trim_drag: Option<timeline::TrimDrag>,
     split: bool,
     export: Option<export::Sheet>,
+    language: words::Language,
 }
 
 impl CutlassApp {
@@ -67,6 +69,7 @@ impl CutlassApp {
             trim_drag: None,
             split: false,
             export: None,
+            language: words::language_from_tag(&words::system_tag()),
         }
     }
 
@@ -92,9 +95,9 @@ impl CutlassApp {
                 .iter()
                 .all(|id| timeline::edit_refused(&self.project, &lanes, *id))
             {
-                "This track is locked."
+                words::of(ui, words::Phrase::TrackIsLocked)
             } else {
-                "That edit did not land."
+                words::of(ui, words::Phrase::EditMissed)
             };
             timeline::show_note(ui, text);
         }
@@ -113,11 +116,14 @@ impl CutlassApp {
         if result.is_err() {
             timeline::show_note(
                 ui,
-                if undo {
-                    "Nothing to undo."
-                } else {
-                    "Nothing to redo."
-                },
+                words::of(
+                    ui,
+                    if undo {
+                        words::Phrase::NothingToUndo
+                    } else {
+                        words::Phrase::NothingToRedo
+                    },
+                ),
             );
         }
     }
@@ -129,6 +135,7 @@ impl eframe::App for CutlassApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        words::install(ui.ctx(), self.language);
         chrome::pass_clicks(frame);
         keys::set_blocked(ui, self.export.is_some());
         if self.export.is_none() {
@@ -174,7 +181,7 @@ impl eframe::App for CutlassApp {
                 if !commands.is_empty()
                     && let Err(error) = self.history.apply(&mut self.project, &commands)
                 {
-                    timeline::show_note(ui, timeline::apply_note(&error));
+                    timeline::show_note(ui, timeline::apply_note(&error, words::active(ui)));
                 }
             });
 
@@ -222,10 +229,18 @@ impl eframe::App for CutlassApp {
 
 /// Project bar. The Mac close, minimize, and maximize buttons are the window's.
 fn header(ui: &mut egui::Ui, name: &str) -> bool {
-    crate::tip::region(ui, "Project");
+    crate::tip::region(ui, words::of(ui, words::Phrase::RegionProject));
     ui.take_available_height();
     let rect = ui.max_rect();
-    let size = Vec2::new(72.0, 26.0);
+    let export = words::of(ui, words::Phrase::Export);
+    let width = words::control_width(
+        ui,
+        export,
+        TextStyle::Button.resolve(ui.style()),
+        20.0,
+        72.0,
+    );
+    let size = Vec2::new(width, 26.0);
     let origin = rect.right_center() - Vec2::new(12.0 + size.x, size.y / 2.0);
     let button = Rect::from_min_size(origin, size);
     let drag = ui.interact(rect, ui.scope_id().with("project-bar"), Sense::drag());
@@ -250,7 +265,7 @@ fn header(ui: &mut egui::Ui, name: &str) -> bool {
 
     ui.put(
         button,
-        Button::new(RichText::new("Export").color(theme::EXPORT_INK).strong())
+        Button::new(RichText::new(export).color(theme::EXPORT_INK).strong())
             .fill(theme::EXPORT)
             .corner_radius(8),
     )

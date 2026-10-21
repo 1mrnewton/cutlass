@@ -176,9 +176,21 @@ pub(crate) fn span(name: &str, start: i64, end: i64, timescale: u32) -> String {
     }
 }
 
-/// `Marker · time` or `Beat · time`.
-pub(crate) fn mark(beat: bool, time: i64, timescale: u32) -> String {
-    let kind = if beat { "Beat" } else { "Marker" };
+/// `Marker · time` or `Beat · time`, in `language`. The clock stays `M:SS.t`.
+pub(crate) fn mark(
+    language: crate::words::Language,
+    beat: bool,
+    time: i64,
+    timescale: u32,
+) -> String {
+    let kind = crate::words::say(
+        language,
+        if beat {
+            crate::words::Phrase::Beat
+        } else {
+            crate::words::Phrase::Marker
+        },
+    );
     format!("{kind} · {}", card_time(time, timescale))
 }
 
@@ -200,6 +212,7 @@ mod tests {
     use eframe::egui;
 
     use super::{mark, span};
+    use crate::words::Language;
 
     #[test]
     fn a_clip_tip_names_the_file_and_its_span() {
@@ -212,8 +225,18 @@ mod tests {
 
     #[test]
     fn a_mark_tip_names_the_kind_and_the_time() {
-        assert_eq!(mark(false, 2_000_000, 1_000_000), "Marker · 0:02.0");
-        assert_eq!(mark(true, 2_000_000, 1_000_000), "Beat · 0:02.0");
+        assert_eq!(
+            mark(Language::English, false, 2_000_000, 1_000_000),
+            "Marker · 0:02.0"
+        );
+        assert_eq!(
+            mark(Language::English, true, 2_000_000, 1_000_000),
+            "Beat · 0:02.0"
+        );
+        assert_eq!(
+            mark(Language::French, false, 2_000_000, 1_000_000),
+            "Marqueur · 0:02.0"
+        );
     }
 
     #[test]

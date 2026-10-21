@@ -10,6 +10,7 @@ use cutlass_project::FrameRate;
 
 use crate::library::card_time;
 use crate::theme;
+use crate::words::{self, Language, Phrase};
 
 const DIALOG: Color32 = Color32::from_rgb(0x32, 0x32, 0x32);
 const CLOSE: Color32 = Color32::from_rgb(0xff, 0x5f, 0x57);
@@ -84,12 +85,15 @@ enum Quality {
 impl Quality {
     const ALL: [Self; 3] = [Self::Standard, Self::High, Self::Best];
 
-    fn label(self) -> &'static str {
-        match self {
-            Self::Standard => "Standard",
-            Self::High => "High",
-            Self::Best => "Best",
-        }
+    fn label(self, language: Language) -> &'static str {
+        words::say(
+            language,
+            match self {
+                Self::Standard => Phrase::Standard,
+                Self::High => Phrase::High,
+                Self::Best => Phrase::Best,
+            },
+        )
     }
 }
 
@@ -230,11 +234,14 @@ enum Channels {
 impl Channels {
     const ALL: [Self; 2] = [Self::Stereo, Self::Mono];
 
-    fn label(self) -> &'static str {
-        match self {
-            Self::Stereo => "Stereo",
-            Self::Mono => "Mono",
-        }
+    fn label(self, language: Language) -> &'static str {
+        words::say(
+            language,
+            match self {
+                Self::Stereo => Phrase::Stereo,
+                Self::Mono => Phrase::Mono,
+            },
+        )
     }
 }
 
@@ -285,11 +292,14 @@ enum GifLoop {
 impl GifLoop {
     const ALL: [Self; 2] = [Self::Once, Self::Loop];
 
-    fn label(self) -> &'static str {
-        match self {
-            Self::Once => "Once",
-            Self::Loop => "Loop",
-        }
+    fn label(self, language: Language) -> &'static str {
+        words::say(
+            language,
+            match self {
+                Self::Once => Phrase::Once,
+                Self::Loop => Phrase::Loop,
+            },
+        )
     }
 }
 
@@ -302,9 +312,9 @@ enum Caption {
 impl Caption {
     const ALL: [Self; 2] = [Self::BurnIn, Self::Srt];
 
-    fn label(self) -> &'static str {
+    fn label(self, language: Language) -> &'static str {
         match self {
-            Self::BurnIn => "Burn in",
+            Self::BurnIn => words::say(language, Phrase::BurnIn),
             Self::Srt => "SRT",
         }
     }
@@ -472,7 +482,7 @@ pub(crate) fn show(ui: &egui::Ui, sheet: &mut Sheet, duration: &str) -> bool {
         .movable(false)
         .constrain(false)
         .fade_in(false)
-        .accessible_name("Export")
+        .accessible_name(words::of(ui, Phrase::Export))
         .role(egui::accesskit::Role::Dialog)
         .show(ui.ctx(), |ui| {
             ui.set_clip_rect(screen);
@@ -518,14 +528,14 @@ fn paint_head(ui: &mut egui::Ui, head: Rect) -> bool {
     ui.painter().text(
         head.center(),
         Align2::CENTER_CENTER,
-        "Export",
+        words::of(ui, Phrase::Export),
         FontId::new(13.0, FontFamily::Proportional),
         theme::INK,
     );
     let hit = Rect::from_center_size(pos2(head.left() + 20.0, head.center().y), vec2(24.0, 24.0));
     let response = ui.interact(hit, ui.scope_id().with("close"), Sense::click());
     ui.painter().circle_filled(hit.center(), 6.0, CLOSE);
-    crate::tip::show(&response, "Close");
+    crate::tip::show(&response, words::of(ui, Phrase::Close));
     response.clicked()
 }
 
@@ -537,13 +547,18 @@ fn paint_foot(ui: &mut egui::Ui, foot: Rect, duration: &str) -> bool {
         FontId::new(12.0, FontFamily::Monospace),
         theme::MUTED,
     );
+    let export_label = words::of(ui, Phrase::Export);
+    let cancel_label = words::of(ui, Phrase::Cancel);
+    let font = FontId::new(13.0, FontFamily::Proportional);
+    let export_w = words::control_width(ui, export_label, font.clone(), 24.0, 72.0);
+    let cancel_w = words::control_width(ui, cancel_label, font, 20.0, 64.0);
     let export = Rect::from_center_size(
-        pos2(foot.right() - 16.0 - 36.0, foot.center().y),
-        vec2(72.0, 26.0),
+        pos2(foot.right() - 16.0 - export_w / 2.0, foot.center().y),
+        vec2(export_w, 26.0),
     );
     let cancel = Rect::from_center_size(
-        pos2(export.left() - 8.0 - 32.0, foot.center().y),
-        vec2(64.0, 26.0),
+        pos2(export.left() - 8.0 - cancel_w / 2.0, foot.center().y),
+        vec2(cancel_w, 26.0),
     );
     let duration_rect =
         Rect::from_min_max(foot.left_top(), pos2(cancel.left() - 8.0, foot.bottom()));
@@ -556,11 +571,11 @@ fn paint_foot(ui: &mut egui::Ui, foot: Rect, duration: &str) -> bool {
         );
     }
     let cancel_response = ui.interact(cancel, ui.scope_id().with("cancel"), Sense::click());
-    crate::tip::name(&cancel_response, "Cancel");
+    crate::tip::name(&cancel_response, cancel_label);
     ui.painter().text(
         cancel.center(),
         Align2::CENTER_CENTER,
-        "Cancel",
+        cancel_label,
         FontId::new(13.0, FontFamily::Proportional),
         if cancel_response.hovered() {
             theme::INK
@@ -569,12 +584,12 @@ fn paint_foot(ui: &mut egui::Ui, foot: Rect, duration: &str) -> bool {
         },
     );
     let export_response = ui.interact(export, ui.scope_id().with("export"), Sense::click());
-    crate::tip::name(&export_response, "Export");
+    crate::tip::name(&export_response, export_label);
     ui.painter().rect_filled(export, 8.0, theme::EXPORT);
     ui.painter().text(
         export.center(),
         Align2::CENTER_CENTER,
-        "Export",
+        export_label,
         FontId::new(13.0, FontFamily::Proportional),
         theme::EXPORT_INK,
     );
@@ -624,7 +639,7 @@ fn paint_body(ui: &mut egui::Ui, body: Rect, sheet: &mut Sheet) {
 }
 
 fn name_row(ui: &mut egui::Ui, sheet: &mut Sheet) {
-    labeled(ui, "Name", |ui, width| {
+    labeled(ui, words::of(ui, Phrase::Name), |ui, width| {
         let output = TextEdit::singleline(&mut sheet.name)
             .id(Id::unique("export-name"))
             .frame(field_frame())
@@ -645,7 +660,13 @@ fn name_row(ui: &mut egui::Ui, sheet: &mut Sheet) {
 }
 
 fn video_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
-    section(ui, "Video", &mut sheet.video_open, &mut sheet.video_on);
+    let language = words::active(ui);
+    section(
+        ui,
+        words::of(ui, Phrase::Video),
+        &mut sheet.video_open,
+        &mut sheet.video_on,
+    );
     if !sheet.video_open {
         return;
     }
@@ -653,7 +674,7 @@ fn video_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
     choice(
         ui,
         "resolution",
-        "Resolution",
+        words::of(ui, Phrase::Resolution),
         &mut resolution,
         &Resolution::ALL,
         Resolution::label,
@@ -664,7 +685,7 @@ fn video_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
     choice(
         ui,
         "rate",
-        "Frame rate",
+        words::of(ui, Phrase::FrameRate),
         &mut sheet.rate,
         &Rate::ALL,
         Rate::label,
@@ -673,7 +694,7 @@ fn video_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
     choice(
         ui,
         "format",
-        "Format",
+        words::of(ui, Phrase::Format),
         &mut format,
         &Container::ALL,
         Container::label,
@@ -685,7 +706,7 @@ fn video_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
     choice(
         ui,
         "codec",
-        "Codec",
+        words::of(ui, Phrase::Codec),
         &mut sheet.codec,
         videos,
         VideoCodec::label,
@@ -695,10 +716,10 @@ fn video_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
         choice(
             ui,
             "quality",
-            "Quality",
+            words::of(ui, Phrase::Quality),
             &mut quality,
             &Quality::ALL,
-            Quality::label,
+            |item| Quality::label(item, language),
         );
         if quality != sheet.quality {
             sheet.set_quality(quality);
@@ -706,7 +727,7 @@ fn video_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
         choice(
             ui,
             "rate-control",
-            "Rate",
+            words::of(ui, Phrase::RateControl),
             &mut sheet.rate_control,
             &RateControl::ALL,
             RateControl::label,
@@ -725,7 +746,13 @@ fn video_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
 }
 
 fn audio_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
-    section(ui, "Audio", &mut sheet.audio_open, &mut sheet.audio_on);
+    let language = words::active(ui);
+    section(
+        ui,
+        words::of(ui, Phrase::Audio),
+        &mut sheet.audio_open,
+        &mut sheet.audio_on,
+    );
     if !sheet.audio_open {
         return;
     }
@@ -733,7 +760,7 @@ fn audio_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
     choice(
         ui,
         "audio-codec",
-        "Codec",
+        words::of(ui, Phrase::Codec),
         &mut sheet.audio,
         audios,
         AudioCodec::label,
@@ -741,7 +768,7 @@ fn audio_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
     choice(
         ui,
         "sample-rate",
-        "Sample rate",
+        words::of(ui, Phrase::SampleRate),
         &mut sheet.sample_rate,
         &SampleRate::ALL,
         SampleRate::label,
@@ -749,10 +776,10 @@ fn audio_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
     choice(
         ui,
         "channels",
-        "Channels",
+        words::of(ui, Phrase::Channels),
         &mut sheet.channels,
         &Channels::ALL,
-        Channels::label,
+        |item| Channels::label(item, language),
     );
     if sheet.shows_audio_bitrate() {
         choice(
@@ -767,14 +794,20 @@ fn audio_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
 }
 
 fn gif_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
-    section(ui, "GIF", &mut sheet.gif_open, &mut sheet.gif_on);
+    let language = words::active(ui);
+    section(
+        ui,
+        words::of(ui, Phrase::Gif),
+        &mut sheet.gif_open,
+        &mut sheet.gif_on,
+    );
     if !sheet.gif_open {
         return;
     }
     choice(
         ui,
         "gif-rate",
-        "Frame rate",
+        words::of(ui, Phrase::FrameRate),
         &mut sheet.gif_rate,
         &GifRate::ALL,
         GifRate::label,
@@ -782,36 +815,37 @@ fn gif_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
     choice(
         ui,
         "gif-loop",
-        "Loop",
+        words::of(ui, Phrase::Loop),
         &mut sheet.gif_loop,
         &GifLoop::ALL,
-        GifLoop::label,
+        |item| GifLoop::label(item, language),
     );
 }
 
 fn caption_section(ui: &mut egui::Ui, sheet: &mut Sheet) {
     section(
         ui,
-        "Caption",
+        words::of(ui, Phrase::Caption),
         &mut sheet.caption_open,
         &mut sheet.caption_on,
     );
     if !sheet.caption_open {
         return;
     }
+    let language = words::active(ui);
     choice(
         ui,
         "caption",
-        "File",
+        words::of(ui, Phrase::File),
         &mut sheet.caption,
         &Caption::ALL,
-        Caption::label,
+        |item| Caption::label(item, language),
     );
 }
 
 fn bitrate_row(ui: &mut egui::Ui, sheet: &mut Sheet) {
     let mut text = sheet.bitrate.clone();
-    labeled(ui, "Bitrate", |ui, width| {
+    labeled(ui, words::of(ui, Phrase::Bitrate), |ui, width| {
         ui.horizontal(|ui| {
             let output = TextEdit::singleline(&mut text)
                 .id(ui.scope_id().with("bitrate"))
@@ -877,11 +911,7 @@ fn section(ui: &mut egui::Ui, title: &str, open: &mut bool, enabled: &mut bool) 
     };
     ui.painter()
         .circle_filled(pos2(thumb, switch.center().y), 7.0, Color32::WHITE);
-    let tip = if *enabled {
-        format!("{title} on")
-    } else {
-        format!("{title} off")
-    };
+    let tip = words::named_switch(words::active(ui), title, *enabled);
     crate::tip::show_switch(&switch_response, &tip, *enabled, true);
 }
 
@@ -917,7 +947,7 @@ fn choice<T: Copy + PartialEq>(
     label: &str,
     current: &mut T,
     options: &[T],
-    text: fn(T) -> &'static str,
+    text: impl Fn(T) -> &'static str,
 ) {
     labeled(ui, label, |ui, width| {
         egui::ComboBox::from_id_salt((salt, "export"))

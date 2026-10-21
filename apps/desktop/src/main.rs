@@ -6,6 +6,7 @@ use eframe::egui::{self, Align2, Button, Rect, RichText, TextStyle, Vec2};
 
 use cutlass_project::{AssetId, Project, ProjectId};
 
+mod inspector;
 mod library;
 mod preview;
 mod ruler;
@@ -94,7 +95,7 @@ impl eframe::App for CutlassApp {
             .frame(theme::gap_left())
             .show_separator_line(false)
             .show(ui, |ui| {
-                ui.painter().rect_filled(ui.max_rect(), 0.0, theme::PANEL);
+                inspector::show(ui, &self.project);
             });
 
         egui::CentralPanel::default()

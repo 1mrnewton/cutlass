@@ -125,7 +125,7 @@ fn clip_rect(lane: Rect, main: bool, start_us: i64, duration_us: i64, pixel_size
     Rect::from_min_size(pos2(x, lane.top() + inset), vec2(width, height))
 }
 
-fn file_name(source: &str) -> &str {
+pub(crate) fn file_name(source: &str) -> &str {
     let trimmed = source.trim_end_matches(['/', '\\']);
     trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
 }

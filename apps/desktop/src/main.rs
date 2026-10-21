@@ -4,8 +4,9 @@
 
 use eframe::egui::{self, Align2, Button, Rect, RichText, TextStyle, Vec2};
 
-use cutlass_project::{Project, ProjectId};
+use cutlass_project::{AssetId, Project, ProjectId};
 
+mod library;
 mod ruler;
 mod theme;
 mod timeline;
@@ -33,6 +34,8 @@ fn main() -> eframe::Result {
 struct CutlassApp {
     project: Project,
     playhead_us: i64,
+    shelf: library::Shelf,
+    selected_asset: Option<AssetId>,
 }
 
 impl CutlassApp {
@@ -42,6 +45,8 @@ impl CutlassApp {
         Self {
             project: Project::new(id, "Untitled"),
             playhead_us: 0,
+            shelf: library::Shelf::Media,
+            selected_asset: None,
         }
     }
 }
@@ -78,7 +83,7 @@ impl eframe::App for CutlassApp {
             .frame(theme::gap_right())
             .show_separator_line(false)
             .show(ui, |ui| {
-                ui.painter().rect_filled(ui.max_rect(), 0.0, theme::PANEL);
+                library::show(ui, &self.project, &mut self.shelf, &mut self.selected_asset);
             });
 
         egui::Panel::right("inspector")

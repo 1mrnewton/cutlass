@@ -9,6 +9,10 @@ pub const INK: Color32 = Color32::from_rgb(0xf3, 0xf3, 0xf3);
 pub const MUTED: Color32 = Color32::from_rgb(0xa3, 0xa3, 0xa3);
 pub const LANE: Color32 = Color32::from_rgb(0x24, 0x24, 0x24);
 pub const LANE_LINE: Color32 = Color32::from_rgb(0x2e, 0x2e, 0x2e);
+/// Active library shelf. `docs/library.md`.
+pub const ACTIVE: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
+/// Idle library-rail label.
+pub const FAINT: Color32 = Color32::from_rgb(0x73, 0x73, 0x73);
 pub const VIDEO: Color32 = Color32::from_rgb(0x5b, 0x8a, 0xa3);
 pub const AUDIO: Color32 = Color32::from_rgb(0x4e, 0x8f, 0x7c);
 pub const TEXT: Color32 = Color32::from_rgb(0x9a, 0x86, 0xb0);

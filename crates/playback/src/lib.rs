@@ -6,5 +6,7 @@
 #![deny(unsafe_code)]
 
 mod queue;
+mod seek;
 
 pub use queue::{PushError, Queue};
+pub use seek::keyframe_before;

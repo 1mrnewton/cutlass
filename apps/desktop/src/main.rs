@@ -144,8 +144,11 @@ impl CutlassApp {
     }
 
     fn import_chosen(&mut self, ui: &egui::Ui) {
-        let paths = import::pick();
-        let (assets, failed) = import::chosen(&paths);
+        self.add_imports(ui, &import::pick());
+    }
+
+    fn add_imports(&mut self, ui: &egui::Ui, paths: &[std::path::PathBuf]) {
+        let (assets, failed) = import::chosen(paths);
         if !assets.is_empty() {
             let commands: Vec<_> = assets
                 .into_iter()
@@ -188,6 +191,10 @@ impl eframe::App for CutlassApp {
         let dialog = self.export.is_some() || self.modify.is_some() || self.app_dialog.is_some();
         keys::set_blocked(ui, dialog);
         if !dialog {
+            let dropped = import::dropped(ui);
+            if !dropped.is_empty() {
+                self.add_imports(ui, &dropped);
+            }
             self.history_shortcut(ui);
             self.delete_pressed(ui);
         }
@@ -342,6 +349,9 @@ impl eframe::App for CutlassApp {
             }
             Some(app_settings::Outcome::Closed) if !opened_settings => self.app_dialog = None,
             _ => {}
+        }
+        if self.export.is_none() && self.modify.is_none() && self.app_dialog.is_none() {
+            import::show_hover(ui);
         }
     }
 }

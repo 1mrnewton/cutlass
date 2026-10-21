@@ -164,6 +164,7 @@ pub(crate) enum Phrase {
     Import,
     ImportUnread,
     ImportEmpty,
+    DropToImport,
 }
 
 #[cfg(test)]
@@ -314,6 +315,7 @@ impl Phrase {
         Self::Import,
         Self::ImportUnread,
         Self::ImportEmpty,
+        Self::DropToImport,
     ];
 }
 
@@ -463,6 +465,7 @@ const ENGLISH: &[&str] = &[
     "Import",
     "This file could not be read.",
     "This file has no picture or sound.",
+    "Drop to import",
 ];
 
 const FRENCH: &[&str] = &[
@@ -611,6 +614,7 @@ const FRENCH: &[&str] = &[
     "Importer",
     "Ce fichier n'a pas pu être lu.",
     "Ce fichier n'a ni image ni son.",
+    "Déposez pour importer",
 ];
 
 /// The word for `phrase` in `language`.
@@ -773,7 +777,15 @@ mod tests {
             say(Language::French, Phrase::ImportUnread),
             "Ce fichier n'a pas pu être lu."
         );
-        assert_eq!(Phrase::ImportEmpty as usize, super::ENGLISH.len() - 1);
+        assert_eq!(
+            say(Language::English, Phrase::DropToImport),
+            "Drop to import"
+        );
+        assert_eq!(
+            say(Language::French, Phrase::DropToImport),
+            "Déposez pour importer"
+        );
+        assert_eq!(Phrase::DropToImport as usize, super::ENGLISH.len() - 1);
         for phrase in Phrase::ALL {
             let english = say(Language::English, *phrase);
             let french = say(Language::French, *phrase);

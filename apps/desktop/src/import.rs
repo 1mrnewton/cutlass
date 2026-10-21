@@ -1,7 +1,9 @@
 //! Turn an opened MP4 or MOV into an asset. The project does not open the file.
-//! `docs/project.md`.
+//! A drop from Finder or Explorer is the same import. `docs/library.md`.
 
 use std::path::{Path, PathBuf};
+
+use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, vec2};
 
 use cutlass_core::Timestamp;
 use cutlass_media::{Content, Probe, TrackInfo};
@@ -73,6 +75,58 @@ pub(crate) fn chosen(paths: &[PathBuf]) -> (Vec<Asset>, Option<ImportError>) {
         None
     };
     (assets, failed)
+}
+
+/// Paths the window received this frame. The integration clears the list after.
+pub(crate) fn dropped(ui: &egui::Ui) -> Vec<PathBuf> {
+    ui.input(|input| {
+        input
+            .raw
+            .dropped_files
+            .iter()
+            .map(|file| file.path().to_path_buf())
+            .collect()
+    })
+}
+
+/// A file is over the window and has not been dropped or cancelled yet.
+pub(crate) fn hovering(ui: &egui::Ui) -> bool {
+    ui.input(|input| !input.raw.hovered_files.is_empty())
+}
+
+/// Dims the window and names the drop. A dialog that is already open does not call this.
+pub(crate) fn show_hover(ui: &egui::Ui) {
+    if !hovering(ui) {
+        return;
+    }
+    let text = crate::words::of(ui, crate::words::Phrase::DropToImport);
+    let screen = ui.ctx().content_rect();
+    egui::Area::new(egui::Id::unique("import-drop"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .movable(false)
+        .constrain(false)
+        .fade_in(false)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(screen);
+            ui.set_min_size(screen.size());
+            ui.painter()
+                .rect_filled(screen, 0.0, Color32::from_black_alpha(140));
+            let font = FontId::new(14.0, FontFamily::Proportional);
+            let galley =
+                ui.painter()
+                    .layout_no_wrap(text.to_owned(), font.clone(), crate::theme::INK);
+            let plate = Rect::from_center_size(screen.center(), galley.size() + vec2(32.0, 16.0));
+            ui.painter().rect_filled(plate, 10.0, crate::theme::BAR);
+            ui.painter().text(
+                plate.center(),
+                Align2::CENTER_CENTER,
+                text,
+                font,
+                crate::theme::INK,
+            );
+            crate::tip::read(ui, plate, ui.scope_id().with("import-drop-label"), text);
+        });
 }
 
 /// The native picker. Cancel returns nothing. The label stays untranslated.
@@ -259,5 +313,75 @@ mod tests {
         let (assets, failed) = chosen(&[std::path::PathBuf::from("/no/such/cutlass-import.mp4")]);
         assert!(assets.is_empty());
         assert_eq!(failed, Some(ImportError::Unread));
+    }
+
+    #[test]
+    fn a_folder_is_unread() {
+        let (assets, failed) = chosen(&[std::env::temp_dir()]);
+        assert!(assets.is_empty());
+        assert_eq!(failed, Some(ImportError::Unread));
+    }
+
+    #[derive(Debug)]
+    struct FakeFile {
+        path: std::path::PathBuf,
+    }
+
+    impl eframe::egui::DroppedFile for FakeFile {
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Err("the shell reads the path".into())
+        }
+    }
+
+    #[test]
+    fn a_hovered_file_is_named_and_a_drop_is_its_path() {
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, crate::words::Language::English);
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(800.0, 600.0),
+        );
+        let path = std::path::PathBuf::from("/no/such/cutlass-drop.mp4");
+        let mut time = 0.0;
+        let mut pass = |input: eframe::egui::RawInput| {
+            time += 0.05;
+            let mut got = Vec::new();
+            let mut input = input;
+            input.screen_rect = Some(screen);
+            input.time = Some(time);
+            let mut output = ctx.run_ui(input, |ui| {
+                super::show_hover(ui);
+                got = super::dropped(ui);
+            });
+            let tree = output.platform_output.accesskit_update.take();
+            output.textures_delta.clear();
+            (tree.expect("the tree is built"), got)
+        };
+        let hover = eframe::egui::RawInput {
+            hovered_files: vec![eframe::egui::HoveredFile {
+                path: Some(path.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let _warm = pass(hover.clone());
+        let (tree, got) = pass(hover);
+        assert!(got.is_empty());
+        assert!(tree.nodes.iter().any(|(_, node)| {
+            node.label() == Some("Drop to import") || node.value() == Some("Drop to import")
+        }));
+        let (tree, got) = pass(eframe::egui::RawInput {
+            dropped_files: vec![std::sync::Arc::new(FakeFile { path: path.clone() })],
+            ..Default::default()
+        });
+        assert_eq!(got, vec![path]);
+        assert!(tree.nodes.iter().all(|(_, node)| {
+            node.label() != Some("Drop to import") && node.value() != Some("Drop to import")
+        }));
     }
 }

@@ -1,0 +1,19 @@
+[package]
+name = "cutlass-compose"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Uploads a frame and converts it to RGB on the GPU."
+
+[dependencies]
+cutlass-color.workspace = true
+cutlass-core.workspace = true
+pollster.workspace = true
+thiserror.workspace = true
+wgpu.workspace = true
+
+[lints]
+workspace = true

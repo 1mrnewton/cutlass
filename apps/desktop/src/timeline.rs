@@ -677,6 +677,7 @@ pub fn show(
     {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
+    let mut remove = None;
     if tracks.height() > 0.0 {
         for (track, lane) in project
             .timeline()
@@ -722,7 +723,8 @@ pub fn show(
                 track,
                 lane_rect,
                 lane.main,
-                &ClipPaint {
+                &mut remove,
+                &mut ClipPaint {
                     project,
                     pixel_size: view.pixel_size,
                     origin_us: view.origin_us,
@@ -735,8 +737,12 @@ pub fn show(
                     guides: &guides.vertical,
                     marks: &mark_times,
                     dim,
+                    lanes: &lanes,
                 },
             );
+        }
+        if let Some(id) = remove.filter(|id| !blocks_edit(project, &lanes, *id)) {
+            commands.push(Command::RemoveSegment(id));
         }
     }
     ui.data_mut(|data| data.insert_temp(lane_id(), lanes));
@@ -1598,7 +1604,7 @@ struct ClipPaint<'a> {
     project: &'a Project,
     pixel_size: f64,
     origin_us: i64,
-    selected: &'a [SegmentId],
+    selected: &'a mut Vec<SegmentId>,
     drag: Option<&'a ClipDrag>,
     trim: Option<&'a TrimDrag>,
     pointer: Option<egui::Pos2>,
@@ -1607,9 +1613,104 @@ struct ClipPaint<'a> {
     guides: &'a [i64],
     marks: &'a [i64],
     dim: bool,
+    lanes: &'a Lanes,
 }
 
-fn paint_segments(ui: &mut egui::Ui, track: &Track, lane: Rect, main: bool, paint: &ClipPaint<'_>) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClipAction {
+    Copy,
+    Cut,
+    Delete,
+    Freeze,
+    Reverse,
+    Mirror,
+    Rotate,
+    Crop,
+    Transcribe,
+    SplitScenes,
+}
+
+fn picture_actions(kind: TrackKind) -> &'static [ClipAction] {
+    match kind {
+        TrackKind::Video => &[
+            ClipAction::Freeze,
+            ClipAction::Reverse,
+            ClipAction::Mirror,
+            ClipAction::Rotate,
+            ClipAction::Crop,
+            ClipAction::Transcribe,
+            ClipAction::SplitScenes,
+        ],
+        TrackKind::Audio => &[ClipAction::Reverse, ClipAction::Transcribe],
+        TrackKind::Text | TrackKind::Sticker => &[ClipAction::Mirror, ClipAction::Rotate],
+        TrackKind::Effect | TrackKind::Filter | TrackKind::Adjust | TrackKind::PluginEffect => &[],
+    }
+}
+
+fn clip_menu(kind: TrackKind) -> Vec<ClipAction> {
+    let mut rows = vec![ClipAction::Copy, ClipAction::Cut, ClipAction::Delete];
+    rows.extend(picture_actions(kind));
+    rows
+}
+
+fn action_runs(action: ClipAction) -> bool {
+    matches!(action, ClipAction::Delete)
+}
+
+fn action_label(action: ClipAction) -> &'static str {
+    match action {
+        ClipAction::Copy => "Copy",
+        ClipAction::Cut => "Cut",
+        ClipAction::Delete => "Delete",
+        ClipAction::Freeze => "Freeze",
+        ClipAction::Reverse => "Reverse",
+        ClipAction::Mirror => "Mirror",
+        ClipAction::Rotate => "Rotate",
+        ClipAction::Crop => "Crop",
+        ClipAction::Transcribe => "Transcribe",
+        ClipAction::SplitScenes => "Split scenes",
+    }
+}
+
+fn paint_clip_menu(
+    ui: &mut egui::Ui,
+    kind: TrackKind,
+    refused: bool,
+    id: SegmentId,
+    remove: &mut Option<SegmentId>,
+) {
+    let rows = clip_menu(kind);
+    let pictures = picture_actions(kind).len();
+    let split_at = rows.len() - pictures;
+    for (index, action) in rows.iter().copied().enumerate() {
+        if index == split_at && pictures > 0 {
+            ui.separator();
+        }
+        let enabled = action_runs(action) && !refused;
+        let color = if enabled { theme::INK } else { theme::FAINT };
+        if ui
+            .add_enabled(
+                enabled,
+                egui::Button::new(egui::RichText::new(action_label(action)).color(color)),
+            )
+            .clicked()
+        {
+            if enabled && action == ClipAction::Delete {
+                *remove = Some(id);
+            }
+            ui.close();
+        }
+    }
+}
+
+fn paint_segments(
+    ui: &mut egui::Ui,
+    track: &Track,
+    lane: Rect,
+    main: bool,
+    remove: &mut Option<SegmentId>,
+    paint: &mut ClipPaint<'_>,
+) {
     for segment in track.segments() {
         let range = segment.timeline();
         let rect = clip_rect(
@@ -1659,6 +1760,18 @@ fn paint_segments(ui: &mut egui::Ui, track: &Track, lane: Rect, main: bool, pain
         } else {
             paint_name(ui, paint.project, segment, rect);
         }
+        let response = ui.interact(
+            rect,
+            ui.scope_id().with(("clip-menu", segment.id())),
+            Sense::click(),
+        );
+        if response.secondary_clicked() && !chosen(paint.selected, segment.id()) {
+            choose(paint.selected, Some(segment.id()));
+        }
+        let refused = blocks_edit(paint.project, paint.lanes, segment.id());
+        let kind = track.kind();
+        let id = segment.id();
+        response.context_menu(|ui| paint_clip_menu(ui, kind, refused, id, remove));
     }
 }
 
@@ -3470,5 +3583,51 @@ mod tests {
             super::magnet_toggle(&cut, &locked_audio),
             Some(Command::SetMagnet(true))
         );
+    }
+
+    #[test]
+    fn a_video_menu_lists_the_picture_actions_and_only_delete_runs() {
+        use cutlass_project::TrackKind;
+        let video = super::clip_menu(TrackKind::Video);
+        assert_eq!(
+            video,
+            vec![
+                super::ClipAction::Copy,
+                super::ClipAction::Cut,
+                super::ClipAction::Delete,
+                super::ClipAction::Freeze,
+                super::ClipAction::Reverse,
+                super::ClipAction::Mirror,
+                super::ClipAction::Rotate,
+                super::ClipAction::Crop,
+                super::ClipAction::Transcribe,
+                super::ClipAction::SplitScenes,
+            ]
+        );
+        let audio = super::clip_menu(TrackKind::Audio);
+        assert_eq!(
+            &audio[3..],
+            &[super::ClipAction::Reverse, super::ClipAction::Transcribe]
+        );
+        let text = super::clip_menu(TrackKind::Text);
+        assert_eq!(
+            &text[3..],
+            &[super::ClipAction::Mirror, super::ClipAction::Rotate]
+        );
+        assert_eq!(
+            super::clip_menu(TrackKind::Sticker),
+            super::clip_menu(TrackKind::Text)
+        );
+        assert_eq!(
+            super::clip_menu(TrackKind::Effect),
+            vec![
+                super::ClipAction::Copy,
+                super::ClipAction::Cut,
+                super::ClipAction::Delete,
+            ]
+        );
+        assert!(super::action_runs(super::ClipAction::Delete));
+        assert!(!super::action_runs(super::ClipAction::Copy));
+        assert!(!super::action_runs(super::ClipAction::Freeze));
     }
 }

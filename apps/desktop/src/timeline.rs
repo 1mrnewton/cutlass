@@ -2,7 +2,7 @@
 
 use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, Sense, Stroke, pos2, vec2};
 
-use cutlass_project::{Project, Track, TrackKind};
+use cutlass_project::{Project, SegmentId, Track, TrackKind};
 
 use crate::ruler;
 use crate::theme;
@@ -22,10 +22,25 @@ struct Lane {
     height: f32,
 }
 
-pub fn show(ui: &mut egui::Ui, project: &Project, playhead: &mut i64) {
+pub fn show(
+    ui: &mut egui::Ui,
+    project: &Project,
+    playhead: &mut i64,
+    selected: &mut Option<SegmentId>,
+) {
     let full = ui.max_rect();
     let ruler_rect = Rect::from_min_size(full.min, vec2(full.width(), RULER_HEIGHT));
     let tracks = Rect::from_min_max(ruler_rect.left_bottom(), full.max);
+    if selected.is_some_and(|id| project.timeline().segment(id).is_none()) {
+        *selected = None;
+    }
+    if tracks.height() > 0.0
+        && ui.input(|input| input.pointer.primary_clicked())
+        && let Some(pointer) = ui.input(|input| input.pointer.interact_pos())
+        && tracks.contains(pointer)
+    {
+        *selected = segment_at(project, tracks, pointer);
+    }
     paint_ruler(ui, ruler_rect, project);
     if tracks.height() > 0.0 {
         let pixel_size = ruler::opening_pixel_size(
@@ -69,7 +84,9 @@ pub fn show(ui: &mut egui::Ui, project: &Project, playhead: &mut i64) {
                 FontId::new(12.0, FontFamily::Proportional),
                 theme::MUTED,
             );
-            paint_segments(ui, project, track, lane_rect, lane.main, pixel_size);
+            paint_segments(
+                ui, project, track, lane_rect, lane.main, pixel_size, *selected,
+            );
         }
     }
     paint_playhead(ui, ruler_rect, tracks, project, playhead);
@@ -86,6 +103,7 @@ fn paint_segments(
     lane: Rect,
     main: bool,
     pixel_size: f64,
+    selected: Option<SegmentId>,
 ) {
     for segment in track.segments() {
         let range = segment.timeline();
@@ -101,6 +119,14 @@ fn paint_segments(
         }
         ui.painter()
             .rect_filled(rect, 7.0, clip_color(track.kind()));
+        if selected == Some(segment.id()) {
+            ui.painter().rect_stroke(
+                rect,
+                7.0,
+                Stroke::new(1.5, Color32::WHITE),
+                egui::StrokeKind::Inside,
+            );
+        }
         let name = project
             .asset(segment.asset_id())
             .map(|asset| file_name(asset.source()))
@@ -116,6 +142,37 @@ fn paint_segments(
             Color32::WHITE,
         );
     }
+}
+
+fn segment_at(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<SegmentId> {
+    if tracks.height() <= 0.0 {
+        return None;
+    }
+    let pixel_size = ruler::opening_pixel_size(
+        (tracks.right() - lane_left(tracks)).max(0.0),
+        project.duration().value,
+    );
+    let lanes = layout(project.timeline().tracks(), tracks);
+    for (track, lane) in project.timeline().tracks().iter().zip(lanes).rev() {
+        let lane_rect = Rect::from_min_size(
+            pos2(lane_left(tracks), lane.top),
+            vec2((tracks.right() - lane_left(tracks)).max(0.0), lane.height),
+        );
+        for segment in track.segments().iter().rev() {
+            let range = segment.timeline();
+            let rect = clip_rect(
+                lane_rect,
+                lane.main,
+                range.start().value,
+                range.duration().value,
+                pixel_size,
+            );
+            if rect.contains(point) {
+                return Some(segment.id());
+            }
+        }
+    }
+    None
 }
 
 fn clip_rect(lane: Rect, main: bool, start_us: i64, duration_us: i64, pixel_size: f64) -> Rect {
@@ -284,7 +341,7 @@ mod tests {
     };
     use eframe::egui::{Rect, pos2, vec2};
 
-    use super::layout;
+    use super::{clip_rect, lane_left, layout, segment_at};
 
     fn project() -> Project {
         Project::new(ProjectId::from_bytes([1; 16]), "Untitled")
@@ -389,5 +446,71 @@ mod tests {
         assert!((short.width() - 8.0).abs() < f32::EPSILON);
         assert!((short.height() - 28.0).abs() < f32::EPSILON);
         assert_eq!(super::file_name("file:///cuts/v.mp4"), "v.mp4");
+    }
+
+    #[test]
+    fn a_point_on_a_clip_finds_it_and_a_point_on_the_head_does_not() {
+        let mut history = History::new();
+        let mut cut = project();
+        let video = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let asset = match history
+            .apply(&mut cut, &[Command::AddAsset(video)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let segment = {
+            let stored = cut.asset(asset).expect("asset");
+            let duration = stored.duration().expect("duration");
+            let source = TimeRange::new(
+                Timestamp::new(0, duration.timescale),
+                Timestamp::new(duration.value, duration.timescale),
+            )
+            .expect("source");
+            Segment::media(stored, source, 0, Channels::Both, Speed::ONE).expect("segment")
+        };
+        let main = cut.timeline().main_track().id();
+        let id = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Segment(id)] => *id,
+            other => panic!("expected a segment, got {other:?}"),
+        };
+        let tracks = Rect::from_min_size(pos2(0.0, 44.0), vec2(800.0, 356.0));
+        let lane = layout(cut.timeline().tracks(), tracks)
+            .into_iter()
+            .find(|lane| lane.main)
+            .expect("main");
+        let width = (tracks.right() - lane_left(tracks)).max(0.0);
+        let pixel_size = crate::ruler::opening_pixel_size(width, cut.duration().value);
+        let lane_rect =
+            Rect::from_min_size(pos2(lane_left(tracks), lane.top), vec2(width, lane.height));
+        let range = cut.timeline().segment(id).expect("segment").timeline();
+        let rect = clip_rect(
+            lane_rect,
+            true,
+            range.start().value,
+            range.duration().value,
+            pixel_size,
+        );
+        assert_eq!(segment_at(&cut, tracks, rect.center()), Some(id));
+        assert_eq!(segment_at(&cut, tracks, pos2(12.0, rect.center().y)), None);
     }
 }

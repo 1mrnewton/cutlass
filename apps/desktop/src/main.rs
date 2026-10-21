@@ -4,7 +4,7 @@
 
 use eframe::egui::{self, Align2, Button, Rect, RichText, TextStyle, Vec2};
 
-use cutlass_project::{AssetId, Project, ProjectId};
+use cutlass_project::{AssetId, Project, ProjectId, SegmentId};
 
 mod inspector;
 mod library;
@@ -38,6 +38,7 @@ struct CutlassApp {
     playhead_us: i64,
     shelf: library::Shelf,
     selected_asset: Option<AssetId>,
+    selected_segment: Option<SegmentId>,
 }
 
 impl CutlassApp {
@@ -49,6 +50,7 @@ impl CutlassApp {
             playhead_us: 0,
             shelf: library::Shelf::Media,
             selected_asset: None,
+            selected_segment: None,
         }
     }
 }
@@ -75,7 +77,12 @@ impl eframe::App for CutlassApp {
             .frame(theme::gap_above())
             .show_separator_line(false)
             .show(ui, |ui| {
-                timeline::show(ui, &self.project, &mut self.playhead_us);
+                timeline::show(
+                    ui,
+                    &self.project,
+                    &mut self.playhead_us,
+                    &mut self.selected_segment,
+                );
             });
 
         egui::Panel::left("library")

@@ -149,6 +149,12 @@ pub(crate) enum Phrase {
     Rotation,
     Opacity,
     Keyframe,
+    Width,
+    Height,
+    Background,
+    Modify,
+    Save,
+    InvalidSettings,
 }
 
 #[cfg(test)]
@@ -284,6 +290,12 @@ impl Phrase {
         Self::Rotation,
         Self::Opacity,
         Self::Keyframe,
+        Self::Width,
+        Self::Height,
+        Self::Background,
+        Self::Modify,
+        Self::Save,
+        Self::InvalidSettings,
     ];
 }
 
@@ -418,6 +430,12 @@ const ENGLISH: &[&str] = &[
     "Rotation",
     "Opacity",
     "Keyframe",
+    "Width",
+    "Height",
+    "Background",
+    "Modify",
+    "Save",
+    "Width and height have to be above zero, and color channels run from 0 to 255.",
 ];
 
 const FRENCH: &[&str] = &[
@@ -551,6 +569,12 @@ const FRENCH: &[&str] = &[
     "Rotation",
     "Opacité",
     "Image clé",
+    "Largeur",
+    "Hauteur",
+    "Arrière-plan",
+    "Modifier",
+    "Enregistrer",
+    "La largeur et la hauteur doivent être supérieures à zéro, et les canaux vont de 0 à 255.",
 ];
 
 /// The word for `phrase` in `language`.
@@ -691,7 +715,13 @@ mod tests {
         assert_eq!(say(Language::French, Phrase::Opacity), "Opacité");
         assert_eq!(say(Language::English, Phrase::Keyframe), "Keyframe");
         assert_eq!(say(Language::French, Phrase::Keyframe), "Image clé");
-        assert_eq!(Phrase::Keyframe as usize, super::ENGLISH.len() - 1);
+        assert_eq!(say(Language::English, Phrase::Modify), "Modify");
+        assert_eq!(say(Language::French, Phrase::Modify), "Modifier");
+        assert_eq!(say(Language::English, Phrase::Save), "Save");
+        assert_eq!(say(Language::French, Phrase::Save), "Enregistrer");
+        assert_eq!(say(Language::English, Phrase::Width), "Width");
+        assert_eq!(say(Language::French, Phrase::Background), "Arrière-plan");
+        assert_eq!(Phrase::InvalidSettings as usize, super::ENGLISH.len() - 1);
         for phrase in Phrase::ALL {
             let english = say(Language::English, *phrase);
             let french = say(Language::French, *phrase);

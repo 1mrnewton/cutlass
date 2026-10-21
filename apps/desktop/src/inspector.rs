@@ -1,5 +1,6 @@
-//! The inspector. Nothing selected shows the project. A video clip edits its
-//! placement. A mark stores a keyframe at the playhead. `docs/inspector.md`.
+//! The inspector. Nothing selected shows the project. Modify opens its settings.
+//! A video clip edits its placement. A mark stores a keyframe at the playhead.
+//! `docs/inspector.md`.
 
 use eframe::egui::{self, Key, RichText, ScrollArea, Sense, TextEdit, UiBuilder, WidgetInfo, vec2};
 
@@ -37,6 +38,8 @@ pub fn show(
     let rows = facts(project, language);
     paint(ui, words::say(language, Phrase::Details), "project", |ui| {
         rows_of(ui, &rows);
+        ui.add_space(16.0);
+        crate::modify::button(ui);
     });
     Vec::new()
 }
@@ -804,7 +807,7 @@ fn facts(project: &Project, language: Language) -> Vec<(&'static str, String)> {
     rows
 }
 
-fn color_space(space: ColorSpace) -> &'static str {
+pub(crate) fn color_space(space: ColorSpace) -> &'static str {
     match space {
         ColorSpace::Rec709 => "Rec. 709",
         ColorSpace::Rec2020Hlg => "Rec. 2020 HLG",
@@ -812,7 +815,7 @@ fn color_space(space: ColorSpace) -> &'static str {
     }
 }
 
-fn ratio(ratio: AspectRatio, language: Language) -> &'static str {
+pub(crate) fn ratio(ratio: AspectRatio, language: Language) -> &'static str {
     match ratio {
         AspectRatio::Original => words::say(language, Phrase::Original),
         AspectRatio::R16x9 => "16:9",
@@ -823,7 +826,7 @@ fn ratio(ratio: AspectRatio, language: Language) -> &'static str {
     }
 }
 
-fn frame_rate(rate: FrameRate) -> &'static str {
+pub(crate) fn frame_rate(rate: FrameRate) -> &'static str {
     match rate {
         FrameRate::Fps23976 => "23.976 fps",
         FrameRate::Fps24 => "24 fps",
@@ -1210,6 +1213,48 @@ mod tests {
         );
         let (_, commands) = pass(&cut, 2_000_000, vec![press(mark, false)]);
         assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn modify_asks_for_the_project_dialog() {
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, Language::English);
+        let cut = Project::new(cutlass_project::ProjectId::from_bytes([4; 16]), "Untitled");
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(320.0, 800.0),
+        );
+        let mut time = 0.0;
+        let mut pass = |events: Vec<eframe::egui::Event>| {
+            time += 0.05;
+            let mut output = ctx.run_ui(
+                eframe::egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    super::show(ui, &cut, None, 0);
+                },
+            );
+            let tree = output.platform_output.accesskit_update.take();
+            output.textures_delta.clear();
+            tree.expect("the tree is built")
+        };
+        let tree = pass(vec![]);
+        let button = center(&tree, "Modify");
+        let press = |pressed| eframe::egui::Event::PointerButton {
+            pos: button,
+            button: eframe::egui::PointerButton::Primary,
+            pressed,
+            modifiers: eframe::egui::Modifiers::NONE,
+        };
+        pass(vec![eframe::egui::Event::PointerMoved(button), press(true)]);
+        pass(vec![press(false)]);
+        assert!(crate::modify::take_ask(&ctx));
+        assert!(!crate::modify::take_ask(&ctx));
     }
 
     fn center(tree: &eframe::egui::accesskit::TreeUpdate, label: &str) -> eframe::egui::Pos2 {

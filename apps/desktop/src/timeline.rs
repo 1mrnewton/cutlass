@@ -4741,8 +4741,12 @@ mod tests {
         };
         pass(vec![eframe::egui::Event::PointerMoved(at), press(at, true)]);
         pass(vec![eframe::egui::Event::PointerMoved(moved)]);
-        let (_, commands) = pass(vec![eframe::egui::Event::PointerMoved(moved), press(moved, false)]);
-        let Command::AddKeyframe { keyframe, .. } = commands.last().expect("the diamond moves") else {
+        let (_, commands) = pass(vec![
+            eframe::egui::Event::PointerMoved(moved),
+            press(moved, false),
+        ]);
+        let Command::AddKeyframe { keyframe, .. } = commands.last().expect("the diamond moves")
+        else {
             panic!("expected a keyframe, got {commands:?}");
         };
         assert!(keyframe.offset().value > 0);

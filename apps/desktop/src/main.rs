@@ -14,6 +14,7 @@ mod inspector;
 mod keys;
 mod library;
 mod media_bin;
+mod modify;
 mod preview;
 mod ruler;
 mod theme;
@@ -53,6 +54,7 @@ struct CutlassApp {
     trim_drag: Option<timeline::TrimDrag>,
     split: bool,
     export: Option<export::Sheet>,
+    modify: Option<modify::Draft>,
     language: words::Language,
     panes: gaps::Panes,
 }
@@ -74,6 +76,7 @@ impl CutlassApp {
             trim_drag: None,
             split: false,
             export: None,
+            modify: None,
             language: words::language_from_tag(&words::system_tag()),
             panes: gaps::Panes::new(),
         }
@@ -143,8 +146,9 @@ impl eframe::App for CutlassApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         words::install(ui.ctx(), self.language);
         chrome::pass_clicks(frame);
-        keys::set_blocked(ui, self.export.is_some());
-        if self.export.is_none() {
+        let dialog = self.export.is_some() || self.modify.is_some();
+        keys::set_blocked(ui, dialog);
+        if !dialog {
             self.history_shortcut(ui);
             self.delete_pressed(ui);
         }
@@ -157,7 +161,7 @@ impl eframe::App for CutlassApp {
             .show(ui, |ui| {
                 open_export = header(ui, self.project.name());
             });
-        let opened = open_export && self.export.is_none();
+        let opened = open_export && self.export.is_none() && self.modify.is_none();
         if opened {
             self.export = Some(export::Sheet::open(
                 self.project.name(),
@@ -248,6 +252,27 @@ impl eframe::App for CutlassApp {
             .is_some_and(|sheet| export::show(ui, sheet, &label));
         if close && !opened {
             self.export = None;
+        }
+
+        let asked = modify::take_ask(ui.ctx());
+        if asked && self.export.is_none() && self.modify.is_none() {
+            self.modify = Some(modify::Draft::open(&self.project));
+        }
+        let outcome = self
+            .modify
+            .as_mut()
+            .map(|draft| modify::show(ui, &self.project, draft));
+        match outcome {
+            Some(modify::Outcome::Saved(commands)) => {
+                if !commands.is_empty()
+                    && let Err(error) = self.history.apply(&mut self.project, &commands)
+                {
+                    timeline::show_note(ui, timeline::apply_note(&error, words::active(ui)));
+                }
+                self.modify = None;
+            }
+            Some(modify::Outcome::Closed) => self.modify = None,
+            Some(modify::Outcome::Open) | None => {}
         }
     }
 }

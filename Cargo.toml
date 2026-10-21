@@ -20,6 +20,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/1mrnewton/cutlass"
 
 [workspace.dependencies]
+cutlass-audiotoolbox = { path = "crates/codecs/native/audiotoolbox" }
 cutlass-color = { path = "crates/color" }
 cutlass-compose = { path = "crates/compose" }
 cutlass-core = { path = "crates/core" }
@@ -30,6 +31,14 @@ cutlass-test-fixtures = { path = "crates/testing/fixtures" }
 cutlass-videotoolbox = { path = "crates/codecs/native/videotoolbox" }
 
 objc2 = "0.6.5"
+objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "AudioConverter",
+    "objc2-core-audio-types",
+] }
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = [
+    "CoreAudioBaseTypes",
+] }
 objc2-core-foundation = "0.3.2"
 objc2-core-media = "0.3.2"
 objc2-core-video = "0.3.2"

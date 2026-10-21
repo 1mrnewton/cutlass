@@ -6,7 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "AudioToolbox audio decode and encode for macOS and iOS."
+description = "AudioToolbox AAC decode and encode for macOS and iOS."
 
 [lints]
 workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+cutlass-core.workspace = true
+objc2-audio-toolbox.workspace = true
+objc2-core-audio-types.workspace = true
+thiserror.workspace = true

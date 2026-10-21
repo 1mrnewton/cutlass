@@ -54,6 +54,17 @@ name = "cutlass-hevc"
 version = "0.1.0"
 
 [[package]]
+name = "cutlass-media"
+version = "0.1.0"
+dependencies = [
+ "cutlass-core",
+ "cutlass-mp4",
+ "cutlass-test-fixtures",
+ "cutlass-videotoolbox",
+ "thiserror",
+]
+
+[[package]]
 name = "cutlass-mediacodec"
 version = "0.1.0"
 

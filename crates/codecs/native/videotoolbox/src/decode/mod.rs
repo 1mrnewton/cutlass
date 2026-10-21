@@ -312,6 +312,11 @@ unsafe extern "C-unwind" fn decoded(
     }));
 }
 
+/// True when this crate can open a decoder for `codec`.
+pub fn decodes(codec: VideoCodec) -> bool {
+    matches!(codec, VideoCodec::H264 | VideoCodec::Hevc)
+}
+
 fn describe(config: &VideoStreamConfig) -> Result<Description<'_>, Error> {
     match config.codec {
         VideoCodec::H264 => h264::describe(&config.config_record),

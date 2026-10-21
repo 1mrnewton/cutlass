@@ -5,6 +5,7 @@ members = [
     "crates/codecs/software/*",
     "crates/containers/*",
     "crates/core",
+    "crates/media",
     "crates/project",
     "crates/testing/*",
 ]
@@ -18,9 +19,11 @@ repository = "https://github.com/1mrnewton/cutlass"
 
 [workspace.dependencies]
 cutlass-core = { path = "crates/core" }
+cutlass-media = { path = "crates/media" }
 cutlass-mp4 = { path = "crates/containers/mp4" }
 cutlass-project = { path = "crates/project" }
 cutlass-test-fixtures = { path = "crates/testing/fixtures" }
+cutlass-videotoolbox = { path = "crates/codecs/native/videotoolbox" }
 
 objc2 = "0.6.5"
 objc2-core-foundation = "0.3.2"

@@ -1,0 +1,23 @@
+[package]
+name = "cutlass-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Probes a file and chooses a decoder."
+
+[dependencies]
+cutlass-core.workspace = true
+cutlass-mp4.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+cutlass-videotoolbox.workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+cutlass-test-fixtures.workspace = true
+
+[lints]
+workspace = true

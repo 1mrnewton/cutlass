@@ -2,11 +2,13 @@
 
 #![cfg(target_vendor = "apple")]
 
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cutlass_core::AudioSamples;
+use cutlass_core::{AudioSamples, Timestamp, VideoFrame};
 use cutlass_output::Output;
+use cutlass_playback::Queue;
 
 #[test]
 fn silence_is_handed_to_the_device() {
@@ -31,6 +33,25 @@ fn silence_is_handed_to_the_device() {
     let time = clock.expect("sample time");
     assert_eq!(time.timescale.get(), 48_000);
     assert!(time.value >= 0);
+
+    let video = NonZeroU32::new(15_360).expect("timescale");
+    let mut pictures = Queue::new(NonZeroUsize::new(2).expect("limit"));
+    pictures
+        .push(VideoFrame {
+            pts: Timestamp::new(0, video),
+            duration: None,
+            image: 0,
+        })
+        .expect("push");
+    pictures
+        .push(VideoFrame {
+            pts: Timestamp::new(15_360, video),
+            duration: None,
+            image: 1,
+        })
+        .expect("push");
+    let shown = pictures.at(time).expect("picture");
+    assert_eq!(shown.image, 0);
 }
 
 #[test]

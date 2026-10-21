@@ -19,3 +19,6 @@ objc2-audio-toolbox = { workspace = true, features = [
 ] }
 objc2-core-audio-types.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+cutlass-playback.workspace = true

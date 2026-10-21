@@ -242,6 +242,7 @@ name = "cutlass-output"
 version = "0.1.0"
 dependencies = [
  "cutlass-core",
+ "cutlass-playback",
  "objc2-audio-toolbox",
  "objc2-core-audio-types",
  "thiserror",

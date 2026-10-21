@@ -3,7 +3,8 @@
 use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, Sense, Stroke, pos2, vec2};
 
 use cutlass_project::{
-    Command, FrameRate, History, Project, SEQUENCE_TIMESCALE, SegmentId, Track, TrackId, TrackKind,
+    Command, FrameRate, History, Keyframe, Project, SEQUENCE_TIMESCALE, SegmentId, Track, TrackId,
+    TrackKind,
 };
 
 use crate::icons::{self, Icon};
@@ -95,6 +96,23 @@ struct Guides {
     selected: Option<Picked>,
     pull: Option<egui::Pos2>,
     row: Option<egui::Pos2>,
+}
+
+/// A keyframe diamond following the pointer. The offset is from the clip start.
+#[derive(Clone, Copy)]
+struct KeyDrag {
+    segment: SegmentId,
+    offset: i64,
+    origin: egui::Pos2,
+}
+
+#[derive(Clone, Copy)]
+struct KeyPlace {
+    start: i64,
+    duration: i64,
+    left: f32,
+    view: View,
+    rate: FrameRate,
 }
 
 /// A mark on a clip, measured from that clip's start so a move carries it.
@@ -540,6 +558,7 @@ pub fn show(
             && let Some(point) =
                 pointer.filter(|point| tracks.contains(*point) && point.x >= lane_left(tracks))
         {
+            ui.data_mut(|data| data.remove::<KeyDrag>(key_drag_id()));
             ui.data_mut(|data| data.remove::<BoxSelect>(box_id));
             guides.selected = None;
             stamps.selected = None;
@@ -575,6 +594,24 @@ pub fn show(
                 *drag = None;
                 *trim = None;
                 toggle_selected(selected, id);
+            } else if let Some(hit) = keyframe_at(project, tracks, point, view) {
+                *drag = None;
+                *trim = None;
+                choose(selected, Some(hit.segment));
+                if segment_lane_locked(project, &lanes, hit.segment) {
+                    held_locked = true;
+                } else {
+                    ui.data_mut(|data| {
+                        data.insert_temp(
+                            key_drag_id(),
+                            KeyDrag {
+                                segment: hit.segment,
+                                offset: hit.offset,
+                                origin: point,
+                            },
+                        );
+                    });
+                }
             } else if !shift && let Some(active) = trim_from(project, tracks, point, view) {
                 choose(selected, Some(active.segment));
                 *drag = None;
@@ -643,12 +680,47 @@ pub fn show(
             ui.data_mut(|data| data.remove::<BoxSelect>(box_id));
         }
         if released {
+            let key = ui.data(|data| data.get_temp::<KeyDrag>(key_drag_id()));
+            if key.is_some() {
+                ui.data_mut(|data| data.remove::<KeyDrag>(key_drag_id()));
+            }
             let clicked = ui.input(|input| input.pointer.primary_clicked());
             let on_locked_clip = pointer.is_some_and(|point| {
                 segment_at(project, tracks, point, view)
                     .is_some_and(|id| segment_lane_locked(project, &lanes, id))
             });
-            if clicked && on_locked_clip && (marker || beat) {
+            if let Some(key) = key {
+                drag.take();
+                trim.take();
+                let next = project
+                    .timeline()
+                    .segment(key.segment)
+                    .map(|segment| {
+                        let range = segment.timeline();
+                        let to = landed_offset(
+                            key.origin,
+                            pointer,
+                            key.offset,
+                            KeyPlace {
+                                start: range.start().value,
+                                duration: range.duration().value,
+                                left: lane_left(tracks),
+                                view,
+                                rate,
+                            },
+                        );
+                        retime_commands(key.segment, segment.keyframes(), key.offset, to)
+                    })
+                    .unwrap_or_default();
+                if next
+                    .iter()
+                    .any(|command| blocks_command(project, &lanes, command))
+                {
+                    note = Some(words::of(ui, Phrase::TrackIsLocked));
+                } else {
+                    commands.extend(next);
+                }
+            } else if clicked && on_locked_clip && (marker || beat) {
                 note = Some(words::of(ui, Phrase::TrackIsLocked));
             } else if clicked
                 && marker
@@ -2090,8 +2162,215 @@ fn paint_segments(
             range.start().timescale.get(),
         );
         let picked = chosen(paint.selected, segment.id());
-        paint.tips.push((response, text, picked));
+        let view = View {
+            pixel_size: paint.pixel_size,
+            origin_us: paint.origin_us,
+        };
+        let on_key = paint_keys(
+            ui,
+            paint.project,
+            segment,
+            rect,
+            lane.left(),
+            view,
+            paint.pointer,
+        );
+        if !on_key {
+            paint.tips.push((response, text, picked));
+        }
     }
+}
+
+fn key_drag_id() -> egui::Id {
+    egui::Id::unique("timeline-keyframe")
+}
+
+fn key_offsets(segment: &cutlass_project::Segment) -> Vec<i64> {
+    let mut offsets: Vec<i64> = segment
+        .keyframes()
+        .iter()
+        .map(|key| key.offset().value)
+        .collect();
+    offsets.sort_unstable();
+    offsets.dedup();
+    offsets
+}
+
+fn key_point(rect: Rect, left: f32, view: View, start: i64, offset: i64) -> egui::Pos2 {
+    let x = view.x(left, start.saturating_add(offset));
+    let x = if rect.width() <= 16.0 {
+        rect.center().x
+    } else {
+        x.clamp(rect.left() + 8.0, rect.right() - 8.0)
+    };
+    pos2(x, rect.center().y)
+}
+
+fn landed_offset(
+    origin: egui::Pos2,
+    pointer: Option<egui::Pos2>,
+    from: i64,
+    place: KeyPlace,
+) -> i64 {
+    let Some(point) = pointer else {
+        return from;
+    };
+    if origin.distance(point) < BOX_SLOP {
+        return from;
+    }
+    let end = place.start.saturating_add(place.duration.max(0));
+    let time = ruler::seek(
+        place.view.us_at(place.left, point.x),
+        place.rate,
+        end.max(0),
+    );
+    time.saturating_sub(place.start)
+        .clamp(0, place.duration.max(0))
+}
+
+fn retime_commands(segment: SegmentId, keys: &[Keyframe], from: i64, to: i64) -> Vec<Command> {
+    if from == to {
+        return Vec::new();
+    }
+    let moving: Vec<Keyframe> = keys
+        .iter()
+        .copied()
+        .filter(|key| key.offset().value == from)
+        .collect();
+    if moving.is_empty() {
+        return Vec::new();
+    }
+    let mut adds = Vec::new();
+    for key in &moving {
+        let Ok(keyframe) = Keyframe::new(to, key.value()) else {
+            return Vec::new();
+        };
+        adds.push(keyframe);
+    }
+    let mut commands = Vec::new();
+    for key in &moving {
+        commands.push(Command::RemoveKeyframe {
+            segment,
+            offset_us: from,
+            property: key.property(),
+        });
+    }
+    for keyframe in adds {
+        commands.push(Command::AddKeyframe { segment, keyframe });
+    }
+    commands
+}
+
+struct KeyHit {
+    segment: SegmentId,
+    offset: i64,
+}
+
+fn keyframe_at(project: &Project, tracks: Rect, point: egui::Pos2, view: View) -> Option<KeyHit> {
+    if tracks.height() <= 0.0 {
+        return None;
+    }
+    let lanes = layout(project.timeline().tracks(), tracks);
+    let mut best: Option<(f32, KeyHit)> = None;
+    for (track, lane) in project.timeline().tracks().iter().zip(lanes).rev() {
+        let lane_rect = Rect::from_min_size(
+            pos2(lane_left(tracks), lane.top),
+            vec2((tracks.right() - lane_left(tracks)).max(0.0), lane.height),
+        );
+        for segment in track.segments().iter().rev() {
+            let range = segment.timeline();
+            let rect = clip_rect(
+                lane_rect,
+                lane.main,
+                range.start().value,
+                range.duration().value,
+                view.pixel_size,
+                view.origin_us,
+            );
+            for offset in key_offsets(segment) {
+                let at = key_point(rect, lane_rect.left(), view, range.start().value, offset);
+                let hit = Rect::from_center_size(at, vec2(16.0, 16.0));
+                if !hit.contains(point) {
+                    continue;
+                }
+                let distance = at.distance(point);
+                let closer = best
+                    .as_ref()
+                    .is_none_or(|(best_distance, _)| distance < *best_distance);
+                if closer {
+                    best = Some((
+                        distance,
+                        KeyHit {
+                            segment: segment.id(),
+                            offset,
+                        },
+                    ));
+                }
+            }
+        }
+    }
+    best.map(|(_, hit)| hit)
+}
+
+fn paint_keys(
+    ui: &mut egui::Ui,
+    project: &Project,
+    segment: &cutlass_project::Segment,
+    rect: Rect,
+    left: f32,
+    view: View,
+    pointer: Option<egui::Pos2>,
+) -> bool {
+    let drag = ui.data(|data| data.get_temp::<KeyDrag>(key_drag_id()));
+    let range = segment.timeline();
+    let live = drag.and_then(|drag| {
+        (drag.segment == segment.id()).then(|| {
+            landed_offset(
+                drag.origin,
+                pointer,
+                drag.offset,
+                KeyPlace {
+                    start: range.start().value,
+                    duration: range.duration().value,
+                    left,
+                    view,
+                    rate: project.settings().rate().rate(),
+                },
+            )
+        })
+    });
+    let mut covered = false;
+    for offset in key_offsets(segment) {
+        let shown =
+            if drag.is_some_and(|drag| drag.segment == segment.id() && drag.offset == offset) {
+                live.unwrap_or(offset)
+            } else {
+                offset
+            };
+        let at = key_point(rect, left, view, range.start().value, shown);
+        let dragging = live.is_some() && drag.is_some_and(|drag| drag.offset == offset);
+        let color = if dragging { theme::EXPORT } else { theme::INK };
+        icons::paint(ui.painter(), at, Icon::Keyframe, 13.0, color);
+        let hit = Rect::from_center_size(at, vec2(16.0, 16.0));
+        if pointer.is_some_and(|point| hit.contains(point)) {
+            covered = true;
+        }
+        let response = ui.interact(
+            hit,
+            ui.scope_id().with(("keyframe", segment.id(), shown)),
+            Sense::hover(),
+        );
+        let us = range.start().value.saturating_add(shown);
+        crate::tip::show_image(
+            &response,
+            &format!(
+                "{} · {}",
+                words::of(ui, Phrase::Keyframe),
+                crate::library::card_time(us, SEQUENCE_TIMESCALE.get())
+            ),
+        );
+    }
+    covered
 }
 
 fn stroke_clip(ui: &egui::Ui, rect: Rect) {
@@ -4212,5 +4491,278 @@ mod tests {
             note,
             Some("Main track is locked. Couldn't turn off main track magnet.")
         );
+    }
+
+    #[test]
+    fn a_keyframe_drag_moves_every_sample_at_that_offset() {
+        use cutlass_project::{Keyframe, KeyframeProperty, KeyframeValue, SegmentId};
+
+        let keys = [
+            Keyframe::new(0, KeyframeValue::Opacity(0.25)).expect("opacity"),
+            Keyframe::new(0, KeyframeValue::Volume(0.5)).expect("volume"),
+            Keyframe::new(400_000, KeyframeValue::Rotation(10.0)).expect("turn"),
+        ];
+        let id = SegmentId::new(3).expect("id");
+        assert!(super::retime_commands(id, &keys, 0, 0).is_empty());
+        let commands = super::retime_commands(id, &keys, 0, 200_000);
+        assert!(matches!(
+            commands.as_slice(),
+            [
+                Command::RemoveKeyframe {
+                    offset_us: 0,
+                    property: KeyframeProperty::Opacity,
+                    ..
+                },
+                Command::RemoveKeyframe {
+                    offset_us: 0,
+                    property: KeyframeProperty::Volume,
+                    ..
+                },
+                Command::AddKeyframe { keyframe: first, .. },
+                Command::AddKeyframe { keyframe: second, .. },
+            ] if first.offset().value == 200_000
+                && second.offset().value == 200_000
+                && first.value() == KeyframeValue::Opacity(0.25)
+                && second.value() == KeyframeValue::Volume(0.5)
+        ));
+    }
+
+    #[test]
+    fn a_short_keyframe_drag_stays_and_a_long_one_stays_inside_the_clip() {
+        use cutlass_project::FrameRate;
+
+        let place = super::KeyPlace {
+            start: 1_000,
+            duration: 1_000_000,
+            left: 0.0,
+            view: super::View {
+                pixel_size: 0.001,
+                origin_us: 0,
+            },
+            rate: FrameRate::Fps30,
+        };
+        let origin = pos2(10.0, 10.0);
+        assert_eq!(
+            super::landed_offset(origin, Some(pos2(12.0, 10.0)), 40, place),
+            40
+        );
+        assert_eq!(
+            super::landed_offset(origin, Some(pos2(-500.0, 10.0)), 40, place),
+            0
+        );
+        let far = super::landed_offset(origin, Some(pos2(50_000.0, 10.0)), 40, place);
+        assert!(far > 500_000 && far <= place.duration);
+    }
+
+    #[test]
+    fn a_keyframe_diamond_is_the_hit_and_the_middle_of_the_clip_is_not() {
+        use cutlass_project::KeyframeValue;
+
+        let mut history = History::new();
+        let mut cut = project();
+        let video = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let asset = match history
+            .apply(&mut cut, &[Command::AddAsset(video)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let segment = {
+            let stored = cut.asset(asset).expect("asset");
+            let duration = stored.duration().expect("duration");
+            let source = TimeRange::new(
+                Timestamp::new(0, duration.timescale),
+                Timestamp::new(duration.value, duration.timescale),
+            )
+            .expect("source");
+            Segment::media(stored, source, 0, Channels::Both, Speed::ONE).expect("segment")
+        };
+        let main = cut.timeline().main_track().id();
+        let id = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Segment(id)] => *id,
+            other => panic!("expected a segment, got {other:?}"),
+        };
+        let key = cutlass_project::Keyframe::new(0, KeyframeValue::Opacity(0.5)).expect("key");
+        history
+            .apply(
+                &mut cut,
+                &[Command::AddKeyframe {
+                    segment: id,
+                    keyframe: key,
+                }],
+            )
+            .expect("keyframe");
+        let tracks = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 400.0));
+        let view = fitted(tracks, cut.duration().value);
+        let lane = layout(cut.timeline().tracks(), tracks)
+            .into_iter()
+            .find(|lane| lane.main)
+            .expect("main");
+        let lane_rect = Rect::from_min_size(
+            pos2(lane_left(tracks), lane.top),
+            vec2((tracks.right() - lane_left(tracks)).max(0.0), lane.height),
+        );
+        let range = cut.timeline().segment(id).expect("segment").timeline();
+        let rect = clip_rect(
+            lane_rect,
+            true,
+            range.start().value,
+            range.duration().value,
+            view.pixel_size,
+            view.origin_us,
+        );
+        let at = super::key_point(rect, lane_rect.left(), view, range.start().value, 0);
+        let hit = super::keyframe_at(&cut, tracks, at, view).expect("diamond");
+        assert_eq!(hit.segment, id);
+        assert_eq!(hit.offset, 0);
+        assert!(super::keyframe_at(&cut, tracks, rect.center(), view).is_none());
+    }
+
+    #[test]
+    fn dragging_the_diamond_writes_the_new_offset() {
+        use cutlass_project::KeyframeValue;
+
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, Language::English);
+        let mut history = History::new();
+        let mut cut = project();
+        let video = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let asset = match history
+            .apply(&mut cut, &[Command::AddAsset(video)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let segment = {
+            let stored = cut.asset(asset).expect("asset");
+            let duration = stored.duration().expect("duration");
+            let source = TimeRange::new(
+                Timestamp::new(0, duration.timescale),
+                Timestamp::new(duration.value, duration.timescale),
+            )
+            .expect("source");
+            Segment::media(stored, source, 0, Channels::Both, Speed::ONE).expect("segment")
+        };
+        let main = cut.timeline().main_track().id();
+        let id = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Segment(id)] => *id,
+            other => panic!("expected a segment, got {other:?}"),
+        };
+        history
+            .apply(
+                &mut cut,
+                &[Command::AddKeyframe {
+                    segment: id,
+                    keyframe: cutlass_project::Keyframe::new(0, KeyframeValue::Opacity(0.5))
+                        .expect("key"),
+                }],
+            )
+            .expect("keyframe");
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 500.0));
+        let mut time = 0.0;
+        let mut selected = vec![id];
+        let mut pass = |events: Vec<eframe::egui::Event>| {
+            time += 0.05;
+            let mut playhead = 0;
+            let mut drag = None;
+            let mut trim = None;
+            let mut split = false;
+            let mut commands = Vec::new();
+            let mut output = ctx.run_ui(
+                eframe::egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    commands.clone_from(&super::show(
+                        ui,
+                        &cut,
+                        &mut playhead,
+                        &mut selected,
+                        &mut drag,
+                        &mut trim,
+                        &mut split,
+                    ));
+                },
+            );
+            let tree = output.platform_output.accesskit_update.take();
+            output.textures_delta.clear();
+            (tree.expect("the tree is built"), commands)
+        };
+        let (tree, _) = pass(vec![]);
+        let at = center(&tree, "Keyframe · 0:00.0");
+        let moved = pos2(at.x + 80.0, at.y);
+        let press = |point: eframe::egui::Pos2, down: bool| eframe::egui::Event::PointerButton {
+            pos: point,
+            button: eframe::egui::PointerButton::Primary,
+            pressed: down,
+            modifiers: eframe::egui::Modifiers::default(),
+        };
+        pass(vec![eframe::egui::Event::PointerMoved(at), press(at, true)]);
+        pass(vec![eframe::egui::Event::PointerMoved(moved)]);
+        let (_, commands) = pass(vec![eframe::egui::Event::PointerMoved(moved), press(moved, false)]);
+        let Command::AddKeyframe { keyframe, .. } = commands.last().expect("the diamond moves") else {
+            panic!("expected a keyframe, got {commands:?}");
+        };
+        assert!(keyframe.offset().value > 0);
+        assert_eq!(keyframe.value(), KeyframeValue::Opacity(0.5));
+        assert!(matches!(
+            commands.first(),
+            Some(Command::RemoveKeyframe { offset_us: 0, .. })
+        ));
+    }
+
+    fn center(tree: &eframe::egui::accesskit::TreeUpdate, label: &str) -> eframe::egui::Pos2 {
+        let (_, node) = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some(label) || node.value() == Some(label))
+            .unwrap_or_else(|| panic!("missing {label}"));
+        let rect = node.bounds().expect("bounds");
+        pos2(
+            ((rect.x0 + rect.x1) / 2.0) as f32,
+            ((rect.y0 + rect.y1) / 2.0) as f32,
+        )
     }
 }

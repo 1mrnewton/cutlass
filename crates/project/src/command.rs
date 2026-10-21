@@ -8,7 +8,7 @@ use crate::Error;
 use crate::asset::Asset;
 use crate::id::{AssetId, SegmentId, TrackId};
 use crate::rate::SequenceRate;
-use crate::segment::{Segment, Transform};
+use crate::segment::{Keyframe, KeyframeProperty, Segment, Transform};
 use crate::settings::{AspectRatio, Color, ColorSpace};
 use crate::time::{self, Speed, TimeRange};
 
@@ -57,6 +57,18 @@ pub enum Command {
     SetTransform {
         segment: SegmentId,
         transform: Transform,
+    },
+    /// One sample. The offset is microseconds from the segment's timeline start.
+    /// The sample is stored and not read.
+    AddKeyframe {
+        segment: SegmentId,
+        keyframe: Keyframe,
+    },
+    /// Removes the sample of `property` at `offset_us`.
+    RemoveKeyframe {
+        segment: SegmentId,
+        offset_us: i64,
+        property: KeyframeProperty,
     },
 }
 

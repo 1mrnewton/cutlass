@@ -59,6 +59,8 @@ pub enum Error {
     KeyframeOutOfRange,
     #[error("two keyframes share a property and an offset")]
     DuplicateKeyframe,
+    #[error("no keyframe of that property at that offset")]
+    MissingKeyframe,
     #[error("opacity is outside 0..=1")]
     Opacity,
     #[error("volume is negative")]

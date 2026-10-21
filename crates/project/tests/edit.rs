@@ -5,8 +5,8 @@ use std::num::NonZeroU32;
 use cutlass_core::Timestamp;
 use cutlass_project::{
     AspectRatio, Asset, AssetId, Channels, Color, ColorSpace, Command, Error, FrameRate, History,
-    Keyframe, KeyframeValue, Outcome, Project, ProjectId, Segment, SegmentId, SequenceRate, Speed,
-    TimeRange, TrackId, TrackKind, Transform,
+    Keyframe, KeyframeProperty, KeyframeValue, Outcome, Project, ProjectId, Segment, SegmentId,
+    SequenceRate, Speed, TimeRange, TrackId, TrackKind, Transform,
 };
 
 fn scale(value: u32) -> NonZeroU32 {
@@ -1225,5 +1225,142 @@ fn transform_moves_the_picture_and_undo_puts_it_back() -> Result<(), Error> {
         ),
         Error::UnknownSegment(missing),
     );
+    Ok(())
+}
+
+#[test]
+fn a_keyframe_is_stored_and_undo_removes_it() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    let keyframe = Keyframe::new(0, KeyframeValue::Opacity(0.5))?;
+    assert_eq!(
+        run(
+            &mut cut,
+            Command::AddKeyframe {
+                segment: id,
+                keyframe,
+            },
+        )?,
+        Outcome::Unchanged
+    );
+    let scale = Keyframe::new(0, KeyframeValue::Scale { x: 2.0, y: 1.0 })?;
+    run(
+        &mut cut,
+        Command::AddKeyframe {
+            segment: id,
+            keyframe: scale,
+        },
+    )?;
+    let placed = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(placed.transform(), Transform::IDENTITY);
+    assert_eq!(placed.keyframes().len(), 2);
+    assert_eq!(placed.keyframes()[0].value(), KeyframeValue::Opacity(0.5));
+    cut.history.undo(&mut cut.project)?;
+    let undone = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(undone.keyframes().len(), 1);
+    cut.history.undo(&mut cut.project)?;
+    let cleared = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert!(cleared.keyframes().is_empty());
+    cut.history.redo(&mut cut.project)?;
+    run(
+        &mut cut,
+        Command::RemoveKeyframe {
+            segment: id,
+            offset_us: 0,
+            property: KeyframeProperty::Opacity,
+        },
+    )?;
+    let removed = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert!(removed.keyframes().is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_bad_keyframe_changes_nothing() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    let keyframe = Keyframe::new(0, KeyframeValue::Opacity(0.5))?;
+    run(
+        &mut cut,
+        Command::AddKeyframe {
+            segment: id,
+            keyframe,
+        },
+    )?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::AddKeyframe {
+                segment: id,
+                keyframe,
+            },
+        ),
+        Error::DuplicateKeyframe,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::AddKeyframe {
+                segment: id,
+                keyframe: Keyframe::new(1_000_001, KeyframeValue::Rotation(10.0))?,
+            },
+        ),
+        Error::KeyframeOutOfRange,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::RemoveKeyframe {
+                segment: id,
+                offset_us: 0,
+                property: KeyframeProperty::Volume,
+            },
+        ),
+        Error::MissingKeyframe,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::RemoveKeyframe {
+                segment: id,
+                offset_us: -1,
+                property: KeyframeProperty::Opacity,
+            },
+        ),
+        Error::NegativeTime,
+    );
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::AddKeyframe {
+                segment: missing,
+                keyframe,
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
+    let kept = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(kept.keyframes(), &[keyframe]);
     Ok(())
 }

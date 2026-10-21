@@ -102,6 +102,16 @@ pub enum KeyframeValue {
     Volume(f64),
 }
 
+/// Which property a sample stores. Position and scale each hold both axes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyframeProperty {
+    Position,
+    Scale,
+    Rotation,
+    Opacity,
+    Volume,
+}
+
 /// One sample of a segment property.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Keyframe {
@@ -129,13 +139,13 @@ impl Keyframe {
         self.value
     }
 
-    fn property(self) -> u8 {
+    pub const fn property(self) -> KeyframeProperty {
         match self.value {
-            KeyframeValue::Position { .. } => 0,
-            KeyframeValue::Scale { .. } => 1,
-            KeyframeValue::Rotation(_) => 2,
-            KeyframeValue::Opacity(_) => 3,
-            KeyframeValue::Volume(_) => 4,
+            KeyframeValue::Position { .. } => KeyframeProperty::Position,
+            KeyframeValue::Scale { .. } => KeyframeProperty::Scale,
+            KeyframeValue::Rotation(_) => KeyframeProperty::Rotation,
+            KeyframeValue::Opacity(_) => KeyframeProperty::Opacity,
+            KeyframeValue::Volume(_) => KeyframeProperty::Volume,
         }
     }
 }
@@ -309,6 +319,27 @@ impl Segment {
             return Err(Error::DuplicateKeyframe);
         }
         self.keyframes.push(keyframe);
+        Ok(())
+    }
+
+    /// Removes the sample of `property` at `offset_us` microseconds from the
+    /// segment start. A missing sample changes nothing.
+    pub fn remove_keyframe(
+        &mut self,
+        offset_us: i64,
+        property: KeyframeProperty,
+    ) -> Result<(), Error> {
+        if offset_us < 0 {
+            return Err(Error::NegativeTime);
+        }
+        let Some(index) = self
+            .keyframes
+            .iter()
+            .position(|key| key.property() == property && key.offset.value == offset_us)
+        else {
+            return Err(Error::MissingKeyframe);
+        };
+        self.keyframes.remove(index);
         Ok(())
     }
 

@@ -136,6 +136,22 @@ impl Project {
                 self.timeline.segment_mut(segment)?.set_transform(transform);
                 Ok(Outcome::Unchanged)
             }
+            Command::AddKeyframe { segment, keyframe } => {
+                self.timeline
+                    .segment_mut(segment)?
+                    .push_keyframe(keyframe)?;
+                Ok(Outcome::Unchanged)
+            }
+            Command::RemoveKeyframe {
+                segment,
+                offset_us,
+                property,
+            } => {
+                self.timeline
+                    .segment_mut(segment)?
+                    .remove_keyframe(offset_us, property)?;
+                Ok(Outcome::Unchanged)
+            }
         }
     }
 

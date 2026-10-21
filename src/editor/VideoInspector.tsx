@@ -1,5 +1,7 @@
 import { useState, type ReactNode } from "react"
+import { ColorTools } from "./ColorTools"
 import { Icon } from "./icons"
+import { useLook, type Look } from "./look"
 import type { Clip } from "./model"
 
 type VideoTab = "video" | "audio" | "speed" | "animation" | "adjust" | "style"
@@ -175,6 +177,7 @@ export function VideoInspector({
   const [lutStrength, setLutStrength] = useState(100)
   const [skin, setSkin] = useState(true)
   const [grades, setGrades] = useState<Record<string, number>>({})
+  const { setLook } = useLook()
 
   const toggleFeature = (id: string) => {
     setEnabled((current) => ({ ...current, [id]: !current[id] }))
@@ -257,9 +260,18 @@ export function VideoInspector({
           onLut={setLut}
           onStrength={setLutStrength}
           onSkin={setSkin}
-          onGrade={(id, value) => setGrades((current) => ({ ...current, [id]: value }))}
+          onGrade={(id, value) => {
+            setGrades((current) => ({ ...current, [id]: value }))
+            if (id === "temp" || id === "saturation" || id === "brightness") {
+              setLook(clip.id, { temp: id === "temp" ? value : grades.temp, sat: id === "saturation" ? value : grades.saturation, bright: id === "brightness" ? value : grades.brightness })
+            }
+          }}
           onResetLut={() => { setLut("None"); setLutStrength(100); setSkin(true) }}
-          onResetGrade={() => setGrades({})}
+          onResetGrade={() => {
+            setGrades({})
+            setLook(clip.id, { temp: 0, sat: 0, bright: 0 })
+          }}
+          onTint={(patch) => setLook(clip.id, patch)}
           onNote={onNote}
         />
       ) : (
@@ -595,6 +607,7 @@ function AdjustTab({
   onGrade,
   onResetLut,
   onResetGrade,
+  onTint,
   onNote,
 }: {
   page: AdjustPage
@@ -613,15 +626,9 @@ function AdjustTab({
   onGrade: (id: string, value: number) => void
   onResetLut: () => void
   onResetGrade: () => void
+  onTint: (patch: Partial<Look>) => void
   onNote: (note: string) => void
 }) {
-  const notes: Record<Exclude<AdjustPage, "basic">, string> = {
-    hsl: "Hue, saturation, and lightness for each color sit here. They do not change the frame.",
-    curves: "The color curves sit here. They do not change the frame.",
-    wheel: "The color wheels sit here. They do not change the frame.",
-    mask: "The adjust mask sits here. It does not change the frame.",
-  }
-
   return (
     <div className="adjust-panel">
       <div className="clip-pages adjust-pages" role="tablist" aria-label="Adjust">
@@ -705,7 +712,7 @@ function AdjustTab({
           </footer>
         </>
       ) : (
-        <p className="clip-note">{notes[page]}</p>
+        <ColorTools page={page} onTint={onTint} />
       )}
     </div>
   )

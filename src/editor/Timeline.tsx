@@ -3,6 +3,7 @@ import { ClipMenu, menuFor } from "./ClipMenu"
 import { Icon } from "./icons"
 import { Tip } from "./Tooltip"
 import {
+  addCaptions,
   addGuide,
   addMarker,
   addPlacement,
@@ -911,7 +912,22 @@ export function Timeline({
           </button>
         </Tip>
         <Tip label="Transcribe">
-          <button type="button" className="tl-tool" aria-label="Transcribe" disabled={!allows(timedKinds)} onClick={() => pictureNote("The prototype does not transcribe a clip.")}>
+          <button
+            type="button"
+            className="tl-tool"
+            aria-label="Transcribe"
+            disabled={!allows(timedKinds)}
+            onClick={() => {
+              const id = selectedIds.find((item) => {
+                const clip = project.clips.find((entry) => entry.id === item)
+                const kind = project.tracks.find((track) => track.id === clip?.trackId)?.kind
+                return kind ? timedKinds.includes(kind) : false
+              })
+              if (!id) return
+              const result = addCaptions(project, id)
+              onProject(result.state, result.note, result.selectId)
+            }}
+          >
             <Icon name="transcribe" />
           </button>
         </Tip>

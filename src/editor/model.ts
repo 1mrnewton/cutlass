@@ -562,6 +562,43 @@ export function clipAt(clips: Clip[], time: number, tone: Tone) {
   return hits.sort((a, b) => b.start - a.start)[0] ?? null
 }
 
+const captionLines = ["We are gathered", "for the vows", "and then we dance"]
+
+export function addCaptions(state: ProjectState, clipId: string): { state: ProjectState; note: string; selectId?: string } {
+  const clip = state.clips.find((item) => item.id === clipId)
+  const from = state.tracks.find((track) => track.id === clip?.trackId)
+  if (!clip || !from || (from.kind !== "video" && from.kind !== "audio" && from.kind !== "text_to_video_text_audio")) {
+    return { state, note: "Transcribe a video or an audio clip." }
+  }
+  const mark = `caption:${clip.id}`
+  const already = state.clips.find((item) => item.assetId === mark)
+  if (already) return { state, note: "Captions are already on the timeline.", selectId: already.id }
+  const slice = Math.max(0.4, clip.duration / captionLines.length)
+  const hits = (trackId: string, start: number, duration: number, clips: Clip[]) =>
+    clips.some((item) => item.trackId === trackId && start < item.start + item.duration - 0.01 && start + duration > item.start + 0.01)
+  let tracks = state.tracks
+  let clips = state.clips
+  let track = tracks.find(
+    (item) => item.kind === "text" && captionLines.every((_, index) => !hits(item.id, clip.start + index * slice, slice, clips)),
+  )
+  if (!track) {
+    track = { id: nextTrackId(tracks), kind: "text" }
+    tracks = placeTrack(tracks, track)
+  }
+  let selectId = ""
+  captionLines.forEach((line, index) => {
+    const start = clip.start + index * slice
+    const duration = Math.max(0.4, Math.min(slice, clip.start + clip.duration - start))
+    const id = nextClipId(clips)
+    if (!selectId) selectId = id
+    clips = [
+      ...clips,
+      bare({ id, trackId: track.id, name: line, start, duration, tone: "title", assetId: mark }),
+    ]
+  })
+  return { state: { ...state, tracks, clips }, note: "Captions are on a text track.", selectId }
+}
+
 function bandInsertAbove(tracks: Track[], kind: TrackKind, hoverId: string | null, main = false) {
   const incoming = layerOf({ kind, main })
   const hover = hoverId ? tracks.find((track) => track.id === hoverId) : undefined

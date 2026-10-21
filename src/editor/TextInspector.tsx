@@ -1,5 +1,6 @@
 import { useState, type Dispatch, type ReactNode, type SetStateAction } from "react"
 import { Icon } from "./icons"
+import { useLook } from "./look"
 import type { Clip } from "./model"
 
 type TextTab = "text" | "animation" | "tracking" | "speech"
@@ -157,6 +158,10 @@ export function TextInspector({
   const [blur, setBlur] = useState(15)
   const [distance, setDistance] = useState(5)
   const [angle, setAngle] = useState(-45)
+  const { setLook } = useLook()
+  const [bubble, setBubble] = useState("none")
+  const [textEffect, setTextEffect] = useState("none")
+  const [trackMode, setTrackMode] = useState("Face")
 
   const applyCase = (mode: CaseMode) => {
     setLetterCase(mode)
@@ -193,10 +198,73 @@ export function TextInspector({
         </div>
       )}
       {tab === "animation" && <TextAnimation onNote={onNote} />}
-      {tab === "tracking" && <p className="clip-note">Tracking is part of the picture. It does not follow a subject.</p>}
+      {tab === "tracking" && (
+        <div className="clip-body">
+          <div className="voice-tags" role="toolbar" aria-label="Tracking target">
+            {["Face", "Body", "Hand", "Custom"].map((item) => (
+              <button key={item} type="button" aria-pressed={trackMode === item} onClick={() => setTrackMode(item)}>
+                {item}
+              </button>
+            ))}
+          </div>
+          <p className="clip-note">The line stays with the {trackMode.toLowerCase()} target on the mock frame. The prototype does not follow a subject.</p>
+          <button type="button" className="save-preset" onClick={() => onNote("The prototype does not follow a subject.")}>Start tracking</button>
+        </div>
+      )}
       {tab === "speech" && <SpeechPanel copy={copy} onNote={onNote} />}
-      {tab === "text" && page !== "basic" && (
-        <p className="clip-note">{page === "bubble" ? "Bubbles are part of the picture." : "Text effects are part of the picture."} They do not change the frame.</p>
+      {tab === "text" && page === "bubble" && (
+        <div className="clip-body">
+          <div className="preset-grid">
+            {[
+              ["none", "None"],
+              ["round", "Round"],
+              ["box", "Box"],
+              ["thought", "Thought"],
+            ].map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                className="preset-tile"
+                aria-label={label}
+                aria-pressed={bubble === id}
+                data-picked={bubble === id ? "true" : "false"}
+                onClick={() => {
+                  setBubble(id)
+                  setLook(clip.id, { bubble: id })
+                }}
+              >
+                {id === "none" ? <Icon name="unavailable" size={16} /> : "Aa"}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {tab === "text" && page === "effects" && (
+        <div className="clip-body">
+          <div className="preset-grid">
+            {[
+              ["none", "None"],
+              ["shadow", "Shadow"],
+              ["glow", "Glow"],
+              ["outline", "Outline"],
+            ].map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                className="preset-tile"
+                aria-label={label}
+                aria-pressed={textEffect === id}
+                data-picked={textEffect === id ? "true" : "false"}
+                onClick={() => {
+                  setTextEffect(id)
+                  setLook(clip.id, { textEffect: id })
+                }}
+              >
+                {label === "None" ? <Icon name="unavailable" size={16} /> : "Aa"}
+              </button>
+            ))}
+          </div>
+        </div>
       )}
       {tab === "text" && page === "basic" && (
         <>

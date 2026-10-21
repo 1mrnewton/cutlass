@@ -7,6 +7,8 @@ import { Preview, Transport } from "./Preview"
 import { ProjectDialog } from "./ProjectDialog"
 import { Timeline } from "./Timeline"
 import { TooltipLayer } from "./Tooltip"
+import { AdjustClipInspector, AudioInspector, EffectInspector, FilterInspector, StickerInspector } from "./KindInspectors"
+import { LookProvider } from "./look"
 import { TextInspector } from "./TextInspector"
 import { VideoInspector } from "./VideoInspector"
 
@@ -42,6 +44,7 @@ export function DesktopEditor({ api }: { api: EditorApi }) {
   }, [])
 
   return (
+    <LookProvider>
     <div className="desktop" ref={desktopRef}>
       <header className="head">
         <div className="topbar">
@@ -188,6 +191,7 @@ export function DesktopEditor({ api }: { api: EditorApi }) {
         />
       )}
     </div>
+    </LookProvider>
   )
 }
 
@@ -358,6 +362,15 @@ function Inspector({
   if (kind === "text" || kind === "text_to_video_text") {
     return <TextInspector key={clip.id} clip={clip} selectedCount={selectedCount} width={width} onNote={onNote} />
   }
+
+  if (kind === "audio" || kind === "text_to_video_text_audio") {
+    return <AudioInspector key={clip.id} clip={clip} width={width} onNote={onNote} />
+  }
+
+  if (kind === "sticker") return <StickerInspector key={clip.id} clip={clip} width={width} />
+  if (kind === "effect" || kind === "plugin_effect") return <EffectInspector key={clip.id} clip={clip} width={width} />
+  if (kind === "filter") return <FilterInspector key={clip.id} clip={clip} width={width} />
+  if (kind === "adjust") return <AdjustClipInspector key={clip.id} clip={clip} width={width} />
 
   return (
     <aside className="inspector" style={{ width }}>

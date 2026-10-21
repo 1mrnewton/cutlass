@@ -33,8 +33,27 @@ pub(crate) fn tool(ui: &egui::Ui) -> Option<Shortcut> {
     take(ui, |shortcut| !shortcut.history())
 }
 
+pub(crate) fn set_blocked(ui: &egui::Ui, blocked: bool) {
+    let id = block_id();
+    if blocked {
+        ui.data_mut(|data| data.insert_temp(id, true));
+    } else {
+        ui.data_mut(|data| data.remove::<bool>(id));
+    }
+}
+
+fn block_id() -> egui::Id {
+    egui::Id::unique("shortcuts-blocked")
+}
+
 fn take(ui: &egui::Ui, want: impl Fn(Shortcut) -> bool) -> Option<Shortcut> {
     if ui.memory(|memory| memory.focused().is_some()) {
+        return None;
+    }
+    if ui
+        .data(|data| data.get_temp::<bool>(block_id()))
+        .unwrap_or(false)
+    {
         return None;
     }
     ui.input_mut(|input| {

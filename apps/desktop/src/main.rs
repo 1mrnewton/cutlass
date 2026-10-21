@@ -2,10 +2,12 @@
 
 #![deny(unsafe_code)]
 
-use eframe::egui::{self, Align2, Button, Rect, RichText, TextStyle, Vec2};
+use eframe::egui::{self, Align2, Button, Rect, RichText, Sense, TextStyle, Vec2};
 
 use cutlass_project::{AssetId, History, Project, ProjectId, SegmentId};
 
+mod chrome;
+mod export;
 mod icons;
 mod inspector;
 mod keys;
@@ -45,6 +47,7 @@ struct CutlassApp {
     clip_drag: Option<timeline::ClipDrag>,
     trim_drag: Option<timeline::TrimDrag>,
     split: bool,
+    export: Option<export::Sheet>,
 }
 
 impl CutlassApp {
@@ -62,6 +65,7 @@ impl CutlassApp {
             clip_drag: None,
             trim_drag: None,
             split: false,
+            export: None,
         }
     }
 
@@ -123,15 +127,29 @@ impl eframe::App for CutlassApp {
         theme::GAP.to_normalized_gamma_f32()
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.history_shortcut(ui);
-        self.delete_pressed(ui);
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        chrome::pass_clicks(frame);
+        keys::set_blocked(ui, self.export.is_some());
+        if self.export.is_none() {
+            self.history_shortcut(ui);
+            self.delete_pressed(ui);
+        }
 
+        let mut open_export = false;
         egui::Panel::top("head")
             .exact_size(theme::HEADER_HEIGHT)
             .frame(theme::bar())
             .show_separator_line(false)
-            .show(ui, |ui| header(ui, self.project.name()));
+            .show(ui, |ui| {
+                open_export = header(ui, self.project.name());
+            });
+        let opened = open_export && self.export.is_none();
+        if opened {
+            self.export = Some(export::Sheet::open(
+                self.project.name(),
+                self.project.settings().rate().rate(),
+            ));
+        }
 
         let timeline_max =
             (ui.available_height() - theme::TIMELINE_RESERVE).max(theme::TIMELINE_MIN);
@@ -188,13 +206,31 @@ impl eframe::App for CutlassApp {
             .show(ui, |ui| {
                 preview::show(ui, &self.project, self.playhead_us);
             });
+
+        let span = self.project.duration();
+        let label = export::duration_label(span.value, span.timescale.get());
+        let close = self
+            .export
+            .as_mut()
+            .is_some_and(|sheet| export::show(ui, sheet, &label));
+        if close && !opened {
+            self.export = None;
+        }
     }
 }
 
 /// Project bar. The Mac close, minimize, and maximize buttons are the window's.
-fn header(ui: &mut egui::Ui, name: &str) {
+fn header(ui: &mut egui::Ui, name: &str) -> bool {
     ui.take_available_height();
     let rect = ui.max_rect();
+    let size = Vec2::new(72.0, 26.0);
+    let origin = rect.right_center() - Vec2::new(12.0 + size.x, size.y / 2.0);
+    let button = Rect::from_min_size(origin, size);
+    let drag = ui.interact(rect, ui.scope_id().with("project-bar"), Sense::drag());
+    let pointer = ui.input(|input| input.pointer.interact_pos());
+    if drag.drag_started() && pointer.is_none_or(|point| !button.contains(point)) {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
     ui.painter().text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -203,12 +239,11 @@ fn header(ui: &mut egui::Ui, name: &str) {
         theme::INK,
     );
 
-    let size = Vec2::new(72.0, 26.0);
-    let origin = rect.right_center() - Vec2::new(12.0 + size.x, size.y / 2.0);
     ui.put(
-        Rect::from_min_size(origin, size),
+        button,
         Button::new(RichText::new("Export").color(theme::EXPORT_INK).strong())
             .fill(theme::EXPORT)
             .corner_radius(8),
-    );
+    )
+    .clicked()
 }

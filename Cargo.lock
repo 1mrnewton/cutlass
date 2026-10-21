@@ -465,6 +465,8 @@ dependencies = [
  "cutlass-core",
  "cutlass-project",
  "eframe",
+ "objc2-app-kit 0.3.2",
+ "raw-window-handle",
  "uuid",
 ]
 

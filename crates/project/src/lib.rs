@@ -31,7 +31,7 @@ pub use id::{AssetId, ProjectId, SegmentId, TimelineId, TrackId};
 pub use project::Project;
 pub use rate::{FrameRate, SequenceRate};
 pub use segment::{
-    Channels, Crop, Easing, Keyframe, KeyframeProperty, KeyframeValue, Segment, Transform,
+    Blend, Channels, Crop, Easing, Keyframe, KeyframeProperty, KeyframeValue, Segment, Transform,
 };
 pub use settings::{AspectRatio, Canvas, Color, ColorSpace, Settings};
 pub use time::{SEQUENCE_TIMESCALE, Speed, TimeRange, source_ticks, timeline_duration};

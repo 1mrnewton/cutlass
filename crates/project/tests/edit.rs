@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 
 use cutlass_core::Timestamp;
 use cutlass_project::{
-    AspectRatio, Asset, AssetId, Channels, Color, ColorSpace, Command, Crop, Easing, Error,
+    AspectRatio, Asset, AssetId, Blend, Channels, Color, ColorSpace, Command, Crop, Easing, Error,
     FrameRate, History, Keyframe, KeyframeProperty, KeyframeValue, Outcome, Project, ProjectId,
     Segment, SegmentId, SequenceRate, Speed, TimeRange, TrackId, TrackKind, Transform,
 };
@@ -2272,6 +2272,123 @@ fn crop_insets_the_picture_and_undo_restores_the_whole() -> Result<(), Error> {
             Command::SetCrop {
                 segment: missing,
                 crop,
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
+    Ok(())
+}
+
+#[test]
+fn blend_sets_the_mode_and_undo_restores_normal() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .blend(),
+        Blend::Normal
+    );
+    assert_eq!(
+        run(
+            &mut cut,
+            Command::SetBlend {
+                segment: id,
+                blend: Blend::Multiply,
+            },
+        )?,
+        Outcome::Unchanged
+    );
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .blend(),
+        Blend::Normal
+    );
+    cut.history.redo(&mut cut.project)?;
+    run(
+        &mut cut,
+        Command::SetSpeed {
+            segment: id,
+            speed: Speed::new(2, 1)?,
+        },
+    )?;
+    let sped = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(sped.timeline().duration().value, 500_000);
+    assert_eq!(sped.blend(), Blend::Multiply);
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: id,
+            at: 250_000,
+        },
+    )?);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .blend(),
+        Blend::Multiply
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(right)
+            .ok_or(Error::UnknownSegment(right))?
+            .blend(),
+        Blend::Multiply
+    );
+
+    let sound = media(&cut.project, asset, 2_000_000, 30_000, Channels::Sound)?;
+    let sound = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: sound,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetBlend {
+                segment: sound,
+                blend: Blend::Screen,
+            },
+        ),
+        Error::NoPicture,
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(sound)
+            .ok_or(Error::UnknownSegment(sound))?
+            .blend(),
+        Blend::Normal
+    );
+    run(
+        &mut cut,
+        Command::SetBlend {
+            segment: sound,
+            blend: Blend::Normal,
+        },
+    )?;
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetBlend {
+                segment: missing,
+                blend: Blend::Add,
             },
         ),
         Error::UnknownSegment(missing),

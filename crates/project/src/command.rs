@@ -8,7 +8,7 @@ use crate::Error;
 use crate::asset::Asset;
 use crate::id::{AssetId, SegmentId, TrackId};
 use crate::rate::SequenceRate;
-use crate::segment::{Crop, Easing, Keyframe, KeyframeProperty, Segment, Transform};
+use crate::segment::{Blend, Crop, Easing, Keyframe, KeyframeProperty, Segment, Transform};
 use crate::settings::{AspectRatio, Color, ColorSpace};
 use crate::time::{self, Speed, TimeRange};
 
@@ -88,6 +88,11 @@ pub enum Command {
     SetCrop {
         segment: SegmentId,
         crop: Crop,
+    },
+    /// How the picture combines with the canvas. Normal is the start.
+    SetBlend {
+        segment: SegmentId,
+        blend: Blend,
     },
     /// Shown when on. It does not move the segment.
     SetVisible {

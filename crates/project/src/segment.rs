@@ -147,6 +147,22 @@ impl Crop {
     }
 }
 
+/// How a picture combines with what is already on the canvas.
+///
+/// [`Blend::Normal`] is the start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Blend {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    Add,
+    SoftLight,
+}
+
 /// A sampled property. The offset is from the segment's timeline start.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum KeyframeValue {
@@ -265,6 +281,7 @@ pub struct Segment {
     denoise: bool,
     keep_pitch: bool,
     crop: Crop,
+    blend: Blend,
     transform: Transform,
     keyframes: Vec<Keyframe>,
 }
@@ -326,6 +343,7 @@ impl Segment {
             denoise: false,
             keep_pitch: true,
             crop: Crop::WHOLE,
+            blend: Blend::Normal,
             transform: Transform::IDENTITY,
             keyframes: Vec::new(),
         }
@@ -390,7 +408,7 @@ impl Segment {
     /// A copy with no id, starting at `start` microseconds on the sequence.
     ///
     /// The source, channels, speed, visible flag, volume, fades, denoise,
-    /// keep pitch, crop, transform, and keyframes stay. Place assigns the id.
+    /// keep pitch, crop, blend, transform, and keyframes stay. Place assigns the id.
     /// A negative start is refused, and so is a start that would overflow the
     /// sequence clock.
     pub fn duplicate(&self, start: i64) -> Result<Self, Error> {
@@ -484,6 +502,17 @@ impl Segment {
             return Err(Error::NoPicture);
         }
         self.crop = crop;
+        Ok(())
+    }
+
+    /// Sets the blend. Normal is the start.
+    ///
+    /// A segment with no picture cannot leave normal.
+    pub(crate) fn set_blend(&mut self, blend: Blend) -> Result<(), Error> {
+        if self.channels == Channels::Sound && blend != Blend::Normal {
+            return Err(Error::NoPicture);
+        }
+        self.blend = blend;
         Ok(())
     }
 
@@ -602,6 +631,10 @@ impl Segment {
 
     pub const fn crop(&self) -> Crop {
         self.crop
+    }
+
+    pub const fn blend(&self) -> Blend {
+        self.blend
     }
 
     pub const fn transform(&self) -> Transform {
@@ -1096,6 +1129,7 @@ mod tests {
         segment.set_keep_pitch(false).unwrap();
         let crop = Crop::new(0.1, 0.2, 0.0, 0.25).unwrap();
         segment.set_crop(crop).unwrap();
+        segment.set_blend(Blend::Multiply).unwrap();
         let transform = Transform::new((0.1, -0.2), (2.0, 3.0), 15.0, 0.4, true, false).unwrap();
         segment.set_transform(transform);
         segment
@@ -1122,6 +1156,7 @@ mod tests {
         assert!(copy.denoise());
         assert!(!copy.keep_pitch());
         assert_eq!(copy.crop(), crop);
+        assert_eq!(copy.blend(), Blend::Multiply);
         assert_eq!(copy.transform(), transform);
         assert_eq!(copy.keyframes(), segment.keyframes());
         assert_eq!(copy.asset_id(), segment.asset_id());
@@ -1464,5 +1499,32 @@ mod tests {
             Segment::media(&asset, source(0, 15_360), 0, Channels::Picture, Speed::ONE).unwrap();
         picture.set_crop(crop).unwrap();
         assert_eq!(picture.crop(), crop);
+    }
+
+    #[test]
+    fn blend_starts_normal_and_a_silent_segment_stays_normal() {
+        let mut sound = one_second();
+        assert_eq!(sound.blend(), Blend::Normal);
+        sound.set_blend(Blend::Multiply).unwrap();
+        assert_eq!(sound.blend(), Blend::Multiply);
+        sound.change_speed(Speed::new(2, 1).unwrap()).unwrap();
+        assert_eq!(sound.blend(), Blend::Multiply);
+        sound.set_blend(Blend::Normal).unwrap();
+        assert_eq!(sound.blend(), Blend::Normal);
+
+        let asset = video(true, 15_360);
+        let mut silent =
+            Segment::media(&asset, source(0, 15_360), 0, Channels::Sound, Speed::ONE).unwrap();
+        assert_eq!(
+            silent.set_blend(Blend::Screen).unwrap_err(),
+            Error::NoPicture
+        );
+        assert_eq!(silent.blend(), Blend::Normal);
+        silent.set_blend(Blend::Normal).unwrap();
+
+        let mut picture =
+            Segment::media(&asset, source(0, 15_360), 0, Channels::Picture, Speed::ONE).unwrap();
+        picture.set_blend(Blend::SoftLight).unwrap();
+        assert_eq!(picture.blend(), Blend::SoftLight);
     }
 }

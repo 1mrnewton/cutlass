@@ -14,7 +14,7 @@ use crate::asset::{Asset, AssetKind};
 use crate::id::{AssetId, SegmentId, TrackId};
 use crate::project::Project;
 use crate::rate::{FrameRate, SequenceRate};
-use crate::segment::{Channels, Crop, Easing, Keyframe, KeyframeValue, Segment, Transform};
+use crate::segment::{Blend, Channels, Crop, Easing, Keyframe, KeyframeValue, Segment, Transform};
 use crate::settings::{AspectRatio, Canvas, Color, ColorSpace, Settings};
 use crate::time::{Speed, TimeRange};
 use crate::timeline::Timeline;
@@ -312,6 +312,7 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
         denoise: segment.denoise(),
         keep_pitch: segment.keep_pitch(),
         crop: crop_doc(segment.crop()),
+        blend: blend_name(segment.blend()),
         transform: transform_doc(segment.transform()),
         keyframes: segment.keyframes().iter().copied().map(key_doc).collect(),
     }
@@ -339,6 +340,7 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
     segment.set_denoise(document.denoise)?;
     segment.set_keep_pitch(document.keep_pitch)?;
     segment.set_crop(crop_from(&document.crop)?)?;
+    segment.set_blend(blend_from(document.blend))?;
     segment.set_transform(transform_from(&document.transform)?);
     for key in &document.keyframes {
         segment.push_keyframe(key_from(key)?)?;
@@ -532,6 +534,36 @@ fn crop_from(document: &CropDoc) -> Result<Crop, Error> {
 
 fn crop_is_whole(crop: &CropDoc) -> bool {
     crop.left == 0.0 && crop.right == 0.0 && crop.top == 0.0 && crop.bottom == 0.0
+}
+
+fn blend_name(blend: Blend) -> BlendName {
+    match blend {
+        Blend::Normal => BlendName::Normal,
+        Blend::Multiply => BlendName::Multiply,
+        Blend::Screen => BlendName::Screen,
+        Blend::Overlay => BlendName::Overlay,
+        Blend::Darken => BlendName::Darken,
+        Blend::Lighten => BlendName::Lighten,
+        Blend::Add => BlendName::Add,
+        Blend::SoftLight => BlendName::SoftLight,
+    }
+}
+
+fn blend_from(name: BlendName) -> Blend {
+    match name {
+        BlendName::Normal => Blend::Normal,
+        BlendName::Multiply => Blend::Multiply,
+        BlendName::Screen => Blend::Screen,
+        BlendName::Overlay => Blend::Overlay,
+        BlendName::Darken => Blend::Darken,
+        BlendName::Lighten => Blend::Lighten,
+        BlendName::Add => Blend::Add,
+        BlendName::SoftLight => Blend::SoftLight,
+    }
+}
+
+fn blend_is_normal(blend: &BlendName) -> bool {
+    *blend == BlendName::Normal
 }
 
 fn stamp_doc(time: Timestamp) -> Stamp {
@@ -735,6 +767,8 @@ struct SegmentDoc {
     keep_pitch: bool,
     #[serde(default, skip_serializing_if = "crop_is_whole")]
     crop: CropDoc,
+    #[serde(default, skip_serializing_if = "blend_is_normal")]
+    blend: BlendName,
     transform: TransformDoc,
     keyframes: Vec<KeyDoc>,
 }
@@ -821,6 +855,20 @@ enum KeyDoc {
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+enum BlendName {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    Add,
+    SoftLight,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 enum EasingName {
     #[default]
     Linear,
@@ -891,7 +939,9 @@ mod tests {
     use cutlass_core::Timestamp;
     use serde_json::{Value, json};
 
-    use super::{ChannelName, EasingName, FILE_VERSION, KeyDoc, KindName, RatioName, SpaceName};
+    use super::{
+        BlendName, ChannelName, EasingName, FILE_VERSION, KeyDoc, KindName, RatioName, SpaceName,
+    };
     use crate::Error;
     use crate::asset::{Asset, AssetKind};
     use crate::command::{Command, Outcome};
@@ -899,7 +949,7 @@ mod tests {
     use crate::id::ProjectId;
     use crate::project::Project;
     use crate::rate::{FrameRate, SequenceRate};
-    use crate::segment::{Channels, Easing, Keyframe, KeyframeValue, Segment, Transform};
+    use crate::segment::{Blend, Channels, Easing, Keyframe, KeyframeValue, Segment, Transform};
     use crate::settings::{AspectRatio, Color, ColorSpace};
     use crate::time::{Speed, TimeRange};
     use crate::track::TrackKind;
@@ -1046,6 +1096,19 @@ mod tests {
         ];
         for (easing, text) in easings {
             assert_eq!(serde_json::to_string(&easing).expect("easing"), text);
+        }
+        let blends = [
+            (BlendName::Normal, "\"normal\""),
+            (BlendName::Multiply, "\"multiply\""),
+            (BlendName::Screen, "\"screen\""),
+            (BlendName::Overlay, "\"overlay\""),
+            (BlendName::Darken, "\"darken\""),
+            (BlendName::Lighten, "\"lighten\""),
+            (BlendName::Add, "\"add\""),
+            (BlendName::SoftLight, "\"soft-light\""),
+        ];
+        for (blend, text) in blends {
+            assert_eq!(serde_json::to_string(&blend).expect("blend"), text);
         }
     }
 
@@ -1237,6 +1300,49 @@ mod tests {
                 "top": 0.0,
                 "bottom": 0.0
             });
+        });
+        refuse(&sound, Error::NoPicture);
+    }
+
+    #[test]
+    fn a_missing_blend_is_normal() {
+        let (project, value) = cut_value();
+        let text = project.to_json().expect("save");
+        assert!(!text.contains("\"blend\""));
+        let loaded = Project::from_json(&text).expect("load");
+        assert_eq!(
+            loaded.timeline().tracks()[1].segments()[0].blend(),
+            Blend::Normal
+        );
+
+        let multiplied = edit(&value, |value| {
+            value["timeline"]["tracks"][1]["segments"][0]["blend"] = json!("multiply");
+        });
+        let loaded = Project::from_json(&multiplied).expect("load");
+        assert_eq!(
+            loaded.timeline().tracks()[1].segments()[0].blend(),
+            Blend::Multiply
+        );
+        let saved = loaded.to_json().expect("save");
+        assert!(saved.contains("\"blend\": \"multiply\""));
+        assert_same(&loaded, &Project::from_json(&saved).expect("reload"));
+
+        let normal = edit(&value, |value| {
+            value["timeline"]["tracks"][1]["segments"][0]["blend"] = json!("normal");
+        });
+        let loaded = Project::from_json(&normal).expect("load");
+        assert_eq!(
+            loaded.timeline().tracks()[1].segments()[0].blend(),
+            Blend::Normal
+        );
+        assert!(!loaded.to_json().expect("save").contains("\"blend\""));
+
+        let unknown = edit(&value, |value| {
+            value["timeline"]["tracks"][1]["segments"][0]["blend"] = json!("xor");
+        });
+        assert_unreadable(&unknown);
+        let sound = edit(&value, |value| {
+            value["timeline"]["tracks"][0]["segments"][0]["blend"] = json!("screen");
         });
         refuse(&sound, Error::NoPicture);
     }

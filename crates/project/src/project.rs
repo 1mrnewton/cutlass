@@ -202,6 +202,10 @@ impl Project {
                 self.timeline.segment_mut(segment)?.set_crop(crop)?;
                 Ok(Outcome::Unchanged)
             }
+            Command::SetBlend { segment, blend } => {
+                self.timeline.segment_mut(segment)?.set_blend(blend)?;
+                Ok(Outcome::Unchanged)
+            }
             Command::SetVisible { segment, visible } => {
                 self.timeline.segment_mut(segment)?.set_visible(visible);
                 Ok(Outcome::Unchanged)

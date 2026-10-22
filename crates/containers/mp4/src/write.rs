@@ -1,4 +1,5 @@
-//! An MP4 file. ISO/IEC 14496-12. The index follows the samples.
+//! An MP4 or QuickTime file. ISO/IEC 14496-12. The index follows the samples,
+//! or it comes first.
 
 use std::num::NonZeroU32;
 
@@ -9,8 +10,38 @@ use crate::Error;
 const DPI_72: u32 = 0x0048_0000;
 const IDENTITY: [u32; 9] = [0x0001_0000, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000];
 
-/// An MP4 file to write. The movie box follows the media data, unless the
-/// index is written first.
+/// A ProRes profile. The sample entry is this code, and there is no config box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProRes {
+    /// `apch`. ProRes 422 HQ. Depth is 24.
+    Hq,
+    /// `apcn`. ProRes 422. Depth is 24.
+    Standard,
+    /// `apcs`. ProRes 422 LT. Depth is 24.
+    Lt,
+    /// `apco`. ProRes 422 Proxy. Depth is 24.
+    Proxy,
+    /// `ap4h`. ProRes 4444. Depth is 32.
+    Yuv4444,
+    /// `ap4x`. ProRes 4444 XQ. Depth is 32.
+    Xq,
+}
+
+impl ProRes {
+    fn sample(self) -> ([u8; 4], u16, &'static str) {
+        match self {
+            Self::Hq => (*b"apch", 24, "Apple ProRes 422 HQ"),
+            Self::Standard => (*b"apcn", 24, "Apple ProRes 422"),
+            Self::Lt => (*b"apcs", 24, "Apple ProRes 422 LT"),
+            Self::Proxy => (*b"apco", 24, "Apple ProRes 422 Proxy"),
+            Self::Yuv4444 => (*b"ap4h", 32, "Apple ProRes 4444"),
+            Self::Xq => (*b"ap4x", 32, "Apple ProRes 4444 XQ"),
+        }
+    }
+}
+
+/// An MP4 or QuickTime file to write. The movie box follows the media data,
+/// unless the index is written first. A ProRes track makes the file QuickTime.
 #[derive(Debug)]
 pub struct MovieFile {
     timescale: NonZeroU32,
@@ -35,26 +66,66 @@ impl MovieFile {
         samples: Vec<Packet>,
     ) -> Result<(), Error> {
         let (entry, config_box) = visual_boxes(config.codec)?;
-        if config.width == 0 || config.height == 0 {
-            return Err(Error::ZeroDimension);
-        }
-        let width = u16::try_from(config.width)
-            .map_err(|_| Error::Inconsistent("the video size does not fit"))?;
-        let height = u16::try_from(config.height)
-            .map_err(|_| Error::Inconsistent("the video size does not fit"))?;
+        let (width, height) = pixel_size(config.width, config.height)?;
+        self.add_visual(
+            timescale,
+            Visual {
+                entry,
+                config_box: Some(config_box),
+                width,
+                height,
+                config: config.config_record,
+                vendor: [0; 4],
+                depth: 0x0018,
+                name: "",
+                quicktime: false,
+            },
+            samples,
+        )
+    }
+
+    /// Add a ProRes track. Samples are in decode order. The file type becomes
+    /// QuickTime. There is no config box.
+    pub fn add_prores(
+        &mut self,
+        timescale: NonZeroU32,
+        profile: ProRes,
+        width: u32,
+        height: u32,
+        samples: Vec<Packet>,
+    ) -> Result<(), Error> {
+        let (width, height) = pixel_size(width, height)?;
+        let (entry, depth, name) = profile.sample();
+        self.add_visual(
+            timescale,
+            Visual {
+                entry,
+                config_box: None,
+                width,
+                height,
+                config: Vec::new(),
+                vendor: *b"appl",
+                depth,
+                name,
+                quicktime: true,
+            },
+            samples,
+        )
+    }
+
+    fn add_visual(
+        &mut self,
+        timescale: NonZeroU32,
+        visual: Visual,
+        samples: Vec<Packet>,
+    ) -> Result<(), Error> {
         let (samples, media_duration) = timed(timescale, samples)?;
         let movie_duration = movie_ticks(media_duration, timescale, self.timescale)?;
         self.tracks.push(Track {
             timescale,
             media_duration,
             movie_duration,
-            kind: TrackKind::Video(Visual {
-                entry,
-                config_box,
-                width,
-                height,
-                config: config.config_record,
-            }),
+            kind: TrackKind::Video(visual),
             samples,
         });
         Ok(())
@@ -109,7 +180,7 @@ impl MovieFile {
         }
         let (payload, placed) = sample_bytes(self)?;
         let mut buf = Buf::default();
-        write_ftyp(&mut buf)?;
+        write_ftyp(&mut buf, quicktime(self))?;
         if index_first {
             // A chunk offset counts from the start of the file, so it includes
             // the movie. A 64-bit offset is four bytes longer than a 32-bit
@@ -199,10 +270,14 @@ enum TrackKind {
 #[derive(Debug)]
 struct Visual {
     entry: [u8; 4],
-    config_box: [u8; 4],
+    config_box: Option<[u8; 4]>,
     width: u16,
     height: u16,
     config: Vec<u8>,
+    vendor: [u8; 4],
+    depth: u16,
+    name: &'static str,
+    quicktime: bool,
 }
 
 #[derive(Debug)]
@@ -218,6 +293,17 @@ struct Sample {
     duration: u32,
     offset: i32,
     keyframe: bool,
+}
+
+fn pixel_size(width: u32, height: u32) -> Result<(u16, u16), Error> {
+    if width == 0 || height == 0 {
+        return Err(Error::ZeroDimension);
+    }
+    let width =
+        u16::try_from(width).map_err(|_| Error::Inconsistent("the video size does not fit"))?;
+    let height =
+        u16::try_from(height).map_err(|_| Error::Inconsistent("the video size does not fit"))?;
+    Ok((width, height))
 }
 
 fn visual_boxes(codec: VideoCodec) -> Result<([u8; 4], [u8; 4]), Error> {
@@ -315,14 +401,27 @@ fn movie_ticks(media_duration: u64, media: NonZeroU32, movie: NonZeroU32) -> Res
     Ok(scaled / media)
 }
 
-fn write_ftyp(buf: &mut Buf) -> Result<(), Error> {
+fn write_ftyp(buf: &mut Buf, quicktime: bool) -> Result<(), Error> {
     let start = buf.open(b"ftyp");
-    buf.push_fourcc(b"isom");
-    buf.push_u32(0);
-    buf.push_fourcc(b"isom");
-    buf.push_fourcc(b"iso2");
-    buf.push_fourcc(b"mp41");
+    if quicktime {
+        buf.push_fourcc(b"qt  ");
+        buf.push_u32(0);
+        buf.push_fourcc(b"qt  ");
+    } else {
+        buf.push_fourcc(b"isom");
+        buf.push_u32(0);
+        buf.push_fourcc(b"isom");
+        buf.push_fourcc(b"iso2");
+        buf.push_fourcc(b"mp41");
+    }
     buf.close(start)
+}
+
+fn quicktime(movie: &MovieFile) -> bool {
+    movie.tracks.iter().any(|track| match &track.kind {
+        TrackKind::Video(video) => video.quicktime,
+        TrackKind::Audio(_) => false,
+    })
 }
 
 fn write_mdat(buf: &mut Buf, payload: &[u8]) -> Result<u64, Error> {
@@ -472,14 +571,7 @@ fn write_video_minf(
     buf.close(vmhd)?;
     write_dinf(buf)?;
     let stbl = buf.open(b"stbl");
-    write_stsd_visual(
-        buf,
-        &video.entry,
-        &video.config_box,
-        video.width,
-        video.height,
-        &video.config,
-    )?;
+    write_stsd_visual(buf, video)?;
     write_sample_tables(buf, samples, offset)?;
     buf.close(stbl)?;
     buf.close(start)
@@ -578,34 +670,48 @@ fn write_dinf(buf: &mut Buf) -> Result<(), Error> {
     buf.close(dinf)
 }
 
-fn write_stsd_visual(
-    buf: &mut Buf,
-    entry: &[u8; 4],
-    config_box: &[u8; 4],
-    width: u16,
-    height: u16,
-    config: &[u8],
-) -> Result<(), Error> {
+fn write_stsd_visual(buf: &mut Buf, video: &Visual) -> Result<(), Error> {
     let stsd = buf.full(b"stsd", 0, 0);
     buf.push_u32(1);
-    let sample = buf.open(entry);
+    let sample = buf.open(&video.entry);
     buf.push_zeros(6);
     buf.push_u16(1);
-    buf.push_zeros(16);
-    buf.push_u16(width);
-    buf.push_u16(height);
+    buf.push_u16(0);
+    buf.push_u16(0);
+    buf.push_fourcc(&video.vendor);
+    buf.push_u32(0);
+    buf.push_u32(0);
+    buf.push_u16(video.width);
+    buf.push_u16(video.height);
     buf.push_u32(DPI_72);
     buf.push_u32(DPI_72);
     buf.push_u32(0);
     buf.push_u16(1);
-    buf.push_zeros(32);
-    buf.push_u16(0x0018);
+    push_compressor_name(buf, video.name)?;
+    buf.push_u16(video.depth);
     buf.push_i16(-1);
-    let config_at = buf.open(config_box);
-    buf.push_bytes(config);
-    buf.close(config_at)?;
+    if let Some(config_box) = video.config_box {
+        let config_at = buf.open(&config_box);
+        buf.push_bytes(&video.config);
+        buf.close(config_at)?;
+    }
     buf.close(sample)?;
     buf.close(stsd)
+}
+
+fn push_compressor_name(buf: &mut Buf, name: &str) -> Result<(), Error> {
+    if name.is_empty() {
+        buf.push_zeros(32);
+        return Ok(());
+    }
+    if name.len() > 31 {
+        return Err(Error::TooLarge);
+    }
+    let mut bytes = [0u8; 32];
+    bytes[0] = u8::try_from(name.len()).map_err(|_| Error::TooLarge)?;
+    bytes[1..1 + name.len()].copy_from_slice(name.as_bytes());
+    buf.push_bytes(&bytes);
+    Ok(())
 }
 
 fn write_sample_tables(

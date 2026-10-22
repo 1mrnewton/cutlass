@@ -5,7 +5,7 @@ use std::num::NonZeroU32;
 use cutlass_core::{
     AudioCodec, AudioStreamConfig, Packet, Timestamp, VideoCodec, VideoStreamConfig,
 };
-use cutlass_mp4::{Error, Fourcc, Kind, Movie, MovieFile, Rotation};
+use cutlass_mp4::{Error, Fourcc, Kind, Movie, MovieFile, ProRes, Rotation};
 
 fn scale(value: u32) -> NonZeroU32 {
     match NonZeroU32::new(value) {
@@ -637,6 +637,149 @@ fn the_index_can_come_first() {
     assert_eq!(
         Movie::parse(&first).expect("read first"),
         Movie::parse(&last).expect("read last")
+    );
+}
+
+#[test]
+fn a_prores_track_round_trips() {
+    let ticks = scale(1_000);
+    let mut file = MovieFile::new(ticks);
+    file.add_prores(
+        ticks,
+        ProRes::Standard,
+        320,
+        180,
+        vec![
+            packet(ticks, 0, 0, 100, &[9, 9], true),
+            packet(ticks, 100, 110, 100, &[8], true),
+        ],
+    )
+    .expect("prores");
+    let last = file.to_bytes().expect("after the samples");
+    let first = file.to_bytes_index_first().expect("index first");
+    assert_ne!(first, last);
+    assert_eq!(&last[..20], b"\0\0\0\x14ftypqt  \0\0\0\0qt  ");
+    assert_eq!(&first[..20], b"\0\0\0\x14ftypqt  \0\0\0\0qt  ");
+    let moov = first
+        .windows(4)
+        .position(|bytes| bytes == b"moov")
+        .expect("moov");
+    let mdat = first
+        .windows(4)
+        .position(|bytes| bytes == b"mdat")
+        .expect("mdat");
+    assert!(moov < mdat);
+    assert_eq!(
+        Movie::parse(&first).expect("read first"),
+        Movie::parse(&last).expect("read last")
+    );
+    let movie = Movie::parse(&last).expect("read");
+    let track = &movie.tracks()[0];
+    let Kind::Video(config) = track.kind() else {
+        panic!("video track");
+    };
+    assert_eq!(config.codec, VideoCodec::ProRes);
+    assert!(config.config_record.is_empty());
+    assert_eq!((config.width, config.height), (320, 180));
+    assert_eq!(track.samples()[1].pts.value, 110);
+    assert_eq!(track.samples()[1].data, [8]);
+    assert_eq!(track.samples()[1].dts.map(|time| time.value), Some(100));
+}
+
+#[test]
+fn each_prores_profile_keeps_its_sample_entry() {
+    let ticks = scale(1_000);
+    let cases = [
+        (ProRes::Hq, *b"apch", 24u16, "Apple ProRes 422 HQ"),
+        (ProRes::Standard, *b"apcn", 24, "Apple ProRes 422"),
+        (ProRes::Lt, *b"apcs", 24, "Apple ProRes 422 LT"),
+        (ProRes::Proxy, *b"apco", 24, "Apple ProRes 422 Proxy"),
+        (ProRes::Yuv4444, *b"ap4h", 32, "Apple ProRes 4444"),
+        (ProRes::Xq, *b"ap4x", 32, "Apple ProRes 4444 XQ"),
+    ];
+    for (profile, entry, depth, name) in cases {
+        let mut file = MovieFile::new(ticks);
+        file.add_prores(
+            ticks,
+            profile,
+            16,
+            16,
+            vec![packet(ticks, 0, 0, 10, &[9], true)],
+        )
+        .expect("prores");
+        let bytes = file.to_bytes().expect("write");
+        let at = bytes
+            .windows(4)
+            .position(|window| window == entry)
+            .expect("entry");
+        assert_eq!(&bytes[at + 16..at + 20], b"appl");
+        assert_eq!(bytes[at + 46], u8::try_from(name.len()).expect("name"));
+        assert_eq!(&bytes[at + 47..at + 47 + name.len()], name.as_bytes());
+        assert_eq!(&bytes[at + 78..at + 80], &depth.to_be_bytes());
+        let movie = Movie::parse(&bytes).expect("read");
+        let Kind::Video(config) = movie.tracks()[0].kind() else {
+            panic!("video track");
+        };
+        assert_eq!(config.codec, VideoCodec::ProRes);
+        assert!(config.config_record.is_empty());
+    }
+}
+
+#[test]
+fn prores_on_the_h264_entry_refuses() {
+    let ticks = scale(1_000);
+    let mut config = h264(16, 16);
+    config.codec = VideoCodec::ProRes;
+    expect_err(
+        write_video(
+            1_000,
+            1_000,
+            config,
+            vec![packet(ticks, 0, 0, 10, &[1], true)],
+        ),
+        Error::Inconsistent("the video codec is not written"),
+    );
+}
+
+#[test]
+fn a_prores_track_makes_the_file_quicktime() {
+    let ticks = scale(1_000);
+    let mut file = MovieFile::new(ticks);
+    file.add_video(
+        ticks,
+        h264(16, 16),
+        vec![packet(ticks, 0, 0, 10, &[1], true)],
+    )
+    .expect("h264");
+    file.add_prores(
+        ticks,
+        ProRes::Hq,
+        16,
+        16,
+        vec![packet(ticks, 0, 0, 10, &[2], true)],
+    )
+    .expect("prores");
+    let bytes = file.to_bytes().expect("write");
+    assert_eq!(&bytes[8..12], b"qt  ");
+    let movie = Movie::parse(&bytes).expect("read");
+    let Kind::Video(first) = movie.tracks()[0].kind() else {
+        panic!("video track");
+    };
+    let Kind::Video(second) = movie.tracks()[1].kind() else {
+        panic!("video track");
+    };
+    assert_eq!(first.codec, VideoCodec::H264);
+    assert_eq!(second.codec, VideoCodec::ProRes);
+    assert!(second.config_record.is_empty());
+}
+
+#[test]
+fn a_zero_prores_size_refuses() {
+    let ticks = scale(1_000);
+    let mut file = MovieFile::new(ticks);
+    expect_err(
+        file.add_prores(ticks, ProRes::Lt, 0, 16, vec![]),
+        Error::ZeroDimension,
     );
 }
 

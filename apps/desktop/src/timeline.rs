@@ -362,7 +362,8 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         Command::Split { segment, .. }
         | Command::RemoveSegment(segment)
         | Command::Trim { segment, .. }
-        | Command::SetSpeed { segment, .. } => blocks_edit(project, lanes, *segment),
+        | Command::SetSpeed { segment, .. }
+        | Command::Freeze { segment, .. } => blocks_edit(project, lanes, *segment),
         Command::SetTransform { segment, .. }
         | Command::SetVolume { segment, .. }
         | Command::SetVisible { segment, .. }
@@ -4358,6 +4359,17 @@ mod tests {
             }],
         };
         assert!(super::blocks_edit(&cut, &locked_audio, video));
+        let freeze = Command::Freeze {
+            segment: video,
+            at: 100,
+            hold: 1_000_000,
+        };
+        assert!(super::blocks_command(&cut, &locked_audio, &freeze));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &freeze
+        ));
         let mut selected = vec![video];
         assert!(!super::delete_selected(
             &mut history,
@@ -4482,6 +4494,11 @@ mod tests {
             blend: Blend::Multiply,
         };
         let detach = Command::DetachAudio { segment: id };
+        let freeze = Command::Freeze {
+            segment: id,
+            at: 500_000,
+            hold: 1_000_000,
+        };
         assert!(super::blocks_command(&cut, &locked, &volume));
         assert!(super::blocks_command(&cut, &locked, &hidden));
         assert!(super::blocks_command(&cut, &locked, &easing));
@@ -4491,6 +4508,7 @@ mod tests {
         assert!(super::blocks_command(&cut, &locked, &crop));
         assert!(super::blocks_command(&cut, &locked, &blend));
         assert!(super::blocks_command(&cut, &locked, &detach));
+        assert!(super::blocks_command(&cut, &locked, &freeze));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),
@@ -4536,6 +4554,11 @@ mod tests {
             &super::Lanes::default(),
             &detach
         ));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &freeze
+        ));
         let stored = cut.asset(asset).expect("asset");
         let away =
             Segment::media(stored, source, 2_000_000, Channels::Sound, Speed::ONE).expect("sound");
@@ -4562,6 +4585,7 @@ mod tests {
             }],
         };
         assert!(super::blocks_command(&cut, &audio_locked, &detach));
+        assert!(!super::blocks_command(&cut, &audio_locked, &freeze));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),

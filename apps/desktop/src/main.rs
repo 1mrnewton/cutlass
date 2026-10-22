@@ -2,9 +2,11 @@
 
 #![deny(unsafe_code)]
 
+use std::path::PathBuf;
+
 use eframe::egui::{self, Align2, Button, Rect, RichText, Sense, TextStyle, Vec2, pos2};
 
-use cutlass_project::{History, Project, ProjectId, SegmentId};
+use cutlass_project::{History, Project, SegmentId};
 
 mod app_settings;
 mod chrome;
@@ -18,6 +20,7 @@ mod library;
 mod media_bin;
 mod modify;
 mod preview;
+mod projects;
 mod ruler;
 mod theme;
 mod timeline;
@@ -38,6 +41,8 @@ fn main() -> eframe::Result {
         "Cutlass",
         eframe::NativeOptions {
             viewport,
+            // The recent list is the only thing stored. The window is not restored.
+            persist_window: false,
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(CutlassApp::new(cc)))),
@@ -47,6 +52,10 @@ fn main() -> eframe::Result {
 struct CutlassApp {
     history: History,
     project: Project,
+    path: Option<PathBuf>,
+    checkpoint: String,
+    recent: Vec<PathBuf>,
+    pending: Option<projects::Replace>,
     playhead_us: i64,
     shelf: library::Shelf,
     media: library::MediaSource,
@@ -67,10 +76,14 @@ impl CutlassApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
         icons::install(&cc.egui_ctx);
-        let id = ProjectId::from_bytes(uuid::Uuid::new_v4().into_bytes());
+        let loaded = projects::blank();
         Self {
             history: History::new(),
-            project: Project::new(id, "Untitled"),
+            project: loaded.project,
+            path: None,
+            checkpoint: loaded.checkpoint,
+            recent: projects::load_recent(cc.storage),
+            pending: None,
             playhead_us: 0,
             shelf: library::Shelf::Media,
             media: library::MediaSource::Project,
@@ -213,6 +226,153 @@ impl CutlassApp {
         };
         timeline::show_note(ui, words::of(ui, phrase));
     }
+
+    fn blocked(&self) -> bool {
+        self.export.is_some()
+            || self.modify.is_some()
+            || self.app_dialog.is_some()
+            || self.pending.is_some()
+    }
+
+    fn unsaved(&self) -> bool {
+        projects::changed(&self.project, &self.checkpoint)
+    }
+
+    /// `true` when the unsaved dialog opened on this frame.
+    fn handle_file(&mut self, ui: &egui::Ui, ask: Option<projects::Ask>) -> bool {
+        let Some(ask) = ask else {
+            return false;
+        };
+        if self.blocked() {
+            return false;
+        }
+        let replacing = match &ask {
+            projects::Ask::Save => {
+                self.save_current(ui);
+                return false;
+            }
+            projects::Ask::SaveAs => {
+                self.save_as(ui);
+                return false;
+            }
+            projects::Ask::New => projects::Replace::New,
+            projects::Ask::Open => projects::Replace::Open,
+            projects::Ask::Recent(path) => projects::Replace::Recent(path.clone()),
+        };
+        self.begin_replace(ui, &ask, replacing)
+    }
+
+    fn begin_replace(
+        &mut self,
+        ui: &egui::Ui,
+        ask: &projects::Ask,
+        next: projects::Replace,
+    ) -> bool {
+        if projects::needs_guard(self.unsaved(), ask) {
+            self.pending = Some(next);
+            true
+        } else {
+            self.replace_now(ui, next);
+            false
+        }
+    }
+
+    fn finish_guard(&mut self, ui: &egui::Ui, choice: Option<projects::GuardChoice>) {
+        let Some(choice) = choice else {
+            return;
+        };
+        let Some(next) = self.pending.clone() else {
+            return;
+        };
+        match choice {
+            projects::GuardChoice::Cancel => self.pending = None,
+            projects::GuardChoice::Discard => {
+                self.pending = None;
+                self.replace_now(ui, next);
+            }
+            projects::GuardChoice::Save => {
+                if self.save_current(ui) {
+                    self.pending = None;
+                    self.replace_now(ui, next);
+                }
+            }
+        }
+    }
+
+    fn replace_now(&mut self, ui: &egui::Ui, next: projects::Replace) {
+        match next {
+            projects::Replace::New => self.install(projects::blank(), None),
+            projects::Replace::Open => {
+                if let Some(path) = projects::pick_open() {
+                    self.open_path(ui, path);
+                }
+            }
+            projects::Replace::Recent(path) => self.open_path(ui, path),
+        }
+    }
+
+    fn open_path(&mut self, ui: &egui::Ui, path: PathBuf) {
+        match projects::read(&path) {
+            Ok(loaded) => {
+                projects::remember(&mut self.recent, &path);
+                self.install(loaded, Some(path));
+            }
+            Err(projects::ReadError::Missing) => {
+                projects::forget(&mut self.recent, &path);
+                timeline::show_note(ui, words::of(ui, words::Phrase::ProjectUnread));
+            }
+            Err(projects::ReadError::Unread) => {
+                timeline::show_note(ui, words::of(ui, words::Phrase::ProjectUnread));
+            }
+        }
+    }
+
+    fn save_current(&mut self, ui: &egui::Ui) -> bool {
+        match self.path.clone() {
+            Some(path) => self.write_path(ui, path),
+            None => self.save_as(ui),
+        }
+    }
+
+    fn save_as(&mut self, ui: &egui::Ui) -> bool {
+        let Some(path) = projects::pick_save(self.project.name()) else {
+            return false;
+        };
+        self.write_path(ui, path)
+    }
+
+    fn write_path(&mut self, ui: &egui::Ui, path: PathBuf) -> bool {
+        match projects::write(&path, &self.project) {
+            Ok(checkpoint) => {
+                self.checkpoint = checkpoint;
+                projects::remember(&mut self.recent, &path);
+                self.path = Some(path);
+                true
+            }
+            Err(()) => {
+                timeline::show_note(ui, words::of(ui, words::Phrase::ProjectUnsaved));
+                false
+            }
+        }
+    }
+
+    /// The undo stack belongs to the cut that was open. A new cut starts empty.
+    fn install(&mut self, loaded: projects::Loaded, path: Option<PathBuf>) {
+        self.history = History::new();
+        self.project = loaded.project;
+        self.checkpoint = loaded.checkpoint;
+        self.path = path;
+        self.pending = None;
+        self.playhead_us = 0;
+        self.selected_segments.clear();
+        self.clip_drag = None;
+        self.trim_drag = None;
+        self.split = false;
+        self.bin = media_bin::Bin::new();
+        self.export = None;
+        self.modify = None;
+        self.app_dialog = None;
+    }
 }
 
 impl eframe::App for CutlassApp {
@@ -220,10 +380,20 @@ impl eframe::App for CutlassApp {
         theme::GAP.to_normalized_gamma_f32()
     }
 
+    /// The recent paths. This is not the project file.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        projects::store_recent(storage, &self.recent);
+    }
+
+    /// The cloud key stays in memory. Widget state is not written.
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         words::install(ui.ctx(), self.language);
         chrome::pass_clicks(frame);
-        let dialog = self.export.is_some() || self.modify.is_some() || self.app_dialog.is_some();
+        let dialog = self.blocked();
         keys::set_blocked(ui, dialog);
         if !dialog {
             let dropped = import::dropped(ui);
@@ -237,22 +407,23 @@ impl eframe::App for CutlassApp {
         let mut bar = Bar {
             export: false,
             settings: false,
+            file: None,
         };
         egui::Panel::top("head")
             .exact_size(theme::HEADER_HEIGHT)
             .frame(theme::bar())
             .show_separator_line(false)
             .show(ui, |ui| {
-                bar = header(ui, self.project.name());
+                bar = header(ui, self.project.name(), &self.recent);
             });
-        let busy = self.export.is_some() || self.modify.is_some() || self.app_dialog.is_some();
-        let opened = bar.export && !busy;
+        let opened = bar.export && !self.blocked();
         if opened {
             self.export = Some(export::Sheet::open(
                 self.project.name(),
                 self.project.settings().rate().rate(),
             ));
         }
+        let opened_guard = self.handle_file(ui, bar.file);
 
         let body = ui.available_rect_before_wrap();
         gaps::drag(ui, &mut self.panes, body);
@@ -294,13 +465,11 @@ impl eframe::App for CutlassApp {
                     &mut self.bin,
                 );
             });
-        if import && self.export.is_none() && self.modify.is_none() && self.app_dialog.is_none() {
+        if import && !self.blocked() {
             self.import_chosen(ui);
         }
         if let Some(id) = library::take_relink(ui.ctx())
-            && self.export.is_none()
-            && self.modify.is_none()
-            && self.app_dialog.is_none()
+            && !self.blocked()
         {
             self.relink(ui, id);
         }
@@ -351,7 +520,7 @@ impl eframe::App for CutlassApp {
         }
 
         let asked = modify::take_ask(ui.ctx());
-        if asked && self.export.is_none() && self.modify.is_none() && self.app_dialog.is_none() {
+        if asked && !self.blocked() {
             self.modify = Some(modify::Draft::open(&self.project));
         }
         let outcome = self
@@ -372,11 +541,7 @@ impl eframe::App for CutlassApp {
         }
 
         let mut opened_settings = false;
-        if bar.settings
-            && self.export.is_none()
-            && self.modify.is_none()
-            && self.app_dialog.is_none()
-        {
+        if bar.settings && !self.blocked() {
             self.app_dialog = Some(app_settings::Draft::open(&self.app));
             opened_settings = true;
         }
@@ -392,7 +557,13 @@ impl eframe::App for CutlassApp {
             Some(app_settings::Outcome::Closed) if !opened_settings => self.app_dialog = None,
             _ => {}
         }
-        if self.export.is_none() && self.modify.is_none() && self.app_dialog.is_none() {
+        if self.pending.is_some() {
+            let choice = projects::show_guard(ui);
+            if !opened_guard {
+                self.finish_guard(ui, choice);
+            }
+        }
+        if !self.blocked() {
             import::show_hover(ui);
         }
     }
@@ -401,18 +572,22 @@ impl eframe::App for CutlassApp {
 struct Bar {
     export: bool,
     settings: bool,
+    file: Option<projects::Ask>,
 }
 
 /// Project bar. The Mac close, minimize, and maximize buttons are the window's.
-fn header(ui: &mut egui::Ui, name: &str) -> Bar {
+/// Dragging the name moves the window. File, Export, and Settings do not.
+fn header(ui: &mut egui::Ui, name: &str, recent: &[PathBuf]) -> Bar {
     crate::tip::region(ui, words::of(ui, words::Phrase::RegionProject));
     ui.take_available_height();
     let rect = ui.max_rect();
     let font = TextStyle::Button.resolve(ui.style());
     let export = words::of(ui, words::Phrase::Export);
     let settings = words::of(ui, words::Phrase::Settings);
+    let file = words::of(ui, words::Phrase::File);
     let export_w = words::control_width(ui, export, font.clone(), 20.0, 72.0);
     let settings_w = words::control_width(ui, settings, font.clone(), 20.0, 72.0);
+    let file_w = words::control_width(ui, file, font.clone(), 20.0, 64.0);
     let export_rect = Rect::from_min_size(
         rect.right_center() - Vec2::new(12.0 + export_w, 13.0),
         Vec2::new(export_w, 26.0),
@@ -421,23 +596,29 @@ fn header(ui: &mut egui::Ui, name: &str) -> Bar {
         pos2(export_rect.left() - 8.0 - settings_w, export_rect.top()),
         Vec2::new(settings_w, 26.0),
     );
+    let file_rect = Rect::from_min_size(
+        pos2(rect.left() + 80.0, export_rect.top()),
+        Vec2::new(file_w, 26.0),
+    );
     let drag = ui.interact(rect, ui.scope_id().with("project-bar"), Sense::drag());
     let pointer = ui.input(|input| input.pointer.interact_pos());
-    let on_control =
-        pointer.is_some_and(|point| export_rect.contains(point) || settings_rect.contains(point));
+    let on_control = pointer.is_some_and(|point| {
+        export_rect.contains(point) || settings_rect.contains(point) || file_rect.contains(point)
+    });
     if drag.drag_started() && !on_control {
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
     ui.painter()
         .text(rect.center(), Align2::CENTER_CENTER, name, font, theme::INK);
     let name_rect = Rect::from_min_max(
-        pos2(rect.left() + 80.0, rect.center().y - 12.0),
+        pos2(file_rect.right() + 8.0, rect.center().y - 12.0),
         pos2(settings_rect.left() - 8.0, rect.center().y + 12.0),
     );
     if name_rect.is_positive() {
         crate::tip::read(ui, name_rect, ui.scope_id().with("project-name"), name);
     }
 
+    let file_ask = projects::file_button(ui, file_rect, recent);
     let settings_clicked = ui
         .put(
             settings_rect,
@@ -455,5 +636,6 @@ fn header(ui: &mut egui::Ui, name: &str) -> Bar {
     Bar {
         export: export_clicked,
         settings: settings_clicked,
+        file: file_ask,
     }
 }

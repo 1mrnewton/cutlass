@@ -1,6 +1,6 @@
 //! The Mac title bar is a view laid over the project bar, and it takes every click
 //! there except the window buttons. Keep that view only as wide as those buttons
-//! so Export, and a drag of the project name, reach the shell.
+//! so File, Export, Settings, and a drag of the project name reach the shell.
 
 #[cfg(target_os = "macos")]
 pub(crate) fn pass_clicks(frame: &eframe::Frame) {

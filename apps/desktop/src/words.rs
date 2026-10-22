@@ -166,6 +166,15 @@ pub(crate) enum Phrase {
     ImportEmpty,
     DropToImport,
     RelinkKind,
+    NewProject,
+    OpenProject,
+    SaveAs,
+    RecentProjects,
+    NoRecent,
+    DontSave,
+    SaveChanges,
+    ProjectUnread,
+    ProjectUnsaved,
 }
 
 #[cfg(test)]
@@ -318,6 +327,15 @@ impl Phrase {
         Self::ImportEmpty,
         Self::DropToImport,
         Self::RelinkKind,
+        Self::NewProject,
+        Self::OpenProject,
+        Self::SaveAs,
+        Self::RecentProjects,
+        Self::NoRecent,
+        Self::DontSave,
+        Self::SaveChanges,
+        Self::ProjectUnread,
+        Self::ProjectUnsaved,
     ];
 }
 
@@ -469,6 +487,15 @@ const ENGLISH: &[&str] = &[
     "This file has no picture or sound.",
     "Drop to import",
     "This file is a different kind.",
+    "New project",
+    "Open",
+    "Save as",
+    "Recent",
+    "No recent projects",
+    "Don't save",
+    "Save changes to this project?",
+    "This project could not be read.",
+    "This project could not be saved.",
 ];
 
 const FRENCH: &[&str] = &[
@@ -619,6 +646,15 @@ const FRENCH: &[&str] = &[
     "Ce fichier n'a ni image ni son.",
     "Déposez pour importer",
     "Ce fichier est d'un autre type.",
+    "Nouveau projet",
+    "Ouvrir",
+    "Enregistrer sous",
+    "Récents",
+    "Aucun projet récent",
+    "Ne pas enregistrer",
+    "Enregistrer les modifications de ce projet ?",
+    "Ce projet n'a pas pu être lu.",
+    "Ce projet n'a pas pu être enregistré.",
 ];
 
 /// The word for `phrase` in `language`.
@@ -797,7 +833,19 @@ mod tests {
             say(Language::French, Phrase::RelinkKind),
             "Ce fichier est d'un autre type."
         );
-        assert_eq!(Phrase::RelinkKind as usize, super::ENGLISH.len() - 1);
+        assert_eq!(say(Language::English, Phrase::NewProject), "New project");
+        assert_eq!(say(Language::French, Phrase::NewProject), "Nouveau projet");
+        assert_eq!(say(Language::English, Phrase::SaveAs), "Save as");
+        assert_eq!(say(Language::French, Phrase::SaveAs), "Enregistrer sous");
+        assert_eq!(
+            say(Language::English, Phrase::ProjectUnsaved),
+            "This project could not be saved."
+        );
+        assert_eq!(
+            say(Language::French, Phrase::ProjectUnsaved),
+            "Ce projet n'a pas pu être enregistré."
+        );
+        assert_eq!(Phrase::ProjectUnsaved as usize, super::ENGLISH.len() - 1);
         for phrase in Phrase::ALL {
             let english = say(Language::English, *phrase);
             let french = say(Language::French, *phrase);

@@ -368,7 +368,8 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::SetVisible { segment, .. }
         | Command::AddKeyframe { segment, .. }
         | Command::RemoveKeyframe { segment, .. }
-        | Command::SetEasing { segment, .. } => segment_lane_locked(project, lanes, *segment),
+        | Command::SetEasing { segment, .. }
+        | Command::SetFades { segment, .. } => segment_lane_locked(project, lanes, *segment),
         Command::SetSource { .. } => false,
         _ => false,
     }
@@ -4441,9 +4442,15 @@ mod tests {
             property: KeyframeProperty::Opacity,
             easing: Easing::EaseIn,
         };
+        let fades = Command::SetFades {
+            segment: id,
+            fade_in: 100_000,
+            fade_out: 0,
+        };
         assert!(super::blocks_command(&cut, &locked, &volume));
         assert!(super::blocks_command(&cut, &locked, &hidden));
         assert!(super::blocks_command(&cut, &locked, &easing));
+        assert!(super::blocks_command(&cut, &locked, &fades));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),
@@ -4458,6 +4465,11 @@ mod tests {
             &cut,
             &super::Lanes::default(),
             &easing
+        ));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &fades
         ));
     }
 

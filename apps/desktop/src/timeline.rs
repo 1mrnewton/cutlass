@@ -1,4 +1,5 @@
 //! The project's tracks, drawn bottom to top, with the toolbar and ruler above them.
+//! A trackpad scroll pans the sheet. The head and the cover stay put horizontally.
 
 use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, Sense, Stroke, pos2, vec2};
 
@@ -557,6 +558,12 @@ pub fn show(
         if playing {
             follow_playhead(&mut view, lane, lane_width, *playhead, duration, rate);
         }
+        let span = lane_scroll(project.timeline().tracks(), tracks);
+        view.scroll_y = clamp_scroll_y(view.scroll_y, span);
+        let delta = sheet_delta(ui, ruler_rect, tracks);
+        if delta != egui::Vec2::ZERO {
+            scroll_sheet(&mut view, delta, lane_width, duration, rate, span);
+        }
         ui.data_mut(|data| data.insert_temp(zoom_id, view));
     }
     let marks_id = ui.scope_id().with("timeline-marks");
@@ -1055,12 +1062,13 @@ pub fn show(
     let mut menu = None;
     let mut clip_tips = Vec::new();
     if tracks.height() > 0.0 {
-        for (track, lane) in project
-            .timeline()
-            .tracks()
-            .iter()
-            .zip(layout(project.timeline().tracks(), tracks))
-        {
+        let lane_clip = ui.clip_rect();
+        ui.set_clip_rect(lane_clip.intersect(tracks));
+        for (track, lane) in project.timeline().tracks().iter().zip(placed(
+            project.timeline().tracks(),
+            tracks,
+            view.scroll_y,
+        )) {
             let lane_rect = Rect::from_min_size(
                 pos2(lane_left(tracks), lane.top),
                 vec2((tracks.right() - lane_left(tracks)).max(0.0), lane.height),
@@ -1146,6 +1154,7 @@ pub fn show(
             );
             ui.set_clip_rect(outer);
         }
+        ui.set_clip_rect(lane_clip);
         if let Some(choice) = menu {
             let locked = words::of(ui, Phrase::TrackIsLocked);
             match choice {
@@ -1333,6 +1342,8 @@ fn sheet_port(ruler: Rect, tracks: Rect) -> Rect {
 struct View {
     pixel_size: f64,
     origin_us: i64,
+    /// Pixels added to every lane top. Zero keeps Main centered.
+    scroll_y: f32,
 }
 
 impl View {
@@ -1340,6 +1351,7 @@ impl View {
         Self {
             pixel_size: ruler::opening_pixel_size(width, duration_us),
             origin_us: 0,
+            scroll_y: 0.0,
         }
     }
 
@@ -1452,6 +1464,109 @@ fn follow_playhead(
     clamp_view(view, width, duration_us, rate);
 }
 
+/// How far the lanes can move from the centered stack.
+/// The first value moves them up, the second moves them down.
+/// A stack that fits the area stays at zero.
+fn lane_scroll(tracks: &[Track], area: Rect) -> (f32, f32) {
+    let lanes = layout(tracks, area);
+    if lanes.is_empty() || area.height() <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let mut min_top = f32::MAX;
+    let mut max_bottom = f32::MIN;
+    for lane in &lanes {
+        min_top = min_top.min(lane.top);
+        max_bottom = max_bottom.max(lane.top + lane.height);
+    }
+    if !min_top.is_finite() || !max_bottom.is_finite() {
+        return (0.0, 0.0);
+    }
+    let above = (area.top() - min_top).max(0.0);
+    let below = (max_bottom - area.bottom()).max(0.0);
+    (-below, above)
+}
+
+fn clamp_scroll_y(scroll_y: f32, span: (f32, f32)) -> f32 {
+    if !scroll_y.is_finite() {
+        return 0.0;
+    }
+    scroll_y.clamp(span.0, span.1)
+}
+
+/// Lane tops after a vertical scroll. Zero matches [`layout`].
+fn placed(tracks: &[Track], area: Rect, scroll_y: f32) -> Vec<Lane> {
+    layout(tracks, area.translate(vec2(0.0, scroll_y)))
+}
+
+/// Moves the sheet by one frame of trackpad or wheel movement.
+///
+/// `delta` is how the content should move, in points. Positive x shows
+/// earlier time. Positive y moves the lanes down. The head and the cover
+/// stay put horizontally, and the ruler follows time only.
+fn scroll_sheet(
+    view: &mut View,
+    delta: egui::Vec2,
+    width: f32,
+    duration_us: i64,
+    rate: FrameRate,
+    span: (f32, f32),
+) {
+    if delta.x.is_finite() && delta.x != 0.0 && view.pixel_size.is_finite() && view.pixel_size > 0.0
+    {
+        let shift = f64::from(-delta.x) / view.pixel_size;
+        if shift.is_finite() {
+            let shift_us = shift.round().clamp(i64::MIN as f64, i64::MAX as f64) as i64;
+            view.origin_us = view.origin_us.saturating_add(shift_us).max(0);
+        }
+    }
+    if delta.y.is_finite() {
+        view.scroll_y += delta.y;
+    }
+    clamp_view(view, width, duration_us, rate);
+    view.scroll_y = clamp_scroll_y(view.scroll_y, span);
+}
+
+/// The scroll to apply while the pointer is over the sheet.
+///
+/// The lanes take both axes. The ruler takes horizontal movement, so time
+/// changes and the lanes stay. A lane head takes vertical movement, so the
+/// heads and the lanes move together. Pinch and command-scroll stay zoom.
+fn sheet_delta(ui: &mut egui::Ui, ruler: Rect, tracks: Rect) -> egui::Vec2 {
+    let delta = ui.input(|input| input.smooth_scroll_delta);
+    let lanes = time_port(tracks);
+    let cover = Rect::from_min_max(
+        pos2(tracks.left() + HEAD, tracks.top()),
+        pos2(lane_left(tracks), tracks.bottom()),
+    );
+    let ruler_view = time_port(ruler);
+    let heads = Rect::from_min_max(tracks.min, pos2(tracks.left() + HEAD, tracks.bottom()));
+    let over_lanes = ui.rect_contains_pointer(lanes) || ui.rect_contains_pointer(cover);
+    let over_ruler = ui.rect_contains_pointer(ruler_view);
+    let over_heads = ui.rect_contains_pointer(heads);
+    if !over_lanes && !over_ruler && !over_heads {
+        return egui::Vec2::ZERO;
+    }
+    let dragging =
+        ui.input(|input| input.pointer.primary_down()) || ui.ctx().dragged_id().is_some();
+    if dragging {
+        return egui::Vec2::ZERO;
+    }
+    if ui.input(|input| input.is_scrolling()) {
+        ui.ctx().request_repaint();
+    }
+    if delta == egui::Vec2::ZERO {
+        return egui::Vec2::ZERO;
+    }
+    ui.input_mut(|input| input.smooth_scroll_delta = egui::Vec2::ZERO);
+    if over_lanes {
+        delta
+    } else if over_ruler {
+        vec2(delta.x, 0.0)
+    } else {
+        vec2(0.0, delta.y)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ZoomStep {
     Out,
@@ -1472,7 +1587,9 @@ fn apply_zoom(
         ZoomStep::In => zoom_around(view, left, anchor, 2.0, width, duration_us, rate),
         ZoomStep::Out => zoom_around(view, left, anchor, 0.5, width, duration_us, rate),
         ZoomStep::Fit => {
+            let scroll_y = view.scroll_y;
             *view = View::fit(width, duration_us);
+            view.scroll_y = scroll_y;
             clamp_view(view, width, duration_us, rate);
         }
     }
@@ -2584,12 +2701,11 @@ fn clips_in(project: &Project, tracks: Rect, area: Rect, view: View) -> Vec<Segm
     }
     let width = (tracks.right() - lane_left(tracks)).max(0.0);
     let mut hits = Vec::new();
-    for (track, lane) in project
-        .timeline()
-        .tracks()
-        .iter()
-        .zip(layout(project.timeline().tracks(), tracks))
-    {
+    for (track, lane) in project.timeline().tracks().iter().zip(placed(
+        project.timeline().tracks(),
+        tracks,
+        view.scroll_y,
+    )) {
         let lane_rect =
             Rect::from_min_size(pos2(lane_left(tracks), lane.top), vec2(width, lane.height));
         for segment in track.segments() {
@@ -2840,6 +2956,7 @@ fn paint_segments(
         let view = View {
             pixel_size: paint.pixel_size,
             origin_us: paint.origin_us,
+            scroll_y: 0.0,
         };
         let on_key = paint_keys(
             ui,
@@ -2945,7 +3062,7 @@ fn keyframe_at(project: &Project, tracks: Rect, point: egui::Pos2, view: View) -
     if tracks.height() <= 0.0 {
         return None;
     }
-    let lanes = layout(project.timeline().tracks(), tracks);
+    let lanes = placed(project.timeline().tracks(), tracks, view.scroll_y);
     let mut best: Option<(f32, KeyHit)> = None;
     for (track, lane) in project.timeline().tracks().iter().zip(lanes).rev() {
         let lane_rect = Rect::from_min_size(
@@ -3342,7 +3459,8 @@ fn move_command(
         )
         .0;
     }
-    let track = lane_under(project, tracks, point).filter(|id| *id != drag.from);
+    let track =
+        lane_under(project, tracks, point, align.view.scroll_y).filter(|id| *id != drag.from);
     if start == drag.start_us && track.is_none() {
         return None;
     }
@@ -3353,13 +3471,18 @@ fn move_command(
     })
 }
 
-fn lane_under(project: &Project, tracks: Rect, point: egui::Pos2) -> Option<TrackId> {
+fn lane_under(
+    project: &Project,
+    tracks: Rect,
+    point: egui::Pos2,
+    scroll_y: f32,
+) -> Option<TrackId> {
     let width = (tracks.right() - lane_left(tracks)).max(0.0);
     for (track, lane) in project
         .timeline()
         .tracks()
         .iter()
-        .zip(layout(project.timeline().tracks(), tracks))
+        .zip(placed(project.timeline().tracks(), tracks, scroll_y))
         .rev()
     {
         let lane_rect =
@@ -3382,7 +3505,7 @@ fn trim_from(project: &Project, tracks: Rect, point: egui::Pos2, view: View) -> 
         .timeline()
         .tracks()
         .iter()
-        .zip(layout(project.timeline().tracks(), tracks))
+        .zip(placed(project.timeline().tracks(), tracks, view.scroll_y))
         .rev()
     {
         let lane_rect =
@@ -3488,7 +3611,7 @@ fn segment_at(project: &Project, tracks: Rect, point: egui::Pos2, view: View) ->
     if tracks.height() <= 0.0 {
         return None;
     }
-    let lanes = layout(project.timeline().tracks(), tracks);
+    let lanes = placed(project.timeline().tracks(), tracks, view.scroll_y);
     for (track, lane) in project.timeline().tracks().iter().zip(lanes).rev() {
         let lane_rect = Rect::from_min_size(
             pos2(lane_left(tracks), lane.top),
@@ -3574,7 +3697,7 @@ fn paint_stamps(
     if tracks.height() <= 0.0 {
         return;
     }
-    let lanes = layout(project.timeline().tracks(), tracks);
+    let lanes = placed(project.timeline().tracks(), tracks, view.scroll_y);
     for (track, lane) in project.timeline().tracks().iter().zip(lanes) {
         let lane_rect = Rect::from_min_size(
             pos2(lane_left(tracks), lane.top),
@@ -4679,6 +4802,7 @@ mod tests {
         let mut view = super::View {
             pixel_size: 0.0002,
             origin_us: 0,
+            scroll_y: 0.0,
         };
         super::zoom_around(
             &mut view,
@@ -4703,6 +4827,109 @@ mod tests {
         let quarter = crate::ruler::quarter_pixel_size(400.0, 2_000_000);
         assert!((view.pixel_size - quarter).abs() < 1e-12);
         assert_eq!(view.origin_us, 0);
+    }
+
+    #[test]
+    fn a_trackpad_scroll_pans_the_sheet_and_stops_at_the_cut() {
+        use cutlass_project::FrameRate;
+
+        let mut view = super::View {
+            pixel_size: 0.001,
+            origin_us: 100_000,
+            scroll_y: 4.0,
+        };
+        super::scroll_sheet(
+            &mut view,
+            vec2(50.0, 0.0),
+            800.0,
+            5_000_000,
+            FrameRate::Fps30,
+            (0.0, 0.0),
+        );
+        assert_eq!(view.origin_us, 50_000);
+        assert_eq!(view.scroll_y, 0.0);
+        super::scroll_sheet(
+            &mut view,
+            vec2(-20_000.0, 0.0),
+            800.0,
+            5_000_000,
+            FrameRate::Fps30,
+            (0.0, 0.0),
+        );
+        assert_eq!(view.origin_us, 4_200_000);
+        super::scroll_sheet(
+            &mut view,
+            vec2(20_000.0, 0.0),
+            800.0,
+            5_000_000,
+            FrameRate::Fps30,
+            (0.0, 0.0),
+        );
+        assert_eq!(view.origin_us, 0);
+        view.scroll_y = 4.0;
+        super::zoom_around(
+            &mut view,
+            0.0,
+            100.0,
+            2.0,
+            800.0,
+            5_000_000,
+            FrameRate::Fps30,
+        );
+        assert_eq!(view.scroll_y, 4.0);
+        assert!(view.pixel_size > 0.001);
+        super::apply_zoom(
+            &mut view,
+            0.0,
+            100.0,
+            super::ZoomStep::Fit,
+            800.0,
+            5_000_000,
+            FrameRate::Fps30,
+        );
+        assert_eq!(view.scroll_y, 4.0);
+    }
+
+    #[test]
+    fn a_vertical_scroll_stops_when_the_lane_meets_the_track_area() {
+        use cutlass_project::FrameRate;
+
+        let cut = project();
+        let area = Rect::from_min_size(pos2(0.0, 100.0), vec2(800.0, 40.0));
+        let span = super::lane_scroll(cut.timeline().tracks(), area);
+        assert_eq!(span, (-12.0, 12.0));
+        let wide = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 400.0));
+        assert_eq!(
+            super::lane_scroll(cut.timeline().tracks(), wide),
+            (0.0, 0.0)
+        );
+        let mut view = super::View {
+            pixel_size: 0.001,
+            origin_us: 0,
+            scroll_y: 0.0,
+        };
+        super::scroll_sheet(
+            &mut view,
+            vec2(0.0, 40.0),
+            800.0,
+            1_000_000,
+            FrameRate::Fps30,
+            span,
+        );
+        assert_eq!(view.scroll_y, 12.0);
+        let lanes = super::placed(cut.timeline().tracks(), area, view.scroll_y);
+        assert!((lanes[0].top - area.top()).abs() < 0.01);
+        super::scroll_sheet(
+            &mut view,
+            vec2(0.0, -40.0),
+            800.0,
+            1_000_000,
+            FrameRate::Fps30,
+            span,
+        );
+        assert_eq!(view.scroll_y, -12.0);
+        let lanes = super::placed(cut.timeline().tracks(), area, view.scroll_y);
+        assert!((lanes[0].top + lanes[0].height - area.bottom()).abs() < 0.01);
     }
 
     #[test]
@@ -4744,6 +4971,7 @@ mod tests {
         let mut view = super::View {
             pixel_size: 0.001,
             origin_us: 0,
+            scroll_y: 0.0,
         };
         super::follow_playhead(&mut view, 0.0, 800.0, 200_000, 5_000_000, FrameRate::Fps30);
         assert_eq!(view.origin_us, 0);
@@ -5995,6 +6223,7 @@ mod tests {
             view: super::View {
                 pixel_size: 0.001,
                 origin_us: 0,
+                scroll_y: 0.0,
             },
             rate: FrameRate::Fps30,
         };

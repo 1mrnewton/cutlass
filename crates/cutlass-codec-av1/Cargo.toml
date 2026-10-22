@@ -1,0 +1,18 @@
+[package]
+name = "cutlass-codec-av1"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native AV1 software decoder for Cutlass. Decode only; no foreign codec."
+
+[dependencies]
+cutlass-core = { path = "../cutlass-core" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+
+[[example]]
+name = "av1dec"
+path = "examples/av1dec.rs"

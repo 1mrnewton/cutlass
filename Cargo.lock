@@ -1463,6 +1463,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutlass-codec-av1"
+version = "0.7.0-alpha.0"
+dependencies = [
+ "cutlass-core",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cutlass-commands"
 version = "0.7.0-alpha.0"
 dependencies = [

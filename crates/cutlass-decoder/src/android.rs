@@ -665,6 +665,9 @@ unsafe fn read_planes(
         PixelFormat::Rgba8 | PixelFormat::Bgra8 => Err(DecodeError::unsupported(
             "MediaCodec reported a packed-RGB output color format",
         )),
+        other => Err(DecodeError::unsupported(format!(
+            "MediaCodec plane reader does not handle {other:?}"
+        ))),
     }
 }
 

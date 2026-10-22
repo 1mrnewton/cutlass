@@ -9,7 +9,8 @@ use crate::Error;
 const DPI_72: u32 = 0x0048_0000;
 const IDENTITY: [u32; 9] = [0x0001_0000, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000];
 
-/// An MP4 file to write. The movie box follows the media data.
+/// An MP4 file to write. The movie box follows the media data, unless the
+/// index is written first.
 #[derive(Debug)]
 pub struct MovieFile {
     timescale: NonZeroU32,
@@ -92,27 +93,91 @@ impl MovieFile {
 
     /// The file bytes. `ftyp`, then `mdat`, then `moov`.
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.assemble(false)
+    }
+
+    /// The file bytes with the index first. `ftyp`, then `moov`, then `mdat`.
+    ///
+    /// A player can start before the samples have all arrived.
+    pub fn to_bytes_index_first(&self) -> Result<Vec<u8>, Error> {
+        self.assemble(true)
+    }
+
+    fn assemble(&self, index_first: bool) -> Result<Vec<u8>, Error> {
         if self.tracks.is_empty() {
             return Err(Error::Inconsistent("the movie has no tracks"));
         }
-        let mut payload = Vec::new();
-        let mut placed = Vec::with_capacity(self.tracks.len());
-        for track in &self.tracks {
-            if track.samples.is_empty() {
-                placed.push(None);
-                continue;
-            }
-            let at = u64::try_from(payload.len()).map_err(|_| Error::TooLarge)?;
-            placed.push(Some(at));
-            for sample in &track.samples {
-                payload.extend_from_slice(&sample.data);
-            }
-        }
+        let (payload, placed) = sample_bytes(self)?;
         let mut buf = Buf::default();
         write_ftyp(&mut buf)?;
+        if index_first {
+            // A chunk offset counts from the start of the file, so it includes
+            // the movie. A 64-bit offset is four bytes longer than a 32-bit
+            // one, which moves the samples. Repeat until the size and the
+            // offsets agree.
+            let (moov, expected) = index_first_moov(self, &placed, buf.bytes.len(), &payload)?;
+            buf.push_bytes(&moov);
+            let data_at = write_mdat(&mut buf, &payload)?;
+            if data_at != expected {
+                return Err(Error::Inconsistent("the index size did not settle"));
+            }
+            return Ok(buf.bytes);
+        }
         let data_at = write_mdat(&mut buf, &payload)?;
         write_moov(&mut buf, self, &placed, data_at)?;
         Ok(buf.bytes)
+    }
+}
+
+fn sample_bytes(movie: &MovieFile) -> Result<(Vec<u8>, Vec<Option<u64>>), Error> {
+    let mut payload = Vec::new();
+    let mut placed = Vec::with_capacity(movie.tracks.len());
+    for track in &movie.tracks {
+        if track.samples.is_empty() {
+            placed.push(None);
+            continue;
+        }
+        let at = u64::try_from(payload.len()).map_err(|_| Error::TooLarge)?;
+        placed.push(Some(at));
+        for sample in &track.samples {
+            payload.extend_from_slice(&sample.data);
+        }
+    }
+    Ok((payload, placed))
+}
+
+fn index_first_moov(
+    movie: &MovieFile,
+    placed: &[Option<u64>],
+    ftyp_len: usize,
+    payload: &[u8],
+) -> Result<(Vec<u8>, u64), Error> {
+    let header = mdat_header_len(payload.len())?;
+    let ftyp = u64::try_from(ftyp_len).map_err(|_| Error::TooLarge)?;
+    let mut previous = 0usize;
+    for _ in 0..4 {
+        let movie_len = u64::try_from(previous).map_err(|_| Error::TooLarge)?;
+        let data_at = ftyp
+            .checked_add(movie_len)
+            .and_then(|at| at.checked_add(header))
+            .ok_or(Error::TooLarge)?;
+        let mut moov = Buf::default();
+        write_moov(&mut moov, movie, placed, data_at)?;
+        if moov.bytes.len() == previous {
+            return Ok((moov.bytes, data_at));
+        }
+        previous = moov.bytes.len();
+    }
+    Err(Error::Inconsistent("the index size did not settle"))
+}
+
+fn mdat_header_len(payload_len: usize) -> Result<u64, Error> {
+    let payload_len = u64::try_from(payload_len).map_err(|_| Error::TooLarge)?;
+    let small = payload_len.checked_add(8).ok_or(Error::TooLarge)?;
+    if u32::try_from(small).is_ok() {
+        Ok(8)
+    } else {
+        Ok(16)
     }
 }
 

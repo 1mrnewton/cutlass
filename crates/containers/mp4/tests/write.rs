@@ -596,6 +596,48 @@ fn an_empty_movie_refuses() {
         MovieFile::new(scale(1_000)).to_bytes(),
         Error::Inconsistent("the movie has no tracks"),
     );
+    expect_err(
+        MovieFile::new(scale(1_000)).to_bytes_index_first(),
+        Error::Inconsistent("the movie has no tracks"),
+    );
+}
+
+#[test]
+fn the_index_can_come_first() {
+    let ticks = scale(1_000);
+    let mut file = MovieFile::new(ticks);
+    file.add_video(
+        ticks,
+        h264(32, 18),
+        vec![
+            packet(ticks, 0, 10, 10, &[1, 2, 3], true),
+            packet(ticks, 10, 10, 10, &[4], false),
+        ],
+    )
+    .expect("video");
+    file.add_audio(
+        ticks,
+        aac(44_100, 2, &[0x12, 0x10]),
+        vec![packet(ticks, 0, 0, 20, &[5, 6, 7, 8], true)],
+    )
+    .expect("audio");
+    let last = file.to_bytes().expect("after the samples");
+    let first = file.to_bytes_index_first().expect("index first");
+    assert_ne!(first, last);
+    assert_eq!(&first[..8], &[0, 0, 0, 28, b'f', b't', b'y', b'p']);
+    let moov = first
+        .windows(4)
+        .position(|bytes| bytes == b"moov")
+        .expect("moov");
+    let mdat = first
+        .windows(4)
+        .position(|bytes| bytes == b"mdat")
+        .expect("mdat");
+    assert!(moov < mdat);
+    assert_eq!(
+        Movie::parse(&first).expect("read first"),
+        Movie::parse(&last).expect("read last")
+    );
 }
 
 #[test]

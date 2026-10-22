@@ -367,7 +367,8 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::SetVolume { segment, .. }
         | Command::SetVisible { segment, .. }
         | Command::AddKeyframe { segment, .. }
-        | Command::RemoveKeyframe { segment, .. } => segment_lane_locked(project, lanes, *segment),
+        | Command::RemoveKeyframe { segment, .. }
+        | Command::SetEasing { segment, .. } => segment_lane_locked(project, lanes, *segment),
         Command::SetSource { .. } => false,
         _ => false,
     }
@@ -3471,8 +3472,8 @@ mod tests {
 
     use cutlass_core::Timestamp;
     use cutlass_project::{
-        Asset, Channels, Command, History, Outcome, Project, ProjectId, Segment, Speed, TimeRange,
-        TrackKind,
+        Asset, Channels, Command, Easing, History, KeyframeProperty, Outcome, Project, ProjectId,
+        Segment, Speed, TimeRange, TrackKind,
     };
     use eframe::egui::{Rect, pos2, vec2};
 
@@ -4434,8 +4435,15 @@ mod tests {
             segment: id,
             visible: false,
         };
+        let easing = Command::SetEasing {
+            segment: id,
+            offset_us: 0,
+            property: KeyframeProperty::Opacity,
+            easing: Easing::EaseIn,
+        };
         assert!(super::blocks_command(&cut, &locked, &volume));
         assert!(super::blocks_command(&cut, &locked, &hidden));
+        assert!(super::blocks_command(&cut, &locked, &easing));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),
@@ -4445,6 +4453,11 @@ mod tests {
             &cut,
             &super::Lanes::default(),
             &hidden
+        ));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &easing
         ));
     }
 

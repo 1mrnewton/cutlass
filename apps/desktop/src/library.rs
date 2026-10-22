@@ -1141,8 +1141,167 @@ mod tests {
         assert!(text.nodes.iter().all(|(_, node)| !named(node, "boat.wav")));
     }
 
+    #[test]
+    fn the_other_shelves_say_empty_and_hide_the_files() {
+        let mut history = History::new();
+        let mut cut = project();
+        let picture = Asset::video(
+            "file:///cuts/picture.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let sound = Asset::audio(
+            "file:///cuts/boat.wav",
+            Timestamp::new(48_000, NonZeroU32::new(48_000).expect("scale")),
+        )
+        .expect("audio");
+        history
+            .apply(
+                &mut cut,
+                &[Command::AddAsset(picture), Command::AddAsset(sound)],
+            )
+            .expect("add");
+
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, crate::words::Language::English);
+        let mut bin = crate::media_bin::Bin::new();
+        let mut source = super::MediaSource::Project;
+        let mut shelf = super::Shelf::Media;
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(400.0, 500.0),
+        );
+        let mut time = 0.0;
+        let mut pass = |shelf: &mut super::Shelf, events: Vec<eframe::egui::Event>| {
+            time += 0.05;
+            let mut output = ctx.run_ui(
+                eframe::egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    super::show(ui, &cut, shelf, &mut source, &mut bin);
+                },
+            );
+            let tree = output.platform_output.accesskit_update.take();
+            output.textures_delta.clear();
+            tree.expect("the tree is built")
+        };
+        let media = pass(&mut shelf, vec![]);
+        assert!(
+            media
+                .nodes
+                .iter()
+                .any(|(_, node)| named(node, "picture.mp4"))
+        );
+        let shelves = [
+            ("Text", super::Shelf::Text),
+            ("Stickers", super::Shelf::Stickers),
+            ("Effects", super::Shelf::Effects),
+            ("Transitions", super::Shelf::Transitions),
+            ("Filters", super::Shelf::Filters),
+            ("Adjustments", super::Shelf::Adjustments),
+            ("Templates", super::Shelf::Templates),
+        ];
+        for (label, kind) in shelves {
+            let tree = pass(&mut shelf, vec![]);
+            let at = center(&tree, label);
+            pass(
+                &mut shelf,
+                vec![
+                    eframe::egui::Event::PointerMoved(at),
+                    press(at, eframe::egui::PointerButton::Primary, true),
+                ],
+            );
+            let shown = pass(
+                &mut shelf,
+                vec![press(at, eframe::egui::PointerButton::Primary, false)],
+            );
+            assert!(shelf == kind);
+            assert!(shown.nodes.iter().any(|(_, node)| named(node, "Empty")));
+            assert!(
+                shown
+                    .nodes
+                    .iter()
+                    .all(|(_, node)| !named(node, "picture.mp4"))
+            );
+            assert!(shown.nodes.iter().all(|(_, node)| !named(node, "boat.wav")));
+            assert!(shown.nodes.iter().all(|(_, node)| !named(node, "Import")));
+            assert!(shown.nodes.iter().all(|(_, node)| !named(node, "All")));
+            assert!(
+                shown
+                    .nodes
+                    .iter()
+                    .all(|(_, node)| !named(node, "New folder"))
+            );
+        }
+        let empty = pass(&mut shelf, vec![]);
+        let at = center(&empty, "Empty");
+        pass(
+            &mut shelf,
+            vec![
+                eframe::egui::Event::PointerMoved(at),
+                press(at, eframe::egui::PointerButton::Secondary, true),
+            ],
+        );
+        let menu = pass(
+            &mut shelf,
+            vec![press(at, eframe::egui::PointerButton::Secondary, false)],
+        );
+        assert!(
+            menu.nodes
+                .iter()
+                .all(|(_, node)| !named(node, "New folder"))
+        );
+        assert!(
+            menu.nodes
+                .iter()
+                .all(|(_, node)| !named(node, "Sorted by name"))
+        );
+        crate::words::install(&ctx, crate::words::Language::French);
+        let french = pass(&mut shelf, vec![]);
+        assert!(french.nodes.iter().any(|(_, node)| named(node, "Vide")));
+        assert!(french.nodes.iter().any(|(_, node)| named(node, "Modèles")));
+        assert!(french.nodes.iter().all(|(_, node)| !named(node, "Empty")));
+    }
+
     fn named(node: &eframe::egui::accesskit::Node, text: &str) -> bool {
         node.label() == Some(text) || node.value() == Some(text)
+    }
+
+    fn center(tree: &eframe::egui::accesskit::TreeUpdate, text: &str) -> eframe::egui::Pos2 {
+        let node = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| named(node, text))
+            .unwrap_or_else(|| panic!("missing {text}"));
+        let bounds = node
+            .1
+            .bounds()
+            .unwrap_or_else(|| panic!("no bounds {text}"));
+        eframe::egui::pos2(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        )
+    }
+
+    fn press(
+        at: eframe::egui::Pos2,
+        button: eframe::egui::PointerButton,
+        pressed: bool,
+    ) -> eframe::egui::Event {
+        eframe::egui::Event::PointerButton {
+            pos: at,
+            button,
+            pressed,
+            modifiers: eframe::egui::Modifiers::default(),
+        }
     }
 
     #[test]

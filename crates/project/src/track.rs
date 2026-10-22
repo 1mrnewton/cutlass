@@ -4,6 +4,7 @@ use crate::Error;
 use crate::id::{SegmentId, TrackId};
 use crate::segment::Segment;
 use crate::time::TimeRange;
+use crate::transition::Transition;
 
 /// One kind per track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +38,7 @@ pub struct Track {
     hidden: bool,
     muted: bool,
     segments: Vec<Segment>,
+    transitions: Vec<Transition>,
 }
 
 impl Track {
@@ -49,6 +51,7 @@ impl Track {
             hidden: false,
             muted: false,
             segments: Vec::new(),
+            transitions: Vec::new(),
         }
     }
 
@@ -61,6 +64,7 @@ impl Track {
             hidden: false,
             muted: false,
             segments: Vec::new(),
+            transitions: Vec::new(),
         };
         track.insert(segment)?;
         Ok(track)
@@ -76,6 +80,7 @@ impl Track {
             hidden: false,
             muted: false,
             segments: Vec::new(),
+            transitions: Vec::new(),
         }
     }
 
@@ -213,6 +218,40 @@ impl Track {
 
     pub fn segments(&self) -> &[Segment] {
         &self.segments
+    }
+
+    /// Transitions on this track. Only the main track holds any.
+    pub fn transitions(&self) -> &[Transition] {
+        &self.transitions
+    }
+
+    pub(crate) fn set_transitions(&mut self, transitions: Vec<Transition>) {
+        self.transitions = transitions;
+    }
+
+    pub(crate) fn upsert_transition(&mut self, transition: Transition) {
+        if let Some(found) = self
+            .transitions
+            .iter_mut()
+            .find(|existing| existing.left() == transition.left())
+        {
+            *found = transition;
+            return;
+        }
+        self.transitions.push(transition);
+    }
+
+    pub(crate) fn clear_transition(&mut self, left: SegmentId) {
+        self.transitions
+            .retain(|transition| transition.left() != left);
+    }
+
+    pub(crate) fn retarget_left(&mut self, from: SegmentId, to: SegmentId) {
+        for transition in &mut self.transitions {
+            if transition.left() == from {
+                transition.retarget_left(to);
+            }
+        }
     }
 }
 

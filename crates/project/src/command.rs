@@ -129,6 +129,17 @@ pub enum Command {
         segment: SegmentId,
         attachment: Option<Attachment>,
     },
+    /// Sets the blend on the cut after `segment`.
+    SetTransition {
+        segment: SegmentId,
+        duration_us: i64,
+        overlap: bool,
+        attachment: Attachment,
+    },
+    /// Removes the blend on the cut after `segment`.
+    ClearTransition {
+        segment: SegmentId,
+    },
     /// Locks the track when on. A locked track refuses an edit.
     SetLocked {
         track: TrackId,

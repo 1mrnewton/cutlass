@@ -20,6 +20,7 @@ use crate::settings::{AspectRatio, Canvas, Color, ColorSpace, Settings};
 use crate::time::{Speed, TimeRange};
 use crate::timeline::Timeline;
 use crate::track::{Track, TrackKind};
+use crate::transition::Transition;
 
 /// The only project-file version this crate writes.
 ///
@@ -275,6 +276,9 @@ fn timeline_from(document: &TimelineDoc, assets: &[Asset]) -> Result<Timeline, E
     timeline.main_mut().set_locked(main.locked());
     timeline.main_mut().set_hidden(main.hidden());
     timeline.main_mut().set_muted(main.muted());
+    timeline
+        .main_mut()
+        .set_transitions(main.transitions().to_vec());
     for track in tracks {
         timeline.insert(track)?;
     }
@@ -310,7 +314,83 @@ fn track_doc(track: &Track) -> TrackDoc {
         hidden: track.hidden(),
         muted: track.muted(),
         segments: track.segments().iter().map(segment_doc).collect(),
+        transitions: track.transitions().iter().map(transition_doc).collect(),
     }
+}
+
+fn transition_doc(transition: &Transition) -> TransitionDoc {
+    TransitionDoc {
+        left: transition.left().to_string(),
+        right: transition.right().to_string(),
+        duration: transition.duration_us(),
+        overlap: transition.overlap(),
+        attachment: attachment_doc(transition.attachment()),
+    }
+}
+
+fn transitions_from(document: &TrackDoc, track: &Track) -> Result<Vec<Transition>, Error> {
+    let mut transitions = Vec::with_capacity(document.transitions.len());
+    for item in &document.transitions {
+        let left: SegmentId = item.left.parse()?;
+        let right: SegmentId = item.right.parse()?;
+        let transition = Transition::new(
+            left,
+            right,
+            item.duration,
+            item.overlap,
+            attachment_from(&item.attachment)?,
+        )?;
+        let segments = track.segments();
+        let Some(index) = segments.iter().position(|segment| segment.id() == left) else {
+            return Err(Error::Transition);
+        };
+        let Some(neighbor) = segments.get(index + 1) else {
+            return Err(Error::Transition);
+        };
+        if neighbor.id() != right
+            || segments[index].timeline().end().value != neighbor.timeline().start().value
+            || !transition.fits(
+                segments[index].timeline().duration().value,
+                neighbor.timeline().duration().value,
+            )
+        {
+            return Err(Error::Transition);
+        }
+        let cut = segments[index].timeline().end().value;
+        let (before, after) = transition.sides();
+        let start = cut.checked_sub(before).ok_or(Error::DurationOverflow)?;
+        let end = cut.checked_add(after).ok_or(Error::DurationOverflow)?;
+        let clashes = transitions.iter().any(|existing: &Transition| {
+            let Some(other_index) = segments
+                .iter()
+                .position(|segment| segment.id() == existing.left())
+            else {
+                return true;
+            };
+            let other_cut = segments[other_index].timeline().end().value;
+            let (other_before, other_after) = existing.sides();
+            let Some(other_start) = other_cut.checked_sub(other_before) else {
+                return true;
+            };
+            let Some(other_end) = other_cut.checked_add(other_after) else {
+                return true;
+            };
+            start < other_end && other_start < end
+        });
+        if clashes || transitions.iter().any(|existing| existing.left() == left) {
+            return Err(Error::Transition);
+        }
+        transitions.push(transition);
+    }
+    transitions.sort_by_key(|transition| {
+        track
+            .segments()
+            .iter()
+            .find(|segment| segment.id() == transition.left())
+            .map(|segment| segment.timeline().start().value)
+            .unwrap_or(0)
+    });
+    Ok(transitions)
 }
 
 fn apply_flags(track: &mut Track, document: &TrackDoc) {
@@ -325,6 +405,9 @@ fn track_from(document: &TrackDoc, assets: &[Asset]) -> Result<Track, Error> {
     if document.main && kind != TrackKind::Video {
         return Err(Error::WrongTrack);
     }
+    if !document.main && !document.transitions.is_empty() {
+        return Err(Error::Transition);
+    }
     let mut segments = Vec::with_capacity(document.segments.len());
     for segment in &document.segments {
         segments.push(segment_from(segment, assets)?);
@@ -335,6 +418,7 @@ fn track_from(document: &TrackDoc, assets: &[Asset]) -> Result<Track, Error> {
             track.insert(segment)?;
         }
         apply_flags(&mut track, document);
+        track.set_transitions(transitions_from(document, &track)?);
         return Ok(track);
     }
     let mut rest = segments.into_iter();
@@ -1024,6 +1108,19 @@ struct TrackDoc {
     #[serde(default, skip_serializing_if = "is_false")]
     muted: bool,
     segments: Vec<SegmentDoc>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    transitions: Vec<TransitionDoc>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransitionDoc {
+    left: String,
+    right: String,
+    duration: i64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    overlap: bool,
+    attachment: AttachmentDoc,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2189,6 +2286,63 @@ mod tests {
         value["timeline"]["tracks"][1]["segments"][0]["effect"] = json!(false);
         value["timeline"]["tracks"][1]["segments"][0]["asset"] = json!("asset-9");
         refuse(&value.to_string(), Error::Attachment);
+    }
+
+    #[test]
+    fn a_transition_round_trips_and_a_bad_cut_refuses_the_file() {
+        use crate::attachment::Attachment;
+
+        let mut project = Project::from_json(EMPTY).expect("load");
+        let mut history = History::new();
+        let mut ids = Vec::new();
+        for (index, name) in ["file:///a.png", "file:///b.png"].into_iter().enumerate() {
+            let asset = Asset::image(name, 8, 8).expect("image");
+            history
+                .apply(&mut project, &[Command::AddAsset(asset)])
+                .expect("add");
+            let stored = project.assets().last().expect("asset");
+            let start = i64::try_from(index).expect("index") * 5_000_000;
+            let segment = Segment::image(stored, start, 1_000_000).expect("still");
+            let main = project.timeline().main_track().id();
+            let placed = history
+                .apply(
+                    &mut project,
+                    &[Command::Place {
+                        track: Some(main),
+                        segment,
+                    }],
+                )
+                .expect("place");
+            ids.push(match placed.as_slice() {
+                [crate::Outcome::Segment(id)] => *id,
+                other => panic!("expected the main track, got {other:?}"),
+            });
+        }
+        history
+            .apply(
+                &mut project,
+                &[Command::SetTransition {
+                    segment: ids[0],
+                    duration_us: 400_000,
+                    overlap: false,
+                    attachment: Attachment::new("crossfade", "1", Vec::new()).expect("plugin"),
+                }],
+            )
+            .expect("transition");
+        let saved = project.to_json().expect("json");
+        assert!(saved.contains("\"duration\": 400000"));
+        assert!(!saved.contains("\"overlap\""));
+        let loaded = Project::from_json(&saved).expect("load");
+        assert_eq!(
+            loaded.timeline().main_track().transitions()[0].left(),
+            ids[0]
+        );
+        let mut value: Value = serde_json::from_str(&saved).expect("value");
+        value["timeline"]["tracks"][0]["transitions"][0]["duration"] = json!(9_000_000);
+        refuse(&value.to_string(), Error::Transition);
+        value["timeline"]["tracks"][0]["transitions"][0]["duration"] = json!(400_000);
+        value["timeline"]["tracks"][0]["segments"][1]["timeline"]["start"] = json!(2_000_000);
+        refuse(&value.to_string(), Error::Transition);
     }
 
     fn grade_field(value: &mut Value, key: &str, next: Value) {

@@ -101,6 +101,10 @@ pub enum Error {
     Parameter,
     #[error("the segment cannot take an attachment")]
     Attachment,
+    #[error("the cut cannot take this transition")]
+    Transition,
+    #[error("the split is inside a transition")]
+    InsideTransition,
     #[error("value is not finite")]
     NonFinite,
     #[error("scale must be positive")]

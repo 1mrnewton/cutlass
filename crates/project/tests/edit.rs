@@ -103,6 +103,24 @@ fn load() -> Result<(Cut, AssetId), Error> {
     Ok((cut, asset))
 }
 
+fn place_still(cut: &mut Cut, name: &str, start: i64, duration: i64) -> Result<SegmentId, Error> {
+    let id = asset_id(run(cut, Command::AddAsset(Asset::image(name, 8, 8)?))?);
+    let stored = cut.project.asset(id).ok_or(Error::UnknownAsset(id))?;
+    let segment = Segment::image(stored, start, duration)?;
+    let main = cut.main;
+    Ok(segment_id(run(
+        cut,
+        Command::Place {
+            track: Some(main),
+            segment,
+        },
+    )?))
+}
+
+fn blur() -> Result<Attachment, Error> {
+    Attachment::new("crossfade", "1", Vec::new())
+}
+
 fn media(
     project: &Project,
     asset: AssetId,
@@ -4377,6 +4395,261 @@ fn an_attachment_names_the_plugin_and_keeps_its_parameters() -> Result<(), Error
             },
         ),
         Error::UnknownSegment(missing),
+    );
+    Ok(())
+}
+
+#[test]
+fn a_transition_sits_on_a_main_track_cut() -> Result<(), Error> {
+    let mut cut = bare();
+    let left = place_still(&mut cut, "file:///a.png", 0, 1_000_000)?;
+    let right = place_still(&mut cut, "file:///b.png", 5_000_000, 1_000_000)?;
+    let third = place_still(&mut cut, "file:///c.png", 9_000_000, 1_000_000)?;
+    run(
+        &mut cut,
+        Command::SetTransition {
+            segment: left,
+            duration_us: 400_000,
+            overlap: false,
+            attachment: blur()?,
+        },
+    )?;
+    let stored = cut.project.timeline().main_track().transitions();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].left(), left);
+    assert_eq!(stored[0].right(), right);
+    assert_eq!(stored[0].duration_us(), 400_000);
+    assert!(!stored[0].overlap());
+    assert_eq!(stored[0].attachment().plugin(), "crossfade");
+    let saved = cut.project.to_json()?;
+    assert!(saved.contains("\"plugin\": \"crossfade\""));
+    assert!(saved.contains("\"duration\": 400000"));
+    assert!(!saved.contains("\"overlap\""));
+    let loaded = Project::from_json(&saved)?;
+    assert_eq!(
+        loaded.timeline().main_track().transitions()[0].right(),
+        right
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetTransition {
+                segment: left,
+                duration_us: 2_000_000,
+                overlap: false,
+                attachment: blur()?,
+            },
+        ),
+        Error::Transition,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetTransition {
+                segment: left,
+                duration_us: 1,
+                overlap: true,
+                attachment: blur()?,
+            },
+        ),
+        Error::Transition,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetTransition {
+                segment: left,
+                duration_us: 0,
+                overlap: false,
+                attachment: blur()?,
+            },
+        ),
+        Error::ZeroDuration,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetTransition {
+                segment: third,
+                duration_us: 800_000,
+                overlap: true,
+                attachment: blur()?,
+            },
+        ),
+        Error::Transition,
+    );
+    run(
+        &mut cut,
+        Command::SetTransition {
+            segment: left,
+            duration_us: 1_000_000,
+            overlap: true,
+            attachment: blur()?,
+        },
+    )?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetTransition {
+                segment: right,
+                duration_us: 1_200_000,
+                overlap: true,
+                attachment: blur()?,
+            },
+        ),
+        Error::Transition,
+    );
+    assert_eq!(cut.project.timeline().main_track().transitions().len(), 1);
+    run(
+        &mut cut,
+        Command::SetTransition {
+            segment: right,
+            duration_us: 200_000,
+            overlap: false,
+            attachment: blur()?,
+        },
+    )?;
+    assert_eq!(cut.project.timeline().main_track().transitions().len(), 2);
+    let (effect, _) = opened(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::effect(0, 1_000_000)?,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetTransition {
+                segment: effect,
+                duration_us: 100_000,
+                overlap: false,
+                attachment: blur()?,
+            },
+        ),
+        Error::Transition,
+    );
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetTransition {
+                segment: missing,
+                duration_us: 100_000,
+                overlap: false,
+                attachment: blur()?,
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
+    run(&mut cut, Command::ClearTransition { segment: right })?;
+    assert_eq!(cut.project.timeline().main_track().transitions().len(), 1);
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(cut.project.timeline().main_track().transitions().len(), 2);
+    Ok(())
+}
+
+#[test]
+fn a_split_inside_a_transition_is_refused_and_the_cut_follows_a_split_before_it()
+-> Result<(), Error> {
+    let mut cut = bare();
+    let left = place_still(&mut cut, "file:///a.png", 0, 1_000_000)?;
+    let right = place_still(&mut cut, "file:///b.png", 5_000_000, 1_000_000)?;
+    run(
+        &mut cut,
+        Command::SetTransition {
+            segment: left,
+            duration_us: 400_000,
+            overlap: false,
+            attachment: blur()?,
+        },
+    )?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Split {
+                segment: left,
+                at: 800_000,
+            },
+        ),
+        Error::InsideTransition,
+    );
+    assert_eq!(
+        cut.project.timeline().main_track().transitions()[0].left(),
+        left
+    );
+    let piece = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: left,
+            at: 200_000,
+        },
+    )?);
+    let transition = &cut.project.timeline().main_track().transitions()[0];
+    assert_eq!(transition.left(), piece);
+    assert_eq!(transition.right(), right);
+    let later = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: right,
+            at: 1_400_000,
+        },
+    )?);
+    assert_ne!(later, right);
+    assert_eq!(
+        cut.project.timeline().main_track().transitions()[0].right(),
+        right
+    );
+    Ok(())
+}
+
+#[test]
+fn a_broken_cut_drops_the_transition_and_undo_puts_it_back() -> Result<(), Error> {
+    let mut cut = bare();
+    let left = place_still(&mut cut, "file:///a.png", 0, 1_000_000)?;
+    let right = place_still(&mut cut, "file:///b.png", 5_000_000, 1_000_000)?;
+    run(
+        &mut cut,
+        Command::SetTransition {
+            segment: left,
+            duration_us: 400_000,
+            overlap: false,
+            attachment: blur()?,
+        },
+    )?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Move {
+                segment: left,
+                track: None,
+                start: 500_000,
+            },
+        ),
+        Error::Overlap,
+    );
+    assert_eq!(cut.project.timeline().main_track().transitions().len(), 1);
+    run(
+        &mut cut,
+        Command::Move {
+            segment: right,
+            track: None,
+            start: 3_000_000,
+        },
+    )?;
+    assert!(cut.project.timeline().main_track().transitions().is_empty());
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(
+        cut.project.timeline().main_track().transitions()[0].left(),
+        left
+    );
+    run(&mut cut, Command::RemoveSegment(right))?;
+    assert!(cut.project.timeline().main_track().transitions().is_empty());
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(
+        cut.project.timeline().main_track().transitions()[0].right(),
+        right
     );
     Ok(())
 }

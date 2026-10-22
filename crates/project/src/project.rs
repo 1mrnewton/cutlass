@@ -6,6 +6,7 @@ use cutlass_core::Timestamp;
 
 use crate::Error;
 use crate::asset::Asset;
+use crate::attachment::Attachment;
 use crate::command::{Command, Outcome};
 use crate::id::{AssetId, ProjectId, SegmentId, TimelineId, TrackId};
 use crate::segment::{Channels, Segment};
@@ -13,6 +14,7 @@ use crate::settings::{AspectRatio, Canvas, Settings};
 use crate::time::{Speed, TimeRange, source_ticks, timeline_duration};
 use crate::timeline::Timeline;
 use crate::track::{Band, Track, TrackKind};
+use crate::transition::Transition;
 
 /// Settings, assets, and one timeline. The shell loads and saves it.
 #[derive(Debug, Clone)]
@@ -125,7 +127,7 @@ impl Project {
     }
 
     pub(crate) fn apply(&mut self, command: Command) -> Result<Outcome, Error> {
-        match command {
+        let outcome = match command {
             Command::AddAsset(asset) => Ok(Outcome::Asset(self.add_asset_now(asset)?)),
             Command::RemoveAsset(id) => {
                 self.remove_asset_now(id)?;
@@ -265,6 +267,19 @@ impl Project {
                     .set_attachment(attachment)?;
                 Ok(Outcome::Unchanged)
             }
+            Command::SetTransition {
+                segment,
+                duration_us,
+                overlap,
+                attachment,
+            } => {
+                self.set_transition_now(segment, duration_us, overlap, attachment)?;
+                Ok(Outcome::Unchanged)
+            }
+            Command::ClearTransition { segment } => {
+                self.clear_transition_now(segment)?;
+                Ok(Outcome::Unchanged)
+            }
             Command::SetVisible { segment, visible } => {
                 self.refuse_lane(segment)?;
                 self.timeline.segment_mut(segment)?.set_visible(visible);
@@ -300,7 +315,174 @@ impl Project {
                     .set_easing(offset_us, property, easing)?;
                 Ok(Outcome::Unchanged)
             }
+        };
+        if outcome.is_ok() {
+            self.repair_transitions();
         }
+        outcome
+    }
+
+    fn set_transition_now(
+        &mut self,
+        segment: SegmentId,
+        duration_us: i64,
+        overlap: bool,
+        attachment: Attachment,
+    ) -> Result<(), Error> {
+        self.refuse_lane(segment)?;
+        let facts = self.touching_cut(segment)?;
+        let transition = Transition::new(segment, facts.right, duration_us, overlap, attachment)?;
+        if !transition.fits(facts.left_dur, facts.right_dur) {
+            return Err(Error::Transition);
+        }
+        let Some((start, end)) = blend_range_checked(facts.cut, transition.sides()) else {
+            return Err(Error::DurationOverflow);
+        };
+        if self.blend_hits(segment, start, end) {
+            return Err(Error::Transition);
+        }
+        self.timeline.main_mut().upsert_transition(transition);
+        Ok(())
+    }
+
+    fn clear_transition_now(&mut self, segment: SegmentId) -> Result<(), Error> {
+        self.refuse_lane(segment)?;
+        if self
+            .timeline
+            .main_track()
+            .segments()
+            .iter()
+            .all(|item| item.id() != segment)
+        {
+            return Err(Error::Transition);
+        }
+        self.timeline.main_mut().clear_transition(segment);
+        Ok(())
+    }
+
+    fn touching_cut(&self, segment: SegmentId) -> Result<CutFacts, Error> {
+        let segments = self.timeline.main_track().segments();
+        let Some(index) = segments.iter().position(|item| item.id() == segment) else {
+            if self.timeline.segment(segment).is_none() {
+                return Err(Error::UnknownSegment(segment));
+            }
+            return Err(Error::Transition);
+        };
+        let left = &segments[index];
+        let Some(right) = segments.get(index + 1) else {
+            return Err(Error::Transition);
+        };
+        if left.timeline().end().value != right.timeline().start().value {
+            return Err(Error::Transition);
+        }
+        Ok(CutFacts {
+            cut: left.timeline().end().value,
+            left_dur: left.timeline().duration().value,
+            right: right.id(),
+            right_dur: right.timeline().duration().value,
+        })
+    }
+
+    fn blend_hits(&self, left: SegmentId, start: i64, end: i64) -> bool {
+        self.timeline
+            .main_track()
+            .transitions()
+            .iter()
+            .any(|existing| {
+                if existing.left() == left {
+                    return false;
+                }
+                let Some(facts) = self.cut_facts(existing.left()) else {
+                    return true;
+                };
+                let Some((other_start, other_end)) =
+                    blend_range_checked(facts.cut, existing.sides())
+                else {
+                    return true;
+                };
+                start < other_end && other_start < end
+            })
+    }
+
+    fn cut_facts(&self, left: SegmentId) -> Option<CutFacts> {
+        self.touching_cut(left).ok()
+    }
+
+    fn refuse_inside_transition(&self, id: SegmentId, at: i64) -> Result<(), Error> {
+        for transition in self.timeline.main_track().transitions() {
+            if transition.left() != id && transition.right() != id {
+                continue;
+            }
+            let Some(facts) = self.cut_facts(transition.left()) else {
+                continue;
+            };
+            if transition.covers(facts.cut, at) {
+                return Err(Error::InsideTransition);
+            }
+        }
+        Ok(())
+    }
+
+    fn repair_transitions(&mut self) {
+        let segments: Vec<(SegmentId, i64, i64, i64)> = self
+            .timeline
+            .main_track()
+            .segments()
+            .iter()
+            .map(|segment| {
+                let range = segment.timeline();
+                (
+                    segment.id(),
+                    range.start().value,
+                    range.end().value,
+                    range.duration().value,
+                )
+            })
+            .collect();
+        let existing = self.timeline.main_track().transitions().to_vec();
+        let mut kept = Vec::new();
+        for transition in existing {
+            let Some(index) = segments.iter().position(|item| item.0 == transition.left()) else {
+                continue;
+            };
+            let Some(right) = segments.get(index + 1) else {
+                continue;
+            };
+            if right.0 != transition.right() || segments[index].2 != right.1 {
+                continue;
+            }
+            if !transition.fits(segments[index].3, right.3) {
+                continue;
+            }
+            let (start, end) = match blend_range_checked(segments[index].2, transition.sides()) {
+                Some(range) => range,
+                None => continue,
+            };
+            let clashes = kept.iter().any(|other: &Transition| {
+                let Some(other_index) = segments.iter().position(|item| item.0 == other.left())
+                else {
+                    return false;
+                };
+                let Some((other_start, other_end)) =
+                    blend_range_checked(segments[other_index].2, other.sides())
+                else {
+                    return false;
+                };
+                start < other_end && other_start < end
+            });
+            if clashes {
+                continue;
+            }
+            kept.push(transition);
+        }
+        kept.sort_by_key(|transition| {
+            segments
+                .iter()
+                .find(|item| item.0 == transition.left())
+                .map(|item| item.1)
+                .unwrap_or(0)
+        });
+        self.timeline.main_mut().set_transitions(kept);
     }
 
     fn allocate(&mut self) -> Result<u64, Error> {
@@ -623,6 +805,9 @@ impl Project {
             .track_of(id)
             .ok_or(Error::UnknownSegment(id))?;
         let on_main = self.timeline.track(from).is_some_and(Track::is_main);
+        if on_main {
+            self.refuse_inside_transition(id, at)?;
+        }
         let asset_id = segment.asset_id();
         let speed = segment.speed();
         let (left_source, left_dur, right_source, right_dur) = match segment.source() {
@@ -732,6 +917,9 @@ impl Project {
             .set_fades(left_in, left_out)?;
         right.set_fades(right_in, right_out)?;
         self.timeline.track_mut(from)?.insert(right)?;
+        if on_main {
+            self.timeline.main_mut().retarget_left(id, right_id);
+        }
         if pack && on_main && self.settings.magnet() {
             self.pack_main()?;
         }
@@ -1294,6 +1482,17 @@ fn check_restored(assets: &[Asset], timeline: &Timeline, next_id: u64) -> Result
         return Err(Error::IdCounter { next_id });
     }
     Ok(())
+}
+
+struct CutFacts {
+    cut: i64,
+    left_dur: i64,
+    right: SegmentId,
+    right_dur: i64,
+}
+
+fn blend_range_checked(cut: i64, sides: (i64, i64)) -> Option<(i64, i64)> {
+    Some((cut.checked_sub(sides.0)?, cut.checked_add(sides.1)?))
 }
 
 fn claim(seen: &mut BTreeSet<u64>, id: u64) -> Result<(), Error> {

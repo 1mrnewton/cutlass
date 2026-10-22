@@ -22,6 +22,7 @@ mod settings;
 mod time;
 mod timeline;
 mod track;
+mod transition;
 
 pub use asset::{Asset, AssetKind};
 pub use attachment::{Attachment, Parameter, ParameterValue};
@@ -39,6 +40,7 @@ pub use settings::{AspectRatio, Canvas, Color, ColorSpace, Settings};
 pub use time::{SEQUENCE_TIMESCALE, Speed, TimeRange, source_ticks, timeline_duration};
 pub use timeline::Timeline;
 pub use track::{Track, TrackKind};
+pub use transition::Transition;
 
 #[cfg(test)]
 pub(crate) mod test_support {

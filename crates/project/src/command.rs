@@ -8,7 +8,7 @@ use crate::Error;
 use crate::asset::Asset;
 use crate::id::{AssetId, SegmentId, TrackId};
 use crate::rate::SequenceRate;
-use crate::segment::{Easing, Keyframe, KeyframeProperty, Segment, Transform};
+use crate::segment::{Crop, Easing, Keyframe, KeyframeProperty, Segment, Transform};
 use crate::settings::{AspectRatio, Color, ColorSpace};
 use crate::time::{self, Speed, TimeRange};
 
@@ -83,6 +83,11 @@ pub enum Command {
     SetKeepPitch {
         segment: SegmentId,
         keep: bool,
+    },
+    /// Four insets of the picture. The whole picture is the start.
+    SetCrop {
+        segment: SegmentId,
+        crop: Crop,
     },
     /// Shown when on. It does not move the segment.
     SetVisible {

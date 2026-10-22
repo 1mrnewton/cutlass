@@ -198,6 +198,10 @@ impl Project {
                 self.timeline.segment_mut(segment)?.set_keep_pitch(keep)?;
                 Ok(Outcome::Unchanged)
             }
+            Command::SetCrop { segment, crop } => {
+                self.timeline.segment_mut(segment)?.set_crop(crop)?;
+                Ok(Outcome::Unchanged)
+            }
             Command::SetVisible { segment, visible } => {
                 self.timeline.segment_mut(segment)?.set_visible(visible);
                 Ok(Outcome::Unchanged)

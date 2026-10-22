@@ -69,6 +69,10 @@ pub enum Error {
     FadeOutOfRange,
     #[error("the segment has no sound")]
     NoSound,
+    #[error("the segment has no picture")]
+    NoPicture,
+    #[error("the crop leaves no picture")]
+    Crop,
     #[error("value is not finite")]
     NonFinite,
     #[error("scale must be positive")]

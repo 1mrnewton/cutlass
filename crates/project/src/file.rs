@@ -14,7 +14,7 @@ use crate::asset::{Asset, AssetKind};
 use crate::id::{AssetId, SegmentId, TrackId};
 use crate::project::Project;
 use crate::rate::{FrameRate, SequenceRate};
-use crate::segment::{Channels, Easing, Keyframe, KeyframeValue, Segment, Transform};
+use crate::segment::{Channels, Crop, Easing, Keyframe, KeyframeValue, Segment, Transform};
 use crate::settings::{AspectRatio, Canvas, Color, ColorSpace, Settings};
 use crate::time::{Speed, TimeRange};
 use crate::timeline::Timeline;
@@ -311,6 +311,7 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
         fade_out: segment.fade_out(),
         denoise: segment.denoise(),
         keep_pitch: segment.keep_pitch(),
+        crop: crop_doc(segment.crop()),
         transform: transform_doc(segment.transform()),
         keyframes: segment.keyframes().iter().copied().map(key_doc).collect(),
     }
@@ -337,6 +338,7 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
     segment.set_fades(document.fade_in, document.fade_out)?;
     segment.set_denoise(document.denoise)?;
     segment.set_keep_pitch(document.keep_pitch)?;
+    segment.set_crop(crop_from(&document.crop)?)?;
     segment.set_transform(transform_from(&document.transform)?);
     for key in &document.keyframes {
         segment.push_keyframe(key_from(key)?)?;
@@ -512,6 +514,24 @@ fn is_true(value: &bool) -> bool {
 
 fn keep_pitch_on() -> bool {
     true
+}
+
+fn crop_doc(crop: Crop) -> CropDoc {
+    let (left, right, top, bottom) = crop.insets();
+    CropDoc {
+        left,
+        right,
+        top,
+        bottom,
+    }
+}
+
+fn crop_from(document: &CropDoc) -> Result<Crop, Error> {
+    Crop::new(document.left, document.right, document.top, document.bottom)
+}
+
+fn crop_is_whole(crop: &CropDoc) -> bool {
+    crop.left == 0.0 && crop.right == 0.0 && crop.top == 0.0 && crop.bottom == 0.0
 }
 
 fn stamp_doc(time: Timestamp) -> Stamp {
@@ -713,6 +733,8 @@ struct SegmentDoc {
     denoise: bool,
     #[serde(default = "keep_pitch_on", skip_serializing_if = "is_true")]
     keep_pitch: bool,
+    #[serde(default, skip_serializing_if = "crop_is_whole")]
+    crop: CropDoc,
     transform: TransformDoc,
     keyframes: Vec<KeyDoc>,
 }
@@ -737,6 +759,15 @@ struct SpanDoc {
 struct SpeedDoc {
     numerator: u32,
     denominator: u32,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CropDoc {
+    left: f64,
+    right: f64,
+    top: f64,
+    bottom: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1143,6 +1174,71 @@ mod tests {
             value["timeline"]["tracks"][2]["segments"][0]["keep_pitch"] = json!(false);
         });
         refuse(&silent, Error::NoSound);
+    }
+
+    #[test]
+    fn a_missing_crop_is_the_whole_picture() {
+        let (project, value) = cut_value();
+        let text = project.to_json().expect("save");
+        assert!(!text.contains("\"crop\""));
+        let loaded = Project::from_json(&text).expect("load");
+        assert!(
+            loaded.timeline().tracks()[1].segments()[0]
+                .crop()
+                .is_whole()
+        );
+
+        let cropped = edit(&value, |value| {
+            value["timeline"]["tracks"][1]["segments"][0]["crop"] = json!({
+                "left": 0.1,
+                "right": 0.2,
+                "top": 0.0,
+                "bottom": 0.25
+            });
+        });
+        let loaded = Project::from_json(&cropped).expect("load");
+        assert_eq!(
+            loaded.timeline().tracks()[1].segments()[0].crop().insets(),
+            (0.1, 0.2, 0.0, 0.25)
+        );
+        let saved = loaded.to_json().expect("save");
+        assert!(saved.contains("\"left\": 0.1"));
+        assert_same(&loaded, &Project::from_json(&saved).expect("reload"));
+
+        let whole = edit(&value, |value| {
+            value["timeline"]["tracks"][1]["segments"][0]["crop"] = json!({
+                "left": 0.0,
+                "right": 0.0,
+                "top": 0.0,
+                "bottom": 0.0
+            });
+        });
+        let loaded = Project::from_json(&whole).expect("load");
+        assert!(
+            loaded.timeline().tracks()[1].segments()[0]
+                .crop()
+                .is_whole()
+        );
+        assert!(!loaded.to_json().expect("save").contains("\"crop\""));
+
+        let empty = edit(&value, |value| {
+            value["timeline"]["tracks"][1]["segments"][0]["crop"] = json!({
+                "left": 0.5,
+                "right": 0.5,
+                "top": 0.0,
+                "bottom": 0.0
+            });
+        });
+        refuse(&empty, Error::Crop);
+        let sound = edit(&value, |value| {
+            value["timeline"]["tracks"][0]["segments"][0]["crop"] = json!({
+                "left": 0.1,
+                "right": 0.0,
+                "top": 0.0,
+                "bottom": 0.0
+            });
+        });
+        refuse(&sound, Error::NoPicture);
     }
 
     #[test]

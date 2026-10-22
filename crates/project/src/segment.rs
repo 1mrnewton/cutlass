@@ -92,6 +92,61 @@ impl Transform {
     }
 }
 
+/// How much of the picture is cut off, as a fraction of each side.
+///
+/// [`Crop::WHOLE`] is the start. Left and right are fractions of the width.
+/// Top and bottom are fractions of the height.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Crop {
+    left: f64,
+    right: f64,
+    top: f64,
+    bottom: f64,
+}
+
+impl Crop {
+    pub const WHOLE: Self = Self {
+        left: 0.0,
+        right: 0.0,
+        top: 0.0,
+        bottom: 0.0,
+    };
+
+    /// A crop that leaves some picture inside the frame.
+    pub fn new(left: f64, right: f64, top: f64, bottom: f64) -> Result<Self, Error> {
+        if ![left, right, top, bottom].into_iter().all(f64::is_finite) {
+            return Err(Error::NonFinite);
+        }
+        if left < 0.0
+            || right < 0.0
+            || top < 0.0
+            || bottom < 0.0
+            || left >= 1.0
+            || right >= 1.0
+            || top >= 1.0
+            || bottom >= 1.0
+            || left + right >= 1.0
+            || top + bottom >= 1.0
+        {
+            return Err(Error::Crop);
+        }
+        Ok(Self {
+            left,
+            right,
+            top,
+            bottom,
+        })
+    }
+
+    pub const fn is_whole(self) -> bool {
+        self.left == 0.0 && self.right == 0.0 && self.top == 0.0 && self.bottom == 0.0
+    }
+
+    pub const fn insets(self) -> (f64, f64, f64, f64) {
+        (self.left, self.right, self.top, self.bottom)
+    }
+}
+
 /// A sampled property. The offset is from the segment's timeline start.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum KeyframeValue {
@@ -209,6 +264,7 @@ pub struct Segment {
     fade_out: i64,
     denoise: bool,
     keep_pitch: bool,
+    crop: Crop,
     transform: Transform,
     keyframes: Vec<Keyframe>,
 }
@@ -269,6 +325,7 @@ impl Segment {
             fade_out: 0,
             denoise: false,
             keep_pitch: true,
+            crop: Crop::WHOLE,
             transform: Transform::IDENTITY,
             keyframes: Vec::new(),
         }
@@ -333,8 +390,9 @@ impl Segment {
     /// A copy with no id, starting at `start` microseconds on the sequence.
     ///
     /// The source, channels, speed, visible flag, volume, fades, denoise,
-    /// keep pitch, transform, and keyframes stay. Place assigns the id. A negative start is refused, and
-    /// so is a start that would overflow the sequence clock.
+    /// keep pitch, crop, transform, and keyframes stay. Place assigns the id.
+    /// A negative start is refused, and so is a start that would overflow the
+    /// sequence clock.
     pub fn duplicate(&self, start: i64) -> Result<Self, Error> {
         let mut copy = self.clone();
         copy.id = SegmentId::raw(0);
@@ -415,6 +473,17 @@ impl Segment {
             return Err(Error::NoSound);
         }
         self.keep_pitch = keep;
+        Ok(())
+    }
+
+    /// Sets the crop. The whole picture is the start.
+    ///
+    /// A segment with no picture cannot take a crop.
+    pub(crate) fn set_crop(&mut self, crop: Crop) -> Result<(), Error> {
+        if self.channels == Channels::Sound && !crop.is_whole() {
+            return Err(Error::NoPicture);
+        }
+        self.crop = crop;
         Ok(())
     }
 
@@ -529,6 +598,10 @@ impl Segment {
 
     pub const fn keep_pitch(&self) -> bool {
         self.keep_pitch
+    }
+
+    pub const fn crop(&self) -> Crop {
+        self.crop
     }
 
     pub const fn transform(&self) -> Transform {
@@ -1021,6 +1094,8 @@ mod tests {
         segment.set_fades(100_000, 50_000).unwrap();
         segment.set_denoise(true).unwrap();
         segment.set_keep_pitch(false).unwrap();
+        let crop = Crop::new(0.1, 0.2, 0.0, 0.25).unwrap();
+        segment.set_crop(crop).unwrap();
         let transform = Transform::new((0.1, -0.2), (2.0, 3.0), 15.0, 0.4, true, false).unwrap();
         segment.set_transform(transform);
         segment
@@ -1046,6 +1121,7 @@ mod tests {
         assert_eq!(copy.fade_out(), 50_000);
         assert!(copy.denoise());
         assert!(!copy.keep_pitch());
+        assert_eq!(copy.crop(), crop);
         assert_eq!(copy.transform(), transform);
         assert_eq!(copy.keyframes(), segment.keyframes());
         assert_eq!(copy.asset_id(), segment.asset_id());
@@ -1355,5 +1431,38 @@ mod tests {
         assert!(picture.keep_pitch());
         picture.set_keep_pitch(true).unwrap();
         assert!(picture.keep_pitch());
+    }
+
+    #[test]
+    fn crop_starts_as_the_whole_picture() {
+        let mut sound = one_second();
+        assert!(sound.crop().is_whole());
+        let crop = Crop::new(0.1, 0.2, 0.0, 0.25).unwrap();
+        sound.set_crop(crop).unwrap();
+        assert_eq!(sound.crop().insets(), (0.1, 0.2, 0.0, 0.25));
+        sound.change_speed(Speed::new(2, 1).unwrap()).unwrap();
+        assert_eq!(sound.crop(), crop);
+
+        assert_eq!(Crop::new(-0.1, 0.0, 0.0, 0.0).unwrap_err(), Error::Crop);
+        assert_eq!(Crop::new(1.0, 0.0, 0.0, 0.0).unwrap_err(), Error::Crop);
+        assert_eq!(Crop::new(0.5, 0.5, 0.0, 0.0).unwrap_err(), Error::Crop);
+        assert_eq!(Crop::new(0.0, 0.0, 0.6, 0.6).unwrap_err(), Error::Crop);
+        assert_eq!(
+            Crop::new(f64::NAN, 0.0, 0.0, 0.0).unwrap_err(),
+            Error::NonFinite
+        );
+        assert!(Crop::WHOLE.is_whole());
+
+        let asset = video(true, 15_360);
+        let mut silent =
+            Segment::media(&asset, source(0, 15_360), 0, Channels::Sound, Speed::ONE).unwrap();
+        assert_eq!(silent.set_crop(crop).unwrap_err(), Error::NoPicture);
+        assert!(silent.crop().is_whole());
+        silent.set_crop(Crop::WHOLE).unwrap();
+
+        let mut picture =
+            Segment::media(&asset, source(0, 15_360), 0, Channels::Picture, Speed::ONE).unwrap();
+        picture.set_crop(crop).unwrap();
+        assert_eq!(picture.crop(), crop);
     }
 }

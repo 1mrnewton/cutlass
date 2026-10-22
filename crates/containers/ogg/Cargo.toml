@@ -1,0 +1,16 @@
+[package]
+name = "cutlass-ogg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Ogg reader."
+
+[dependencies]
+cutlass-core.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

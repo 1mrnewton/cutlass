@@ -2,7 +2,9 @@
 
 use std::num::NonZeroU32;
 
-use cutlass_core::{ColorTags, ContentLight, MasteringDisplay, Packet, VideoStreamConfig};
+use cutlass_core::{
+    ColorTags, ContentLight, MasteringDisplay, Packet, Rotation, VideoStreamConfig,
+};
 
 use crate::entry::{self, Audio, Description};
 use crate::read::{self, Atom, Reader};
@@ -159,21 +161,6 @@ pub enum Kind {
     Audio(Audio),
     /// The handler type of a track that is left undemuxed, such as timecode.
     Other(Fourcc),
-}
-
-/// Clockwise rotation stored in a track matrix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Rotation {
-    /// The identity matrix.
-    Zero,
-    /// 90 degrees clockwise.
-    Clockwise90,
-    /// 180 degrees.
-    Clockwise180,
-    /// 270 degrees clockwise.
-    Clockwise270,
-    /// A matrix that is not one of those four.
-    Other,
 }
 
 /// One edit-list entry, not applied to the samples.

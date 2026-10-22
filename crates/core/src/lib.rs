@@ -8,6 +8,7 @@ mod color;
 mod frame;
 mod packet;
 mod pixel;
+mod rotation;
 mod time;
 
 pub use audio::{AudioCodec, AudioFrame, AudioSamples, AudioSamplesError, AudioStreamConfig};
@@ -16,4 +17,5 @@ pub use color::{ColorTags, ContentLight, MasteringDisplay};
 pub use frame::VideoFrame;
 pub use packet::Packet;
 pub use pixel::{ColorRange, PixelFormat};
+pub use rotation::Rotation;
 pub use time::Timestamp;

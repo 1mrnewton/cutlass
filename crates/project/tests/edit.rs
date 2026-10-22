@@ -1559,3 +1559,174 @@ fn duplicating_a_main_clip_leaves_its_overlay() -> Result<(), Error> {
     assert_eq!(on_track(&cut, overlay), overlay_track);
     Ok(())
 }
+
+#[test]
+fn volume_sets_the_gain_and_undo_puts_it_back() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    let keyframe = Keyframe::new(0, KeyframeValue::Volume(0.5))?;
+    run(
+        &mut cut,
+        Command::AddKeyframe {
+            segment: id,
+            keyframe,
+        },
+    )?;
+    assert_eq!(
+        run(
+            &mut cut,
+            Command::SetVolume {
+                segment: id,
+                volume: 0.25,
+            },
+        )?,
+        Outcome::Unchanged
+    );
+    let placed = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(placed.volume(), 0.25);
+    assert!(placed.visible());
+    assert_eq!(placed.timeline().start().value, 0);
+    assert_eq!(placed.keyframes(), &[keyframe]);
+    cut.history.undo(&mut cut.project)?;
+    let restored = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(restored.volume(), 1.0);
+    cut.history.redo(&mut cut.project)?;
+    let again = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(again.volume(), 0.25);
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetVolume {
+                segment: missing,
+                volume: 0.0,
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .volume(),
+        0.25
+    );
+    Ok(())
+}
+
+#[test]
+fn a_bad_volume_changes_nothing() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    run(
+        &mut cut,
+        Command::SetVolume {
+            segment: id,
+            volume: 0.25,
+        },
+    )?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetVolume {
+                segment: id,
+                volume: -0.1,
+            },
+        ),
+        Error::NegativeVolume,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetVolume {
+                segment: id,
+                volume: f64::NAN,
+            },
+        ),
+        Error::NonFinite,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetVolume {
+                segment: id,
+                volume: f64::INFINITY,
+            },
+        ),
+        Error::NonFinite,
+    );
+    let kept = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(kept.volume(), 0.25);
+    assert!(kept.visible());
+    Ok(())
+}
+
+#[test]
+fn visible_hides_the_segment_and_undo_shows_it() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    assert_eq!(
+        run(
+            &mut cut,
+            Command::SetVisible {
+                segment: id,
+                visible: false,
+            },
+        )?,
+        Outcome::Unchanged
+    );
+    let placed = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert!(!placed.visible());
+    assert_eq!(placed.volume(), 1.0);
+    assert_eq!(placed.timeline().start().value, 0);
+    assert_eq!(on_track(&cut, id), cut.main);
+    cut.history.undo(&mut cut.project)?;
+    assert!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .visible()
+    );
+    cut.history.redo(&mut cut.project)?;
+    assert!(
+        !cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .visible()
+    );
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetVisible {
+                segment: missing,
+                visible: false,
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
+    Ok(())
+}

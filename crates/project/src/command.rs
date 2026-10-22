@@ -63,6 +63,16 @@ pub enum Command {
         segment: SegmentId,
         transform: Transform,
     },
+    /// Linear gain. `1` is unity. A negative or non-finite gain is refused.
+    SetVolume {
+        segment: SegmentId,
+        volume: f64,
+    },
+    /// Shown when on. It does not move the segment.
+    SetVisible {
+        segment: SegmentId,
+        visible: bool,
+    },
     /// One sample. The offset is microseconds from the segment's timeline start.
     /// The sample is stored and not read.
     AddKeyframe {

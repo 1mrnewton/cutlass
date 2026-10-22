@@ -176,6 +176,14 @@ impl Project {
                 self.timeline.segment_mut(segment)?.set_transform(transform);
                 Ok(Outcome::Unchanged)
             }
+            Command::SetVolume { segment, volume } => {
+                self.timeline.segment_mut(segment)?.set_volume(volume)?;
+                Ok(Outcome::Unchanged)
+            }
+            Command::SetVisible { segment, visible } => {
+                self.timeline.segment_mut(segment)?.set_visible(visible);
+                Ok(Outcome::Unchanged)
+            }
             Command::AddKeyframe { segment, keyframe } => {
                 self.timeline
                     .segment_mut(segment)?

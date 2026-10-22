@@ -16,7 +16,8 @@ use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
 use cutlass_core::{
-    ColorRange, ColorTags, Packet, PixelFormat, VideoCodec, VideoFrame, VideoStreamConfig,
+    ColorRange, ColorTags, ContentLight, MasteringDisplay, Packet, PixelFormat, VideoCodec,
+    VideoFrame, VideoStreamConfig,
 };
 use objc2_core_foundation::{CFBoolean, CFData, CFDictionary, CFRetained, CFString, CFType};
 use objc2_core_media::{
@@ -56,6 +57,10 @@ pub struct DecoderOptions {
     pub require_hardware: bool,
     /// Copied onto every frame. `None` leaves the frame untagged.
     pub color: Option<ColorTags>,
+    /// Copied onto every frame. `None` when the container had no mastering display.
+    pub mastering: Option<MasteringDisplay>,
+    /// Copied onto every frame. `None` when the container had no content light level.
+    pub content_light: Option<ContentLight>,
 }
 
 /// A VideoToolbox decode session for one stream.
@@ -72,6 +77,8 @@ pub struct Decoder {
     output: Arc<Queue<Decoded>>,
     reorder: Reorder<VideoFrame<PixelBuffer>>,
     color: Option<ColorTags>,
+    mastering: Option<MasteringDisplay>,
+    content_light: Option<ContentLight>,
 }
 
 // SAFETY: VideoToolbox sessions and format descriptions may be used from any
@@ -135,6 +142,8 @@ impl Decoder {
             output,
             reorder: Reorder::new(),
             color: options.color,
+            mastering: options.mastering,
+            content_light: options.content_light,
         })
     }
 
@@ -171,6 +180,8 @@ impl Decoder {
 
     fn tagged(&self, mut frame: VideoFrame<PixelBuffer>) -> VideoFrame<PixelBuffer> {
         frame.color = self.color;
+        frame.mastering = self.mastering;
+        frame.content_light = self.content_light;
         frame
     }
 
@@ -320,6 +331,8 @@ unsafe extern "C-unwind" fn decoded(
         pts,
         duration: from_cm_time(duration),
         color: None,
+        mastering: None,
+        content_light: None,
         image: PixelBuffer::from_retained(image, writable),
     }));
 }

@@ -308,7 +308,13 @@ fn open_clip(asset: AssetId, source: &str) -> Clip {
     else {
         return missing(asset, source);
     };
-    let Content::Video { config, color, .. } = &probe.tracks()[index].content else {
+    let Content::Video {
+        config,
+        color,
+        mastering,
+        content_light,
+    } = &probe.tracks()[index].content
+    else {
         return missing(asset, source);
     };
     let Ok(matrix) = Matrix::resolve(
@@ -318,7 +324,7 @@ fn open_clip(asset: AssetId, source: &str) -> Clip {
     ) else {
         return missing(asset, source);
     };
-    let Ok(session) = VideoSession::open(config, *color) else {
+    let Ok(session) = VideoSession::open(config, *color, *mastering, *content_light) else {
         return missing(asset, source);
     };
     let Some(packets) = probe.samples(index).map(<[Packet]>::to_vec) else {
@@ -439,7 +445,8 @@ mod tests {
             Err(error) => panic!("opening a GPU failed: {error}"),
         };
         let fixture = cutlass_test_fixtures::video("h264-high-bframes-128x72");
-        let mut session = Session(VideoSession::open(&fixture.config, None).expect("decoder"));
+        let mut session =
+            Session(VideoSession::open(&fixture.config, None, None, None).expect("decoder"));
         let mut ahead = Ahead::new(NonZeroUsize::new(2).expect("depth"));
         let time = fixture.frames[0].pts;
         let (pixels, width, height) = frame_rgba(

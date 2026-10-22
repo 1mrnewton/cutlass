@@ -41,6 +41,8 @@ fn silence_is_handed_to_the_device() {
             pts: Timestamp::new(0, video),
             duration: None,
             color: None,
+            mastering: None,
+            content_light: None,
             image: 0,
         })
         .expect("push");
@@ -49,6 +51,8 @@ fn silence_is_handed_to_the_device() {
             pts: Timestamp::new(15_360, video),
             duration: None,
             color: None,
+            mastering: None,
+            content_light: None,
             image: 1,
         })
         .expect("push");

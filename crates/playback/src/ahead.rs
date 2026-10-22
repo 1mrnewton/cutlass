@@ -207,6 +207,8 @@ mod tests {
             pts: time(ms),
             duration: None,
             color: None,
+            mastering: None,
+            content_light: None,
             image: ms,
         }
     }

@@ -109,6 +109,8 @@ mod tests {
             pts: Timestamp::new(ms, NonZeroU32::new(1_000).expect("timescale")),
             duration: None,
             color: None,
+            mastering: None,
+            content_light: None,
             image: ms,
         }
     }

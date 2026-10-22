@@ -6,7 +6,7 @@
 
 mod support;
 
-use cutlass_core::{ColorTags, VideoCodec, VideoStreamConfig};
+use cutlass_core::{ColorTags, ContentLight, MasteringDisplay, VideoCodec, VideoStreamConfig};
 use cutlass_test_fixtures::VideoFixture;
 use cutlass_videotoolbox::{Decoder, DecoderOptions, Error};
 use support::{decode_all, frame_crc};
@@ -48,7 +48,7 @@ fn assert_matches_reference(fixture: &VideoFixture) {
             expected.pts.value
         );
         assert!(
-            frame.color.is_none(),
+            frame.color.is_none() && frame.mastering.is_none() && frame.content_light.is_none(),
             "{}: an untagged stream leaves the frame untagged",
             fixture.name
         );
@@ -56,7 +56,7 @@ fn assert_matches_reference(fixture: &VideoFixture) {
 }
 
 #[test]
-fn a_frame_keeps_the_colour_tags() {
+fn a_frame_keeps_the_colour_it_was_opened_with() {
     let fixture = cutlass_test_fixtures::video("h264-high-bframes-128x72");
     let tags = ColorTags {
         primaries: 1,
@@ -64,10 +64,24 @@ fn a_frame_keeps_the_colour_tags() {
         matrix: 1,
         full_range: Some(false),
     };
+    let display = MasteringDisplay {
+        primaries_x: [1, 2, 3],
+        primaries_y: [4, 5, 6],
+        white_x: 7,
+        white_y: 8,
+        max_luminance: 10_000_000,
+        min_luminance: 0,
+    };
+    let light = ContentLight {
+        max_content_light_level: 1_000,
+        max_pic_average_light_level: 0,
+    };
     let mut decoder = Decoder::new(
         &fixture.config,
         DecoderOptions {
             color: Some(tags),
+            mastering: Some(display),
+            content_light: Some(light),
             ..DecoderOptions::default()
         },
     )
@@ -76,6 +90,8 @@ fn a_frame_keeps_the_colour_tags() {
     assert!(!frames.is_empty());
     for frame in &frames {
         assert_eq!(frame.color, Some(tags));
+        assert_eq!(frame.mastering, Some(display));
+        assert_eq!(frame.content_light, Some(light));
     }
 }
 

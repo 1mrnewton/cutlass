@@ -764,11 +764,13 @@ version = "0.1.0"
 name = "cutlass-desktop"
 version = "0.1.0"
 dependencies = [
+ "cutlass-audiotoolbox",
  "cutlass-color",
  "cutlass-compose",
  "cutlass-core",
  "cutlass-media",
  "cutlass-mp4",
+ "cutlass-output",
  "cutlass-playback",
  "cutlass-project",
  "cutlass-test-fixtures",

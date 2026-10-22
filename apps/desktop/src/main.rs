@@ -13,6 +13,7 @@ mod chrome;
 mod export;
 mod frames;
 mod gaps;
+mod hear;
 mod icons;
 mod import;
 mod inspector;
@@ -66,6 +67,7 @@ struct CutlassApp {
     recovery_shown: bool,
     playhead_us: i64,
     play: Option<play::Run>,
+    hear: hear::Hear,
     reel: frames::Reel,
     shelf: library::Shelf,
     media: library::MediaSource,
@@ -106,6 +108,7 @@ impl CutlassApp {
             recovery_shown: false,
             playhead_us: 0,
             play: None,
+            hear: hear::Hear::new(),
             reel: frames::Reel::new(gpu),
             shelf: library::Shelf::Media,
             media: library::MediaSource::Project,
@@ -491,24 +494,48 @@ impl CutlassApp {
         let rate = self.project.settings().rate().rate();
         let duration = self.project.duration().value;
         self.playhead_us = play::toggle(&mut self.play, self.playhead_us, duration, rate);
+        if self.play.is_some() {
+            self.hear.start(&self.project, self.playhead_us);
+        } else {
+            self.hear.stop();
+        }
     }
 
     fn advance_play(&mut self, ctx: &egui::Context) {
-        let Some(run) = &self.play else {
+        let Some((origin, elapsed, rate, duration)) = self.play.as_ref().map(|run| {
+            (
+                run.origin_us(),
+                run.elapsed(),
+                self.project.settings().rate().rate(),
+                self.project.duration().value,
+            )
+        }) else {
             return;
         };
-        let rate = self.project.settings().rate().rate();
-        let duration = self.project.duration().value;
-        match play::advance(run.origin_us(), run.elapsed(), duration, rate) {
-            play::Motion::Running(us) => {
+        match self.hear.follow(&self.project, duration, rate) {
+            hear::Lead::Silent => match play::advance(origin, elapsed, duration, rate) {
+                play::Motion::Running(us) => {
+                    self.playhead_us = us;
+                    ctx.request_repaint_after(play::frame_wait(rate));
+                }
+                play::Motion::Finished(us) => {
+                    self.playhead_us = us;
+                    self.play = None;
+                }
+                play::Motion::Idle => self.play = None,
+            },
+            hear::Lead::Waiting => {
+                ctx.request_repaint();
+            }
+            hear::Lead::Running(us) => {
                 self.playhead_us = us;
                 ctx.request_repaint_after(play::frame_wait(rate));
             }
-            play::Motion::Finished(us) => {
+            hear::Lead::Finished(us) => {
                 self.playhead_us = us;
                 self.play = None;
+                self.hear.stop();
             }
-            play::Motion::Idle => self.play = None,
         }
     }
 }
@@ -539,6 +566,9 @@ impl eframe::App for CutlassApp {
         chrome::pass_clicks(frame);
         let key_play = !self.blocked() && keys::play(ui);
         if self.blocked() {
+            if self.play.is_some() {
+                self.hear.stop();
+            }
             self.play = None;
         }
         self.advance_play(ui.ctx());
@@ -623,6 +653,7 @@ impl eframe::App for CutlassApp {
             });
         if self.play.is_some() && self.playhead_us != driven {
             self.play = None;
+            self.hear.stop();
         }
 
         let mut import = false;

@@ -33,6 +33,10 @@ struct Shared {
     played: usize,
     /// When set, a returned buffer is not filled again.
     closed: bool,
+    /// Buffers the callback could not fill. The owner enqueues them after
+    /// more samples arrive. A raw pointer is stored as `usize` so the sample
+    /// lock stays `Send`. The owner is the only thread that enqueues one.
+    idle: Vec<usize>,
 }
 
 /// Plays planar PCM on the default output device.
@@ -62,6 +66,7 @@ impl Output {
             channels,
             played: 0,
             closed: true,
+            idle: Vec::new(),
         }));
         let mut format = pcm(sample_rate, channels);
         let mut queue = ptr::null_mut();
@@ -131,11 +136,13 @@ impl Output {
             shared.frame = 0;
             shared.frames = samples.frames();
             shared.played = 0;
+            shared.idle.clear();
         }
         self.stop_queue()?;
         {
             let mut shared = self.lock()?;
             shared.closed = false;
+            shared.idle.clear();
         }
         if samples.frames() == 0 {
             return Ok(());
@@ -145,6 +152,62 @@ impl Output {
             self.enqueue(buffer)?;
         }
         self.start()
+    }
+
+    /// Appends samples without moving the clock back to zero.
+    ///
+    /// [`Self::play`] has to be called first. A buffer the device returned
+    /// empty is filled from the new samples and queued again. Played samples
+    /// already copied into a device buffer are dropped, so a long cut does
+    /// not keep the whole mix.
+    pub fn extend(&mut self, samples: &AudioSamples) -> Result<(), Error> {
+        if samples.sample_rate() != self.sample_rate || samples.channels() != self.channels {
+            return Err(Error::InvalidInput("audio samples do not match the output"));
+        }
+        if samples.frames() == 0 {
+            return Ok(());
+        }
+        let idle = {
+            let mut shared = self.lock()?;
+            if shared.closed {
+                return Err(Error::InvalidInput("audio output is stopped"));
+            }
+            discard_played(&mut shared);
+            let extra = samples.interleaved();
+            shared.frames = shared.frames.saturating_add(samples.frames());
+            shared.samples.extend(extra);
+            std::mem::take(&mut shared.idle)
+        };
+        let mut resumed = false;
+        for buffer in idle {
+            let buffer = buffer as AudioQueueBufferRef;
+            if buffer.is_null() {
+                continue;
+            }
+            self.enqueue(buffer)?;
+            resumed = true;
+        }
+        if resumed {
+            self.resume()?;
+        }
+        Ok(())
+    }
+
+    /// Stops the device and drops anything still queued.
+    pub fn stop(&mut self) -> Result<(), Error> {
+        {
+            let mut shared = self.lock()?;
+            shared.closed = true;
+            shared.samples.clear();
+            shared.frame = 0;
+            shared.frames = 0;
+            shared.played = 0;
+            shared.idle.clear();
+        }
+        self.stop_queue()?;
+        let mut shared = self.lock()?;
+        shared.idle.clear();
+        Ok(())
     }
 
     /// Frames copied into a device buffer.
@@ -199,6 +262,18 @@ impl Output {
         error::check("AudioQueueStart", status)
     }
 
+    /// Starts a queue that ran out of buffers. A queue that is already
+    /// running reports an invalid state, and that is not a failure.
+    fn resume(&self) -> Result<(), Error> {
+        // SAFETY: `queue` is the queue this value owns. A null start time
+        // means start now.
+        let status = unsafe { AudioQueueStart(self.queue, ptr::null()) };
+        if status == 0 || status == kAudioQueueErr_InvalidRunState {
+            return Ok(());
+        }
+        error::check("AudioQueueStart", status)
+    }
+
     fn stop_queue(&self) -> Result<(), Error> {
         // SAFETY: `queue` is the queue this value owns. Stopping immediately
         // returns after the current callback, which only copies one buffer.
@@ -248,14 +323,29 @@ unsafe extern "C-unwind" fn completed(
         return;
     }
     let give = copy_into(buffer, &mut shared);
-    drop(shared);
     if give == 0 {
+        shared.idle.push(buffer as usize);
         return;
     }
+    drop(shared);
     // SAFETY: `buffer` belongs to `queue` and was just returned by it.
     unsafe {
         let _ = AudioQueueEnqueueBuffer(queue, buffer, 0, ptr::null());
     }
+}
+
+fn discard_played(shared: &mut Shared) {
+    let channels = usize::from(shared.channels);
+    if channels == 0 || shared.frame == 0 {
+        return;
+    }
+    let floats = shared.frame.saturating_mul(channels);
+    if floats > shared.samples.len() {
+        return;
+    }
+    shared.samples.drain(..floats);
+    shared.frames = shared.frames.saturating_sub(shared.frame);
+    shared.frame = 0;
 }
 
 fn copy_into(buffer: AudioQueueBufferRef, shared: &mut Shared) -> usize {

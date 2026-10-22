@@ -1,0 +1,1176 @@
+//! The sound under the playhead.
+//!
+//! On Apple, play decodes the audible clips into the output device at their
+//! volume and the picture follows that clock. A fade, a mute, and a scrub
+//! are not heard. Other systems keep the wall clock.
+
+use cutlass_core::AudioSamples;
+use cutlass_project::{Channels, Project, Segment, SegmentId};
+
+#[cfg(target_vendor = "apple")]
+use std::collections::HashMap;
+#[cfg(target_vendor = "apple")]
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+#[cfg(target_vendor = "apple")]
+use std::thread::JoinHandle;
+#[cfg(target_vendor = "apple")]
+use std::time::Duration;
+
+#[cfg(target_vendor = "apple")]
+use cutlass_audiotoolbox::{Decoder, decodes};
+#[cfg(target_vendor = "apple")]
+use cutlass_core::{AudioStreamConfig, Packet};
+#[cfg(target_vendor = "apple")]
+use cutlass_media::{Content, Probe};
+#[cfg(target_vendor = "apple")]
+use cutlass_output::Output;
+#[cfg(target_vendor = "apple")]
+use cutlass_project::FrameRate;
+
+/// How much timeline time one fill covers.
+#[cfg(target_vendor = "apple")]
+const CHUNK_US: i64 = 250_000;
+/// Keep at least this much audio queued ahead of the clock.
+#[cfg(target_vendor = "apple")]
+const AHEAD_US: i64 = 400_000;
+/// The device is opened stereo. A mono clip is copied to both sides.
+#[cfg(target_vendor = "apple")]
+const OUT_CHANNELS: u16 = 2;
+
+/// What the playhead should do while play is running.
+pub(crate) enum Lead {
+    /// The cut has no sound the device can play. The wall clock moves it.
+    Silent,
+    /// The first samples are still opening. Hold the playhead.
+    Waiting,
+    /// The device clock, snapped to a frame.
+    Running(i64),
+    /// The clock reached the end of the cut.
+    Finished(i64),
+}
+
+/// One decoded clip, spread across its timeline span.
+struct MixClip {
+    origin_us: i64,
+    span_us: i64,
+    volume: f32,
+    channels: u16,
+    /// Channel-major planes.
+    planar: Vec<f32>,
+}
+
+/// Samples for `[from_us, until_us)` at `rate`, in `channels` planes.
+fn mix(clips: &[MixClip], from_us: i64, until_us: i64, rate: u32, channels: u16) -> AudioSamples {
+    let frames = frames_in(from_us, until_us, rate);
+    let channels_n = usize::from(channels);
+    let mut planar = vec![0f32; frames.saturating_mul(channels_n)];
+    if frames == 0 || channels == 0 || rate == 0 {
+        return AudioSamples::new(rate.max(1), channels.max(1), Vec::new()).unwrap_or_else(|_| {
+            AudioSamples::new(48_000, 1, Vec::new()).expect("an empty buffer is valid")
+        });
+    }
+    for clip in clips {
+        if clip.span_us <= 0 || clip.volume == 0.0 || clip.channels == 0 {
+            continue;
+        }
+        let clip_frames = clip.planar.len() / usize::from(clip.channels);
+        if clip_frames == 0 {
+            continue;
+        }
+        for frame in 0..frames {
+            let time = from_us.saturating_add(frame_us(frame, rate));
+            let rel = time.saturating_sub(clip.origin_us);
+            if rel < 0 || rel >= clip.span_us {
+                continue;
+            }
+            let pos = (rel as f64) / (clip.span_us as f64) * (clip_frames as f64);
+            for channel in 0..channels_n {
+                let sample = clip_sample(clip, channel, pos) * clip.volume;
+                let slot = channel * frames + frame;
+                planar[slot] = (planar[slot] + sample).clamp(-1.0, 1.0);
+            }
+        }
+    }
+    AudioSamples::new(rate, channels, planar).unwrap_or_else(|_| {
+        AudioSamples::new(rate, channels, vec![0.0; frames * channels_n])
+            .expect("a zeroed buffer matches the frame count")
+    })
+}
+
+fn frames_in(from_us: i64, until_us: i64, rate: u32) -> usize {
+    let span = until_us.saturating_sub(from_us).max(0) as u128;
+    let frames = span.saturating_mul(u128::from(rate)) / 1_000_000;
+    usize::try_from(frames).unwrap_or(0)
+}
+
+fn frame_us(frame: usize, rate: u32) -> i64 {
+    if rate == 0 {
+        return 0;
+    }
+    let us = (frame as u128).saturating_mul(1_000_000) / u128::from(rate);
+    i64::try_from(us).unwrap_or(i64::MAX)
+}
+
+fn clip_sample(clip: &MixClip, channel: usize, pos: f64) -> f32 {
+    let source = usize::from(clip.channels);
+    let frames = clip.planar.len() / source;
+    let index = if source == 1 {
+        0
+    } else if channel < source {
+        channel
+    } else {
+        0
+    };
+    let plane = &clip.planar[index * frames..(index + 1) * frames];
+    sample_at(plane, pos)
+}
+
+fn sample_at(plane: &[f32], pos: f64) -> f32 {
+    if plane.is_empty() || !pos.is_finite() {
+        return 0.0;
+    }
+    if pos <= 0.0 {
+        return plane[0];
+    }
+    let last = plane.len() - 1;
+    if pos >= last as f64 {
+        return plane[last];
+    }
+    let index = pos.floor() as usize;
+    let frac = (pos - index as f64) as f32;
+    plane[index] * (1.0 - frac) + plane[index + 1] * frac
+}
+
+struct Cue {
+    segment: SegmentId,
+    source: String,
+    start_us: i64,
+    end_us: i64,
+    source_start: i64,
+    source_scale: u32,
+}
+
+struct PieceAsk {
+    source: String,
+    clip_start_us: i64,
+    volume: f64,
+    origin_us: i64,
+    span_us: i64,
+    first_tick: i64,
+    last_tick: i64,
+    tick_scale: u32,
+}
+
+fn cues(project: &Project) -> Vec<Cue> {
+    let mut found = Vec::new();
+    for track in project.timeline().tracks() {
+        for segment in track.segments() {
+            if let Some(cue) = cue_of(project, segment) {
+                found.push(cue);
+            }
+        }
+    }
+    found
+}
+
+fn cue_of(project: &Project, segment: &Segment) -> Option<Cue> {
+    if segment.channels() == Channels::Picture || !segment.visible() {
+        return None;
+    }
+    let asset = project.asset(segment.asset_id()?)?;
+    let source = segment.source()?;
+    let timeline = segment.timeline();
+    Some(Cue {
+        segment: segment.id(),
+        source: asset.source().to_owned(),
+        start_us: timeline.start().value,
+        end_us: timeline.end().value,
+        source_start: source.start().value,
+        source_scale: source.start().timescale.get(),
+    })
+}
+
+fn pieces(project: &Project, cues: &[Cue], from_us: i64, until_us: i64) -> Vec<PieceAsk> {
+    let mut asks = Vec::new();
+    for cue in cues {
+        let Some(segment) = project.timeline().segment(cue.segment) else {
+            continue;
+        };
+        if let Some(ask) = piece_ask(segment, cue, from_us, until_us) {
+            asks.push(ask);
+        }
+    }
+    asks
+}
+
+fn piece_ask(segment: &Segment, cue: &Cue, from_us: i64, until_us: i64) -> Option<PieceAsk> {
+    if !segment.visible() || segment.channels() == Channels::Picture {
+        return None;
+    }
+    let origin = from_us.max(cue.start_us);
+    let end = until_us.min(cue.end_us);
+    if end <= origin {
+        return None;
+    }
+    let into = origin.checked_sub(cue.start_us)?;
+    let span = end.checked_sub(cue.start_us)?;
+    let first = cue
+        .source_start
+        .checked_add(segment.source_offset(into).ok()?)?;
+    let last = cue
+        .source_start
+        .checked_add(segment.source_offset(span).ok()?)?;
+    if last <= first {
+        return None;
+    }
+    Some(PieceAsk {
+        source: cue.source.clone(),
+        clip_start_us: cue.start_us,
+        volume: segment.volume(),
+        origin_us: origin,
+        span_us: end - origin,
+        first_tick: first,
+        last_tick: last,
+        tick_scale: cue.source_scale,
+    })
+}
+
+/// Plays the audible clips, or stays quiet when this system has no output.
+pub(crate) struct Hear {
+    #[cfg(target_vendor = "apple")]
+    live: Live,
+}
+
+impl Hear {
+    pub(crate) fn new() -> Self {
+        Self {
+            #[cfg(target_vendor = "apple")]
+            live: Live::new(),
+        }
+    }
+
+    /// Starts hearing at `origin_us`. A cut with no audible clip stays on the wall clock.
+    pub(crate) fn start(&mut self, project: &Project, origin_us: i64) {
+        #[cfg(target_vendor = "apple")]
+        self.live.start(project, origin_us);
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = (project, origin_us);
+        }
+    }
+
+    /// Stops the device. A second call does nothing.
+    pub(crate) fn stop(&mut self) {
+        #[cfg(target_vendor = "apple")]
+        self.live.stop();
+    }
+
+    /// Feeds the device and reports where the playhead belongs.
+    pub(crate) fn follow(
+        &mut self,
+        project: &Project,
+        duration_us: i64,
+        rate: cutlass_project::FrameRate,
+    ) -> Lead {
+        #[cfg(target_vendor = "apple")]
+        {
+            self.live.follow(project, duration_us, rate)
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = (project, duration_us, rate);
+            Lead::Silent
+        }
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+struct Live {
+    bridge: Option<Bridge>,
+    output: Option<Output>,
+    generation: u64,
+    origin_us: i64,
+    end_us: i64,
+    filled_us: i64,
+    rate: u32,
+    waiting: bool,
+    cues: Vec<Cue>,
+    mode: Mode,
+}
+
+#[cfg(target_vendor = "apple")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Idle,
+    Silent,
+    Live,
+}
+
+#[cfg(target_vendor = "apple")]
+impl Live {
+    fn new() -> Self {
+        Self {
+            bridge: None,
+            output: None,
+            generation: 0,
+            origin_us: 0,
+            end_us: 0,
+            filled_us: 0,
+            rate: 0,
+            waiting: false,
+            cues: Vec::new(),
+            mode: Mode::Idle,
+        }
+    }
+
+    fn start(&mut self, project: &Project, origin_us: i64) {
+        self.stop();
+        let found = cues(project);
+        if found.is_empty() {
+            self.mode = Mode::Silent;
+            return;
+        }
+        self.ensure();
+        self.generation = self.generation.wrapping_add(1);
+        self.origin_us = origin_us;
+        self.end_us = project.duration().value;
+        self.filled_us = origin_us;
+        self.rate = 0;
+        self.cues = found;
+        self.mode = Mode::Live;
+        self.waiting = false;
+        if !self.post(project) {
+            self.mode = Mode::Silent;
+        }
+    }
+
+    fn stop(&mut self) {
+        if self.output.is_none() && !self.waiting && self.mode != Mode::Live {
+            self.mode = Mode::Idle;
+            return;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.mode = Mode::Idle;
+        self.waiting = false;
+        self.cues.clear();
+        self.rate = 0;
+        self.filled_us = 0;
+        if let Some(output) = &mut self.output {
+            let _ = output.stop();
+        }
+        self.output = None;
+        if let Some(bridge) = &self.bridge {
+            bridge.post(Message::Stop);
+        }
+    }
+
+    fn follow(&mut self, project: &Project, duration_us: i64, rate: FrameRate) -> Lead {
+        if self.mode == Mode::Silent {
+            return Lead::Silent;
+        }
+        if self.mode != Mode::Live {
+            return Lead::Silent;
+        }
+        self.end_us = duration_us;
+        self.pump(project);
+        if self.mode == Mode::Silent {
+            return Lead::Silent;
+        }
+        self.lead(duration_us, rate)
+    }
+
+    fn ensure(&mut self) {
+        if self.bridge.is_none() {
+            self.bridge = Bridge::start();
+        }
+    }
+
+    fn pump(&mut self, project: &Project) {
+        let answer = self.bridge.as_ref().and_then(Bridge::take);
+        if let Some(answer) = answer {
+            self.waiting = false;
+            self.take(answer);
+        }
+        if self.mode != Mode::Live || self.waiting || self.filled_us >= self.end_us {
+            return;
+        }
+        let ahead = self.filled_us.saturating_sub(self.heard_us());
+        if self.output.is_none() || ahead < AHEAD_US {
+            self.post(project);
+        }
+    }
+
+    fn post(&mut self, project: &Project) -> bool {
+        let until = self.end_us.min(self.filled_us.saturating_add(CHUNK_US));
+        if until <= self.filled_us {
+            return false;
+        }
+        let Some(bridge) = &self.bridge else {
+            return false;
+        };
+        let fill = Fill {
+            generation: self.generation,
+            from_us: self.filled_us,
+            until_us: until,
+            sources: self.cues.iter().map(|cue| cue.source.clone()).collect(),
+            pieces: pieces(project, &self.cues, self.filled_us, until),
+        };
+        let posted = bridge.post(Message::Fill(fill));
+        self.waiting = posted;
+        posted
+    }
+
+    fn take(&mut self, answer: Answer) {
+        let (generation, from_us, until_us, rate, clips) = match answer {
+            Answer::Missing { generation } => {
+                if generation == self.generation && self.output.is_none() {
+                    self.mode = Mode::Silent;
+                }
+                return;
+            }
+            Answer::Ready {
+                generation,
+                from_us,
+                until_us,
+                rate,
+                clips,
+            } => (generation, from_us, until_us, rate, clips),
+        };
+        if generation != self.generation || self.mode != Mode::Live {
+            return;
+        }
+        if self.rate == 0 {
+            self.rate = rate;
+        }
+        if self.rate == 0 {
+            self.mode = Mode::Silent;
+            return;
+        }
+        let samples = mix(&clips, from_us, until_us, self.rate, OUT_CHANNELS);
+        if samples.frames() == 0 {
+            self.filled_us = until_us;
+            return;
+        }
+        if self.output.is_none() {
+            match Output::new(self.rate, OUT_CHANNELS) {
+                Ok(mut output) => match output.play(&samples) {
+                    Ok(()) => self.output = Some(output),
+                    Err(_) => {
+                        self.mode = Mode::Silent;
+                        return;
+                    }
+                },
+                Err(_) => {
+                    self.mode = Mode::Silent;
+                    return;
+                }
+            }
+        } else if let Some(output) = &mut self.output
+            && output.extend(&samples).is_err()
+        {
+            let _ = output.stop();
+            self.output = None;
+            self.mode = Mode::Silent;
+            return;
+        }
+        self.filled_us = until_us;
+    }
+
+    fn heard_us(&self) -> i64 {
+        let Some(output) = &self.output else {
+            return self.origin_us;
+        };
+        match output.clock() {
+            Ok(Some(time)) => clock_us(self.origin_us, time),
+            _ => self.origin_us,
+        }
+    }
+
+    fn lead(&self, duration_us: i64, rate: FrameRate) -> Lead {
+        let Some(output) = &self.output else {
+            return Lead::Waiting;
+        };
+        let Ok(Some(time)) = output.clock() else {
+            return Lead::Waiting;
+        };
+        let at = clock_us(self.origin_us, time);
+        let elapsed = u64::try_from(at.saturating_sub(self.origin_us).max(0)).unwrap_or(u64::MAX);
+        match crate::play::advance(
+            self.origin_us,
+            Duration::from_micros(elapsed),
+            duration_us,
+            rate,
+        ) {
+            crate::play::Motion::Running(us) => Lead::Running(us),
+            crate::play::Motion::Finished(us) => Lead::Finished(us),
+            crate::play::Motion::Idle => Lead::Silent,
+        }
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn clock_us(origin_us: i64, time: cutlass_core::Timestamp) -> i64 {
+    let scale = i128::from(time.timescale.get());
+    if scale <= 0 {
+        return origin_us;
+    }
+    let us = i128::from(time.value).saturating_mul(1_000_000) / scale;
+    origin_us.saturating_add(i64::try_from(us).unwrap_or(i64::MAX))
+}
+
+#[cfg(target_vendor = "apple")]
+enum Message {
+    Stop,
+    Fill(Fill),
+}
+
+#[cfg(target_vendor = "apple")]
+struct Fill {
+    generation: u64,
+    from_us: i64,
+    until_us: i64,
+    sources: Vec<String>,
+    pieces: Vec<PieceAsk>,
+}
+
+#[cfg(target_vendor = "apple")]
+enum Answer {
+    Missing {
+        generation: u64,
+    },
+    Ready {
+        generation: u64,
+        from_us: i64,
+        until_us: i64,
+        rate: u32,
+        clips: Vec<MixClip>,
+    },
+}
+
+#[cfg(target_vendor = "apple")]
+struct Bridge {
+    ask: Arc<Note<Message>>,
+    sound: Arc<Slot<Answer>>,
+    join: Option<JoinHandle<()>>,
+}
+
+#[cfg(target_vendor = "apple")]
+impl Bridge {
+    fn start() -> Option<Self> {
+        let ask = Arc::new(Note::new());
+        let sound = Arc::new(Slot::new());
+        let ask_thread = Arc::clone(&ask);
+        let sound_thread = Arc::clone(&sound);
+        let join = std::thread::Builder::new()
+            .name("cutlass-hear".to_owned())
+            .spawn(move || hear_loop(ask_thread, sound_thread))
+            .ok();
+        join.is_some().then_some(Self { ask, sound, join })
+    }
+
+    fn post(&self, message: Message) -> bool {
+        self.ask.post(message);
+        true
+    }
+
+    fn take(&self) -> Option<Answer> {
+        self.sound.take()
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        self.ask.close();
+        if let Some(handle) = self.join.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn hear_loop(ask: Arc<Note<Message>>, sound: Arc<Slot<Answer>>) {
+    let mut worker = Worker::default();
+    while let Some(message) = ask.wait() {
+        match message {
+            Message::Stop => {
+                worker.tapes.clear();
+                worker.layout = None;
+            }
+            Message::Fill(fill) => {
+                let answer = worker.fill(fill);
+                sound.publish(answer);
+            }
+        }
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+#[derive(Default)]
+struct Worker {
+    generation: u64,
+    layout: Option<u32>,
+    files: HashMap<String, Opened>,
+    tapes: HashMap<(String, i64), Tape>,
+}
+
+#[cfg(target_vendor = "apple")]
+impl Worker {
+    fn fill(&mut self, fill: Fill) -> Answer {
+        if self.generation != fill.generation {
+            self.tapes.clear();
+            self.layout = None;
+            self.generation = fill.generation;
+        }
+        let Some(rate) = self.rate_of(&fill.sources) else {
+            return Answer::Missing {
+                generation: fill.generation,
+            };
+        };
+        let mut clips = Vec::new();
+        for ask in &fill.pieces {
+            if let Some(clip) = self.clip(ask) {
+                clips.push(clip);
+            }
+        }
+        Answer::Ready {
+            generation: fill.generation,
+            from_us: fill.from_us,
+            until_us: fill.until_us,
+            rate,
+            clips,
+        }
+    }
+
+    fn rate_of(&mut self, sources: &[String]) -> Option<u32> {
+        if let Some(rate) = self.layout {
+            return Some(rate);
+        }
+        for source in sources {
+            if self.open(source).is_some() {
+                return self.layout;
+            }
+        }
+        None
+    }
+
+    fn open(&mut self, source: &str) -> Option<()> {
+        if self.files.contains_key(source) {
+            return Some(());
+        }
+        let opened = read_audio(source)?;
+        if self.layout.is_none() {
+            self.layout = Some(opened.rate);
+        }
+        self.files.insert(source.to_owned(), opened);
+        Some(())
+    }
+
+    fn clip(&mut self, ask: &PieceAsk) -> Option<MixClip> {
+        self.open(&ask.source)?;
+        let key = (ask.source.clone(), ask.clip_start_us);
+        if !self.tapes.contains_key(&key) {
+            let opened = self.files.get(&ask.source)?;
+            self.tapes.insert(key.clone(), Tape::new(opened));
+        }
+        let rate = self.files.get(&ask.source)?.rate;
+        let first = ticks_to_samples(ask.first_tick, ask.tick_scale, rate)?;
+        let last = ticks_to_samples(ask.last_tick, ask.tick_scale, rate)?;
+        let count = usize::try_from(last.saturating_sub(first)).ok()?;
+        if count == 0 {
+            return None;
+        }
+        let tape = self.tapes.get_mut(&key)?;
+        let planar = tape.pull(first, count)?;
+        let channels = tape.channels;
+        Some(MixClip {
+            origin_us: ask.origin_us,
+            span_us: ask.span_us,
+            volume: ask.volume as f32,
+            channels,
+            planar,
+        })
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+struct Opened {
+    config: AudioStreamConfig,
+    packets: Vec<Packet>,
+    rate: u32,
+}
+
+#[cfg(target_vendor = "apple")]
+fn read_audio(source: &str) -> Option<Opened> {
+    let path = crate::frames::file_path(source)?;
+    let bytes = std::fs::read(path).ok()?;
+    let probe = Probe::parse(&bytes).ok()?;
+    let index = probe.tracks().iter().position(|track| {
+        track.enabled && matches!(&track.content, Content::Audio(config) if decodes(config.codec))
+    })?;
+    let Content::Audio(config) = &probe.tracks()[index].content else {
+        return None;
+    };
+    if config.sample_rate == 0 || config.channels == 0 {
+        return None;
+    }
+    let packets = probe.samples(index)?.to_vec();
+    Some(Opened {
+        rate: config.sample_rate,
+        config: config.clone(),
+        packets,
+    })
+}
+
+#[cfg(target_vendor = "apple")]
+fn ticks_to_samples(ticks: i64, scale: u32, rate: u32) -> Option<u64> {
+    if scale == 0 || rate == 0 || ticks <= 0 {
+        return Some(0);
+    }
+    let samples = u128::from(ticks as u64).saturating_mul(u128::from(rate)) / u128::from(scale);
+    u64::try_from(samples).ok()
+}
+
+#[cfg(target_vendor = "apple")]
+struct Tape {
+    config: AudioStreamConfig,
+    packets: Vec<Packet>,
+    rate: u32,
+    channels: u16,
+    decoder: Option<Decoder>,
+    next_packet: usize,
+    pending_at: u64,
+    pending: Vec<Vec<f32>>,
+    failed: bool,
+}
+
+#[cfg(target_vendor = "apple")]
+impl Tape {
+    fn new(opened: &Opened) -> Self {
+        Self {
+            config: opened.config.clone(),
+            packets: opened.packets.clone(),
+            rate: opened.rate,
+            channels: opened.config.channels,
+            decoder: None,
+            next_packet: 0,
+            pending_at: 0,
+            pending: Vec::new(),
+            failed: false,
+        }
+    }
+
+    fn pull(&mut self, first: u64, count: usize) -> Option<Vec<f32>> {
+        if self.failed || count == 0 || self.channels == 0 {
+            return None;
+        }
+        if !self.can_continue(first) && !self.seek(first) {
+            self.failed = true;
+            return None;
+        }
+        let need = first.saturating_add(count as u64);
+        let mut steps = 0;
+        let limit = self.packets.len().saturating_add(2);
+        while self.pending_end() < need && steps < limit {
+            steps += 1;
+            if !self.decode_next() {
+                break;
+            }
+        }
+        let skip = usize::try_from(first.saturating_sub(self.pending_at)).ok()?;
+        let channels = usize::from(self.channels);
+        let have = self.pending.first().map(Vec::len).unwrap_or(0);
+        let mut planar = vec![0f32; count.saturating_mul(channels)];
+        let take = count.min(have.saturating_sub(skip));
+        for channel in 0..channels {
+            let plane = self.pending.get(channel)?;
+            if skip > plane.len() {
+                continue;
+            }
+            let end = skip.saturating_add(take).min(plane.len());
+            let dest = channel * count;
+            planar[dest..dest + (end - skip)].copy_from_slice(&plane[skip..end]);
+        }
+        let consumed = skip.saturating_add(take);
+        for plane in &mut self.pending {
+            if consumed < plane.len() {
+                plane.drain(..consumed);
+            } else {
+                plane.clear();
+            }
+        }
+        self.pending_at = first.saturating_add(take as u64);
+        Some(planar)
+    }
+
+    fn can_continue(&self, first: u64) -> bool {
+        self.decoder.is_some() && first >= self.pending_at
+    }
+
+    fn pending_end(&self) -> u64 {
+        let frames = self.pending.first().map(Vec::len).unwrap_or(0) as u64;
+        self.pending_at.saturating_add(frames)
+    }
+
+    fn seek(&mut self, first: u64) -> bool {
+        let Ok(decoder) = Decoder::new(&self.config) else {
+            return false;
+        };
+        self.decoder = Some(decoder);
+        self.pending = vec![Vec::new(); usize::from(self.channels)];
+        let index = self
+            .packets
+            .iter()
+            .rposition(|packet| packet_sample(packet, self.rate) <= first)
+            .unwrap_or(0);
+        self.next_packet = index;
+        self.pending_at = self
+            .packets
+            .get(index)
+            .map(|packet| packet_sample(packet, self.rate))
+            .unwrap_or(0);
+        true
+    }
+
+    fn decode_next(&mut self) -> bool {
+        let Some(decoder) = &mut self.decoder else {
+            return false;
+        };
+        let decoded = if self.next_packet < self.packets.len() {
+            let packet = &self.packets[self.next_packet];
+            self.next_packet += 1;
+            decoder.decode(&packet.data)
+        } else {
+            decoder.flush()
+        };
+        let Ok(decoded) = decoded else {
+            self.failed = true;
+            return false;
+        };
+        if decoded.frames() == 0 {
+            return self.next_packet < self.packets.len();
+        }
+        for channel in 0..self.channels {
+            let Some(plane) = decoded.plane(channel) else {
+                self.failed = true;
+                return false;
+            };
+            if let Some(pending) = self.pending.get_mut(usize::from(channel)) {
+                pending.extend_from_slice(plane);
+            }
+        }
+        true
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn packet_sample(packet: &Packet, rate: u32) -> u64 {
+    if packet.pts.value <= 0 || rate == 0 {
+        return 0;
+    }
+    let ticks = u128::from(packet.pts.value as u64);
+    let scale = u128::from(packet.pts.timescale.get());
+    if scale == 0 {
+        return 0;
+    }
+    u64::try_from(ticks.saturating_mul(u128::from(rate)) / scale).unwrap_or(u64::MAX)
+}
+
+#[cfg(target_vendor = "apple")]
+struct Note<T> {
+    state: Mutex<NoteState<T>>,
+    wake: Condvar,
+}
+
+#[cfg(target_vendor = "apple")]
+struct NoteState<T> {
+    value: Option<T>,
+    closed: bool,
+}
+
+#[cfg(target_vendor = "apple")]
+impl<T> Note<T> {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(NoteState {
+                value: None,
+                closed: false,
+            }),
+            wake: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, NoteState<T>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn post(&self, value: T) {
+        let mut state = self.lock();
+        if state.closed {
+            return;
+        }
+        state.value = Some(value);
+        self.wake.notify_one();
+    }
+
+    fn close(&self) {
+        let mut state = self.lock();
+        state.closed = true;
+        state.value = None;
+        self.wake.notify_one();
+    }
+
+    fn wait(&self) -> Option<T> {
+        let mut state = self.lock();
+        loop {
+            if let Some(value) = state.value.take() {
+                return Some(value);
+            }
+            if state.closed {
+                return None;
+            }
+            state = self
+                .wake
+                .wait(state)
+                .unwrap_or_else(|poison| poison.into_inner());
+        }
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+struct Slot<T> {
+    inner: Mutex<Option<T>>,
+}
+
+#[cfg(target_vendor = "apple")]
+impl<T> Slot<T> {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
+        }
+    }
+
+    fn publish(&self, value: T) {
+        *self.lock() = Some(value);
+    }
+
+    fn take(&self) -> Option<T> {
+        self.lock().take()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<T>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+
+    use cutlass_core::Timestamp;
+    use cutlass_project::{
+        Asset, Channels, Command, History, Outcome, Project, ProjectId, Segment, Speed, TimeRange,
+    };
+
+    use super::{MixClip, cue_of, frames_in, mix};
+
+    fn project() -> Project {
+        Project::new(ProjectId::from_bytes([2; 16]), "Untitled")
+    }
+
+    fn scale(value: u32) -> NonZeroU32 {
+        NonZeroU32::new(value).expect("scale")
+    }
+
+    fn place(channels: Channels, speed: Speed) -> (Project, cutlass_project::SegmentId) {
+        let mut history = History::new();
+        let mut cut = project();
+        let audio = Asset::audio("file:///cuts/a.m4a", Timestamp::new(96_000, scale(48_000)))
+            .expect("audio");
+        let id = match history
+            .apply(&mut cut, &[Command::AddAsset(audio)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let segment = {
+            let stored = cut.asset(id).expect("asset");
+            let source = TimeRange::new(
+                Timestamp::new(0, scale(48_000)),
+                Timestamp::new(96_000, scale(48_000)),
+            )
+            .expect("source");
+            Segment::media(stored, source, 0, channels, speed).expect("segment")
+        };
+        history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: None,
+                    segment,
+                }],
+            )
+            .expect("place");
+        let segment = cut
+            .timeline()
+            .tracks()
+            .iter()
+            .flat_map(|track| track.segments())
+            .next()
+            .expect("segment")
+            .id();
+        (cut, segment)
+    }
+
+    #[test]
+    fn a_picture_is_not_a_voice_and_a_faster_clip_covers_more_source() {
+        let (cut, sound) = place(Channels::Sound, Speed::new(2, 1).expect("speed"));
+        let video = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, scale(30_000)),
+            320,
+            180,
+            false,
+        )
+        .expect("video");
+        let mut history = History::new();
+        let mut cut = cut;
+        let video_id = match history
+            .apply(&mut cut, &[Command::AddAsset(video)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let picture = {
+            let stored = cut.asset(video_id).expect("asset");
+            let source = TimeRange::new(
+                Timestamp::new(0, scale(30_000)),
+                Timestamp::new(30_000, scale(30_000)),
+            )
+            .expect("source");
+            Segment::media(stored, source, 0, Channels::Picture, Speed::ONE).expect("segment")
+        };
+        let main = cut.timeline().main_track().id();
+        history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: Some(main),
+                    segment: picture,
+                }],
+            )
+            .expect("place");
+        let cues = super::cues(&cut);
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].segment, sound);
+        let segment = cut.timeline().segment(sound).expect("sound");
+        let ask = super::piece_ask(segment, &cues[0], 0, 250_000).expect("window");
+        assert_eq!(ask.first_tick, 0);
+        assert_eq!(ask.last_tick, 24_000);
+        assert!(
+            cue_of(
+                &cut,
+                cut.timeline()
+                    .tracks()
+                    .iter()
+                    .flat_map(|track| track.segments())
+                    .find(|segment| segment.channels() == Channels::Picture)
+                    .expect("picture")
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn volume_scales_and_a_later_clip_stays_silent_until_it_starts() {
+        let tone = MixClip {
+            origin_us: 0,
+            span_us: 1_000_000,
+            volume: 0.5,
+            channels: 1,
+            planar: vec![1.0; 8],
+        };
+        let mixed = mix(&[tone], 0, 1_000, 1_000, 2);
+        assert_eq!(mixed.frames(), 1);
+        assert!((mixed.plane(0).expect("left")[0] - 0.5).abs() < 1e-4);
+        assert!((mixed.plane(1).expect("right")[0] - 0.5).abs() < 1e-4);
+
+        let later = MixClip {
+            origin_us: 1_000,
+            span_us: 1_000,
+            volume: 1.0,
+            channels: 1,
+            planar: vec![1.0],
+        };
+        let mixed = mix(&[later], 0, 2_000, 1_000, 1);
+        assert_eq!(frames_in(0, 2_000, 1_000), 2);
+        assert_eq!(mixed.plane(0).expect("mono")[0], 0.0);
+        assert!((mixed.plane(0).expect("mono")[1] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn overlapping_clips_sum_and_stop_at_full_scale() {
+        let clip = |volume: f32| MixClip {
+            origin_us: 0,
+            span_us: 1_000,
+            volume,
+            channels: 1,
+            planar: vec![1.0],
+        };
+        let mixed = mix(&[clip(0.25), clip(0.25)], 0, 1_000, 1_000, 1);
+        assert!((mixed.plane(0).expect("sum")[0] - 0.5).abs() < 1e-4);
+        let mixed = mix(&[clip(1.0), clip(1.0)], 0, 1_000, 1_000, 1);
+        assert_eq!(mixed.plane(0).expect("clamped")[0], 1.0);
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_constant_survives_a_pull_from_the_start_and_from_later() {
+        use cutlass_audiotoolbox::Encoder;
+        use cutlass_core::{AudioSamples, Packet, Timestamp};
+
+        let rate = 48_000u32;
+        let frames = 16_384usize;
+        let source = AudioSamples::new(rate, 1, vec![0.25; frames]).expect("constant");
+        let mut encoder = Encoder::new(rate, 1).expect("encoder");
+        let mut encoded = encoder.encode(&source).expect("encode");
+        encoded.extend(encoder.finish().expect("finish"));
+        let mut packets = Vec::new();
+        let mut pts = 0i64;
+        for packet in encoded {
+            packets.push(Packet {
+                data: packet.data,
+                pts: Timestamp::new(pts, scale(rate)),
+                dts: None,
+                duration: Some(Timestamp::new(1_024, scale(rate))),
+                keyframe: true,
+            });
+            pts += 1_024;
+        }
+        let opened = super::Opened {
+            config: cutlass_core::AudioStreamConfig {
+                codec: cutlass_core::AudioCodec::Aac,
+                sample_rate: rate,
+                channels: 1,
+                config_record: encoder.config_record().to_vec(),
+            },
+            packets,
+            rate,
+        };
+        let mut tape = super::Tape::new(&opened);
+        let early = tape.pull(0, 4_096).expect("start");
+        assert_eq!(early.len(), 4_096);
+        assert!(early.iter().any(|sample| sample.abs() > 0.1));
+        let later = tape.pull(8_192, 1_024).expect("later");
+        let mean = later.iter().sum::<f32>() / later.len() as f32;
+        assert!((mean - 0.25).abs() < 0.05, "mean {mean} from a 0.25 tone");
+    }
+}

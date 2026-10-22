@@ -25,7 +25,9 @@ uuid.workspace = true
 rfd = { workspace = true, features = ["xdg-portal"] }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
+cutlass-audiotoolbox.workspace = true
 cutlass-color.workspace = true
+cutlass-output.workspace = true
 cutlass-playback.workspace = true
 cutlass-videotoolbox.workspace = true
 

@@ -1,8 +1,8 @@
 //! The preview clock.
 //!
 //! Play runs the playhead from where it sits to the end of the cut, then
-//! stops on the last frame. The clock is the wall time since play started.
-//! Audio is not the clock yet.
+//! stops on the last frame. The wall clock moves a cut with no sound. When
+//! the device is playing, the audio clock moves it instead.
 
 use std::time::Duration;
 

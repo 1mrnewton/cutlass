@@ -63,6 +63,33 @@ fn silence_is_handed_to_the_device() {
 }
 
 #[test]
+fn more_samples_keep_the_same_clock() {
+    let Some(mut output) = open() else {
+        return;
+    };
+    let frames = 4_800usize;
+    let first = AudioSamples::new(48_000, 2, vec![0.0; frames * 2]).expect("silence");
+    let more = AudioSamples::new(48_000, 2, vec![0.0; frames * 2]).expect("more silence");
+    output.play(&first).expect("play");
+    output.extend(&more).expect("extend");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while output.enqueued_frames() < frames * 2 {
+        if Instant::now() > deadline {
+            panic!(
+                "enqueued {} of {} frames",
+                output.enqueued_frames(),
+                frames * 2
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let time = output.clock().expect("clock").expect("sample time");
+    assert_eq!(time.timescale.get(), 48_000);
+    output.stop().expect("stop");
+    assert!(output.clock().expect("clock").is_none());
+}
+
+#[test]
 fn a_mismatched_stream_is_rejected() {
     let Some(mut output) = open() else {
         return;

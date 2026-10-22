@@ -828,6 +828,14 @@ name = "cutlass-mp3"
 version = "0.1.0"
 
 [[package]]
+name = "cutlass-mp3-file"
+version = "0.1.0"
+dependencies = [
+ "cutlass-core",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cutlass-mp4"
 version = "0.1.0"
 dependencies = [

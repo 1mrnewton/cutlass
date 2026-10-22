@@ -371,7 +371,8 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::SetEasing { segment, .. }
         | Command::SetFades { segment, .. }
         | Command::SetDenoise { segment, .. }
-        | Command::SetKeepPitch { segment, .. } => segment_lane_locked(project, lanes, *segment),
+        | Command::SetKeepPitch { segment, .. }
+        | Command::SetCrop { segment, .. } => segment_lane_locked(project, lanes, *segment),
         Command::SetSource { .. } => false,
         _ => false,
     }
@@ -3475,8 +3476,8 @@ mod tests {
 
     use cutlass_core::Timestamp;
     use cutlass_project::{
-        Asset, Channels, Command, Easing, History, KeyframeProperty, Outcome, Project, ProjectId,
-        Segment, Speed, TimeRange, TrackKind,
+        Asset, Channels, Command, Crop, Easing, History, KeyframeProperty, Outcome, Project,
+        ProjectId, Segment, Speed, TimeRange, TrackKind,
     };
     use eframe::egui::{Rect, pos2, vec2};
 
@@ -4457,12 +4458,17 @@ mod tests {
             segment: id,
             keep: false,
         };
+        let crop = Command::SetCrop {
+            segment: id,
+            crop: Crop::new(0.1, 0.0, 0.0, 0.0).expect("crop"),
+        };
         assert!(super::blocks_command(&cut, &locked, &volume));
         assert!(super::blocks_command(&cut, &locked, &hidden));
         assert!(super::blocks_command(&cut, &locked, &easing));
         assert!(super::blocks_command(&cut, &locked, &fades));
         assert!(super::blocks_command(&cut, &locked, &denoise));
         assert!(super::blocks_command(&cut, &locked, &pitch));
+        assert!(super::blocks_command(&cut, &locked, &crop));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),
@@ -4492,6 +4498,11 @@ mod tests {
             &cut,
             &super::Lanes::default(),
             &pitch
+        ));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &crop
         ));
     }
 

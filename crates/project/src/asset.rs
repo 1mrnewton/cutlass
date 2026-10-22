@@ -108,6 +108,12 @@ impl Asset {
         &self.source
     }
 
+    /// Replaces the source string. An empty string is refused and the old one stays.
+    pub(crate) fn set_source(&mut self, source: impl Into<String>) -> Result<(), Error> {
+        self.source = source_string(source)?;
+        Ok(())
+    }
+
     pub const fn duration(&self) -> Option<Timestamp> {
         self.duration
     }

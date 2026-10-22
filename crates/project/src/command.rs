@@ -16,6 +16,11 @@ use crate::time::{self, Speed, TimeRange};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     AddAsset(Asset),
+    /// Replaces the source string. Kind, duration, and size stay. The project does not open the path.
+    SetSource {
+        asset: AssetId,
+        source: String,
+    },
     Rename(String),
     SetCanvas {
         width: u32,

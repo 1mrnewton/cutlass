@@ -78,6 +78,10 @@ impl Project {
     pub(crate) fn apply(&mut self, command: Command) -> Result<Outcome, Error> {
         match command {
             Command::AddAsset(asset) => Ok(Outcome::Asset(self.add_asset_now(asset)?)),
+            Command::SetSource { asset, source } => {
+                self.set_source_now(asset, source)?;
+                Ok(Outcome::Unchanged)
+            }
             Command::Rename(name) => {
                 self.name = name;
                 Ok(Outcome::Unchanged)
@@ -162,6 +166,15 @@ impl Project {
             return Err(Error::IdsExhausted);
         }
         Ok(id)
+    }
+
+    fn set_source_now(&mut self, id: AssetId, source: String) -> Result<(), Error> {
+        let asset = self
+            .assets
+            .iter_mut()
+            .find(|asset| asset.id() == id)
+            .ok_or(Error::UnknownAsset(id))?;
+        asset.set_source(source)
     }
 
     fn add_asset_now(&mut self, mut asset: Asset) -> Result<AssetId, Error> {
@@ -698,6 +711,87 @@ mod tests {
             .apply(&mut project, &[Command::Rename("spot".to_string())])
             .unwrap();
         assert_eq!(project.name(), "spot");
+    }
+
+    #[test]
+    fn set_source_replaces_the_path_and_leaves_the_clip() {
+        let mut history = History::new();
+        let mut project = project();
+        let video = Asset::video(
+            "file:///v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).unwrap()),
+            320,
+            180,
+            true,
+        )
+        .unwrap();
+        let id = match history
+            .apply(&mut project, &[Command::AddAsset(video)])
+            .unwrap()
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let stored = project.asset(id).unwrap();
+        let duration = stored.duration().unwrap();
+        let source = TimeRange::new(
+            Timestamp::new(0, duration.timescale),
+            Timestamp::new(duration.value, duration.timescale),
+        )
+        .unwrap();
+        let segment = Segment::media(stored, source, 0, Channels::Both, Speed::ONE).unwrap();
+        let main = project.timeline().main_track().id();
+        history
+            .apply(
+                &mut project,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .unwrap();
+        history
+            .apply(
+                &mut project,
+                &[Command::SetSource {
+                    asset: id,
+                    source: "file:///other.mp4".to_string(),
+                }],
+            )
+            .unwrap();
+        let asset = project.asset(id).unwrap();
+        assert_eq!(asset.source(), "file:///other.mp4");
+        assert_eq!(asset.duration().unwrap().value, 30_000);
+        assert_eq!(asset.visual_size(), Some((320, 180)));
+        assert_eq!(
+            project.timeline().main_track().segments()[0]
+                .source()
+                .unwrap()
+                .duration()
+                .value,
+            30_000
+        );
+        history.undo(&mut project).unwrap();
+        assert_eq!(project.asset(id).unwrap().source(), "file:///v.mp4");
+        let empty = history.apply(
+            &mut project,
+            &[Command::SetSource {
+                asset: id,
+                source: String::new(),
+            }],
+        );
+        assert_eq!(empty.unwrap_err(), Error::EmptySource);
+        assert_eq!(project.asset(id).unwrap().source(), "file:///v.mp4");
+        let missing = crate::id::AssetId::raw(99);
+        let unknown = history.apply(
+            &mut project,
+            &[Command::SetSource {
+                asset: missing,
+                source: "file:///x.mp4".to_string(),
+            }],
+        );
+        assert_eq!(unknown.unwrap_err(), Error::UnknownAsset(missing));
     }
 
     #[test]

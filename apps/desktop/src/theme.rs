@@ -52,6 +52,11 @@ pub fn install(ctx: &egui::Context) {
         style.visuals.extreme_bg_color = GAP;
         style.visuals.faint_bg_color = BAR;
         style.visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
+        // Hover is a light frame and press is a white one. The shell paints its own fills.
+        style.visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+        style.visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+        style.visuals.widgets.active.bg_stroke = Stroke::NONE;
+        style.visuals.widgets.open.bg_stroke = Stroke::NONE;
         // A panel draws its resize line from these strokes. Width 0 leaves the
         // gap with no color. The color is the scroll bar, so it stays faint.
         style.visuals.widgets.inactive.fg_stroke.color = FAINT;

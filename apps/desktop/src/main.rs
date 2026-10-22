@@ -550,10 +550,21 @@ impl eframe::App for CutlassApp {
                     &mut self.trim_drag,
                     &mut self.split,
                 );
-                if !commands.is_empty()
-                    && let Err(error) = self.history.apply(&mut self.project, &commands)
-                {
-                    timeline::show_note(ui, timeline::apply_note(&error, words::active(ui)));
+                if !commands.is_empty() {
+                    let select_placed = timeline::take_placed(ui);
+                    match self.history.apply(&mut self.project, &commands) {
+                        Ok(outcomes) => {
+                            if select_placed && let Some(id) = timeline::placed_segment(&outcomes) {
+                                self.selected_segments = vec![id];
+                            }
+                        }
+                        Err(error) => {
+                            timeline::show_note(
+                                ui,
+                                timeline::apply_note(&error, words::active(ui)),
+                            );
+                        }
+                    }
                 }
             });
 

@@ -3,8 +3,8 @@
 use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, Sense, Stroke, pos2, vec2};
 
 use cutlass_project::{
-    Command, FrameRate, History, Keyframe, Project, SEQUENCE_TIMESCALE, SegmentId, Track, TrackId,
-    TrackKind,
+    Command, Error, FrameRate, History, Keyframe, Project, ProjectId, SEQUENCE_TIMESCALE, Segment,
+    SegmentId, Track, TrackId, TrackKind,
 };
 
 use crate::icons::{self, Icon};
@@ -268,6 +268,91 @@ pub(crate) fn edit_refused(project: &Project, lanes: &Lanes, id: SegmentId) -> b
     blocks_edit(project, lanes, id)
 }
 
+/// The shell's copy. It is not a project field and it is not saved.
+#[derive(Clone)]
+struct Hold {
+    project: ProjectId,
+    track: Option<TrackId>,
+    segment: Segment,
+}
+
+fn hold_id() -> egui::Id {
+    egui::Id::unique("clip-hold")
+}
+
+fn placed_id() -> egui::Id {
+    egui::Id::unique("select-placed")
+}
+
+fn remember_clip(ui: &egui::Ui, project: &Project, id: SegmentId) {
+    let Some(segment) = project.timeline().segment(id) else {
+        return;
+    };
+    ui.data_mut(|data| {
+        data.insert_temp(
+            hold_id(),
+            Hold {
+                project: project.id(),
+                track: segment_track(project, id),
+                segment: segment.clone(),
+            },
+        );
+    });
+}
+
+fn remembered(ui: &egui::Ui, project: ProjectId) -> Option<Hold> {
+    let hold = ui.data(|data| data.get_temp::<Hold>(hold_id()))?;
+    same_cut(&hold, project).cloned()
+}
+
+fn same_cut(hold: &Hold, project: ProjectId) -> Option<&Hold> {
+    (hold.project == project).then_some(hold)
+}
+
+fn place_copy(segment: &Segment, track: Option<TrackId>, start: i64) -> Result<Command, Error> {
+    Ok(Command::Place {
+        track,
+        segment: segment.duplicate(start)?,
+    })
+}
+
+/// Place opens another track when the time is taken, so a locked lane has to
+/// be refused before the command is sent.
+fn paste_blocked(project: &Project, lanes: &Lanes, track: Option<TrackId>) -> bool {
+    let Some(track) = track else {
+        return false;
+    };
+    if lane_row(lanes, track).locked {
+        return true;
+    }
+    if project.timeline().main_track().id() != track || !project.settings().magnet() {
+        return false;
+    }
+    project
+        .timeline()
+        .main_track()
+        .segments()
+        .iter()
+        .any(|segment| ripples_locked(project, lanes, segment.id()))
+}
+
+fn mark_placed(ui: &egui::Ui) {
+    ui.data_mut(|data| data.insert_temp(placed_id(), true));
+}
+
+pub(crate) fn take_placed(ui: &egui::Ui) -> bool {
+    ui.data_mut(|data| data.remove_temp(placed_id()))
+        .unwrap_or(false)
+}
+
+pub(crate) fn placed_segment(outcomes: &[cutlass_project::Outcome]) -> Option<SegmentId> {
+    match outcomes {
+        [cutlass_project::Outcome::Segment(id)]
+        | [cutlass_project::Outcome::Opened { segment: id, .. }] => Some(*id),
+        _ => None,
+    }
+}
+
 fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
     match command {
         Command::Move { segment, track, .. } => {
@@ -422,44 +507,50 @@ pub fn show(
     retain_lanes(project, &mut lanes);
     let mut note = None;
     if let Some(key) = crate::keys::tool(ui) {
-        let mut modes = Modes {
-            split,
-            snap: &mut snap,
-            marker: &mut marker,
-            beat: &mut beat,
-        };
-        let (command, refusal, zoom) = apply_shortcut(
-            key,
-            duration > 0,
-            project,
-            &lanes,
-            &mut modes,
-            words::active(ui),
-        );
-        if let Some(command) = command {
-            commands.push(command);
-        }
-        if let Some(text) = refusal {
-            note = Some(text);
-        }
-        if duration > 0
-            && lane_width > 0.0
-            && let Some(step) = zoom
-        {
-            let anchor = view.x(lane, *playhead).clamp(lane, lane + lane_width);
-            match step {
-                ZoomStep::In => {
-                    zoom_around(&mut view, lane, anchor, 2.0, lane_width, duration, rate);
+        match clip_edit(key, ui, project, &lanes, *playhead, selected, &mut commands) {
+            ClipKey::Done => {}
+            ClipKey::Refused(text) => note = Some(text),
+            ClipKey::Other => {
+                let mut modes = Modes {
+                    split,
+                    snap: &mut snap,
+                    marker: &mut marker,
+                    beat: &mut beat,
+                };
+                let (command, refusal, zoom) = apply_shortcut(
+                    key,
+                    duration > 0,
+                    project,
+                    &lanes,
+                    &mut modes,
+                    words::active(ui),
+                );
+                if let Some(command) = command {
+                    commands.push(command);
                 }
-                ZoomStep::Out => {
-                    zoom_around(&mut view, lane, anchor, 0.5, lane_width, duration, rate);
+                if let Some(text) = refusal {
+                    note = Some(text);
                 }
-                ZoomStep::Fit => {
-                    view = View::fit(lane_width, duration);
-                    clamp_view(&mut view, lane_width, duration, rate);
+                if duration > 0
+                    && lane_width > 0.0
+                    && let Some(step) = zoom
+                {
+                    let anchor = view.x(lane, *playhead).clamp(lane, lane + lane_width);
+                    match step {
+                        ZoomStep::In => {
+                            zoom_around(&mut view, lane, anchor, 2.0, lane_width, duration, rate);
+                        }
+                        ZoomStep::Out => {
+                            zoom_around(&mut view, lane, anchor, 0.5, lane_width, duration, rate);
+                        }
+                        ZoomStep::Fit => {
+                            view = View::fit(lane_width, duration);
+                            clamp_view(&mut view, lane_width, duration, rate);
+                        }
+                    }
+                    ui.data_mut(|data| data.insert_temp(zoom_id, view));
                 }
             }
-            ui.data_mut(|data| data.insert_temp(zoom_id, view));
         }
     }
     if tracks.height() > 0.0 {
@@ -835,7 +926,7 @@ pub fn show(
     {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
-    let mut remove = None;
+    let mut menu = None;
     let mut clip_tips = Vec::new();
     if tracks.height() > 0.0 {
         for (track, lane) in project
@@ -884,7 +975,7 @@ pub fn show(
                 track,
                 lane_rect,
                 lane.main,
-                &mut remove,
+                &mut menu,
                 &mut ClipPaint {
                     project,
                     pixel_size: view.pixel_size,
@@ -903,11 +994,25 @@ pub fn show(
                 },
             );
         }
-        if let Some(id) = remove {
-            if blocks_edit(project, &lanes, id) {
-                note = Some(words::of(ui, Phrase::TrackIsLocked));
-            } else {
-                commands.push(Command::RemoveSegment(id));
+        if let Some(choice) = menu {
+            let locked = words::of(ui, Phrase::TrackIsLocked);
+            match choice {
+                ClipRequest::Copy(id) => remember_clip(ui, project, id),
+                ClipRequest::Cut(id) => {
+                    if blocks_edit(project, &lanes, id) {
+                        note = Some(locked);
+                    } else {
+                        remember_clip(ui, project, id);
+                        commands.push(Command::RemoveSegment(id));
+                    }
+                }
+                ClipRequest::Remove(id) => {
+                    if blocks_edit(project, &lanes, id) {
+                        note = Some(locked);
+                    } else {
+                        commands.push(Command::RemoveSegment(id));
+                    }
+                }
             }
         }
     }
@@ -1768,6 +1873,94 @@ struct Modes<'a> {
     beat: &'a mut bool,
 }
 
+enum ClipKey {
+    Other,
+    Done,
+    Refused(&'static str),
+}
+
+fn one_selected(selected: &[SegmentId]) -> Option<SegmentId> {
+    match selected {
+        [id] => Some(*id),
+        _ => None,
+    }
+}
+
+fn clip_edit(
+    key: crate::keys::Shortcut,
+    ui: &egui::Ui,
+    project: &Project,
+    lanes: &Lanes,
+    playhead: i64,
+    selected: &[SegmentId],
+    commands: &mut Vec<Command>,
+) -> ClipKey {
+    use crate::keys::Shortcut;
+    let locked = words::of(ui, Phrase::TrackIsLocked);
+    match key {
+        Shortcut::Copy => {
+            if let Some(id) = one_selected(selected) {
+                remember_clip(ui, project, id);
+            }
+            ClipKey::Done
+        }
+        Shortcut::Cut => {
+            let Some(id) = one_selected(selected) else {
+                return ClipKey::Done;
+            };
+            if blocks_edit(project, lanes, id) {
+                return ClipKey::Refused(locked);
+            }
+            remember_clip(ui, project, id);
+            commands.push(Command::RemoveSegment(id));
+            ClipKey::Done
+        }
+        Shortcut::Duplicate => {
+            let Some(id) = one_selected(selected) else {
+                return ClipKey::Done;
+            };
+            if blocks_edit(project, lanes, id) {
+                return ClipKey::Refused(locked);
+            }
+            let Some(segment) = project.timeline().segment(id) else {
+                return ClipKey::Done;
+            };
+            match place_copy(
+                segment,
+                segment_track(project, id),
+                segment.timeline().end().value,
+            ) {
+                Ok(command) => {
+                    commands.push(command);
+                    mark_placed(ui);
+                    ClipKey::Done
+                }
+                Err(error) => ClipKey::Refused(apply_note(&error, words::active(ui))),
+            }
+        }
+        Shortcut::Paste => {
+            let Some(held) = remembered(ui, project.id()) else {
+                return ClipKey::Done;
+            };
+            let track = held
+                .track
+                .filter(|id| project.timeline().track(*id).is_some());
+            if paste_blocked(project, lanes, track) {
+                return ClipKey::Refused(locked);
+            }
+            match place_copy(&held.segment, track, playhead) {
+                Ok(command) => {
+                    commands.push(command);
+                    mark_placed(ui);
+                    ClipKey::Done
+                }
+                Err(error) => ClipKey::Refused(apply_note(&error, words::active(ui))),
+            }
+        }
+        _ => ClipKey::Other,
+    }
+}
+
 fn apply_shortcut(
     key: crate::keys::Shortcut,
     live: bool,
@@ -1778,7 +1971,12 @@ fn apply_shortcut(
 ) -> (Option<Command>, Option<&'static str>, Option<ZoomStep>) {
     use crate::keys::Shortcut;
     match key {
-        Shortcut::Undo | Shortcut::Redo => (None, None, None),
+        Shortcut::Undo
+        | Shortcut::Redo
+        | Shortcut::Copy
+        | Shortcut::Cut
+        | Shortcut::Paste
+        | Shortcut::Duplicate => (None, None, None),
         Shortcut::Select => {
             *modes.split = false;
             *modes.marker = false;
@@ -2026,8 +2224,30 @@ fn clip_menu(kind: TrackKind) -> Vec<ClipAction> {
     rows
 }
 
+enum ClipRequest {
+    Copy(SegmentId),
+    Cut(SegmentId),
+    Remove(SegmentId),
+}
+
 fn action_runs(action: ClipAction) -> bool {
-    matches!(action, ClipAction::Delete)
+    matches!(
+        action,
+        ClipAction::Copy | ClipAction::Cut | ClipAction::Delete
+    )
+}
+
+fn action_enabled(action: ClipAction, refused: bool) -> bool {
+    action_runs(action) && (!refused || matches!(action, ClipAction::Copy))
+}
+
+fn clip_request(action: ClipAction, id: SegmentId) -> Option<ClipRequest> {
+    match action {
+        ClipAction::Copy => Some(ClipRequest::Copy(id)),
+        ClipAction::Cut => Some(ClipRequest::Cut(id)),
+        ClipAction::Delete => Some(ClipRequest::Remove(id)),
+        _ => None,
+    }
 }
 
 fn action_label(action: ClipAction, language: Language) -> &'static str {
@@ -2051,7 +2271,7 @@ fn paint_clip_menu(
     kind: TrackKind,
     refused: bool,
     id: SegmentId,
-    remove: &mut Option<SegmentId>,
+    menu: &mut Option<ClipRequest>,
 ) {
     let rows = clip_menu(kind);
     let pictures = picture_actions(kind).len();
@@ -2060,7 +2280,7 @@ fn paint_clip_menu(
         if index == split_at && pictures > 0 {
             ui.separator();
         }
-        let enabled = action_runs(action) && !refused;
+        let enabled = action_enabled(action, refused);
         let color = if enabled { theme::INK } else { theme::FAINT };
         if ui
             .add_enabled(
@@ -2071,8 +2291,8 @@ fn paint_clip_menu(
             )
             .clicked()
         {
-            if enabled && action == ClipAction::Delete {
-                *remove = Some(id);
+            if let Some(choice) = clip_request(action, id) {
+                *menu = Some(choice);
             }
             ui.close();
         }
@@ -2084,7 +2304,7 @@ fn paint_segments(
     track: &Track,
     lane: Rect,
     main: bool,
-    remove: &mut Option<SegmentId>,
+    menu: &mut Option<ClipRequest>,
     paint: &mut ClipPaint<'_>,
 ) {
     for segment in track.segments() {
@@ -2149,7 +2369,7 @@ fn paint_segments(
         let refused = blocks_edit(paint.project, paint.lanes, segment.id());
         let kind = track.kind();
         let id = segment.id();
-        response.context_menu(|ui| paint_clip_menu(ui, kind, refused, id, remove));
+        response.context_menu(|ui| paint_clip_menu(ui, kind, refused, id, menu));
         let range = segment.timeline();
         let name = paint
             .project
@@ -4269,7 +4489,7 @@ mod tests {
     }
 
     #[test]
-    fn a_video_menu_lists_the_picture_actions_and_only_delete_runs() {
+    fn a_video_menu_lists_the_picture_actions_and_copy_cut_and_delete_run() {
         use cutlass_project::TrackKind;
         let video = super::clip_menu(TrackKind::Video);
         assert_eq!(
@@ -4309,9 +4529,261 @@ mod tests {
                 super::ClipAction::Delete,
             ]
         );
+        assert!(super::action_runs(super::ClipAction::Copy));
+        assert!(super::action_runs(super::ClipAction::Cut));
         assert!(super::action_runs(super::ClipAction::Delete));
-        assert!(!super::action_runs(super::ClipAction::Copy));
         assert!(!super::action_runs(super::ClipAction::Freeze));
+        assert!(super::action_enabled(super::ClipAction::Copy, true));
+        assert!(!super::action_enabled(super::ClipAction::Cut, true));
+        assert!(!super::action_enabled(super::ClipAction::Delete, true));
+        assert!(super::action_enabled(super::ClipAction::Cut, false));
+    }
+
+    #[test]
+    fn a_copy_places_where_the_clip_ends_and_a_paste_uses_the_named_time() {
+        let mut history = History::new();
+        let mut cut = project();
+        history
+            .apply(&mut cut, &[Command::SetMagnet(false)])
+            .expect("magnet");
+        let main = cut.timeline().main_track().id();
+        let picture = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let asset = match history
+            .apply(&mut cut, &[Command::AddAsset(picture)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let stored = cut.asset(asset).expect("asset");
+        let duration = stored.duration().expect("duration");
+        let source = TimeRange::new(
+            Timestamp::new(0, duration.timescale),
+            Timestamp::new(duration.value, duration.timescale),
+        )
+        .expect("source");
+        let segment =
+            Segment::media(stored, source, 0, Channels::Both, Speed::ONE).expect("segment");
+        let id = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Segment(id)] => *id,
+            other => panic!("expected the same track, got {other:?}"),
+        };
+        let stored = cut.timeline().segment(id).expect("clip").clone();
+        let end = stored.timeline().end().value;
+        let copy = super::place_copy(&stored, Some(main), end).expect("duplicate");
+        let placed = match history
+            .apply(&mut cut, &[copy])
+            .expect("place copy")
+            .as_slice()
+        {
+            [Outcome::Segment(id)] => *id,
+            other => panic!("expected the same track, got {other:?}"),
+        };
+        assert_eq!(
+            cut.timeline()
+                .segment(placed)
+                .expect("copy")
+                .timeline()
+                .start()
+                .value,
+            end
+        );
+        assert_eq!(
+            cut.timeline()
+                .segment(id)
+                .expect("original")
+                .timeline()
+                .start()
+                .value,
+            0
+        );
+        let paste = super::place_copy(&stored, Some(main), 3_000_000).expect("paste");
+        let pasted = match history.apply(&mut cut, &[paste]).expect("paste").as_slice() {
+            [Outcome::Segment(id)] => *id,
+            other => panic!("expected the same track, got {other:?}"),
+        };
+        assert_eq!(
+            cut.timeline()
+                .segment(pasted)
+                .expect("pasted")
+                .timeline()
+                .start()
+                .value,
+            3_000_000
+        );
+    }
+
+    #[test]
+    fn a_locked_lane_is_refused_before_place_can_open_another_track() {
+        let cut = project();
+        let main = cut.timeline().main_track().id();
+        let locked = super::Lanes {
+            rows: vec![super::LaneFlag {
+                track: main,
+                locked: true,
+                hidden: false,
+                muted: false,
+            }],
+        };
+        assert!(super::paste_blocked(&cut, &locked, Some(main)));
+        assert!(!super::paste_blocked(&cut, &locked, None));
+        assert!(!super::paste_blocked(
+            &cut,
+            &super::Lanes::default(),
+            Some(main)
+        ));
+    }
+
+    #[test]
+    fn a_locked_follower_refuses_a_paste_that_place_would_accept() {
+        let mut history = History::new();
+        let mut cut = project();
+        let main = cut.timeline().main_track().id();
+        let picture = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let asset = match history
+            .apply(&mut cut, &[Command::AddAsset(picture)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let stored = cut.asset(asset).expect("asset");
+        let duration = stored.duration().expect("duration");
+        let source = TimeRange::new(
+            Timestamp::new(0, duration.timescale),
+            Timestamp::new(duration.value, duration.timescale),
+        )
+        .expect("source");
+        let segment =
+            Segment::media(stored, source, 0, Channels::Both, Speed::ONE).expect("segment");
+        let id = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Segment(id)] => *id,
+            other => panic!("expected the same track, got {other:?}"),
+        };
+        let stored = cut.asset(asset).expect("asset");
+        let duration = stored.duration().expect("duration");
+        let source = TimeRange::new(
+            Timestamp::new(0, duration.timescale),
+            Timestamp::new(duration.value, duration.timescale),
+        )
+        .expect("source");
+        let overlay =
+            Segment::media(stored, source, 100, Channels::Both, Speed::ONE).expect("overlay");
+        let overlay_track = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: None,
+                    segment: overlay,
+                }],
+            )
+            .expect("overlay")
+            .as_slice()
+        {
+            [Outcome::Opened { track, .. }] => *track,
+            other => panic!("expected a new track, got {other:?}"),
+        };
+        let locked = super::Lanes {
+            rows: vec![super::LaneFlag {
+                track: overlay_track,
+                locked: true,
+                hidden: false,
+                muted: false,
+            }],
+        };
+        assert!(super::paste_blocked(&cut, &locked, Some(main)));
+        assert!(super::blocks_edit(&cut, &locked, id));
+        let clip = cut.timeline().segment(id).expect("clip").clone();
+        let command =
+            super::place_copy(&clip, Some(main), clip.timeline().end().value).expect("copy");
+        assert!(!super::blocks_command(&cut, &locked, &command));
+        assert!(!super::paste_blocked(
+            &cut,
+            &super::Lanes::default(),
+            Some(main)
+        ));
+    }
+
+    #[test]
+    fn a_hold_from_another_cut_is_ignored() {
+        let picture = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            false,
+        )
+        .expect("video");
+        let duration = picture.duration().expect("duration");
+        let source = TimeRange::new(
+            Timestamp::new(0, duration.timescale),
+            Timestamp::new(duration.value, duration.timescale),
+        )
+        .expect("source");
+        let segment =
+            Segment::media(&picture, source, 0, Channels::Picture, Speed::ONE).expect("segment");
+        let hold = super::Hold {
+            project: ProjectId::from_bytes([2; 16]),
+            track: None,
+            segment,
+        };
+        assert!(super::same_cut(&hold, ProjectId::from_bytes([1; 16])).is_none());
+        assert!(super::same_cut(&hold, hold.project).is_some());
+    }
+
+    #[test]
+    fn one_placed_segment_is_the_new_selection() {
+        use cutlass_project::{SegmentId, TrackId};
+        let segment = SegmentId::new(3).expect("id");
+        let track = TrackId::new(2).expect("id");
+        assert_eq!(
+            super::placed_segment(&[Outcome::Segment(segment)]),
+            Some(segment)
+        );
+        assert_eq!(
+            super::placed_segment(&[Outcome::Opened { segment, track }]),
+            Some(segment)
+        );
+        assert!(
+            super::placed_segment(&[Outcome::Segment(segment), Outcome::Segment(segment)])
+                .is_none()
+        );
     }
 
     #[test]

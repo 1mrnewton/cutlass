@@ -17,6 +17,10 @@ pub(crate) enum Shortcut {
     ZoomIn,
     ZoomOut,
     ZoomFit,
+    Copy,
+    Cut,
+    Paste,
+    Duplicate,
 }
 
 impl Shortcut {
@@ -112,6 +116,18 @@ pub(crate) fn shortcut(modifiers: &Modifiers, key: Key) -> Option<Shortcut> {
     }
     if command && !shift && key == Key::B {
         return Some(Shortcut::Split);
+    }
+    if command && !shift && key == Key::C {
+        return Some(Shortcut::Copy);
+    }
+    if command && !shift && key == Key::X {
+        return Some(Shortcut::Cut);
+    }
+    if command && !shift && key == Key::V {
+        return Some(Shortcut::Paste);
+    }
+    if command && !shift && key == Key::D {
+        return Some(Shortcut::Duplicate);
     }
     if !command && !ctrl && shift && key == Key::Z {
         return Some(Shortcut::ZoomFit);
@@ -219,6 +235,32 @@ mod tests {
         alt.alt = true;
         assert_eq!(shortcut(&alt, Key::M), None);
         assert_eq!(shortcut(&mods(false, false, true), Key::B), None);
+    }
+
+    #[test]
+    fn command_c_copies_command_x_cuts_command_v_pastes_and_command_d_duplicates() {
+        assert_eq!(
+            shortcut(&mods(true, false, false), Key::C),
+            Some(Shortcut::Copy)
+        );
+        assert_eq!(
+            shortcut(&mods(true, true, false), Key::X),
+            Some(Shortcut::Cut)
+        );
+        assert_eq!(
+            shortcut(&mods(true, false, false), Key::V),
+            Some(Shortcut::Paste)
+        );
+        assert_eq!(
+            shortcut(&mods(true, false, false), Key::D),
+            Some(Shortcut::Duplicate)
+        );
+        assert_eq!(shortcut(&mods(true, false, true), Key::C), None);
+        assert_eq!(shortcut(&mods(false, false, false), Key::C), None);
+        assert_eq!(shortcut(&mods(false, true, false), Key::V), None);
+        let mut alt = mods(true, false, false);
+        alt.alt = true;
+        assert_eq!(shortcut(&alt, Key::D), None);
     }
 
     #[test]

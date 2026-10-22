@@ -18,6 +18,7 @@ cutlass-core.workspace = true
 cutlass-media.workspace = true
 cutlass-project.workspace = true
 eframe.workspace = true
+log.workspace = true
 rfd.workspace = true
 uuid.workspace = true
 

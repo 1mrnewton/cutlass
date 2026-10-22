@@ -1,14 +1,15 @@
 //! The sound under the playhead.
 //!
 //! On Apple, play decodes the audible clips into the output device at their
-//! volume and the picture follows that clock. A fade, a mute, and a scrub
+//! volume and the picture follows that clock. A failure is written to the
+//! app log, and the cut stays on the wall clock. A fade, a mute, and a scrub
 //! are not heard. Other systems keep the wall clock.
 
 use cutlass_core::AudioSamples;
 use cutlass_project::{Channels, Project, Segment, SegmentId};
 
 #[cfg(target_vendor = "apple")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(target_vendor = "apple")]
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[cfg(target_vendor = "apple")]
@@ -331,6 +332,11 @@ impl Live {
             return;
         }
         self.ensure();
+        if self.bridge.is_none() {
+            log::warn!("The audio thread did not start. The cut stays on the wall clock.");
+            self.mode = Mode::Silent;
+            return;
+        }
         self.generation = self.generation.wrapping_add(1);
         self.origin_us = origin_us;
         self.end_us = project.duration().value;
@@ -443,6 +449,7 @@ impl Live {
             self.rate = rate;
         }
         if self.rate == 0 {
+            log::warn!("The audio file reported no sample rate. The cut stays on the wall clock.");
             self.mode = Mode::Silent;
             return;
         }
@@ -455,19 +462,28 @@ impl Live {
             match Output::new(self.rate, OUT_CHANNELS) {
                 Ok(mut output) => match output.play(&samples) {
                     Ok(()) => self.output = Some(output),
-                    Err(_) => {
+                    Err(error) => {
+                        log::warn!(
+                            "The audio device did not start: {error}. The cut stays on the wall clock."
+                        );
                         self.mode = Mode::Silent;
                         return;
                     }
                 },
-                Err(_) => {
+                Err(error) => {
+                    log::warn!(
+                        "The audio device did not open: {error}. The cut stays on the wall clock."
+                    );
                     self.mode = Mode::Silent;
                     return;
                 }
             }
         } else if let Some(output) = &mut self.output
-            && output.extend(&samples).is_err()
+            && let Err(error) = output.extend(&samples)
         {
+            log::warn!(
+                "The audio device stopped taking samples: {error}. The cut stays on the wall clock."
+            );
             let _ = output.stop();
             self.output = None;
             self.mode = Mode::Silent;
@@ -611,6 +627,7 @@ struct Worker {
     generation: u64,
     layout: Option<u32>,
     files: HashMap<String, Opened>,
+    closed: HashSet<String>,
     tapes: HashMap<(String, i64), Tape>,
 }
 
@@ -620,9 +637,11 @@ impl Worker {
         if self.generation != fill.generation {
             self.tapes.clear();
             self.layout = None;
+            self.closed.clear();
             self.generation = fill.generation;
         }
         let Some(rate) = self.rate_of(&fill.sources) else {
+            log::warn!("No clip opened for playback. The cut stays on the wall clock.");
             return Answer::Missing {
                 generation: fill.generation,
             };
@@ -658,7 +677,17 @@ impl Worker {
         if self.files.contains_key(source) {
             return Some(());
         }
-        let opened = read_audio(source)?;
+        if self.closed.contains(source) {
+            return None;
+        }
+        let opened = match read_audio(source) {
+            Ok(opened) => opened,
+            Err(reason) => {
+                log::warn!("{reason}");
+                self.closed.insert(source.to_owned());
+                return None;
+            }
+        };
         if self.layout.is_none() {
             self.layout = Some(opened.rate);
         }
@@ -695,27 +724,36 @@ impl Worker {
 
 #[cfg(target_vendor = "apple")]
 struct Opened {
+    path: String,
     config: AudioStreamConfig,
     packets: Vec<Packet>,
     rate: u32,
 }
 
 #[cfg(target_vendor = "apple")]
-fn read_audio(source: &str) -> Option<Opened> {
-    let path = crate::frames::file_path(source)?;
-    let bytes = std::fs::read(path).ok()?;
-    let probe = Probe::parse(&bytes).ok()?;
-    let index = probe.tracks().iter().position(|track| {
+fn read_audio(source: &str) -> Result<Opened, String> {
+    let Some(path) = crate::frames::file_path(source) else {
+        return Err(format!("Audio is not a file ({source})."));
+    };
+    let bytes = std::fs::read(path).map_err(|error| format!("Could not read {path}: {error}."))?;
+    let probe = Probe::parse(&bytes)
+        .map_err(|error| format!("Could not open {path} for audio: {error}."))?;
+    let Some(index) = probe.tracks().iter().position(|track| {
         track.enabled && matches!(&track.content, Content::Audio(config) if decodes(config.codec))
-    })?;
+    }) else {
+        return Err(format!("No AAC track in {path}."));
+    };
     let Content::Audio(config) = &probe.tracks()[index].content else {
-        return None;
+        return Err(format!("No AAC track in {path}."));
     };
     if config.sample_rate == 0 || config.channels == 0 {
-        return None;
+        return Err(format!("The AAC track in {path} has no rate or channels."));
     }
-    let packets = probe.samples(index)?.to_vec();
-    Some(Opened {
+    let Some(packets) = probe.samples(index).map(<[Packet]>::to_vec) else {
+        return Err(format!("The AAC track in {path} has no samples."));
+    };
+    Ok(Opened {
+        path: path.to_owned(),
         rate: config.sample_rate,
         config: config.clone(),
         packets,
@@ -733,6 +771,7 @@ fn ticks_to_samples(ticks: i64, scale: u32, rate: u32) -> Option<u64> {
 
 #[cfg(target_vendor = "apple")]
 struct Tape {
+    path: String,
     config: AudioStreamConfig,
     packets: Vec<Packet>,
     rate: u32,
@@ -748,6 +787,7 @@ struct Tape {
 impl Tape {
     fn new(opened: &Opened) -> Self {
         Self {
+            path: opened.path.clone(),
             config: opened.config.clone(),
             packets: opened.packets.clone(),
             rate: opened.rate,
@@ -765,7 +805,6 @@ impl Tape {
             return None;
         }
         if !self.can_continue(first) && !self.seek(first) {
-            self.failed = true;
             return None;
         }
         let need = first.saturating_add(count as u64);
@@ -812,9 +851,24 @@ impl Tape {
         self.pending_at.saturating_add(frames)
     }
 
+    fn fail(&mut self, reason: String) {
+        if self.failed {
+            return;
+        }
+        log::warn!("{reason}");
+        self.failed = true;
+    }
+
     fn seek(&mut self, first: u64) -> bool {
-        let Ok(decoder) = Decoder::new(&self.config) else {
-            return false;
+        let decoder = match Decoder::new(&self.config) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                let path = self.path.clone();
+                self.fail(format!(
+                    "Could not open the AAC decoder for {path}: {error}."
+                ));
+                return false;
+            }
         };
         self.decoder = Some(decoder);
         self.pending = vec![Vec::new(); usize::from(self.channels)];
@@ -843,16 +897,21 @@ impl Tape {
         } else {
             decoder.flush()
         };
-        let Ok(decoded) = decoded else {
-            self.failed = true;
-            return false;
+        let decoded = match decoded {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                let path = self.path.clone();
+                self.fail(format!("Could not decode audio in {path}: {error}."));
+                return false;
+            }
         };
         if decoded.frames() == 0 {
             return self.next_packet < self.packets.len();
         }
         for channel in 0..self.channels {
             let Some(plane) = decoded.plane(channel) else {
-                self.failed = true;
+                let path = self.path.clone();
+                self.fail(format!("The audio in {path} is missing a channel."));
                 return false;
             };
             if let Some(pending) = self.pending.get_mut(usize::from(channel)) {
@@ -1156,6 +1215,7 @@ mod tests {
             pts += 1_024;
         }
         let opened = super::Opened {
+            path: "tone.m4a".to_owned(),
             config: cutlass_core::AudioStreamConfig {
                 codec: cutlass_core::AudioCodec::Aac,
                 sample_rate: rate,

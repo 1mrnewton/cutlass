@@ -19,6 +19,7 @@ mod import;
 mod inspector;
 mod keys;
 mod library;
+mod logs;
 mod media_bin;
 mod menu;
 mod modify;
@@ -32,6 +33,7 @@ mod tip;
 mod words;
 
 fn main() -> eframe::Result {
+    logs::open();
     let viewport = egui::ViewportBuilder::default()
         .with_title("Cutlass")
         .with_app_id("cutlass")
@@ -89,9 +91,13 @@ impl CutlassApp {
         theme::install(&cc.egui_ctx);
         icons::install(&cc.egui_ctx);
         let loaded = projects::blank();
+        logs::project(loaded.project.name());
         let gpu = cc.wgpu_render_state.as_ref().map(|state| {
             cutlass_compose::Gpu::with_device(state.device.clone(), state.queue.clone())
         });
+        if gpu.is_none() {
+            log::warn!("The window has no GPU. The preview stays the background plate.");
+        }
         let ours = std::process::id();
         let recovery = projects::draft_dir()
             .and_then(|dir| projects::find_recovery(&dir, ours, projects::process_running));
@@ -399,6 +405,8 @@ impl CutlassApp {
         self.pending = None;
         self.playhead_us = 0;
         self.play = None;
+        self.hear.stop();
+        logs::project(self.project.name());
         self.selected_segments.clear();
         self.clip_drag = None;
         self.trim_drag = None;
@@ -562,6 +570,7 @@ impl eframe::App for CutlassApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        logs::project(self.project.name());
         words::install(ui.ctx(), self.language);
         chrome::pass_clicks(frame);
         let key_play = !self.blocked() && keys::play(ui);

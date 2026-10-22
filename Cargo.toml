@@ -34,6 +34,7 @@ cutlass-playback = { path = "crates/playback" }
 cutlass-mp4 = { path = "crates/containers/mp4" }
 cutlass-nvcodec = { path = "crates/codecs/native/nvcodec" }
 cutlass-project = { path = "crates/project" }
+log = { version = "0.4.34", features = ["std"] }
 eframe = { version = "0.37.0", default-features = false, features = [
     "accesskit",
     "clipboard",

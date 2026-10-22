@@ -776,6 +776,7 @@ dependencies = [
  "cutlass-test-fixtures",
  "cutlass-videotoolbox",
  "eframe",
+ "log",
  "objc2-app-kit 0.3.2",
  "raw-window-handle",
  "rfd",

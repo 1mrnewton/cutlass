@@ -89,12 +89,37 @@ pub(crate) fn needs_guard(changed: bool, ask: &Ask) -> bool {
 /// Reads a `.cutlass` file. A failure loads nothing.
 pub(crate) fn read(path: &Path) -> Result<Loaded, ReadError> {
     if !path.is_file() {
+        log::warn!("Could not open {}: the file is missing.", path.display());
         return Err(ReadError::Missing);
     }
-    let bytes = std::fs::read(path).map_err(|_| ReadError::Unread)?;
-    let text = String::from_utf8(bytes).map_err(|_| ReadError::Unread)?;
-    let project = Project::from_json(&text).map_err(|_| ReadError::Unread)?;
-    let checkpoint = project.to_json().map_err(|_| ReadError::Unread)?;
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            log::warn!("Could not open {}: {error}.", path.display());
+            return Err(ReadError::Unread);
+        }
+    };
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => {
+            log::warn!("Could not open {}: the file is not text.", path.display());
+            return Err(ReadError::Unread);
+        }
+    };
+    let project = match Project::from_json(&text) {
+        Ok(project) => project,
+        Err(error) => {
+            log::warn!("Could not open {}: {error}.", path.display());
+            return Err(ReadError::Unread);
+        }
+    };
+    let checkpoint = match project.to_json() {
+        Ok(checkpoint) => checkpoint,
+        Err(error) => {
+            log::warn!("Could not open {}: {error}.", path.display());
+            return Err(ReadError::Unread);
+        }
+    };
     Ok(Loaded {
         project,
         checkpoint,
@@ -618,11 +643,13 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 
 fn write_text(path: &Path, text: &str) -> Result<(), ()> {
     let tmp = sibling(path, "tmp");
-    if std::fs::write(&tmp, text).is_err() {
+    if let Err(error) = std::fs::write(&tmp, text) {
+        log::warn!("Could not save {}: {error}.", path.display());
         let _ = std::fs::remove_file(&tmp);
         return Err(());
     }
-    if replace_file(&tmp, path).is_err() {
+    if let Err(error) = replace_file(&tmp, path) {
+        log::warn!("Could not save {}: {error}.", path.display());
         let _ = std::fs::remove_file(&tmp);
         return Err(());
     }

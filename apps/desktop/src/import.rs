@@ -21,9 +21,16 @@ pub(crate) enum ImportError {
 /// The first enabled picture track, or the first enabled sound track.
 pub(crate) fn asset_from_bytes(source: &str, bytes: &[u8]) -> Result<Asset, ImportError> {
     if source.is_empty() {
+        log::warn!("Could not import a file: the source is empty.");
         return Err(ImportError::Unread);
     }
-    let probe = Probe::parse(bytes).map_err(|_| ImportError::Unread)?;
+    let probe = match Probe::parse(bytes) {
+        Ok(probe) => probe,
+        Err(error) => {
+            log::warn!("Could not import {source}: {error}.");
+            return Err(ImportError::Unread);
+        }
+    };
     asset_from_tracks(source, probe.tracks())
 }
 
@@ -35,22 +42,52 @@ fn asset_from_tracks(source: &str, tracks: &[TrackInfo]) -> Result<Asset, Import
         .iter()
         .find(|track| track.enabled && matches!(track.content, Content::Audio(_)));
     if let Some(track) = video {
-        let (width, height) = track.picture_size().ok_or(ImportError::Unread)?;
-        return Asset::video(source, stamp(track)?, width, height, audio.is_some())
-            .map_err(|_| ImportError::Unread);
+        let Some((width, height)) = track.picture_size() else {
+            log::warn!("Could not import {source}: the picture has no size.");
+            return Err(ImportError::Unread);
+        };
+        let Ok(time) = stamp(track) else {
+            log::warn!("Could not import {source}: the track has no duration.");
+            return Err(ImportError::Unread);
+        };
+        return match Asset::video(source, time, width, height, audio.is_some()) {
+            Ok(asset) => Ok(asset),
+            Err(error) => {
+                log::warn!("Could not import {source}: {error}.");
+                Err(ImportError::Unread)
+            }
+        };
     }
     if let Some(track) = audio {
-        return Asset::audio(source, stamp(track)?).map_err(|_| ImportError::Unread);
+        let Ok(time) = stamp(track) else {
+            log::warn!("Could not import {source}: the track has no duration.");
+            return Err(ImportError::Unread);
+        };
+        return match Asset::audio(source, time) {
+            Ok(asset) => Ok(asset),
+            Err(error) => {
+                log::warn!("Could not import {source}: {error}.");
+                Err(ImportError::Unread)
+            }
+        };
     }
+    log::warn!("Could not import {source}: the file has no picture and no sound.");
     Err(ImportError::Empty)
 }
 
 /// Reads one path. A missing file, or a path that is not Unicode, is unread.
 pub(crate) fn from_path(path: &Path) -> Result<Asset, ImportError> {
     let Some(source) = path.to_str() else {
+        log::warn!("Could not import {}: the path is not text.", path.display());
         return Err(ImportError::Unread);
     };
-    let bytes = std::fs::read(path).map_err(|_| ImportError::Unread)?;
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            log::warn!("Could not import {}: {error}.", path.display());
+            return Err(ImportError::Unread);
+        }
+    };
     asset_from_bytes(source, &bytes)
 }
 

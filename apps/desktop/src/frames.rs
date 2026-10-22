@@ -2,8 +2,9 @@
 //!
 //! On Apple a worker decodes VideoToolbox frames ahead of the playhead. The
 //! window samples the GPU texture for the frame that is due and does not copy
-//! it back. A seek keeps the last picture until the new one is ready. Where no
-//! video decoder is linked, there is no picture.
+//! it back. A failure is written to the app log. A seek keeps the last picture
+//! until the new one is ready. Where no video decoder is linked, there is no
+//! picture.
 
 use cutlass_compose::Gpu;
 use cutlass_project::Project;
@@ -61,6 +62,12 @@ pub struct Reel {
     waiting: bool,
     #[cfg(target_vendor = "apple")]
     generation: u64,
+    /// The GPU import already failed for this run. The next frames stay quiet.
+    #[cfg(target_vendor = "apple")]
+    copied: bool,
+    /// A dropped frame was already written. The next drops stay quiet.
+    #[cfg(target_vendor = "apple")]
+    dropped: bool,
 }
 
 impl Reel {
@@ -84,6 +91,10 @@ impl Reel {
             waiting: false,
             #[cfg(target_vendor = "apple")]
             generation: 0,
+            #[cfg(target_vendor = "apple")]
+            copied: false,
+            #[cfg(target_vendor = "apple")]
+            dropped: false,
         }
     }
 
@@ -96,6 +107,8 @@ impl Reel {
             self.plate = None;
             self.texture = None;
             self.waiting = false;
+            self.copied = false;
+            self.dropped = false;
             self.generation = self.generation.wrapping_add(1);
             if let Some(bridge) = &self.bridge {
                 bridge.post(Message::Drop);
@@ -248,16 +261,41 @@ impl Reel {
             self.waiting = false;
             return;
         }
-        let drawn = {
+        let imported = {
             let Some(gpu) = &self.gpu else {
                 return;
             };
-            match gpu.queue_pixel_buffer(&buffer, matrix) {
-                Ok(image) => Drawn::Gpu(Box::new(image)),
-                Err(_) => match rgba_of(gpu, &buffer, matrix) {
+            gpu.queue_pixel_buffer(&buffer, matrix)
+        };
+        let drawn = match imported {
+            Ok(image) => {
+                self.copied = false;
+                self.dropped = false;
+                Drawn::Gpu(Box::new(image))
+            }
+            Err(error) => {
+                if !self.copied {
+                    log::warn!(
+                        "The preview copied a frame on the CPU. The GPU import failed: {error}."
+                    );
+                    self.copied = true;
+                }
+                let copied = {
+                    let Some(gpu) = &self.gpu else {
+                        return;
+                    };
+                    rgba_of(gpu, &buffer, matrix)
+                };
+                match copied {
                     Some((pixels, width, height)) => Drawn::Cpu(pixels, width, height),
-                    None => Drawn::Failed,
-                },
+                    None => {
+                        if !self.dropped {
+                            log::warn!("The preview dropped a frame. The CPU copy failed.");
+                            self.dropped = true;
+                        }
+                        Drawn::Failed
+                    }
+                }
             }
         };
         match drawn {
@@ -268,6 +306,10 @@ impl Reel {
             }
             Drawn::Cpu(pixels, width, height) => {
                 if self.store(ctx, &pixels, width, height).is_none() {
+                    if !self.dropped {
+                        log::warn!("The preview dropped a frame. The CPU copy could not be shown.");
+                        self.dropped = true;
+                    }
                     self.pending = None;
                     self.waiting = true;
                     return;
@@ -426,19 +468,29 @@ impl Decode for Session {
 #[cfg(target_vendor = "apple")]
 fn open_clip(asset: AssetId, source: &str) -> Clip {
     let Some(path) = file_path(source) else {
+        log::warn!("The preview skipped {source}: it is not a file.");
         return Clip::Missing;
     };
-    let Ok(bytes) = std::fs::read(Path::new(path)) else {
-        return Clip::Missing;
+    let bytes = match std::fs::read(Path::new(path)) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            log::warn!("The preview could not read {path}: {error}.");
+            return Clip::Missing;
+        }
     };
-    let Ok(probe) = Probe::parse(&bytes) else {
-        return Clip::Missing;
+    let probe = match Probe::parse(&bytes) {
+        Ok(probe) => probe,
+        Err(error) => {
+            log::warn!("The preview could not open {path}: {error}.");
+            return Clip::Missing;
+        }
     };
     let Some(index) = probe
         .tracks()
         .iter()
         .position(|track| track.enabled && matches!(track.content, Content::Video { .. }))
     else {
+        log::warn!("The preview found no picture track in {path}.");
         return Clip::Missing;
     };
     let Content::Video {
@@ -448,21 +500,30 @@ fn open_clip(asset: AssetId, source: &str) -> Clip {
         content_light,
     } = &probe.tracks()[index].content
     else {
+        log::warn!("The preview found no picture track in {path}.");
         return Clip::Missing;
     };
-    let Ok(matrix) = Matrix::resolve(
+    let matrix = match Matrix::resolve(
         color.as_ref().map(|tags| tags.matrix),
         config.width,
         config.height,
-    ) else {
-        return Clip::Missing;
+    ) {
+        Ok(matrix) => matrix,
+        Err(error) => {
+            log::warn!("The preview could not resolve the color of {path}: {error}.");
+            return Clip::Missing;
+        }
     };
     let rotation = probe.tracks()[index].rotation;
-    let Ok(session) = VideoSession::open(config, *color, *mastering, *content_light, rotation)
-    else {
-        return Clip::Missing;
+    let session = match VideoSession::open(config, *color, *mastering, *content_light, rotation) {
+        Ok(session) => session,
+        Err(error) => {
+            log::warn!("The preview could not decode {path}: {error}.");
+            return Clip::Missing;
+        }
     };
     let Some(packets) = probe.samples(index).map(<[Packet]>::to_vec) else {
+        log::warn!("The preview found no picture samples in {path}.");
         return Clip::Missing;
     };
     let depth = std::num::NonZeroUsize::new(QUEUE_DEPTH).expect("the queue holds a frame");
@@ -649,21 +710,30 @@ enum Body {
 #[cfg(target_vendor = "apple")]
 fn play_loop(ask: Arc<Note<Message>>, picture: Arc<Slot<Picture>>) {
     let mut open = None;
+    let mut missed = None;
     while let Some(message) = ask.wait() {
         match message {
-            Message::Drop => open = None,
-            Message::Show(show) => serve(&mut open, &picture, show),
+            Message::Drop => {
+                open = None;
+                missed = None;
+            }
+            Message::Show(show) => serve(&mut open, &mut missed, &picture, show),
         }
     }
 }
 
 #[cfg(target_vendor = "apple")]
-fn serve(open: &mut Option<Open>, picture: &Slot<Picture>, show: Ask) {
-    if open
+fn serve(open: &mut Option<Open>, missed: &mut Option<String>, picture: &Slot<Picture>, show: Ask) {
+    let switched = open
         .as_ref()
-        .is_none_or(|clip| clip.asset != show.asset || clip.source != show.source)
-    {
+        .is_none_or(|clip| clip.asset != show.asset || clip.source != show.source);
+    if switched && missed.as_deref() != Some(show.source.as_str()) {
         *open = ready(show.asset, &show.source);
+        if open.is_none() {
+            *missed = Some(show.source.clone());
+        } else {
+            missed.take();
+        }
     }
     let Some(clip) = open.as_mut() else {
         picture.publish(unavailable(&show));
@@ -673,7 +743,10 @@ fn serve(open: &mut Option<Open>, picture: &Slot<Picture>, show: Ask) {
         picture.publish(unavailable(&show));
         return;
     }
-    if pump(clip, show.time).is_err() {
+    if let Err(error) = pump(clip, show.time) {
+        if clip.failed.is_none() {
+            log::warn!("The preview could not decode {}: {error}.", clip.source);
+        }
         clip.failed = Some(show.time);
         picture.publish(unavailable(&show));
         return;
@@ -683,6 +756,9 @@ fn serve(open: &mut Option<Open>, picture: &Slot<Picture>, show: Ask) {
         .at(show.time)
         .map(|frame| (frame.pts, frame.image.clone()));
     let Some((pts, buffer)) = taken else {
+        if clip.failed.is_none() {
+            log::warn!("The preview has no frame at this time in {}.", clip.source);
+        }
         clip.failed = Some(show.time);
         picture.publish(unavailable(&show));
         return;
@@ -717,13 +793,13 @@ fn ready(asset: AssetId, source: &str) -> Option<Open> {
 }
 
 #[cfg(target_vendor = "apple")]
-fn pump(clip: &mut Open, time: Timestamp) -> Result<(), ()> {
+fn pump(clip: &mut Open, time: Timestamp) -> Result<(), String> {
     let jump = jumps(clip.followed, time) || clip.ahead.is_empty();
     if jump {
         let rest = clip
             .ahead
             .seek_to(&mut clip.session, &clip.packets, time)
-            .map_err(|_| ())?;
+            .map_err(|error| error.to_string())?;
         clip.cursor = clip.packets.len() - rest.len();
     } else {
         let _ = clip.ahead.at(time);
@@ -731,7 +807,7 @@ fn pump(clip: &mut Open, time: Timestamp) -> Result<(), ()> {
         let mut rest = &clip.packets[start..];
         clip.ahead
             .fill(&mut clip.session, &mut rest)
-            .map_err(|_| ())?;
+            .map_err(|error| error.to_string())?;
         clip.cursor = clip.packets.len() - rest.len();
     }
     clip.followed = Some(time);

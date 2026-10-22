@@ -485,6 +485,7 @@ pub(crate) struct Tools<'a> {
     pub split: &'a mut bool,
     pub can_undo: bool,
     pub can_redo: bool,
+    pub playing: bool,
 }
 
 pub fn show(
@@ -500,6 +501,7 @@ pub fn show(
         split,
         can_undo,
         can_redo,
+        playing,
     } = tools;
     crate::tip::region(ui, words::of(ui, Phrase::RegionTimeline));
     // The panel stores the height this ui claims. Painting the lanes does not
@@ -551,6 +553,9 @@ pub fn show(
         let factor = f64::from(ui.input(|input| input.zoom_delta()));
         if let Some(point) = pointer.filter(|point| full.contains(*point)) {
             zoom_around(&mut view, lane, point.x, factor, lane_width, duration, rate);
+        }
+        if playing {
+            follow_playhead(&mut view, lane, lane_width, *playhead, duration, rate);
         }
         ui.data_mut(|data| data.insert_temp(zoom_id, view));
     }
@@ -1409,6 +1414,41 @@ fn zoom_around(
         0
     };
     view.origin_us = time.saturating_sub(delta).max(0);
+    clamp_view(view, width, duration_us, rate);
+}
+
+/// Shifts the sheet so `playhead` stays inside the lanes while play is running.
+fn follow_playhead(
+    view: &mut View,
+    left: f32,
+    width: f32,
+    playhead: i64,
+    duration_us: i64,
+    rate: FrameRate,
+) {
+    if width <= 0.0 || !(view.pixel_size.is_finite() && view.pixel_size > 0.0) {
+        return;
+    }
+    let margin = 48.0_f32.min(width * 0.25);
+    let x = view.x(left, playhead);
+    let min_x = left + margin;
+    let max_x = left + width - margin;
+    let shift_px = if x > max_x {
+        x - max_x
+    } else if x < min_x {
+        x - min_x
+    } else {
+        0.0
+    };
+    if shift_px == 0.0 {
+        return;
+    }
+    let shift = f64::from(shift_px) / view.pixel_size;
+    if !shift.is_finite() {
+        return;
+    }
+    let shift_us = shift.round().clamp(i64::MIN as f64, i64::MAX as f64) as i64;
+    view.origin_us = view.origin_us.saturating_add(shift_us).max(0);
     clamp_view(view, width, duration_us, rate);
 }
 
@@ -2458,7 +2498,8 @@ fn apply_shortcut(
         | Shortcut::Copy
         | Shortcut::Cut
         | Shortcut::Paste
-        | Shortcut::Duplicate => (None, None, None),
+        | Shortcut::Duplicate
+        | Shortcut::Play => (None, None, None),
         Shortcut::Select => {
             *modes.split = false;
             *modes.marker = false;
@@ -4697,6 +4738,29 @@ mod tests {
     }
 
     #[test]
+    fn playing_keeps_the_playhead_inside_the_lanes() {
+        use cutlass_project::FrameRate;
+
+        let mut view = super::View {
+            pixel_size: 0.001,
+            origin_us: 0,
+        };
+        super::follow_playhead(&mut view, 0.0, 800.0, 200_000, 5_000_000, FrameRate::Fps30);
+        assert_eq!(view.origin_us, 0);
+        super::follow_playhead(
+            &mut view,
+            0.0,
+            800.0,
+            2_000_000,
+            5_000_000,
+            FrameRate::Fps30,
+        );
+        let x = view.x(0.0, 2_000_000);
+        assert!((0.0..=800.0).contains(&x));
+        assert!(view.origin_us > 0);
+    }
+
+    #[test]
     fn a_horizontal_line_keeps_its_fraction_of_the_tracks() {
         let tracks = Rect::from_min_size(pos2(0.0, 44.0), vec2(600.0, 200.0));
         assert_eq!(super::row_fraction(tracks, 44.0), 0.0);
@@ -6119,6 +6183,7 @@ mod tests {
                             split: &mut split,
                             can_undo: false,
                             can_redo: false,
+                            playing: false,
                         },
                     ));
                 },

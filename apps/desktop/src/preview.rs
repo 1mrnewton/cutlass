@@ -19,6 +19,7 @@ pub fn show(
     ui: &mut egui::Ui,
     project: &Project,
     playhead_us: i64,
+    playing: bool,
     selected: &mut Vec<SegmentId>,
     picture: Option<egui::TextureId>,
 ) -> Vec<cutlass_project::Command> {
@@ -125,11 +126,26 @@ pub fn show(
             )
         });
     }
-    paint_transport(ui, transport, project, playhead_us);
+    paint_transport(ui, transport, project, playhead_us, playing);
     commands
 }
 
-fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us: i64) {
+pub(crate) fn take_play(ui: &egui::Ui) -> bool {
+    ui.data_mut(|data| data.remove_temp(play_id()))
+        .unwrap_or(false)
+}
+
+fn play_id() -> egui::Id {
+    egui::Id::unique("preview-play")
+}
+
+fn paint_transport(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    project: &Project,
+    playhead_us: i64,
+    playing: bool,
+) {
     let rate = project.settings().rate();
     let live = project.duration().value > 0;
     let ink = if live { theme::INK } else { theme::MUTED };
@@ -157,24 +173,38 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
 
     let dim = if live { 1.0 } else { 0.35 };
     let play = Rect::from_center_size(rect.center(), Vec2::splat(36.0));
-    let play_response = ui.interact(play, ui.scope_id().with("play"), Sense::hover());
+    let play_response = ui.interact(
+        play,
+        ui.scope_id().with("play"),
+        if live { Sense::click() } else { Sense::hover() },
+    );
+    if play_response.clicked() {
+        ui.data_mut(|data| data.insert_temp(play_id(), true));
+    }
     let (disk, mark) = theme::face(
         theme::INK,
         Color32::from_rgb(0x12, 0x13, 0x0f),
-        live && theme::hot(&play_response),
+        live && (playing || theme::hot(&play_response)),
     );
     ui.painter()
         .circle_filled(play.center(), 18.0, disk.gamma_multiply(dim));
     icons::paint(
         ui.painter(),
         play.center(),
-        Icon::Play,
+        if playing { Icon::Pause } else { Icon::Play },
         16.0,
         mark.gamma_multiply(dim),
     );
     crate::tip::show_enabled(
         &play_response,
-        crate::words::of(ui, crate::words::Phrase::Play),
+        crate::words::of(
+            ui,
+            if playing {
+                crate::words::Phrase::Pause
+            } else {
+                crate::words::Phrase::Play
+            },
+        ),
         live,
     );
 
@@ -1472,7 +1502,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    super::show(ui, project, 1_500_000, &mut Vec::new(), None);
+                    super::show(ui, project, 1_500_000, false, &mut Vec::new(), None);
                 },
             );
             let tree = output.platform_output.accesskit_update.take();
@@ -1627,7 +1657,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                commands.clone_from(&super::show(ui, cut, 0, selected, None));
+                commands.clone_from(&super::show(ui, cut, 0, false, selected, None));
             },
         );
         let tree = output.platform_output.accesskit_update.take();
@@ -2000,7 +2030,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    super::show(ui, &cut, 0, &mut Vec::new(), picture);
+                    super::show(ui, &cut, 0, false, &mut Vec::new(), picture);
                 },
             );
             let found = output

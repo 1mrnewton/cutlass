@@ -76,6 +76,15 @@ pub struct PlaneMut<'a> {
     pub height: usize,
 }
 
+impl Clone for PixelBuffer {
+    fn clone(&self) -> Self {
+        Self {
+            buffer: self.buffer.clone(),
+            writable: false,
+        }
+    }
+}
+
 impl PixelBuffer {
     /// Allocates an IOSurface-backed buffer the caller can fill.
     pub fn new(

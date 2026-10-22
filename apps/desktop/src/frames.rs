@@ -1,19 +1,28 @@
 //! The picture under the playhead.
 //!
-//! On Apple the top picture is decoded and converted on the window's GPU, then
-//! painted in its box. A resting playhead keeps that picture. A new time
-//! decodes on the UI thread, so moving the playhead can wait. Where no video
-//! decoder is linked, there is no picture. `docs/preview.md`.
-
-use std::path::Path;
+//! On Apple a worker decodes VideoToolbox frames ahead of the playhead. The
+//! window uploads the frame that is due. A seek keeps the last picture until
+//! the new one is ready. Where no video decoder is linked, there is no picture.
 
 use cutlass_compose::Gpu;
-use cutlass_project::{AssetId, Project};
+use cutlass_project::Project;
+
+#[cfg(any(test, target_vendor = "apple"))]
+use cutlass_core::Timestamp;
+#[cfg(target_vendor = "apple")]
+use cutlass_project::AssetId;
+#[cfg(target_vendor = "apple")]
+use std::path::Path;
+
+#[cfg(target_vendor = "apple")]
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+#[cfg(target_vendor = "apple")]
+use std::thread::JoinHandle;
 
 #[cfg(target_vendor = "apple")]
 use cutlass_color::{Matrix, YuvPlanes};
 #[cfg(target_vendor = "apple")]
-use cutlass_core::{Packet, Timestamp};
+use cutlass_core::Packet;
 #[cfg(target_vendor = "apple")]
 use cutlass_media::{Content, Probe, VideoSession};
 #[cfg(target_vendor = "apple")]
@@ -21,24 +30,48 @@ use cutlass_playback::{Ahead, Decode};
 #[cfg(target_vendor = "apple")]
 use cutlass_videotoolbox::PixelBuffer;
 
+/// How many decoded frames the worker keeps, including the one on screen.
+#[cfg(target_vendor = "apple")]
+const QUEUE_DEPTH: usize = 8;
+
+/// A forward jump longer than this seeks from a keyframe instead of decoding through.
+#[cfg(any(test, target_vendor = "apple"))]
+const SEEK_GAP_SECS: f64 = 1.0;
+
 /// The open clip and the GPU the window already created.
 pub struct Reel {
     gpu: Option<Gpu>,
     #[cfg(target_vendor = "apple")]
-    clip: Option<Clip>,
+    bridge: Option<Bridge>,
     #[cfg(target_vendor = "apple")]
     texture: Option<eframe::egui::TextureHandle>,
+    #[cfg(target_vendor = "apple")]
+    pending: Option<Ask>,
+    #[cfg(target_vendor = "apple")]
+    shown: Option<Shown>,
+    #[cfg(target_vendor = "apple")]
+    waiting: bool,
+    #[cfg(target_vendor = "apple")]
+    generation: u64,
 }
 
 impl Reel {
     /// `gpu` is the window's device. Without one, the plate stays the background.
     pub fn new(gpu: Option<Gpu>) -> Self {
         Self {
+            #[cfg(target_vendor = "apple")]
+            bridge: gpu.is_some().then(Bridge::start),
             gpu,
             #[cfg(target_vendor = "apple")]
-            clip: None,
-            #[cfg(target_vendor = "apple")]
             texture: None,
+            #[cfg(target_vendor = "apple")]
+            pending: None,
+            #[cfg(target_vendor = "apple")]
+            shown: None,
+            #[cfg(target_vendor = "apple")]
+            waiting: false,
+            #[cfg(target_vendor = "apple")]
+            generation: 0,
         }
     }
 
@@ -46,8 +79,26 @@ impl Reel {
     pub fn clear(&mut self) {
         #[cfg(target_vendor = "apple")]
         {
-            self.clip = None;
+            self.pending = None;
+            self.shown = None;
             self.texture = None;
+            self.waiting = false;
+            self.generation = self.generation.wrapping_add(1);
+            if let Some(bridge) = &self.bridge {
+                bridge.post(Message::Drop);
+            }
+        }
+    }
+
+    /// A frame was asked for and has not arrived.
+    pub fn waiting(&self) -> bool {
+        #[cfg(target_vendor = "apple")]
+        {
+            self.waiting
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            false
         }
     }
 
@@ -79,106 +130,120 @@ impl Reel {
         playhead_us: i64,
         hidden: &[cutlass_project::TrackId],
     ) -> Option<eframe::egui::TextureId> {
-        let segment = crate::preview::picture_segment(project, playhead_us, hidden)?;
-        let asset_id = segment.asset_id()?;
-        let time = crate::preview::media_time(segment, playhead_us)?;
-        let source = project.asset(asset_id)?.source();
-        if !self.same(asset_id, source) {
-            let owned = source.to_owned();
-            self.prepare(asset_id, &owned);
-        }
-        if !self.ready() {
+        let Some(segment) = crate::preview::picture_segment(project, playhead_us, hidden) else {
+            self.hide();
             return None;
-        }
-        self.frame(ctx, time)
+        };
+        let Some(asset) = segment.asset_id() else {
+            self.hide();
+            return None;
+        };
+        let Some(time) = crate::preview::media_time(segment, playhead_us) else {
+            self.hide();
+            return None;
+        };
+        let Some(source) = project.asset(asset).map(|asset| asset.source()) else {
+            self.hide();
+            return None;
+        };
+        self.ask(asset, source, time);
+        self.deliver(ctx);
+        self.texture.as_ref().map(|texture| texture.id())
     }
 
     #[cfg(target_vendor = "apple")]
-    fn same(&self, asset: AssetId, source: &str) -> bool {
-        self.clip
-            .as_ref()
-            .is_some_and(|clip| clip.asset() == asset && clip.source() == source)
-    }
-
-    #[cfg(target_vendor = "apple")]
-    fn ready(&self) -> bool {
-        self.clip.as_ref().is_some_and(Clip::is_ready)
-    }
-
-    #[cfg(target_vendor = "apple")]
-    fn prepare(&mut self, asset: AssetId, source: &str) {
+    fn hide(&mut self) {
+        self.pending = None;
+        self.shown = None;
         self.texture = None;
-        self.clip = Some(open_clip(asset, source));
+        self.waiting = false;
     }
 
     #[cfg(target_vendor = "apple")]
-    fn frame(
-        &mut self,
-        ctx: &eframe::egui::Context,
-        time: Timestamp,
-    ) -> Option<eframe::egui::TextureId> {
-        let key = (time.value, time.timescale.get());
-        if self.cached(key) {
-            return self.texture.as_ref().map(|texture| texture.id());
+    fn ask(&mut self, asset: AssetId, source: &str, time: Timestamp) {
+        if self.pending.as_ref().is_some_and(|pending| {
+            pending.asset == asset && pending.source == source && pending.time == time
+        }) {
+            return;
         }
-        let (pixels, width, height) = self.decode(time)?;
-        self.store(ctx, key, &pixels, width, height)
-    }
-
-    #[cfg(target_vendor = "apple")]
-    fn cached(&self, key: (i64, u32)) -> bool {
-        let Some(Clip::Ready(open)) = &self.clip else {
-            return false;
+        let same_clip = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.asset == asset && pending.source == source);
+        if !same_clip {
+            self.generation = self.generation.wrapping_add(1);
+            self.texture = None;
+            self.shown = None;
+        }
+        let ask = Ask {
+            generation: self.generation,
+            asset,
+            source: source.to_owned(),
+            time,
         };
-        let Some(shown) = &open.shown else {
-            return false;
+        let posted = self
+            .bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.post(Message::Show(ask.clone())));
+        self.pending = Some(ask);
+        self.waiting = posted
+            && self
+                .shown
+                .as_ref()
+                .is_none_or(|shown| shown.requested != time);
+    }
+
+    #[cfg(target_vendor = "apple")]
+    fn deliver(&mut self, ctx: &eframe::egui::Context) {
+        let Some(picture) = self.bridge.as_ref().and_then(Bridge::take) else {
+            return;
         };
-        shown.value == key.0 && shown.scale == key.1 && self.texture.is_some()
-    }
-
-    #[cfg(target_vendor = "apple")]
-    fn decode(&mut self, time: Timestamp) -> Option<(Vec<u8>, u32, u32)> {
-        let key = (time.value, time.timescale.get());
-        if self.failed_at(key) {
-            return None;
-        }
-        let decoded = {
-            let gpu = self.gpu.as_ref()?;
-            let Clip::Ready(open) = self.clip.as_mut()? else {
-                return None;
-            };
-            frame_rgba(
-                gpu,
-                &mut open.session,
-                &mut open.ahead,
-                &open.packets,
-                time,
-                open.matrix,
-            )
+        let Some(pending) = self.pending.clone() else {
+            return;
         };
-        if decoded.is_none() {
-            self.note_failure(key);
+        if picture.generation != pending.generation || picture.requested != pending.time {
+            return;
         }
-        decoded
-    }
-
-    #[cfg(target_vendor = "apple")]
-    fn failed_at(&self, key: (i64, u32)) -> bool {
-        matches!(&self.clip, Some(Clip::Ready(open)) if open.failed == Some(key))
-    }
-
-    #[cfg(target_vendor = "apple")]
-    fn note_failure(&mut self, key: (i64, u32)) {
-        if let Some(Clip::Ready(open)) = &mut self.clip {
-            open.failed = Some(key);
+        let Body::Frame {
+            buffer,
+            matrix,
+            pts,
+        } = picture.body
+        else {
+            self.waiting = false;
+            return;
+        };
+        if self.texture.is_some() && self.shown.as_ref().is_some_and(|shown| shown.pts == pts) {
+            if let Some(shown) = &mut self.shown {
+                shown.requested = pending.time;
+            }
+            self.waiting = false;
+            return;
         }
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        let Some((pixels, width, height)) = rgba_of(gpu, &buffer, matrix) else {
+            self.pending = None;
+            self.waiting = true;
+            return;
+        };
+        if self.store(ctx, &pixels, width, height).is_none() {
+            self.pending = None;
+            self.waiting = true;
+            return;
+        }
+        self.shown = Some(Shown {
+            pts,
+            requested: pending.time,
+        });
+        self.waiting = false;
     }
 
     #[cfg(target_vendor = "apple")]
     fn store(
         &mut self,
         ctx: &eframe::egui::Context,
-        key: (i64, u32),
         pixels: &[u8],
         width: u32,
         height: u32,
@@ -195,13 +260,6 @@ impl Reel {
             texture.set(image, options);
         } else {
             self.texture = Some(ctx.load_texture("preview-frame", image, options));
-        }
-        if let Some(Clip::Ready(open)) = &mut self.clip {
-            open.shown = Some(Shown {
-                value: key.0,
-                scale: key.1,
-            });
-            open.failed = None;
         }
         self.texture.as_ref().map(|texture| texture.id())
     }
@@ -222,8 +280,8 @@ pub(crate) fn file_path(source: &str) -> Option<&str> {
 
 #[cfg(target_vendor = "apple")]
 struct Shown {
-    value: i64,
-    scale: u32,
+    pts: Timestamp,
+    requested: Timestamp,
 }
 
 #[cfg(target_vendor = "apple")]
@@ -234,35 +292,15 @@ struct Open {
     matrix: Matrix,
     session: Session,
     ahead: Ahead<PixelBuffer>,
-    shown: Option<Shown>,
-    failed: Option<(i64, u32)>,
+    cursor: usize,
+    followed: Option<Timestamp>,
+    failed: Option<Timestamp>,
 }
 
 #[cfg(target_vendor = "apple")]
 enum Clip {
-    Missing { asset: AssetId, source: String },
+    Missing,
     Ready(Box<Open>),
-}
-
-#[cfg(target_vendor = "apple")]
-impl Clip {
-    fn asset(&self) -> AssetId {
-        match self {
-            Self::Missing { asset, .. } => *asset,
-            Self::Ready(open) => open.asset,
-        }
-    }
-
-    fn source(&self) -> &str {
-        match self {
-            Self::Missing { source, .. } => source,
-            Self::Ready(open) => &open.source,
-        }
-    }
-
-    fn is_ready(&self) -> bool {
-        matches!(self, Self::Ready(_))
-    }
 }
 
 #[cfg(target_vendor = "apple")]
@@ -293,20 +331,20 @@ impl Decode for Session {
 #[cfg(target_vendor = "apple")]
 fn open_clip(asset: AssetId, source: &str) -> Clip {
     let Some(path) = file_path(source) else {
-        return missing(asset, source);
+        return Clip::Missing;
     };
     let Ok(bytes) = std::fs::read(Path::new(path)) else {
-        return missing(asset, source);
+        return Clip::Missing;
     };
     let Ok(probe) = Probe::parse(&bytes) else {
-        return missing(asset, source);
+        return Clip::Missing;
     };
     let Some(index) = probe
         .tracks()
         .iter()
         .position(|track| track.enabled && matches!(track.content, Content::Video { .. }))
     else {
-        return missing(asset, source);
+        return Clip::Missing;
     };
     let Content::Video {
         config,
@@ -315,24 +353,24 @@ fn open_clip(asset: AssetId, source: &str) -> Clip {
         content_light,
     } = &probe.tracks()[index].content
     else {
-        return missing(asset, source);
+        return Clip::Missing;
     };
     let Ok(matrix) = Matrix::resolve(
         color.as_ref().map(|tags| tags.matrix),
         config.width,
         config.height,
     ) else {
-        return missing(asset, source);
+        return Clip::Missing;
     };
     let rotation = probe.tracks()[index].rotation;
     let Ok(session) = VideoSession::open(config, *color, *mastering, *content_light, rotation)
     else {
-        return missing(asset, source);
+        return Clip::Missing;
     };
     let Some(packets) = probe.samples(index).map(<[Packet]>::to_vec) else {
-        return missing(asset, source);
+        return Clip::Missing;
     };
-    let depth = std::num::NonZeroUsize::new(2).expect("two frames fit in the queue");
+    let depth = std::num::NonZeroUsize::new(QUEUE_DEPTH).expect("the queue holds a frame");
     Clip::Ready(Box::new(Open {
         asset,
         source: source.to_owned(),
@@ -340,19 +378,272 @@ fn open_clip(asset: AssetId, source: &str) -> Clip {
         matrix,
         session: Session(session),
         ahead: Ahead::new(depth),
-        shown: None,
+        cursor: 0,
+        followed: None,
         failed: None,
     }))
 }
 
 #[cfg(target_vendor = "apple")]
-fn missing(asset: AssetId, source: &str) -> Clip {
-    Clip::Missing {
-        asset,
-        source: source.to_owned(),
+struct Bridge {
+    ask: Arc<Note<Message>>,
+    picture: Arc<Slot<Picture>>,
+    join: Option<JoinHandle<()>>,
+}
+
+#[cfg(target_vendor = "apple")]
+impl Bridge {
+    fn start() -> Self {
+        let ask = Arc::new(Note::new());
+        let picture = Arc::new(Slot::new());
+        let ask_thread = Arc::clone(&ask);
+        let picture_thread = Arc::clone(&picture);
+        let join = std::thread::Builder::new()
+            .name("cutlass-playback".to_owned())
+            .spawn(move || play_loop(ask_thread, picture_thread))
+            .ok();
+        Self { ask, picture, join }
+    }
+
+    fn post(&self, message: Message) -> bool {
+        if self.join.is_none() {
+            return false;
+        }
+        self.ask.post(message);
+        true
+    }
+
+    fn take(&self) -> Option<Picture> {
+        self.picture.take()
     }
 }
 
+#[cfg(target_vendor = "apple")]
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        self.ask.close();
+        if let Some(handle) = self.join.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+struct Note<T> {
+    state: Mutex<NoteState<T>>,
+    wake: Condvar,
+}
+
+#[cfg(target_vendor = "apple")]
+struct NoteState<T> {
+    value: Option<T>,
+    closed: bool,
+}
+
+#[cfg(target_vendor = "apple")]
+impl<T> Note<T> {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(NoteState {
+                value: None,
+                closed: false,
+            }),
+            wake: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, NoteState<T>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn post(&self, value: T) {
+        let mut state = self.lock();
+        if state.closed {
+            return;
+        }
+        state.value = Some(value);
+        self.wake.notify_one();
+    }
+
+    fn close(&self) {
+        let mut state = self.lock();
+        state.closed = true;
+        state.value = None;
+        self.wake.notify_one();
+    }
+
+    fn wait(&self) -> Option<T> {
+        let mut state = self.lock();
+        loop {
+            if let Some(value) = state.value.take() {
+                return Some(value);
+            }
+            if state.closed {
+                return None;
+            }
+            state = self
+                .wake
+                .wait(state)
+                .unwrap_or_else(|poison| poison.into_inner());
+        }
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+struct Slot<T> {
+    inner: Mutex<Option<T>>,
+}
+
+#[cfg(target_vendor = "apple")]
+impl<T> Slot<T> {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
+        }
+    }
+
+    fn publish(&self, value: T) {
+        *self.lock() = Some(value);
+    }
+
+    fn take(&self) -> Option<T> {
+        self.lock().take()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<T>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+enum Message {
+    Show(Ask),
+    Drop,
+}
+
+#[cfg(target_vendor = "apple")]
+#[derive(Clone)]
+struct Ask {
+    generation: u64,
+    asset: AssetId,
+    source: String,
+    time: Timestamp,
+}
+
+#[cfg(target_vendor = "apple")]
+struct Picture {
+    generation: u64,
+    requested: Timestamp,
+    body: Body,
+}
+
+#[cfg(target_vendor = "apple")]
+enum Body {
+    Frame {
+        buffer: PixelBuffer,
+        matrix: Matrix,
+        pts: Timestamp,
+    },
+    Unavailable,
+}
+
+#[cfg(target_vendor = "apple")]
+fn play_loop(ask: Arc<Note<Message>>, picture: Arc<Slot<Picture>>) {
+    let mut open = None;
+    while let Some(message) = ask.wait() {
+        match message {
+            Message::Drop => open = None,
+            Message::Show(show) => serve(&mut open, &picture, show),
+        }
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn serve(open: &mut Option<Open>, picture: &Slot<Picture>, show: Ask) {
+    if open
+        .as_ref()
+        .is_none_or(|clip| clip.asset != show.asset || clip.source != show.source)
+    {
+        *open = ready(show.asset, &show.source);
+    }
+    let Some(clip) = open.as_mut() else {
+        picture.publish(unavailable(&show));
+        return;
+    };
+    if clip.failed == Some(show.time) {
+        picture.publish(unavailable(&show));
+        return;
+    }
+    if pump(clip, show.time).is_err() {
+        clip.failed = Some(show.time);
+        picture.publish(unavailable(&show));
+        return;
+    }
+    let taken = clip
+        .ahead
+        .at(show.time)
+        .map(|frame| (frame.pts, frame.image.clone()));
+    let Some((pts, buffer)) = taken else {
+        clip.failed = Some(show.time);
+        picture.publish(unavailable(&show));
+        return;
+    };
+    clip.failed = None;
+    picture.publish(Picture {
+        generation: show.generation,
+        requested: show.time,
+        body: Body::Frame {
+            buffer,
+            matrix: clip.matrix,
+            pts,
+        },
+    });
+}
+
+#[cfg(target_vendor = "apple")]
+fn unavailable(show: &Ask) -> Picture {
+    Picture {
+        generation: show.generation,
+        requested: show.time,
+        body: Body::Unavailable,
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn ready(asset: AssetId, source: &str) -> Option<Open> {
+    match open_clip(asset, source) {
+        Clip::Ready(open) => Some(*open),
+        Clip::Missing => None,
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn pump(clip: &mut Open, time: Timestamp) -> Result<(), ()> {
+    let jump = jumps(clip.followed, time) || clip.ahead.is_empty();
+    if jump {
+        let rest = clip
+            .ahead
+            .seek_to(&mut clip.session, &clip.packets, time)
+            .map_err(|_| ())?;
+        clip.cursor = clip.packets.len() - rest.len();
+    } else {
+        let _ = clip.ahead.at(time);
+        let start = clip.cursor.min(clip.packets.len());
+        let mut rest = &clip.packets[start..];
+        clip.ahead
+            .fill(&mut clip.session, &mut rest)
+            .map_err(|_| ())?;
+        clip.cursor = clip.packets.len() - rest.len();
+    }
+    clip.followed = Some(time);
+    Ok(())
+}
+
+#[cfg(test)]
 #[cfg(target_vendor = "apple")]
 fn frame_rgba(
     gpu: &Gpu,
@@ -409,6 +700,18 @@ fn cpu_image(gpu: &Gpu, buffer: &PixelBuffer, matrix: Matrix) -> Option<cutlass_
         .flatten()
 }
 
+/// `true` when `time` is behind the last request, or more than a second ahead of it.
+#[cfg(any(test, target_vendor = "apple"))]
+fn jumps(followed: Option<Timestamp>, time: Timestamp) -> bool {
+    let Some(prev) = followed else {
+        return true;
+    };
+    if time < prev {
+        return true;
+    }
+    time.as_secs_f64() - prev.as_secs_f64() > SEEK_GAP_SECS
+}
+
 #[cfg(test)]
 mod tests {
     use super::file_path;
@@ -424,6 +727,18 @@ mod tests {
         assert_eq!(file_path("content://media/1"), None);
         assert_eq!(file_path(""), None);
         assert_eq!(file_path("file://"), None);
+    }
+
+    #[test]
+    fn a_backward_or_long_jump_seeks() {
+        use std::num::NonZeroU32;
+
+        let scale = NonZeroU32::new(1_000).expect("scale");
+        let at = |ms| super::Timestamp::new(ms, scale);
+        assert!(super::jumps(None, at(0)));
+        assert!(super::jumps(Some(at(1_000)), at(0)));
+        assert!(!super::jumps(Some(at(0)), at(500)));
+        assert!(super::jumps(Some(at(0)), at(2_000)));
     }
 
     #[cfg(target_vendor = "apple")]

@@ -21,6 +21,7 @@ mod library;
 mod media_bin;
 mod menu;
 mod modify;
+mod play;
 mod preview;
 mod projects;
 mod ruler;
@@ -64,6 +65,7 @@ struct CutlassApp {
     recovery: Option<projects::Recovery>,
     recovery_shown: bool,
     playhead_us: i64,
+    play: Option<play::Run>,
     reel: frames::Reel,
     shelf: library::Shelf,
     media: library::MediaSource,
@@ -103,6 +105,7 @@ impl CutlassApp {
             recovery,
             recovery_shown: false,
             playhead_us: 0,
+            play: None,
             reel: frames::Reel::new(gpu),
             shelf: library::Shelf::Media,
             media: library::MediaSource::Project,
@@ -392,6 +395,7 @@ impl CutlassApp {
         self.path = path;
         self.pending = None;
         self.playhead_us = 0;
+        self.play = None;
         self.selected_segments.clear();
         self.clip_drag = None;
         self.trim_drag = None;
@@ -482,6 +486,31 @@ impl CutlassApp {
         }
         self.draft_text = None;
     }
+
+    fn toggle_play(&mut self) {
+        let rate = self.project.settings().rate().rate();
+        let duration = self.project.duration().value;
+        self.playhead_us = play::toggle(&mut self.play, self.playhead_us, duration, rate);
+    }
+
+    fn advance_play(&mut self, ctx: &egui::Context) {
+        let Some(run) = &self.play else {
+            return;
+        };
+        let rate = self.project.settings().rate().rate();
+        let duration = self.project.duration().value;
+        match play::advance(run.origin_us(), run.elapsed(), duration, rate) {
+            play::Motion::Running(us) => {
+                self.playhead_us = us;
+                ctx.request_repaint_after(play::frame_wait(rate));
+            }
+            play::Motion::Finished(us) => {
+                self.playhead_us = us;
+                self.play = None;
+            }
+            play::Motion::Idle => self.play = None,
+        }
+    }
 }
 
 impl eframe::App for CutlassApp {
@@ -508,6 +537,12 @@ impl eframe::App for CutlassApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         words::install(ui.ctx(), self.language);
         chrome::pass_clicks(frame);
+        let key_play = !self.blocked() && keys::play(ui);
+        if self.blocked() {
+            self.play = None;
+        }
+        self.advance_play(ui.ctx());
+        let driven = self.playhead_us;
         let dialog = self.blocked();
         keys::set_blocked(ui, dialog);
         if !dialog {
@@ -560,6 +595,7 @@ impl eframe::App for CutlassApp {
                         split: &mut self.split,
                         can_undo: self.history.can_undo(),
                         can_redo: self.history.can_redo(),
+                        playing: self.play.is_some(),
                     },
                 );
                 match timeline::take_tool(ui) {
@@ -585,6 +621,9 @@ impl eframe::App for CutlassApp {
                     }
                 }
             });
+        if self.play.is_some() && self.playhead_us != driven {
+            self.play = None;
+        }
 
         let mut import = false;
         let mut placed = Vec::new();
@@ -654,6 +693,7 @@ impl eframe::App for CutlassApp {
                     ui,
                     &self.project,
                     self.playhead_us,
+                    self.play.is_some(),
                     &mut self.selected_segments,
                     picture,
                 );
@@ -663,6 +703,16 @@ impl eframe::App for CutlassApp {
                     timeline::show_note(ui, timeline::apply_note(&error, words::active(ui)));
                 }
             });
+        if key_play || (!self.blocked() && preview::take_play(ui)) {
+            self.toggle_play();
+        }
+        if self.play.is_some() {
+            let rate = self.project.settings().rate().rate();
+            ui.ctx().request_repaint_after(play::frame_wait(rate));
+        }
+        if self.reel.waiting() {
+            ui.ctx().request_repaint();
+        }
         gaps::show(ui, body, &self.panes);
 
         let span = self.project.duration();

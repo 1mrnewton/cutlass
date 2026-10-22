@@ -21,6 +21,7 @@ pub(crate) enum Shortcut {
     Cut,
     Paste,
     Duplicate,
+    Play,
 }
 
 impl Shortcut {
@@ -34,7 +35,13 @@ pub(crate) fn history(ui: &egui::Ui) -> Option<Shortcut> {
 }
 
 pub(crate) fn tool(ui: &egui::Ui) -> Option<Shortcut> {
-    take(ui, |shortcut| !shortcut.history())
+    take(ui, |shortcut| {
+        !shortcut.history() && !matches!(shortcut, Shortcut::Play)
+    })
+}
+
+pub(crate) fn play(ui: &egui::Ui) -> bool {
+    take(ui, |shortcut| matches!(shortcut, Shortcut::Play)).is_some()
 }
 
 pub(crate) fn set_blocked(ui: &egui::Ui, blocked: bool) {
@@ -135,6 +142,9 @@ pub(crate) fn shortcut(modifiers: &Modifiers, key: Key) -> Option<Shortcut> {
     if !command && !ctrl && key == Key::Backtick {
         return Some(Shortcut::Linkage);
     }
+    if !command && !ctrl && !shift && key == Key::Space {
+        return Some(Shortcut::Play);
+    }
     if !command && !ctrl && !shift {
         return match key {
             Key::A => Some(Shortcut::Select),
@@ -231,6 +241,12 @@ mod tests {
             shortcut(&mods(false, false, false), Key::M),
             Some(Shortcut::Marker)
         );
+        assert_eq!(
+            shortcut(&mods(false, false, false), Key::Space),
+            Some(Shortcut::Play)
+        );
+        assert_eq!(shortcut(&mods(true, false, false), Key::Space), None);
+        assert_eq!(shortcut(&mods(false, false, true), Key::Space), None);
         let mut alt = mods(false, false, false);
         alt.alt = true;
         assert_eq!(shortcut(&alt, Key::M), None);

@@ -12,6 +12,7 @@
 mod entry;
 mod error;
 mod fourcc;
+mod fragment;
 mod movie;
 mod read;
 mod tables;

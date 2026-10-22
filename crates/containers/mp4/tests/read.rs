@@ -306,10 +306,73 @@ fn a_short_box_is_rejected() {
 }
 
 #[test]
-fn a_fragment_is_rejected() {
+fn a_short_tail_in_a_sample_entry_is_padding() {
+    let movie = Movie::parse(&entry_file(&[0, 0, 0, 0])).expect("padding");
+    assert_eq!(movie.tracks()[0].samples()[0].data, [9]);
+}
+
+#[test]
+fn a_box_that_runs_past_the_file_is_rejected() {
+    expect_err(
+        Movie::parse(&[0, 0, 0, 16, b'm', b'o', b'o', b'v', 0, 0, 0, 0]),
+        Error::Truncated { at: 8, need: 8 },
+    );
+}
+
+#[test]
+fn an_empty_fragment_keeps_the_sample_table() {
     let mut file = video_file(false);
     file.extend(atom(b"moof", &[]));
-    expect_err(Movie::parse(&file), Error::Fragmented);
+    let movie = Movie::parse(&file).expect("empty fragment");
+    assert_eq!(movie.tracks()[0].samples().len(), 3);
+    assert_eq!(movie.tracks()[0].samples()[0].data, [1, 2, 3]);
+    assert_eq!(movie.tracks()[0].duration(), 400);
+    assert_eq!(movie.duration(), 1000);
+    assert!(movie.tracks()[1].samples().is_empty());
+}
+
+#[test]
+fn a_fragmented_movie_keeps_samples_and_a_duration() {
+    let movie = Movie::parse(&fragmented_file()).expect("fragment");
+    assert_eq!(movie.timescale(), scale(1000));
+    assert_eq!(movie.duration(), 120);
+    let video = &movie.tracks()[0];
+    assert_eq!(video.duration(), 120);
+    assert_eq!(video.display_width(), 16);
+    assert_eq!(video.display_height(), 16);
+    let samples = video.samples();
+    let ticks = scale(1000);
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0].data, [0x11, 0x22]);
+    assert_eq!(samples[0].dts, Some(Timestamp::new(100, ticks)));
+    assert_eq!(samples[0].pts, Timestamp::new(105, ticks));
+    assert_eq!(samples[0].duration, Some(Timestamp::new(10, ticks)));
+    assert!(samples[0].keyframe);
+    assert_eq!(samples[1].data, [0x33, 0x44, 0x55]);
+    assert_eq!(samples[1].dts, Some(Timestamp::new(110, ticks)));
+    assert_eq!(samples[1].pts, Timestamp::new(107, ticks));
+    assert_eq!(samples[1].duration, Some(Timestamp::new(10, ticks)));
+    assert!(!samples[1].keyframe);
+}
+
+#[test]
+fn a_version_zero_composition_offset_is_signed() {
+    let movie = Movie::parse(&composition_file(0xFFFF_FFEC)).expect("ctts");
+    let sample = &movie.tracks()[0].samples()[0];
+    let ticks = scale(1000);
+    assert_eq!(sample.dts, Some(Timestamp::new(0, ticks)));
+    assert_eq!(sample.pts, Timestamp::new(-20, ticks));
+}
+
+#[test]
+fn a_fragment_without_a_data_base_is_rejected() {
+    let mut file = atom(b"ftyp", b"isom\0\0\0\0isom");
+    file.extend(fragmented_moov());
+    file.extend(moof_without_base());
+    expect_err(
+        Movie::parse(&file),
+        Error::Inconsistent("a fragment has no data base"),
+    );
 }
 
 #[test]
@@ -331,6 +394,127 @@ fn a_sample_past_the_end_is_rejected() {
         Movie::parse(&sample_past_end()),
         Error::Inconsistent("a sample extends past the end of the file"),
     );
+}
+
+fn composition_file(offset: u32) -> Vec<u8> {
+    let ftyp = atom(b"ftyp", b"isom\0\0\0\0isom");
+    let mdat = atom(b"mdat", &[9]);
+    let payload_at = u32::try_from(ftyp.len() + 8).expect("offset fits");
+    let mut trak = tkhd(0, 1, 100, MATRIX_0, 16, 16);
+    let mut mdia = mdhd(0, 1000, 100);
+    mdia.extend(hdlr(b"vide"));
+    let mut stbl = stsd(&avc1(16, 16, &[1]));
+    stbl.extend(stts(&[(1, 100)]));
+    stbl.extend(ctts(&[(1, offset)]));
+    stbl.extend(stsc(&[(1, 1, 1)]));
+    stbl.extend(stsz(&[1]));
+    stbl.extend(stco(&[payload_at]));
+    mdia.extend(atom(b"minf", &atom(b"stbl", &stbl)));
+    trak.extend(atom(b"mdia", &mdia));
+    let mut moov = mvhd(0, 1000, 100);
+    moov.extend(atom(b"trak", &trak));
+    let mut file = ftyp;
+    file.extend(mdat);
+    file.extend(atom(b"moov", &moov));
+    file
+}
+
+fn fragmented_file() -> Vec<u8> {
+    let moof_len = fragmented_moof(0, 0).len();
+    let first = i32::try_from(moof_len + 8).expect("offset fits");
+    let moof = fragmented_moof(first, first + 3);
+    assert_eq!(
+        moof.len(),
+        moof_len,
+        "data offsets do not change the fragment size"
+    );
+    let mut file = atom(b"ftyp", b"isom\0\0\0\0isom");
+    file.extend(fragmented_moov());
+    file.extend(moof);
+    file.extend(atom(b"mdat", &[0x11, 0x22, 0xAA, 0x33, 0x44, 0x55]));
+    file
+}
+
+fn fragmented_moov() -> Vec<u8> {
+    let mut trak = tkhd(0, 1, 0, MATRIX_0, 16, 16);
+    let mut mdia = mdhd(0, 1000, 0);
+    mdia.extend(hdlr(b"vide"));
+    let mut stbl = stsd(&avc1(16, 16, &[1]));
+    stbl.extend(stts(&[]));
+    stbl.extend(stsc(&[]));
+    stbl.extend(stsz(&[]));
+    stbl.extend(stco(&[]));
+    mdia.extend(atom(b"minf", &atom(b"stbl", &stbl)));
+    trak.extend(atom(b"mdia", &mdia));
+    let mut moov = mvhd(0, 1000, 0);
+    moov.extend(atom(b"trak", &trak));
+    // The fragment header overrides this duration. A reader that keeps the
+    // trex duration reports 1 instead of 10.
+    moov.extend(atom(b"mvex", &trex(1, 1, 99, 0)));
+    atom(b"moov", &moov)
+}
+
+fn fragmented_moof(first: i32, second: i32) -> Vec<u8> {
+    let mut traf = tfhd();
+    traf.extend(tfdt(100));
+    traf.extend(trun_unsigned(first));
+    traf.extend(trun_signed(second));
+    let mut moof = full(b"mfhd", 0, 0, &1u32.to_be_bytes());
+    moof.extend(atom(b"traf", &traf));
+    atom(b"moof", &moof)
+}
+
+fn moof_without_base() -> Vec<u8> {
+    let tfhd = full(b"tfhd", 0, 0, &1u32.to_be_bytes());
+    let mut trun = 1u32.to_be_bytes().to_vec();
+    trun.extend_from_slice(&0i32.to_be_bytes());
+    let trun = full(b"trun", 0, 0x0001, &trun);
+    let mut traf = tfhd;
+    traf.extend(trun);
+    atom(b"moof", &atom(b"traf", &traf))
+}
+
+/// `default-base-is-moof`, plus default duration, size, and flags.
+fn tfhd() -> Vec<u8> {
+    let flags = 0x0002_0000 | 0x0000_0008 | 0x0000_0010 | 0x0000_0020;
+    let mut body = 1u32.to_be_bytes().to_vec();
+    body.extend_from_slice(&10u32.to_be_bytes());
+    body.extend_from_slice(&50u32.to_be_bytes());
+    body.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    full(b"tfhd", 0, flags, &body)
+}
+
+fn tfdt(base: u64) -> Vec<u8> {
+    full(b"tfdt", 1, 0, &base.to_be_bytes())
+}
+
+fn trun_unsigned(data_offset: i32) -> Vec<u8> {
+    let flags = 0x0001 | 0x0004 | 0x0200 | 0x0800;
+    let mut body = 1u32.to_be_bytes().to_vec();
+    body.extend_from_slice(&data_offset.to_be_bytes());
+    body.extend_from_slice(&0u32.to_be_bytes());
+    body.extend_from_slice(&2u32.to_be_bytes());
+    body.extend_from_slice(&5u32.to_be_bytes());
+    full(b"trun", 0, flags, &body)
+}
+
+fn trun_signed(data_offset: i32) -> Vec<u8> {
+    let flags = 0x0001 | 0x0200 | 0x0400 | 0x0800;
+    let mut body = 1u32.to_be_bytes().to_vec();
+    body.extend_from_slice(&data_offset.to_be_bytes());
+    body.extend_from_slice(&3u32.to_be_bytes());
+    body.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    body.extend_from_slice(&(-3i32).to_be_bytes());
+    full(b"trun", 1, flags, &body)
+}
+
+fn trex(track: u32, duration: u32, size: u32, flags: u32) -> Vec<u8> {
+    let mut body = track.to_be_bytes().to_vec();
+    body.extend_from_slice(&1u32.to_be_bytes());
+    body.extend_from_slice(&duration.to_be_bytes());
+    body.extend_from_slice(&size.to_be_bytes());
+    body.extend_from_slice(&flags.to_be_bytes());
+    full(b"trex", 0, 0, &body)
 }
 
 fn video_file(clockwise90: bool) -> Vec<u8> {

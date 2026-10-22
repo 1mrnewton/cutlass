@@ -35,7 +35,9 @@ pub(crate) fn packets(
                     "composition offsets do not cover every sample",
                 ));
             }
-            Some((ctts_entries, version == 1))
+            // Version 0 is unsigned in ISO/IEC 14496-12. QuickTime still writes
+            // a negative offset in that version, as a two's-complement value.
+            Some((ctts_entries, true))
         }
     };
     let chunks = chunk_offsets(stbl)?;

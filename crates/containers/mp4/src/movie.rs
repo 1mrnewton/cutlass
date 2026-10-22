@@ -26,15 +26,31 @@ impl Movie {
     /// Read a file that is already in memory.
     pub fn parse(data: &[u8]) -> Result<Self, Error> {
         let top = read::atoms(data, 0)?;
-        if top.iter().any(|atom| atom.kind == *b"moof") {
-            return Err(Error::Fragmented);
-        }
         let moov = read::required(&top, *b"moov")?;
         let children = read::atoms(moov.payload, moov.payload_base()?)?;
-        let (timescale, duration) = movie_header(read::required(&children, *b"mvhd")?)?;
-        let mut tracks = Vec::new();
+        let (timescale, mut duration) = movie_header(read::required(&children, *b"mvhd")?)?;
+        let defaults = crate::fragment::defaults(read::only(&children, *b"mvex")?)?;
+        let mut opened = Vec::new();
         for trak in children.iter().filter(|atom| atom.kind == *b"trak") {
-            tracks.push(track(data, trak, timescale)?);
+            opened.push(open_track(data, trak)?);
+        }
+        for moof in top.iter().filter(|atom| atom.kind == *b"moof") {
+            let mut refs = Vec::with_capacity(opened.len());
+            for track in &mut opened {
+                refs.push(crate::fragment::TrackRef {
+                    id: track.id,
+                    timescale: track.timescale,
+                    samples: &mut track.samples,
+                });
+            }
+            crate::fragment::append(data, moof, &mut refs, &defaults)?;
+        }
+        let mut tracks = Vec::with_capacity(opened.len());
+        for track in opened {
+            tracks.push(finish(track, timescale)?);
+        }
+        if duration == 0 {
+            duration = movie_span(&tracks, timescale)?;
         }
         Ok(Self {
             timescale,
@@ -49,6 +65,9 @@ impl Movie {
     }
 
     /// Duration from the movie header, in [`Self::timescale`] units.
+    ///
+    /// A header duration of zero, when a track has samples, is the longest
+    /// track measured in the movie timescale.
     pub fn duration(&self) -> u64 {
         self.duration
     }
@@ -96,6 +115,9 @@ impl Track {
     }
 
     /// Duration from the media header, in [`Self::timescale`] units.
+    ///
+    /// A header duration of zero, when the track has samples, is the end of
+    /// the last sample.
     pub fn duration(&self) -> u64 {
         self.duration
     }
@@ -194,7 +216,23 @@ impl Edit {
     }
 }
 
-fn track(file: &[u8], trak: &Atom<'_>, movie_timescale: NonZeroU32) -> Result<Track, Error> {
+struct OpenTrack {
+    id: u32,
+    enabled: bool,
+    timescale: NonZeroU32,
+    duration: u64,
+    kind: Kind,
+    rotation: Rotation,
+    display_width: u32,
+    display_height: u32,
+    edits: Vec<Edit>,
+    samples: Vec<Packet>,
+    color: Option<ColorTags>,
+    mastering: Option<MasteringDisplay>,
+    content_light: Option<ContentLight>,
+}
+
+fn open_track(file: &[u8], trak: &Atom<'_>) -> Result<OpenTrack, Error> {
     let children = read::atoms(trak.payload, trak.payload_base()?)?;
     let header = track_header(read::required(&children, *b"tkhd")?)?;
     let mdia = read::required(&children, *b"mdia")?;
@@ -202,7 +240,7 @@ fn track(file: &[u8], trak: &Atom<'_>, movie_timescale: NonZeroU32) -> Result<Tr
     let (timescale, duration) = media_header(read::required(&media, *b"mdhd")?)?;
     let handler = handler_type(read::required(&media, *b"hdlr")?)?;
     let edits = edits(&children)?;
-    let (kind, color, mastering, content_light, mut samples) =
+    let (kind, color, mastering, content_light, samples) =
         if handler == *b"vide" || handler == *b"soun" {
             let minf = read::required(&media, *b"minf")?;
             let minf_children = read::atoms(minf.payload, minf.payload_base()?)?;
@@ -229,8 +267,7 @@ fn track(file: &[u8], trak: &Atom<'_>, movie_timescale: NonZeroU32) -> Result<Tr
                 Vec::new(),
             )
         };
-    apply_edits(&mut samples, &edits, movie_timescale, timescale)?;
-    Ok(Track {
+    Ok(OpenTrack {
         id: header.id,
         enabled: header.enabled,
         timescale,
@@ -240,12 +277,76 @@ fn track(file: &[u8], trak: &Atom<'_>, movie_timescale: NonZeroU32) -> Result<Tr
         display_width: header.display_width,
         display_height: header.display_height,
         edits,
-        frame_duration: constant_duration(&samples),
         samples,
         color,
         mastering,
         content_light,
     })
+}
+
+fn finish(mut open: OpenTrack, movie_timescale: NonZeroU32) -> Result<Track, Error> {
+    if open.duration == 0 {
+        if let Some(end) = sample_end(&open.samples)? {
+            open.duration = end;
+        }
+    }
+    apply_edits(
+        &mut open.samples,
+        &open.edits,
+        movie_timescale,
+        open.timescale,
+    )?;
+    Ok(Track {
+        id: open.id,
+        enabled: open.enabled,
+        timescale: open.timescale,
+        duration: open.duration,
+        kind: open.kind,
+        rotation: open.rotation,
+        display_width: open.display_width,
+        display_height: open.display_height,
+        edits: open.edits,
+        frame_duration: constant_duration(&open.samples),
+        samples: open.samples,
+        color: open.color,
+        mastering: open.mastering,
+        content_light: open.content_light,
+    })
+}
+
+/// End of the last sample, in the track timescale, before edit lists move it.
+fn sample_end(samples: &[Packet]) -> Result<Option<u64>, Error> {
+    let mut end = 0u64;
+    for sample in samples {
+        let start = sample.dts.unwrap_or(sample.pts).value;
+        let duration = sample.duration.map(|stamp| stamp.value).unwrap_or(0);
+        let at = start.checked_add(duration).ok_or(Error::TooLarge)?;
+        if at > 0 {
+            let at = u64::try_from(at).map_err(|_| Error::TooLarge)?;
+            end = end.max(at);
+        }
+    }
+    Ok((end > 0).then_some(end))
+}
+
+fn movie_span(tracks: &[Track], movie: NonZeroU32) -> Result<u64, Error> {
+    let mut longest = 0u64;
+    for track in tracks {
+        if track.duration == 0 {
+            continue;
+        }
+        let ticks = scale_duration(track.duration, track.timescale, movie)?;
+        longest = longest.max(ticks);
+    }
+    Ok(longest)
+}
+
+fn scale_duration(ticks: u64, from: NonZeroU32, to: NonZeroU32) -> Result<u64, Error> {
+    let scaled = u128::from(ticks)
+        .checked_mul(u128::from(to.get()))
+        .ok_or(Error::TooLarge)?
+        .div_ceil(u128::from(from.get()));
+    u64::try_from(scaled).map_err(|_| Error::TooLarge)
 }
 
 struct Header {

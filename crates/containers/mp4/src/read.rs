@@ -95,6 +95,11 @@ pub(crate) struct Atom<'a> {
 }
 
 impl<'a> Atom<'a> {
+    /// File offset of the first byte of this box.
+    pub(crate) fn start(&self) -> u64 {
+        self.start
+    }
+
     pub(crate) fn payload_base(&self) -> Result<u64, Error> {
         self.start.checked_add(self.header).ok_or(Error::TooLarge)
     }
@@ -103,13 +108,10 @@ impl<'a> Atom<'a> {
 pub(crate) fn atoms(data: &[u8], base: u64) -> Result<Vec<Atom<'_>>, Error> {
     let mut reader = Reader::new(data, base);
     let mut found = Vec::new();
-    while reader.remaining() > 0 {
-        if reader.remaining() < 8 {
-            return Err(Error::Truncated {
-                at: reader.file_pos()?,
-                need: 8,
-            });
-        }
+    // Fewer than eight bytes cannot start a box. ISO/IEC 14496-12 leaves that
+    // tail as padding. QuickTime puts four zero bytes after a sample entry's
+    // children, and treating them as a truncated box refused the file.
+    while reader.remaining() >= 8 {
         let start = reader.file_pos()?;
         let size32 = reader.u32()?;
         let kind = reader.fourcc()?;

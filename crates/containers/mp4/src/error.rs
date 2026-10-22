@@ -23,9 +23,6 @@ pub enum Error {
     /// A number does not fit the field it is stored in.
     #[error("a number in the file does not fit")]
     TooLarge,
-    /// The file is fragmented. Fragmented movies are not read yet.
-    #[error("fragmented MP4 is not read yet")]
-    Fragmented,
     /// The track id is zero.
     #[error("track id is zero")]
     BadTrackId,

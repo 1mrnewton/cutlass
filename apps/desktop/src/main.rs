@@ -19,6 +19,7 @@ mod inspector;
 mod keys;
 mod library;
 mod media_bin;
+mod menu;
 mod modify;
 mod preview;
 mod projects;

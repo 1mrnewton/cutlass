@@ -22,6 +22,13 @@ pub const FILTER: Color32 = Color32::from_rgb(0x6a, 0x8f, 0x72);
 pub const ADJUST: Color32 = Color32::from_rgb(0x8a, 0x7e, 0x9a);
 pub const EXPORT: Color32 = Color32::from_rgb(0x00, 0xc8, 0xd7);
 pub const EXPORT_INK: Color32 = Color32::from_rgb(0x06, 0x22, 0x26);
+/// Right-click plate. `docs/desktop-layout.md`.
+pub const MENU: Color32 = Color32::from_rgb(0x2c, 0x2c, 0x2c);
+pub const MENU_HOVER: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+pub const MENU_OFF: Color32 = Color32::from_rgb(0x6f, 0x6f, 0x6f);
+pub const MENU_KEY: Color32 = Color32::from_rgb(0x8d, 0x8d, 0x8d);
+pub const MENU_KEY_OFF: Color32 = Color32::from_rgb(0x5c, 0x5c, 0x5c);
+pub const MENU_BADGE: Color32 = Color32::from_rgb(0x6d, 0x5e, 0xfc);
 
 /// Dark gap between panels. That gap is the drag handle.
 pub const GAP_PX: i8 = 6;

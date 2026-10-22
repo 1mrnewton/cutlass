@@ -170,6 +170,31 @@ impl Icon {
     }
 }
 
+/// A glyph atom for a menu row. The face stays private to this module.
+pub(crate) fn mark(icon: Icon, size: f32, color: Color32) -> egui::Atom<'static> {
+    let glyph = icon.glyph().to_owned();
+    egui::AtomKind::closure(move |ui, _| {
+        let _ = ui.spacing();
+        let extent = egui::Vec2::splat(size);
+        egui::IntoSizedResult {
+            intrinsic_size: extent,
+            sized: egui::SizedAtomKind::Paint {
+                paint: std::sync::Arc::new(move |ui: &egui::Ui, args: egui::AtomPaintArgs| {
+                    ui.painter().text(
+                        args.rect.center(),
+                        Align2::CENTER_CENTER,
+                        &glyph,
+                        FontId::new(size, FontFamily::Name(FAMILY.into())),
+                        color,
+                    );
+                }),
+                size: extent,
+            },
+        }
+    })
+    .into()
+}
+
 pub fn paint(painter: &egui::Painter, pos: Pos2, icon: Icon, size: f32, color: Color32) {
     painter.text(
         pos,

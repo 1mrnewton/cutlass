@@ -412,7 +412,7 @@ fn paint_cards(
             if !media && order.is_empty() {
                 paint_empty_word(ui, area);
             }
-            background.context_menu(|ui| empty_menu(ui, bin, media));
+            crate::menu::context_menu(&background, |ui| empty_menu(ui, bin, media));
         });
     commands
 }
@@ -528,7 +528,7 @@ fn handle_folder(
     {
         bin.move_file(*drag, Some(folder));
     }
-    response.context_menu(|ui| folder_menu(ui, bin, folder));
+    crate::menu::context_menu(&response, |ui| folder_menu(ui, bin, folder));
     crate::tip::show_selected(&response, &name, bin.is_selected(id));
     paint_folder(
         ui,
@@ -591,7 +591,7 @@ fn handle_file(
         bin.select_only(id);
     }
     let source = asset.source().to_owned();
-    response.context_menu(|ui| file_menu(ui, bin, asset_id, &source));
+    crate::menu::context_menu(&response, |ui| file_menu(ui, bin, asset_id, &source));
     crate::tip::show_selected(&response, &name, bin.is_selected(id));
     paint_picture(
         ui.painter(),
@@ -702,59 +702,64 @@ fn rename_field(ui: &mut egui::Ui, bin: &mut Bin, id: u64, rect: Rect) {
 }
 
 fn empty_menu(ui: &mut egui::Ui, bin: &mut Bin, folders: bool) {
-    if folders && menu_row(ui, words::of(ui, Phrase::NewFolder), true) {
+    if folders && crate::menu::row(ui, words::of(ui, Phrase::NewFolder), true) {
         bin.add_folder(words::of(ui, Phrase::UntitledFolder));
     }
     sort_menu(ui, bin);
 }
 
 fn folder_menu(ui: &mut egui::Ui, bin: &mut Bin, id: u64) {
-    if menu_row(ui, words::of(ui, Phrase::Delete), true) {
+    if crate::menu::row(ui, words::of(ui, Phrase::Delete), true) {
         bin.delete_folder(id);
     }
-    menu_row(ui, words::of(ui, Phrase::OpenLocation), false);
-    menu_row(ui, words::of(ui, Phrase::NewFolderWith), false);
-    if menu_row(ui, words::of(ui, Phrase::Rename), true) {
+    crate::menu::row(ui, words::of(ui, Phrase::OpenLocation), false);
+    crate::menu::row(ui, words::of(ui, Phrase::NewFolderWith), false);
+    if crate::menu::row(ui, words::of(ui, Phrase::Rename), true) {
         bin.begin_rename(id);
     }
-    menu_row(ui, words::of(ui, Phrase::LinkMedia), false);
-    if menu_row(ui, words::of(ui, Phrase::ExportClips), true) {
+    crate::menu::row(ui, words::of(ui, Phrase::LinkMedia), false);
+    if crate::menu::row(ui, words::of(ui, Phrase::ExportClips), true) {
         crate::timeline::show_note(ui, words::of(ui, Phrase::ExportWritesNothing));
     }
 }
 
 fn file_menu(ui: &mut egui::Ui, bin: &mut Bin, id: AssetId, source: &str) {
-    if menu_row(ui, words::of(ui, Phrase::OpenLocation), true) {
+    if crate::menu::row(ui, words::of(ui, Phrase::OpenLocation), true) {
         crate::timeline::show_note(ui, words::of(ui, Phrase::DoesNotOpenFile));
     }
-    if menu_row(ui, words::of(ui, Phrase::Delete), true) {
+    if crate::menu::row(ui, words::of(ui, Phrase::Delete), true) {
         bin.hide_file(id);
     }
-    if menu_row(ui, words::of(ui, Phrase::NewFolderWith), true) {
+    if crate::menu::row(ui, words::of(ui, Phrase::NewFolderWith), true) {
         bin.add_folder_with(id, words::of(ui, Phrase::UntitledFolder));
     }
     if source_missing(source) {
-        if menu_row(ui, words::of(ui, Phrase::LinkMedia), true) {
+        if crate::menu::row(ui, words::of(ui, Phrase::LinkMedia), true) {
             ask_relink(ui, id);
         }
     } else {
-        menu_row(ui, words::of(ui, Phrase::LinkMedia), false);
+        crate::menu::row(ui, words::of(ui, Phrase::LinkMedia), false);
     }
-    if split_row(ui) {
+    if crate::menu::row_badge(
+        ui,
+        words::of(ui, Phrase::SplitScenes),
+        words::of(ui, Phrase::Free),
+        true,
+    ) {
         crate::timeline::show_note(ui, words::of(ui, Phrase::SplitScenes));
     }
-    if menu_row(ui, words::of(ui, Phrase::ExportClips), true) {
+    if crate::menu::row(ui, words::of(ui, Phrase::ExportClips), true) {
         crate::timeline::show_note(ui, words::of(ui, Phrase::ExportWritesNothing));
     }
 }
 
 fn sort_menu(ui: &mut egui::Ui, bin: &mut Bin) {
-    ui.menu_button(words::of(ui, Phrase::Sort), |ui| {
-        if menu_row(ui, words::of(ui, Phrase::Name), true) {
+    crate::menu::submenu(ui, words::of(ui, Phrase::Sort), |ui| {
+        if crate::menu::row(ui, words::of(ui, Phrase::Name), true) {
             bin.set_sort(Sort::Name);
             crate::timeline::show_note(ui, words::of(ui, Phrase::SortedByName));
         }
-        if menu_row(ui, words::of(ui, Phrase::Duration), true) {
+        if crate::menu::row(ui, words::of(ui, Phrase::Duration), true) {
             bin.set_sort(Sort::Duration);
             crate::timeline::show_note(ui, words::of(ui, Phrase::SortedByDuration));
         }
@@ -782,35 +787,6 @@ pub(crate) fn take_relink(ctx: &egui::Context) -> Option<AssetId> {
         ctx.data_mut(|data| data.remove::<AssetId>(id));
     }
     value
-}
-
-fn menu_row(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
-    let color = if enabled { theme::INK } else { theme::FAINT };
-    let clicked = ui
-        .add_enabled(
-            enabled,
-            egui::Button::new(egui::RichText::new(label).color(color)),
-        )
-        .clicked();
-    if clicked {
-        ui.close();
-    }
-    clicked
-}
-
-fn split_row(ui: &mut egui::Ui) -> bool {
-    let clicked = ui
-        .add(
-            egui::Button::new(
-                egui::RichText::new(words::of(ui, Phrase::SplitScenes)).color(theme::INK),
-            )
-            .shortcut_text(words::of(ui, Phrase::Free)),
-        )
-        .clicked();
-    if clicked {
-        ui.close();
-    }
-    clicked
 }
 
 fn paint_folder(
@@ -1455,6 +1431,16 @@ mod tests {
             .find(|(_, node)| node.label() == Some("New folder"))
             .expect("new folder row");
         let bounds = row.1.bounds().expect("row bounds");
+        let width = bounds.x1 - bounds.x0;
+        let height = bounds.y1 - bounds.y0;
+        assert!(
+            (width - 236.0).abs() < 1.0,
+            "a menu row is the plate's inner width, got {width}"
+        );
+        assert!(
+            (height - 32.0).abs() < 1.0,
+            "a menu row is 32px, got {height}"
+        );
         let at = eframe::egui::pos2(
             ((bounds.x0 + bounds.x1) / 2.0) as f32,
             ((bounds.y0 + bounds.y1) / 2.0) as f32,

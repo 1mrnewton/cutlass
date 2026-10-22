@@ -2390,6 +2390,21 @@ fn action_label(action: ClipAction, language: Language) -> &'static str {
     words::say(language, phrase)
 }
 
+fn action_key(action: ClipAction) -> Option<&'static str> {
+    match action {
+        ClipAction::Copy => Some("⌘C"),
+        ClipAction::Cut => Some("⌘X"),
+        ClipAction::Delete => Some("⌫"),
+        ClipAction::Freeze
+        | ClipAction::Reverse
+        | ClipAction::Mirror
+        | ClipAction::Rotate
+        | ClipAction::Crop
+        | ClipAction::Transcribe
+        | ClipAction::SplitScenes => None,
+    }
+}
+
 fn paint_clip_menu(
     ui: &mut egui::Ui,
     kind: TrackKind,
@@ -2402,23 +2417,16 @@ fn paint_clip_menu(
     let split_at = rows.len() - pictures;
     for (index, action) in rows.iter().copied().enumerate() {
         if index == split_at && pictures > 0 {
-            ui.separator();
+            crate::menu::rule(ui);
         }
         let enabled = action_enabled(action, refused);
-        let color = if enabled { theme::INK } else { theme::FAINT };
-        if ui
-            .add_enabled(
-                enabled,
-                egui::Button::new(
-                    egui::RichText::new(action_label(action, words::active(ui))).color(color),
-                ),
-            )
-            .clicked()
-        {
-            if let Some(choice) = clip_request(action, id) {
-                *menu = Some(choice);
-            }
-            ui.close();
+        let label = action_label(action, words::active(ui));
+        let clicked = match action_key(action) {
+            Some(key) => crate::menu::row_key(ui, label, key, enabled),
+            None => crate::menu::row(ui, label, enabled),
+        };
+        if clicked && let Some(choice) = clip_request(action, id) {
+            *menu = Some(choice);
         }
     }
 }
@@ -2493,7 +2501,7 @@ fn paint_segments(
         let refused = blocks_edit(paint.project, paint.lanes, segment.id());
         let kind = track.kind();
         let id = segment.id();
-        response.context_menu(|ui| paint_clip_menu(ui, kind, refused, id, menu));
+        crate::menu::context_menu(&response, |ui| paint_clip_menu(ui, kind, refused, id, menu));
         let range = segment.timeline();
         let name = clip_name(paint.project, segment);
         let text = crate::tip::span(

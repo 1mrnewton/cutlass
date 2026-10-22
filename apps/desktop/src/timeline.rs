@@ -459,6 +459,8 @@ struct BoxSelect {
     origin: egui::Pos2,
     additive: bool,
     kept: Vec<SegmentId>,
+    /// Set once the pointer has moved far enough that this press is a selection.
+    moved: bool,
 }
 
 /// A clip following the pointer. The move is written when the pointer goes up.
@@ -664,6 +666,7 @@ pub fn show(
         let released = ui.input(|input| input.pointer.primary_released());
         let shift = ui.input(|input| input.modifiers.shift);
         let box_id = ui.scope_id().with("box-select");
+        let scrub_id = ui.scope_id().with("ruler-scrub");
         if pressed && let Some(point) = pointer {
             held_locked = false;
             let mark = playhead_mark(ruler_rect, project, *playhead, view);
@@ -676,22 +679,33 @@ pub fn show(
                 ruler_rect.contains(point) && point.x < lane_left(ruler_rect) && !on_buttons;
             let can_draw = guides.shown && !guides.locked;
             if on_ruler {
-                if let Some(index) = near_us(view, lane_left(ruler_rect), &stamps.ruler, point.x) {
+                let on_mark = if let Some(index) =
+                    near_us(view, lane_left(ruler_rect), &stamps.ruler, point.x)
+                {
                     stamps.selected = Some(PickedStamp::Ruler(stamps.ruler[index]));
                     guides.selected = None;
                     selected.clear();
                     guides.pull = None;
                     guides.row = None;
-                } else if !marker && can_draw {
+                    ui.data_mut(|data| data.remove::<bool>(scrub_id));
+                    true
+                } else {
+                    false
+                };
+                if !on_mark && !marker && can_draw {
                     guides.pull = Some(point);
                     guides.row = None;
                     *drag = None;
                     *trim = None;
-                } else {
+                } else if !on_mark {
                     guides.pull = None;
                     guides.row = None;
                     *drag = None;
                     *trim = None;
+                }
+                if !on_mark && let Some(us) = playhead_at(project, ruler_rect, point.x, view) {
+                    *playhead = us;
+                    ui.data_mut(|data| data.insert_temp(scrub_id, true));
                 }
             } else if on_corner && can_draw {
                 guides.row = Some(point);
@@ -710,6 +724,20 @@ pub fn show(
             let time = time_at(ruler_rect, project, origin.x, view);
             guides.selected = Some(Picked::Vertical(keep_line(&mut guides.vertical, time)));
             selected.clear();
+        }
+        if ui
+            .data(|data| data.get_temp::<bool>(scrub_id))
+            .unwrap_or(false)
+        {
+            if ui.input(|input| input.pointer.primary_down()) {
+                if let Some(point) = pointer
+                    && let Some(us) = playhead_at(project, ruler_rect, point.x, view)
+                {
+                    *playhead = us;
+                }
+            } else {
+                ui.data_mut(|data| data.remove::<bool>(scrub_id));
+            }
         }
         if released
             && guides.row.take().is_some()
@@ -865,6 +893,7 @@ pub fn show(
                                 origin: point,
                                 additive: shift,
                                 kept,
+                                moved: false,
                             },
                         );
                     });
@@ -883,10 +912,14 @@ pub fn show(
                 }
             }
         }
-        if let Some(boxing) = ui.data(|data| data.get_temp::<BoxSelect>(box_id))
+        if let Some(mut boxing) = ui.data(|data| data.get_temp::<BoxSelect>(box_id))
             && let Some(point) = pointer
             && boxing.origin.distance(point) >= BOX_SLOP
         {
+            if !boxing.moved {
+                boxing.moved = true;
+                ui.data_mut(|data| data.insert_temp(box_id, boxing.clone()));
+            }
             let hits = clips_in(
                 project,
                 tracks,
@@ -899,6 +932,13 @@ pub fn show(
                 hits
             };
             box_rect = Some(Rect::from_two_pos(boxing.origin, point));
+        }
+        if released
+            && let Some(boxing) = ui.data(|data| data.get_temp::<BoxSelect>(box_id))
+            && !boxing.moved
+            && let Some(us) = playhead_at(project, tracks, boxing.origin.x, view)
+        {
+            *playhead = us;
         }
         if !ui.input(|input| input.pointer.primary_down()) {
             ui.data_mut(|data| data.remove::<BoxSelect>(box_id));
@@ -2051,6 +2091,19 @@ fn keep_line(lines: &mut Vec<i64>, time: i64) -> usize {
     }
     lines.push(time);
     lines.len() - 1
+}
+
+/// The frame under `x`, kept inside the cut. An empty cut has no playhead to move.
+fn playhead_at(project: &Project, area: Rect, x: f32, view: View) -> Option<i64> {
+    let duration = project.duration().value;
+    if duration <= 0 || !(view.pixel_size.is_finite() && view.pixel_size > 0.0) {
+        return None;
+    }
+    Some(ruler::seek(
+        view.us_at(lane_left(area), x),
+        project.settings().rate().rate(),
+        duration,
+    ))
 }
 
 fn time_at(area: Rect, project: &Project, x: f32, view: View) -> i64 {
@@ -4962,6 +5015,66 @@ mod tests {
         let visible = rect.intersect(port);
         assert!(visible.width() > 0.0);
         assert!(!visible.intersects(head));
+    }
+
+    #[test]
+    fn a_click_seeks_inside_the_cut_and_an_empty_cut_does_not() {
+        let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 200.0));
+        let view = super::View {
+            pixel_size: 0.001,
+            origin_us: 0,
+            scroll_y: 0.0,
+        };
+        assert_eq!(super::playhead_at(&project(), area, 300.0, view), None);
+
+        let mut history = History::new();
+        let mut cut = project();
+        let video = Asset::video(
+            "file:///v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("timescale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let asset = match history
+            .apply(&mut cut, &[Command::AddAsset(video)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let stored = cut.asset(asset).expect("asset");
+        let duration = stored.duration().expect("duration");
+        let source = TimeRange::new(
+            Timestamp::new(0, duration.timescale),
+            Timestamp::new(30_000, duration.timescale),
+        )
+        .expect("source");
+        let picture =
+            Segment::media(stored, source, 0, Channels::Picture, Speed::ONE).expect("picture");
+        history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: None,
+                    segment: picture,
+                }],
+            )
+            .expect("place");
+        let duration = cut.duration().value;
+        let rate = cut.settings().rate().rate();
+        let left = super::lane_left(area);
+        assert_eq!(super::playhead_at(&cut, area, left, view), Some(0));
+        let middle = left + 100.0;
+        let expected = crate::ruler::seek(view.us_at(left, middle), rate, duration);
+        assert_eq!(super::playhead_at(&cut, area, middle, view), Some(expected));
+        assert!(expected > 0 && expected < duration);
+        assert_eq!(
+            super::playhead_at(&cut, area, left + 10_000.0, view),
+            Some(crate::ruler::seek(duration, rate, duration))
+        );
     }
 
     #[test]

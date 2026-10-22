@@ -2,7 +2,7 @@
 
 use std::num::NonZeroU32;
 
-use cutlass_core::{Packet, VideoCodec, VideoStreamConfig};
+use cutlass_core::{AudioCodec, AudioStreamConfig, Packet, VideoCodec, VideoStreamConfig};
 
 use crate::Error;
 
@@ -47,13 +47,44 @@ impl MovieFile {
             timescale,
             media_duration,
             movie_duration,
-            kind: TrackKind::Video {
+            kind: TrackKind::Video(Visual {
                 entry,
                 config_box,
                 width,
                 height,
                 config: config.config_record,
-            },
+            }),
+            samples,
+        });
+        Ok(())
+    }
+
+    /// Add an AAC track. Samples are in decode order. The config record is the
+    /// decoder-specific descriptor.
+    pub fn add_audio(
+        &mut self,
+        timescale: NonZeroU32,
+        config: AudioStreamConfig,
+        samples: Vec<Packet>,
+    ) -> Result<(), Error> {
+        aac_only(config.codec)?;
+        if config.channels == 0 {
+            return Err(Error::ZeroChannels);
+        }
+        if config.sample_rate == 0 {
+            return Err(Error::BadSampleRate);
+        }
+        let (samples, media_duration) = timed(timescale, samples)?;
+        let movie_duration = movie_ticks(media_duration, timescale, self.timescale)?;
+        self.tracks.push(Track {
+            timescale,
+            media_duration,
+            movie_duration,
+            kind: TrackKind::Audio(Sound {
+                sample_rate: config.sample_rate,
+                channels: config.channels,
+                config: config.config_record,
+            }),
             samples,
         });
         Ok(())
@@ -96,13 +127,24 @@ struct Track {
 
 #[derive(Debug)]
 enum TrackKind {
-    Video {
-        entry: [u8; 4],
-        config_box: [u8; 4],
-        width: u16,
-        height: u16,
-        config: Vec<u8>,
-    },
+    Video(Visual),
+    Audio(Sound),
+}
+
+#[derive(Debug)]
+struct Visual {
+    entry: [u8; 4],
+    config_box: [u8; 4],
+    width: u16,
+    height: u16,
+    config: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct Sound {
+    sample_rate: u32,
+    channels: u16,
+    config: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -124,6 +166,19 @@ fn visual_boxes(codec: VideoCodec) -> Result<([u8; 4], [u8; 4]), Error> {
         | VideoCodec::Mpeg4Part2
         | VideoCodec::Mjpeg
         | VideoCodec::ProRes => Err(Error::Inconsistent("the video codec is not written")),
+    }
+}
+
+fn aac_only(codec: AudioCodec) -> Result<(), Error> {
+    match codec {
+        AudioCodec::Aac => Ok(()),
+        AudioCodec::Mp3
+        | AudioCodec::Pcm
+        | AudioCodec::Flac
+        | AudioCodec::Opus
+        | AudioCodec::Vorbis
+        | AudioCodec::Alac
+        | AudioCodec::Ac3 => Err(Error::Inconsistent("the audio codec is not written")),
     }
 }
 
@@ -293,8 +348,9 @@ fn write_tkhd(buf: &mut Buf, id: u32, track: &Track) -> Result<(), Error> {
     buf.push_zeros(8);
     buf.push_u16(0);
     buf.push_u16(0);
-    let (volume, width, height) = match track.kind {
-        TrackKind::Video { width, height, .. } => (0, u32::from(width), u32::from(height)),
+    let (volume, width, height) = match &track.kind {
+        TrackKind::Video(video) => (0, u32::from(video.width), u32::from(video.height)),
+        TrackKind::Audio(_) => (0x0100, 0, 0),
     };
     buf.push_u16(volume);
     buf.push_u16(0);
@@ -316,10 +372,14 @@ fn write_mdia(buf: &mut Buf, track: &Track, offset: Option<u64>) -> Result<(), E
     buf.push_u16(0x55C4);
     buf.push_u16(0);
     buf.close(header)?;
-    match track.kind {
-        TrackKind::Video { .. } => {
+    match &track.kind {
+        TrackKind::Video(video) => {
             write_hdlr(buf, b"vide", "VideoHandler")?;
-            write_video_minf(buf, track, offset)?;
+            write_video_minf(buf, video, &track.samples, offset)?;
+        }
+        TrackKind::Audio(audio) => {
+            write_hdlr(buf, b"soun", "SoundHandler")?;
+            write_audio_minf(buf, audio, &track.samples, offset)?;
         }
     }
     buf.close(start)
@@ -335,24 +395,112 @@ fn write_hdlr(buf: &mut Buf, kind: &[u8; 4], name: &str) -> Result<(), Error> {
     buf.close(start)
 }
 
-fn write_video_minf(buf: &mut Buf, track: &Track, offset: Option<u64>) -> Result<(), Error> {
-    let TrackKind::Video {
-        entry,
-        config_box,
-        width,
-        height,
-        config,
-    } = &track.kind;
+fn write_video_minf(
+    buf: &mut Buf,
+    video: &Visual,
+    samples: &[Sample],
+    offset: Option<u64>,
+) -> Result<(), Error> {
     let start = buf.open(b"minf");
     let vmhd = buf.full(b"vmhd", 0, 1);
     buf.push_zeros(8);
     buf.close(vmhd)?;
     write_dinf(buf)?;
     let stbl = buf.open(b"stbl");
-    write_stsd_visual(buf, entry, config_box, *width, *height, config)?;
-    write_sample_tables(buf, &track.samples, offset)?;
+    write_stsd_visual(
+        buf,
+        &video.entry,
+        &video.config_box,
+        video.width,
+        video.height,
+        &video.config,
+    )?;
+    write_sample_tables(buf, samples, offset)?;
     buf.close(stbl)?;
     buf.close(start)
+}
+
+fn write_audio_minf(
+    buf: &mut Buf,
+    audio: &Sound,
+    samples: &[Sample],
+    offset: Option<u64>,
+) -> Result<(), Error> {
+    let start = buf.open(b"minf");
+    let smhd = buf.full(b"smhd", 0, 0);
+    buf.push_u16(0);
+    buf.push_u16(0);
+    buf.close(smhd)?;
+    write_dinf(buf)?;
+    let stbl = buf.open(b"stbl");
+    write_stsd_audio(buf, audio)?;
+    write_sample_tables(buf, samples, offset)?;
+    buf.close(stbl)?;
+    buf.close(start)
+}
+
+fn write_stsd_audio(buf: &mut Buf, audio: &Sound) -> Result<(), Error> {
+    let stsd = buf.full(b"stsd", 0, 0);
+    buf.push_u32(1);
+    let sample = buf.open(b"mp4a");
+    buf.push_zeros(6);
+    buf.push_u16(1);
+    if audio.sample_rate <= 65_535 {
+        let rate = audio.sample_rate.checked_shl(16).ok_or(Error::TooLarge)?;
+        buf.push_u16(0);
+        buf.push_u16(0);
+        buf.push_u32(0);
+        buf.push_u16(audio.channels);
+        buf.push_u16(16);
+        buf.push_u16(0);
+        buf.push_u16(0);
+        buf.push_u32(rate);
+    } else {
+        buf.push_u16(2);
+        buf.push_zeros(22);
+        buf.push_u64(f64::from(audio.sample_rate).to_bits());
+        buf.push_u32(u32::from(audio.channels));
+        buf.push_zeros(20);
+    }
+    let esds = buf.full(b"esds", 0, 0);
+    let body = esds_body(&audio.config)?;
+    buf.push_bytes(&body);
+    buf.close(esds)?;
+    buf.close(sample)?;
+    buf.close(stsd)
+}
+
+fn esds_body(config: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut decoder = vec![0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    if !config.is_empty() {
+        decoder.extend(descriptor(0x05, config)?);
+    }
+    let mut elementary = vec![0x00, 0x01, 0x00];
+    elementary.extend(descriptor(0x04, &decoder)?);
+    descriptor(0x03, &elementary)
+}
+
+fn descriptor(tag: u8, body: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut buf = Buf::default();
+    buf.push_u8(tag);
+    let mut groups = Vec::new();
+    let mut left = body.len();
+    loop {
+        groups.push(u8::try_from(left & 0x7f).map_err(|_| Error::TooLarge)?);
+        left >>= 7;
+        if left == 0 {
+            break;
+        }
+        if groups.len() == 4 {
+            return Err(Error::TooLarge);
+        }
+    }
+    while let Some(group) = groups.pop() {
+        let continued = u8::from(!groups.is_empty()) << 7;
+        buf.push_u8(group | continued);
+    }
+    buf.push_bytes(body);
+    Ok(buf.bytes)
 }
 
 fn write_dinf(buf: &mut Buf) -> Result<(), Error> {

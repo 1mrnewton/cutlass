@@ -3,7 +3,7 @@
 //! The crate takes the file bytes and returns tracks and samples. It does no
 //! I/O. Sample timestamps are media time when the track has no edit list. An
 //! edit list moves them onto the movie timeline. It also writes an MP4 file
-//! from H.264 or HEVC samples, with the index after the media data.
+//! from H.264, HEVC, and AAC samples, with the index after the media data.
 //! `docs/codecs.md` lists the containers.
 
 #![deny(unsafe_code)]

@@ -2,8 +2,10 @@
 
 use std::num::NonZeroU32;
 
-use cutlass_core::{Packet, Timestamp, VideoCodec, VideoStreamConfig};
-use cutlass_mp4::{Error, Kind, Movie, MovieFile, Rotation};
+use cutlass_core::{
+    AudioCodec, AudioStreamConfig, Packet, Timestamp, VideoCodec, VideoStreamConfig,
+};
+use cutlass_mp4::{Error, Fourcc, Kind, Movie, MovieFile, Rotation};
 
 fn scale(value: u32) -> NonZeroU32 {
     match NonZeroU32::new(value) {
@@ -12,11 +14,20 @@ fn scale(value: u32) -> NonZeroU32 {
     }
 }
 
-fn expect_err(result: Result<Vec<u8>, Error>, expected: Error) {
+fn expect_err<T>(result: Result<T, Error>, expected: Error) {
     match result {
         Err(error) if error == expected => {}
         Err(error) => panic!("expected {expected}, got {error}"),
         Ok(_) => panic!("expected {expected}"),
+    }
+}
+
+fn aac(rate: u32, channels: u16, config: &[u8]) -> AudioStreamConfig {
+    AudioStreamConfig {
+        codec: AudioCodec::Aac,
+        sample_rate: rate,
+        channels,
+        config_record: config.to_vec(),
     }
 }
 
@@ -137,6 +148,128 @@ fn an_hevc_track_round_trips() {
     assert_eq!((stored.width, stored.height), (64, 64));
     assert_eq!(stored.config_record, [1, 2, 3, 4]);
     assert_eq!(movie.tracks()[0].samples()[0].data, [9]);
+}
+
+#[test]
+fn an_aac_track_round_trips() {
+    let ticks = scale(44_100);
+    let mut file = MovieFile::new(ticks);
+    file.add_audio(
+        ticks,
+        aac(44_100, 2, &[0x12, 0x10]),
+        vec![packet(ticks, 0, 0, 1024, &[5, 6], true)],
+    )
+    .expect("aac");
+    let movie = Movie::parse(&file.to_bytes().expect("bytes")).expect("read");
+    let track = &movie.tracks()[0];
+    assert_eq!(track.timescale(), ticks);
+    assert_eq!(track.duration(), 1024);
+    assert_eq!((track.display_width(), track.display_height()), (0, 0));
+    let Kind::Audio(audio) = track.kind() else {
+        panic!("audio track");
+    };
+    assert_eq!(audio.codec(), Some(AudioCodec::Aac));
+    assert_eq!(audio.sample_entry(), Fourcc::new(*b"mp4a"));
+    assert_eq!(audio.sample_rate(), 44_100);
+    assert_eq!(audio.channels(), 2);
+    assert_eq!(audio.config_record(), [0x12, 0x10]);
+    assert_eq!(track.samples()[0].data, [5, 6]);
+    assert_eq!(
+        track.samples()[0].duration.map(|time| time.value),
+        Some(1024)
+    );
+}
+
+#[test]
+fn a_high_sample_rate_uses_version_two() {
+    let ticks = scale(96_000);
+    let mut file = MovieFile::new(ticks);
+    file.add_audio(ticks, aac(96_000, 1, &[0x11, 0x90]), Vec::new())
+        .expect("rate");
+    let movie = Movie::parse(&file.to_bytes().expect("bytes")).expect("read");
+    let Kind::Audio(audio) = movie.tracks()[0].kind() else {
+        panic!("audio track");
+    };
+    assert_eq!(audio.sample_rate(), 96_000);
+    assert_eq!(audio.channels(), 1);
+    assert_eq!(audio.config_record(), [0x11, 0x90]);
+}
+
+#[test]
+fn a_long_decoder_config_round_trips() {
+    let ticks = scale(48_000);
+    let config = vec![0x11; 200];
+    let mut file = MovieFile::new(ticks);
+    file.add_audio(ticks, aac(48_000, 2, &config), Vec::new())
+        .expect("config");
+    let movie = Movie::parse(&file.to_bytes().expect("bytes")).expect("read");
+    let Kind::Audio(audio) = movie.tracks()[0].kind() else {
+        panic!("audio track");
+    };
+    assert_eq!(audio.config_record(), config);
+}
+
+#[test]
+fn video_and_audio_share_the_movie() {
+    let video_scale = scale(30);
+    let audio_scale = scale(44_100);
+    let mut file = MovieFile::new(video_scale);
+    file.add_video(
+        video_scale,
+        h264(16, 16),
+        vec![packet(video_scale, 0, 0, 30, &[1], true)],
+    )
+    .expect("video");
+    file.add_audio(
+        audio_scale,
+        aac(44_100, 2, &[0x12, 0x10]),
+        vec![packet(audio_scale, 0, 0, 44_100, &[2], true)],
+    )
+    .expect("audio");
+    let movie = Movie::parse(&file.to_bytes().expect("bytes")).expect("read");
+    assert_eq!(movie.duration(), 30);
+    assert_eq!(movie.tracks().len(), 2);
+    assert_eq!(movie.tracks()[0].duration(), 30);
+    assert_eq!(movie.tracks()[0].samples()[0].data, [1]);
+    assert_eq!(movie.tracks()[1].duration(), 44_100);
+    assert_eq!(movie.tracks()[1].timescale(), audio_scale);
+    assert_eq!(movie.tracks()[1].samples()[0].data, [2]);
+    let Kind::Audio(audio) = movie.tracks()[1].kind() else {
+        panic!("audio track");
+    };
+    assert_eq!(audio.sample_rate(), 44_100);
+}
+
+#[test]
+fn a_zero_channel_count_refuses() {
+    let ticks = scale(44_100);
+    let mut file = MovieFile::new(ticks);
+    expect_err(
+        file.add_audio(ticks, aac(44_100, 0, &[]), Vec::new()),
+        Error::ZeroChannels,
+    );
+}
+
+#[test]
+fn a_zero_sample_rate_refuses() {
+    let ticks = scale(44_100);
+    let mut file = MovieFile::new(ticks);
+    expect_err(
+        file.add_audio(ticks, aac(0, 2, &[]), Vec::new()),
+        Error::BadSampleRate,
+    );
+}
+
+#[test]
+fn another_audio_codec_refuses() {
+    let ticks = scale(44_100);
+    let mut config = aac(44_100, 2, &[]);
+    config.codec = AudioCodec::Mp3;
+    let mut file = MovieFile::new(ticks);
+    expect_err(
+        file.add_audio(ticks, config, Vec::new()),
+        Error::Inconsistent("the audio codec is not written"),
+    );
 }
 
 #[test]

@@ -386,7 +386,8 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::SetBlend { segment, .. }
         | Command::Reverse { segment }
         | Command::SetText { segment, .. }
-        | Command::SetSticker { segment, .. } => segment_lane_locked(project, lanes, *segment),
+        | Command::SetSticker { segment, .. }
+        | Command::SetAttachment { segment, .. } => segment_lane_locked(project, lanes, *segment),
         Command::SetSource { .. } => false,
         Command::DetachAudio { segment } => detach_blocked(project, lanes, *segment),
         _ => false,
@@ -4574,6 +4575,10 @@ mod tests {
             segment: id,
             name: "Star".to_owned(),
         };
+        let attachment = Command::SetAttachment {
+            segment: id,
+            attachment: None,
+        };
         assert!(super::blocks_command(&cut, &locked, &volume));
         assert!(super::blocks_command(&cut, &locked, &hidden));
         assert!(super::blocks_command(&cut, &locked, &easing));
@@ -4587,6 +4592,7 @@ mod tests {
         assert!(super::blocks_command(&cut, &locked, &reverse));
         assert!(super::blocks_command(&cut, &locked, &words));
         assert!(super::blocks_command(&cut, &locked, &sticker));
+        assert!(super::blocks_command(&cut, &locked, &attachment));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),
@@ -4651,6 +4657,11 @@ mod tests {
             &cut,
             &super::Lanes::default(),
             &sticker
+        ));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &attachment
         ));
         let stored = cut.asset(asset).expect("asset");
         let away =

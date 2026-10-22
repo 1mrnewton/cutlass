@@ -7,6 +7,8 @@ edition = "2024"
 [package.metadata]
 cargo-fuzz = true
 
+[workspace]
+
 [dependencies]
 cutlass-mp4 = { path = ".." }
 libfuzzer-sys = "0.4"

@@ -1306,13 +1306,26 @@ mod tests {
 
     #[test]
     fn free_stock_replaces_the_bin_and_lists_no_shots() {
+        let mut history = History::new();
+        let mut cut = project();
+        let picture = Asset::video(
+            "file:///cuts/picture.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        history
+            .apply(&mut cut, &[Command::AddAsset(picture)])
+            .expect("add");
+
         let ctx = eframe::egui::Context::default();
         ctx.enable_accesskit();
         crate::words::install(&ctx, crate::words::Language::English);
         let mut bin = crate::media_bin::Bin::new();
         let mut shelf = super::Shelf::Media;
         let mut source = super::MediaSource::Project;
-        let cut = project();
         let screen = eframe::egui::Rect::from_min_size(
             eframe::egui::pos2(0.0, 0.0),
             eframe::egui::vec2(400.0, 500.0),
@@ -1333,40 +1346,103 @@ mod tests {
             );
             let tree = output.platform_output.accesskit_update.take();
             output.textures_delta.clear();
-            tree.expect("the tree is built")
+            (tree.expect("the tree is built"), source)
         };
-        let tree = pass(vec![]);
+        fn click(
+            pass: &mut impl FnMut(
+                Vec<eframe::egui::Event>,
+            )
+                -> (eframe::egui::accesskit::TreeUpdate, super::MediaSource),
+            label: &str,
+            button: eframe::egui::PointerButton,
+        ) -> (eframe::egui::accesskit::TreeUpdate, super::MediaSource) {
+            let (tree, _) = pass(vec![]);
+            let at = center(&tree, label);
+            pass(vec![
+                eframe::egui::Event::PointerMoved(at),
+                press(at, button, true),
+            ]);
+            pass(vec![press(at, button, false)])
+        }
+
+        let (tree, _) = pass(vec![]);
+        assert!(
+            tree.nodes
+                .iter()
+                .any(|(_, node)| named(node, "picture.mp4"))
+        );
         assert!(tree.nodes.iter().any(|(_, node)| named(node, "All")));
         assert!(tree.nodes.iter().any(|(_, node)| named(node, "Import")));
-        let row = tree
-            .nodes
-            .iter()
-            .find(|(_, node)| node.label() == Some("Free stock"))
-            .expect("free stock");
-        let bounds = row.1.bounds().expect("row bounds");
-        let at = eframe::egui::pos2(
-            ((bounds.x0 + bounds.x1) / 2.0) as f32,
-            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        let (stock, shown) = click(
+            &mut pass,
+            "Free stock",
+            eframe::egui::PointerButton::Primary,
         );
-        pass(vec![
-            eframe::egui::Event::PointerMoved(at),
-            eframe::egui::Event::PointerButton {
-                pos: at,
-                button: eframe::egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: eframe::egui::Modifiers::default(),
-            },
-        ]);
-        let stock = pass(vec![eframe::egui::Event::PointerButton {
-            pos: at,
-            button: eframe::egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: eframe::egui::Modifiers::default(),
-        }]);
-        assert!(source == super::MediaSource::Stock);
+        assert!(shown == super::MediaSource::Stock);
         assert!(stock.nodes.iter().any(|(_, node)| named(node, "Empty")));
+        assert!(
+            stock
+                .nodes
+                .iter()
+                .all(|(_, node)| !named(node, "picture.mp4"))
+        );
         assert!(stock.nodes.iter().all(|(_, node)| !named(node, "All")));
         assert!(stock.nodes.iter().all(|(_, node)| !named(node, "Import")));
+        assert!(
+            stock
+                .nodes
+                .iter()
+                .all(|(_, node)| !named(node, "New folder"))
+        );
+        let (menu, shown) = click(&mut pass, "Empty", eframe::egui::PointerButton::Secondary);
+        assert!(
+            menu.nodes
+                .iter()
+                .all(|(_, node)| !named(node, "New folder"))
+        );
+        assert!(
+            menu.nodes
+                .iter()
+                .all(|(_, node)| !named(node, "Sorted by name"))
+        );
+        assert!(shown == super::MediaSource::Stock);
+        let (back, shown) = click(&mut pass, "Project", eframe::egui::PointerButton::Primary);
+        assert!(shown == super::MediaSource::Project);
+        assert!(
+            back.nodes
+                .iter()
+                .any(|(_, node)| named(node, "picture.mp4"))
+        );
+        assert!(back.nodes.iter().any(|(_, node)| named(node, "Import")));
+        assert!(back.nodes.iter().all(|(_, node)| !named(node, "Empty")));
+
+        crate::words::install(&ctx, crate::words::Language::French);
+        let (french, shown) = click(
+            &mut pass,
+            "Stock libre",
+            eframe::egui::PointerButton::Primary,
+        );
+        assert!(shown == super::MediaSource::Stock);
+        assert!(french.nodes.iter().any(|(_, node)| named(node, "Vide")));
+        assert!(
+            french
+                .nodes
+                .iter()
+                .any(|(_, node)| named(node, "Stock libre"))
+        );
+        assert!(
+            french
+                .nodes
+                .iter()
+                .all(|(_, node)| !named(node, "picture.mp4"))
+        );
+        assert!(french.nodes.iter().all(|(_, node)| !named(node, "Empty")));
+        assert!(
+            french
+                .nodes
+                .iter()
+                .all(|(_, node)| !named(node, "Importer"))
+        );
     }
 
     #[test]

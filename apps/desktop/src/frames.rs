@@ -5,9 +5,9 @@
 //! the clock has reached, and drops frames that are already late. The next
 //! clip opens on a side thread during the last second before the cut. The
 //! window samples the GPU texture for the frame that is due and does not copy
-//! it back. A failure is written to the app log. A seek keeps the last picture
-//! until the new one is ready. Where no video decoder is linked, there is no
-//! picture.
+//! it back. A failure is written to the app log. A seek, and a cut, keep the
+//! last picture until the new one is ready. Where no video decoder is linked,
+//! there is no picture.
 
 use cutlass_compose::Gpu;
 use cutlass_project::Project;
@@ -217,8 +217,8 @@ impl Reel {
             .is_some_and(|pending| pending.asset == asset && pending.source == source);
         if !same_clip {
             self.generation = self.generation.wrapping_add(1);
-            self.plate = None;
-            self.texture = None;
+            // The last frame stays until this clip's picture is imported.
+            // Dropping it here paints the empty plate across the cut.
             self.shown = None;
         }
         let ask = Ask {
@@ -265,6 +265,10 @@ impl Reel {
         } = picture.body
         else {
             if picture.requested == pending.time {
+                self.plate = None;
+                self.texture = None;
+                self.shown = None;
+                self.free_native(Some(state));
                 self.waiting = false;
             }
             return;

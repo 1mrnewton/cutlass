@@ -384,7 +384,8 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::SetKeepPitch { segment, .. }
         | Command::SetCrop { segment, .. }
         | Command::SetBlend { segment, .. }
-        | Command::Reverse { segment } => segment_lane_locked(project, lanes, *segment),
+        | Command::Reverse { segment }
+        | Command::SetText { segment, .. } => segment_lane_locked(project, lanes, *segment),
         Command::SetSource { .. } => false,
         Command::DetachAudio { segment } => detach_blocked(project, lanes, *segment),
         _ => false,
@@ -4549,6 +4550,10 @@ mod tests {
             hold: 1_000_000,
         };
         let reverse = Command::Reverse { segment: id };
+        let words = Command::SetText {
+            segment: id,
+            words: "Hi".to_owned(),
+        };
         assert!(super::blocks_command(&cut, &locked, &volume));
         assert!(super::blocks_command(&cut, &locked, &hidden));
         assert!(super::blocks_command(&cut, &locked, &easing));
@@ -4560,6 +4565,7 @@ mod tests {
         assert!(super::blocks_command(&cut, &locked, &detach));
         assert!(super::blocks_command(&cut, &locked, &freeze));
         assert!(super::blocks_command(&cut, &locked, &reverse));
+        assert!(super::blocks_command(&cut, &locked, &words));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),
@@ -4614,6 +4620,11 @@ mod tests {
             &cut,
             &super::Lanes::default(),
             &reverse
+        ));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &words
         ));
         let stored = cut.asset(asset).expect("asset");
         let away =

@@ -686,9 +686,13 @@ impl eframe::App for CutlassApp {
             .frame(theme::panel())
             .show(ui, |ui| {
                 let hidden = timeline::hidden_tracks(&self.project);
-                let picture = self
-                    .reel
-                    .image(ui.ctx(), &self.project, self.playhead_us, &hidden);
+                let picture = self.reel.image(
+                    ui.ctx(),
+                    frame.wgpu_render_state(),
+                    &self.project,
+                    self.playhead_us,
+                    &hidden,
+                );
                 let commands = preview::show(
                     ui,
                     &self.project,

@@ -105,6 +105,27 @@ fn an_imported_nv12_frame_matches_the_cpu_conversion() {
 
 #[cfg(target_vendor = "apple")]
 #[test]
+fn a_queued_nv12_frame_is_sampled_after_the_buffer_is_dropped() {
+    let Some(gpu) = open_gpu() else {
+        return;
+    };
+    let y = [16u8, 235, 235, 16];
+    let chroma = [90u8, 240];
+    let expected = to_rgba(&planes_nv12(&y, &chroma)).expect("cpu conversion");
+    let image = {
+        let mut buffer =
+            cutlass_videotoolbox::PixelBuffer::new(2, 2, PixelFormat::Nv12, ColorRange::Limited)
+                .expect("pixel buffer");
+        write_rows(&mut buffer, &y, 2, &chroma, 2);
+        gpu.queue_pixel_buffer(&buffer, Matrix::Bt709)
+            .expect("queue")
+    };
+    let actual = gpu.read_rgba(&image).expect("readback");
+    assert_close(&actual, &expected);
+}
+
+#[cfg(target_vendor = "apple")]
+#[test]
 fn an_imported_p010_frame_matches_the_cpu_conversion() {
     let Some(gpu) = open_gpu() else {
         return;

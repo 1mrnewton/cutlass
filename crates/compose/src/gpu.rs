@@ -19,10 +19,23 @@ pub struct Gpu {
 }
 
 /// An RGBA8 picture on the GPU. [`Gpu::read_rgba`] copies it back.
+///
+/// On Apple the wrapped source planes stay alive with the picture, so a
+/// queued draw can finish after the pixel buffer is released.
 pub struct RgbImage {
     texture: wgpu::Texture,
     width: u32,
     height: u32,
+    /// Keeps the wrapped planes alive until this picture is dropped.
+    #[cfg(target_vendor = "apple")]
+    _source: Option<crate::import::Imported>,
+}
+
+impl RgbImage {
+    /// The RGBA texture. A later pass on the same queue can sample it.
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
 }
 
 impl Gpu {
@@ -167,7 +180,9 @@ impl Gpu {
             },
         )?;
         let coefficients = Coefficients::new(planes.format, planes.range, planes.matrix);
-        self.draw(&y, &chroma, width, height, coefficients)
+        let image = self.encode(&y, &chroma, width, height, coefficients)?;
+        self.wait()?;
+        Ok(image)
     }
 
     /// Samples an IOSurface-backed frame. The GPU reads the surface, so the
@@ -175,6 +190,36 @@ impl Gpu {
     /// finished, and the caller may then reuse the buffer.
     #[cfg(target_vendor = "apple")]
     pub fn render_pixel_buffer(
+        &self,
+        buffer: &cutlass_videotoolbox::PixelBuffer,
+        matrix: cutlass_color::Matrix,
+    ) -> Result<RgbImage, Error> {
+        let image = self.paint_pixel_buffer(buffer, matrix)?;
+        self.wait()?;
+        Ok(image)
+    }
+
+    /// Queues the same draw and returns before the GPU finishes.
+    ///
+    /// A later pass on this queue can sample the texture. The picture keeps
+    /// the wrapped surface until it is dropped, so drop it after that pass
+    /// has finished. Finished work already on the device is reaped here. This
+    /// draw is not waited on, and the pixels are not read back.
+    #[cfg(target_vendor = "apple")]
+    pub fn queue_pixel_buffer(
+        &self,
+        buffer: &cutlass_videotoolbox::PixelBuffer,
+        matrix: cutlass_color::Matrix,
+    ) -> Result<RgbImage, Error> {
+        let image = self.paint_pixel_buffer(buffer, matrix)?;
+        self.device
+            .poll(wgpu::PollType::Poll)
+            .map_err(|error| Error::Wait(error.to_string()))?;
+        Ok(image)
+    }
+
+    #[cfg(target_vendor = "apple")]
+    fn paint_pixel_buffer(
         &self,
         buffer: &cutlass_videotoolbox::PixelBuffer,
         matrix: cutlass_color::Matrix,
@@ -197,10 +242,19 @@ impl Gpu {
         let imported =
             crate::import::import(&self.device, buffer, y_format, chroma_format, width, height)?;
         let coefficients = Coefficients::new(format, range, matrix);
-        self.draw(&imported.y, &imported.chroma, width, height, coefficients)
+        let mut image = self.encode(&imported.y, &imported.chroma, width, height, coefficients)?;
+        image._source = Some(imported);
+        Ok(image)
     }
 
-    fn draw(
+    fn wait(&self) -> Result<(), Error> {
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| Error::Wait(error.to_string()))?;
+        Ok(())
+    }
+
+    fn encode(
         &self,
         y: &wgpu::Texture,
         chroma: &wgpu::Texture,
@@ -277,13 +331,12 @@ impl Gpu {
             pass.draw(0..3, 0..1);
         }
         self.queue.submit([encoder.finish()]);
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|error| Error::Wait(error.to_string()))?;
         Ok(RgbImage {
             texture,
             width,
             height,
+            #[cfg(target_vendor = "apple")]
+            _source: None,
         })
     }
 

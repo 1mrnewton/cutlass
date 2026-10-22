@@ -1,8 +1,9 @@
 //! The picture under the playhead.
 //!
 //! On Apple a worker decodes VideoToolbox frames ahead of the playhead. The
-//! window uploads the frame that is due. A seek keeps the last picture until
-//! the new one is ready. Where no video decoder is linked, there is no picture.
+//! window samples the GPU texture for the frame that is due and does not copy
+//! it back. A seek keeps the last picture until the new one is ready. Where no
+//! video decoder is linked, there is no picture.
 
 use cutlass_compose::Gpu;
 use cutlass_project::Project;
@@ -43,6 +44,13 @@ pub struct Reel {
     gpu: Option<Gpu>,
     #[cfg(target_vendor = "apple")]
     bridge: Option<Bridge>,
+    /// GPU picture the preview samples. The texture stays here until the next frame.
+    #[cfg(target_vendor = "apple")]
+    plate: Option<cutlass_compose::RgbImage>,
+    /// egui id for `plate`. The renderer does not own the wgpu texture.
+    #[cfg(target_vendor = "apple")]
+    native: Option<eframe::egui::TextureId>,
+    /// CPU fallback, used when the frame has no surface the GPU can sample.
     #[cfg(target_vendor = "apple")]
     texture: Option<eframe::egui::TextureHandle>,
     #[cfg(target_vendor = "apple")]
@@ -63,6 +71,10 @@ impl Reel {
             bridge: gpu.is_some().then(Bridge::start),
             gpu,
             #[cfg(target_vendor = "apple")]
+            plate: None,
+            #[cfg(target_vendor = "apple")]
+            native: None,
+            #[cfg(target_vendor = "apple")]
             texture: None,
             #[cfg(target_vendor = "apple")]
             pending: None,
@@ -81,6 +93,7 @@ impl Reel {
         {
             self.pending = None;
             self.shown = None;
+            self.plate = None;
             self.texture = None;
             self.waiting = false;
             self.generation = self.generation.wrapping_add(1);
@@ -106,6 +119,7 @@ impl Reel {
     pub fn image(
         &mut self,
         ctx: &eframe::egui::Context,
+        state: Option<&eframe::egui_wgpu::RenderState>,
         project: &Project,
         playhead_us: i64,
         hidden: &[cutlass_project::TrackId],
@@ -113,11 +127,11 @@ impl Reel {
         self.gpu.as_ref()?;
         #[cfg(target_vendor = "apple")]
         {
-            self.image_apple(ctx, project, playhead_us, hidden)
+            self.image_apple(ctx, state, project, playhead_us, hidden)
         }
         #[cfg(not(target_vendor = "apple"))]
         {
-            let _ = (ctx, project, playhead_us, hidden);
+            let _ = (ctx, state, project, playhead_us, hidden);
             None
         }
     }
@@ -126,36 +140,42 @@ impl Reel {
     fn image_apple(
         &mut self,
         ctx: &eframe::egui::Context,
+        state: Option<&eframe::egui_wgpu::RenderState>,
         project: &Project,
         playhead_us: i64,
         hidden: &[cutlass_project::TrackId],
     ) -> Option<eframe::egui::TextureId> {
         let Some(segment) = crate::preview::picture_segment(project, playhead_us, hidden) else {
-            self.hide();
+            self.hide(state);
             return None;
         };
         let Some(asset) = segment.asset_id() else {
-            self.hide();
+            self.hide(state);
             return None;
         };
         let Some(time) = crate::preview::media_time(segment, playhead_us) else {
-            self.hide();
+            self.hide(state);
             return None;
         };
         let Some(source) = project.asset(asset).map(|asset| asset.source()) else {
-            self.hide();
+            self.hide(state);
             return None;
         };
         self.ask(asset, source, time);
-        self.deliver(ctx);
+        self.deliver(ctx, state);
+        if self.plate.is_some() {
+            return self.native;
+        }
         self.texture.as_ref().map(|texture| texture.id())
     }
 
     #[cfg(target_vendor = "apple")]
-    fn hide(&mut self) {
+    fn hide(&mut self, state: Option<&eframe::egui_wgpu::RenderState>) {
         self.pending = None;
         self.shown = None;
+        self.plate = None;
         self.texture = None;
+        self.free_native(state);
         self.waiting = false;
     }
 
@@ -172,6 +192,7 @@ impl Reel {
             .is_some_and(|pending| pending.asset == asset && pending.source == source);
         if !same_clip {
             self.generation = self.generation.wrapping_add(1);
+            self.plate = None;
             self.texture = None;
             self.shown = None;
         }
@@ -194,7 +215,14 @@ impl Reel {
     }
 
     #[cfg(target_vendor = "apple")]
-    fn deliver(&mut self, ctx: &eframe::egui::Context) {
+    fn deliver(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        state: Option<&eframe::egui_wgpu::RenderState>,
+    ) {
+        let Some(state) = state else {
+            return;
+        };
         let Some(picture) = self.bridge.as_ref().and_then(Bridge::take) else {
             return;
         };
@@ -213,31 +241,91 @@ impl Reel {
             self.waiting = false;
             return;
         };
-        if self.texture.is_some() && self.shown.as_ref().is_some_and(|shown| shown.pts == pts) {
+        if self.has_picture() && self.shown.as_ref().is_some_and(|shown| shown.pts == pts) {
             if let Some(shown) = &mut self.shown {
                 shown.requested = pending.time;
             }
             self.waiting = false;
             return;
         }
-        let Some(gpu) = &self.gpu else {
-            return;
+        let drawn = {
+            let Some(gpu) = &self.gpu else {
+                return;
+            };
+            match gpu.queue_pixel_buffer(&buffer, matrix) {
+                Ok(image) => Drawn::Gpu(Box::new(image)),
+                Err(_) => match rgba_of(gpu, &buffer, matrix) {
+                    Some((pixels, width, height)) => Drawn::Cpu(pixels, width, height),
+                    None => Drawn::Failed,
+                },
+            }
         };
-        let Some((pixels, width, height)) = rgba_of(gpu, &buffer, matrix) else {
-            self.pending = None;
-            self.waiting = true;
-            return;
-        };
-        if self.store(ctx, &pixels, width, height).is_none() {
-            self.pending = None;
-            self.waiting = true;
-            return;
+        match drawn {
+            Drawn::Gpu(image) => {
+                self.bind(state, &image);
+                self.texture = None;
+                self.plate = Some(*image);
+            }
+            Drawn::Cpu(pixels, width, height) => {
+                if self.store(ctx, &pixels, width, height).is_none() {
+                    self.pending = None;
+                    self.waiting = true;
+                    return;
+                }
+                self.plate = None;
+                self.free_native(Some(state));
+            }
+            Drawn::Failed => {
+                self.pending = None;
+                self.waiting = true;
+                return;
+            }
         }
         self.shown = Some(Shown {
             pts,
             requested: pending.time,
         });
         self.waiting = false;
+    }
+
+    #[cfg(target_vendor = "apple")]
+    fn has_picture(&self) -> bool {
+        self.plate.is_some() || self.texture.is_some()
+    }
+
+    /// Points the preview at `image`. The wgpu texture stays owned by the reel.
+    #[cfg(target_vendor = "apple")]
+    fn bind(&mut self, state: &eframe::egui_wgpu::RenderState, image: &cutlass_compose::RgbImage) {
+        let view = image
+            .texture()
+            .create_view(&eframe::wgpu::TextureViewDescriptor::default());
+        let mut renderer = state.renderer.write();
+        if let Some(id) = self.native {
+            renderer.update_egui_texture_from_wgpu_texture(
+                &state.device,
+                &view,
+                eframe::wgpu::FilterMode::Linear,
+                id,
+            );
+        } else {
+            self.native = Some(renderer.register_native_texture(
+                &state.device,
+                &view,
+                eframe::wgpu::FilterMode::Linear,
+            ));
+        }
+    }
+
+    #[cfg(target_vendor = "apple")]
+    fn free_native(&mut self, state: Option<&eframe::egui_wgpu::RenderState>) {
+        let Some(id) = self.native.take() else {
+            return;
+        };
+        let Some(state) = state else {
+            self.native = Some(id);
+            return;
+        };
+        state.renderer.write().free_texture(&id);
     }
 
     #[cfg(target_vendor = "apple")]
@@ -282,6 +370,13 @@ pub(crate) fn file_path(source: &str) -> Option<&str> {
 struct Shown {
     pts: Timestamp,
     requested: Timestamp,
+}
+
+#[cfg(target_vendor = "apple")]
+enum Drawn {
+    Gpu(Box<cutlass_compose::RgbImage>),
+    Cpu(Vec<u8>, u32, u32),
+    Failed,
 }
 
 #[cfg(target_vendor = "apple")]

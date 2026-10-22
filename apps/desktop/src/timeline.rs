@@ -375,8 +375,22 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::SetCrop { segment, .. }
         | Command::SetBlend { segment, .. } => segment_lane_locked(project, lanes, *segment),
         Command::SetSource { .. } => false,
+        Command::DetachAudio { segment } => detach_blocked(project, lanes, *segment),
         _ => false,
     }
+}
+
+/// Detach edits the picture's lane and lands on an audio lane when one has room.
+fn detach_blocked(project: &Project, lanes: &Lanes, id: SegmentId) -> bool {
+    if segment_lane_locked(project, lanes, id) {
+        return true;
+    }
+    let Some(segment) = project.timeline().segment(id) else {
+        return false;
+    };
+    project
+        .audio_track_with_room(segment.timeline())
+        .is_some_and(|track| lane_row(lanes, track).locked)
 }
 
 /// Marker flags and beat notes. View state, until the project stores them.
@@ -4467,6 +4481,7 @@ mod tests {
             segment: id,
             blend: Blend::Multiply,
         };
+        let detach = Command::DetachAudio { segment: id };
         assert!(super::blocks_command(&cut, &locked, &volume));
         assert!(super::blocks_command(&cut, &locked, &hidden));
         assert!(super::blocks_command(&cut, &locked, &easing));
@@ -4475,6 +4490,7 @@ mod tests {
         assert!(super::blocks_command(&cut, &locked, &pitch));
         assert!(super::blocks_command(&cut, &locked, &crop));
         assert!(super::blocks_command(&cut, &locked, &blend));
+        assert!(super::blocks_command(&cut, &locked, &detach));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),
@@ -4514,6 +4530,42 @@ mod tests {
             &cut,
             &super::Lanes::default(),
             &blend
+        ));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &detach
+        ));
+        let stored = cut.asset(asset).expect("asset");
+        let away =
+            Segment::media(stored, source, 2_000_000, Channels::Sound, Speed::ONE).expect("sound");
+        let audio = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: None,
+                    segment: away,
+                }],
+            )
+            .expect("audio")
+            .as_slice()
+        {
+            [Outcome::Opened { track, .. }] => *track,
+            other => panic!("expected an audio track, got {other:?}"),
+        };
+        let audio_locked = super::Lanes {
+            rows: vec![super::LaneFlag {
+                track: audio,
+                locked: true,
+                hidden: false,
+                muted: false,
+            }],
+        };
+        assert!(super::blocks_command(&cut, &audio_locked, &detach));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &detach
         ));
     }
 

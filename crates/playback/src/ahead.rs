@@ -85,6 +85,12 @@ impl<I> Ahead<I> {
         self.queue.is_full()
     }
 
+    /// The frames still queued, earliest first. A frame held back from a full
+    /// queue is not included.
+    pub fn frames(&self) -> impl Iterator<Item = &VideoFrame<I>> {
+        self.queue.iter()
+    }
+
     /// The decoder was flushed and no frame is waiting to enter the queue.
     pub fn drained(&self) -> bool {
         self.flushed && self.held.is_none()

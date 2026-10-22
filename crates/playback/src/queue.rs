@@ -57,6 +57,11 @@ impl<I> Queue<I> {
         self.frames.len() == self.limit
     }
 
+    /// The frames still queued, earliest first.
+    pub(crate) fn iter(&self) -> std::collections::vec_deque::Iter<'_, VideoFrame<I>> {
+        self.frames.iter()
+    }
+
     /// Appends `frame`. Presentation times must increase.
     ///
     /// On failure the frame is returned. A full queue means the decoder

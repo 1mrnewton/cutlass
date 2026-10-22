@@ -747,6 +747,7 @@ impl eframe::App for CutlassApp {
                     &self.project,
                     self.playhead_us,
                     &hidden,
+                    self.play.is_some(),
                 );
                 let commands = preview::show(
                     ui,

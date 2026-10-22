@@ -2,8 +2,10 @@
 //!
 //! On Apple each video track has its own VideoToolbox reader and frame queue.
 //! The reader stays inside the current group of pictures, skips to a keyframe
-//! the clock has reached, and drops frames that are already late. The next
-//! clip on a track opens while the hardware reader count is under the cap.
+//! the clock has reached, and drops frames that are already late. Pictures it
+//! has already decoded stay in a per-track cache, and the ones that cache
+//! drops stay in a shared pool. A file that was opened before is parsed once.
+//! The next clip on a track opens while the hardware reader count is under the cap.
 //! The window draws those frames from the bottom track upward and does not
 //! copy them back. A failure is written to the app log. A seek, and a cut,
 //! keep the last picture until the new one is ready. Where no video decoder
@@ -13,12 +15,19 @@ use cutlass_compose::Gpu;
 use cutlass_project::Project;
 
 #[cfg(target_vendor = "apple")]
-use cutlass_core::Timestamp;
+use cutlass_core::{
+    ColorTags, ContentLight, MasteringDisplay, Packet, Rotation, Timestamp, VideoFrame,
+    VideoStreamConfig,
+};
 #[cfg(target_vendor = "apple")]
 use cutlass_project::{AssetId, TrackId};
 #[cfg(target_vendor = "apple")]
 use std::path::Path;
 
+#[cfg(target_vendor = "apple")]
+use std::collections::VecDeque;
+#[cfg(target_vendor = "apple")]
+use std::num::NonZeroUsize;
 #[cfg(target_vendor = "apple")]
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[cfg(target_vendor = "apple")]
@@ -27,11 +36,9 @@ use std::thread::JoinHandle;
 #[cfg(target_vendor = "apple")]
 use cutlass_color::{Matrix, YuvPlanes};
 #[cfg(target_vendor = "apple")]
-use cutlass_core::Packet;
-#[cfg(target_vendor = "apple")]
 use cutlass_media::{Content, Probe, VideoSession};
 #[cfg(target_vendor = "apple")]
-use cutlass_playback::{Ahead, Decode, Reach};
+use cutlass_playback::{Ahead, Decode, FrameCache, FramePool, Reach};
 #[cfg(target_vendor = "apple")]
 use cutlass_videotoolbox::PixelBuffer;
 
@@ -47,6 +54,22 @@ const DECODE_BUDGET: usize = QUEUE_DEPTH;
 /// not recovered. A picture that is already on screen still gets a reader.
 #[cfg(target_vendor = "apple")]
 const HW_READER_CAP: usize = 8;
+
+/// Pictures one track keeps. CapCut's frame-cache maximum was not recovered.
+#[cfg(target_vendor = "apple")]
+const FRAME_CACHE_MAX: usize = 8;
+
+/// Pictures playback keeps behind the playhead.
+#[cfg(target_vendor = "apple")]
+const FRAME_CACHE_MIN: usize = 2;
+
+/// Pictures kept after a track cache drops them. CapCut's pool size was not recovered.
+#[cfg(target_vendor = "apple")]
+const FRAME_POOL_MAX: usize = 64;
+
+/// Parsed files kept so the next reader does not read them again.
+#[cfg(target_vendor = "apple")]
+const DEMUX_CACHE_MAX: usize = 8;
 
 /// The open readers and the GPU the window already created.
 pub struct Reel {
@@ -143,17 +166,18 @@ impl Reel {
         project: &Project,
         playhead_us: i64,
         hidden: &[cutlass_project::TrackId],
+        playing: bool,
     ) -> Vec<crate::preview::DrawnPicture> {
         if self.gpu.is_none() {
             return Vec::new();
         }
         #[cfg(target_vendor = "apple")]
         {
-            self.images_apple(ctx, state, project, playhead_us, hidden)
+            self.images_apple(ctx, state, project, playhead_us, hidden, playing)
         }
         #[cfg(not(target_vendor = "apple"))]
         {
-            let _ = (ctx, state, project, playhead_us, hidden);
+            let _ = (ctx, state, project, playhead_us, hidden, playing);
             Vec::new()
         }
     }
@@ -166,11 +190,12 @@ impl Reel {
         project: &Project,
         playhead_us: i64,
         hidden: &[cutlass_project::TrackId],
+        playing: bool,
     ) -> Vec<crate::preview::DrawnPicture> {
         let layers = crate::preview::picture_layers(project, playhead_us, hidden);
         let next = crate::preview::upcoming_layers(project, playhead_us, hidden);
         self.retain(&layers, state);
-        self.ask(project, playhead_us, &layers, &next);
+        self.ask(project, playhead_us, &layers, &next, playing);
         self.deliver(ctx, state);
         let mut drawn = Vec::new();
         for (track, _) in layers {
@@ -210,6 +235,7 @@ impl Reel {
         playhead_us: i64,
         layers: &[(TrackId, &cutlass_project::Segment)],
         next: &[(TrackId, AssetId, &str)],
+        playing: bool,
     ) {
         let mut show = Vec::new();
         for (track, segment) in layers {
@@ -239,14 +265,16 @@ impl Reel {
                 source: (*source).to_owned(),
             })
             .collect();
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.layers == show && pending.next == next)
-        {
+        if self.pending.as_ref().is_some_and(|pending| {
+            pending.layers == show && pending.next == next && pending.playing == playing
+        }) {
             return;
         }
-        let ask = Ask { layers: show, next };
+        let ask = Ask {
+            layers: show,
+            next,
+            playing,
+        };
         let posted = self
             .bridge
             .as_ref()
@@ -558,10 +586,11 @@ enum Drawn {
 #[cfg(target_vendor = "apple")]
 struct Open {
     source: String,
-    packets: Vec<Packet>,
-    matrix: Matrix,
+    /// Keeps this file in the demuxer cache for as long as the reader is open.
+    parsed: Arc<ParsedClip>,
     session: Session,
     ahead: Ahead<PixelBuffer>,
+    pictures: FrameCache<PixelBuffer>,
     cursor: usize,
     followed: Option<Timestamp>,
     failed: Option<Timestamp>,
@@ -599,23 +628,213 @@ impl Decode for Session {
 }
 
 #[cfg(target_vendor = "apple")]
-fn open_clip(source: &str) -> Clip {
+struct ParsedClip {
+    packets: Arc<[Packet]>,
+    matrix: Matrix,
+    config: VideoStreamConfig,
+    color: Option<ColorTags>,
+    mastering: Option<MasteringDisplay>,
+    content_light: Option<ContentLight>,
+    rotation: Rotation,
+}
+
+#[cfg(target_vendor = "apple")]
+struct Caches {
+    demux: Mutex<DemuxCache>,
+    pool: Mutex<PicturePool>,
+}
+
+#[cfg(target_vendor = "apple")]
+impl Caches {
+    fn new() -> Self {
+        Self {
+            demux: Mutex::new(DemuxCache::new(DEMUX_CACHE_MAX)),
+            pool: Mutex::new(PicturePool::new(FRAME_POOL_MAX)),
+        }
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+struct PicturePool {
+    frames: FramePool<PixelBuffer>,
+    noted: usize,
+}
+
+#[cfg(target_vendor = "apple")]
+impl PicturePool {
+    fn new(maximum: usize) -> Self {
+        let maximum = NonZeroUsize::new(maximum).unwrap_or(NonZeroUsize::MIN);
+        Self {
+            frames: FramePool::new(maximum),
+            noted: 0,
+        }
+    }
+
+    fn find(&self, key: &str, time: Timestamp) -> Option<VideoFrame<PixelBuffer>> {
+        self.frames
+            .find(key, time, Timestamp::new(0, time.timescale))
+            .cloned()
+    }
+
+    fn put_all(&mut self, key: &str, frames: Vec<VideoFrame<PixelBuffer>>) {
+        if frames.is_empty() {
+            return;
+        }
+        for frame in frames {
+            self.frames.put(key, frame);
+        }
+        self.note();
+    }
+
+    fn note(&mut self) {
+        let len = self.frames.len();
+        if self.noted == len {
+            return;
+        }
+        self.noted = len;
+        log::info!("The preview is holding {len} cached pictures.");
+    }
+}
+
+/// Parsed files, oldest first. A file a reader still holds is not dropped.
+#[cfg(target_vendor = "apple")]
+struct DemuxCache {
+    maximum: usize,
+    entries: VecDeque<(String, Arc<ParsedClip>)>,
+}
+
+#[cfg(target_vendor = "apple")]
+#[derive(Debug)]
+enum DemuxStore {
+    Stored,
+    Evicted(String),
+    Full,
+}
+
+#[cfg(target_vendor = "apple")]
+impl DemuxCache {
+    fn new(maximum: usize) -> Self {
+        Self {
+            maximum,
+            entries: VecDeque::new(),
+        }
+    }
+
+    fn fetch(&mut self, source: &str) -> Option<Arc<ParsedClip>> {
+        let index = self.entries.iter().position(|(key, _)| key == source)?;
+        let entry = self.entries.remove(index)?;
+        let parsed = Arc::clone(&entry.1);
+        self.entries.push_back(entry);
+        Some(parsed)
+    }
+
+    fn store(&mut self, source: String, parsed: Arc<ParsedClip>) -> DemuxStore {
+        if let Some(index) = self.entries.iter().position(|(key, _)| key == &source) {
+            if let Some(entry) = self.entries.remove(index) {
+                self.entries.push_back(entry);
+            }
+            return DemuxStore::Stored;
+        }
+        if self.entries.len() >= self.maximum {
+            let unused = self
+                .entries
+                .iter()
+                .position(|(_, parsed)| Arc::strong_count(parsed) == 1);
+            let Some(index) = unused else {
+                return DemuxStore::Full;
+            };
+            let Some((previous, _)) = self.entries.remove(index) else {
+                return DemuxStore::Full;
+            };
+            self.entries.push_back((source, parsed));
+            return DemuxStore::Evicted(previous);
+        }
+        self.entries.push_back((source, parsed));
+        DemuxStore::Stored
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn open_clip(source: &str, caches: &Caches) -> Clip {
     let Some(path) = file_path(source) else {
         log::warn!("The preview skipped {source}: it is not a file.");
         return Clip::Missing;
     };
+    let parsed = match lock_demux(caches).fetch(source) {
+        Some(parsed) => {
+            log::info!("The preview reused a cached demuxer for {path}.");
+            parsed
+        }
+        None => {
+            let Some(parsed) = read_clip(path) else {
+                return Clip::Missing;
+            };
+            match lock_demux(caches).store(source.to_owned(), Arc::clone(&parsed)) {
+                DemuxStore::Evicted(previous) => {
+                    log::info!(
+                        "The preview dropped the cached demuxer for {previous}. The demuxer cache is full."
+                    );
+                }
+                DemuxStore::Full => {
+                    log::info!("The preview opened {path} and the demuxer cache is full.");
+                }
+                DemuxStore::Stored => {}
+            }
+            parsed
+        }
+    };
+    let session = match VideoSession::open(
+        &parsed.config,
+        parsed.color,
+        parsed.mastering,
+        parsed.content_light,
+        parsed.rotation,
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            log::warn!("The preview could not decode {path}: {error}.");
+            return Clip::Missing;
+        }
+    };
+    let depth = NonZeroUsize::new(QUEUE_DEPTH).expect("the queue holds a frame");
+    let pictures = FrameCache::new(
+        NonZeroUsize::new(FRAME_CACHE_MAX).expect("the cache holds a frame"),
+        FRAME_CACHE_MIN,
+    );
+    Clip::Ready(Box::new(Open {
+        source: source.to_owned(),
+        parsed,
+        session: Session(session),
+        ahead: Ahead::new(depth),
+        pictures,
+        cursor: 0,
+        followed: None,
+        failed: None,
+    }))
+}
+
+#[cfg(target_vendor = "apple")]
+fn lock_demux(caches: &Caches) -> MutexGuard<'_, DemuxCache> {
+    caches
+        .demux
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[cfg(target_vendor = "apple")]
+fn read_clip(path: &str) -> Option<Arc<ParsedClip>> {
     let bytes = match std::fs::read(Path::new(path)) {
         Ok(bytes) => bytes,
         Err(error) => {
             log::warn!("The preview could not read {path}: {error}.");
-            return Clip::Missing;
+            return None;
         }
     };
     let probe = match Probe::parse(&bytes) {
         Ok(probe) => probe,
         Err(error) => {
             log::warn!("The preview could not open {path}: {error}.");
-            return Clip::Missing;
+            return None;
         }
     };
     let Some(index) = probe
@@ -624,7 +843,7 @@ fn open_clip(source: &str) -> Clip {
         .position(|track| track.enabled && matches!(track.content, Content::Video { .. }))
     else {
         log::warn!("The preview found no picture track in {path}.");
-        return Clip::Missing;
+        return None;
     };
     let Content::Video {
         config,
@@ -634,7 +853,7 @@ fn open_clip(source: &str) -> Clip {
     } = &probe.tracks()[index].content
     else {
         log::warn!("The preview found no picture track in {path}.");
-        return Clip::Missing;
+        return None;
     };
     let matrix = match Matrix::resolve(
         color.as_ref().map(|tags| tags.matrix),
@@ -644,31 +863,21 @@ fn open_clip(source: &str) -> Clip {
         Ok(matrix) => matrix,
         Err(error) => {
             log::warn!("The preview could not resolve the color of {path}: {error}.");
-            return Clip::Missing;
-        }
-    };
-    let rotation = probe.tracks()[index].rotation;
-    let session = match VideoSession::open(config, *color, *mastering, *content_light, rotation) {
-        Ok(session) => session,
-        Err(error) => {
-            log::warn!("The preview could not decode {path}: {error}.");
-            return Clip::Missing;
+            return None;
         }
     };
     let Some(packets) = probe.samples(index).map(<[Packet]>::to_vec) else {
         log::warn!("The preview found no picture samples in {path}.");
-        return Clip::Missing;
+        return None;
     };
-    let depth = std::num::NonZeroUsize::new(QUEUE_DEPTH).expect("the queue holds a frame");
-    Clip::Ready(Box::new(Open {
-        source: source.to_owned(),
-        packets,
+    Some(Arc::new(ParsedClip {
+        packets: Arc::from(packets),
         matrix,
-        session: Session(session),
-        ahead: Ahead::new(depth),
-        cursor: 0,
-        followed: None,
-        failed: None,
+        config: config.clone(),
+        color: *color,
+        mastering: *mastering,
+        content_light: *content_light,
+        rotation: probe.tracks()[index].rotation,
     }))
 }
 
@@ -826,6 +1035,7 @@ enum Chunk {
 struct Ask {
     layers: Vec<ShowLayer>,
     next: Vec<ShowNext>,
+    playing: bool,
 }
 
 #[cfg(target_vendor = "apple")]
@@ -857,7 +1067,11 @@ struct LayerFrame {
 
 #[cfg(target_vendor = "apple")]
 enum ReaderMsg {
-    At { generation: u64, time: Timestamp },
+    At {
+        generation: u64,
+        time: Timestamp,
+        playing: bool,
+    },
     Stop,
 }
 
@@ -882,6 +1096,7 @@ enum Body {
 
 #[cfg(target_vendor = "apple")]
 fn direct_loop(ask: Arc<Note<Message>>, board: Arc<Mutex<Vec<LayerFrame>>>) {
+    let caches = Arc::new(Caches::new());
     let mut readers = Vec::new();
     let mut open = 0;
     let mut delayed = false;
@@ -893,7 +1108,14 @@ fn direct_loop(ask: Arc<Note<Message>>, board: Arc<Mutex<Vec<LayerFrame>>>) {
                 delayed = false;
             }
             Message::Show(show) => {
-                reconcile(&board, &mut readers, &mut open, &mut delayed, &show);
+                reconcile(
+                    &board,
+                    &caches,
+                    &mut readers,
+                    &mut open,
+                    &mut delayed,
+                    &show,
+                );
             }
         }
     }
@@ -903,6 +1125,7 @@ fn direct_loop(ask: Arc<Note<Message>>, board: Arc<Mutex<Vec<LayerFrame>>>) {
 #[cfg(target_vendor = "apple")]
 fn reconcile(
     board: &Arc<Mutex<Vec<LayerFrame>>>,
+    caches: &Arc<Caches>,
     readers: &mut Vec<Reader>,
     open: &mut usize,
     delayed: &mut bool,
@@ -934,16 +1157,18 @@ fn reconcile(
             reader.note.post(ReaderMsg::At {
                 generation: layer.generation,
                 time: layer.time,
+                playing: show.playing,
             });
             continue;
         }
         spawn_reader(
             readers,
             Arc::clone(board),
+            Arc::clone(caches),
             layer.track,
             layer.asset,
             layer.source.clone(),
-            Some((layer.generation, layer.time)),
+            Some((layer.generation, layer.time, show.playing)),
         );
     }
     let mut skipped = false;
@@ -961,6 +1186,7 @@ fn reconcile(
         spawn_reader(
             readers,
             Arc::clone(board),
+            Arc::clone(caches),
             next.track,
             next.asset,
             next.source.clone(),
@@ -995,20 +1221,25 @@ fn note_readers(open: &mut usize, count: usize) {
 fn spawn_reader(
     readers: &mut Vec<Reader>,
     board: Arc<Mutex<Vec<LayerFrame>>>,
+    caches: Arc<Caches>,
     track: TrackId,
     asset: AssetId,
     source: String,
-    first: Option<(u64, Timestamp)>,
+    first: Option<(u64, Timestamp, bool)>,
 ) {
     let note = Arc::new(Note::new());
-    if let Some((generation, time)) = first {
-        note.post(ReaderMsg::At { generation, time });
+    if let Some((generation, time, playing)) = first {
+        note.post(ReaderMsg::At {
+            generation,
+            time,
+            playing,
+        });
     }
     let note_thread = Arc::clone(&note);
     let source_thread = source.clone();
     let spawned = std::thread::Builder::new()
         .name("cutlass-decode".to_owned())
-        .spawn(move || decode_loop(note_thread, board, track, source_thread));
+        .spawn(move || decode_loop(note_thread, board, caches, track, source_thread));
     match spawned {
         Ok(join) => readers.push(Reader {
             track,
@@ -1035,26 +1266,35 @@ fn stop_readers(readers: &mut Vec<Reader>) {
 fn decode_loop(
     note: Arc<Note<ReaderMsg>>,
     board: Arc<Mutex<Vec<LayerFrame>>>,
+    caches: Arc<Caches>,
     track: TrackId,
     source: String,
 ) {
-    let mut open = match open_clip(&source) {
+    let mut open = match open_clip(&source, &caches) {
         Clip::Ready(open) => Some(*open),
         Clip::Missing => None,
+    };
+    let parked = ParkPictures {
+        open: &mut open,
+        pool: &caches.pool,
     };
     let mut target = None;
     loop {
         if target.is_none() {
             match note.wait() {
                 None | Some(ReaderMsg::Stop) => return,
-                Some(ReaderMsg::At { generation, time }) => target = Some((generation, time)),
+                Some(ReaderMsg::At {
+                    generation,
+                    time,
+                    playing,
+                }) => target = Some((generation, time, playing)),
             }
             continue;
         }
-        let Some((generation, time)) = target else {
+        let Some((generation, time, playing)) = target else {
             continue;
         };
-        let Some(clip) = open.as_mut() else {
+        let Some(clip) = parked.open.as_mut() else {
             publish(
                 &board,
                 LayerFrame {
@@ -1067,11 +1307,15 @@ fn decode_loop(
             target = None;
             continue;
         };
-        let chunk = step(clip, &board, track, generation, time);
+        let chunk = step(clip, &board, &caches.pool, track, generation, time, playing);
         match note.poll() {
             Inbox::Closed | Inbox::Message(ReaderMsg::Stop) => return,
-            Inbox::Message(ReaderMsg::At { generation, time }) => {
-                target = Some((generation, time));
+            Inbox::Message(ReaderMsg::At {
+                generation,
+                time,
+                playing,
+            }) => {
+                target = Some((generation, time, playing));
             }
             Inbox::Empty => {
                 if chunk != Chunk::Short {
@@ -1083,20 +1327,58 @@ fn decode_loop(
 }
 
 #[cfg(target_vendor = "apple")]
+struct ParkPictures<'a> {
+    open: &'a mut Option<Open>,
+    pool: &'a Mutex<PicturePool>,
+}
+
+#[cfg(target_vendor = "apple")]
+impl Drop for ParkPictures<'_> {
+    fn drop(&mut self) {
+        let Some(clip) = self.open.as_mut() else {
+            return;
+        };
+        let frames = clip.pictures.drain();
+        if frames.is_empty() {
+            return;
+        }
+        let mut pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        pool.put_all(&clip.source, frames);
+    }
+}
+
+#[cfg(target_vendor = "apple")]
 fn step(
     clip: &mut Open,
     board: &Mutex<Vec<LayerFrame>>,
+    pool: &Mutex<PicturePool>,
     track: TrackId,
     generation: u64,
     time: Timestamp,
+    playing: bool,
 ) -> Chunk {
-    if clip.failed == Some(time) {
+    let hit = cached_frame(clip, pool, time, playing);
+    if let Some(frame) = &hit {
+        clip.failed = None;
+        show_frame(clip, board, track, generation, time, frame);
+        let behind = clip.followed.is_some_and(|followed| time < followed);
+        if !playing || behind {
+            return Chunk::Covers;
+        }
+    }
+    if hit.is_none() && clip.failed == Some(time) {
         publish(board, missing(track, generation, time));
         return Chunk::Settled;
     }
     let readable = match pump(clip, time) {
         Ok(readable) => readable,
         Err(error) => {
+            if hit.is_some() {
+                return Chunk::Covers;
+            }
             if clip.failed.is_none() {
                 log::warn!("The preview could not decode {}: {error}.", clip.source);
             }
@@ -1106,6 +1388,9 @@ fn step(
         }
     };
     if !readable {
+        if hit.is_some() {
+            return Chunk::Covers;
+        }
         if clip.failed.is_none() {
             log::warn!("The preview has no frame at this time in {}.", clip.source);
         }
@@ -1113,14 +1398,18 @@ fn step(
         publish(board, missing(track, generation, time));
         return Chunk::Settled;
     }
-    let matrix = clip.matrix;
+    remember(clip, pool, time, playing);
+    let matrix = clip.parsed.matrix;
     let taken = clip
         .ahead
         .at(time)
         .map(|frame| (frame.pts, frame.image.clone()));
     let Some((pts, buffer)) = taken else {
-        let finished =
-            clip.ahead.is_full() || (clip.cursor >= clip.packets.len() && clip.ahead.drained());
+        if hit.is_some() {
+            return Chunk::Covers;
+        }
+        let finished = clip.ahead.is_full()
+            || (clip.cursor >= clip.parsed.packets.len() && clip.ahead.drained());
         if !finished {
             return Chunk::Short;
         }
@@ -1151,6 +1440,81 @@ fn step(
 }
 
 #[cfg(target_vendor = "apple")]
+fn cached_frame(
+    clip: &mut Open,
+    pool: &Mutex<PicturePool>,
+    time: Timestamp,
+    playing: bool,
+) -> Option<VideoFrame<PixelBuffer>> {
+    let tolerance = Timestamp::new(0, time.timescale);
+    if let Some(frame) = clip.pictures.find(time, tolerance).cloned() {
+        return Some(frame);
+    }
+    let found = pool
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .find(&clip.source, time);
+    let frame = found?;
+    let remembered = clip.pictures.insert(frame.clone(), time, playing);
+    let mut extra = remembered.evicted;
+    if let Some(refused) = remembered.refused {
+        extra.push(refused);
+    }
+    if !extra.is_empty() {
+        pool.lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .put_all(&clip.source, extra);
+    }
+    Some(frame)
+}
+
+#[cfg(target_vendor = "apple")]
+fn remember(clip: &mut Open, pool: &Mutex<PicturePool>, time: Timestamp, playing: bool) {
+    let queued: Vec<_> = clip.ahead.frames().cloned().collect();
+    if queued.is_empty() {
+        return;
+    }
+    let mut extra = Vec::new();
+    for frame in queued {
+        let remembered = clip.pictures.insert(frame, time, playing);
+        extra.extend(remembered.evicted);
+        if let Some(refused) = remembered.refused {
+            extra.push(refused);
+        }
+    }
+    if extra.is_empty() {
+        return;
+    }
+    pool.lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .put_all(&clip.source, extra);
+}
+
+#[cfg(target_vendor = "apple")]
+fn show_frame(
+    clip: &Open,
+    board: &Mutex<Vec<LayerFrame>>,
+    track: TrackId,
+    generation: u64,
+    time: Timestamp,
+    frame: &VideoFrame<PixelBuffer>,
+) {
+    publish(
+        board,
+        LayerFrame {
+            track,
+            generation,
+            requested: time,
+            body: Body::Frame {
+                buffer: frame.image.clone(),
+                matrix: clip.parsed.matrix,
+                pts: frame.pts,
+            },
+        },
+    );
+}
+
+#[cfg(target_vendor = "apple")]
 fn missing(track: TrackId, generation: u64, time: Timestamp) -> LayerFrame {
     LayerFrame {
         track,
@@ -1173,15 +1537,15 @@ fn publish(board: &Mutex<Vec<LayerFrame>>, frame: LayerFrame) {
 #[cfg(target_vendor = "apple")]
 fn pump(clip: &mut Open, time: Timestamp) -> Result<bool, String> {
     let (start, restart) =
-        match cutlass_playback::reach(&clip.packets, clip.cursor, clip.followed, time) {
+        match cutlass_playback::reach(&clip.parsed.packets, clip.cursor, clip.followed, time) {
             None => {
                 clip.followed = Some(time);
                 return Ok(false);
             }
             Some(Reach::Keyframe(index)) => (index, true),
-            Some(Reach::Forward) => (clip.cursor.min(clip.packets.len()), false),
+            Some(Reach::Forward) => (clip.cursor.min(clip.parsed.packets.len()), false),
         };
-    let mut pending = &clip.packets[start..];
+    let mut pending = &clip.parsed.packets[start..];
     clip.ahead
         .follow(
             &mut clip.session,
@@ -1191,7 +1555,7 @@ fn pump(clip: &mut Open, time: Timestamp) -> Result<bool, String> {
             restart,
         )
         .map_err(|error| error.to_string())?;
-    clip.cursor = clip.packets.len() - pending.len();
+    clip.cursor = clip.parsed.packets.len() - pending.len();
     clip.followed = Some(time);
     Ok(true)
 }
@@ -1268,6 +1632,53 @@ mod tests {
         assert_eq!(file_path("content://media/1"), None);
         assert_eq!(file_path(""), None);
         assert_eq!(file_path("file://"), None);
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_demuxer_cache_reuses_a_parsed_file_and_keeps_one_still_open() {
+        use std::sync::Arc;
+
+        use cutlass_color::Matrix;
+        use cutlass_core::{Rotation, VideoCodec, VideoStreamConfig};
+
+        use super::{DemuxCache, DemuxStore, ParsedClip};
+
+        let parsed = || {
+            Arc::new(ParsedClip {
+                packets: Arc::from(Vec::new()),
+                matrix: Matrix::Bt709,
+                config: VideoStreamConfig {
+                    codec: VideoCodec::H264,
+                    width: 16,
+                    height: 16,
+                    config_record: Vec::new(),
+                },
+                color: None,
+                mastering: None,
+                content_light: None,
+                rotation: Rotation::Zero,
+            })
+        };
+        let mut cache = DemuxCache::new(1);
+        let first = parsed();
+        assert!(matches!(
+            cache.store("a".to_owned(), Arc::clone(&first)),
+            DemuxStore::Stored
+        ));
+        drop(first);
+        let held = parsed();
+        match cache.store("b".to_owned(), Arc::clone(&held)) {
+            DemuxStore::Evicted(previous) => assert_eq!(previous, "a"),
+            other => panic!("expected the idle demuxer to be dropped, got {other:?}"),
+        }
+        assert!(matches!(
+            cache.store("c".to_owned(), parsed()),
+            DemuxStore::Full
+        ));
+        assert!(cache.fetch("b").is_some());
+        assert!(cache.fetch("a").is_none());
+        drop(held);
     }
 
     #[cfg(target_vendor = "apple")]

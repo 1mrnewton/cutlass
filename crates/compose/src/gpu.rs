@@ -38,6 +38,18 @@ impl RgbImage {
     }
 }
 
+/// What the window's device has to enable before a 10-bit frame can be sampled.
+///
+/// P010 is stored in 16-bit unorm textures. wgpu leaves that feature off until
+/// the device asks for it. `available` is what the adapter offers.
+pub fn sampling_features(available: wgpu::Features) -> wgpu::Features {
+    let mut features = wgpu::Features::empty();
+    if available.contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM) {
+        features |= wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+    }
+    features
+}
+
 impl Gpu {
     /// Opens the default adapter.
     pub fn new() -> Result<Self, Error> {
@@ -45,15 +57,8 @@ impl Gpu {
         let adapter =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
                 .map_err(|_| Error::NoAdapter)?;
-        let mut required_features = wgpu::Features::empty();
-        if adapter
-            .features()
-            .contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
-        {
-            required_features |= wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
-        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features,
+            required_features: sampling_features(adapter.features()),
             ..Default::default()
         }))
         .map_err(|error| Error::Device(error.to_string()))?;
@@ -561,4 +566,16 @@ fn uniform_bytes(coefficients: Coefficients) -> [u8; 32] {
         bytes[start..start + 4].copy_from_slice(&value.to_le_bytes());
     }
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sampling_features;
+
+    #[test]
+    fn ten_bit_frames_ask_for_the_feature_the_window_must_request() {
+        let asked = sampling_features(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM);
+        assert!(asked.contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM));
+        assert!(sampling_features(wgpu::Features::empty()).is_empty());
+    }
 }

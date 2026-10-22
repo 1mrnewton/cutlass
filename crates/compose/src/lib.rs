@@ -11,4 +11,4 @@ mod gpu;
 mod import;
 
 pub use error::Error;
-pub use gpu::{Gpu, RgbImage};
+pub use gpu::{Gpu, RgbImage, sampling_features};

@@ -42,18 +42,33 @@ fn main() -> eframe::Result {
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)
         .with_title_shown(false);
+    let mut native = eframe::NativeOptions {
+        viewport,
+        renderer: eframe::Renderer::Wgpu,
+        // The recent list is the only thing stored. The window is not restored.
+        persist_window: false,
+        ..Default::default()
+    };
+    request_preview_features(&mut native);
 
     eframe::run_native(
         "Cutlass",
-        eframe::NativeOptions {
-            viewport,
-            renderer: eframe::Renderer::Wgpu,
-            // The recent list is the only thing stored. The window is not restored.
-            persist_window: false,
-            ..Default::default()
-        },
+        native,
         Box::new(|cc| Ok(Box::new(CutlassApp::new(cc)))),
     )
+}
+
+/// A 10-bit frame is P010. The window device has to ask before it can sample one.
+fn request_preview_features(native: &mut eframe::NativeOptions) {
+    let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut native.wgpu_options.wgpu_setup else {
+        return;
+    };
+    let previous = std::sync::Arc::clone(&setup.device_descriptor);
+    setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+        let mut descriptor = previous(adapter);
+        descriptor.required_features |= cutlass_compose::sampling_features(adapter.features());
+        descriptor
+    });
 }
 
 struct CutlassApp {
@@ -895,5 +910,39 @@ fn header(ui: &mut egui::Ui, name: &str, recent: &[PathBuf]) -> Bar {
         export: export_clicked,
         settings: settings_clicked,
         file: file_ask,
+    }
+}
+
+#[cfg(test)]
+mod preview_device {
+    use super::request_preview_features;
+
+    #[test]
+    fn the_window_asks_for_ten_bit_samples_when_the_adapter_has_them() {
+        let instance = eframe::wgpu::Instance::new(
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
+        let Ok(adapter) = pollster::block_on(
+            instance.request_adapter(&eframe::wgpu::RequestAdapterOptions::default()),
+        ) else {
+            return;
+        };
+        if !adapter
+            .features()
+            .contains(eframe::wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
+        {
+            return;
+        }
+        let mut native = eframe::NativeOptions::default();
+        request_preview_features(&mut native);
+        let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &native.wgpu_options.wgpu_setup else {
+            panic!("the window opens its own device");
+        };
+        let descriptor = (setup.device_descriptor)(&adapter);
+        assert!(
+            descriptor
+                .required_features
+                .contains(eframe::wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
+        );
     }
 }

@@ -45,6 +45,7 @@ raw-window-handle = "0.6.2"
 
 [dev-dependencies]
 cutlass-mp4.workspace = true
+pollster.workspace = true
 
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
 cutlass-test-fixtures.workspace = true

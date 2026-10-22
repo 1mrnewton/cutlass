@@ -3840,3 +3840,208 @@ fn text_keeps_its_words_on_a_text_track() -> Result<(), Error> {
     );
     Ok(())
 }
+
+#[test]
+fn a_sticker_keeps_its_name_on_a_sticker_track() -> Result<(), Error> {
+    let mut cut = bare();
+    assert_eq!(
+        Segment::sticker("", 0, 1_000_000).expect_err("empty"),
+        Error::Sticker
+    );
+    let (id, track) = opened(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::sticker("Star", 0, 2_000_000)?,
+        },
+    )?);
+    let stored = cut
+        .project
+        .timeline()
+        .track(track)
+        .ok_or(Error::UnknownTrack(track))?;
+    assert_eq!(stored.kind(), TrackKind::Sticker);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .sticker_name(),
+        Some("Star")
+    );
+    assert!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .asset_id()
+            .is_none()
+    );
+    let (_, other) = opened(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::sticker("Dot", 0, 1_000_000)?,
+        },
+    )?);
+    assert_ne!(other, track);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .track(other)
+            .ok_or(Error::UnknownTrack(other))?
+            .kind(),
+        TrackKind::Sticker
+    );
+    let main = cut.main;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Place {
+                track: Some(main),
+                segment: Segment::sticker("No", 3_000_000, 1_000_000)?,
+            },
+        ),
+        Error::WrongTrack,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::Place {
+                track: Some(track),
+                segment: Segment::text("No", 3_000_000, 1_000_000)?,
+            },
+        ),
+        Error::WrongTrack,
+    );
+    let video = add_video(&mut cut, 10, 1280, 720)?;
+    let clip = media(&cut.project, video, 0, 30_000, Channels::Both)?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Place {
+                track: Some(track),
+                segment: clip,
+            },
+        ),
+        Error::WrongTrack,
+    );
+    run(
+        &mut cut,
+        Command::SetSticker {
+            segment: id,
+            name: "Moon".to_owned(),
+        },
+    )?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetSticker {
+                segment: id,
+                name: String::new(),
+            },
+        ),
+        Error::Sticker,
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .sticker_name(),
+        Some("Moon")
+    );
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: id,
+            at: 1_000_000,
+        },
+    )?);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(right)
+            .ok_or(Error::UnknownSegment(right))?
+            .sticker_name(),
+        Some("Moon")
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetSpeed {
+                segment: id,
+                speed: Speed::new(2, 1)?,
+            },
+        ),
+        Error::Sticker,
+    );
+    expect_err(
+        run(&mut cut, Command::Reverse { segment: id }),
+        Error::Sticker,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::Freeze {
+                segment: id,
+                at: 500_000,
+                hold: 1_000_000,
+            },
+        ),
+        Error::Sticker,
+    );
+    let saved = cut.project.to_json()?;
+    assert!(saved.contains("\"sticker\": \"Moon\""));
+    assert!(!saved.contains("\"asset\":"));
+    assert!(!saved.contains("\"text\""));
+    let loaded = Project::from_json(&saved)?;
+    assert_eq!(
+        loaded
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .sticker_name(),
+        Some("Moon")
+    );
+    cut.history.undo(&mut cut.project)?;
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .sticker_name(),
+        Some("Star")
+    );
+    let placed = media(&cut.project, video, 0, 30_000, Channels::Both)?;
+    let clip_id = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: placed,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetSticker {
+                segment: clip_id,
+                name: "Nope".to_owned(),
+            },
+        ),
+        Error::NotSticker,
+    );
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetSticker {
+                segment: missing,
+                name: "x".to_owned(),
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
+    Ok(())
+}

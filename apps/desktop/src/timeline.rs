@@ -2640,6 +2640,9 @@ fn clip_name(project: &Project, segment: &cutlass_project::Segment) -> String {
     if let Some(words) = segment.words() {
         return words.to_owned();
     }
+    if let Some(name) = segment.sticker_name() {
+        return name.to_owned();
+    }
     segment
         .asset_id()
         .and_then(|id| project.asset(id))

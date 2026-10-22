@@ -118,6 +118,11 @@ pub enum Command {
         segment: SegmentId,
         words: String,
     },
+    /// Replaces the name on a sticker segment. An empty name is refused.
+    SetSticker {
+        segment: SegmentId,
+        name: String,
+    },
     /// Locks the track when on. A locked track refuses an edit.
     SetLocked {
         track: TrackId,
@@ -194,6 +199,9 @@ pub fn commands_for_trim(
 ) -> Result<Vec<Command>, Error> {
     if segment.is_text() {
         return Err(Error::Text);
+    }
+    if segment.is_sticker() {
+        return Err(Error::Sticker);
     }
     let Some(id) = segment.asset_id() else {
         return Err(Error::Text);

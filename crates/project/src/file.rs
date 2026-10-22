@@ -353,6 +353,7 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
         id: segment.id().to_string(),
         asset: segment.asset_id().map(|id| id.to_string()),
         text: segment.words().map(str::to_owned),
+        sticker: segment.sticker_name().map(str::to_owned),
         source: segment.source().map(range_doc),
         timeline: SpanDoc {
             start: segment.timeline().start().value,
@@ -380,10 +381,19 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
 fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Error> {
     let id: SegmentId = document.id.parse()?;
     if document.text.is_some() {
-        if document.asset.is_some() {
+        if document.asset.is_some() || document.sticker.is_some() {
             return Err(Error::Text);
         }
         let mut segment = text_segment(document)?;
+        segment.assign(id);
+        finish_segment(&mut segment, document)?;
+        return Ok(segment);
+    }
+    if document.sticker.is_some() {
+        if document.asset.is_some() {
+            return Err(Error::Sticker);
+        }
+        let mut segment = sticker_segment(document)?;
         segment.assign(id);
         finish_segment(&mut segment, document)?;
         return Ok(segment);
@@ -444,6 +454,23 @@ fn text_segment(document: &SegmentDoc) -> Result<Segment, Error> {
         return Err(Error::Channels);
     }
     Segment::text(words, document.timeline.start, document.timeline.duration)
+}
+
+fn sticker_segment(document: &SegmentDoc) -> Result<Segment, Error> {
+    let Some(name) = document.sticker.clone() else {
+        return Err(Error::Sticker);
+    };
+    if document.source.is_some() || document.frozen {
+        return Err(Error::Sticker);
+    }
+    let speed = Speed::new(document.speed.numerator, document.speed.denominator)?;
+    if speed != Speed::ONE {
+        return Err(Error::Sticker);
+    }
+    if channels_from(document.channels) != Channels::Picture {
+        return Err(Error::Channels);
+    }
+    Segment::sticker(name, document.timeline.start, document.timeline.duration)
 }
 
 fn image_segment(
@@ -863,6 +890,8 @@ struct SegmentDoc {
     asset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sticker: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<RangeDoc>,
     timeline: SpanDoc,
@@ -1822,6 +1851,52 @@ mod tests {
             .expect("segment")
             .remove("text");
         refuse(&bare.to_string(), Error::Text);
+    }
+
+    #[test]
+    fn a_sticker_segment_has_a_name_and_no_file() {
+        let mut project = Project::from_json(EMPTY).expect("load");
+        let mut history = History::new();
+        history
+            .apply(
+                &mut project,
+                &[Command::Place {
+                    track: None,
+                    segment: Segment::sticker("Star", 0, 1_000_000).expect("sticker"),
+                }],
+            )
+            .expect("place");
+        let saved = project.to_json().expect("json");
+        assert!(saved.contains("\"sticker\": \"Star\""));
+        assert!(!saved.contains("\"asset\""));
+        assert!(!saved.contains("\"text\""));
+        let loaded = Project::from_json(&saved).expect("load");
+        assert_eq!(
+            loaded.timeline().tracks()[1].segments()[0].sticker_name(),
+            Some("Star")
+        );
+        let mut value: Value = serde_json::from_str(&saved).expect("value");
+        value["timeline"]["tracks"][1]["segments"][0]["text"] = json!("Hi");
+        refuse(&value.to_string(), Error::Text);
+        value["timeline"]["tracks"][1]["segments"][0]
+            .as_object_mut()
+            .expect("segment")
+            .remove("text");
+        value["timeline"]["tracks"][1]["segments"][0]["asset"] = json!("asset-9");
+        refuse(&value.to_string(), Error::Sticker);
+        value["timeline"]["tracks"][1]["segments"][0]
+            .as_object_mut()
+            .expect("segment")
+            .remove("asset");
+        value["timeline"]["tracks"][1]["segments"][0]["sticker"] = json!("");
+        refuse(&value.to_string(), Error::Sticker);
+        value["timeline"]["tracks"][1]["segments"][0]["sticker"] = json!("Star");
+        value["timeline"]["tracks"][1]["segments"][0]["source"] = json!({
+            "start": 0,
+            "duration": 1,
+            "timescale": 30000
+        });
+        refuse(&value.to_string(), Error::Sticker);
     }
 
     fn cut_value() -> (Project, Value) {

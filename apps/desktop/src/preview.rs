@@ -967,6 +967,9 @@ fn shot<'a>(project: &'a Project, us: i64, hidden: &[cutlass_project::TrackId]) 
                 if let Some(words) = segment.words() {
                     return Some(words);
                 }
+                if let Some(name) = segment.sticker_name() {
+                    return Some(name);
+                }
                 let asset = project.asset(segment.asset_id()?)?;
                 return Some(file_name(asset.source()));
             }

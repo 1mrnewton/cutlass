@@ -85,6 +85,10 @@ pub enum Error {
     Text,
     #[error("the segment is not text")]
     NotText,
+    #[error("a sticker segment has no file")]
+    Sticker,
+    #[error("the segment is not a sticker")]
+    NotSticker,
     #[error("value is not finite")]
     NonFinite,
     #[error("scale must be positive")]

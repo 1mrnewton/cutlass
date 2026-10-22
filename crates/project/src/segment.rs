@@ -265,13 +265,19 @@ impl Keyframe {
     }
 }
 
-/// One use of an asset.
+/// What a segment points at. Exactly one of a file, words, or a sticker name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Content {
+    Media(AssetId),
+    Text(String),
+    Sticker(String),
+}
+
+/// One use of an asset, a title, or a sticker.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Segment {
     id: SegmentId,
-    asset: Option<AssetId>,
-    /// The words, when this segment is text. A media segment leaves this empty.
-    text: Option<String>,
+    content: Content,
     source: Option<TimeRange>,
     timeline: TimeRange,
     channels: Channels,
@@ -300,7 +306,7 @@ impl Segment {
         check_media(asset, source, channels)?;
         let timeline_span = timeline_duration(source.duration(), speed)?;
         Ok(Self::new(
-            Some(asset.id()),
+            Content::Media(asset.id()),
             Some(source),
             TimeRange::sequence(timeline_start_us, timeline_span.value)?,
             channels,
@@ -317,7 +323,7 @@ impl Segment {
             return Err(Error::MediaSource);
         }
         Ok(Self::new(
-            Some(asset.id()),
+            Content::Media(asset.id()),
             None,
             TimeRange::sequence(timeline_start_us, timeline_duration_us)?,
             Channels::Picture,
@@ -334,19 +340,39 @@ impl Segment {
         timeline_start_us: i64,
         timeline_duration_us: i64,
     ) -> Result<Self, Error> {
-        let mut segment = Self::new(
-            None,
+        Ok(Self::new(
+            Content::Text(words.into()),
             None,
             TimeRange::sequence(timeline_start_us, timeline_duration_us)?,
             Channels::Picture,
             Speed::ONE,
-        );
-        segment.text = Some(words.into());
-        Ok(segment)
+        ))
+    }
+
+    /// A named sticker on the sequence. The duration is named, in microseconds.
+    ///
+    /// There is no file. Speed is `1/1` and the channels are picture. An empty
+    /// name is refused. The name is stored and not opened.
+    pub fn sticker(
+        name: impl Into<String>,
+        timeline_start_us: i64,
+        timeline_duration_us: i64,
+    ) -> Result<Self, Error> {
+        let name = name.into();
+        if name.is_empty() {
+            return Err(Error::Sticker);
+        }
+        Ok(Self::new(
+            Content::Sticker(name),
+            None,
+            TimeRange::sequence(timeline_start_us, timeline_duration_us)?,
+            Channels::Picture,
+            Speed::ONE,
+        ))
     }
 
     fn new(
-        asset: Option<AssetId>,
+        content: Content,
         source: Option<TimeRange>,
         timeline: TimeRange,
         channels: Channels,
@@ -354,8 +380,7 @@ impl Segment {
     ) -> Self {
         Self {
             id: SegmentId::raw(0),
-            asset,
-            text: None,
+            content,
             source,
             timeline,
             channels,
@@ -375,12 +400,11 @@ impl Segment {
     }
 
     pub(crate) fn recheck(&self, asset: &Asset) -> Result<(), Error> {
-        if self.text.is_some() {
-            return Err(Error::Text);
-        }
-        let Some(id) = self.asset else {
+        self.refuse_no_file()?;
+        let Content::Media(id) = &self.content else {
             return Err(Error::Text);
         };
+        let id = *id;
         if asset.id() != id {
             return Err(Error::UnknownAsset(id));
         }
@@ -397,9 +421,7 @@ impl Segment {
     }
 
     pub(crate) fn trim_source(&mut self, asset: &Asset, source: TimeRange) -> Result<(), Error> {
-        if self.text.is_some() {
-            return Err(Error::Text);
-        }
+        self.refuse_no_file()?;
         if self.frozen {
             return Err(Error::Freeze);
         }
@@ -411,9 +433,7 @@ impl Segment {
     }
 
     pub(crate) fn change_speed(&mut self, speed: Speed) -> Result<(), Error> {
-        if self.text.is_some() {
-            return Err(Error::Text);
-        }
+        self.refuse_no_file()?;
         if self.frozen {
             return Err(Error::Freeze);
         }
@@ -563,9 +583,7 @@ impl Segment {
     ///
     /// The segment must already be picture, at speed 1/1, with a one-tick source.
     pub(crate) fn hold_frame(&mut self, duration_us: i64) -> Result<(), Error> {
-        if self.text.is_some() {
-            return Err(Error::Text);
-        }
+        self.refuse_no_file()?;
         if self.channels != Channels::Picture {
             return Err(Error::NoPicture);
         }
@@ -676,16 +694,38 @@ impl Segment {
     }
 
     pub(crate) fn set_asset(&mut self, asset: AssetId) {
-        self.asset = Some(asset);
+        self.content = Content::Media(asset);
     }
 
     /// Replaces the words. A media segment is refused.
     pub(crate) fn set_words(&mut self, words: String) -> Result<(), Error> {
-        if self.text.is_none() {
+        if !matches!(self.content, Content::Text(_)) {
             return Err(Error::NotText);
         }
-        self.text = Some(words);
+        self.content = Content::Text(words);
         Ok(())
+    }
+
+    /// Replaces the name. A segment that is not a sticker is refused.
+    ///
+    /// An empty name is refused and the stored name stays.
+    pub(crate) fn set_sticker(&mut self, name: String) -> Result<(), Error> {
+        if !matches!(self.content, Content::Sticker(_)) {
+            return Err(Error::NotSticker);
+        }
+        if name.is_empty() {
+            return Err(Error::Sticker);
+        }
+        self.content = Content::Sticker(name);
+        Ok(())
+    }
+
+    fn refuse_no_file(&self) -> Result<(), Error> {
+        match &self.content {
+            Content::Text(_) => Err(Error::Text),
+            Content::Sticker(_) => Err(Error::Sticker),
+            Content::Media(_) => Ok(()),
+        }
     }
 
     pub const fn id(&self) -> SegmentId {
@@ -693,16 +733,34 @@ impl Segment {
     }
 
     pub const fn asset_id(&self) -> Option<AssetId> {
-        self.asset
+        match &self.content {
+            Content::Media(id) => Some(*id),
+            Content::Text(_) | Content::Sticker(_) => None,
+        }
     }
 
     /// The words, when this segment is text.
     pub fn words(&self) -> Option<&str> {
-        self.text.as_deref()
+        match &self.content {
+            Content::Text(words) => Some(words),
+            Content::Media(_) | Content::Sticker(_) => None,
+        }
     }
 
     pub const fn is_text(&self) -> bool {
-        self.text.is_some()
+        matches!(&self.content, Content::Text(_))
+    }
+
+    /// The sticker's name, when this segment is a sticker.
+    pub fn sticker_name(&self) -> Option<&str> {
+        match &self.content {
+            Content::Sticker(name) => Some(name),
+            Content::Media(_) | Content::Text(_) => None,
+        }
+    }
+
+    pub const fn is_sticker(&self) -> bool {
+        matches!(&self.content, Content::Sticker(_))
     }
 
     pub const fn source(&self) -> Option<TimeRange> {

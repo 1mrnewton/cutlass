@@ -250,6 +250,11 @@ impl Project {
                 self.timeline.segment_mut(segment)?.set_words(words)?;
                 Ok(Outcome::Unchanged)
             }
+            Command::SetSticker { segment, name } => {
+                self.refuse_lane(segment)?;
+                self.timeline.segment_mut(segment)?.set_sticker(name)?;
+                Ok(Outcome::Unchanged)
+            }
             Command::SetVisible { segment, visible } => {
                 self.refuse_lane(segment)?;
                 self.timeline.segment_mut(segment)?.set_visible(visible);
@@ -399,7 +404,7 @@ impl Project {
                         track.overlaps_range(segment.timeline()),
                     )
                 };
-                if !accepts(kind, segment.channels(), segment.is_text()) {
+                if !accepts(kind, segment.channels(), body(&segment)) {
                     return Err(Error::WrongTrack);
                 }
                 if locked {
@@ -537,12 +542,12 @@ impl Project {
         let to = track.unwrap_or(from);
         let segment = self.timeline.segment(id).ok_or(Error::UnknownSegment(id))?;
         let channels = segment.channels();
-        let text = segment.is_text();
+        let body = body(segment);
         let duration = segment.timeline().duration().value;
         let old_start = segment.timeline().start().value;
         let (to_main, dest_locked) = {
             let dest = self.timeline.track(to).ok_or(Error::UnknownTrack(to))?;
-            if !accepts(dest.kind(), channels, text) {
+            if !accepts(dest.kind(), channels, body) {
                 return Err(Error::WrongTrack);
             }
             (dest.is_main(), dest.locked())
@@ -735,6 +740,9 @@ impl Project {
             if segment.is_text() {
                 return Err(Error::Text);
             }
+            if segment.is_sticker() {
+                return Err(Error::Sticker);
+            }
             if segment.channels() == Channels::Sound {
                 return Err(Error::NoPicture);
             }
@@ -818,6 +826,9 @@ impl Project {
         if segment.is_text() {
             return Err(Error::Text);
         }
+        if segment.is_sticker() {
+            return Err(Error::Sticker);
+        }
         if segment.frozen() {
             return Err(Error::Freeze);
         }
@@ -880,7 +891,7 @@ impl Project {
     }
 
     fn prepare(&self, segment: &Segment) -> Result<(), Error> {
-        if segment.is_text() {
+        if segment.is_text() || segment.is_sticker() {
             return Ok(());
         }
         let id = segment.asset_id().ok_or(Error::Text)?;
@@ -970,19 +981,39 @@ impl Project {
     }
 }
 
-fn kind_for(segment: &Segment) -> TrackKind {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Body {
+    Media,
+    Text,
+    Sticker,
+}
+
+fn body(segment: &Segment) -> Body {
     if segment.is_text() {
-        return TrackKind::Text;
-    }
-    match segment.channels() {
-        Channels::Sound => TrackKind::Audio,
-        Channels::Picture | Channels::Both => TrackKind::Video,
+        Body::Text
+    } else if segment.is_sticker() {
+        Body::Sticker
+    } else {
+        Body::Media
     }
 }
 
-fn accepts(kind: TrackKind, channels: Channels, text: bool) -> bool {
-    if text {
-        return kind == TrackKind::Text;
+fn kind_for(segment: &Segment) -> TrackKind {
+    match body(segment) {
+        Body::Text => TrackKind::Text,
+        Body::Sticker => TrackKind::Sticker,
+        Body::Media => match segment.channels() {
+            Channels::Sound => TrackKind::Audio,
+            Channels::Picture | Channels::Both => TrackKind::Video,
+        },
+    }
+}
+
+fn accepts(kind: TrackKind, channels: Channels, body: Body) -> bool {
+    match body {
+        Body::Text => return kind == TrackKind::Text,
+        Body::Sticker => return kind == TrackKind::Sticker,
+        Body::Media => {}
     }
     match (kind, channels) {
         (TrackKind::Video, Channels::Picture | Channels::Both) => true,
@@ -1204,13 +1235,19 @@ fn check_restored(assets: &[Asset], timeline: &Timeline, next_id: u64) -> Result
                 }
                 continue;
             }
+            if segment.is_sticker() {
+                if track.kind() != TrackKind::Sticker {
+                    return Err(Error::WrongTrack);
+                }
+                continue;
+            }
             let asset_id = segment.asset_id().ok_or(Error::Text)?;
             let asset = assets
                 .iter()
                 .find(|asset| asset.id() == asset_id)
                 .ok_or(Error::UnknownAsset(asset_id))?;
             segment.recheck(asset)?;
-            if !accepts(track.kind(), segment.channels(), false) {
+            if !accepts(track.kind(), segment.channels(), Body::Media) {
                 return Err(Error::WrongTrack);
             }
         }

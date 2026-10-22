@@ -3,7 +3,7 @@
 use crate::{AssetId, SegmentId, TrackId};
 
 /// Why a project value was refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     #[error("source string is empty")]
     EmptySource,
@@ -81,4 +81,23 @@ pub enum Error {
     BadId,
     #[error("the project has no ids left")]
     IdsExhausted,
+    #[error("the project file could not be read: {0}")]
+    Unreadable(String),
+    /// `1` is [`crate::FILE_VERSION`].
+    #[error("project file version {found} is not 1")]
+    FileVersion { found: u64 },
+    #[error("the id counter {next_id} does not pass every id in the file")]
+    IdCounter { next_id: u64 },
+    #[error("id {0} is repeated")]
+    RepeatedId(u64),
+    #[error("tracks are not in band order")]
+    TrackOrder,
+    #[error("the file has no main track")]
+    MissingMain,
+    #[error("timescale is zero")]
+    ZeroTimescale,
+    #[error("timeline duration {found} does not match {expected}")]
+    TimelineDuration { found: i64, expected: i64 },
+    #[error("an image segment plays at 1/1")]
+    ImageSpeed,
 }

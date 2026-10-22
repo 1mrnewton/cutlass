@@ -1,14 +1,17 @@
 //! The project model: settings, assets, and one timeline.
 //!
-//! The crate does no I/O. The shell mints the project id and passes source
-//! strings through. The project assigns every other id. Commands and the undo
-//! stacks live here. `docs/project.md` is the model.
+//! The crate does not open a path. [`Project::to_json`] and [`Project::from_json`]
+//! are version [`FILE_VERSION`] of the project file. The shell mints the project
+//! id, passes source strings through, and reads and writes the path. The project
+//! assigns every other id. Undo and redo stay in [`History`] for the session.
+//! `docs/project.md` is the model.
 
 #![deny(unsafe_code)]
 
 mod asset;
 mod command;
 mod error;
+mod file;
 mod history;
 mod id;
 mod project;
@@ -22,6 +25,7 @@ mod track;
 pub use asset::{Asset, AssetKind};
 pub use command::{Command, Outcome, TrimEdge, commands_for_trim};
 pub use error::Error;
+pub use file::FILE_VERSION;
 pub use history::History;
 pub use id::{AssetId, ProjectId, SegmentId, TimelineId, TrackId};
 pub use project::Project;

@@ -52,6 +52,48 @@ impl fmt::Debug for ProjectId {
     }
 }
 
+impl FromStr for ProjectId {
+    type Err = Error;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let bytes = text.as_bytes();
+        if bytes.len() != 36 {
+            return Err(Error::BadId);
+        }
+        let mut out = [0_u8; 16];
+        let mut index = 0;
+        let mut high = true;
+        for (place, byte) in bytes.iter().enumerate() {
+            if matches!(place, 8 | 13 | 18 | 23) {
+                if *byte != b'-' {
+                    return Err(Error::BadId);
+                }
+                continue;
+            }
+            let value = hex_digit(*byte)?;
+            if high {
+                out[index] = value << 4;
+            } else {
+                out[index] |= value;
+                index += 1;
+            }
+            high = !high;
+        }
+        if index != 16 {
+            return Err(Error::BadId);
+        }
+        Ok(Self(out))
+    }
+}
+
+fn hex_digit(byte: u8) -> Result<u8, Error> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => Err(Error::BadId),
+    }
+}
+
 macro_rules! entity_id {
     ($name:ident, $prefix:literal) => {
         /// A number from the project counter.
@@ -140,6 +182,27 @@ mod tests {
         assert_eq!(
             "timeline-1".parse::<TimelineId>().unwrap().to_string(),
             "timeline-1"
+        );
+    }
+
+    #[test]
+    fn a_project_id_parses_its_own_spelling() {
+        let id = ProjectId::from_bytes([
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ]);
+        assert_eq!(id.to_string().parse::<ProjectId>().expect("parse"), id);
+        assert_eq!(
+            "00112233-4455-6677-8899-AABBCCDDEEFF"
+                .parse::<ProjectId>()
+                .expect_err("upper"),
+            Error::BadId
+        );
+        assert_eq!(
+            "00112233445566778899aabbccddeeff"
+                .parse::<ProjectId>()
+                .expect_err("dashes"),
+            Error::BadId
         );
     }
 

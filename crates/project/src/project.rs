@@ -1,5 +1,7 @@
 //! The project: settings, assets, and one timeline.
 
+use std::collections::BTreeSet;
+
 use cutlass_core::Timestamp;
 
 use crate::Error;
@@ -10,7 +12,7 @@ use crate::segment::{Channels, Segment};
 use crate::settings::{AspectRatio, Canvas, Settings};
 use crate::time::{TimeRange, source_ticks, timeline_duration};
 use crate::timeline::Timeline;
-use crate::track::{Track, TrackKind};
+use crate::track::{Band, Track, TrackKind};
 
 /// Settings, assets, and one timeline. The shell loads and saves it.
 #[derive(Debug, Clone)]
@@ -34,6 +36,25 @@ impl Project {
             assets: Vec::new(),
             timeline: Timeline::new(TimelineId::raw(1), TrackId::raw(2)),
         }
+    }
+
+    pub(crate) fn restore(
+        id: ProjectId,
+        next_id: u64,
+        name: String,
+        settings: Settings,
+        assets: Vec<Asset>,
+        timeline: Timeline,
+    ) -> Result<Self, Error> {
+        check_restored(&assets, &timeline, next_id)?;
+        Ok(Self {
+            id,
+            next_id,
+            name,
+            settings,
+            assets,
+            timeline,
+        })
     }
 
     pub const fn id(&self) -> ProjectId {
@@ -73,6 +94,21 @@ impl Project {
 
     pub fn duration(&self) -> cutlass_core::Timestamp {
         self.timeline.duration()
+    }
+
+    /// Version [`crate::FILE_VERSION`] of the project file, as JSON text.
+    ///
+    /// Undo and redo are not included. The crate does not open a path.
+    pub fn to_json(&self) -> Result<String, Error> {
+        crate::file::to_json(self)
+    }
+
+    /// Reads version [`crate::FILE_VERSION`].
+    ///
+    /// Any other version, or a file that does not match this version, loads
+    /// nothing.
+    pub fn from_json(text: &str) -> Result<Self, Error> {
+        crate::file::from_json(text)
     }
 
     pub(crate) fn apply(&mut self, command: Command) -> Result<Outcome, Error> {
@@ -668,6 +704,66 @@ fn preview_overlap(track: &Track, starts: &[(SegmentId, i64)]) -> Result<(), Err
                 .unwrap_or(pair[1].0);
             return Err(Error::LinkageOverlap(moved));
         }
+    }
+    Ok(())
+}
+
+fn check_restored(assets: &[Asset], timeline: &Timeline, next_id: u64) -> Result<(), Error> {
+    let mut seen = BTreeSet::new();
+    claim(&mut seen, timeline.id().get())?;
+    let mut mains = 0;
+    let mut previous: Option<Band> = None;
+    for track in timeline.tracks() {
+        claim(&mut seen, track.id().get())?;
+        if track.is_main() {
+            mains += 1;
+            if track.kind() != TrackKind::Video {
+                return Err(Error::WrongTrack);
+            }
+        } else if track.segments().is_empty() {
+            return Err(Error::EmptyTrack);
+        }
+        if previous.is_some_and(|band| band > track.band()) {
+            return Err(Error::TrackOrder);
+        }
+        previous = Some(track.band());
+        for segment in track.segments() {
+            claim(&mut seen, segment.id().get())?;
+            let asset = assets
+                .iter()
+                .find(|asset| asset.id() == segment.asset_id())
+                .ok_or(Error::UnknownAsset(segment.asset_id()))?;
+            segment.recheck(asset)?;
+            if !accepts(track.kind(), segment.channels()) {
+                return Err(Error::WrongTrack);
+            }
+        }
+    }
+    if mains != 1 {
+        return Err(if mains == 0 {
+            Error::MissingMain
+        } else {
+            Error::SecondMainTrack
+        });
+    }
+    for asset in assets {
+        claim(&mut seen, asset.id().get())?;
+    }
+    let Some(max) = seen.iter().next_back().copied() else {
+        return Err(Error::MissingMain);
+    };
+    if next_id <= max {
+        return Err(Error::IdCounter { next_id });
+    }
+    Ok(())
+}
+
+fn claim(seen: &mut BTreeSet<u64>, id: u64) -> Result<(), Error> {
+    if id == 0 {
+        return Err(Error::BadId);
+    }
+    if !seen.insert(id) {
+        return Err(Error::RepeatedId(id));
     }
     Ok(())
 }

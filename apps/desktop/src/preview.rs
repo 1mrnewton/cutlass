@@ -970,6 +970,9 @@ fn shot<'a>(project: &'a Project, us: i64, hidden: &[cutlass_project::TrackId]) 
                 if let Some(name) = segment.sticker_name() {
                     return Some(name);
                 }
+                if let Some(plugin) = segment.attachment().map(|attachment| attachment.plugin()) {
+                    return Some(plugin);
+                }
                 if segment.is_effect() {
                     return Some("Effect");
                 }

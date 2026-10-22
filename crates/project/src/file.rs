@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::Error;
 use crate::asset::{Asset, AssetKind};
+use crate::attachment::{Attachment, Parameter, ParameterValue};
 use crate::id::{AssetId, SegmentId, TrackId};
 use crate::project::Project;
 use crate::rate::{FrameRate, SequenceRate};
@@ -357,6 +358,7 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
         effect: segment.is_effect(),
         filter: segment.is_filter(),
         adjust: segment.is_adjust(),
+        attachment: segment.attachment().map(attachment_doc),
         source: segment.source().map(range_doc),
         timeline: SpanDoc {
             start: segment.timeline().start().value,
@@ -384,7 +386,11 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
 fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Error> {
     let id: SegmentId = document.id.parse()?;
     if document.text.is_some() {
-        if document.asset.is_some() || document.sticker.is_some() || graded(document) {
+        if document.asset.is_some()
+            || document.sticker.is_some()
+            || graded(document)
+            || document.attachment.is_some()
+        {
             return Err(Error::Text);
         }
         let mut segment = text_segment(document)?;
@@ -393,7 +399,7 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
         return Ok(segment);
     }
     if document.sticker.is_some() {
-        if document.asset.is_some() || graded(document) {
+        if document.asset.is_some() || graded(document) || document.attachment.is_some() {
             return Err(Error::Sticker);
         }
         let mut segment = sticker_segment(document)?;
@@ -406,9 +412,15 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
             return Err(grade.error());
         }
         let mut segment = grade_segment(document, grade)?;
+        if let Some(attachment) = &document.attachment {
+            segment.set_attachment(Some(attachment_from(attachment)?))?;
+        }
         segment.assign(id);
         finish_segment(&mut segment, document)?;
         return Ok(segment);
+    }
+    if document.attachment.is_some() {
+        return Err(Error::Attachment);
     }
     let Some(asset_name) = document.asset.as_deref() else {
         return Err(Error::Text);
@@ -540,6 +552,69 @@ impl Grade {
             Grade::Adjust => Segment::adjust(start, duration),
         }
     }
+}
+
+fn attachment_doc(attachment: &Attachment) -> AttachmentDoc {
+    AttachmentDoc {
+        plugin: attachment.plugin().to_owned(),
+        version: attachment.version().to_owned(),
+        parameters: attachment
+            .parameters()
+            .iter()
+            .map(|parameter| ParameterDoc {
+                name: parameter.name().to_owned(),
+                value: match parameter.value() {
+                    ParameterValue::Bool(value) => ValueDoc::Bool(*value),
+                    ParameterValue::Number(value) => ValueDoc::Number(*value),
+                    ParameterValue::Text(value) => ValueDoc::Text(value.clone()),
+                },
+            })
+            .collect(),
+    }
+}
+
+fn attachment_from(document: &AttachmentDoc) -> Result<Attachment, Error> {
+    let parameters = document
+        .parameters
+        .iter()
+        .map(|parameter| {
+            let value = match &parameter.value {
+                ValueDoc::Bool(value) => ParameterValue::Bool(*value),
+                ValueDoc::Number(value) => ParameterValue::Number(*value),
+                ValueDoc::Text(value) => ParameterValue::Text(value.clone()),
+            };
+            Parameter::new(parameter.name.clone(), value)
+        })
+        .collect();
+    Attachment::new(
+        document.plugin.clone(),
+        document.version.clone(),
+        parameters,
+    )
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttachmentDoc {
+    plugin: String,
+    version: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    parameters: Vec<ParameterDoc>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParameterDoc {
+    name: String,
+    value: ValueDoc,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ValueDoc {
+    Bool(bool),
+    Number(f64),
+    Text(String),
 }
 
 fn image_segment(
@@ -967,6 +1042,8 @@ struct SegmentDoc {
     filter: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     adjust: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attachment: Option<AttachmentDoc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<RangeDoc>,
     timeline: SpanDoc,
@@ -2050,6 +2127,68 @@ mod tests {
         grade_field(&mut value, "adjust", json!(true));
         grade_field(&mut value, "frozen", json!(true));
         refuse(&value.to_string(), Error::Adjust);
+    }
+
+    #[test]
+    fn an_attachment_round_trips_and_a_bad_one_refuses_the_file() {
+        use crate::attachment::{Attachment, Parameter, ParameterValue};
+
+        let mut project = Project::from_json(EMPTY).expect("load");
+        let mut history = History::new();
+        let placed = history
+            .apply(
+                &mut project,
+                &[Command::Place {
+                    track: None,
+                    segment: Segment::effect(0, 1_000_000).expect("effect"),
+                }],
+            )
+            .expect("place");
+        let id = match placed.as_slice() {
+            [crate::Outcome::Opened { segment, .. }] => *segment,
+            other => panic!("expected a track, got {other:?}"),
+        };
+        history
+            .apply(
+                &mut project,
+                &[Command::SetAttachment {
+                    segment: id,
+                    attachment: Some(
+                        Attachment::new(
+                            "blur",
+                            "1",
+                            vec![Parameter::new("amount", ParameterValue::Number(0.5))],
+                        )
+                        .expect("attachment"),
+                    ),
+                }],
+            )
+            .expect("attach");
+        let saved = project.to_json().expect("json");
+        assert!(saved.contains("\"plugin\": \"blur\""));
+        let loaded = Project::from_json(&saved).expect("load");
+        assert_eq!(
+            loaded.timeline().tracks()[1].segments()[0]
+                .attachment()
+                .expect("attachment")
+                .plugin(),
+            "blur"
+        );
+        let mut value: Value = serde_json::from_str(&saved).expect("value");
+        value["timeline"]["tracks"][1]["segments"][0]["attachment"]["version"] = json!("");
+        refuse(&value.to_string(), Error::Plugin);
+        value["timeline"]["tracks"][1]["segments"][0]["attachment"]["version"] = json!("1");
+        value["timeline"]["tracks"][1]["segments"][0]["attachment"]["parameters"]
+            .as_array_mut()
+            .expect("parameters")
+            .push(json!({
+                "name": "amount",
+                "value": true
+            }));
+        refuse(&value.to_string(), Error::Parameter);
+        value["timeline"]["tracks"][1]["segments"][0]["effect"] = json!(false);
+        value["timeline"]["tracks"][1]["segments"][0]["asset"] = json!("asset-9");
+        refuse(&value.to_string(), Error::Attachment);
     }
 
     fn grade_field(value: &mut Value, key: &str, next: Value) {

@@ -5,6 +5,7 @@ use cutlass_core::Timestamp;
 use crate::Error;
 use crate::Speed;
 use crate::asset::{Asset, AssetKind};
+use crate::attachment::Attachment;
 use crate::id::{AssetId, SegmentId};
 use crate::time::{SEQUENCE_TIMESCALE, TimeRange, timeline_duration};
 
@@ -266,14 +267,14 @@ impl Keyframe {
 }
 
 /// What a segment points at. Exactly one of a file, words, a sticker name, or a grade.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Content {
     Media(AssetId),
     Text(String),
     Sticker(String),
-    Effect,
-    Filter,
-    Adjust,
+    Effect(Option<Box<Attachment>>),
+    Filter(Option<Box<Attachment>>),
+    Adjust(Option<Box<Attachment>>),
 }
 
 /// One use of an asset, a title, or a sticker.
@@ -378,21 +379,33 @@ impl Segment {
     ///
     /// There is no file and no name. Speed is `1/1` and the channels are picture.
     pub fn effect(timeline_start_us: i64, timeline_duration_us: i64) -> Result<Self, Error> {
-        Self::plain(Content::Effect, timeline_start_us, timeline_duration_us)
+        Self::plain(
+            Content::Effect(None),
+            timeline_start_us,
+            timeline_duration_us,
+        )
     }
 
     /// A filter on the sequence. The duration is named, in microseconds.
     ///
     /// There is no file and no name. Speed is `1/1` and the channels are picture.
     pub fn filter(timeline_start_us: i64, timeline_duration_us: i64) -> Result<Self, Error> {
-        Self::plain(Content::Filter, timeline_start_us, timeline_duration_us)
+        Self::plain(
+            Content::Filter(None),
+            timeline_start_us,
+            timeline_duration_us,
+        )
     }
 
     /// An adjustment on the sequence. The duration is named, in microseconds.
     ///
     /// There is no file and no name. Speed is `1/1` and the channels are picture.
     pub fn adjust(timeline_start_us: i64, timeline_duration_us: i64) -> Result<Self, Error> {
-        Self::plain(Content::Adjust, timeline_start_us, timeline_duration_us)
+        Self::plain(
+            Content::Adjust(None),
+            timeline_start_us,
+            timeline_duration_us,
+        )
     }
 
     fn plain(
@@ -758,13 +771,37 @@ impl Segment {
         Ok(())
     }
 
+    /// Sets or clears the attachment. A segment that is not an effect, a
+    /// filter, or an adjustment is refused.
+    pub(crate) fn set_attachment(&mut self, attachment: Option<Attachment>) -> Result<(), Error> {
+        let attachment = attachment.map(Box::new);
+        match &mut self.content {
+            Content::Effect(slot) | Content::Filter(slot) | Content::Adjust(slot) => {
+                *slot = attachment;
+                Ok(())
+            }
+            Content::Media(_) | Content::Text(_) | Content::Sticker(_) => Err(Error::Attachment),
+        }
+    }
+
+    /// The attachment, when this segment is an effect, a filter, or an adjustment
+    /// and one is set.
+    pub fn attachment(&self) -> Option<&Attachment> {
+        match &self.content {
+            Content::Effect(attachment)
+            | Content::Filter(attachment)
+            | Content::Adjust(attachment) => attachment.as_deref(),
+            Content::Media(_) | Content::Text(_) | Content::Sticker(_) => None,
+        }
+    }
+
     pub(crate) fn refuse_no_file(&self) -> Result<(), Error> {
         match &self.content {
             Content::Text(_) => Err(Error::Text),
             Content::Sticker(_) => Err(Error::Sticker),
-            Content::Effect => Err(Error::Effect),
-            Content::Filter => Err(Error::Filter),
-            Content::Adjust => Err(Error::Adjust),
+            Content::Effect(_) => Err(Error::Effect),
+            Content::Filter(_) => Err(Error::Filter),
+            Content::Adjust(_) => Err(Error::Adjust),
             Content::Media(_) => Ok(()),
         }
     }
@@ -778,9 +815,9 @@ impl Segment {
             Content::Media(id) => Some(*id),
             Content::Text(_)
             | Content::Sticker(_)
-            | Content::Effect
-            | Content::Filter
-            | Content::Adjust => None,
+            | Content::Effect(_)
+            | Content::Filter(_)
+            | Content::Adjust(_) => None,
         }
     }
 
@@ -790,9 +827,9 @@ impl Segment {
             Content::Text(words) => Some(words),
             Content::Media(_)
             | Content::Sticker(_)
-            | Content::Effect
-            | Content::Filter
-            | Content::Adjust => None,
+            | Content::Effect(_)
+            | Content::Filter(_)
+            | Content::Adjust(_) => None,
         }
     }
 
@@ -806,9 +843,9 @@ impl Segment {
             Content::Sticker(name) => Some(name),
             Content::Media(_)
             | Content::Text(_)
-            | Content::Effect
-            | Content::Filter
-            | Content::Adjust => None,
+            | Content::Effect(_)
+            | Content::Filter(_)
+            | Content::Adjust(_) => None,
         }
     }
 
@@ -817,15 +854,15 @@ impl Segment {
     }
 
     pub const fn is_effect(&self) -> bool {
-        matches!(&self.content, Content::Effect)
+        matches!(&self.content, Content::Effect(_))
     }
 
     pub const fn is_filter(&self) -> bool {
-        matches!(&self.content, Content::Filter)
+        matches!(&self.content, Content::Filter(_))
     }
 
     pub const fn is_adjust(&self) -> bool {
-        matches!(&self.content, Content::Adjust)
+        matches!(&self.content, Content::Adjust(_))
     }
 
     pub const fn source(&self) -> Option<TimeRange> {

@@ -6,6 +6,7 @@ use cutlass_core::Timestamp;
 
 use crate::Error;
 use crate::asset::Asset;
+use crate::attachment::Attachment;
 use crate::id::{AssetId, SegmentId, TrackId};
 use crate::rate::SequenceRate;
 use crate::segment::{Blend, Crop, Easing, Keyframe, KeyframeProperty, Segment, Transform};
@@ -122,6 +123,11 @@ pub enum Command {
     SetSticker {
         segment: SegmentId,
         name: String,
+    },
+    /// Sets or clears the plugin attachment. `None` clears it.
+    SetAttachment {
+        segment: SegmentId,
+        attachment: Option<Attachment>,
     },
     /// Locks the track when on. A locked track refuses an edit.
     SetLocked {

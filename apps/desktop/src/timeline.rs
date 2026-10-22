@@ -2644,6 +2644,9 @@ fn clip_name(project: &Project, segment: &cutlass_project::Segment) -> String {
     if let Some(name) = segment.sticker_name() {
         return name.to_owned();
     }
+    if let Some(plugin) = segment.attachment().map(|attachment| attachment.plugin()) {
+        return plugin.to_owned();
+    }
     if segment.is_effect() {
         return "Effect".to_owned();
     }

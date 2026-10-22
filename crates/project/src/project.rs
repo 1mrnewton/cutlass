@@ -255,6 +255,16 @@ impl Project {
                 self.timeline.segment_mut(segment)?.set_sticker(name)?;
                 Ok(Outcome::Unchanged)
             }
+            Command::SetAttachment {
+                segment,
+                attachment,
+            } => {
+                self.refuse_lane(segment)?;
+                self.timeline
+                    .segment_mut(segment)?
+                    .set_attachment(attachment)?;
+                Ok(Outcome::Unchanged)
+            }
             Command::SetVisible { segment, visible } => {
                 self.refuse_lane(segment)?;
                 self.timeline.segment_mut(segment)?.set_visible(visible);

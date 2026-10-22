@@ -9,6 +9,7 @@
 #![deny(unsafe_code)]
 
 mod asset;
+mod attachment;
 mod command;
 mod error;
 mod file;
@@ -23,6 +24,7 @@ mod timeline;
 mod track;
 
 pub use asset::{Asset, AssetKind};
+pub use attachment::{Attachment, Parameter, ParameterValue};
 pub use command::{Command, Outcome, TrimEdge, commands_for_trim};
 pub use error::Error;
 pub use file::FILE_VERSION;

@@ -95,6 +95,12 @@ pub enum Error {
     Filter,
     #[error("an adjustment has no file")]
     Adjust,
+    #[error("a plugin needs an id and a version")]
+    Plugin,
+    #[error("a parameter name is empty or repeated")]
+    Parameter,
+    #[error("the segment cannot take an attachment")]
+    Attachment,
     #[error("value is not finite")]
     NonFinite,
     #[error("scale must be positive")]

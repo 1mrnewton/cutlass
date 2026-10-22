@@ -4,9 +4,10 @@ use std::num::NonZeroU32;
 
 use cutlass_core::Timestamp;
 use cutlass_project::{
-    AspectRatio, Asset, AssetId, AssetKind, Blend, Channels, Color, ColorSpace, Command, Crop,
-    Easing, Error, FrameRate, History, Keyframe, KeyframeProperty, KeyframeValue, Outcome, Project,
-    ProjectId, Segment, SegmentId, SequenceRate, Speed, TimeRange, TrackId, TrackKind, Transform,
+    AspectRatio, Asset, AssetId, AssetKind, Attachment, Blend, Channels, Color, ColorSpace,
+    Command, Crop, Easing, Error, FrameRate, History, Keyframe, KeyframeProperty, KeyframeValue,
+    Outcome, Parameter, ParameterValue, Project, ProjectId, Segment, SegmentId, SequenceRate,
+    Speed, TimeRange, TrackId, TrackKind, Transform,
 };
 
 fn scale(value: u32) -> NonZeroU32 {
@@ -4172,10 +4173,7 @@ fn an_effect_a_filter_and_an_adjustment_open_their_own_tracks() -> Result<(), Er
         Error::Effect,
     );
     expect_err(
-        run(
-            &mut cut,
-            Command::Reverse { segment: filter },
-        ),
+        run(&mut cut, Command::Reverse { segment: filter }),
         Error::Filter,
     );
     expect_err(
@@ -4222,6 +4220,163 @@ fn an_effect_a_filter_and_an_adjustment_open_their_own_tracks() -> Result<(), Er
             .segment(adjust)
             .ok_or(Error::UnknownSegment(adjust))?
             .is_adjust()
+    );
+    Ok(())
+}
+
+#[test]
+fn an_attachment_names_the_plugin_and_keeps_its_parameters() -> Result<(), Error> {
+    let mut cut = bare();
+    let (id, _) = opened(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::effect(0, 2_000_000)?,
+        },
+    )?);
+    let attachment = Attachment::new(
+        "blur",
+        "1",
+        vec![
+            Parameter::new("amount", ParameterValue::Number(0.5)),
+            Parameter::new("on", ParameterValue::Bool(true)),
+            Parameter::new("label", ParameterValue::Text("soft".to_owned())),
+        ],
+    )?;
+    run(
+        &mut cut,
+        Command::SetAttachment {
+            segment: id,
+            attachment: Some(attachment),
+        },
+    )?;
+    let stored = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?
+        .attachment()
+        .expect("attachment");
+    assert_eq!(stored.plugin(), "blur");
+    assert_eq!(stored.version(), "1");
+    assert_eq!(stored.parameters().len(), 3);
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: id,
+            at: 1_000_000,
+        },
+    )?);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(right)
+            .ok_or(Error::UnknownSegment(right))?
+            .attachment()
+            .expect("copy")
+            .plugin(),
+        "blur"
+    );
+    expect_err(Attachment::new("blur", "", Vec::new()), Error::Plugin);
+    expect_err(Attachment::new("", "1", Vec::new()), Error::Plugin);
+    expect_err(
+        Attachment::new(
+            "blur",
+            "1",
+            vec![
+                Parameter::new("amount", ParameterValue::Number(0.5)),
+                Parameter::new("amount", ParameterValue::Number(1.0)),
+            ],
+        ),
+        Error::Parameter,
+    );
+    expect_err(
+        Attachment::new(
+            "blur",
+            "1",
+            vec![Parameter::new("", ParameterValue::Bool(false))],
+        ),
+        Error::Parameter,
+    );
+    expect_err(
+        Attachment::new(
+            "blur",
+            "1",
+            vec![Parameter::new("amount", ParameterValue::Number(f64::NAN))],
+        ),
+        Error::NonFinite,
+    );
+    let saved = cut.project.to_json()?;
+    assert!(saved.contains("\"plugin\": \"blur\""));
+    assert!(saved.contains("\"version\": \"1\""));
+    let loaded = Project::from_json(&saved)?;
+    assert_eq!(
+        loaded
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .attachment()
+            .expect("loaded")
+            .parameters()[2]
+            .value(),
+        &ParameterValue::Text("soft".to_owned())
+    );
+    run(
+        &mut cut,
+        Command::SetAttachment {
+            segment: id,
+            attachment: None,
+        },
+    )?;
+    assert!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .attachment()
+            .is_none()
+    );
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .attachment()
+            .expect("undo")
+            .plugin(),
+        "blur"
+    );
+    let video = add_video(&mut cut, 10, 1280, 720)?;
+    let clip = media(&cut.project, video, 0, 30_000, Channels::Both)?;
+    let main = cut.main;
+    let clip_id = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: clip,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetAttachment {
+                segment: clip_id,
+                attachment: Some(Attachment::new("blur", "1", Vec::new())?),
+            },
+        ),
+        Error::Attachment,
+    );
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetAttachment {
+                segment: missing,
+                attachment: None,
+            },
+        ),
+        Error::UnknownSegment(missing),
     );
     Ok(())
 }

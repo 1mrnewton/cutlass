@@ -56,6 +56,8 @@ struct CutlassApp {
     checkpoint: String,
     recent: Vec<PathBuf>,
     pending: Option<projects::Replace>,
+    draft_slot: String,
+    draft_text: Option<String>,
     playhead_us: i64,
     shelf: library::Shelf,
     media: library::MediaSource,
@@ -84,6 +86,8 @@ impl CutlassApp {
             checkpoint: loaded.checkpoint,
             recent: projects::load_recent(cc.storage),
             pending: None,
+            draft_slot: std::process::id().to_string(),
+            draft_text: None,
             playhead_us: 0,
             shelf: library::Shelf::Media,
             media: library::MediaSource::Project,
@@ -347,6 +351,7 @@ impl CutlassApp {
                 self.checkpoint = checkpoint;
                 projects::remember(&mut self.recent, &path);
                 self.path = Some(path);
+                self.clear_draft();
                 true
             }
             Err(()) => {
@@ -372,6 +377,38 @@ impl CutlassApp {
         self.export = None;
         self.modify = None;
         self.app_dialog = None;
+        self.clear_draft();
+    }
+
+    /// A changed cut is copied beside the app. The user's file is not written.
+    fn flush_draft(&mut self) {
+        let Ok(text) = self.project.to_json() else {
+            return;
+        };
+        if text == self.checkpoint {
+            if self.draft_text.is_some() {
+                self.clear_draft();
+            }
+            return;
+        }
+        if !projects::draft_needed(&self.checkpoint, &text, self.draft_text.as_deref()) {
+            return;
+        }
+        let Some(dir) = projects::draft_dir() else {
+            return;
+        };
+        let name = self.project.name().to_owned();
+        let source = self.path.clone();
+        if projects::write_draft(&dir, &self.draft_slot, &text, &name, source.as_deref()).is_ok() {
+            self.draft_text = Some(text);
+        }
+    }
+
+    fn clear_draft(&mut self) {
+        if let Some(dir) = projects::draft_dir() {
+            projects::remove_draft(&dir, &self.draft_slot);
+        }
+        self.draft_text = None;
     }
 }
 
@@ -380,9 +417,15 @@ impl eframe::App for CutlassApp {
         theme::GAP.to_normalized_gamma_f32()
     }
 
-    /// The recent paths. This is not the project file.
+    /// The recent paths, and a copy of a changed cut. This does not write the user's file.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         projects::store_recent(storage, &self.recent);
+        self.flush_draft();
+    }
+
+    /// How often that copy is made. The recent list is stored at the same time.
+    fn auto_save_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(30)
     }
 
     /// The cloud key stays in memory. Widget state is not written.

@@ -2,7 +2,8 @@
 //!
 //! [`cutlass_project::Project`] turns a cut into version
 //! [`cutlass_project::FILE_VERSION`] text. This module reads and writes the
-//! path. The list of recent paths is not a project field.
+//! path. The list of recent paths is not a project field. A changed cut is
+//! also copied to a sidecar. That copy is not the user's file.
 
 use std::path::{Path, PathBuf};
 
@@ -106,16 +107,49 @@ pub(crate) fn read(path: &Path) -> Result<Loaded, ReadError> {
 /// That gap is the later crash-recovery work, not this write.
 pub(crate) fn write(path: &Path, project: &Project) -> Result<String, ()> {
     let text = project.to_json().map_err(|_| ())?;
-    let tmp = sibling(path, "tmp");
-    if std::fs::write(&tmp, &text).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(());
-    }
-    if replace_file(&tmp, path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(());
-    }
+    write_text(path, &text)?;
     Ok(text)
+}
+
+/// The copy differs from the user's file, and from the last copy.
+pub(crate) fn draft_needed(checkpoint: &str, current: &str, written: Option<&str>) -> bool {
+    current != checkpoint && written != Some(current)
+}
+
+/// This process's autosave directory, under the app's storage.
+pub(crate) fn draft_dir() -> Option<PathBuf> {
+    eframe::storage_dir("cutlass").map(|dir| dir.join("autosave"))
+}
+
+/// Copies a changed cut. `slot` is this process. The user's path is not written.
+///
+/// The note is written after the copy. Another slot in `dir` is left alone.
+pub(crate) fn write_draft(
+    dir: &Path,
+    slot: &str,
+    text: &str,
+    name: &str,
+    source: Option<&Path>,
+) -> Result<(), ()> {
+    if !slot_ok(slot) {
+        return Err(());
+    }
+    std::fs::create_dir_all(dir).map_err(|_| ())?;
+    write_text(&dir.join(format!("{slot}.cutlass")), text)?;
+    write_text(
+        &dir.join(format!("{slot}.meta")),
+        &encode_note(name, source),
+    )?;
+    Ok(())
+}
+
+/// Removes this process's copy. Another slot in `dir` stays.
+pub(crate) fn remove_draft(dir: &Path, slot: &str) {
+    if !slot_ok(slot) {
+        return;
+    }
+    let _ = std::fs::remove_file(dir.join(format!("{slot}.cutlass")));
+    let _ = std::fs::remove_file(dir.join(format!("{slot}.meta")));
 }
 
 /// Puts `path` first and keeps at most ten.
@@ -407,6 +441,44 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     }
 }
 
+fn write_text(path: &Path, text: &str) -> Result<(), ()> {
+    let tmp = sibling(path, "tmp");
+    if std::fs::write(&tmp, text).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(());
+    }
+    if replace_file(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(());
+    }
+    Ok(())
+}
+
+fn slot_ok(slot: &str) -> bool {
+    !slot.is_empty() && slot.len() <= 20 && slot.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn encode_note(name: &str, source: Option<&Path>) -> String {
+    let source = source
+        .and_then(|path| path.to_str())
+        .map(escape_note)
+        .unwrap_or_default();
+    format!("1\n{}\n{source}\n", escape_note(name))
+}
+
+fn escape_note(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for glyph in text.chars() {
+        match glyph {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(glyph),
+        }
+    }
+    out
+}
+
 fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
     if std::fs::rename(from, to).is_ok() {
         return Ok(());
@@ -436,9 +508,9 @@ mod tests {
     use crate::words;
 
     use super::{
-        Ask, GuardChoice, PathBuf, ReadError, blank, changed, decode_recent, encode_recent,
-        ensure_suffix, file_button, file_title, forget, load_recent, needs_guard, read, remember,
-        row_label, show_guard, store_recent, write,
+        Ask, GuardChoice, PathBuf, ReadError, blank, changed, decode_recent, draft_needed,
+        encode_recent, ensure_suffix, file_button, file_title, forget, load_recent, needs_guard,
+        read, remember, remove_draft, row_label, show_guard, store_recent, write, write_draft,
     };
 
     #[test]
@@ -467,6 +539,46 @@ mod tests {
         assert!(matches!(read(&dir.0), Err(ReadError::Missing)));
         assert!(write(&dir.0.join("no").join("such.cutlass"), &loaded.project).is_err());
         assert_eq!(std::fs::read_to_string(&path).expect("untouched"), text);
+    }
+
+    #[test]
+    fn a_changed_cut_is_copied_beside_the_app_and_not_into_its_file() {
+        let loaded = blank();
+        let checkpoint = loaded.checkpoint.clone();
+        assert!(!draft_needed(&checkpoint, &checkpoint, None));
+        let mut project = loaded.project;
+        let mut history = History::new();
+        history
+            .apply(&mut project, &[Command::Rename("Cut\nA\\B".to_owned())])
+            .expect("rename");
+        let current = project.to_json().expect("json");
+        assert!(draft_needed(&checkpoint, &current, None));
+        assert!(!draft_needed(&checkpoint, &current, Some(&current)));
+
+        let dir = TempDir::new();
+        let source = dir.0.join("film.cutlass");
+        write_draft(&dir.0.join("autosave"), "7", &checkpoint, "Old", None).expect("old slot");
+        write_draft(
+            &dir.0.join("autosave"),
+            "42",
+            &current,
+            project.name(),
+            Some(&source),
+        )
+        .expect("this slot");
+        assert!(!source.exists());
+        let copy = read(&dir.0.join("autosave").join("42.cutlass")).expect("copy");
+        assert_eq!(copy.project.name(), "Cut\nA\\B");
+        let note = std::fs::read_to_string(dir.0.join("autosave").join("42.meta")).expect("note");
+        let (name, path) = note_fields(&note).expect("note fields");
+        assert_eq!(name, "Cut\nA\\B");
+        assert_eq!(path.as_deref(), Some(source.to_str().expect("path")));
+        assert!(write_draft(&dir.0, "nope", &current, "Cut", None).is_err());
+        remove_draft(&dir.0.join("autosave"), "42");
+        assert!(!dir.0.join("autosave").join("42.cutlass").exists());
+        assert!(!dir.0.join("autosave").join("42.meta").exists());
+        assert!(dir.0.join("autosave").join("7.cutlass").is_file());
+        assert!(dir.0.join("autosave").join("7.meta").is_file());
     }
 
     #[test]
@@ -809,6 +921,42 @@ mod tests {
 
     fn named(node: &eframe::egui::accesskit::Node, text: &str) -> bool {
         node.label() == Some(text) || node.value() == Some(text)
+    }
+
+    fn note_fields(text: &str) -> Option<(String, Option<String>)> {
+        let mut lines = text.lines();
+        if lines.next()? != "1" {
+            return None;
+        }
+        let name = unescape_note(lines.next()?)?;
+        let source = lines.next()?;
+        if lines.next().is_some() {
+            return None;
+        }
+        let source = if source.is_empty() {
+            None
+        } else {
+            Some(unescape_note(source)?)
+        };
+        Some((name, source))
+    }
+
+    fn unescape_note(text: &str) -> Option<String> {
+        let mut out = String::new();
+        let mut glyphs = text.chars();
+        while let Some(glyph) = glyphs.next() {
+            if glyph != '\\' {
+                out.push(glyph);
+                continue;
+            }
+            match glyphs.next()? {
+                '\\' => out.push('\\'),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                _ => return None,
+            }
+        }
+        Some(out)
     }
 
     struct TempDir(PathBuf);

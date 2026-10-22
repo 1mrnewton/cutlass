@@ -143,6 +143,41 @@ impl CutlassApp {
         }
     }
 
+    fn relink(&mut self, ui: &egui::Ui, id: cutlass_project::AssetId) {
+        let Some(path) = import::pick_one() else {
+            return;
+        };
+        let replacement = match import::from_path(&path) {
+            Ok(asset) => asset,
+            Err(import::ImportError::Empty) => {
+                timeline::show_note(ui, words::of(ui, words::Phrase::ImportEmpty));
+                return;
+            }
+            Err(import::ImportError::Unread) => {
+                timeline::show_note(ui, words::of(ui, words::Phrase::ImportUnread));
+                return;
+            }
+        };
+        let Some(current) = self.project.asset(id) else {
+            timeline::show_note(ui, words::of(ui, words::Phrase::EditMissed));
+            return;
+        };
+        if !import::same_kind(current.kind(), replacement.kind()) {
+            timeline::show_note(ui, words::of(ui, words::Phrase::RelinkKind));
+            return;
+        }
+        if current.source() == replacement.source() {
+            return;
+        }
+        let source = replacement.source().to_owned();
+        if let Err(error) = self.history.apply(
+            &mut self.project,
+            &[cutlass_project::Command::SetSource { asset: id, source }],
+        ) {
+            timeline::show_note(ui, timeline::apply_note(&error, words::active(ui)));
+        }
+    }
+
     fn import_chosen(&mut self, ui: &egui::Ui) {
         self.add_imports(ui, &import::pick());
     }
@@ -261,6 +296,13 @@ impl eframe::App for CutlassApp {
             });
         if import && self.export.is_none() && self.modify.is_none() && self.app_dialog.is_none() {
             self.import_chosen(ui);
+        }
+        if let Some(id) = library::take_relink(ui.ctx())
+            && self.export.is_none()
+            && self.modify.is_none()
+            && self.app_dialog.is_none()
+        {
+            self.relink(ui, id);
         }
 
         egui::Panel::right("inspector")

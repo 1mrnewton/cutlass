@@ -165,6 +165,7 @@ pub(crate) enum Phrase {
     ImportUnread,
     ImportEmpty,
     DropToImport,
+    RelinkKind,
 }
 
 #[cfg(test)]
@@ -316,6 +317,7 @@ impl Phrase {
         Self::ImportUnread,
         Self::ImportEmpty,
         Self::DropToImport,
+        Self::RelinkKind,
     ];
 }
 
@@ -466,6 +468,7 @@ const ENGLISH: &[&str] = &[
     "This file could not be read.",
     "This file has no picture or sound.",
     "Drop to import",
+    "This file is a different kind.",
 ];
 
 const FRENCH: &[&str] = &[
@@ -615,6 +618,7 @@ const FRENCH: &[&str] = &[
     "Ce fichier n'a pas pu être lu.",
     "Ce fichier n'a ni image ni son.",
     "Déposez pour importer",
+    "Ce fichier est d'un autre type.",
 ];
 
 /// The word for `phrase` in `language`.
@@ -785,7 +789,15 @@ mod tests {
             say(Language::French, Phrase::DropToImport),
             "Déposez pour importer"
         );
-        assert_eq!(Phrase::DropToImport as usize, super::ENGLISH.len() - 1);
+        assert_eq!(
+            say(Language::English, Phrase::RelinkKind),
+            "This file is a different kind."
+        );
+        assert_eq!(
+            say(Language::French, Phrase::RelinkKind),
+            "Ce fichier est d'un autre type."
+        );
+        assert_eq!(Phrase::RelinkKind as usize, super::ENGLISH.len() - 1);
         for phrase in Phrase::ALL {
             let english = say(Language::English, *phrase);
             let french = say(Language::French, *phrase);

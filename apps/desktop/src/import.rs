@@ -7,7 +7,7 @@ use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, vec2};
 
 use cutlass_core::Timestamp;
 use cutlass_media::{Content, Probe, TrackInfo};
-use cutlass_project::Asset;
+use cutlass_project::{Asset, AssetKind};
 
 /// Why a file did not become an asset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +129,23 @@ pub(crate) fn show_hover(ui: &egui::Ui) {
         });
 }
 
+/// A video stays a video, and sound stays sound. Size and audio inside a video may differ.
+pub(crate) fn same_kind(current: AssetKind, replacement: AssetKind) -> bool {
+    matches!(
+        (current, replacement),
+        (AssetKind::Video { .. }, AssetKind::Video { .. })
+            | (AssetKind::Audio, AssetKind::Audio)
+            | (AssetKind::Image { .. }, AssetKind::Image { .. })
+    )
+}
+
+/// One file from the native picker. Cancel returns nothing.
+pub(crate) fn pick_one() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("MP4, MOV, M4A", &["mp4", "mov", "m4a"])
+        .pick_file()
+}
+
 /// The native picker. Cancel returns nothing. The label stays untranslated.
 pub(crate) fn pick() -> Vec<PathBuf> {
     rfd::FileDialog::new()
@@ -154,7 +171,7 @@ mod tests {
     use cutlass_mp4::Rotation;
     use cutlass_project::AssetKind;
 
-    use super::{ImportError, asset_from_bytes, asset_from_tracks, chosen};
+    use super::{ImportError, asset_from_bytes, asset_from_tracks, chosen, same_kind};
 
     fn scale(value: u32) -> NonZeroU32 {
         NonZeroU32::new(value).expect("nonzero")
@@ -313,6 +330,30 @@ mod tests {
         let (assets, failed) = chosen(&[std::path::PathBuf::from("/no/such/cutlass-import.mp4")]);
         assert!(assets.is_empty());
         assert_eq!(failed, Some(ImportError::Unread));
+    }
+
+    #[test]
+    fn a_replacement_must_be_the_same_kind() {
+        let picture = AssetKind::Video {
+            has_audio: true,
+            width: 16,
+            height: 16,
+        };
+        let silent = AssetKind::Video {
+            has_audio: false,
+            width: 32,
+            height: 8,
+        };
+        assert!(same_kind(picture, silent));
+        assert!(same_kind(AssetKind::Audio, AssetKind::Audio));
+        assert!(!same_kind(picture, AssetKind::Audio));
+        assert!(!same_kind(
+            AssetKind::Image {
+                width: 1,
+                height: 1
+            },
+            picture
+        ));
     }
 
     #[test]

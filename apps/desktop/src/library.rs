@@ -560,7 +560,8 @@ fn handle_file(
     if response.secondary_clicked() && !bin.is_selected(id) {
         bin.select_only(id);
     }
-    response.context_menu(|ui| file_menu(ui, bin, asset_id));
+    let source = asset.source().to_owned();
+    response.context_menu(|ui| file_menu(ui, bin, asset_id, &source));
     crate::tip::show_selected(&response, &name, bin.is_selected(id));
     paint_picture(
         ui.painter(),
@@ -620,7 +621,7 @@ fn folder_menu(ui: &mut egui::Ui, bin: &mut Bin, id: u64) {
     }
 }
 
-fn file_menu(ui: &mut egui::Ui, bin: &mut Bin, id: AssetId) {
+fn file_menu(ui: &mut egui::Ui, bin: &mut Bin, id: AssetId, source: &str) {
     if menu_row(ui, words::of(ui, Phrase::OpenLocation), true) {
         crate::timeline::show_note(ui, words::of(ui, Phrase::DoesNotOpenFile));
     }
@@ -630,7 +631,13 @@ fn file_menu(ui: &mut egui::Ui, bin: &mut Bin, id: AssetId) {
     if menu_row(ui, words::of(ui, Phrase::NewFolderWith), true) {
         bin.add_folder_with(id, words::of(ui, Phrase::UntitledFolder));
     }
-    menu_row(ui, words::of(ui, Phrase::LinkMedia), false);
+    if source_missing(source) {
+        if menu_row(ui, words::of(ui, Phrase::LinkMedia), true) {
+            ask_relink(ui, id);
+        }
+    } else {
+        menu_row(ui, words::of(ui, Phrase::LinkMedia), false);
+    }
     if split_row(ui) {
         crate::timeline::show_note(ui, words::of(ui, Phrase::SplitScenes));
     }
@@ -650,6 +657,29 @@ fn sort_menu(ui: &mut egui::Ui, bin: &mut Bin) {
             crate::timeline::show_note(ui, words::of(ui, Phrase::SortedByDuration));
         }
     });
+}
+
+/// A path that is not a file. A folder and a content URI count as missing.
+fn source_missing(source: &str) -> bool {
+    !std::path::Path::new(source).is_file()
+}
+
+fn relink_id() -> egui::Id {
+    egui::Id::unique("library-relink")
+}
+
+fn ask_relink(ui: &egui::Ui, id: AssetId) {
+    ui.data_mut(|data| data.insert_temp(relink_id(), id));
+}
+
+/// The file menu asked to relink this asset. The ask is consumed.
+pub(crate) fn take_relink(ctx: &egui::Context) -> Option<AssetId> {
+    let id = relink_id();
+    let value = ctx.data(|data| data.get_temp::<AssetId>(id));
+    if value.is_some() {
+        ctx.data_mut(|data| data.remove::<AssetId>(id));
+    }
+    value
 }
 
 fn menu_row(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
@@ -1178,5 +1208,118 @@ mod tests {
         assert!(stock.nodes.iter().any(|(_, node)| named(node, "Empty")));
         assert!(stock.nodes.iter().all(|(_, node)| !named(node, "All")));
         assert!(stock.nodes.iter().all(|(_, node)| !named(node, "Import")));
+    }
+
+    #[test]
+    fn a_missing_file_can_ask_to_relink() {
+        assert!(super::source_missing("content://media/1"));
+        assert!(super::source_missing("/no/such/cutlass-relink.mp4"));
+        let present = std::env::temp_dir().join("cutlass-relink-present.mp4");
+        std::fs::write(&present, b"x").expect("temp file");
+        assert!(!super::source_missing(
+            present.to_str().expect("utf-8 path")
+        ));
+        std::fs::remove_file(&present).expect("remove temp");
+
+        let mut history = History::new();
+        let mut cut = project();
+        let missing = Asset::video(
+            "/no/such/cutlass-relink.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            16,
+            16,
+            false,
+        )
+        .expect("video");
+        let id = match history
+            .apply(&mut cut, &[Command::AddAsset(missing)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, crate::words::Language::English);
+        let mut bin = crate::media_bin::Bin::new();
+        let mut shelf = super::Shelf::Media;
+        let mut source = super::MediaSource::Project;
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(400.0, 500.0),
+        );
+        let mut time = 0.0;
+        let mut pass = |events: Vec<eframe::egui::Event>| {
+            time += 0.05;
+            let mut output = ctx.run_ui(
+                eframe::egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    super::show(ui, &cut, &mut shelf, &mut source, &mut bin);
+                },
+            );
+            let tree = output.platform_output.accesskit_update.take();
+            output.textures_delta.clear();
+            tree.expect("the tree is built")
+        };
+        let tree = pass(vec![]);
+        let card = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| named(node, "cutlass-relink.mp4"))
+            .expect("card");
+        let bounds = card.1.bounds().expect("card bounds");
+        let at = eframe::egui::pos2(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        );
+        pass(vec![
+            eframe::egui::Event::PointerMoved(at),
+            eframe::egui::Event::PointerButton {
+                pos: at,
+                button: eframe::egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: eframe::egui::Modifiers::default(),
+            },
+        ]);
+        pass(vec![eframe::egui::Event::PointerButton {
+            pos: at,
+            button: eframe::egui::PointerButton::Secondary,
+            pressed: false,
+            modifiers: eframe::egui::Modifiers::default(),
+        }]);
+        let menu = pass(vec![]);
+        let row = menu
+            .nodes
+            .iter()
+            .find(|(_, node)| named(node, "Link to media"))
+            .expect("link row");
+        assert!(!row.1.is_disabled());
+        let bounds = row.1.bounds().expect("row bounds");
+        let at = eframe::egui::pos2(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        );
+        pass(vec![
+            eframe::egui::Event::PointerMoved(at),
+            eframe::egui::Event::PointerButton {
+                pos: at,
+                button: eframe::egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: eframe::egui::Modifiers::default(),
+            },
+        ]);
+        pass(vec![eframe::egui::Event::PointerButton {
+            pos: at,
+            button: eframe::egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: eframe::egui::Modifiers::default(),
+        }]);
+        assert_eq!(super::take_relink(&ctx), Some(id));
     }
 }

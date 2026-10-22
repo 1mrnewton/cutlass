@@ -281,6 +281,7 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         Command::SetTransform { segment, .. }
         | Command::AddKeyframe { segment, .. }
         | Command::RemoveKeyframe { segment, .. } => segment_lane_locked(project, lanes, *segment),
+        Command::SetSource { .. } => false,
         _ => false,
     }
 }

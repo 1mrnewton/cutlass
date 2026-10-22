@@ -7,9 +7,10 @@ use crate::Speed;
 use crate::animation::{Animation, AnimationKind, AnimationSlots};
 use crate::asset::{Asset, AssetKind};
 use crate::attachment::Attachment;
+use crate::curve::SpeedCurve;
 use crate::id::{AssetId, SegmentId};
 use crate::mark::StampList;
-use crate::time::{SEQUENCE_TIMESCALE, TimeRange, timeline_duration};
+use crate::time::{self, SEQUENCE_TIMESCALE, TimeRange, timeline_duration};
 
 /// Picture, sound, or both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,12 +272,23 @@ impl Keyframe {
 /// What a segment points at. Exactly one of a file, words, a sticker name, or a grade.
 #[derive(Debug, Clone, PartialEq)]
 enum Content {
-    Media(AssetId),
+    Media {
+        id: AssetId,
+        curve: Option<Box<SpeedCurve>>,
+    },
     Text(String),
     Sticker(String),
     Effect(Option<Box<Attachment>>),
     Filter(Option<Box<Attachment>>),
     Adjust(Option<Box<Attachment>>),
+}
+
+/// Durations and curves on the two sides of a source cut.
+pub(crate) struct SpeedParts {
+    pub left_us: i64,
+    pub right_us: i64,
+    pub left: Option<SpeedCurve>,
+    pub right: Option<SpeedCurve>,
 }
 
 /// One use of an asset, a title, or a sticker.
@@ -314,7 +326,10 @@ impl Segment {
         check_media(asset, source, channels)?;
         let timeline_span = timeline_duration(source.duration(), speed)?;
         Ok(Self::new(
-            Content::Media(asset.id()),
+            Content::Media {
+                id: asset.id(),
+                curve: None,
+            },
             Some(source),
             TimeRange::sequence(timeline_start_us, timeline_span.value)?,
             channels,
@@ -331,7 +346,10 @@ impl Segment {
             return Err(Error::MediaSource);
         }
         Ok(Self::new(
-            Content::Media(asset.id()),
+            Content::Media {
+                id: asset.id(),
+                curve: None,
+            },
             None,
             TimeRange::sequence(timeline_start_us, timeline_duration_us)?,
             Channels::Picture,
@@ -458,7 +476,7 @@ impl Segment {
 
     pub(crate) fn recheck(&self, asset: &Asset) -> Result<(), Error> {
         self.refuse_no_file()?;
-        let Content::Media(id) = &self.content else {
+        let Content::Media { id, .. } = &self.content else {
             return Err(Error::Text);
         };
         let id = *id;
@@ -483,7 +501,7 @@ impl Segment {
             return Err(Error::Freeze);
         }
         check_media(asset, source, self.channels)?;
-        let duration = timeline_duration(source.duration(), self.speed)?;
+        let duration = self.duration_of(source.duration())?;
         self.finish_duration(duration)?;
         self.source = Some(source);
         Ok(())
@@ -498,7 +516,95 @@ impl Segment {
         let duration = timeline_duration(source.duration(), speed)?;
         self.finish_duration(duration)?;
         self.speed = speed;
+        self.write_curve(None);
         Ok(())
+    }
+
+    /// Sets the curve, or clears it. A curve replaces the rational. Clearing
+    /// one returns the speed to `1/1`. With no curve, the rational stays.
+    pub(crate) fn set_curve(&mut self, curve: Option<SpeedCurve>) -> Result<(), Error> {
+        self.refuse_no_file()?;
+        if self.frozen {
+            return Err(Error::Freeze);
+        }
+        let source = self.source.ok_or(Error::ImageSource)?;
+        let duration = match &curve {
+            Some(curve) => curve.timeline_span(source.duration())?,
+            None => {
+                if self.curve().is_none() {
+                    return Ok(());
+                }
+                timeline_duration(source.duration(), Speed::ONE)?
+            }
+        };
+        self.finish_duration(duration)?;
+        self.speed = Speed::ONE;
+        self.write_curve(curve);
+        Ok(())
+    }
+
+    /// Stores a curve that already matches the next source. The caller then trims.
+    pub(crate) fn install_curve(&mut self, curve: SpeedCurve) {
+        self.speed = Speed::ONE;
+        self.write_curve(Some(curve));
+    }
+
+    fn write_curve(&mut self, curve: Option<SpeedCurve>) {
+        if let Content::Media { curve: slot, .. } = &mut self.content {
+            *slot = curve.map(Box::new);
+        }
+    }
+
+    fn duration_of(&self, source: Timestamp) -> Result<Timestamp, Error> {
+        match self.curve() {
+            Some(curve) => curve.timeline_span(source),
+            None => timeline_duration(source, self.speed),
+        }
+    }
+
+    /// Timeline microseconds of `source` at this segment's speed.
+    pub(crate) fn span_for(&self, source: Timestamp) -> Result<i64, Error> {
+        Ok(self.duration_of(source)?.value)
+    }
+
+    /// Source ticks whose timeline length is closest to `want_us`, within `room`.
+    pub(crate) fn ticks_for_duration(&self, want_us: i64, room: i64) -> Result<i64, Error> {
+        let source = self.source.ok_or(Error::MediaSource)?;
+        let scale = source.duration().timescale;
+        match self.curve() {
+            Some(curve) => curve.ticks_for_span(want_us, scale, room),
+            None => time::source_ticks(want_us, scale, self.speed),
+        }
+    }
+
+    /// How a source cut divides the speed. Durations are the two pieces.
+    pub(crate) fn split_speed(&self, cut_ticks: i64) -> Result<SpeedParts, Error> {
+        let source = self.source.ok_or(Error::MediaSource)?;
+        let total = source.duration().value;
+        if cut_ticks <= 0 || cut_ticks >= total {
+            return Err(Error::SplitOutside);
+        }
+        let scale = source.duration().timescale;
+        let right_ticks = total - cut_ticks;
+        match self.curve() {
+            Some(curve) => {
+                let (left, right) = curve.split(cut_ticks, total)?;
+                Ok(SpeedParts {
+                    left_us: left.timeline_span(Timestamp::new(cut_ticks, scale))?.value,
+                    right_us: right
+                        .timeline_span(Timestamp::new(right_ticks, scale))?
+                        .value,
+                    left: Some(left),
+                    right: Some(right),
+                })
+            }
+            None => Ok(SpeedParts {
+                left_us: timeline_duration(Timestamp::new(cut_ticks, scale), self.speed)?.value,
+                right_us: timeline_duration(Timestamp::new(right_ticks, scale), self.speed)?.value,
+                left: None,
+                right: None,
+            }),
+        }
     }
 
     fn finish_duration(&mut self, duration: Timestamp) -> Result<(), Error> {
@@ -533,9 +639,9 @@ impl Segment {
 
     /// A copy with no id, starting at `start` microseconds on the sequence.
     ///
-    /// The source, channels, speed, visible flag, volume, fades, denoise,
-    /// keep pitch, crop, blend, freeze, transform, keyframes, animations,
-    /// clip markers, and beats stay. Place assigns the id.
+    /// The source, channels, speed, a speed curve, visible flag, volume, fades,
+    /// denoise, keep pitch, crop, blend, freeze, transform, keyframes,
+    /// animations, clip markers, and beats stay. Place assigns the id.
     /// A negative start is refused, and so is a start that would overflow the
     /// sequence clock.
     pub fn duplicate(&self, start: i64) -> Result<Self, Error> {
@@ -652,7 +758,7 @@ impl Segment {
             return Err(Error::NoPicture);
         }
         let source = self.source.ok_or(Error::MediaSource)?;
-        if source.duration().value != 1 || self.speed != Speed::ONE {
+        if source.duration().value != 1 || self.speed != Speed::ONE || self.curve().is_some() {
             return Err(Error::Freeze);
         }
         self.finish_duration(Timestamp::new(duration_us, SEQUENCE_TIMESCALE))?;
@@ -760,7 +866,11 @@ impl Segment {
     }
 
     pub(crate) fn set_asset(&mut self, asset: AssetId) {
-        self.content = Content::Media(asset);
+        let curve = match &mut self.content {
+            Content::Media { curve, .. } => curve.take(),
+            _ => None,
+        };
+        self.content = Content::Media { id: asset, curve };
     }
 
     /// Replaces the words. A media segment is refused.
@@ -795,7 +905,9 @@ impl Segment {
                 *slot = attachment;
                 Ok(())
             }
-            Content::Media(_) | Content::Text(_) | Content::Sticker(_) => Err(Error::Attachment),
+            Content::Media { .. } | Content::Text(_) | Content::Sticker(_) => {
+                Err(Error::Attachment)
+            }
         }
     }
 
@@ -806,7 +918,7 @@ impl Segment {
             Content::Effect(attachment)
             | Content::Filter(attachment)
             | Content::Adjust(attachment) => attachment.as_deref(),
-            Content::Media(_) | Content::Text(_) | Content::Sticker(_) => None,
+            Content::Media { .. } | Content::Text(_) | Content::Sticker(_) => None,
         }
     }
 
@@ -957,7 +1069,7 @@ impl Segment {
 
     fn accepts_animation(&self) -> bool {
         match &self.content {
-            Content::Media(_) => self.channels != Channels::Sound,
+            Content::Media { .. } => self.channels != Channels::Sound,
             Content::Text(_) | Content::Sticker(_) => true,
             Content::Effect(_) | Content::Filter(_) | Content::Adjust(_) => false,
         }
@@ -970,7 +1082,7 @@ impl Segment {
             Content::Effect(_) => Err(Error::Effect),
             Content::Filter(_) => Err(Error::Filter),
             Content::Adjust(_) => Err(Error::Adjust),
-            Content::Media(_) => Ok(()),
+            Content::Media { .. } => Ok(()),
         }
     }
 
@@ -980,7 +1092,7 @@ impl Segment {
 
     pub const fn asset_id(&self) -> Option<AssetId> {
         match &self.content {
-            Content::Media(id) => Some(*id),
+            Content::Media { id, .. } => Some(*id),
             Content::Text(_)
             | Content::Sticker(_)
             | Content::Effect(_)
@@ -993,7 +1105,7 @@ impl Segment {
     pub fn words(&self) -> Option<&str> {
         match &self.content {
             Content::Text(words) => Some(words),
-            Content::Media(_)
+            Content::Media { .. }
             | Content::Sticker(_)
             | Content::Effect(_)
             | Content::Filter(_)
@@ -1009,7 +1121,7 @@ impl Segment {
     pub fn sticker_name(&self) -> Option<&str> {
         match &self.content {
             Content::Sticker(name) => Some(name),
-            Content::Media(_)
+            Content::Media { .. }
             | Content::Text(_)
             | Content::Effect(_)
             | Content::Filter(_)
@@ -1047,6 +1159,33 @@ impl Segment {
 
     pub const fn speed(&self) -> Speed {
         self.speed
+    }
+
+    /// The curve replacing the rational, when one is set.
+    ///
+    /// The stored rational is then `1/1` and is not the playback speed.
+    pub fn curve(&self) -> Option<&SpeedCurve> {
+        match &self.content {
+            Content::Media { curve, .. } => curve.as_deref(),
+            Content::Text(_)
+            | Content::Sticker(_)
+            | Content::Effect(_)
+            | Content::Filter(_)
+            | Content::Adjust(_) => None,
+        }
+    }
+
+    /// Source ticks covered by `timeline_us` microseconds from the segment start.
+    ///
+    /// With no curve, the rounding matches [`source_ticks`](crate::source_ticks).
+    /// A curve maps to the latest tick whose time is still at or before
+    /// `timeline_us`, and a tie takes the later tick.
+    pub fn source_offset(&self, timeline_us: i64) -> Result<i64, Error> {
+        let source = self.source.ok_or(Error::MediaSource)?;
+        match self.curve() {
+            Some(curve) => curve.source_ticks(timeline_us, source.duration()),
+            None => time::source_ticks(timeline_us, source.duration().timescale, self.speed),
+        }
     }
 
     pub const fn visible(&self) -> bool {

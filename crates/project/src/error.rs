@@ -25,6 +25,8 @@ pub enum Error {
     DurationOverflow,
     #[error("speed is zero")]
     ZeroSpeed,
+    #[error("the speed curve does not cover the source")]
+    Curve,
     #[error("duration rounds to zero on the sequence clock")]
     RoundsToZero,
     #[error("an image has no source range")]

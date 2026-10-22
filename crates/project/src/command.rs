@@ -8,11 +8,12 @@ use crate::Error;
 use crate::animation::{Animation, AnimationKind};
 use crate::asset::Asset;
 use crate::attachment::Attachment;
+use crate::curve::SpeedCurve;
 use crate::id::{AssetId, SegmentId, TrackId};
 use crate::rate::SequenceRate;
 use crate::segment::{Blend, Crop, Easing, Keyframe, KeyframeProperty, Segment, Transform};
 use crate::settings::{AspectRatio, Color, ColorSpace};
-use crate::time::{self, Speed, TimeRange};
+use crate::time::{Speed, TimeRange};
 
 /// One edit. Several of these can be one undo step.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +50,11 @@ pub enum Command {
     SetSpeed {
         segment: SegmentId,
         speed: Speed,
+    },
+    /// Sets the speed curve. `None` clears it and returns the speed to `1/1`.
+    SetCurve {
+        segment: SegmentId,
+        curve: Option<SpeedCurve>,
     },
     /// `track: None` keeps the segment on its track. `start` is microseconds.
     Move {
@@ -278,7 +284,7 @@ pub fn commands_for_trim(
         }
     };
     let scale = source.start().timescale;
-    let mut ticks = time::source_ticks(want_duration, scale, segment.speed())?;
+    let mut ticks = segment.ticks_for_duration(want_duration, media.value)?;
     let source_start = source.start().value;
     let source_end = source.end().value;
     let (new_source_start, new_source_duration) = match edge {
@@ -311,7 +317,7 @@ pub fn commands_for_trim(
     if new_source == source && edge == TrimEdge::End {
         return Ok(Vec::new());
     }
-    let actual = time::timeline_duration(new_source.duration(), segment.speed())?.value;
+    let actual = segment.span_for(new_source.duration())?;
     let new_start = match edge {
         TrimEdge::End => old_start,
         TrimEdge::Start => old_end.saturating_sub(actual).max(0),

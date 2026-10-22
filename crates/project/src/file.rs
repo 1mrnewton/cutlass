@@ -13,6 +13,7 @@ use crate::Error;
 use crate::animation::{Animation, AnimationKind};
 use crate::asset::{Asset, AssetKind};
 use crate::attachment::{Attachment, Parameter, ParameterValue};
+use crate::curve::{SpeedCurve, SpeedPoint};
 use crate::id::{AssetId, SegmentId, TrackId};
 use crate::project::Project;
 use crate::rate::{FrameRate, SequenceRate};
@@ -482,10 +483,7 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
             duration: segment.timeline().duration().value,
         },
         channels: channel_name(segment.channels()),
-        speed: SpeedDoc {
-            numerator: segment.speed().numerator(),
-            denominator: segment.speed().denominator().get(),
-        },
+        speed: speed_doc(segment),
         visible: segment.visible(),
         volume: segment.volume(),
         fade_in: segment.fade_in(),
@@ -577,17 +575,20 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
         .iter()
         .find(|asset| asset.id() == asset_id)
         .ok_or(Error::UnknownAsset(asset_id))?;
-    let speed = Speed::new(document.speed.numerator, document.speed.denominator)?;
+    let pace = pace_from(&document.speed)?;
     let channels = channels_from(document.channels);
     let mut segment = match asset.kind() {
         AssetKind::Image { .. } => {
             if document.frozen {
                 return Err(Error::ImageSource);
             }
+            let Pace::Constant(speed) = pace else {
+                return Err(Error::ImageSpeed);
+            };
             image_segment(asset, document, speed, channels)?
         }
         AssetKind::Video { .. } | AssetKind::Audio => {
-            media_segment(asset, document, speed, channels)?
+            media_segment(asset, document, pace, channels)?
         }
     };
     segment.assign(id);
@@ -640,9 +641,13 @@ fn text_segment(document: &SegmentDoc) -> Result<Segment, Error> {
     if document.source.is_some() || document.frozen {
         return Err(Error::Text);
     }
-    let speed = Speed::new(document.speed.numerator, document.speed.denominator)?;
-    if speed != Speed::ONE {
-        return Err(Error::Text);
+    match pace_from(&document.speed)? {
+        Pace::Curve(_) => return Err(Error::Text),
+        Pace::Constant(speed) => {
+            if speed != Speed::ONE {
+                return Err(Error::Text);
+            }
+        }
     }
     if channels_from(document.channels) != Channels::Picture {
         return Err(Error::Channels);
@@ -657,9 +662,13 @@ fn sticker_segment(document: &SegmentDoc) -> Result<Segment, Error> {
     if document.source.is_some() || document.frozen {
         return Err(Error::Sticker);
     }
-    let speed = Speed::new(document.speed.numerator, document.speed.denominator)?;
-    if speed != Speed::ONE {
-        return Err(Error::Sticker);
+    match pace_from(&document.speed)? {
+        Pace::Curve(_) => return Err(Error::Sticker),
+        Pace::Constant(speed) => {
+            if speed != Speed::ONE {
+                return Err(Error::Sticker);
+            }
+        }
     }
     if channels_from(document.channels) != Channels::Picture {
         return Err(Error::Channels);
@@ -689,9 +698,13 @@ fn grade_segment(document: &SegmentDoc, grade: Grade) -> Result<Segment, Error> 
     {
         return Err(grade.error());
     }
-    let speed = Speed::new(document.speed.numerator, document.speed.denominator)?;
-    if speed != Speed::ONE {
-        return Err(grade.error());
+    match pace_from(&document.speed)? {
+        Pace::Curve(_) => return Err(grade.error()),
+        Pace::Constant(speed) => {
+            if speed != Speed::ONE {
+                return Err(grade.error());
+            }
+        }
     }
     if channels_from(document.channels) != Channels::Picture {
         return Err(Error::Channels);
@@ -808,7 +821,7 @@ fn image_segment(
 fn media_segment(
     asset: &Asset,
     document: &SegmentDoc,
-    speed: Speed,
+    pace: Pace,
     channels: Channels,
 ) -> Result<Segment, Error> {
     let source = document.source.as_ref().ok_or(Error::MediaSource)?;
@@ -816,10 +829,20 @@ fn media_segment(
         Timestamp::new(source.start, scale(source.timescale)?),
         Timestamp::new(source.duration, scale(source.timescale)?),
     )?;
+    let speed = match &pace {
+        Pace::Constant(speed) => *speed,
+        Pace::Curve(_) => Speed::ONE,
+    };
     let mut segment = Segment::media(asset, range, document.timeline.start, channels, speed)?;
     if document.frozen {
+        if matches!(pace, Pace::Curve(_)) {
+            return Err(Error::Freeze);
+        }
         segment.hold_frame(document.timeline.duration)?;
         return Ok(segment);
+    }
+    if let Pace::Curve(curve) = pace {
+        segment.set_curve(Some(curve))?;
     }
     let expected = segment.timeline().duration().value;
     if document.timeline.duration != expected {
@@ -829,6 +852,61 @@ fn media_segment(
         });
     }
     Ok(segment)
+}
+
+fn speed_doc(segment: &Segment) -> SpeedDoc {
+    if let Some(curve) = segment.curve() {
+        return SpeedDoc {
+            numerator: None,
+            denominator: None,
+            points: curve
+                .points()
+                .iter()
+                .map(|point| {
+                    let (numerator, denominator) = point.at();
+                    SpeedPointDoc {
+                        at: [numerator, denominator],
+                        speed: RationalDoc {
+                            numerator: point.speed().numerator(),
+                            denominator: point.speed().denominator().get(),
+                        },
+                    }
+                })
+                .collect(),
+        };
+    }
+    SpeedDoc {
+        numerator: Some(segment.speed().numerator()),
+        denominator: Some(segment.speed().denominator().get()),
+        points: Vec::new(),
+    }
+}
+
+fn pace_from(speed: &SpeedDoc) -> Result<Pace, Error> {
+    let curved = !speed.points.is_empty();
+    let rated = speed.numerator.is_some() || speed.denominator.is_some();
+    if curved && rated {
+        return Err(Error::Curve);
+    }
+    if curved {
+        let mut points = Vec::with_capacity(speed.points.len());
+        for point in &speed.points {
+            points.push(SpeedPoint::new(
+                point.at[0],
+                point.at[1],
+                Speed::new(point.speed.numerator, point.speed.denominator)?,
+            )?);
+        }
+        return Ok(Pace::Curve(SpeedCurve::new(points)?));
+    }
+    let numerator = speed.numerator.ok_or(Error::Curve)?;
+    let denominator = speed.denominator.ok_or(Error::Curve)?;
+    Ok(Pace::Constant(Speed::new(numerator, denominator)?))
+}
+
+enum Pace {
+    Constant(Speed),
+    Curve(SpeedCurve),
 }
 
 fn transform_doc(transform: Transform) -> TransformDoc {
@@ -1295,6 +1373,24 @@ struct SpanDoc {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpeedDoc {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    numerator: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    denominator: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    points: Vec<SpeedPointDoc>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpeedPointDoc {
+    at: [u32; 2],
+    speed: RationalDoc,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RationalDoc {
     numerator: u32,
     denominator: u32,
 }
@@ -1450,6 +1546,7 @@ mod tests {
     use crate::Error;
     use crate::asset::{Asset, AssetKind};
     use crate::command::{Command, Outcome};
+    use crate::curve::{SpeedCurve, SpeedPoint};
     use crate::history::History;
     use crate::id::{AssetId, ProjectId};
     use crate::project::Project;
@@ -2642,6 +2739,184 @@ mod tests {
         let mut empty: Value = serde_json::from_str(EMPTY).expect("empty");
         empty["timeline"]["markers"] = json!([0]);
         refuse(&empty.to_string(), Error::Marker);
+    }
+
+    #[test]
+    fn a_speed_curve_round_trips_and_a_bad_one_refuses_the_file() {
+        let (_project, value) = cut_value();
+        let speed = &value["timeline"]["tracks"][1]["segments"][0]["speed"];
+        assert_eq!(speed["numerator"], json!(2));
+        assert!(speed.get("points").is_none());
+        let source = &value["timeline"]["tracks"][1]["segments"][0]["source"];
+        let ticks = source["duration"].as_i64().expect("ticks");
+        let scale_value = source["timescale"].as_u64().expect("scale");
+        assert_eq!(ticks, 30_000);
+        assert_eq!(scale_value, 30_000);
+        let scale = NonZeroU32::new(u32::try_from(scale_value).expect("scale")).expect("scale");
+        let curve = SpeedCurve::new(vec![
+            SpeedPoint::new(0, 1, Speed::ONE).expect("start"),
+            SpeedPoint::new(1, 1, Speed::new(2, 1).expect("fast")).expect("end"),
+        ])
+        .expect("curve");
+        let span = curve
+            .timeline_span(Timestamp::new(ticks, scale))
+            .expect("span");
+        assert_eq!(span.value, 693_147);
+
+        let text = edit(&value, |value| {
+            let segment = &mut value["timeline"]["tracks"][1]["segments"][0];
+            segment["speed"] = ramp_points();
+            segment["timeline"]["duration"] = json!(span.value);
+        });
+        let loaded = Project::from_json(&text).expect("curve");
+        let segment = &loaded.timeline().main_track().segments()[0];
+        assert_eq!(segment.curve(), Some(&curve));
+        assert_eq!(segment.speed(), Speed::ONE);
+        assert_eq!(segment.timeline().duration().value, 693_147);
+        let saved = loaded.to_json().expect("save");
+        let again: Value = serde_json::from_str(&saved).expect("json");
+        let stored = &again["timeline"]["tracks"][1]["segments"][0]["speed"];
+        assert!(stored.get("numerator").is_none());
+        assert!(stored.get("denominator").is_none());
+        assert_eq!(stored["points"].as_array().expect("points").len(), 2);
+        assert_eq!(
+            Project::from_json(&saved)
+                .expect("reload")
+                .to_json()
+                .expect("again"),
+            saved
+        );
+
+        refuse(
+            &edit(&value, |value| {
+                let segment = &mut value["timeline"]["tracks"][1]["segments"][0];
+                segment["speed"] = ramp_points();
+            }),
+            Error::TimelineDuration {
+                found: 500_000,
+                expected: 693_147,
+            },
+        );
+        refuse(
+            &edit(&value, |value| {
+                value["timeline"]["tracks"][1]["segments"][0]["speed"] = rated_ramp();
+                value["timeline"]["tracks"][1]["segments"][0]["timeline"]["duration"] =
+                    json!(span.value);
+            }),
+            Error::Curve,
+        );
+        refuse(
+            &edit(&value, |value| {
+                value["timeline"]["tracks"][1]["segments"][0]["speed"] = json!({});
+            }),
+            Error::Curve,
+        );
+        refuse(
+            &edit(&value, |value| {
+                value["timeline"]["tracks"][1]["segments"][0]["speed"] = json!({
+                    "points": [{
+                        "at": [0, 1],
+                        "speed": { "numerator": 1, "denominator": 1 }
+                    }]
+                });
+            }),
+            Error::Curve,
+        );
+        refuse(
+            &edit(&value, |value| {
+                value["timeline"]["tracks"][1]["segments"][0]["speed"] = json!({
+                    "points": [
+                        { "at": [0, 1], "speed": { "numerator": 1, "denominator": 1 } },
+                        { "at": [2, 1], "speed": { "numerator": 2, "denominator": 1 } }
+                    ]
+                });
+            }),
+            Error::Curve,
+        );
+        refuse(
+            &edit(&value, |value| {
+                value["timeline"]["tracks"][1]["segments"][0]["speed"] = json!({
+                    "points": [
+                        { "at": [0, 1], "speed": { "numerator": 1, "denominator": 1 } },
+                        { "at": [1, 1], "speed": { "numerator": 0, "denominator": 1 } }
+                    ]
+                });
+            }),
+            Error::ZeroSpeed,
+        );
+        refuse(
+            &edit(&value, |value| {
+                let segment = &mut value["timeline"]["tracks"][1]["segments"][0];
+                segment["frozen"] = json!(true);
+                segment["speed"] = ramp_points();
+                segment["timeline"]["duration"] = json!(span.value);
+            }),
+            Error::Freeze,
+        );
+        refuse(
+            &edit(&value, |value| {
+                value["timeline"]["tracks"][2]["segments"][0]["speed"] = ramp_points();
+            }),
+            Error::ImageSpeed,
+        );
+        refuse(
+            &edit(&value, |value| {
+                value["timeline"]["tracks"][2]["segments"][0]["speed"] = rated_ramp();
+            }),
+            Error::Curve,
+        );
+
+        let mut history = History::new();
+        let mut project = Project::new(sample_id(), "Untitled");
+        let words = Segment::text("hi", 0, 1_000_000).expect("text");
+        history
+            .apply(
+                &mut project,
+                &[Command::Place {
+                    track: None,
+                    segment: words,
+                }],
+            )
+            .expect("place");
+        let caption: Value = serde_json::from_str(&project.to_json().expect("json")).expect("text");
+        let text_track = caption["timeline"]["tracks"]
+            .as_array()
+            .expect("tracks")
+            .iter()
+            .position(|track| track["kind"] == json!("text"))
+            .expect("text track");
+        refuse(
+            &edit(&caption, |value| {
+                value["timeline"]["tracks"][text_track]["segments"][0]["speed"] = ramp_points();
+            }),
+            Error::Text,
+        );
+        refuse(
+            &edit(&caption, |value| {
+                value["timeline"]["tracks"][text_track]["segments"][0]["speed"] = rated_ramp();
+            }),
+            Error::Curve,
+        );
+    }
+
+    fn ramp_points() -> Value {
+        json!({
+            "points": [
+                { "at": [0, 1], "speed": { "numerator": 1, "denominator": 1 } },
+                { "at": [1, 1], "speed": { "numerator": 2, "denominator": 1 } }
+            ]
+        })
+    }
+
+    fn rated_ramp() -> Value {
+        json!({
+            "numerator": 1,
+            "denominator": 1,
+            "points": [
+                { "at": [0, 1], "speed": { "numerator": 1, "denominator": 1 } },
+                { "at": [1, 1], "speed": { "numerator": 2, "denominator": 1 } }
+            ]
+        })
     }
 
     fn grade_field(value: &mut Value, key: &str, next: Value) {

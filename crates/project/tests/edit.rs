@@ -7,7 +7,8 @@ use cutlass_project::{
     Animation, AnimationKind, AspectRatio, Asset, AssetId, AssetKind, Attachment, Blend, Channels,
     Color, ColorSpace, Command, Crop, Easing, Error, FrameRate, History, Keyframe,
     KeyframeProperty, KeyframeValue, Outcome, Parameter, ParameterValue, Project, ProjectId,
-    Segment, SegmentId, SequenceRate, Speed, TimeRange, TrackId, TrackKind, Transform,
+    Segment, SegmentId, SequenceRate, Speed, SpeedCurve, SpeedPoint, TimeRange, TrackId, TrackKind,
+    Transform, TrimEdge, commands_for_trim,
 };
 
 fn scale(value: u32) -> NonZeroU32 {
@@ -5513,5 +5514,471 @@ fn a_shorter_cut_drops_a_mark_and_undo_puts_it_back() -> Result<(), Error> {
     assert!(cut.project.timeline().markers().is_empty());
     cut.history.undo(&mut cut.project)?;
     assert_eq!(cut.project.timeline().markers(), &[0, 1_000_000, 1_500_000]);
+    Ok(())
+}
+
+fn one_to_two() -> Result<SpeedCurve, Error> {
+    SpeedCurve::new(vec![
+        SpeedPoint::new(0, 1, Speed::ONE)?,
+        SpeedPoint::new(1, 1, Speed::new(2, 1)?)?,
+    ])
+}
+
+fn place_ramp(cut: &mut Cut) -> Result<(AssetId, SegmentId), Error> {
+    let asset = asset_id(run(
+        cut,
+        Command::AddAsset(Asset::video(
+            "file:///ramp.mp4",
+            Timestamp::new(1_000_000, scale(1_000_000)),
+            16,
+            16,
+            true,
+        )?),
+    )?);
+    let id = place_main(cut, asset, 0, 1_000_000)?;
+    Ok((asset, id))
+}
+
+fn segment(cut: &Cut, id: SegmentId) -> Result<&Segment, Error> {
+    cut.project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))
+}
+
+#[test]
+fn a_curve_replaces_the_speed_rational() -> Result<(), Error> {
+    let mut cut = bare();
+    let (_asset, id) = place_ramp(&mut cut)?;
+    let fast = Speed::new(2, 1)?;
+    run(
+        &mut cut,
+        Command::SetSpeed {
+            segment: id,
+            speed: fast,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetCurve {
+            segment: id,
+            curve: None,
+        },
+    )?;
+    assert_eq!(segment(&cut, id)?.speed(), fast);
+    assert!(segment(&cut, id)?.curve().is_none());
+    assert_eq!(segment(&cut, id)?.timeline().duration().value, 500_000);
+
+    let flat = SpeedCurve::new(vec![
+        SpeedPoint::new(0, 1, fast)?,
+        SpeedPoint::new(1, 1, Speed::new(4, 2)?)?,
+    ])?;
+    run(
+        &mut cut,
+        Command::SetCurve {
+            segment: id,
+            curve: Some(flat.clone()),
+        },
+    )?;
+    assert_eq!(segment(&cut, id)?.curve(), Some(&flat));
+    assert_eq!(segment(&cut, id)?.speed(), Speed::ONE);
+    assert_eq!(segment(&cut, id)?.timeline().duration().value, 500_000);
+
+    let curve = one_to_two()?;
+    run(
+        &mut cut,
+        Command::SetCurve {
+            segment: id,
+            curve: Some(curve.clone()),
+        },
+    )?;
+    assert_eq!(segment(&cut, id)?.curve(), Some(&curve));
+    assert_eq!(segment(&cut, id)?.speed(), Speed::ONE);
+    assert_eq!(segment(&cut, id)?.timeline().duration().value, 693_147);
+    assert_eq!(segment(&cut, id)?.source_offset(0)?, 0);
+    assert_eq!(segment(&cut, id)?.source_offset(693_147)?, 1_000_000);
+    assert_eq!(segment(&cut, id)?.source_offset(346_573)?, 414_213);
+
+    let loaded = Project::from_json(&cut.project.to_json()?)?;
+    assert_eq!(segment_of(&loaded, id)?.curve(), Some(&curve));
+    assert_eq!(
+        segment_of(&loaded, id)?.timeline().duration().value,
+        693_147
+    );
+
+    run(
+        &mut cut,
+        Command::SetSpeed {
+            segment: id,
+            speed: fast,
+        },
+    )?;
+    assert!(segment(&cut, id)?.curve().is_none());
+    assert_eq!(segment(&cut, id)?.speed(), fast);
+    assert_eq!(segment(&cut, id)?.timeline().duration().value, 500_000);
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(segment(&cut, id)?.curve(), Some(&curve));
+    assert_eq!(segment(&cut, id)?.timeline().duration().value, 693_147);
+
+    run(
+        &mut cut,
+        Command::SetCurve {
+            segment: id,
+            curve: None,
+        },
+    )?;
+    assert!(segment(&cut, id)?.curve().is_none());
+    assert_eq!(segment(&cut, id)?.speed(), Speed::ONE);
+    assert_eq!(segment(&cut, id)?.timeline().duration().value, 1_000_000);
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(segment(&cut, id)?.curve(), Some(&curve));
+    assert_eq!(segment(&cut, id)?.timeline().duration().value, 693_147);
+    Ok(())
+}
+
+fn segment_of(project: &Project, id: SegmentId) -> Result<&Segment, Error> {
+    project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))
+}
+
+#[test]
+fn a_trim_keeps_the_speed_curve() -> Result<(), Error> {
+    let mut cut = bare();
+    let (asset, id) = place_ramp(&mut cut)?;
+    let curve = one_to_two()?;
+    run(
+        &mut cut,
+        Command::SetCurve {
+            segment: id,
+            curve: Some(curve.clone()),
+        },
+    )?;
+    let (clip, media) = {
+        let clip = segment(&cut, id)?.clone();
+        let media = cut
+            .project
+            .asset(asset)
+            .ok_or(Error::UnknownAsset(asset))?
+            .clone();
+        (clip, media)
+    };
+    let commands = commands_for_trim(&clip, &media, TrimEdge::End, -346_573)?;
+    let source = match commands.as_slice() {
+        [
+            Command::Trim {
+                segment: trimmed,
+                source,
+            },
+        ] => {
+            assert_eq!(*trimmed, id);
+            *source
+        }
+        other => panic!("expected one trim, got {other:?}"),
+    };
+    assert_eq!(source.duration().value, 500_000);
+    run(
+        &mut cut,
+        Command::Trim {
+            segment: id,
+            source,
+        },
+    )?;
+    assert_eq!(segment(&cut, id)?.curve(), Some(&curve));
+    assert_eq!(segment(&cut, id)?.timeline().duration().value, 346_574);
+    assert_eq!(
+        segment(&cut, id)?
+            .source()
+            .ok_or(Error::MediaSource)?
+            .duration()
+            .value,
+        500_000
+    );
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(segment(&cut, id)?.timeline().duration().value, 693_147);
+    assert_eq!(segment(&cut, id)?.curve(), Some(&curve));
+    Ok(())
+}
+
+#[test]
+fn a_split_cuts_the_speed_curve() -> Result<(), Error> {
+    let mut cut = bare();
+    let (_asset, id) = place_ramp(&mut cut)?;
+    let curve = one_to_two()?;
+    run(
+        &mut cut,
+        Command::SetCurve {
+            segment: id,
+            curve: Some(curve),
+        },
+    )?;
+    assert_eq!(segment(&cut, id)?.source_offset(405_465)?, 500_000);
+    let right_id = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: id,
+            at: 405_465,
+        },
+    )?);
+    let slow = Speed::new(3, 2)?;
+    let fast = Speed::new(2, 1)?;
+    {
+        let left = segment(&cut, id)?;
+        let left_points = left.curve().ok_or(Error::Curve)?.points();
+        assert_eq!(left_points[0].at(), (0, 1));
+        assert_eq!(left_points[0].speed(), Speed::ONE);
+        assert_eq!(left_points[1].speed(), slow);
+        assert_eq!(left.timeline().duration().value, 405_465);
+        assert_eq!(
+            left.source().ok_or(Error::MediaSource)?.duration().value,
+            500_000
+        );
+    }
+    {
+        let right = segment(&cut, right_id)?;
+        let right_points = right.curve().ok_or(Error::Curve)?.points();
+        assert_eq!(right_points[0].speed(), slow);
+        assert_eq!(right_points[1].at(), (1, 1));
+        assert_eq!(right_points[1].speed(), fast);
+        assert_eq!(right.timeline().duration().value, 287_682);
+        assert_eq!(right.timeline().start().value, 405_465);
+        assert_eq!(
+            right.source().ok_or(Error::MediaSource)?.duration().value,
+            500_000
+        );
+    }
+    cut.history.undo(&mut cut.project)?;
+    let restored = segment(&cut, id)?;
+    assert_eq!(restored.timeline().duration().value, 693_147);
+    assert_eq!(
+        restored.curve().ok_or(Error::Curve)?.points()[1].speed(),
+        fast
+    );
+    assert!(cut.project.timeline().segment(right_id).is_none());
+    Ok(())
+}
+
+#[test]
+fn a_copy_a_reverse_a_detach_and_a_freeze_keep_the_curve_on_the_moving_picture() -> Result<(), Error>
+{
+    let mut cut = bare();
+    let (_asset, id) = place_ramp(&mut cut)?;
+    let curve = one_to_two()?;
+    run(
+        &mut cut,
+        Command::SetCurve {
+            segment: id,
+            curve: Some(curve.clone()),
+        },
+    )?;
+    let main = cut.main;
+    let copy = segment(&cut, id)?.duplicate(5_000_000)?;
+    assert_eq!(copy.curve(), Some(&curve));
+    let copy_id = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: copy,
+        },
+    )?);
+    assert_eq!(segment(&cut, copy_id)?.curve(), Some(&curve));
+
+    let forward = segment(&cut, id)?.asset_id().ok_or(Error::ImageSource)?;
+    let reversed = asset_id(run(&mut cut, Command::Reverse { segment: id })?);
+    assert_ne!(reversed, forward);
+    assert_eq!(segment(&cut, id)?.curve(), Some(&curve));
+    assert_eq!(segment(&cut, id)?.timeline().duration().value, 693_147);
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(segment(&cut, id)?.asset_id(), Some(forward));
+
+    let (sound, _) = opened(run(&mut cut, Command::DetachAudio { segment: id })?);
+    assert_eq!(segment(&cut, id)?.curve(), Some(&curve));
+    assert_eq!(segment(&cut, sound)?.curve(), Some(&curve));
+    assert_eq!(segment(&cut, sound)?.timeline().duration().value, 693_147);
+    cut.history.undo(&mut cut.project)?;
+    assert!(cut.project.timeline().segment(sound).is_none());
+    assert_eq!(segment(&cut, id)?.curve(), Some(&curve));
+
+    let still = segment_id(run(
+        &mut cut,
+        Command::Freeze {
+            segment: id,
+            at: 405_465,
+            hold: 100_000,
+        },
+    )?);
+    assert!(segment(&cut, still)?.frozen());
+    assert!(segment(&cut, still)?.curve().is_none());
+    assert_eq!(segment(&cut, still)?.speed(), Speed::ONE);
+    assert_eq!(segment(&cut, still)?.timeline().duration().value, 100_000);
+    let slow = Speed::new(3, 2)?;
+    {
+        let left = segment(&cut, id)?;
+        assert_eq!(left.curve().ok_or(Error::Curve)?.points()[1].speed(), slow);
+        assert_eq!(left.timeline().duration().value, 405_465);
+    }
+    let right_id = cut
+        .project
+        .timeline()
+        .main_track()
+        .segments()
+        .iter()
+        .find(|segment| segment.id() != id && segment.id() != still && segment.id() != copy_id)
+        .map(Segment::id)
+        .ok_or(Error::Curve)?;
+    {
+        let right = segment(&cut, right_id)?;
+        assert_eq!(right.curve().ok_or(Error::Curve)?.points()[0].speed(), slow);
+        assert_eq!(right.timeline().duration().value, 287_682);
+    }
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetCurve {
+                segment: still,
+                curve: Some(curve),
+            },
+        ),
+        Error::Freeze,
+    );
+    assert!(segment(&cut, still)?.curve().is_none());
+    assert_eq!(segment(&cut, id)?.timeline().duration().value, 405_465);
+    Ok(())
+}
+
+#[test]
+fn a_curve_is_refused_when_the_segment_cannot_take_one() -> Result<(), Error> {
+    let mut cut = bare();
+    let (_asset, id) = place_ramp(&mut cut)?;
+    let curve = one_to_two()?;
+    run(
+        &mut cut,
+        Command::AddKeyframe {
+            segment: id,
+            keyframe: Keyframe::new(800_000, KeyframeValue::Opacity(0.5))?,
+        },
+    )?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetCurve {
+                segment: id,
+                curve: Some(curve.clone()),
+            },
+        ),
+        Error::KeyframeOutOfRange,
+    );
+    assert!(segment(&cut, id)?.curve().is_none());
+    assert_eq!(segment(&cut, id)?.timeline().duration().value, 1_000_000);
+    run(
+        &mut cut,
+        Command::RemoveKeyframe {
+            segment: id,
+            offset_us: 800_000,
+            property: KeyframeProperty::Opacity,
+        },
+    )?;
+
+    let main = cut.main;
+    run(
+        &mut cut,
+        Command::SetLocked {
+            track: main,
+            on: true,
+        },
+    )?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetCurve {
+                segment: id,
+                curve: Some(curve.clone()),
+            },
+        ),
+        Error::Locked,
+    );
+    assert!(segment(&cut, id)?.curve().is_none());
+    run(
+        &mut cut,
+        Command::SetLocked {
+            track: main,
+            on: false,
+        },
+    )?;
+
+    let still = place_still(&mut cut, "file:///still.png", 5_000_000, 1_000_000)?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetCurve {
+                segment: still,
+                curve: Some(curve.clone()),
+            },
+        ),
+        Error::ImageSource,
+    );
+    let words = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::text("hi", 0, 1_000_000)?,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetCurve {
+                segment: words,
+                curve: Some(curve.clone()),
+            },
+        ),
+        Error::Text,
+    );
+    let sticker = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::sticker("star", 0, 1_000_000)?,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetCurve {
+                segment: sticker,
+                curve: Some(curve.clone()),
+            },
+        ),
+        Error::Sticker,
+    );
+    let effect = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::effect(0, 1_000_000)?,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetCurve {
+                segment: effect,
+                curve: Some(curve.clone()),
+            },
+        ),
+        Error::Effect,
+    );
+    run(&mut cut, Command::RemoveSegment(id))?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetCurve {
+                segment: id,
+                curve: Some(curve),
+            },
+        ),
+        Error::UnknownSegment(id),
+    );
     Ok(())
 }

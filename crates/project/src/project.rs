@@ -12,7 +12,7 @@ use crate::command::{Command, Outcome};
 use crate::id::{AssetId, ProjectId, SegmentId, TimelineId, TrackId};
 use crate::segment::{Channels, Segment};
 use crate::settings::{AspectRatio, Canvas, Settings};
-use crate::time::{Speed, TimeRange, source_ticks, timeline_duration};
+use crate::time::{Speed, TimeRange};
 use crate::timeline::Timeline;
 use crate::track::{Band, Track, TrackKind};
 use crate::transition::Transition;
@@ -193,6 +193,10 @@ impl Project {
             }
             Command::SetSpeed { segment, speed } => {
                 self.set_speed_now(segment, speed)?;
+                Ok(Outcome::Unchanged)
+            }
+            Command::SetCurve { segment, curve } => {
+                self.set_curve_now(segment, curve)?;
                 Ok(Outcome::Unchanged)
             }
             Command::Move {
@@ -860,6 +864,25 @@ impl Project {
         self.reflow(id, on_main)
     }
 
+    fn set_curve_now(
+        &mut self,
+        id: SegmentId,
+        curve: Option<crate::SpeedCurve>,
+    ) -> Result<(), Error> {
+        let on_main = self
+            .timeline
+            .main_track()
+            .segments()
+            .iter()
+            .any(|segment| segment.id() == id);
+        if self.timeline.segment(id).is_none() {
+            return Err(Error::UnknownSegment(id));
+        }
+        self.refuse_edit(id)?;
+        self.timeline.segment_mut(id)?.set_curve(curve)?;
+        self.reflow(id, on_main)
+    }
+
     fn move_now(&mut self, id: SegmentId, track: Option<TrackId>, start: i64) -> Result<(), Error> {
         if start < 0 {
             return Err(Error::NegativeTime);
@@ -946,7 +969,8 @@ impl Project {
             self.refuse_inside_transition(id, at)?;
         }
         let asset_id = segment.asset_id();
-        let speed = segment.speed();
+        let mut left_curve = None;
+        let mut right_curve = None;
         let (left_source, left_dur, right_source, right_dur) = match segment.source() {
             None => {
                 let left = at
@@ -963,7 +987,7 @@ impl Project {
                 let left_us = at
                     .checked_sub(range.start().value)
                     .ok_or(Error::DurationOverflow)?;
-                let ticks = source_ticks(left_us, source.duration().timescale, speed)?;
+                let ticks = segment.source_offset(left_us)?;
                 if ticks < 1 || ticks >= source.duration().value {
                     return Err(Error::SplitOutside);
                 }
@@ -983,9 +1007,15 @@ impl Project {
                     Timestamp::new(right_start, scale),
                     Timestamp::new(right_ticks, scale),
                 )?;
-                let left_dur = timeline_duration(left_source.duration(), speed)?.value;
-                let right_dur = timeline_duration(right_source.duration(), speed)?.value;
-                (Some(left_source), left_dur, Some(right_source), right_dur)
+                let parts = segment.split_speed(ticks)?;
+                left_curve = parts.left;
+                right_curve = parts.right;
+                (
+                    Some(left_source),
+                    parts.left_us,
+                    Some(right_source),
+                    parts.right_us,
+                )
             }
         };
         let total = left_dur
@@ -1031,6 +1061,9 @@ impl Project {
         match left_source {
             Some(source) => {
                 let asset = asset.as_ref().ok_or(Error::Text)?;
+                if let Some(curve) = left_curve {
+                    self.timeline.segment_mut(id)?.install_curve(curve);
+                }
                 self.timeline.segment_mut(id)?.trim_source(asset, source)?;
             }
             None => self
@@ -1045,6 +1078,9 @@ impl Project {
         match right_source {
             Some(source) => {
                 let asset = asset.as_ref().ok_or(Error::Text)?;
+                if let Some(curve) = right_curve {
+                    right.install_curve(curve);
+                }
                 right.trim_source(asset, source)?;
                 right.set_start(right_start)?;
             }

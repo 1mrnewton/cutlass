@@ -143,7 +143,7 @@ pub fn source_ticks(
     round_half_away(numer, denom)
 }
 
-fn round_half_away(numer: i128, denom: i128) -> Result<i64, Error> {
+pub(crate) fn round_half_away(numer: i128, denom: i128) -> Result<i64, Error> {
     if denom <= 0 {
         return Err(Error::ZeroSpeed);
     }

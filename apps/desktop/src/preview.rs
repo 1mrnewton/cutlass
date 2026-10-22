@@ -82,14 +82,17 @@ pub fn show(
         let drag = drag.flatten();
         if let Some(plate) = plate {
             let outer = ui.clip_rect();
-            ui.set_clip_rect(outer.intersect(frame));
+            let well = outer.intersect(frame);
+            ui.set_clip_rect(well);
             let (red, green, blue) = project.settings().background().channels();
             ui.painter()
                 .rect_filled(plate, 0.0, Color32::from_rgb(red, green, blue));
             if let Some(id) = picture
                 && let Some(layer) = shown_box(project, playhead_us, &hidden, plate, drag.as_ref())
             {
+                ui.set_clip_rect(well.intersect(plate));
                 paint_picture(ui, id, &layer);
+                ui.set_clip_rect(well);
             }
             paint_selected(
                 ui,
@@ -1092,6 +1095,7 @@ mod tests {
     use cutlass_core::Timestamp;
     use cutlass_project::{
         Asset, Channels, Command, History, Outcome, Project, ProjectId, Segment, Speed, TimeRange,
+        Transform,
     };
 
     fn project() -> Project {
@@ -2042,6 +2046,73 @@ mod tests {
             &layer,
             layer.center + eframe::egui::vec2(80.0, 80.0)
         ));
+    }
+
+    #[test]
+    fn a_turned_picture_is_clipped_to_the_canvas() {
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, crate::words::Language::English);
+        let image = eframe::egui::ColorImage::filled([2, 2], eframe::egui::Color32::WHITE);
+        let texture = ctx.load_texture("turned", image, eframe::egui::TextureOptions::LINEAR);
+        let mut cut = placed();
+        let id = cut
+            .timeline()
+            .tracks()
+            .iter()
+            .flat_map(|track| track.segments())
+            .next()
+            .expect("segment")
+            .id();
+        History::new()
+            .apply(
+                &mut cut,
+                &[Command::SetTransform {
+                    segment: id,
+                    transform: Transform::new((0.0, 0.0), (1.0, 1.0), 45.0, 1.0, false, false)
+                        .expect("turn"),
+                }],
+            )
+            .expect("turn");
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(400.0, 300.0),
+        );
+        let frame = eframe::egui::Rect::from_min_max(
+            screen.min + eframe::egui::vec2(16.0, 16.0),
+            eframe::egui::pos2(screen.right() - 16.0, screen.bottom() - 52.0 - 8.0),
+        );
+        let plate = super::fitted_canvas(frame, 1920, 1080).expect("plate");
+        let mut output = ctx.run_ui(
+            eframe::egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(1.0),
+                ..Default::default()
+            },
+            |ui| {
+                super::show(ui, &cut, 0, false, &mut Vec::new(), Some(texture.id()));
+            },
+        );
+        let clipped = output
+            .shapes
+            .iter()
+            .find(|clipped| uses_texture(&clipped.shape, texture.id()))
+            .expect("picture");
+        let clip = clipped.clip_rect;
+        assert!((clip.left() - plate.left()).abs() < 0.5);
+        assert!((clip.right() - plate.right()).abs() < 0.5);
+        assert!((clip.top() - plate.top()).abs() < 0.5);
+        assert!((clip.bottom() - plate.bottom()).abs() < 0.5);
+        let mesh = match &clipped.shape {
+            eframe::egui::Shape::Mesh(mesh) => mesh,
+            other => panic!("expected a mesh, got {other:?}"),
+        };
+        assert!(
+            mesh.vertices
+                .iter()
+                .any(|vertex| !plate.contains(vertex.pos))
+        );
+        output.textures_delta.clear();
     }
 
     #[test]

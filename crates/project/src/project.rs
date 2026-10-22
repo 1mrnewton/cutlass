@@ -221,6 +221,7 @@ impl Project {
             }
             Command::DetachAudio { segment } => self.detach_now(segment),
             Command::Freeze { segment, at, hold } => self.freeze_now(segment, at, hold),
+            Command::Reverse { segment } => self.reverse_now(segment),
             Command::SetVisible { segment, visible } => {
                 self.timeline.segment_mut(segment)?.set_visible(visible);
                 Ok(Outcome::Unchanged)
@@ -265,12 +266,32 @@ impl Project {
     }
 
     fn set_source_now(&mut self, id: AssetId, source: String) -> Result<(), Error> {
-        let asset = self
-            .assets
+        if self.asset(id).is_none() {
+            return Err(Error::UnknownAsset(id));
+        }
+        let partner = self.reverse_partner(id);
+        self.asset_mut(id)?.set_source(source.clone())?;
+        if let Some(partner) = partner {
+            self.asset_mut(partner)?.set_source(source)?;
+        }
+        Ok(())
+    }
+
+    fn asset_mut(&mut self, id: AssetId) -> Result<&mut Asset, Error> {
+        self.assets
             .iter_mut()
             .find(|asset| asset.id() == id)
-            .ok_or(Error::UnknownAsset(id))?;
-        asset.set_source(source)
+            .ok_or(Error::UnknownAsset(id))
+    }
+
+    fn reverse_partner(&self, id: AssetId) -> Option<AssetId> {
+        if let Some(forward) = self.asset(id)?.reverses() {
+            return Some(forward);
+        }
+        self.assets
+            .iter()
+            .find(|asset| asset.reverses() == Some(id))
+            .map(Asset::id)
     }
 
     fn add_asset_now(&mut self, mut asset: Asset) -> Result<AssetId, Error> {
@@ -678,6 +699,44 @@ impl Project {
         Ok(Outcome::Segment(freeze_id))
     }
 
+    fn reverse_now(&mut self, id: SegmentId) -> Result<Outcome, Error> {
+        let segment = self
+            .timeline
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .clone();
+        if segment.frozen() {
+            return Err(Error::Freeze);
+        }
+        let source = segment.source().ok_or(Error::ImageSource)?;
+        let current_id = segment.asset_id();
+        let current = self
+            .asset(current_id)
+            .ok_or(Error::UnknownAsset(current_id))?
+            .clone();
+        let target_id = if let Some(forward) = current.reverses() {
+            forward
+        } else if let Some(existing) = self
+            .assets
+            .iter()
+            .find(|asset| asset.reverses() == Some(current_id))
+        {
+            existing.id()
+        } else {
+            self.add_asset_now(current.reversed()?)?
+        };
+        let target = self
+            .asset(target_id)
+            .ok_or(Error::UnknownAsset(target_id))?
+            .clone();
+        let media = target.duration().ok_or(Error::ImageSource)?;
+        let mirrored = mirror_source(source, media)?;
+        let segment = self.timeline.segment_mut(id)?;
+        segment.set_asset(target_id);
+        segment.trim_source(&target, mirrored)?;
+        Ok(Outcome::Asset(target_id))
+    }
+
     fn collides(
         &self,
         track: TrackId,
@@ -825,6 +884,23 @@ fn magnet_index(segments: &[Segment], start: i64) -> usize {
         .iter()
         .position(|segment| segment.timeline().start().value >= start)
         .unwrap_or(segments.len())
+}
+
+fn mirror_source(source: TimeRange, media: Timestamp) -> Result<TimeRange, Error> {
+    if source.start().timescale != media.timescale {
+        return Err(Error::SourceTimescale {
+            asset: media.timescale.get(),
+            source_scale: source.start().timescale.get(),
+        });
+    }
+    let start = media
+        .value
+        .checked_sub(source.end().value)
+        .ok_or(Error::DurationOverflow)?;
+    if start < 0 {
+        return Err(Error::SourceOutsideAsset);
+    }
+    TimeRange::new(Timestamp::new(start, media.timescale), source.duration())
 }
 
 fn moved_starts(

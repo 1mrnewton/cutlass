@@ -28,6 +28,8 @@ pub struct Asset {
     kind: AssetKind,
     source: String,
     duration: Option<Timestamp>,
+    /// The forward asset, when this asset is that file played backwards.
+    reverses: Option<AssetId>,
 }
 
 impl Asset {
@@ -58,6 +60,7 @@ impl Asset {
             kind: AssetKind::Audio,
             source: source_string(source)?,
             duration: Some(duration),
+            reverses: None,
         })
     }
 
@@ -70,6 +73,7 @@ impl Asset {
             kind: AssetKind::Image { width, height },
             source: source_string(source)?,
             duration: None,
+            reverses: None,
         })
     }
 
@@ -89,6 +93,7 @@ impl Asset {
             kind,
             source: source_string(source)?,
             duration: Some(duration),
+            reverses: None,
         })
     }
 
@@ -116,6 +121,29 @@ impl Asset {
 
     pub const fn duration(&self) -> Option<Timestamp> {
         self.duration
+    }
+
+    /// The asset this one plays backwards. None when this asset is forward.
+    pub const fn reverses(&self) -> Option<AssetId> {
+        self.reverses
+    }
+
+    pub(crate) fn set_reverses(&mut self, id: AssetId) {
+        self.reverses = Some(id);
+    }
+
+    /// A second asset for this file, played backwards. The id is not assigned yet.
+    pub(crate) fn reversed(&self) -> Result<Self, Error> {
+        if self.duration.is_none() {
+            return Err(Error::ImageSource);
+        }
+        Ok(Self {
+            id: AssetId::raw(0),
+            kind: self.kind,
+            source: self.source.clone(),
+            duration: self.duration,
+            reverses: Some(self.id),
+        })
     }
 
     pub const fn is_video(&self) -> bool {
@@ -234,6 +262,21 @@ mod tests {
             Asset::video("file:///v.mp4", length(1), 0, 10, true).unwrap_err(),
             Error::ZeroCanvas
         );
+    }
+
+    #[test]
+    fn a_reverse_copies_the_file_and_names_it() {
+        let mut forward = Asset::video("file:///v.mp4", length(30_000), 320, 180, true).unwrap();
+        forward.assign(AssetId::raw(4));
+        let reverse = forward.reversed().unwrap();
+        assert_eq!(reverse.id(), AssetId::raw(0));
+        assert_eq!(reverse.reverses(), Some(AssetId::raw(4)));
+        assert_eq!(reverse.source(), forward.source());
+        assert_eq!(reverse.kind(), forward.kind());
+        assert_eq!(reverse.duration(), forward.duration());
+        assert!(forward.reverses().is_none());
+        let image = Asset::image("file:///still.png", 8, 8).unwrap();
+        assert_eq!(image.reversed().unwrap_err(), Error::ImageSource);
     }
 
     #[test]

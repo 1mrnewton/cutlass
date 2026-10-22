@@ -4,9 +4,9 @@ use std::num::NonZeroU32;
 
 use cutlass_core::Timestamp;
 use cutlass_project::{
-    AspectRatio, Asset, AssetId, Blend, Channels, Color, ColorSpace, Command, Crop, Easing, Error,
-    FrameRate, History, Keyframe, KeyframeProperty, KeyframeValue, Outcome, Project, ProjectId,
-    Segment, SegmentId, SequenceRate, Speed, TimeRange, TrackId, TrackKind, Transform,
+    AspectRatio, Asset, AssetId, AssetKind, Blend, Channels, Color, ColorSpace, Command, Crop,
+    Easing, Error, FrameRate, History, Keyframe, KeyframeProperty, KeyframeValue, Outcome, Project,
+    ProjectId, Segment, SegmentId, SequenceRate, Speed, TimeRange, TrackId, TrackKind, Transform,
 };
 
 fn scale(value: u32) -> NonZeroU32 {
@@ -3092,6 +3092,347 @@ fn a_freeze_needs_a_picture_with_a_source() -> Result<(), Error> {
                 hold: 1_000,
             },
         ),
+        Error::UnknownSegment(missing),
+    );
+    Ok(())
+}
+
+#[test]
+fn reverse_points_the_segment_at_the_reversed_file() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let id = place_main(&mut cut, asset, 1_000_000, 30_000)?;
+    let scale = cut
+        .project
+        .asset(asset)
+        .ok_or(Error::UnknownAsset(asset))?
+        .duration()
+        .ok_or(Error::ImageSource)?
+        .timescale;
+    let trimmed = TimeRange::new(Timestamp::new(60_000, scale), Timestamp::new(30_000, scale))?;
+    run(
+        &mut cut,
+        Command::Trim {
+            segment: id,
+            source: trimmed,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetVisible {
+            segment: id,
+            visible: false,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::AddKeyframe {
+            segment: id,
+            keyframe: Keyframe::new(100_000, KeyframeValue::Opacity(0.2))?,
+        },
+    )?;
+    let reverse = asset_id(run(&mut cut, Command::Reverse { segment: id })?);
+    assert_ne!(reverse, asset);
+    let segment = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(segment.asset_id(), reverse);
+    assert_eq!(segment.timeline().start().value, 1_000_000);
+    assert_eq!(segment.timeline().duration().value, 1_000_000);
+    assert_eq!(segment.channels(), Channels::Both);
+    assert_eq!(segment.speed(), Speed::ONE);
+    assert!(!segment.visible());
+    assert_eq!(segment.keyframes().len(), 1);
+    assert_eq!(
+        segment.source(),
+        Some(TimeRange::new(
+            Timestamp::new(210_000, scale),
+            Timestamp::new(30_000, scale),
+        )?)
+    );
+    let (kind, reverses, source, duration) = {
+        let stored = cut
+            .project
+            .asset(reverse)
+            .ok_or(Error::UnknownAsset(reverse))?;
+        (
+            stored.kind(),
+            stored.reverses(),
+            stored.source().to_string(),
+            stored.duration(),
+        )
+    };
+    let forward = cut.project.asset(asset).ok_or(Error::UnknownAsset(asset))?;
+    assert_eq!(reverses, Some(asset));
+    assert_eq!(
+        kind,
+        AssetKind::Video {
+            has_audio: true,
+            width: 1280,
+            height: 720,
+        }
+    );
+    assert_eq!(source, forward.source());
+    assert_eq!(duration, forward.duration());
+    let text = cut.project.to_json()?;
+    assert_eq!(text.matches("\"reverses\"").count(), 1);
+    let loaded = Project::from_json(&text)?;
+    assert_eq!(
+        loaded
+            .asset(reverse)
+            .ok_or(Error::UnknownAsset(reverse))?
+            .reverses(),
+        Some(asset)
+    );
+    assert_eq!(
+        loaded
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .source()
+            .expect("source")
+            .start()
+            .value,
+        210_000
+    );
+
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .asset_id(),
+        asset
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .source(),
+        Some(trimmed)
+    );
+    assert!(cut.project.asset(reverse).is_none());
+    assert!(!cut.project.to_json()?.contains("\"reverses\""));
+    cut.history.redo(&mut cut.project)?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .asset_id(),
+        reverse
+    );
+    assert_eq!(
+        cut.project
+            .asset(reverse)
+            .ok_or(Error::UnknownAsset(reverse))?
+            .reverses(),
+        Some(asset)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_second_reverse_reuses_the_asset_and_relink_keeps_both() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let first = place_main(&mut cut, asset, 0, 30_000)?;
+    let reverse = asset_id(run(&mut cut, Command::Reverse { segment: first })?);
+    let second = place_main(&mut cut, asset, 2_000_000, 15_000)?;
+    let reused = asset_id(run(&mut cut, Command::Reverse { segment: second })?);
+    assert_eq!(reused, reverse);
+    assert_eq!(cut.project.assets().len(), 2);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(second)
+            .ok_or(Error::UnknownSegment(second))?
+            .source()
+            .expect("source")
+            .start()
+            .value,
+        285_000
+    );
+    let back = asset_id(run(&mut cut, Command::Reverse { segment: first })?);
+    assert_eq!(back, asset);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(first)
+            .ok_or(Error::UnknownSegment(first))?
+            .source()
+            .expect("source")
+            .start()
+            .value,
+        0
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(second)
+            .ok_or(Error::UnknownSegment(second))?
+            .asset_id(),
+        reverse
+    );
+    assert_eq!(cut.project.assets().len(), 2);
+
+    run(
+        &mut cut,
+        Command::SetSource {
+            asset,
+            source: "file:///other.mp4".to_string(),
+        },
+    )?;
+    assert_eq!(
+        cut.project.asset(asset).expect("forward").source(),
+        "file:///other.mp4"
+    );
+    assert_eq!(
+        cut.project.asset(reverse).expect("reverse").source(),
+        "file:///other.mp4"
+    );
+    run(
+        &mut cut,
+        Command::SetSource {
+            asset: reverse,
+            source: "file:///third.mp4".to_string(),
+        },
+    )?;
+    assert_eq!(
+        cut.project.asset(asset).expect("forward").source(),
+        "file:///third.mp4"
+    );
+    assert_eq!(
+        cut.project.asset(reverse).expect("reverse").source(),
+        "file:///third.mp4"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_reverse_needs_a_source() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    let freeze = same_track(run(
+        &mut cut,
+        Command::Freeze {
+            segment: id,
+            at: 500_000,
+            hold: 1_000_000,
+        },
+    )?);
+    expect_err(
+        run(&mut cut, Command::Reverse { segment: freeze }),
+        Error::Freeze,
+    );
+    assert!(
+        cut.project
+            .timeline()
+            .segment(freeze)
+            .ok_or(Error::UnknownSegment(freeze))?
+            .frozen()
+    );
+    assert!(
+        cut.project
+            .assets()
+            .iter()
+            .all(|item| item.reverses().is_none())
+    );
+
+    run(&mut cut, Command::SetMagnet(false))?;
+    let image = asset_id(run(
+        &mut cut,
+        Command::AddAsset(Asset::image("file:///still.png", 8, 8)?),
+    )?);
+    let image_segment = {
+        let stored = cut.project.asset(image).ok_or(Error::UnknownAsset(image))?;
+        Segment::image(stored, 8_000_000, 1_000_000)?
+    };
+    let main = cut.main;
+    let image_id = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: image_segment,
+        },
+    )?);
+    expect_err(
+        run(&mut cut, Command::Reverse { segment: image_id }),
+        Error::ImageSource,
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(image_id)
+            .ok_or(Error::UnknownSegment(image_id))?
+            .asset_id(),
+        image
+    );
+
+    let wav = asset_id(run(
+        &mut cut,
+        Command::AddAsset(Asset::audio(
+            "file:///a.wav",
+            Timestamp::new(96_000, scale(48_000)),
+        )?),
+    )?);
+    let sound_segment = {
+        let stored = cut.project.asset(wav).ok_or(Error::UnknownAsset(wav))?;
+        let media = stored.duration().ok_or(Error::ImageSource)?;
+        let source = TimeRange::new(
+            Timestamp::new(0, media.timescale),
+            Timestamp::new(48_000, media.timescale),
+        )?;
+        Segment::media(stored, source, 0, Channels::Sound, Speed::ONE)?
+    };
+    let sound = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: sound_segment,
+        },
+    )?);
+    let reversed = asset_id(run(&mut cut, Command::Reverse { segment: sound })?);
+    assert_eq!(
+        cut.project
+            .asset(reversed)
+            .ok_or(Error::UnknownAsset(reversed))?
+            .kind(),
+        AssetKind::Audio
+    );
+    assert_eq!(
+        cut.project
+            .asset(reversed)
+            .ok_or(Error::UnknownAsset(reversed))?
+            .reverses(),
+        Some(wav)
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(sound)
+            .ok_or(Error::UnknownSegment(sound))?
+            .source()
+            .expect("source")
+            .start()
+            .value,
+        48_000
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(sound)
+            .ok_or(Error::UnknownSegment(sound))?
+            .channels(),
+        Channels::Sound
+    );
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(&mut cut, Command::Reverse { segment: missing }),
         Error::UnknownSegment(missing),
     );
     Ok(())

@@ -637,6 +637,10 @@ impl Segment {
         self.id = id;
     }
 
+    pub(crate) fn set_asset(&mut self, asset: AssetId) {
+        self.asset = asset;
+    }
+
     pub const fn id(&self) -> SegmentId {
         self.id
     }

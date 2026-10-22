@@ -132,6 +132,7 @@ fn settings_from(document: &SettingsDoc) -> Result<Settings, Error> {
 fn asset_doc(asset: &Asset) -> AssetDoc {
     let id = asset.id().to_string();
     let source = asset.source().to_string();
+    let reverses = asset.reverses().map(|id| id.to_string());
     match asset.kind() {
         AssetKind::Video {
             has_audio,
@@ -141,6 +142,7 @@ fn asset_doc(asset: &Asset) -> AssetDoc {
             id,
             kind: AssetKindName::Video,
             source,
+            reverses,
             duration: Some(media_stamp(asset)),
             width: Some(width),
             height: Some(height),
@@ -150,6 +152,7 @@ fn asset_doc(asset: &Asset) -> AssetDoc {
             id,
             kind: AssetKindName::Audio,
             source,
+            reverses,
             duration: Some(media_stamp(asset)),
             width: None,
             height: None,
@@ -159,6 +162,7 @@ fn asset_doc(asset: &Asset) -> AssetDoc {
             id,
             kind: AssetKindName::Image,
             source,
+            reverses,
             duration: None,
             width: Some(width),
             height: Some(height),
@@ -172,7 +176,43 @@ fn media_stamp(asset: &Asset) -> Stamp {
 }
 
 fn assets_from(documents: Vec<AssetDoc>) -> Result<Vec<Asset>, Error> {
-    documents.into_iter().map(asset_from).collect()
+    let assets = documents
+        .into_iter()
+        .map(asset_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    check_reverses(&assets)?;
+    Ok(assets)
+}
+
+fn check_reverses(assets: &[Asset]) -> Result<(), Error> {
+    for (index, asset) in assets.iter().enumerate() {
+        let Some(target_id) = asset.reverses() else {
+            continue;
+        };
+        if target_id == asset.id() {
+            return Err(Error::Reverse);
+        }
+        let target = assets
+            .iter()
+            .find(|item| item.id() == target_id)
+            .ok_or(Error::UnknownAsset(target_id))?;
+        if asset.duration().is_none() || target.duration().is_none() {
+            return Err(Error::ImageSource);
+        }
+        let repeated = assets
+            .iter()
+            .take(index)
+            .any(|earlier| earlier.reverses() == Some(target_id));
+        if target.reverses().is_some()
+            || target.kind() != asset.kind()
+            || target.duration() != asset.duration()
+            || target.source() != asset.source()
+            || repeated
+        {
+            return Err(Error::Reverse);
+        }
+    }
+    Ok(())
 }
 
 fn asset_from(document: AssetDoc) -> Result<Asset, Error> {
@@ -209,6 +249,9 @@ fn asset_from(document: AssetDoc) -> Result<Asset, Error> {
         }
     };
     asset.assign(id);
+    if let Some(target) = document.reverses {
+        asset.set_reverses(target.parse()?);
+    }
     Ok(asset)
 }
 
@@ -723,6 +766,8 @@ struct AssetDoc {
     kind: AssetKindName,
     source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    reverses: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     duration: Option<Stamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     width: Option<u32>,
@@ -958,7 +1003,7 @@ mod tests {
     use crate::asset::{Asset, AssetKind};
     use crate::command::{Command, Outcome};
     use crate::history::History;
-    use crate::id::ProjectId;
+    use crate::id::{AssetId, ProjectId};
     use crate::project::Project;
     use crate::rate::{FrameRate, SequenceRate};
     use crate::segment::{Blend, Channels, Easing, Keyframe, KeyframeValue, Segment, Transform};
@@ -1555,6 +1600,102 @@ mod tests {
         let again = Project::from_json(&saved).expect("reload");
         assert!(again.timeline().main_track().segments()[0].frozen());
         assert!(!again.to_json().expect("save").contains("\"frozen\": false"));
+    }
+
+    #[test]
+    fn a_reverse_names_one_matching_asset() {
+        let (_project, value) = cut_value();
+        let next = value["next_id"].as_u64().expect("counter");
+        let forward = value["assets"][0]["id"]
+            .as_str()
+            .expect("video")
+            .to_string();
+        let mut valid = value.clone();
+        let mut reverse = valid["assets"][0].clone();
+        reverse["id"] = json!(format!("asset-{next}"));
+        reverse["reverses"] = json!(forward);
+        valid["assets"]
+            .as_array_mut()
+            .expect("assets")
+            .push(reverse);
+        valid["next_id"] = json!(next + 1);
+        let loaded =
+            Project::from_json(&serde_json::to_string(&valid).expect("json")).expect("load");
+        let (target, source) = {
+            let stored = loaded
+                .assets()
+                .iter()
+                .find(|asset| asset.reverses().is_some())
+                .expect("reverse");
+            (
+                stored.reverses().expect("target").to_string(),
+                stored.source().to_string(),
+            )
+        };
+        assert_eq!(target, forward);
+        assert_eq!(source, loaded.assets()[0].source());
+        let saved = loaded.to_json().expect("save");
+        assert_eq!(saved.matches("\"reverses\"").count(), 1);
+
+        let mut missing = valid.clone();
+        missing["assets"][3]["reverses"] = json!("asset-99");
+        refuse(
+            &serde_json::to_string(&missing).expect("json"),
+            Error::UnknownAsset(AssetId::new(99).expect("id")),
+        );
+        let mut itself = valid.clone();
+        itself["assets"][3]["reverses"] = json!(format!("asset-{next}"));
+        refuse(
+            &serde_json::to_string(&itself).expect("json"),
+            Error::Reverse,
+        );
+        let mut drifted = valid.clone();
+        drifted["assets"][3]["source"] = json!("file:///other.mp4");
+        refuse(
+            &serde_json::to_string(&drifted).expect("json"),
+            Error::Reverse,
+        );
+        drifted = valid.clone();
+        drifted["assets"][3]["duration"]["value"] = json!(1);
+        refuse(
+            &serde_json::to_string(&drifted).expect("json"),
+            Error::Reverse,
+        );
+
+        let mut image = value.clone();
+        image["assets"][2]["reverses"] = json!(forward);
+        refuse(
+            &serde_json::to_string(&image).expect("json"),
+            Error::ImageSource,
+        );
+
+        let mut doubled = valid.clone();
+        let mut second = doubled["assets"][0].clone();
+        second["id"] = json!(format!("asset-{}", next + 1));
+        second["reverses"] = json!(forward);
+        doubled["assets"]
+            .as_array_mut()
+            .expect("assets")
+            .push(second);
+        doubled["next_id"] = json!(next + 2);
+        refuse(
+            &serde_json::to_string(&doubled).expect("json"),
+            Error::Reverse,
+        );
+
+        let mut chained = valid;
+        let mut further = chained["assets"][0].clone();
+        further["id"] = json!(format!("asset-{}", next + 1));
+        further["reverses"] = json!(format!("asset-{next}"));
+        chained["assets"]
+            .as_array_mut()
+            .expect("assets")
+            .push(further);
+        chained["next_id"] = json!(next + 2);
+        refuse(
+            &serde_json::to_string(&chained).expect("json"),
+            Error::Reverse,
+        );
     }
 
     fn cut_value() -> (Project, Value) {

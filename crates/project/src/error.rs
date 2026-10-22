@@ -75,6 +75,8 @@ pub enum Error {
     Crop,
     #[error("a freeze holds one frame")]
     Freeze,
+    #[error("the reverse does not match its asset")]
+    Reverse,
     #[error("value is not finite")]
     NonFinite,
     #[error("scale must be positive")]

@@ -107,6 +107,10 @@ pub enum Command {
         at: i64,
         hold: i64,
     },
+    /// Points the segment at the reverse of its asset. The timeline range stays.
+    Reverse {
+        segment: SegmentId,
+    },
     /// Shown when on. It does not move the segment.
     SetVisible {
         segment: SegmentId,

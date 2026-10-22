@@ -2060,3 +2060,109 @@ fn denoise_turns_on_for_sound_and_undo_turns_it_off() -> Result<(), Error> {
     );
     Ok(())
 }
+
+#[test]
+fn keep_pitch_turns_off_and_a_speed_change_leaves_it() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    assert!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .keep_pitch()
+    );
+    assert_eq!(
+        run(
+            &mut cut,
+            Command::SetKeepPitch {
+                segment: id,
+                keep: false,
+            },
+        )?,
+        Outcome::Unchanged
+    );
+    cut.history.undo(&mut cut.project)?;
+    assert!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .keep_pitch()
+    );
+    cut.history.redo(&mut cut.project)?;
+    run(
+        &mut cut,
+        Command::SetSpeed {
+            segment: id,
+            speed: Speed::new(2, 1)?,
+        },
+    )?;
+    let sped = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(sped.timeline().duration().value, 500_000);
+    assert!(!sped.keep_pitch());
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: id,
+            at: 250_000,
+        },
+    )?);
+    assert!(
+        !cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .keep_pitch()
+    );
+    assert!(
+        !cut.project
+            .timeline()
+            .segment(right)
+            .ok_or(Error::UnknownSegment(right))?
+            .keep_pitch()
+    );
+
+    let picture = media(&cut.project, asset, 2_000_000, 30_000, Channels::Picture)?;
+    let main = cut.main;
+    let picture = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: picture,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetKeepPitch {
+                segment: picture,
+                keep: false,
+            },
+        ),
+        Error::NoSound,
+    );
+    assert!(
+        cut.project
+            .timeline()
+            .segment(picture)
+            .ok_or(Error::UnknownSegment(picture))?
+            .keep_pitch()
+    );
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetKeepPitch {
+                segment: missing,
+                keep: false,
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
+    Ok(())
+}

@@ -310,6 +310,7 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
         fade_in: segment.fade_in(),
         fade_out: segment.fade_out(),
         denoise: segment.denoise(),
+        keep_pitch: segment.keep_pitch(),
         transform: transform_doc(segment.transform()),
         keyframes: segment.keyframes().iter().copied().map(key_doc).collect(),
     }
@@ -335,6 +336,7 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
     segment.set_volume(document.volume)?;
     segment.set_fades(document.fade_in, document.fade_out)?;
     segment.set_denoise(document.denoise)?;
+    segment.set_keep_pitch(document.keep_pitch)?;
     segment.set_transform(transform_from(&document.transform)?);
     for key in &document.keyframes {
         segment.push_keyframe(key_from(key)?)?;
@@ -502,6 +504,14 @@ fn is_zero(value: &i64) -> bool {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn keep_pitch_on() -> bool {
+    true
 }
 
 fn stamp_doc(time: Timestamp) -> Stamp {
@@ -701,6 +711,8 @@ struct SegmentDoc {
     fade_out: i64,
     #[serde(default, skip_serializing_if = "is_false")]
     denoise: bool,
+    #[serde(default = "keep_pitch_on", skip_serializing_if = "is_true")]
+    keep_pitch: bool,
     transform: TransformDoc,
     keyframes: Vec<KeyDoc>,
 }
@@ -1099,6 +1111,36 @@ mod tests {
 
         let silent = edit(&value, |value| {
             value["timeline"]["tracks"][2]["segments"][0]["denoise"] = json!(true);
+        });
+        refuse(&silent, Error::NoSound);
+    }
+
+    #[test]
+    fn a_missing_keep_pitch_holds_the_pitch() {
+        let (project, value) = cut_value();
+        let text = project.to_json().expect("save");
+        assert!(!text.contains("keep_pitch"));
+        let loaded = Project::from_json(&text).expect("load");
+        assert!(loaded.timeline().tracks()[1].segments()[0].keep_pitch());
+
+        let followed = edit(&value, |value| {
+            value["timeline"]["tracks"][1]["segments"][0]["keep_pitch"] = json!(false);
+        });
+        let loaded = Project::from_json(&followed).expect("load");
+        assert!(!loaded.timeline().tracks()[1].segments()[0].keep_pitch());
+        let saved = loaded.to_json().expect("save");
+        assert!(saved.contains("\"keep_pitch\": false"));
+        assert_same(&loaded, &Project::from_json(&saved).expect("reload"));
+
+        let explicit = edit(&value, |value| {
+            value["timeline"]["tracks"][1]["segments"][0]["keep_pitch"] = json!(true);
+        });
+        let loaded = Project::from_json(&explicit).expect("load");
+        assert!(loaded.timeline().tracks()[1].segments()[0].keep_pitch());
+        assert!(!loaded.to_json().expect("save").contains("keep_pitch"));
+
+        let silent = edit(&value, |value| {
+            value["timeline"]["tracks"][2]["segments"][0]["keep_pitch"] = json!(false);
         });
         refuse(&silent, Error::NoSound);
     }

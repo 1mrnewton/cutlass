@@ -194,6 +194,10 @@ impl Project {
                 self.timeline.segment_mut(segment)?.set_denoise(on)?;
                 Ok(Outcome::Unchanged)
             }
+            Command::SetKeepPitch { segment, keep } => {
+                self.timeline.segment_mut(segment)?.set_keep_pitch(keep)?;
+                Ok(Outcome::Unchanged)
+            }
             Command::SetVisible { segment, visible } => {
                 self.timeline.segment_mut(segment)?.set_visible(visible);
                 Ok(Outcome::Unchanged)

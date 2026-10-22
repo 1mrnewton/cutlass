@@ -79,6 +79,11 @@ pub enum Command {
         segment: SegmentId,
         on: bool,
     },
+    /// Whether a speed change keeps the pitch. A segment with no sound cannot turn it off.
+    SetKeepPitch {
+        segment: SegmentId,
+        keep: bool,
+    },
     /// Shown when on. It does not move the segment.
     SetVisible {
         segment: SegmentId,

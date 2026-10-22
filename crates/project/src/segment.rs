@@ -208,6 +208,7 @@ pub struct Segment {
     fade_in: i64,
     fade_out: i64,
     denoise: bool,
+    keep_pitch: bool,
     transform: Transform,
     keyframes: Vec<Keyframe>,
 }
@@ -267,6 +268,7 @@ impl Segment {
             fade_in: 0,
             fade_out: 0,
             denoise: false,
+            keep_pitch: true,
             transform: Transform::IDENTITY,
             keyframes: Vec::new(),
         }
@@ -331,7 +333,7 @@ impl Segment {
     /// A copy with no id, starting at `start` microseconds on the sequence.
     ///
     /// The source, channels, speed, visible flag, volume, fades, denoise,
-    /// transform, and keyframes stay. Place assigns the id. A negative start is refused, and
+    /// keep pitch, transform, and keyframes stay. Place assigns the id. A negative start is refused, and
     /// so is a start that would overflow the sequence clock.
     pub fn duplicate(&self, start: i64) -> Result<Self, Error> {
         let mut copy = self.clone();
@@ -401,6 +403,18 @@ impl Segment {
             return Err(Error::NoSound);
         }
         self.denoise = on;
+        Ok(())
+    }
+
+    /// Sets whether a speed change keeps the pitch.
+    ///
+    /// On is the start. A segment with no sound cannot turn it off. The speed
+    /// rational stays as it is.
+    pub(crate) fn set_keep_pitch(&mut self, keep: bool) -> Result<(), Error> {
+        if !keep && self.channels == Channels::Picture {
+            return Err(Error::NoSound);
+        }
+        self.keep_pitch = keep;
         Ok(())
     }
 
@@ -511,6 +525,10 @@ impl Segment {
 
     pub const fn denoise(&self) -> bool {
         self.denoise
+    }
+
+    pub const fn keep_pitch(&self) -> bool {
+        self.keep_pitch
     }
 
     pub const fn transform(&self) -> Transform {
@@ -1002,6 +1020,7 @@ mod tests {
         segment.set_volume(0.25).unwrap();
         segment.set_fades(100_000, 50_000).unwrap();
         segment.set_denoise(true).unwrap();
+        segment.set_keep_pitch(false).unwrap();
         let transform = Transform::new((0.1, -0.2), (2.0, 3.0), 15.0, 0.4, true, false).unwrap();
         segment.set_transform(transform);
         segment
@@ -1026,6 +1045,7 @@ mod tests {
         assert_eq!(copy.fade_in(), 100_000);
         assert_eq!(copy.fade_out(), 50_000);
         assert!(copy.denoise());
+        assert!(!copy.keep_pitch());
         assert_eq!(copy.transform(), transform);
         assert_eq!(copy.keyframes(), segment.keyframes());
         assert_eq!(copy.asset_id(), segment.asset_id());
@@ -1313,5 +1333,27 @@ mod tests {
         assert!(!picture.denoise());
         picture.set_denoise(false).unwrap();
         assert!(!picture.denoise());
+    }
+
+    #[test]
+    fn keep_pitch_starts_on_and_a_silent_segment_stays_on() {
+        let mut sound = one_second();
+        assert!(sound.keep_pitch());
+        sound.set_keep_pitch(false).unwrap();
+        assert!(!sound.keep_pitch());
+        sound.change_speed(Speed::new(2, 1).unwrap()).unwrap();
+        assert!(!sound.keep_pitch());
+        assert_eq!(sound.timeline().duration().value, 500_000);
+        sound.set_keep_pitch(true).unwrap();
+        assert!(sound.keep_pitch());
+
+        let asset = video(false, 15_360);
+        let mut picture =
+            Segment::media(&asset, source(0, 15_360), 0, Channels::Picture, Speed::ONE).unwrap();
+        assert!(picture.keep_pitch());
+        assert_eq!(picture.set_keep_pitch(false).unwrap_err(), Error::NoSound);
+        assert!(picture.keep_pitch());
+        picture.set_keep_pitch(true).unwrap();
+        assert!(picture.keep_pitch());
     }
 }

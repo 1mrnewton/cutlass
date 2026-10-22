@@ -1,6 +1,6 @@
 //! Failures from building or editing a project.
 
-use crate::{AssetId, SegmentId, TrackId};
+use crate::{AssetId, SegmentId, TimelineId, TrackId};
 
 /// Why a project value was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -27,6 +27,12 @@ pub enum Error {
     ZeroSpeed,
     #[error("the speed curve does not cover the source")]
     Curve,
+    #[error("the sequence is not a nested timeline")]
+    SequenceNest,
+    #[error("the nested timeline would contain itself")]
+    NestCycle,
+    #[error("the nested timeline is still named")]
+    NestInUse,
     #[error("duration rounds to zero on the sequence clock")]
     RoundsToZero,
     #[error("an image has no source range")]
@@ -53,6 +59,8 @@ pub enum Error {
     UnknownTrack(TrackId),
     #[error("unknown segment {0}")]
     UnknownSegment(SegmentId),
+    #[error("unknown timeline {0}")]
+    UnknownTimeline(TimelineId),
     #[error("duplicate id {0}")]
     DuplicateSegment(SegmentId),
     #[error("duplicate id {0}")]

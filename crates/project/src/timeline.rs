@@ -8,7 +8,7 @@ use crate::segment::Segment;
 use crate::time::SEQUENCE_TIMESCALE;
 use crate::track::Track;
 
-/// One timeline. Nested timelines wait.
+/// One timeline. The project stores the sequence and any nested timelines.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Timeline {
     id: TimelineId,

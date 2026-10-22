@@ -14,7 +14,7 @@ use crate::animation::{Animation, AnimationKind};
 use crate::asset::{Asset, AssetKind};
 use crate::attachment::{Attachment, Parameter, ParameterValue};
 use crate::curve::{SpeedCurve, SpeedPoint};
-use crate::id::{AssetId, SegmentId, TrackId};
+use crate::id::{AssetId, SegmentId, TimelineId, TrackId};
 use crate::project::Project;
 use crate::rate::{FrameRate, SequenceRate};
 use crate::segment::{Blend, Channels, Crop, Easing, Keyframe, KeyframeValue, Segment, Transform};
@@ -74,11 +74,16 @@ fn document_from(project: &Project) -> Document {
         name: project.name().to_string(),
         settings: settings_doc(project.settings()),
         assets: project.assets().iter().map(asset_doc).collect(),
-        timeline: TimelineDoc {
-            id: project.timeline().id().to_string(),
-            tracks: project.timeline().tracks().iter().map(track_doc).collect(),
-            markers: project.timeline().markers().to_vec(),
-        },
+        timeline: timeline_doc(project.timeline()),
+        nests: project.nests().iter().map(timeline_doc).collect(),
+    }
+}
+
+fn timeline_doc(timeline: &Timeline) -> TimelineDoc {
+    TimelineDoc {
+        id: timeline.id().to_string(),
+        tracks: timeline.tracks().iter().map(track_doc).collect(),
+        markers: timeline.markers().to_vec(),
     }
 }
 
@@ -92,6 +97,10 @@ fn project_from(document: Document) -> Result<Project, Error> {
     let settings = settings_from(&document.settings)?;
     let assets = assets_from(document.assets)?;
     let timeline = timeline_from(&document.timeline, &assets)?;
+    let mut nests = Vec::with_capacity(document.nests.len());
+    for nest in &document.nests {
+        nests.push(timeline_from(nest, &assets)?);
+    }
     Project::restore(
         id,
         document.next_id,
@@ -99,6 +108,7 @@ fn project_from(document: Document) -> Result<Project, Error> {
         settings,
         assets,
         timeline,
+        nests,
     )
 }
 
@@ -507,6 +517,7 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
             .collect(),
         markers: segment.markers().to_vec(),
         beats: segment.beats().to_vec(),
+        nest: segment.nest().map(|id| id.to_string()),
     }
 }
 
@@ -535,6 +546,7 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
             || document.sticker.is_some()
             || graded(document)
             || document.attachment.is_some()
+            || document.nest.is_some()
         {
             return Err(Error::Text);
         }
@@ -544,7 +556,11 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
         return Ok(segment);
     }
     if document.sticker.is_some() {
-        if document.asset.is_some() || graded(document) || document.attachment.is_some() {
+        if document.asset.is_some()
+            || graded(document)
+            || document.attachment.is_some()
+            || document.nest.is_some()
+        {
             return Err(Error::Sticker);
         }
         let mut segment = sticker_segment(document)?;
@@ -553,7 +569,7 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
         return Ok(segment);
     }
     if let Some(grade) = grade_of(document)? {
-        if document.asset.is_some() {
+        if document.asset.is_some() || document.nest.is_some() {
             return Err(grade.error());
         }
         let mut segment = grade_segment(document, grade)?;
@@ -579,7 +595,7 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
     let channels = channels_from(document.channels);
     let mut segment = match asset.kind() {
         AssetKind::Image { .. } => {
-            if document.frozen {
+            if document.nest.is_some() || document.frozen {
                 return Err(Error::ImageSource);
             }
             let Pace::Constant(speed) = pace else {
@@ -835,7 +851,7 @@ fn media_segment(
     };
     let mut segment = Segment::media(asset, range, document.timeline.start, channels, speed)?;
     if document.frozen {
-        if matches!(pace, Pace::Curve(_)) {
+        if document.nest.is_some() || matches!(pace, Pace::Curve(_)) {
             return Err(Error::Freeze);
         }
         segment.hold_frame(document.timeline.duration)?;
@@ -843,6 +859,10 @@ fn media_segment(
     }
     if let Pace::Curve(curve) = pace {
         segment.set_curve(Some(curve))?;
+    }
+    if let Some(name) = &document.nest {
+        let nest: TimelineId = name.parse()?;
+        segment.set_nest(Some(nest))?;
     }
     let expected = segment.timeline().duration().value;
     if document.timeline.duration != expected {
@@ -1204,6 +1224,8 @@ struct Document {
     settings: SettingsDoc,
     assets: Vec<AssetDoc>,
     timeline: TimelineDoc,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    nests: Vec<TimelineDoc>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1336,6 +1358,8 @@ struct SegmentDoc {
     markers: Vec<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     beats: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nest: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1548,7 +1572,7 @@ mod tests {
     use crate::command::{Command, Outcome};
     use crate::curve::{SpeedCurve, SpeedPoint};
     use crate::history::History;
-    use crate::id::{AssetId, ProjectId};
+    use crate::id::{AssetId, ProjectId, TimelineId};
     use crate::project::Project;
     use crate::rate::{FrameRate, SequenceRate};
     use crate::segment::{Blend, Channels, Easing, Keyframe, KeyframeValue, Segment, Transform};
@@ -1600,6 +1624,7 @@ mod tests {
         assert_eq!(left.settings(), right.settings());
         assert_eq!(left.assets(), right.assets());
         assert_eq!(left.timeline(), right.timeline());
+        assert_eq!(left.nests(), right.nests());
     }
 
     fn assert_unreadable(text: &str) {
@@ -3088,6 +3113,179 @@ mod tests {
     fn image_clip(project: &Project, id: crate::id::AssetId) -> Segment {
         let asset = project.asset(id).expect("image");
         Segment::image(asset, 0, 1_000_000).expect("image clip")
+    }
+
+    fn put(value: &mut Value, key: &str, next: Value) {
+        value
+            .as_object_mut()
+            .expect("object")
+            .insert(key.to_string(), next);
+    }
+
+    fn nested_project(timelines: usize) -> Project {
+        let mut history = History::new();
+        let mut project = Project::new(sample_id(), "Nest");
+        let scale = NonZeroU32::new(30_000).expect("scale");
+        history
+            .apply(
+                &mut project,
+                &[Command::AddAsset(
+                    Asset::video(
+                        "file:///nest.mp4",
+                        Timestamp::new(60_000, scale),
+                        16,
+                        16,
+                        true,
+                    )
+                    .expect("video"),
+                )],
+            )
+            .expect("asset");
+        let asset = project.assets()[0].id();
+        let source = TimeRange::new(Timestamp::new(0, scale), Timestamp::new(60_000, scale))
+            .expect("source");
+        let segment = Segment::media(
+            project.asset(asset).expect("stored"),
+            source,
+            0,
+            Channels::Both,
+            Speed::ONE,
+        )
+        .expect("segment");
+        let main = project.timeline().main_track().id();
+        history
+            .apply(
+                &mut project,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .expect("place");
+        for _ in 0..timelines {
+            history
+                .apply(&mut project, &[Command::AddTimeline])
+                .expect("timeline");
+        }
+        project
+    }
+
+    fn value_of(project: &Project) -> Value {
+        serde_json::from_str(&project.to_json().expect("json")).expect("value")
+    }
+
+    #[test]
+    fn a_nested_timeline_round_trips_and_a_cycle_refuses_the_file() {
+        let project = nested_project(2);
+        let mut linked = value_of(&project);
+        let clip = linked["timeline"]["tracks"][0]["segments"][0].clone();
+        put(
+            &mut linked["timeline"]["tracks"][0]["segments"][0],
+            "nest",
+            json!("timeline-5"),
+        );
+        let mut inside = clip.clone();
+        put(&mut inside, "id", json!("segment-9"));
+        put(&mut inside, "nest", json!("timeline-7"));
+        linked["nests"][0]["tracks"][0]["segments"] = json!([inside]);
+        linked["next_id"] = json!(10);
+        let loaded =
+            Project::from_json(&serde_json::to_string(&linked).expect("text")).expect("load");
+        assert_eq!(
+            loaded.timeline().main_track().segments()[0]
+                .nest()
+                .expect("name")
+                .to_string(),
+            "timeline-5"
+        );
+        assert_eq!(
+            loaded.nests()[0].main_track().segments()[0]
+                .nest()
+                .expect("inner")
+                .to_string(),
+            "timeline-7"
+        );
+        assert!(loaded.nests()[1].main_track().segments().is_empty());
+
+        let mut cycle = value_of(&project);
+        let clip = cycle["timeline"]["tracks"][0]["segments"][0].clone();
+        let mut left = clip.clone();
+        put(&mut left, "id", json!("segment-9"));
+        put(&mut left, "nest", json!("timeline-7"));
+        let mut right = clip;
+        put(&mut right, "id", json!("segment-10"));
+        put(&mut right, "nest", json!("timeline-5"));
+        cycle["nests"][0]["tracks"][0]["segments"] = json!([left]);
+        cycle["nests"][1]["tracks"][0]["segments"] = json!([right]);
+        cycle["next_id"] = json!(11);
+        refuse(
+            &serde_json::to_string(&cycle).expect("cycle"),
+            Error::NestCycle,
+        );
+
+        let mut itself = value_of(&project);
+        let mut clip = itself["timeline"]["tracks"][0]["segments"][0].clone();
+        put(&mut clip, "id", json!("segment-9"));
+        put(&mut clip, "nest", json!("timeline-5"));
+        itself["nests"][0]["tracks"][0]["segments"] = json!([clip]);
+        itself["next_id"] = json!(10);
+        refuse(
+            &serde_json::to_string(&itself).expect("itself"),
+            Error::NestCycle,
+        );
+
+        let mut sequence = value_of(&project);
+        let mut clip = sequence["timeline"]["tracks"][0]["segments"][0].clone();
+        put(&mut clip, "id", json!("segment-9"));
+        put(&mut clip, "nest", json!("timeline-1"));
+        sequence["nests"][0]["tracks"][0]["segments"] = json!([clip]);
+        sequence["next_id"] = json!(10);
+        refuse(
+            &serde_json::to_string(&sequence).expect("sequence"),
+            Error::SequenceNest,
+        );
+
+        let missing = TimelineId::new(99).expect("id");
+        let mut unknown = value_of(&project);
+        put(
+            &mut unknown["timeline"]["tracks"][0]["segments"][0],
+            "nest",
+            json!("timeline-99"),
+        );
+        refuse(
+            &serde_json::to_string(&unknown).expect("unknown"),
+            Error::UnknownTimeline(missing),
+        );
+
+        let mut frozen = value_of(&project);
+        put(
+            &mut frozen["timeline"]["tracks"][0]["segments"][0],
+            "frozen",
+            json!(true),
+        );
+        put(
+            &mut frozen["timeline"]["tracks"][0]["segments"][0],
+            "nest",
+            json!("timeline-5"),
+        );
+        refuse(
+            &serde_json::to_string(&frozen).expect("frozen"),
+            Error::Freeze,
+        );
+
+        let mut only = value_of(&nested_project(1));
+        let clip = only["timeline"]["tracks"][0]["segments"][0].clone();
+        only["timeline"]["tracks"][0]["segments"] = json!([]);
+        only["nests"][0]["tracks"][0]["segments"] = json!([clip]);
+        let mut held =
+            Project::from_json(&serde_json::to_string(&only).expect("held")).expect("held");
+        let asset = held.assets()[0].id();
+        assert_eq!(
+            History::new()
+                .apply(&mut held, &[Command::RemoveAsset(asset)])
+                .expect_err("used"),
+            Error::AssetInUse
+        );
     }
 
     fn keyframes(segment: crate::id::SegmentId, duration: i64) -> Vec<Command> {

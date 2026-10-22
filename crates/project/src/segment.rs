@@ -8,7 +8,7 @@ use crate::animation::{Animation, AnimationKind, AnimationSlots};
 use crate::asset::{Asset, AssetKind};
 use crate::attachment::Attachment;
 use crate::curve::SpeedCurve;
-use crate::id::{AssetId, SegmentId};
+use crate::id::{AssetId, SegmentId, TimelineId};
 use crate::mark::StampList;
 use crate::time::{self, SEQUENCE_TIMESCALE, TimeRange, timeline_duration};
 
@@ -269,12 +269,19 @@ impl Keyframe {
     }
 }
 
+/// A curve or a nested timeline. Allocated only when one of them is set.
+#[derive(Debug, Clone, PartialEq)]
+struct MediaExtra {
+    curve: Option<SpeedCurve>,
+    nest: Option<TimelineId>,
+}
+
 /// What a segment points at. Exactly one of a file, words, a sticker name, or a grade.
 #[derive(Debug, Clone, PartialEq)]
 enum Content {
     Media {
         id: AssetId,
-        curve: Option<Box<SpeedCurve>>,
+        extra: Option<Box<MediaExtra>>,
     },
     Text(String),
     Sticker(String),
@@ -328,7 +335,7 @@ impl Segment {
         Ok(Self::new(
             Content::Media {
                 id: asset.id(),
-                curve: None,
+                extra: None,
             },
             Some(source),
             TimeRange::sequence(timeline_start_us, timeline_span.value)?,
@@ -348,7 +355,7 @@ impl Segment {
         Ok(Self::new(
             Content::Media {
                 id: asset.id(),
-                curve: None,
+                extra: None,
             },
             None,
             TimeRange::sequence(timeline_start_us, timeline_duration_us)?,
@@ -550,8 +557,51 @@ impl Segment {
     }
 
     fn write_curve(&mut self, curve: Option<SpeedCurve>) {
-        if let Content::Media { curve: slot, .. } = &mut self.content {
-            *slot = curve.map(Box::new);
+        let present = curve.is_some();
+        self.write_extra(|extra| extra.curve = curve, present);
+    }
+
+    /// Names a nested timeline, or clears it. The caller checks the id.
+    pub(crate) fn set_nest(&mut self, nest: Option<TimelineId>) -> Result<(), Error> {
+        self.refuse_no_file()?;
+        if self.frozen {
+            return Err(Error::Freeze);
+        }
+        if self.source.is_none() {
+            return Err(Error::ImageSource);
+        }
+        if self.nest() == nest {
+            return Ok(());
+        }
+        self.write_nest(nest);
+        Ok(())
+    }
+
+    fn write_nest(&mut self, nest: Option<TimelineId>) {
+        let present = nest.is_some();
+        self.write_extra(|extra| extra.nest = nest, present);
+    }
+
+    /// `present` is whether the value being written is set. An empty extra is dropped.
+    fn write_extra(&mut self, write: impl FnOnce(&mut MediaExtra), present: bool) {
+        let Content::Media { extra, .. } = &mut self.content else {
+            return;
+        };
+        if extra.is_none() {
+            if !present {
+                return;
+            }
+            *extra = Some(Box::new(MediaExtra {
+                curve: None,
+                nest: None,
+            }));
+        }
+        let Some(slot) = extra.as_mut() else {
+            return;
+        };
+        write(slot);
+        if slot.curve.is_none() && slot.nest.is_none() {
+            *extra = None;
         }
     }
 
@@ -639,9 +689,9 @@ impl Segment {
 
     /// A copy with no id, starting at `start` microseconds on the sequence.
     ///
-    /// The source, channels, speed, a speed curve, visible flag, volume, fades,
-    /// denoise, keep pitch, crop, blend, freeze, transform, keyframes,
-    /// animations, clip markers, and beats stay. Place assigns the id.
+    /// The source, channels, speed, a speed curve, a nested timeline id, visible
+    /// flag, volume, fades, denoise, keep pitch, crop, blend, freeze, transform,
+    /// keyframes, animations, clip markers, and beats stay. Place assigns the id.
     /// A negative start is refused, and so is a start that would overflow the
     /// sequence clock.
     pub fn duplicate(&self, start: i64) -> Result<Self, Error> {
@@ -758,7 +808,11 @@ impl Segment {
             return Err(Error::NoPicture);
         }
         let source = self.source.ok_or(Error::MediaSource)?;
-        if source.duration().value != 1 || self.speed != Speed::ONE || self.curve().is_some() {
+        if source.duration().value != 1
+            || self.speed != Speed::ONE
+            || self.curve().is_some()
+            || self.nest().is_some()
+        {
             return Err(Error::Freeze);
         }
         self.finish_duration(Timestamp::new(duration_us, SEQUENCE_TIMESCALE))?;
@@ -866,11 +920,11 @@ impl Segment {
     }
 
     pub(crate) fn set_asset(&mut self, asset: AssetId) {
-        let curve = match &mut self.content {
-            Content::Media { curve, .. } => curve.take(),
+        let extra = match &mut self.content {
+            Content::Media { extra, .. } => extra.take(),
             _ => None,
         };
-        self.content = Content::Media { id: asset, curve };
+        self.content = Content::Media { id: asset, extra };
     }
 
     /// Replaces the words. A media segment is refused.
@@ -1161,18 +1215,27 @@ impl Segment {
         self.speed
     }
 
-    /// The curve replacing the rational, when one is set.
-    ///
-    /// The stored rational is then `1/1` and is not the playback speed.
-    pub fn curve(&self) -> Option<&SpeedCurve> {
+    fn extra(&self) -> Option<&MediaExtra> {
         match &self.content {
-            Content::Media { curve, .. } => curve.as_deref(),
+            Content::Media { extra, .. } => extra.as_deref(),
             Content::Text(_)
             | Content::Sticker(_)
             | Content::Effect(_)
             | Content::Filter(_)
             | Content::Adjust(_) => None,
         }
+    }
+
+    /// The curve replacing the rational, when one is set.
+    ///
+    /// The stored rational is then `1/1` and is not the playback speed.
+    pub fn curve(&self) -> Option<&SpeedCurve> {
+        self.extra().and_then(|extra| extra.curve.as_ref())
+    }
+
+    /// The nested timeline this segment names, when one is set.
+    pub fn nest(&self) -> Option<TimelineId> {
+        self.extra().and_then(|extra| extra.nest)
     }
 
     /// Source ticks covered by `timeline_us` microseconds from the segment start.

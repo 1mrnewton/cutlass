@@ -9,7 +9,7 @@ use crate::animation::{Animation, AnimationKind};
 use crate::asset::Asset;
 use crate::attachment::Attachment;
 use crate::curve::SpeedCurve;
-use crate::id::{AssetId, SegmentId, TrackId};
+use crate::id::{AssetId, SegmentId, TimelineId, TrackId};
 use crate::rate::SequenceRate;
 use crate::segment::{Blend, Crop, Easing, Keyframe, KeyframeProperty, Segment, Transform};
 use crate::settings::{AspectRatio, Color, ColorSpace};
@@ -55,6 +55,15 @@ pub enum Command {
     SetCurve {
         segment: SegmentId,
         curve: Option<SpeedCurve>,
+    },
+    /// Creates an empty nested timeline. The outcome is its id. It is not the sequence.
+    AddTimeline,
+    /// Drops one nested timeline. One a segment still names is refused.
+    RemoveTimeline(TimelineId),
+    /// Names a nested timeline, or clears it. `None` clears the name.
+    SetNest {
+        segment: SegmentId,
+        nest: Option<TimelineId>,
     },
     /// `track: None` keeps the segment on its track. `start` is microseconds.
     Move {
@@ -233,6 +242,8 @@ pub enum Outcome {
         segment: SegmentId,
         track: TrackId,
     },
+    /// A nested timeline this command created.
+    Timeline(TimelineId),
 }
 
 /// Which edge a trim drag moves.

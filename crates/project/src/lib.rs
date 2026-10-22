@@ -1,4 +1,4 @@
-//! The project model: settings, assets, and one timeline.
+//! The project model: settings, assets, one sequence, and nested timelines.
 //!
 //! The crate does not open a path. [`Project::to_json`] and [`Project::from_json`]
 //! are version [`FILE_VERSION`] of the project file. The shell mints the project

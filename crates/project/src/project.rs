@@ -1,4 +1,4 @@
-//! The project: settings, assets, and one timeline.
+//! The project: settings, assets, one sequence, and nested timelines.
 
 use std::collections::BTreeSet;
 
@@ -17,7 +17,7 @@ use crate::timeline::Timeline;
 use crate::track::{Band, Track, TrackKind};
 use crate::transition::Transition;
 
-/// Settings, assets, and one timeline. The shell loads and saves it.
+/// Settings, assets, one sequence, and nested timelines. The shell loads and saves it.
 #[derive(Debug, Clone)]
 pub struct Project {
     id: ProjectId,
@@ -26,6 +26,7 @@ pub struct Project {
     settings: Settings,
     assets: Vec<Asset>,
     timeline: Timeline,
+    nests: Vec<Timeline>,
 }
 
 impl Project {
@@ -38,6 +39,7 @@ impl Project {
             settings: Settings::default(),
             assets: Vec::new(),
             timeline: Timeline::new(TimelineId::raw(1), TrackId::raw(2)),
+            nests: Vec::new(),
         }
     }
 
@@ -48,8 +50,9 @@ impl Project {
         settings: Settings,
         assets: Vec<Asset>,
         timeline: Timeline,
+        nests: Vec<Timeline>,
     ) -> Result<Self, Error> {
-        check_restored(&assets, &timeline, next_id)?;
+        check_restored(&assets, &timeline, &nests, next_id)?;
         Ok(Self {
             id,
             next_id,
@@ -57,6 +60,7 @@ impl Project {
             settings,
             assets,
             timeline,
+            nests,
         })
     }
 
@@ -91,8 +95,19 @@ impl Project {
         self.assets.iter().find(|asset| asset.id() == id)
     }
 
+    /// The sequence. The shell edits this timeline.
     pub const fn timeline(&self) -> &Timeline {
         &self.timeline
+    }
+
+    /// Nested timelines. The sequence is not in this list.
+    pub fn nests(&self) -> &[Timeline] {
+        &self.nests
+    }
+
+    /// One nested timeline. The sequence is not included.
+    pub fn nest(&self, id: TimelineId) -> Option<&Timeline> {
+        self.nests.iter().find(|timeline| timeline.id() == id)
     }
 
     /// The highest audio track with room for `range`.
@@ -197,6 +212,15 @@ impl Project {
             }
             Command::SetCurve { segment, curve } => {
                 self.set_curve_now(segment, curve)?;
+                Ok(Outcome::Unchanged)
+            }
+            Command::AddTimeline => Ok(Outcome::Timeline(self.add_timeline_now()?)),
+            Command::RemoveTimeline(id) => {
+                self.remove_timeline_now(id)?;
+                Ok(Outcome::Unchanged)
+            }
+            Command::SetNest { segment, nest } => {
+                self.set_nest_now(segment, nest)?;
                 Ok(Outcome::Unchanged)
             }
             Command::Move {
@@ -694,12 +718,74 @@ impl Project {
     }
 
     fn asset_in_use(&self, id: AssetId) -> bool {
-        self.timeline.tracks().iter().any(|track| {
-            track
-                .segments()
-                .iter()
-                .any(|segment| segment.asset_id() == Some(id))
+        self.every_timeline().any(|timeline| {
+            timeline.tracks().iter().any(|track| {
+                track
+                    .segments()
+                    .iter()
+                    .any(|segment| segment.asset_id() == Some(id))
+            })
         })
+    }
+
+    fn every_timeline(&self) -> impl Iterator<Item = &Timeline> {
+        std::iter::once(&self.timeline).chain(self.nests.iter())
+    }
+
+    fn add_timeline_now(&mut self) -> Result<TimelineId, Error> {
+        let id = TimelineId::raw(self.allocate()?);
+        let track = TrackId::raw(self.allocate()?);
+        self.nests.push(Timeline::new(id, track));
+        Ok(id)
+    }
+
+    fn remove_timeline_now(&mut self, id: TimelineId) -> Result<(), Error> {
+        if self.timeline.id() == id {
+            return Err(Error::SequenceNest);
+        }
+        if self.nest(id).is_none() {
+            return Err(Error::UnknownTimeline(id));
+        }
+        if self.nest_named(id) {
+            return Err(Error::NestInUse);
+        }
+        self.nests.retain(|timeline| timeline.id() != id);
+        Ok(())
+    }
+
+    fn nest_named(&self, id: TimelineId) -> bool {
+        self.every_timeline().any(|timeline| {
+            timeline.tracks().iter().any(|track| {
+                track
+                    .segments()
+                    .iter()
+                    .any(|segment| segment.nest() == Some(id))
+            })
+        })
+    }
+
+    fn set_nest_now(&mut self, id: SegmentId, nest: Option<TimelineId>) -> Result<(), Error> {
+        self.refuse_lane(id)?;
+        let segment = self.timeline.segment(id).ok_or(Error::UnknownSegment(id))?;
+        if segment.frozen() {
+            return Err(Error::Freeze);
+        }
+        segment.refuse_no_file()?;
+        if segment.source().is_none() {
+            return Err(Error::ImageSource);
+        }
+        if let Some(nest_id) = nest {
+            if nest_id == self.timeline.id() {
+                return Err(Error::SequenceNest);
+            }
+            if self.nest(nest_id).is_none() {
+                return Err(Error::UnknownTimeline(nest_id));
+            }
+            if reaches(&self.timeline, &self.nests, nest_id, self.timeline.id()) {
+                return Err(Error::NestCycle);
+            }
+        }
+        self.timeline.segment_mut(id)?.set_nest(nest)
     }
 
     fn set_magnet_now(&mut self, on: bool) -> Result<(), Error> {
@@ -1606,13 +1692,40 @@ fn preview_overlap(track: &Track, starts: &[(SegmentId, i64)]) -> Result<(), Err
     Ok(())
 }
 
-fn check_restored(assets: &[Asset], timeline: &Timeline, next_id: u64) -> Result<(), Error> {
+fn check_restored(
+    assets: &[Asset],
+    timeline: &Timeline,
+    nests: &[Timeline],
+    next_id: u64,
+) -> Result<(), Error> {
     let mut seen = BTreeSet::new();
-    claim(&mut seen, timeline.id().get())?;
+    check_timeline(assets, timeline, &mut seen)?;
+    for nest in nests {
+        check_timeline(assets, nest, &mut seen)?;
+    }
+    check_nest_links(timeline, nests)?;
+    for asset in assets {
+        claim(&mut seen, asset.id().get())?;
+    }
+    let Some(max) = seen.iter().next_back().copied() else {
+        return Err(Error::MissingMain);
+    };
+    if next_id <= max {
+        return Err(Error::IdCounter { next_id });
+    }
+    Ok(())
+}
+
+fn check_timeline(
+    assets: &[Asset],
+    timeline: &Timeline,
+    seen: &mut BTreeSet<u64>,
+) -> Result<(), Error> {
+    claim(seen, timeline.id().get())?;
     let mut mains = 0;
     let mut previous: Option<Band> = None;
     for track in timeline.tracks() {
-        claim(&mut seen, track.id().get())?;
+        claim(seen, track.id().get())?;
         if track.is_main() {
             mains += 1;
             if track.kind() != TrackKind::Video {
@@ -1626,7 +1739,7 @@ fn check_restored(assets: &[Asset], timeline: &Timeline, next_id: u64) -> Result
         }
         previous = Some(track.band());
         for segment in track.segments() {
-            claim(&mut seen, segment.id().get())?;
+            claim(seen, segment.id().get())?;
             if let Some(expected) = restored_kind(segment) {
                 if track.kind() != expected {
                     return Err(Error::WrongTrack);
@@ -1651,16 +1764,146 @@ fn check_restored(assets: &[Asset], timeline: &Timeline, next_id: u64) -> Result
             Error::SecondMainTrack
         });
     }
-    for asset in assets {
-        claim(&mut seen, asset.id().get())?;
+    Ok(())
+}
+
+fn check_nest_links(sequence: &Timeline, nests: &[Timeline]) -> Result<(), Error> {
+    let timelines = std::iter::once(sequence).chain(nests.iter());
+    for host in timelines {
+        for track in host.tracks() {
+            for segment in track.segments() {
+                let Some(nest) = segment.nest() else {
+                    continue;
+                };
+                if nest == sequence.id() {
+                    return Err(Error::SequenceNest);
+                }
+                if !nests.iter().any(|timeline| timeline.id() == nest) {
+                    return Err(Error::UnknownTimeline(nest));
+                }
+            }
+        }
     }
-    let Some(max) = seen.iter().next_back().copied() else {
-        return Err(Error::MissingMain);
-    };
-    if next_id <= max {
-        return Err(Error::IdCounter { next_id });
+    if has_cycle(sequence, nests) {
+        return Err(Error::NestCycle);
     }
     Ok(())
+}
+
+fn timeline_ref<'a>(
+    sequence: &'a Timeline,
+    nests: &'a [Timeline],
+    id: TimelineId,
+) -> Option<&'a Timeline> {
+    if sequence.id() == id {
+        Some(sequence)
+    } else {
+        nests.iter().find(|timeline| timeline.id() == id)
+    }
+}
+
+/// `from` can reach `target` by following nested timeline ids, including `from` itself.
+fn reaches(sequence: &Timeline, nests: &[Timeline], from: TimelineId, target: TimelineId) -> bool {
+    let mut pending = vec![from];
+    let mut seen = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if id == target {
+            return true;
+        }
+        if !seen.insert(id.get()) {
+            continue;
+        }
+        let Some(timeline) = timeline_ref(sequence, nests, id) else {
+            continue;
+        };
+        for track in timeline.tracks() {
+            for segment in track.segments() {
+                if let Some(next) = segment.nest() {
+                    pending.push(next);
+                }
+            }
+        }
+    }
+    false
+}
+
+struct Walk {
+    id: TimelineId,
+    edges: Vec<TimelineId>,
+    index: usize,
+}
+
+fn nest_edges(sequence: &Timeline, nests: &[Timeline], id: TimelineId) -> Vec<TimelineId> {
+    let Some(timeline) = timeline_ref(sequence, nests, id) else {
+        return Vec::new();
+    };
+    let mut edges = Vec::new();
+    for track in timeline.tracks() {
+        for segment in track.segments() {
+            if let Some(next) = segment.nest() {
+                edges.push(next);
+            }
+        }
+    }
+    edges
+}
+
+enum WalkStep {
+    Empty,
+    Done(TimelineId),
+    Edge(TimelineId),
+}
+
+fn has_cycle(sequence: &Timeline, nests: &[Timeline]) -> bool {
+    let mut done = BTreeSet::new();
+    let roots: Vec<_> = std::iter::once(sequence.id())
+        .chain(nests.iter().map(Timeline::id))
+        .collect();
+    for root in roots {
+        if done.contains(&root.get()) {
+            continue;
+        }
+        let mut visiting = BTreeSet::new();
+        visiting.insert(root.get());
+        let mut stack = vec![Walk {
+            id: root,
+            edges: nest_edges(sequence, nests, root),
+            index: 0,
+        }];
+        loop {
+            let step = match stack.last_mut() {
+                None => WalkStep::Empty,
+                Some(frame) if frame.index >= frame.edges.len() => WalkStep::Done(frame.id),
+                Some(frame) => {
+                    let next = frame.edges[frame.index];
+                    frame.index += 1;
+                    WalkStep::Edge(next)
+                }
+            };
+            match step {
+                WalkStep::Empty => break,
+                WalkStep::Done(id) => {
+                    visiting.remove(&id.get());
+                    done.insert(id.get());
+                    stack.pop();
+                }
+                WalkStep::Edge(next) => {
+                    if done.contains(&next.get()) {
+                        continue;
+                    }
+                    if !visiting.insert(next.get()) {
+                        return true;
+                    }
+                    stack.push(Walk {
+                        id: next,
+                        edges: nest_edges(sequence, nests, next),
+                        index: 0,
+                    });
+                }
+            }
+        }
+    }
+    false
 }
 
 struct CutFacts {

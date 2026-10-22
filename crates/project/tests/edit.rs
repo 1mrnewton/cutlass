@@ -7,8 +7,8 @@ use cutlass_project::{
     Animation, AnimationKind, AspectRatio, Asset, AssetId, AssetKind, Attachment, Blend, Channels,
     Color, ColorSpace, Command, Crop, Easing, Error, FrameRate, History, Keyframe,
     KeyframeProperty, KeyframeValue, Outcome, Parameter, ParameterValue, Project, ProjectId,
-    Segment, SegmentId, SequenceRate, Speed, SpeedCurve, SpeedPoint, TimeRange, TrackId, TrackKind,
-    Transform, TrimEdge, commands_for_trim,
+    Segment, SegmentId, SequenceRate, Speed, SpeedCurve, SpeedPoint, TimeRange, TimelineId,
+    TrackId, TrackKind, Transform, TrimEdge, commands_for_trim,
 };
 
 fn scale(value: u32) -> NonZeroU32 {
@@ -64,6 +64,13 @@ fn segment_id(outcome: Outcome) -> SegmentId {
     match outcome {
         Outcome::Segment(id) | Outcome::Opened { segment: id, .. } => id,
         other => panic!("expected a segment, got {other:?}"),
+    }
+}
+
+fn timeline_id(outcome: Outcome) -> TimelineId {
+    match outcome {
+        Outcome::Timeline(id) => id,
+        other => panic!("expected a timeline, got {other:?}"),
     }
 }
 
@@ -5979,6 +5986,418 @@ fn a_curve_is_refused_when_the_segment_cannot_take_one() -> Result<(), Error> {
             },
         ),
         Error::UnknownSegment(id),
+    );
+    Ok(())
+}
+
+fn nest_of(cut: &Cut, id: SegmentId) -> Option<TimelineId> {
+    cut.project.timeline().segment(id).and_then(Segment::nest)
+}
+
+fn ramp() -> Result<SpeedCurve, Error> {
+    SpeedCurve::new(vec![
+        SpeedPoint::new(0, 1, Speed::ONE)?,
+        SpeedPoint::new(1, 1, Speed::new(2, 1)?)?,
+    ])
+}
+
+#[test]
+fn a_video_segment_names_a_nested_timeline() -> Result<(), Error> {
+    let fresh = Project::new(ProjectId::from_bytes([9; 16]), "empty");
+    assert!(!fresh.to_json()?.contains("\"nests\""));
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    let sequence = cut.project.timeline().id();
+    let nest = timeline_id(run(&mut cut, Command::AddTimeline)?);
+    assert_ne!(nest, sequence);
+    assert_eq!(cut.project.timeline().id(), sequence);
+    assert_eq!(cut.project.nests().len(), 1);
+    assert_eq!(cut.project.nest(nest).expect("nest").tracks().len(), 1);
+    assert!(
+        cut.project
+            .nest(nest)
+            .expect("nest")
+            .main_track()
+            .segments()
+            .is_empty()
+    );
+    run(
+        &mut cut,
+        Command::SetCurve {
+            segment: id,
+            curve: Some(ramp()?),
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetNest {
+            segment: id,
+            nest: Some(nest),
+        },
+    )?;
+    assert_eq!(nest_of(&cut, id), Some(nest));
+    assert!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .expect("clip")
+            .curve()
+            .is_some()
+    );
+    assert_eq!(cut.project.nests().len(), 1);
+    let text = cut.project.to_json()?;
+    assert!(text.contains("\"nests\""));
+    assert!(text.contains("\"nest\""));
+    let loaded = Project::from_json(&text)?;
+    assert_eq!(loaded.nests().len(), 1);
+    assert_eq!(loaded.nests()[0].id(), nest);
+    assert_eq!(
+        loaded.timeline().segment(id).expect("clip").nest(),
+        Some(nest)
+    );
+    assert!(
+        loaded
+            .timeline()
+            .segment(id)
+            .expect("clip")
+            .curve()
+            .is_some()
+    );
+    run(
+        &mut cut,
+        Command::SetSpeed {
+            segment: id,
+            speed: Speed::ONE,
+        },
+    )?;
+    assert!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .expect("clip")
+            .curve()
+            .is_none()
+    );
+    assert_eq!(nest_of(&cut, id), Some(nest));
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(nest_of(&cut, id), Some(nest));
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(nest_of(&cut, id), None);
+    assert_eq!(cut.project.nests().len(), 1);
+    cut.history.redo(&mut cut.project)?;
+    assert_eq!(nest_of(&cut, id), Some(nest));
+    run(
+        &mut cut,
+        Command::SetNest {
+            segment: id,
+            nest: Some(nest),
+        },
+    )?;
+    assert_eq!(cut.project.nests().len(), 1);
+
+    let audio = asset_id(run(
+        &mut cut,
+        Command::AddAsset(Asset::audio(
+            "file:///room.wav",
+            Timestamp::new(48_000, scale(48_000)),
+        )?),
+    )?);
+    let sound_segment = media(&cut.project, audio, 0, 48_000, Channels::Sound)?;
+    let sound = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: sound_segment,
+        },
+    )?);
+    run(
+        &mut cut,
+        Command::SetNest {
+            segment: sound,
+            nest: Some(nest),
+        },
+    )?;
+    assert_eq!(nest_of(&cut, sound), Some(nest));
+    expect_err(
+        run(&mut cut, Command::RemoveTimeline(nest)),
+        Error::NestInUse,
+    );
+    run(
+        &mut cut,
+        Command::SetNest {
+            segment: sound,
+            nest: None,
+        },
+    )?;
+    expect_err(
+        run(&mut cut, Command::RemoveTimeline(nest)),
+        Error::NestInUse,
+    );
+    run(
+        &mut cut,
+        Command::SetNest {
+            segment: id,
+            nest: None,
+        },
+    )?;
+    assert_eq!(cut.project.nests().len(), 1);
+    run(&mut cut, Command::RemoveTimeline(nest))?;
+    assert!(cut.project.nests().is_empty());
+    assert!(!cut.project.to_json()?.contains("\"nests\""));
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(cut.project.nests().len(), 1);
+    assert_eq!(nest_of(&cut, id), None);
+    Ok(())
+}
+
+#[test]
+fn a_split_a_copy_a_detach_and_a_freeze_keep_the_nested_timeline() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let id = place_main(&mut cut, asset, 0, 60_000)?;
+    let nest = timeline_id(run(&mut cut, Command::AddTimeline)?);
+    run(
+        &mut cut,
+        Command::SetNest {
+            segment: id,
+            nest: Some(nest),
+        },
+    )?;
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: id,
+            at: 1_000_000,
+        },
+    )?);
+    assert_eq!(nest_of(&cut, id), Some(nest));
+    assert_eq!(nest_of(&cut, right), Some(nest));
+    assert_eq!(cut.project.nests().len(), 1);
+    let copy = cut
+        .project
+        .timeline()
+        .segment(id)
+        .expect("left")
+        .duplicate(3_000_000)?;
+    assert_eq!(copy.nest(), Some(nest));
+    let main = cut.main;
+    let copied = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: copy,
+        },
+    )?);
+    assert_eq!(nest_of(&cut, copied), Some(nest));
+    let sound = segment_id(run(&mut cut, Command::DetachAudio { segment: id })?);
+    assert_eq!(nest_of(&cut, id), Some(nest));
+    assert_eq!(nest_of(&cut, sound), Some(nest));
+    run(&mut cut, Command::Reverse { segment: right })?;
+    assert_eq!(nest_of(&cut, right), Some(nest));
+
+    let still_source = place_main(&mut cut, asset, 6_000_000, 60_000)?;
+    run(
+        &mut cut,
+        Command::SetNest {
+            segment: still_source,
+            nest: Some(nest),
+        },
+    )?;
+    let still = segment_id(run(
+        &mut cut,
+        Command::Freeze {
+            segment: still_source,
+            at: 6_500_000,
+            hold: 1_000_000,
+        },
+    )?);
+    assert_eq!(nest_of(&cut, still), None);
+    let kept = cut
+        .project
+        .timeline()
+        .main_track()
+        .segments()
+        .iter()
+        .filter(|segment| segment.id() != still)
+        .filter(|segment| segment.nest() == Some(nest))
+        .count();
+    assert!(kept >= 2);
+    Ok(())
+}
+
+#[test]
+fn a_nest_is_refused_when_the_segment_cannot_take_one() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 60_000)?;
+    let nest = timeline_id(run(&mut cut, Command::AddTimeline)?);
+    let name = Command::SetNest {
+        segment: id,
+        nest: Some(nest),
+    };
+    let image = place_still(&mut cut, "file:///still.png", 5_000_000, 1_000_000)?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetNest {
+                segment: image,
+                nest: Some(nest),
+            },
+        ),
+        Error::ImageSource,
+    );
+    let text = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::text("Hi", 0, 1_000_000)?,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetNest {
+                segment: text,
+                nest: Some(nest),
+            },
+        ),
+        Error::Text,
+    );
+    let sticker = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::sticker("star", 0, 1_000_000)?,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetNest {
+                segment: sticker,
+                nest: Some(nest),
+            },
+        ),
+        Error::Sticker,
+    );
+    let effect = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::effect(0, 1_000_000)?,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetNest {
+                segment: effect,
+                nest: Some(nest),
+            },
+        ),
+        Error::Effect,
+    );
+    let filter = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::filter(0, 1_000_000)?,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetNest {
+                segment: filter,
+                nest: Some(nest),
+            },
+        ),
+        Error::Filter,
+    );
+    let adjust = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::adjust(0, 1_000_000)?,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetNest {
+                segment: adjust,
+                nest: Some(nest),
+            },
+        ),
+        Error::Adjust,
+    );
+    let still = segment_id(run(
+        &mut cut,
+        Command::Freeze {
+            segment: id,
+            at: 1_000_000,
+            hold: 500_000,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetNest {
+                segment: still,
+                nest: Some(nest),
+            },
+        ),
+        Error::Freeze,
+    );
+    let sequence = cut.project.timeline().id();
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetNest {
+                segment: id,
+                nest: Some(sequence),
+            },
+        ),
+        Error::SequenceNest,
+    );
+    let missing_timeline = TimelineId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetNest {
+                segment: id,
+                nest: Some(missing_timeline),
+            },
+        ),
+        Error::UnknownTimeline(missing_timeline),
+    );
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetNest {
+                segment: missing,
+                nest: Some(nest),
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
+    let main = cut.main;
+    run(
+        &mut cut,
+        Command::SetLocked {
+            track: main,
+            on: true,
+        },
+    )?;
+    expect_err(run(&mut cut, name), Error::Locked);
+    assert_eq!(nest_of(&cut, id), None);
+    expect_err(
+        run(&mut cut, Command::RemoveTimeline(sequence)),
+        Error::SequenceNest,
+    );
+    expect_err(
+        run(&mut cut, Command::RemoveTimeline(missing_timeline)),
+        Error::UnknownTimeline(missing_timeline),
     );
     Ok(())
 }

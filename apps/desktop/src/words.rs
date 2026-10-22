@@ -177,6 +177,7 @@ pub(crate) enum Phrase {
     ProjectUnread,
     ProjectUnsaved,
     RestoreCut,
+    Nest,
     Restore,
 }
 
@@ -341,6 +342,7 @@ impl Phrase {
         Self::ProjectUnread,
         Self::ProjectUnsaved,
         Self::RestoreCut,
+        Self::Nest,
         Self::Restore,
     ];
 }
@@ -504,6 +506,7 @@ const ENGLISH: &[&str] = &[
     "This project could not be read.",
     "This project could not be saved.",
     "Restore this cut?",
+    "Nest",
     "Restore",
 ];
 
@@ -666,6 +669,7 @@ const FRENCH: &[&str] = &[
     "Ce projet n'a pas pu être lu.",
     "Ce projet n'a pas pu être enregistré.",
     "Restaurer ce montage ?",
+    "Imbriqué",
     "Restaurer",
 ];
 

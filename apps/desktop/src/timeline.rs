@@ -395,7 +395,8 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::AddClipMarker { segment, .. }
         | Command::RemoveClipMarker { segment, .. }
         | Command::AddBeat { segment, .. }
-        | Command::RemoveBeat { segment, .. } => segment_lane_locked(project, lanes, *segment),
+        | Command::RemoveBeat { segment, .. }
+        | Command::SetNest { segment, .. } => segment_lane_locked(project, lanes, *segment),
         Command::SetSource { .. } => false,
         Command::DetachAudio { segment } => detach_blocked(project, lanes, *segment),
         _ => false,
@@ -4526,7 +4527,12 @@ mod tests {
             segment: video,
             curve: Some(ramp()),
         };
+        let nest = Command::SetNest {
+            segment: video,
+            nest: None,
+        };
         assert!(super::blocks_command(&cut, &locked_audio, &curve));
+        assert!(!super::blocks_command(&cut, &locked_audio, &nest));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),
@@ -4715,6 +4721,10 @@ mod tests {
             segment: id,
             curve: Some(ramp()),
         };
+        let nest = Command::SetNest {
+            segment: id,
+            nest: None,
+        };
         assert!(super::blocks_command(&cut, &locked, &volume));
         assert!(super::blocks_command(&cut, &locked, &hidden));
         assert!(super::blocks_command(&cut, &locked, &easing));
@@ -4738,6 +4748,12 @@ mod tests {
         assert!(super::blocks_command(&cut, &locked, &clear_mark));
         assert!(super::blocks_command(&cut, &locked, &clear_beat));
         assert!(super::blocks_command(&cut, &locked, &curve));
+        assert!(super::blocks_command(&cut, &locked, &nest));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &nest
+        ));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),

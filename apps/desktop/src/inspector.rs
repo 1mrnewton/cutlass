@@ -773,6 +773,9 @@ fn describe(
         ),
         (say(Phrase::Speed), pace_text(segment)),
     ];
+    if let Some(nest) = segment.nest() {
+        rows.push((say(Phrase::Nest), nest.to_string()));
+    }
     if segment.channels() != Channels::Picture {
         rows.push((say(Phrase::Volume), number(segment.volume())));
     }
@@ -1028,6 +1031,36 @@ mod tests {
             .find(|(label, _)| *label == "Speed")
             .expect("speed");
         assert_eq!(speed.1, "0 1/1, 1 2/1");
+    }
+
+    #[test]
+    fn a_nested_timeline_lists_its_id() {
+        let (mut cut, id) = video_cut();
+        let mut history = History::new();
+        let nest = match history
+            .apply(&mut cut, &[Command::AddTimeline])
+            .expect("timeline")
+            .as_slice()
+        {
+            [Outcome::Timeline(nest)] => *nest,
+            other => panic!("expected a timeline, got {other:?}"),
+        };
+        history
+            .apply(
+                &mut cut,
+                &[Command::SetNest {
+                    segment: id,
+                    nest: Some(nest),
+                }],
+            )
+            .expect("nest");
+        let panel = describe(&cut, id, Language::English, false).expect("panel");
+        let row = panel
+            .rows
+            .iter()
+            .find(|(label, _)| *label == "Nest")
+            .expect("nest");
+        assert_eq!(row.1, nest.to_string());
     }
 
     #[test]

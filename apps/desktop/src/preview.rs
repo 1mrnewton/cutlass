@@ -1851,6 +1851,80 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_timeline_does_not_change_the_seek() {
+        let scale = NonZeroU32::new(1_000_000).expect("scale");
+        let asset = Asset::video(
+            "file:///cuts/nest.mp4",
+            Timestamp::new(1_000_000, scale),
+            16,
+            16,
+            true,
+        )
+        .expect("video");
+        let mut history = History::new();
+        let mut cut = project();
+        let asset = match history
+            .apply(&mut cut, &[Command::AddAsset(asset)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let source = TimeRange::new(Timestamp::new(0, scale), Timestamp::new(1_000_000, scale))
+            .expect("source");
+        let segment = Segment::media(
+            cut.asset(asset).expect("asset"),
+            source,
+            0,
+            Channels::Both,
+            Speed::ONE,
+        )
+        .expect("segment");
+        let main = cut.timeline().main_track().id();
+        let id = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Segment(id)] => *id,
+            other => panic!("expected a segment, got {other:?}"),
+        };
+        let nest = match history
+            .apply(&mut cut, &[Command::AddTimeline])
+            .expect("timeline")
+            .as_slice()
+        {
+            [Outcome::Timeline(nest)] => *nest,
+            other => panic!("expected a timeline, got {other:?}"),
+        };
+        history
+            .apply(
+                &mut cut,
+                &[Command::SetNest {
+                    segment: id,
+                    nest: Some(nest),
+                }],
+            )
+            .expect("nest");
+        let mid = {
+            let segment = cut.timeline().segment(id).expect("clip");
+            super::media_time(segment, 400_000).expect("mid")
+        };
+        assert_eq!(mid.value, 400_000);
+        assert_eq!(mid.timescale, scale);
+        let stored = cut.nest(nest).expect("stored");
+        assert_eq!(stored.tracks().len(), 1);
+        assert!(stored.main_track().segments().is_empty());
+    }
+
+    #[test]
     fn a_rotated_picture_stays_inside_its_box() {
         let flat = super::LayerBox {
             center: eframe::egui::pos2(100.0, 80.0),

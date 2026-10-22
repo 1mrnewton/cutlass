@@ -700,6 +700,14 @@ name = "cutlass-ac3"
 version = "0.1.0"
 
 [[package]]
+name = "cutlass-aiff"
+version = "0.1.0"
+dependencies = [
+ "cutlass-core",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cutlass-alac"
 version = "0.1.0"
 

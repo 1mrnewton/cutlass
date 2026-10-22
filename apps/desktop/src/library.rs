@@ -881,7 +881,7 @@ fn on_timeline(project: &Project, id: AssetId) -> bool {
         track
             .segments()
             .iter()
-            .any(|segment| segment.asset_id() == id)
+            .any(|segment| segment.asset_id() == Some(id))
     })
 }
 

@@ -80,7 +80,7 @@ impl Reel {
         hidden: &[cutlass_project::TrackId],
     ) -> Option<eframe::egui::TextureId> {
         let segment = crate::preview::picture_segment(project, playhead_us, hidden)?;
-        let asset_id = segment.asset_id();
+        let asset_id = segment.asset_id()?;
         let time = crate::preview::media_time(segment, playhead_us)?;
         let source = project.asset(asset_id)?.source();
         if !self.same(asset_id, source) {

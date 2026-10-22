@@ -351,7 +351,8 @@ fn track_from(document: &TrackDoc, assets: &[Asset]) -> Result<Track, Error> {
 fn segment_doc(segment: &Segment) -> SegmentDoc {
     SegmentDoc {
         id: segment.id().to_string(),
-        asset: segment.asset_id().to_string(),
+        asset: segment.asset_id().map(|id| id.to_string()),
+        text: segment.words().map(str::to_owned),
         source: segment.source().map(range_doc),
         timeline: SpanDoc {
             start: segment.timeline().start().value,
@@ -378,7 +379,19 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
 
 fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Error> {
     let id: SegmentId = document.id.parse()?;
-    let asset_id: AssetId = document.asset.parse()?;
+    if document.text.is_some() {
+        if document.asset.is_some() {
+            return Err(Error::Text);
+        }
+        let mut segment = text_segment(document)?;
+        segment.assign(id);
+        finish_segment(&mut segment, document)?;
+        return Ok(segment);
+    }
+    let Some(asset_name) = document.asset.as_deref() else {
+        return Err(Error::Text);
+    };
+    let asset_id: AssetId = asset_name.parse()?;
     let asset = assets
         .iter()
         .find(|asset| asset.id() == asset_id)
@@ -397,6 +410,11 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
         }
     };
     segment.assign(id);
+    finish_segment(&mut segment, document)?;
+    Ok(segment)
+}
+
+fn finish_segment(segment: &mut Segment, document: &SegmentDoc) -> Result<(), Error> {
     segment.set_visible(document.visible);
     segment.set_volume(document.volume)?;
     segment.set_fades(document.fade_in, document.fade_out)?;
@@ -408,7 +426,24 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
     for key in &document.keyframes {
         segment.push_keyframe(key_from(key)?)?;
     }
-    Ok(segment)
+    Ok(())
+}
+
+fn text_segment(document: &SegmentDoc) -> Result<Segment, Error> {
+    let Some(words) = document.text.clone() else {
+        return Err(Error::Text);
+    };
+    if document.source.is_some() || document.frozen {
+        return Err(Error::Text);
+    }
+    let speed = Speed::new(document.speed.numerator, document.speed.denominator)?;
+    if speed != Speed::ONE {
+        return Err(Error::Text);
+    }
+    if channels_from(document.channels) != Channels::Picture {
+        return Err(Error::Channels);
+    }
+    Segment::text(words, document.timeline.start, document.timeline.duration)
 }
 
 fn image_segment(
@@ -824,7 +859,10 @@ struct TrackDoc {
 #[serde(deny_unknown_fields)]
 struct SegmentDoc {
     id: String,
-    asset: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    asset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<RangeDoc>,
     timeline: SpanDoc,
@@ -1755,6 +1793,37 @@ mod tests {
         assert!(project.timeline().main_track().locked());
     }
 
+    #[test]
+    fn a_text_segment_has_words_and_no_file() {
+        let mut project = Project::from_json(EMPTY).expect("load");
+        let mut history = History::new();
+        history
+            .apply(
+                &mut project,
+                &[Command::Place {
+                    track: None,
+                    segment: Segment::text("Hi", 0, 1_000_000).expect("text"),
+                }],
+            )
+            .expect("place");
+        let saved = project.to_json().expect("json");
+        assert!(saved.contains("\"text\": \"Hi\""));
+        assert!(!saved.contains("\"asset\""));
+        let mut value: Value = serde_json::from_str(&saved).expect("value");
+        value["timeline"]["tracks"][1]["segments"][0]["asset"] = json!("asset-9");
+        refuse(&value.to_string(), Error::Text);
+        let mut bare = value;
+        bare["timeline"]["tracks"][1]["segments"][0]
+            .as_object_mut()
+            .expect("segment")
+            .remove("asset");
+        bare["timeline"]["tracks"][1]["segments"][0]
+            .as_object_mut()
+            .expect("segment")
+            .remove("text");
+        refuse(&bare.to_string(), Error::Text);
+    }
+
     fn cut_value() -> (Project, Value) {
         let project = cut();
         let text = project.to_json().expect("save");
@@ -1868,7 +1937,7 @@ mod tests {
         assert!(!project.timeline().tracks()[1].segments()[0].visible());
         assert_eq!(
             project.timeline().tracks()[2].segments()[0].asset_id(),
-            image_id
+            Some(image_id)
         );
         project
     }

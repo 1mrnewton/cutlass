@@ -1436,7 +1436,7 @@ fn a_copy_keeps_the_clip_and_lands_where_it_ended() -> Result<(), Error> {
         .timeline()
         .segment(placed)
         .ok_or(Error::UnknownSegment(placed))?;
-    assert_eq!(next.asset_id(), asset);
+    assert_eq!(next.asset_id(), Some(asset));
     assert_eq!(next.source(), source);
     assert_eq!(next.channels(), Channels::Both);
     assert_eq!(next.speed(), Speed::new(2, 1)?);
@@ -1477,7 +1477,7 @@ fn a_copy_still_places_after_the_original_is_removed() -> Result<(), Error> {
         .segment(placed)
         .ok_or(Error::UnknownSegment(placed))?;
     assert_eq!(next.source(), original.source());
-    assert_eq!(next.asset_id(), asset);
+    assert_eq!(next.asset_id(), Some(asset));
     Ok(())
 }
 
@@ -2502,7 +2502,7 @@ fn detach_audio_adds_a_sound_segment_of_the_same_asset() -> Result<(), Error> {
     assert_eq!(picture.keyframes().len(), 1);
     assert_eq!(picture.keyframes()[0].property(), KeyframeProperty::Opacity);
     assert_eq!(heard.channels(), Channels::Sound);
-    assert_eq!(heard.asset_id(), asset);
+    assert_eq!(heard.asset_id(), Some(asset));
     assert_eq!(heard.source(), picture.source());
     assert_eq!(heard.timeline(), picture.timeline());
     assert_eq!(heard.speed(), picture.speed());
@@ -2732,7 +2732,7 @@ fn freeze_inserts_one_source_tick_and_shifts_the_rest() -> Result<(), Error> {
     assert!(still.frozen());
     assert_eq!(still.channels(), Channels::Picture);
     assert_eq!(still.speed(), Speed::ONE);
-    assert_eq!(still.asset_id(), asset);
+    assert_eq!(still.asset_id(), Some(asset));
     assert_eq!(still.timeline().start().value, 1_500_000);
     assert_eq!(still.timeline().duration().value, 2_000_000);
     assert_eq!(still.volume(), 1.0);
@@ -3138,7 +3138,7 @@ fn reverse_points_the_segment_at_the_reversed_file() -> Result<(), Error> {
         .timeline()
         .segment(id)
         .ok_or(Error::UnknownSegment(id))?;
-    assert_eq!(segment.asset_id(), reverse);
+    assert_eq!(segment.asset_id(), Some(reverse));
     assert_eq!(segment.timeline().start().value, 1_000_000);
     assert_eq!(segment.timeline().duration().value, 1_000_000);
     assert_eq!(segment.channels(), Channels::Both);
@@ -3205,7 +3205,7 @@ fn reverse_points_the_segment_at_the_reversed_file() -> Result<(), Error> {
             .segment(id)
             .ok_or(Error::UnknownSegment(id))?
             .asset_id(),
-        asset
+        Some(asset)
     );
     assert_eq!(
         cut.project
@@ -3224,7 +3224,7 @@ fn reverse_points_the_segment_at_the_reversed_file() -> Result<(), Error> {
             .segment(id)
             .ok_or(Error::UnknownSegment(id))?
             .asset_id(),
-        reverse
+        Some(reverse)
     );
     assert_eq!(
         cut.project
@@ -3276,7 +3276,7 @@ fn a_second_reverse_reuses_the_asset_and_relink_keeps_both() -> Result<(), Error
             .segment(second)
             .ok_or(Error::UnknownSegment(second))?
             .asset_id(),
-        reverse
+        Some(reverse)
     );
     assert_eq!(cut.project.assets().len(), 2);
 
@@ -3370,7 +3370,7 @@ fn a_reverse_needs_a_source() -> Result<(), Error> {
             .segment(image_id)
             .ok_or(Error::UnknownSegment(image_id))?
             .asset_id(),
-        image
+        Some(image)
     );
 
     let wav = asset_id(run(
@@ -3694,5 +3694,149 @@ fn a_used_asset_and_its_reverse_stay() -> Result<(), Error> {
     cut.history.undo(&mut cut.project)?;
     assert!(cut.project.asset(reverse).is_some());
     assert!(cut.project.timeline().segment(clip).is_none());
+    Ok(())
+}
+
+#[test]
+fn text_keeps_its_words_on_a_text_track() -> Result<(), Error> {
+    let mut cut = bare();
+    let (id, track) = opened(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::text("Hello", 0, 2_000_000)?,
+        },
+    )?);
+    let stored = cut
+        .project
+        .timeline()
+        .track(track)
+        .ok_or(Error::UnknownTrack(track))?;
+    assert_eq!(stored.kind(), TrackKind::Text);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .words(),
+        Some("Hello")
+    );
+    assert!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .asset_id()
+            .is_none()
+    );
+    run(
+        &mut cut,
+        Command::SetText {
+            segment: id,
+            words: String::new(),
+        },
+    )?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .words(),
+        Some("")
+    );
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: id,
+            at: 1_000_000,
+        },
+    )?);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(right)
+            .ok_or(Error::UnknownSegment(right))?
+            .words(),
+        Some("")
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetSpeed {
+                segment: id,
+                speed: Speed::new(2, 1)?,
+            },
+        ),
+        Error::Text,
+    );
+    expect_err(run(&mut cut, Command::Reverse { segment: id }), Error::Text);
+    expect_err(
+        run(
+            &mut cut,
+            Command::Freeze {
+                segment: id,
+                at: 500_000,
+                hold: 1_000_000,
+            },
+        ),
+        Error::Text,
+    );
+    let main = cut.main;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Place {
+                track: Some(main),
+                segment: Segment::text("No", 3_000_000, 1_000_000)?,
+            },
+        ),
+        Error::WrongTrack,
+    );
+    let video = add_video(&mut cut, 10, 1280, 720)?;
+    let clip = media(&cut.project, video, 0, 30_000, Channels::Both)?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Place {
+                track: Some(track),
+                segment: clip,
+            },
+        ),
+        Error::WrongTrack,
+    );
+    let saved = cut.project.to_json()?;
+    assert!(saved.contains("\"text\": \"\""));
+    assert!(!saved.contains("\"asset\""));
+    let loaded = Project::from_json(&saved)?;
+    assert_eq!(
+        loaded
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .words(),
+        Some("")
+    );
+    cut.history.undo(&mut cut.project)?;
+    cut.history.undo(&mut cut.project)?;
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .words(),
+        Some("Hello")
+    );
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetText {
+                segment: missing,
+                words: "x".to_owned(),
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
     Ok(())
 }

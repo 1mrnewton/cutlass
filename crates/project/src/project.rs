@@ -245,6 +245,11 @@ impl Project {
             Command::DetachAudio { segment } => self.detach_now(segment),
             Command::Freeze { segment, at, hold } => self.freeze_now(segment, at, hold),
             Command::Reverse { segment } => self.reverse_now(segment),
+            Command::SetText { segment, words } => {
+                self.refuse_lane(segment)?;
+                self.timeline.segment_mut(segment)?.set_words(words)?;
+                Ok(Outcome::Unchanged)
+            }
             Command::SetVisible { segment, visible } => {
                 self.refuse_lane(segment)?;
                 self.timeline.segment_mut(segment)?.set_visible(visible);
@@ -355,7 +360,7 @@ impl Project {
             track
                 .segments()
                 .iter()
-                .any(|segment| segment.asset_id() == id)
+                .any(|segment| segment.asset_id() == Some(id))
         })
     }
 
@@ -394,7 +399,7 @@ impl Project {
                         track.overlaps_range(segment.timeline()),
                     )
                 };
-                if !accepts(kind, segment.channels()) {
+                if !accepts(kind, segment.channels(), segment.is_text()) {
                     return Err(Error::WrongTrack);
                 }
                 if locked {
@@ -409,7 +414,7 @@ impl Project {
         let segment_id = SegmentId::raw(self.allocate()?);
         segment.assign(segment_id);
         let Some((track_id, kind, main, overlaps)) = target else {
-            let track = self.spill(kind_for(segment.channels()), segment)?;
+            let track = self.spill(kind_for(&segment), segment)?;
             return Ok(Outcome::Opened {
                 segment: segment_id,
                 track,
@@ -489,6 +494,9 @@ impl Project {
             .ok_or(Error::UnknownSegment(id))?
             .asset_id();
         self.refuse_edit(id)?;
+        let Some(asset_id) = asset_id else {
+            return Err(Error::Text);
+        };
         let on_main = self
             .timeline
             .main_track()
@@ -529,11 +537,12 @@ impl Project {
         let to = track.unwrap_or(from);
         let segment = self.timeline.segment(id).ok_or(Error::UnknownSegment(id))?;
         let channels = segment.channels();
+        let text = segment.is_text();
         let duration = segment.timeline().duration().value;
         let old_start = segment.timeline().start().value;
         let (to_main, dest_locked) = {
             let dest = self.timeline.track(to).ok_or(Error::UnknownTrack(to))?;
-            if !accepts(dest.kind(), channels) {
+            if !accepts(dest.kind(), channels, text) {
                 return Err(Error::WrongTrack);
             }
             (dest.is_main(), dest.locked())
@@ -664,10 +673,13 @@ impl Project {
             return Err(Error::Overlap);
         }
 
-        let asset = self
-            .asset(asset_id)
-            .ok_or(Error::UnknownAsset(asset_id))?
-            .clone();
+        let asset = match asset_id {
+            Some(id) if left_source.is_some() => {
+                Some(self.asset(id).ok_or(Error::UnknownAsset(id))?.clone())
+            }
+            None if left_source.is_some() => return Err(Error::Text),
+            _ => None,
+        };
         let right_id = SegmentId::raw(self.allocate()?);
         let mut right = self
             .timeline
@@ -676,7 +688,10 @@ impl Project {
             .clone();
         let keys = self.timeline.segment_mut(id)?.split_keyframes(left_dur)?;
         match left_source {
-            Some(source) => self.timeline.segment_mut(id)?.trim_source(&asset, source)?,
+            Some(source) => {
+                let asset = asset.as_ref().ok_or(Error::Text)?;
+                self.timeline.segment_mut(id)?.trim_source(asset, source)?;
+            }
             None => self
                 .timeline
                 .segment_mut(id)?
@@ -686,7 +701,8 @@ impl Project {
         right.assign(right_id);
         match right_source {
             Some(source) => {
-                right.trim_source(&asset, source)?;
+                let asset = asset.as_ref().ok_or(Error::Text)?;
+                right.trim_source(asset, source)?;
                 right.set_start(right_start)?;
             }
             None => {
@@ -716,6 +732,9 @@ impl Project {
         }
         {
             let segment = self.timeline.segment(id).ok_or(Error::UnknownSegment(id))?;
+            if segment.is_text() {
+                return Err(Error::Text);
+            }
             if segment.channels() == Channels::Sound {
                 return Err(Error::NoPicture);
             }
@@ -743,7 +762,7 @@ impl Project {
         let cut = right.timeline().start().value;
         let source = right.source().ok_or(Error::MediaSource)?;
         let frame = TimeRange::new(source.start(), Timestamp::new(1, source.start().timescale))?;
-        let asset_id = right.asset_id();
+        let asset_id = right.asset_id().ok_or(Error::MediaSource)?;
         let asset = self
             .asset(asset_id)
             .ok_or(Error::UnknownAsset(asset_id))?
@@ -796,12 +815,15 @@ impl Project {
             .segment(id)
             .ok_or(Error::UnknownSegment(id))?
             .clone();
+        if segment.is_text() {
+            return Err(Error::Text);
+        }
         if segment.frozen() {
             return Err(Error::Freeze);
         }
         let source = segment.source().ok_or(Error::ImageSource)?;
         self.refuse_lane(id)?;
-        let current_id = segment.asset_id();
+        let current_id = segment.asset_id().ok_or(Error::ImageSource)?;
         let current = self
             .asset(current_id)
             .ok_or(Error::UnknownAsset(current_id))?
@@ -858,9 +880,11 @@ impl Project {
     }
 
     fn prepare(&self, segment: &Segment) -> Result<(), Error> {
-        let asset = self
-            .asset(segment.asset_id())
-            .ok_or(Error::UnknownAsset(segment.asset_id()))?;
+        if segment.is_text() {
+            return Ok(());
+        }
+        let id = segment.asset_id().ok_or(Error::Text)?;
+        let asset = self.asset(id).ok_or(Error::UnknownAsset(id))?;
         segment.recheck(asset)
     }
 
@@ -946,14 +970,20 @@ impl Project {
     }
 }
 
-fn kind_for(channels: Channels) -> TrackKind {
-    match channels {
+fn kind_for(segment: &Segment) -> TrackKind {
+    if segment.is_text() {
+        return TrackKind::Text;
+    }
+    match segment.channels() {
         Channels::Sound => TrackKind::Audio,
         Channels::Picture | Channels::Both => TrackKind::Video,
     }
 }
 
-fn accepts(kind: TrackKind, channels: Channels) -> bool {
+fn accepts(kind: TrackKind, channels: Channels, text: bool) -> bool {
+    if text {
+        return kind == TrackKind::Text;
+    }
     match (kind, channels) {
         (TrackKind::Video, Channels::Picture | Channels::Both) => true,
         (TrackKind::Video, Channels::Sound) => false,
@@ -1168,12 +1198,19 @@ fn check_restored(assets: &[Asset], timeline: &Timeline, next_id: u64) -> Result
         previous = Some(track.band());
         for segment in track.segments() {
             claim(&mut seen, segment.id().get())?;
+            if segment.is_text() {
+                if track.kind() != TrackKind::Text {
+                    return Err(Error::WrongTrack);
+                }
+                continue;
+            }
+            let asset_id = segment.asset_id().ok_or(Error::Text)?;
             let asset = assets
                 .iter()
-                .find(|asset| asset.id() == segment.asset_id())
-                .ok_or(Error::UnknownAsset(segment.asset_id()))?;
+                .find(|asset| asset.id() == asset_id)
+                .ok_or(Error::UnknownAsset(asset_id))?;
             segment.recheck(asset)?;
-            if !accepts(track.kind(), segment.channels()) {
+            if !accepts(track.kind(), segment.channels(), false) {
                 return Err(Error::WrongTrack);
             }
         }

@@ -81,6 +81,10 @@ pub enum Error {
     Locked,
     #[error("the asset is still used")]
     AssetInUse,
+    #[error("a text segment has no file")]
+    Text,
+    #[error("the segment is not text")]
+    NotText,
     #[error("value is not finite")]
     NonFinite,
     #[error("scale must be positive")]

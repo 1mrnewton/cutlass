@@ -728,7 +728,7 @@ fn describe(
         .iter()
         .find(|track| track.segments().iter().any(|segment| segment.id() == id))?;
     let segment = track.segments().iter().find(|segment| segment.id() == id)?;
-    let asset = project.asset(segment.asset_id())?;
+    let asset = project.asset(segment.asset_id()?)?;
     let range = segment.timeline();
     let speed = segment.speed();
     let say = |phrase| words::say(language, phrase);

@@ -393,7 +393,7 @@ fn picture_box(
     if segment.channels() == Channels::Sound {
         return None;
     }
-    let media = project.asset(segment.asset_id())?.visual_size()?;
+    let media = project.asset(segment.asset_id()?)?.visual_size()?;
     let transform = segment.transform();
     let (position, scale, rotation) = drag
         .filter(|drag| drag.segment == segment.id())
@@ -429,8 +429,9 @@ pub(crate) fn picture_segment<'a>(
         track.segments().iter().find(|segment| {
             covers(segment, playhead_us)
                 && segment.channels() != Channels::Sound
-                && project
-                    .asset(segment.asset_id())
+                && segment
+                    .asset_id()
+                    .and_then(|id| project.asset(id))
                     .and_then(|asset| asset.visual_size())
                     .is_some()
         })
@@ -756,7 +757,7 @@ fn chosen_layer(
 }
 
 fn unit_size(project: &Project, segment: &cutlass_project::Segment, plate: Rect) -> Option<Vec2> {
-    let media = project.asset(segment.asset_id())?.visual_size()?;
+    let media = project.asset(segment.asset_id()?)?.visual_size()?;
     layer_box(
         plate,
         (project.settings().width(), project.settings().height()),
@@ -963,7 +964,10 @@ fn shot<'a>(project: &'a Project, us: i64, hidden: &[cutlass_project::TrackId]) 
         for segment in track.segments() {
             let range = segment.timeline();
             if segment.visible() && range.start().value <= us && us < range.end().value {
-                let asset = project.asset(segment.asset_id())?;
+                if let Some(words) = segment.words() {
+                    return Some(words);
+                }
+                let asset = project.asset(segment.asset_id()?)?;
                 return Some(file_name(asset.source()));
             }
         }
@@ -1396,7 +1400,7 @@ mod tests {
                             .segments()
                             .iter()
                             .find(|segment| segment.id() == hit)
-                            .map(|segment| segment.asset_id())
+                            .and_then(|segment| segment.asset_id())
                     })
                     .expect("segment"),
             )

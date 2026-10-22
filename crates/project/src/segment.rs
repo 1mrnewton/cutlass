@@ -269,7 +269,9 @@ impl Keyframe {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Segment {
     id: SegmentId,
-    asset: AssetId,
+    asset: Option<AssetId>,
+    /// The words, when this segment is text. A media segment leaves this empty.
+    text: Option<String>,
     source: Option<TimeRange>,
     timeline: TimeRange,
     channels: Channels,
@@ -298,7 +300,7 @@ impl Segment {
         check_media(asset, source, channels)?;
         let timeline_span = timeline_duration(source.duration(), speed)?;
         Ok(Self::new(
-            asset.id(),
+            Some(asset.id()),
             Some(source),
             TimeRange::sequence(timeline_start_us, timeline_span.value)?,
             channels,
@@ -315,7 +317,7 @@ impl Segment {
             return Err(Error::MediaSource);
         }
         Ok(Self::new(
-            asset.id(),
+            Some(asset.id()),
             None,
             TimeRange::sequence(timeline_start_us, timeline_duration_us)?,
             Channels::Picture,
@@ -323,8 +325,28 @@ impl Segment {
         ))
     }
 
+    /// Words on the sequence. The duration is named, in microseconds.
+    ///
+    /// There is no file. Speed is `1/1` and the channels are picture. The words
+    /// may be empty.
+    pub fn text(
+        words: impl Into<String>,
+        timeline_start_us: i64,
+        timeline_duration_us: i64,
+    ) -> Result<Self, Error> {
+        let mut segment = Self::new(
+            None,
+            None,
+            TimeRange::sequence(timeline_start_us, timeline_duration_us)?,
+            Channels::Picture,
+            Speed::ONE,
+        );
+        segment.text = Some(words.into());
+        Ok(segment)
+    }
+
     fn new(
-        asset: AssetId,
+        asset: Option<AssetId>,
         source: Option<TimeRange>,
         timeline: TimeRange,
         channels: Channels,
@@ -333,6 +355,7 @@ impl Segment {
         Self {
             id: SegmentId::raw(0),
             asset,
+            text: None,
             source,
             timeline,
             channels,
@@ -352,8 +375,14 @@ impl Segment {
     }
 
     pub(crate) fn recheck(&self, asset: &Asset) -> Result<(), Error> {
-        if asset.id() != self.asset {
-            return Err(Error::UnknownAsset(self.asset));
+        if self.text.is_some() {
+            return Err(Error::Text);
+        }
+        let Some(id) = self.asset else {
+            return Err(Error::Text);
+        };
+        if asset.id() != id {
+            return Err(Error::UnknownAsset(id));
         }
         match self.source {
             Some(source) => check_media(asset, source, self.channels),
@@ -368,6 +397,9 @@ impl Segment {
     }
 
     pub(crate) fn trim_source(&mut self, asset: &Asset, source: TimeRange) -> Result<(), Error> {
+        if self.text.is_some() {
+            return Err(Error::Text);
+        }
         if self.frozen {
             return Err(Error::Freeze);
         }
@@ -379,6 +411,9 @@ impl Segment {
     }
 
     pub(crate) fn change_speed(&mut self, speed: Speed) -> Result<(), Error> {
+        if self.text.is_some() {
+            return Err(Error::Text);
+        }
         if self.frozen {
             return Err(Error::Freeze);
         }
@@ -528,6 +563,9 @@ impl Segment {
     ///
     /// The segment must already be picture, at speed 1/1, with a one-tick source.
     pub(crate) fn hold_frame(&mut self, duration_us: i64) -> Result<(), Error> {
+        if self.text.is_some() {
+            return Err(Error::Text);
+        }
         if self.channels != Channels::Picture {
             return Err(Error::NoPicture);
         }
@@ -638,15 +676,33 @@ impl Segment {
     }
 
     pub(crate) fn set_asset(&mut self, asset: AssetId) {
-        self.asset = asset;
+        self.asset = Some(asset);
+    }
+
+    /// Replaces the words. A media segment is refused.
+    pub(crate) fn set_words(&mut self, words: String) -> Result<(), Error> {
+        if self.text.is_none() {
+            return Err(Error::NotText);
+        }
+        self.text = Some(words);
+        Ok(())
     }
 
     pub const fn id(&self) -> SegmentId {
         self.id
     }
 
-    pub const fn asset_id(&self) -> AssetId {
+    pub const fn asset_id(&self) -> Option<AssetId> {
         self.asset
+    }
+
+    /// The words, when this segment is text.
+    pub fn words(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+
+    pub const fn is_text(&self) -> bool {
+        self.text.is_some()
     }
 
     pub const fn source(&self) -> Option<TimeRange> {

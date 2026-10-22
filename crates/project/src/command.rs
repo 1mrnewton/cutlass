@@ -113,6 +113,11 @@ pub enum Command {
     Reverse {
         segment: SegmentId,
     },
+    /// Replaces the words on a text segment.
+    SetText {
+        segment: SegmentId,
+        words: String,
+    },
     /// Locks the track when on. A locked track refuses an edit.
     SetLocked {
         track: TrackId,
@@ -187,8 +192,14 @@ pub fn commands_for_trim(
     edge: TrimEdge,
     delta_us: i64,
 ) -> Result<Vec<Command>, Error> {
-    if asset.id() != segment.asset_id() {
-        return Err(Error::UnknownAsset(segment.asset_id()));
+    if segment.is_text() {
+        return Err(Error::Text);
+    }
+    let Some(id) = segment.asset_id() else {
+        return Err(Error::Text);
+    };
+    if asset.id() != id {
+        return Err(Error::UnknownAsset(id));
     }
     let Some(source) = segment.source() else {
         return Err(Error::MediaSource);

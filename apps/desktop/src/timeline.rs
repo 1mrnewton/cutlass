@@ -2407,13 +2407,9 @@ fn paint_segments(
         let id = segment.id();
         response.context_menu(|ui| paint_clip_menu(ui, kind, refused, id, menu));
         let range = segment.timeline();
-        let name = paint
-            .project
-            .asset(segment.asset_id())
-            .map(|asset| file_name(asset.source()))
-            .unwrap_or("");
+        let name = clip_name(paint.project, segment);
         let text = crate::tip::span(
-            name,
+            &name,
             range.start().value,
             range.end().value,
             range.start().timescale.get(),
@@ -2639,11 +2635,19 @@ fn stroke_clip(ui: &egui::Ui, rect: Rect) {
     );
 }
 
+fn clip_name(project: &Project, segment: &cutlass_project::Segment) -> String {
+    if let Some(words) = segment.words() {
+        return words.to_owned();
+    }
+    segment
+        .asset_id()
+        .and_then(|id| project.asset(id))
+        .map(|asset| file_name(asset.source()).to_owned())
+        .unwrap_or_default()
+}
+
 fn paint_name(ui: &egui::Ui, project: &Project, segment: &cutlass_project::Segment, rect: Rect) {
-    let name = project
-        .asset(segment.asset_id())
-        .map(|asset| file_name(asset.source()))
-        .unwrap_or("");
+    let name = clip_name(project, segment);
     if name.is_empty() {
         return;
     }
@@ -2996,7 +3000,7 @@ fn trim_commands(
     let Some(segment) = project.timeline().segment(trim.segment) else {
         return Vec::new();
     };
-    let Some(asset) = project.asset(segment.asset_id()) else {
+    let Some(asset) = segment.asset_id().and_then(|id| project.asset(id)) else {
         return Vec::new();
     };
     let pixel_size = align.view.pixel_size;

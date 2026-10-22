@@ -5,6 +5,7 @@
 use cutlass_core::Timestamp;
 
 use crate::Error;
+use crate::animation::{Animation, AnimationKind};
 use crate::asset::Asset;
 use crate::attachment::Attachment;
 use crate::id::{AssetId, SegmentId, TrackId};
@@ -139,6 +140,12 @@ pub enum Command {
     /// Removes the blend on the cut after `segment`.
     ClearTransition {
         segment: SegmentId,
+    },
+    /// Sets or clears one animation. `None` clears that kind.
+    SetAnimation {
+        segment: SegmentId,
+        kind: AnimationKind,
+        animation: Option<Animation>,
     },
     /// Locks the track when on. A locked track refuses an edit.
     SetLocked {

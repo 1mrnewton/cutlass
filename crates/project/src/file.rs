@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::Error;
+use crate::animation::{Animation, AnimationKind};
 use crate::asset::{Asset, AssetKind};
 use crate::attachment::{Attachment, Parameter, ParameterValue};
 use crate::id::{AssetId, SegmentId, TrackId};
@@ -464,6 +465,34 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
         frozen: segment.frozen(),
         transform: transform_doc(segment.transform()),
         keyframes: segment.keyframes().iter().copied().map(key_doc).collect(),
+        animations: AnimationKind::ALL
+            .into_iter()
+            .filter_map(|kind| {
+                segment.animation(kind).map(|animation| AnimationDoc {
+                    kind: animation_kind_name(kind),
+                    name: animation.name().to_owned(),
+                    duration: animation.duration_us(),
+                })
+            })
+            .collect(),
+    }
+}
+
+fn animation_kind_name(kind: AnimationKind) -> AnimationKindName {
+    match kind {
+        AnimationKind::In => AnimationKindName::In,
+        AnimationKind::Out => AnimationKindName::Out,
+        AnimationKind::Combo => AnimationKindName::Combo,
+        AnimationKind::Loop => AnimationKindName::Loop,
+    }
+}
+
+fn animation_kind_from(kind: AnimationKindName) -> AnimationKind {
+    match kind {
+        AnimationKindName::In => AnimationKind::In,
+        AnimationKindName::Out => AnimationKind::Out,
+        AnimationKindName::Combo => AnimationKind::Combo,
+        AnimationKindName::Loop => AnimationKind::Loop,
     }
 }
 
@@ -543,6 +572,24 @@ fn finish_segment(segment: &mut Segment, document: &SegmentDoc) -> Result<(), Er
     segment.set_transform(transform_from(&document.transform)?);
     for key in &document.keyframes {
         segment.push_keyframe(key_from(key)?)?;
+    }
+    let mut seen = [false; 4];
+    for animation in &document.animations {
+        let kind = animation_kind_from(animation.kind);
+        let index = match kind {
+            AnimationKind::In => 0,
+            AnimationKind::Out => 1,
+            AnimationKind::Combo => 2,
+            AnimationKind::Loop => 3,
+        };
+        if seen[index] {
+            return Err(Error::Animation);
+        }
+        seen[index] = true;
+        segment.set_animation(
+            kind,
+            Some(Animation::new(animation.name.clone(), animation.duration)?),
+        )?;
     }
     Ok(())
 }
@@ -1164,6 +1211,25 @@ struct SegmentDoc {
     frozen: bool,
     transform: TransformDoc,
     keyframes: Vec<KeyDoc>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    animations: Vec<AnimationDoc>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnimationDoc {
+    kind: AnimationKindName,
+    name: String,
+    duration: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum AnimationKindName {
+    In,
+    Out,
+    Combo,
+    Loop,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1333,7 +1399,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        BlendName, ChannelName, EasingName, FILE_VERSION, KeyDoc, KindName, RatioName, SpaceName,
+        AnimationKindName, BlendName, ChannelName, EasingName, FILE_VERSION, KeyDoc, KindName,
+        RatioName, SpaceName,
     };
     use crate::Error;
     use crate::asset::{Asset, AssetKind};
@@ -1471,6 +1538,22 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ChannelName::Both).expect("channels"),
             "\"both\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AnimationKindName::In).expect("animation"),
+            "\"in\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AnimationKindName::Out).expect("animation"),
+            "\"out\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AnimationKindName::Combo).expect("animation"),
+            "\"combo\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AnimationKindName::Loop).expect("animation"),
+            "\"loop\""
         );
         let key = KeyDoc::Rotation {
             offset: 0,
@@ -2343,6 +2426,65 @@ mod tests {
         value["timeline"]["tracks"][0]["transitions"][0]["duration"] = json!(400_000);
         value["timeline"]["tracks"][0]["segments"][1]["timeline"]["start"] = json!(2_000_000);
         refuse(&value.to_string(), Error::Transition);
+    }
+
+    #[test]
+    fn an_animation_round_trips_and_a_bad_one_refuses_the_file() {
+        use crate::animation::{Animation, AnimationKind};
+
+        let mut project = Project::from_json(EMPTY).expect("load");
+        let mut history = History::new();
+        let asset = Asset::image("file:///a.png", 8, 8).expect("image");
+        history
+            .apply(&mut project, &[Command::AddAsset(asset)])
+            .expect("add");
+        let stored = project.assets().last().expect("asset");
+        let segment = Segment::image(stored, 0, 1_000_000).expect("still");
+        let main = project.timeline().main_track().id();
+        let placed = history
+            .apply(
+                &mut project,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .expect("place");
+        let id = match placed.as_slice() {
+            [crate::Outcome::Segment(id)] => *id,
+            other => panic!("expected the main track, got {other:?}"),
+        };
+        history
+            .apply(
+                &mut project,
+                &[Command::SetAnimation {
+                    segment: id,
+                    kind: AnimationKind::In,
+                    animation: Some(Animation::new("rise", 400_000).expect("animation")),
+                }],
+            )
+            .expect("animation");
+        let saved = project.to_json().expect("json");
+        assert!(saved.contains("\"kind\": \"in\""));
+        let loaded = Project::from_json(&saved).expect("load");
+        assert_eq!(
+            loaded.timeline().main_track().segments()[0]
+                .animation(AnimationKind::In)
+                .expect("animation")
+                .name(),
+            "rise"
+        );
+        let mut value: Value = serde_json::from_str(&saved).expect("value");
+        value["timeline"]["tracks"][0]["segments"][0]["animations"][0]["duration"] =
+            json!(2_000_000);
+        refuse(&value.to_string(), Error::Animation);
+        value["timeline"]["tracks"][0]["segments"][0]["animations"][0]["duration"] = json!(400_000);
+        let repeat = value["timeline"]["tracks"][0]["segments"][0]["animations"][0].clone();
+        value["timeline"]["tracks"][0]["segments"][0]["animations"]
+            .as_array_mut()
+            .expect("animations")
+            .push(repeat);
+        refuse(&value.to_string(), Error::Animation);
     }
 
     fn grade_field(value: &mut Value, key: &str, next: Value) {

@@ -4,6 +4,7 @@ use cutlass_core::Timestamp;
 
 use crate::Error;
 use crate::Speed;
+use crate::animation::{Animation, AnimationKind, AnimationSlots};
 use crate::asset::{Asset, AssetKind};
 use crate::attachment::Attachment;
 use crate::id::{AssetId, SegmentId};
@@ -297,6 +298,7 @@ pub struct Segment {
     frozen: bool,
     transform: Transform,
     keyframes: Vec<Keyframe>,
+    animations: Option<Box<AnimationSlots>>,
 }
 
 impl Segment {
@@ -447,6 +449,7 @@ impl Segment {
             frozen: false,
             transform: Transform::IDENTITY,
             keyframes: Vec::new(),
+            animations: None,
         }
     }
 
@@ -511,6 +514,12 @@ impl Segment {
         if self.fade_out > span {
             self.fade_out = span;
         }
+        if let Some(slots) = self.animations.as_mut() {
+            slots.refit(span);
+            if slots.is_empty() {
+                self.animations = None;
+            }
+        }
         Ok(())
     }
 
@@ -522,7 +531,8 @@ impl Segment {
     /// A copy with no id, starting at `start` microseconds on the sequence.
     ///
     /// The source, channels, speed, visible flag, volume, fades, denoise,
-    /// keep pitch, crop, blend, freeze, transform, and keyframes stay. Place assigns the id.
+    /// keep pitch, crop, blend, freeze, transform, keyframes, and animations
+    /// stay. Place assigns the id.
     /// A negative start is refused, and so is a start that would overflow the
     /// sequence clock.
     pub fn duplicate(&self, start: i64) -> Result<Self, Error> {
@@ -667,6 +677,7 @@ impl Segment {
         sound
             .keyframes
             .retain(|key| key.property() == KeyframeProperty::Volume);
+        sound.animations = None;
 
         self.channels = Channels::Picture;
         self.volume = 1.0;
@@ -792,6 +803,69 @@ impl Segment {
             | Content::Filter(attachment)
             | Content::Adjust(attachment) => attachment.as_deref(),
             Content::Media(_) | Content::Text(_) | Content::Sticker(_) => None,
+        }
+    }
+
+    /// The animation of this kind, when one is set.
+    pub fn animation(&self, kind: AnimationKind) -> Option<&Animation> {
+        self.animations.as_ref().and_then(|slots| slots.get(kind))
+    }
+
+    /// Sets or clears one animation. The wrong segment, or a duration that
+    /// does not fit, is refused.
+    pub(crate) fn set_animation(
+        &mut self,
+        kind: AnimationKind,
+        animation: Option<Animation>,
+    ) -> Result<(), Error> {
+        if !self.accepts_animation() {
+            return Err(Error::Animation);
+        }
+        if let Some(animation) = &animation {
+            let other = match kind {
+                AnimationKind::In => self
+                    .animation(AnimationKind::Out)
+                    .map(Animation::duration_us)
+                    .unwrap_or(0),
+                AnimationKind::Out => self
+                    .animation(AnimationKind::In)
+                    .map(Animation::duration_us)
+                    .unwrap_or(0),
+                AnimationKind::Combo | AnimationKind::Loop => 0,
+            };
+            let span = self.timeline.duration().value;
+            let Some(total) = animation.duration_us().checked_add(other) else {
+                return Err(Error::Animation);
+            };
+            if total > span {
+                return Err(Error::Animation);
+            }
+        }
+        let slots = self
+            .animations
+            .get_or_insert_with(|| Box::new(AnimationSlots::empty()));
+        slots.set(kind, animation);
+        if slots.is_empty() {
+            self.animations = None;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn clear_animation(&mut self, kind: AnimationKind) {
+        let Some(slots) = self.animations.as_mut() else {
+            return;
+        };
+        slots.set(kind, None);
+        if slots.is_empty() {
+            self.animations = None;
+        }
+    }
+
+    fn accepts_animation(&self) -> bool {
+        match &self.content {
+            Content::Media(_) => self.channels != Channels::Sound,
+            Content::Text(_) | Content::Sticker(_) => true,
+            Content::Effect(_) | Content::Filter(_) | Content::Adjust(_) => false,
         }
     }
 

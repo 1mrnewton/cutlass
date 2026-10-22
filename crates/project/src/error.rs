@@ -105,6 +105,8 @@ pub enum Error {
     Transition,
     #[error("the split is inside a transition")]
     InsideTransition,
+    #[error("the segment cannot take this animation")]
+    Animation,
     #[error("value is not finite")]
     NonFinite,
     #[error("scale must be positive")]

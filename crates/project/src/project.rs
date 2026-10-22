@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use cutlass_core::Timestamp;
 
 use crate::Error;
+use crate::animation::AnimationKind;
 use crate::asset::Asset;
 use crate::attachment::Attachment;
 use crate::command::{Command, Outcome};
@@ -278,6 +279,17 @@ impl Project {
             }
             Command::ClearTransition { segment } => {
                 self.clear_transition_now(segment)?;
+                Ok(Outcome::Unchanged)
+            }
+            Command::SetAnimation {
+                segment,
+                kind,
+                animation,
+            } => {
+                self.refuse_lane(segment)?;
+                self.timeline
+                    .segment_mut(segment)?
+                    .set_animation(kind, animation)?;
                 Ok(Outcome::Unchanged)
             }
             Command::SetVisible { segment, visible } => {
@@ -886,6 +898,9 @@ impl Project {
             .segment(id)
             .ok_or(Error::UnknownSegment(id))?
             .clone();
+        self.timeline
+            .segment_mut(id)?
+            .clear_animation(AnimationKind::Out);
         let keys = self.timeline.segment_mut(id)?.split_keyframes(left_dur)?;
         match left_source {
             Some(source) => {
@@ -899,6 +914,7 @@ impl Project {
         }
         right.replace_keyframes(keys);
         right.assign(right_id);
+        right.clear_animation(AnimationKind::In);
         match right_source {
             Some(source) => {
                 let asset = asset.as_ref().ok_or(Error::Text)?;

@@ -4,10 +4,10 @@ use std::num::NonZeroU32;
 
 use cutlass_core::Timestamp;
 use cutlass_project::{
-    AspectRatio, Asset, AssetId, AssetKind, Attachment, Blend, Channels, Color, ColorSpace,
-    Command, Crop, Easing, Error, FrameRate, History, Keyframe, KeyframeProperty, KeyframeValue,
-    Outcome, Parameter, ParameterValue, Project, ProjectId, Segment, SegmentId, SequenceRate,
-    Speed, TimeRange, TrackId, TrackKind, Transform,
+    Animation, AnimationKind, AspectRatio, Asset, AssetId, AssetKind, Attachment, Blend, Channels,
+    Color, ColorSpace, Command, Crop, Easing, Error, FrameRate, History, Keyframe,
+    KeyframeProperty, KeyframeValue, Outcome, Parameter, ParameterValue, Project, ProjectId,
+    Segment, SegmentId, SequenceRate, Speed, TimeRange, TrackId, TrackKind, Transform,
 };
 
 fn scale(value: u32) -> NonZeroU32 {
@@ -4650,6 +4650,473 @@ fn a_broken_cut_drops_the_transition_and_undo_puts_it_back() -> Result<(), Error
     assert_eq!(
         cut.project.timeline().main_track().transitions()[0].right(),
         right
+    );
+    Ok(())
+}
+
+fn motion(name: &str, duration: i64) -> Result<Animation, Error> {
+    Animation::new(name, duration)
+}
+
+#[test]
+fn a_segment_stores_one_animation_of_each_kind() -> Result<(), Error> {
+    let mut cut = bare();
+    let id = place_still(&mut cut, "file:///a.png", 0, 2_000_000)?;
+    for (kind, name, duration) in [
+        (AnimationKind::In, "rise", 800_000),
+        (AnimationKind::Out, "sink", 800_000),
+        (AnimationKind::Combo, "sway", 2_000_000),
+        (AnimationKind::Loop, "pulse", 500_000),
+    ] {
+        run(
+            &mut cut,
+            Command::SetAnimation {
+                segment: id,
+                kind,
+                animation: Some(motion(name, duration)?),
+            },
+        )?;
+    }
+    let segment = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(
+        segment.animation(AnimationKind::In).expect("in").name(),
+        "rise"
+    );
+    assert_eq!(
+        segment
+            .animation(AnimationKind::Out)
+            .expect("out")
+            .duration_us(),
+        800_000
+    );
+    assert_eq!(
+        segment
+            .animation(AnimationKind::Combo)
+            .expect("combo")
+            .name(),
+        "sway"
+    );
+    let saved = cut.project.to_json()?;
+    assert!(saved.contains("\"kind\": \"in\""));
+    assert!(saved.contains("\"name\": \"rise\""));
+    assert!(saved.contains("\"kind\": \"loop\""));
+    let loaded = Project::from_json(&saved)?;
+    assert_eq!(
+        loaded
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .animation(AnimationKind::In)
+            .expect("loaded")
+            .name(),
+        "rise"
+    );
+    let copy = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?
+        .duplicate(3_000_000)?;
+    let main = cut.main;
+    let copied = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: copy,
+        },
+    )?);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(copied)
+            .ok_or(Error::UnknownSegment(copied))?
+            .animation(AnimationKind::Combo)
+            .expect("copy")
+            .name(),
+        "sway"
+    );
+    expect_err(motion("", 100_000), Error::Animation);
+    expect_err(motion("rise", 0), Error::ZeroDuration);
+    expect_err(motion("rise", -1), Error::NegativeTime);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetAnimation {
+                segment: id,
+                kind: AnimationKind::In,
+                animation: Some(motion("rise", 3_000_000)?),
+            },
+        ),
+        Error::Animation,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetAnimation {
+                segment: id,
+                kind: AnimationKind::In,
+                animation: Some(motion("rise", 1_500_000)?),
+            },
+        ),
+        Error::Animation,
+    );
+    let (effect, _) = opened(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::effect(0, 1_000_000)?,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetAnimation {
+                segment: effect,
+                kind: AnimationKind::In,
+                animation: Some(motion("rise", 100_000)?),
+            },
+        ),
+        Error::Animation,
+    );
+    let video = add_video(&mut cut, 10, 1280, 720)?;
+    let sound = media(&cut.project, video, 0, 30_000, Channels::Sound)?;
+    let sound_id = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: sound,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetAnimation {
+                segment: sound_id,
+                kind: AnimationKind::Loop,
+                animation: Some(motion("pulse", 100_000)?),
+            },
+        ),
+        Error::Animation,
+    );
+    let (title, _) = opened(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::text("Hi", 0, 1_000_000)?,
+        },
+    )?);
+    run(
+        &mut cut,
+        Command::SetAnimation {
+            segment: title,
+            kind: AnimationKind::In,
+            animation: Some(motion("type", 200_000)?),
+        },
+    )?;
+    let (sticker, _) = opened(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::sticker("Star", 0, 1_000_000)?,
+        },
+    )?);
+    run(
+        &mut cut,
+        Command::SetAnimation {
+            segment: sticker,
+            kind: AnimationKind::Loop,
+            animation: Some(motion("spin", 200_000)?),
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetAnimation {
+            segment: id,
+            kind: AnimationKind::Loop,
+            animation: None,
+        },
+    )?;
+    assert!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .animation(AnimationKind::Loop)
+            .is_none()
+    );
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .animation(AnimationKind::Loop)
+            .expect("undo")
+            .name(),
+        "pulse"
+    );
+    let both = media(&cut.project, video, 0, 60_000, Channels::Both)?;
+    let picture = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: both,
+        },
+    )?);
+    run(
+        &mut cut,
+        Command::SetAnimation {
+            segment: picture,
+            kind: AnimationKind::In,
+            animation: Some(motion("rise", 200_000)?),
+        },
+    )?;
+    let detached = run(&mut cut, Command::DetachAudio { segment: picture })?;
+    let sound_piece = match detached {
+        Outcome::Opened { segment, .. } | Outcome::Segment(segment) => segment,
+        other => panic!("expected the sound, got {other:?}"),
+    };
+    assert!(
+        cut.project
+            .timeline()
+            .segment(sound_piece)
+            .ok_or(Error::UnknownSegment(sound_piece))?
+            .animation(AnimationKind::In)
+            .is_none()
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(picture)
+            .ok_or(Error::UnknownSegment(picture))?
+            .animation(AnimationKind::In)
+            .expect("picture")
+            .name(),
+        "rise"
+    );
+    let start = cut
+        .project
+        .timeline()
+        .segment(picture)
+        .ok_or(Error::UnknownSegment(picture))?
+        .timeline()
+        .start()
+        .value;
+    let still = segment_id(run(
+        &mut cut,
+        Command::Freeze {
+            segment: picture,
+            at: start + 500_000,
+            hold: 400_000,
+        },
+    )?);
+    assert!(
+        cut.project
+            .timeline()
+            .segment(still)
+            .ok_or(Error::UnknownSegment(still))?
+            .animation(AnimationKind::In)
+            .is_none()
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(picture)
+            .ok_or(Error::UnknownSegment(picture))?
+            .animation(AnimationKind::In)
+            .expect("left")
+            .name(),
+        "rise"
+    );
+    let missing = SegmentId::new(9_999)?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetAnimation {
+                segment: missing,
+                kind: AnimationKind::In,
+                animation: Some(motion("rise", 100_000)?),
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
+    Ok(())
+}
+
+#[test]
+fn a_split_keeps_in_on_the_left_and_out_on_the_right() -> Result<(), Error> {
+    let mut cut = bare();
+    let id = place_still(&mut cut, "file:///a.png", 0, 2_000_000)?;
+    for (kind, name, duration) in [
+        (AnimationKind::In, "rise", 800_000),
+        (AnimationKind::Out, "sink", 800_000),
+        (AnimationKind::Combo, "sway", 2_000_000),
+        (AnimationKind::Loop, "pulse", 1_500_000),
+    ] {
+        run(
+            &mut cut,
+            Command::SetAnimation {
+                segment: id,
+                kind,
+                animation: Some(motion(name, duration)?),
+            },
+        )?;
+    }
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: id,
+            at: 1_000_000,
+        },
+    )?);
+    let left = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(
+        left.animation(AnimationKind::In).expect("in").duration_us(),
+        800_000
+    );
+    assert!(left.animation(AnimationKind::Out).is_none());
+    assert_eq!(
+        left.animation(AnimationKind::Combo)
+            .expect("combo")
+            .duration_us(),
+        1_000_000
+    );
+    assert_eq!(
+        left.animation(AnimationKind::Loop)
+            .expect("loop")
+            .duration_us(),
+        1_000_000
+    );
+    let piece = cut
+        .project
+        .timeline()
+        .segment(right)
+        .ok_or(Error::UnknownSegment(right))?;
+    assert!(piece.animation(AnimationKind::In).is_none());
+    assert_eq!(
+        piece
+            .animation(AnimationKind::Out)
+            .expect("out")
+            .duration_us(),
+        800_000
+    );
+    assert_eq!(
+        piece
+            .animation(AnimationKind::Combo)
+            .expect("combo")
+            .duration_us(),
+        1_000_000
+    );
+    Ok(())
+}
+
+#[test]
+fn a_shorter_segment_clamps_in_and_out() -> Result<(), Error> {
+    let mut cut = bare();
+    let video = add_video(&mut cut, 10, 1280, 720)?;
+    let clip = media(&cut.project, video, 0, 60_000, Channels::Picture)?;
+    let main = cut.main;
+    let id = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: clip,
+        },
+    )?);
+    run(
+        &mut cut,
+        Command::SetAnimation {
+            segment: id,
+            kind: AnimationKind::In,
+            animation: Some(motion("rise", 800_000)?),
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetAnimation {
+            segment: id,
+            kind: AnimationKind::Out,
+            animation: Some(motion("sink", 800_000)?),
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetSpeed {
+            segment: id,
+            speed: Speed::new(2, 1)?,
+        },
+    )?;
+    let segment = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(segment.timeline().duration().value, 1_000_000);
+    assert_eq!(
+        segment
+            .animation(AnimationKind::In)
+            .expect("in")
+            .duration_us(),
+        500_000
+    );
+    assert_eq!(
+        segment
+            .animation(AnimationKind::Out)
+            .expect("out")
+            .duration_us(),
+        500_000
+    );
+    let tiny = media(&cut.project, video, 2_000_000, 60_000, Channels::Picture)?;
+    let tiny_id = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: tiny,
+        },
+    )?);
+    run(
+        &mut cut,
+        Command::SetAnimation {
+            segment: tiny_id,
+            kind: AnimationKind::In,
+            animation: Some(motion("rise", 1)?),
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetAnimation {
+            segment: tiny_id,
+            kind: AnimationKind::Out,
+            animation: Some(motion("sink", 1_000_000)?),
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetSpeed {
+            segment: tiny_id,
+            speed: Speed::new(2, 1)?,
+        },
+    )?;
+    let shortened = cut
+        .project
+        .timeline()
+        .segment(tiny_id)
+        .ok_or(Error::UnknownSegment(tiny_id))?;
+    assert!(shortened.animation(AnimationKind::In).is_none());
+    assert_eq!(
+        shortened
+            .animation(AnimationKind::Out)
+            .expect("out")
+            .duration_us(),
+        1_000_000
     );
     Ok(())
 }

@@ -8,6 +8,7 @@
 
 #![deny(unsafe_code)]
 
+mod animation;
 mod asset;
 mod attachment;
 mod command;
@@ -24,6 +25,7 @@ mod timeline;
 mod track;
 mod transition;
 
+pub use animation::{Animation, AnimationKind};
 pub use asset::{Asset, AssetKind};
 pub use attachment::{Attachment, Parameter, ParameterValue};
 pub use command::{Command, Outcome, TrimEdge, commands_for_trim};

@@ -516,6 +516,38 @@ impl Segment {
         Ok(())
     }
 
+    /// Pulls the sound off this segment.
+    ///
+    /// The picture keeps its crop, blend, transform, and samples other than
+    /// volume. Volume, fades, denoise, and keep pitch return to the start.
+    /// The returned segment is sound of the same asset, with no id yet.
+    pub(crate) fn take_sound(&mut self) -> Result<Segment, Error> {
+        match self.channels {
+            Channels::Picture => return Err(Error::NoSound),
+            Channels::Sound => return Err(Error::NoPicture),
+            Channels::Both => {}
+        }
+        let mut sound = self.clone();
+        sound.id = SegmentId::raw(0);
+        sound.channels = Channels::Sound;
+        sound.crop = Crop::WHOLE;
+        sound.blend = Blend::Normal;
+        sound.transform = Transform::IDENTITY;
+        sound
+            .keyframes
+            .retain(|key| key.property() == KeyframeProperty::Volume);
+
+        self.channels = Channels::Picture;
+        self.volume = 1.0;
+        self.fade_in = 0;
+        self.fade_out = 0;
+        self.denoise = false;
+        self.keep_pitch = true;
+        self.keyframes
+            .retain(|key| key.property() != KeyframeProperty::Volume);
+        Ok(sound)
+    }
+
     pub fn set_transform(&mut self, transform: Transform) {
         self.transform = transform;
     }
@@ -1526,5 +1558,70 @@ mod tests {
             Segment::media(&asset, source(0, 15_360), 0, Channels::Picture, Speed::ONE).unwrap();
         picture.set_blend(Blend::SoftLight).unwrap();
         assert_eq!(picture.blend(), Blend::SoftLight);
+    }
+
+    #[test]
+    fn detach_splits_the_sound_off_the_picture() {
+        let mut clip = one_second();
+        clip.set_visible(false);
+        clip.set_volume(0.25).unwrap();
+        clip.set_fades(100_000, 50_000).unwrap();
+        clip.set_denoise(true).unwrap();
+        clip.set_keep_pitch(false).unwrap();
+        let crop = Crop::new(0.1, 0.0, 0.0, 0.0).unwrap();
+        clip.set_crop(crop).unwrap();
+        clip.set_blend(Blend::Multiply).unwrap();
+        let transform = Transform::new((0.1, -0.2), (2.0, 1.0), 15.0, 0.4, true, false).unwrap();
+        clip.set_transform(transform);
+        let volume = Keyframe::new(100_000, KeyframeValue::Volume(0.5))
+            .unwrap()
+            .with_easing(Easing::EaseIn);
+        let opacity = Keyframe::new(0, KeyframeValue::Opacity(0.2)).unwrap();
+        clip.push_keyframe(volume).unwrap();
+        clip.push_keyframe(opacity).unwrap();
+        clip.assign(SegmentId::raw(4));
+        let source = clip.source();
+        let timeline = clip.timeline();
+        let speed = clip.speed();
+
+        let sound = clip.take_sound().unwrap();
+        assert_eq!(clip.id(), SegmentId::raw(4));
+        assert_eq!(sound.id(), SegmentId::raw(0));
+        assert_eq!(clip.channels(), Channels::Picture);
+        assert_eq!(sound.channels(), Channels::Sound);
+        assert_eq!(sound.asset_id(), clip.asset_id());
+        assert_eq!(sound.source(), source);
+        assert_eq!(clip.source(), source);
+        assert_eq!(sound.timeline(), timeline);
+        assert_eq!(clip.timeline(), timeline);
+        assert_eq!(sound.speed(), speed);
+        assert!(!sound.visible());
+        assert!(!clip.visible());
+        assert_eq!(sound.volume(), 0.25);
+        assert_eq!(clip.volume(), 1.0);
+        assert_eq!(sound.fade_in(), 100_000);
+        assert_eq!(sound.fade_out(), 50_000);
+        assert_eq!(clip.fade_in(), 0);
+        assert_eq!(clip.fade_out(), 0);
+        assert!(sound.denoise());
+        assert!(!clip.denoise());
+        assert!(!sound.keep_pitch());
+        assert!(clip.keep_pitch());
+        assert!(sound.crop().is_whole());
+        assert_eq!(clip.crop(), crop);
+        assert_eq!(sound.blend(), Blend::Normal);
+        assert_eq!(clip.blend(), Blend::Multiply);
+        assert_eq!(sound.transform(), Transform::IDENTITY);
+        assert_eq!(clip.transform(), transform);
+        assert_eq!(sound.keyframes(), &[volume]);
+        assert_eq!(clip.keyframes(), &[opacity]);
+
+        let picture = clip.clone();
+        assert_eq!(clip.take_sound().unwrap_err(), Error::NoSound);
+        assert_eq!(clip, picture);
+        let mut sound = sound;
+        let before = sound.clone();
+        assert_eq!(sound.take_sound().unwrap_err(), Error::NoPicture);
+        assert_eq!(sound, before);
     }
 }

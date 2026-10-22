@@ -94,6 +94,10 @@ pub enum Command {
         segment: SegmentId,
         blend: Blend,
     },
+    /// Pulls the sound off a picture-and-sound segment into a new sound segment.
+    DetachAudio {
+        segment: SegmentId,
+    },
     /// Shown when on. It does not move the segment.
     SetVisible {
         segment: SegmentId,

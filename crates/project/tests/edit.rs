@@ -2395,3 +2395,253 @@ fn blend_sets_the_mode_and_undo_restores_normal() -> Result<(), Error> {
     );
     Ok(())
 }
+
+#[test]
+fn detach_audio_adds_a_sound_segment_of_the_same_asset() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    let crop = Crop::new(0.1, 0.0, 0.0, 0.0)?;
+    let transform = Transform::new((0.2, 0.0), (1.0, 1.0), 0.0, 1.0, false, false)?;
+    run(
+        &mut cut,
+        Command::SetVolume {
+            segment: id,
+            volume: 0.25,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetFades {
+            segment: id,
+            fade_in: 100_000,
+            fade_out: 50_000,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetDenoise {
+            segment: id,
+            on: true,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetKeepPitch {
+            segment: id,
+            keep: false,
+        },
+    )?;
+    run(&mut cut, Command::SetCrop { segment: id, crop })?;
+    run(
+        &mut cut,
+        Command::SetBlend {
+            segment: id,
+            blend: Blend::Multiply,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetTransform {
+            segment: id,
+            transform,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetVisible {
+            segment: id,
+            visible: false,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::AddKeyframe {
+            segment: id,
+            keyframe: Keyframe::new(0, KeyframeValue::Opacity(0.2))?,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::AddKeyframe {
+            segment: id,
+            keyframe: Keyframe::new(100_000, KeyframeValue::Volume(0.5))?
+                .with_easing(Easing::EaseIn),
+        },
+    )?;
+
+    let (sound, track) = opened(run(&mut cut, Command::DetachAudio { segment: id })?);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .track(track)
+            .ok_or(Error::UnknownTrack(track))?
+            .kind(),
+        TrackKind::Audio
+    );
+    assert_eq!(kinds(&cut), vec![TrackKind::Audio, TrackKind::Video]);
+    let picture = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    let heard = cut
+        .project
+        .timeline()
+        .segment(sound)
+        .ok_or(Error::UnknownSegment(sound))?;
+    assert_eq!(picture.channels(), Channels::Picture);
+    assert_eq!(picture.volume(), 1.0);
+    assert_eq!(picture.fade_in(), 0);
+    assert_eq!(picture.fade_out(), 0);
+    assert!(!picture.denoise());
+    assert!(picture.keep_pitch());
+    assert_eq!(picture.crop(), crop);
+    assert_eq!(picture.blend(), Blend::Multiply);
+    assert_eq!(picture.transform(), transform);
+    assert!(!picture.visible());
+    assert_eq!(picture.keyframes().len(), 1);
+    assert_eq!(picture.keyframes()[0].property(), KeyframeProperty::Opacity);
+    assert_eq!(heard.channels(), Channels::Sound);
+    assert_eq!(heard.asset_id(), asset);
+    assert_eq!(heard.source(), picture.source());
+    assert_eq!(heard.timeline(), picture.timeline());
+    assert_eq!(heard.speed(), picture.speed());
+    assert_eq!(heard.volume(), 0.25);
+    assert_eq!(heard.fade_in(), 100_000);
+    assert_eq!(heard.fade_out(), 50_000);
+    assert!(heard.denoise());
+    assert!(!heard.keep_pitch());
+    assert!(heard.crop().is_whole());
+    assert_eq!(heard.blend(), Blend::Normal);
+    assert_eq!(heard.transform(), Transform::IDENTITY);
+    assert!(!heard.visible());
+    assert_eq!(heard.keyframes().len(), 1);
+    assert_eq!(heard.keyframes()[0].easing(), Easing::EaseIn);
+    let loaded = Project::from_json(&cut.project.to_json()?)?;
+    assert_eq!(
+        loaded
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .channels(),
+        Channels::Picture
+    );
+    assert_eq!(
+        loaded
+            .timeline()
+            .segment(sound)
+            .ok_or(Error::UnknownSegment(sound))?
+            .channels(),
+        Channels::Sound
+    );
+
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .channels(),
+        Channels::Both
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .volume(),
+        0.25
+    );
+    assert!(cut.project.timeline().segment(sound).is_none());
+    assert_eq!(kinds(&cut), vec![TrackKind::Video]);
+    cut.history.redo(&mut cut.project)?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(sound)
+            .ok_or(Error::UnknownSegment(sound))?
+            .channels(),
+        Channels::Sound
+    );
+    expect_err(
+        run(&mut cut, Command::DetachAudio { segment: id }),
+        Error::NoSound,
+    );
+    expect_err(
+        run(&mut cut, Command::DetachAudio { segment: sound }),
+        Error::NoPicture,
+    );
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(&mut cut, Command::DetachAudio { segment: missing }),
+        Error::UnknownSegment(missing),
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .channels(),
+        Channels::Picture
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(sound)
+            .ok_or(Error::UnknownSegment(sound))?
+            .channels(),
+        Channels::Sound
+    );
+    Ok(())
+}
+
+#[test]
+fn a_free_audio_track_keeps_the_sound_and_a_taken_one_opens_another() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let first = place_main(&mut cut, asset, 1_000_000, 30_000)?;
+    let (sound, audio) = opened(run(&mut cut, Command::DetachAudio { segment: first })?);
+    assert_eq!(start(&cut, first)?, 1_000_000);
+    assert_eq!(start(&cut, sound)?, 1_000_000);
+
+    let later = place_main(&mut cut, asset, 3_000_000, 30_000)?;
+    let later_sound = same_track(run(&mut cut, Command::DetachAudio { segment: later })?);
+    assert_eq!(on_track(&cut, later_sound), audio);
+    assert_eq!(start(&cut, later_sound)?, 3_000_000);
+    assert_eq!(kinds(&cut), vec![TrackKind::Audio, TrackKind::Video]);
+
+    run(
+        &mut cut,
+        Command::Move {
+            segment: first,
+            track: None,
+            start: 1_500_000,
+        },
+    )?;
+    assert_eq!(start(&cut, first)?, 1_500_000);
+    assert_eq!(start(&cut, sound)?, 1_500_000);
+    assert_eq!(start(&cut, later)?, 3_000_000);
+    assert_eq!(start(&cut, later_sound)?, 3_000_000);
+
+    let (overlay, _) = open_picture(&mut cut, asset, 1_500_000, 30_000)?;
+    let (_, second) = opened(run(&mut cut, Command::DetachAudio { segment: overlay })?);
+    assert_ne!(second, audio);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .track(second)
+            .ok_or(Error::UnknownTrack(second))?
+            .kind(),
+        TrackKind::Audio
+    );
+    assert_eq!(
+        kinds(&cut),
+        vec![
+            TrackKind::Audio,
+            TrackKind::Audio,
+            TrackKind::Video,
+            TrackKind::Video
+        ]
+    );
+    Ok(())
+}

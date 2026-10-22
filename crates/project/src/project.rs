@@ -92,6 +92,19 @@ impl Project {
         &self.timeline
     }
 
+    /// The highest audio track with room for `range`.
+    ///
+    /// `None` means every audio track is taken at that time, so a place opens
+    /// another audio track.
+    pub fn audio_track_with_room(&self, range: TimeRange) -> Option<TrackId> {
+        self.timeline
+            .tracks()
+            .iter()
+            .rev()
+            .find(|track| track.kind() == TrackKind::Audio && !track.overlaps_range(range))
+            .map(Track::id)
+    }
+
     pub fn duration(&self) -> cutlass_core::Timestamp {
         self.timeline.duration()
     }
@@ -206,6 +219,7 @@ impl Project {
                 self.timeline.segment_mut(segment)?.set_blend(blend)?;
                 Ok(Outcome::Unchanged)
             }
+            Command::DetachAudio { segment } => self.detach_now(segment),
             Command::SetVisible { segment, visible } => {
                 self.timeline.segment_mut(segment)?.set_visible(visible);
                 Ok(Outcome::Unchanged)
@@ -335,6 +349,12 @@ impl Project {
         }
         self.timeline.track_mut(track_id)?.insert(segment)?;
         Ok(Outcome::Segment(segment_id))
+    }
+
+    fn detach_now(&mut self, id: SegmentId) -> Result<Outcome, Error> {
+        let sound = self.timeline.segment_mut(id)?.take_sound()?;
+        let home = self.audio_track_with_room(sound.timeline());
+        self.place_now(home, sound)
     }
 
     fn remove_now(&mut self, id: SegmentId) -> Result<(), Error> {

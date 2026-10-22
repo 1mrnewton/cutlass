@@ -71,6 +71,44 @@ pub fn superblock_size(use_128: bool) -> usize {
     if use_128 { BLOCK_128X128 } else { BLOCK_64X64 }
 }
 
+/// `Subsampled_Size[bsize][sub_x][sub_y]`. `None` is `BLOCK_INVALID`.
+pub fn subsampled_block_size(bsize: usize, sub_x: u8, sub_y: u8) -> Option<usize> {
+    const INVALID: u8 = 255;
+    const TABLE: [[[u8; 2]; 2]; 22] = [
+        [[0, 0], [0, 0]],
+        [[1, 0], [INVALID, 0]],
+        [[2, INVALID], [0, 0]],
+        [[3, 2], [1, 0]],
+        [[4, 3], [INVALID, 1]],
+        [[5, INVALID], [3, 2]],
+        [[6, 5], [4, 3]],
+        [[7, 6], [INVALID, 4]],
+        [[8, INVALID], [6, 5]],
+        [[9, 8], [7, 6]],
+        [[10, 9], [INVALID, 7]],
+        [[11, INVALID], [9, 8]],
+        [[12, 11], [10, 9]],
+        [[13, 12], [INVALID, 10]],
+        [[14, INVALID], [12, 11]],
+        [[15, 14], [13, 12]],
+        [[16, 1], [INVALID, 1]],
+        [[17, INVALID], [2, 2]],
+        [[18, 4], [INVALID, 16]],
+        [[19, INVALID], [5, 17]],
+        [[20, 7], [INVALID, 18]],
+        [[21, INVALID], [8, 19]],
+    ];
+    if sub_x > 1 || sub_y > 1 {
+        return None;
+    }
+    let value = TABLE.get(bsize)?[sub_x as usize][sub_y as usize];
+    if value == INVALID {
+        None
+    } else {
+        Some(value as usize)
+    }
+}
+
 /// Sub-block size for the four partition types that square blocks use in the
 /// forced-split and uniform cases. `None` means the combination is invalid.
 pub fn partition_subsize(partition: u8, bsize: usize) -> Option<usize> {
@@ -108,5 +146,18 @@ pub fn partition_subsize(partition: u8, bsize: usize) -> Option<usize> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subsampled_420_sizes_match_the_spec_rows() {
+        assert_eq!(subsampled_block_size(BLOCK_16X16, 1, 1), Some(BLOCK_8X8));
+        assert_eq!(subsampled_block_size(BLOCK_8X8, 1, 1), Some(BLOCK_4X4));
+        assert_eq!(subsampled_block_size(BLOCK_4X8, 1, 0), None);
+        assert_eq!(subsampled_block_size(16, 0, 1), Some(BLOCK_4X8));
     }
 }

@@ -535,7 +535,8 @@ mod tests {
             .unwrap();
         enc.encode_symbol(1, &cdf::SKIP[0]).unwrap();
         enc.encode_symbol(0, &cdf::KF_Y_MODE[0][0]).unwrap();
-        enc.encode_symbol(0, &cdf::UV_DC_CFL).unwrap();
+        enc.encode_symbol(0, cdf::uv_mode_cdf(false, 0).unwrap())
+            .unwrap();
         enc.finish().unwrap()
     }
 
@@ -547,7 +548,8 @@ mod tests {
             .unwrap();
         enc.encode_symbol(0, &cdf::SKIP[0]).unwrap();
         enc.encode_symbol(0, &cdf::KF_Y_MODE[0][0]).unwrap();
-        enc.encode_symbol(0, &cdf::UV_DC_CFL).unwrap();
+        enc.encode_symbol(0, cdf::uv_mode_cdf(false, 0).unwrap())
+            .unwrap();
         let mut maps = coeff::LevelMaps::new(4, 4);
         for y in 0..4 {
             for x in 0..4 {

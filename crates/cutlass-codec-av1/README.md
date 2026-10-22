@@ -8,10 +8,12 @@ Specification, state lifetimes, and the coverage matrix are in `docs/av1/`.
 ## What this build reconstructs
 
 Reduced-still and ordinary intra frames that stay inside a narrow lossless
-8-bit 4:2:0 path: one uniform tile, tools that this build rejects left off,
-DC / vertical / horizontal luma prediction, and 4×4 lossless Walsh–Hadamard
-coefficients. `capabilities()` does not advertise a profile until that
-profile's legal configurations reconstruct.
+8-bit 4:2:0 path: one uniform tile, square partitions (`NONE`, `HORZ`,
+`VERT`, `SPLIT`), DC / vertical / horizontal prediction, and 4×4 lossless
+Walsh–Hadamard coefficients. `capabilities()` does not advertise a profile
+until that profile's legal configurations reconstruct. A patterned 16×16
+lossless frame from libaom v3.13.1 matches `aomdec` when the encoder is kept
+inside this subset.
 
 Other tools return `DecodeError::Unsupported` before a frame is published.
 Large-scale tile lists are an explicit unsupported mode. Film grain is parsed

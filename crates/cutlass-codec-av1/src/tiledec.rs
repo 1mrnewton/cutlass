@@ -1,19 +1,21 @@
 //! Intra tile reconstruction for the configurations this build can finish.
 //!
-//! The supported slice is an 8-bit 4:2:0 intra frame, one tile, DC prediction,
-//! skip residuals, no screen-content tools, no segmentation, no delta-q, no
-//! super-resolution, no loop filter, no CDEF, no restoration, and no film grain.
+//! The supported slice is an 8-bit 4:2:0 intra frame, one tile, DC / vertical /
+//! horizontal prediction, lossless 4×4 residuals, no screen-content tools, no
+//! segmentation, no delta-q, no super-resolution, no loop filter, no CDEF, no
+//! restoration, and no film grain.
 //! Other legal headers parse and then return [`DecodeError::Unsupported`]
 //! before any pixel is published.
 
 use crate::bits::BitReader;
-use crate::cdf::{self, KF_Y_MODE, SKIP, UV_DC_CFL};
+use crate::cdf::{self, KF_Y_MODE, SKIP};
 use crate::coeff::{self, LevelMaps};
 use crate::error::DecodeError;
 use crate::geom::{
-    BLOCK_8X8, DC_PRED, H_PRED, INTRA_MODE_CONTEXT, MI_SIZE, PARTITION_HORZ, PARTITION_NONE,
-    PARTITION_SPLIT, PARTITION_VERT, V_PRED, block_height, block_width, mi_height_log2,
-    mi_width_log2, num_4x4_wide, partition_subsize, superblock_size,
+    BLOCK_4X4, BLOCK_8X8, DC_PRED, H_PRED, INTRA_MODE_CONTEXT, MI_SIZE, PARTITION_HORZ,
+    PARTITION_NONE, PARTITION_SPLIT, PARTITION_VERT, V_PRED, block_height, block_width,
+    mi_height_log2, mi_width_log2, num_4x4_wide, partition_subsize, subsampled_block_size,
+    superblock_size,
 };
 use crate::header::{FrameHeader, TxMode};
 use crate::intra;
@@ -348,6 +350,24 @@ fn decode_partition(
     }
 }
 
+/// Lossless CfL is allowed only when the chroma residual is 4×4. Otherwise
+/// it is allowed for luma blocks whose larger side is at most 32.
+fn uv_cfl_allowed(
+    header: &FrameHeader,
+    bsize: usize,
+    seq: &SequenceHeader,
+) -> Result<bool, DecodeError> {
+    if header.coded_lossless {
+        let plane = subsampled_block_size(bsize, seq.subsampling_x, seq.subsampling_y)
+            .ok_or_else(|| DecodeError::malformed("chroma block size"))?;
+        Ok(plane == BLOCK_4X4)
+    } else {
+        let w = block_width(bsize).ok_or_else(|| DecodeError::malformed("block width"))?;
+        let h = block_height(bsize).ok_or_else(|| DecodeError::malformed("block height"))?;
+        Ok(w.max(h) <= 32)
+    }
+}
+
 fn decode_block(
     sym: &mut SymbolDecoder<'_>,
     seq: &SequenceHeader,
@@ -399,19 +419,30 @@ fn decode_block(
             "directional, smooth, and Paeth predictors are not reconstructed in this build",
         ));
     }
+    let mut uv_mode = DC_PRED;
+    let mut avail_u_chroma = false;
+    let mut avail_l_chroma = false;
     if has_chroma {
-        if y_mode != DC_PRED {
+        let cfl_allowed = uv_cfl_allowed(header, bsize, seq)?;
+        let uv_cdf = cdf::uv_mode_cdf(cfl_allowed, y_mode)
+            .ok_or_else(|| DecodeError::malformed("uv mode cdf"))?;
+        let mut uv_cdf = uv_cdf.to_vec();
+        uv_mode = sym.read_symbol(&mut uv_cdf)? as u8;
+        if uv_mode != DC_PRED && uv_mode != V_PRED && uv_mode != H_PRED {
             return Err(DecodeError::unsupported(
-                "chroma mode CDFs are wired for DC luma only in this build",
+                "directional, smooth, Paeth, and CfL chroma predictors are not reconstructed in this build",
             ));
         }
-        let mut uv_cdf = UV_DC_CFL.to_vec();
-        let uv_mode = sym.read_symbol(&mut uv_cdf)?;
-        if uv_mode != u32::from(DC_PRED) {
-            return Err(DecodeError::unsupported(
-                "non-DC chroma predictors are not reconstructed in this build",
-            ));
-        }
+        avail_u_chroma = if seq.subsampling_y == 1 && bh4 == 1 {
+            state.inside(r as i32 - 2, c as i32)
+        } else {
+            avail_u
+        };
+        avail_l_chroma = if seq.subsampling_x == 1 && bw4 == 1 {
+            state.inside(r as i32, c as i32 - 2)
+        } else {
+            avail_l
+        };
     }
     if header.tx_mode == TxMode::Select && !header.coded_lossless {
         return Err(DecodeError::unsupported(
@@ -447,9 +478,9 @@ fn decode_block(
             c,
             bw,
             bh,
-            DC_PRED,
-            avail_l,
-            avail_u,
+            uv_mode,
+            avail_l_chroma,
+            avail_u_chroma,
             true,
             1,
             read_coeffs,
@@ -464,9 +495,9 @@ fn decode_block(
             c,
             bw,
             bh,
-            DC_PRED,
-            avail_l,
-            avail_u,
+            uv_mode,
+            avail_l_chroma,
+            avail_u_chroma,
             true,
             2,
             read_coeffs,

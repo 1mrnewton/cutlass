@@ -75,6 +75,7 @@ pollster = "0.4.0"
 rfd = { version = "0.17.2", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+miniz_oxide = "0.9.1"
 thiserror = "2.0.21"
 wgpu = { version = "30.0.1", default-features = false, features = [
     "std",

@@ -924,6 +924,9 @@ dependencies = [
 [[package]]
 name = "cutlass-vaapi"
 version = "0.1.0"
+dependencies = [
+ "cutlass-core",
+]
 
 [[package]]
 name = "cutlass-videotoolbox"

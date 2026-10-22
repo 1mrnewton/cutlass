@@ -8,5 +8,8 @@ repository.workspace = true
 publish = false
 description = "VA-API video decode and encode for Intel and AMD GPUs on Linux."
 
+[dependencies]
+cutlass-core.workspace = true
+
 [lints]
 workspace = true

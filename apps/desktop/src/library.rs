@@ -146,10 +146,18 @@ fn paint_rail(ui: &mut egui::Ui, rect: Rect, shelf: &mut Shelf) {
 
 fn rail_button(ui: &mut egui::Ui, shelf: Shelf, active: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
-    if active {
-        ui.painter().rect_filled(rect, 10.0, theme::ACTIVE);
+    let (fill, color) = theme::face(
+        if active {
+            theme::ACTIVE
+        } else {
+            Color32::TRANSPARENT
+        },
+        if active { theme::INK } else { theme::FAINT },
+        theme::hot(&response),
+    );
+    if fill.a() > 0 {
+        ui.painter().rect_filled(rect, 10.0, fill);
     }
-    let color = if active { theme::INK } else { theme::FAINT };
     icons::paint(ui.painter(), rect.center(), shelf.icon(), 20.0, color);
     crate::tip::show_radio(&response, words::of(ui, shelf.phrase()), active);
     response
@@ -219,10 +227,18 @@ fn source_button(
     active: bool,
 ) -> egui::Response {
     let response = ui.interact(rect, ui.scope_id().with(salt), Sense::click());
-    if active {
-        ui.painter().rect_filled(rect, 8.0, theme::ACTIVE);
+    let (fill, color) = theme::face(
+        if active {
+            theme::ACTIVE
+        } else {
+            Color32::TRANSPARENT
+        },
+        if active { theme::INK } else { theme::MUTED },
+        theme::hot(&response),
+    );
+    if fill.a() > 0 {
+        ui.painter().rect_filled(rect, 8.0, fill);
     }
-    let color = if active { theme::INK } else { theme::MUTED };
     ui.painter().text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -270,12 +286,12 @@ fn paint_bin(
 }
 
 fn import_button(ui: &mut egui::Ui, rect: Rect, label: &str) -> bool {
-    ui.put(
-        rect,
-        egui::Button::new(egui::RichText::new(label).size(12.0).color(theme::INK))
-            .fill(theme::BAR)
-            .corner_radius(8),
-    )
+    theme::with_face(ui, theme::BAR, theme::INK, |ui| {
+        ui.put(
+            rect,
+            egui::Button::new(egui::RichText::new(label).size(12.0)).corner_radius(8),
+        )
+    })
     .clicked()
 }
 
@@ -308,16 +324,15 @@ fn path_crumb(
     label: &str,
 ) {
     let current = open == place;
-    let text = egui::RichText::new(label).size(12.0).color(if current {
-        theme::INK
-    } else {
-        theme::MUTED
-    });
-    let response = ui.add(egui::Button::new(text).fill(if current {
+    let fill = if current {
         theme::ACTIVE
     } else {
         Color32::TRANSPARENT
-    }));
+    };
+    let ink = if current { theme::INK } else { theme::MUTED };
+    let response = theme::with_face(ui, fill, ink, |ui| {
+        ui.add(egui::Button::new(egui::RichText::new(label).size(12.0)))
+    });
     if response.clicked() {
         bin.open_place(place);
     }
@@ -604,7 +619,7 @@ fn handle_file(
         selected_edge(ui, rect);
     }
     if let Some(plus) = plus.response {
-        paint_plus(ui, plus.rect);
+        paint_plus(ui, plus.rect, theme::hot(&plus));
         crate::tip::show(&plus, words::of(ui, Phrase::AddToTimeline));
     }
     (response, plus.command, plus_hot)
@@ -666,16 +681,10 @@ fn plus_rect(card: Rect) -> Rect {
     )
 }
 
-fn paint_plus(ui: &egui::Ui, rect: Rect) {
-    ui.painter()
-        .rect_filled(rect, PLUS / 2.0, Color32::from_black_alpha(170));
-    icons::paint(
-        ui.painter(),
-        rect.center(),
-        Icon::Plus,
-        14.0,
-        Color32::WHITE,
-    );
+fn paint_plus(ui: &egui::Ui, rect: Rect, hot: bool) {
+    let (fill, ink) = theme::face(Color32::from_black_alpha(170), Color32::WHITE, hot);
+    ui.painter().rect_filled(rect, PLUS / 2.0, fill);
+    icons::paint(ui.painter(), rect.center(), Icon::Plus, 14.0, ink);
 }
 
 fn rename_field(ui: &mut egui::Ui, bin: &mut Bin, id: u64, rect: Rect) {

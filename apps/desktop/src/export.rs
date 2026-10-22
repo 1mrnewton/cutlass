@@ -534,7 +534,8 @@ fn paint_head(ui: &mut egui::Ui, head: Rect) -> bool {
     );
     let hit = Rect::from_center_size(pos2(head.left() + 20.0, head.center().y), vec2(24.0, 24.0));
     let response = ui.interact(hit, ui.scope_id().with("close"), Sense::click());
-    ui.painter().circle_filled(hit.center(), 6.0, CLOSE);
+    let (fill, _) = theme::face(CLOSE, CLOSE, theme::hot(&response));
+    ui.painter().circle_filled(hit.center(), 6.0, fill);
     crate::tip::show(&response, words::of(ui, Phrase::Close));
     response.clicked()
 }
@@ -572,26 +573,35 @@ fn paint_foot(ui: &mut egui::Ui, foot: Rect, duration: &str) -> bool {
     }
     let cancel_response = ui.interact(cancel, ui.scope_id().with("cancel"), Sense::click());
     crate::tip::name(&cancel_response, cancel_label);
+    let (cancel_fill, cancel_ink) = theme::face(
+        Color32::TRANSPARENT,
+        theme::MUTED,
+        theme::hot(&cancel_response),
+    );
+    if cancel_fill.a() > 0 {
+        ui.painter().rect_filled(cancel, 6.0, cancel_fill);
+    }
     ui.painter().text(
         cancel.center(),
         Align2::CENTER_CENTER,
         cancel_label,
         FontId::new(13.0, FontFamily::Proportional),
-        if cancel_response.hovered() {
-            theme::INK
-        } else {
-            theme::MUTED
-        },
+        cancel_ink,
     );
     let export_response = ui.interact(export, ui.scope_id().with("export"), Sense::click());
     crate::tip::name(&export_response, export_label);
-    ui.painter().rect_filled(export, 8.0, theme::EXPORT);
+    let (export_fill, export_ink) = theme::face(
+        theme::EXPORT,
+        theme::EXPORT_INK,
+        theme::hot(&export_response),
+    );
+    ui.painter().rect_filled(export, 8.0, export_fill);
     ui.painter().text(
         export.center(),
         Align2::CENTER_CENTER,
         export_label,
         FontId::new(13.0, FontFamily::Proportional),
-        theme::EXPORT_INK,
+        export_ink,
     );
     cancel_response.clicked() || export_response.clicked()
 }

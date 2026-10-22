@@ -290,12 +290,12 @@ pub(crate) fn pick_save(name: &str) -> Option<PathBuf> {
 pub(crate) fn file_button(ui: &mut egui::Ui, rect: Rect, recent: &[PathBuf]) -> Option<Ask> {
     let label = words::of(ui, Phrase::File);
     let mut child = ui.new_child(UiBuilder::new().id_salt("file-menu").max_rect(rect));
-    let response = child.add_sized(
-        rect.size(),
-        Button::new(RichText::new(label).color(theme::INK)).fill(theme::BAR),
-    );
+    let response = theme::with_face(&mut child, theme::BAR, theme::INK, |ui| {
+        ui.add_sized(rect.size(), Button::new(RichText::new(label)))
+    });
     let mut ask = None;
     let _open = egui::Popup::menu(&response).show(|ui| {
+        theme::tune_menu(ui);
         if ui.button(words::of(ui, Phrase::NewProject)).clicked() {
             ask = Some(Ask::New);
             ui.close();
@@ -504,12 +504,10 @@ fn button_at(
     ink: egui::Color32,
 ) -> Option<()> {
     let rect = Rect::from_min_size(at, vec2(width, 26.0));
-    let clicked = ui
-        .put(
-            rect,
-            Button::new(RichText::new(label).color(ink)).fill(fill),
-        )
-        .clicked();
+    let clicked = theme::with_face(ui, fill, ink, |ui| {
+        ui.put(rect, Button::new(RichText::new(label)))
+    })
+    .clicked();
     clicked.then_some(())
 }
 

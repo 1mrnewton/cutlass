@@ -92,12 +92,12 @@ pub(crate) fn button(ui: &mut egui::Ui) {
     let label = words::of(ui, Phrase::Modify);
     let font = FontId::new(13.0, FontFamily::Proportional);
     let width = words::control_width(ui, label, font, 24.0, 88.0);
-    let response = ui.add_sized(
-        vec2(width, 28.0),
-        egui::Button::new(RichText::new(label).size(13.0).color(theme::EXPORT_INK))
-            .fill(theme::EXPORT)
-            .corner_radius(8),
-    );
+    let response = theme::with_face(ui, theme::EXPORT, theme::EXPORT_INK, |ui| {
+        ui.add_sized(
+            vec2(width, 28.0),
+            egui::Button::new(RichText::new(label).size(13.0)).corner_radius(8),
+        )
+    });
     crate::tip::name(&response, label);
     if response.clicked() {
         ui.ctx().data_mut(|data| data.insert_temp(ask_id(), true));
@@ -176,7 +176,8 @@ fn paint_head(ui: &mut egui::Ui, head: Rect) -> bool {
     );
     let hit = Rect::from_center_size(pos2(head.left() + 20.0, head.center().y), vec2(24.0, 24.0));
     let response = ui.interact(hit, ui.scope_id().with("close"), Sense::click());
-    ui.painter().circle_filled(hit.center(), 6.0, CLOSE);
+    let (fill, _) = theme::face(CLOSE, CLOSE, theme::hot(&response));
+    ui.painter().circle_filled(hit.center(), 6.0, fill);
     crate::tip::show(&response, words::of(ui, Phrase::Close));
     response.clicked()
 }
@@ -259,26 +260,32 @@ fn paint_foot(
     );
     let cancel_response = ui.interact(cancel, ui.scope_id().with("cancel"), Sense::click());
     crate::tip::name(&cancel_response, cancel_label);
+    let (cancel_fill, cancel_ink) = theme::face(
+        Color32::TRANSPARENT,
+        theme::MUTED,
+        theme::hot(&cancel_response),
+    );
+    if cancel_fill.a() > 0 {
+        ui.painter().rect_filled(cancel, 6.0, cancel_fill);
+    }
     ui.painter().text(
         cancel.center(),
         Align2::CENTER_CENTER,
         cancel_label,
         FontId::new(13.0, FontFamily::Proportional),
-        if cancel_response.hovered() {
-            theme::INK
-        } else {
-            theme::MUTED
-        },
+        cancel_ink,
     );
     let save_response = ui.interact(save, ui.scope_id().with("save"), Sense::click());
     crate::tip::name(&save_response, save_label);
-    ui.painter().rect_filled(save, 8.0, theme::EXPORT);
+    let (save_fill, save_ink) =
+        theme::face(theme::EXPORT, theme::EXPORT_INK, theme::hot(&save_response));
+    ui.painter().rect_filled(save, 8.0, save_fill);
     ui.painter().text(
         save.center(),
         Align2::CENTER_CENTER,
         save_label,
         FontId::new(13.0, FontFamily::Proportional),
-        theme::EXPORT_INK,
+        save_ink,
     );
     if save_response.clicked() {
         return Some(match changes(project, draft) {
@@ -326,12 +333,12 @@ fn number_row(ui: &mut egui::Ui, phrase: Phrase, salt: &str, text: &mut String) 
 fn drop_row(ui: &mut egui::Ui, draft: &mut Draft) {
     labeled(ui, words::of(ui, Phrase::DropFrame), |ui, width| {
         let word = words::of(ui, if draft.drop { Phrase::On } else { Phrase::Off });
-        let response = ui.add_sized(
-            vec2(width, 32.0),
-            egui::Button::new(RichText::new(word).size(13.0).color(theme::INK))
-                .fill(theme::PANEL)
-                .corner_radius(10),
-        );
+        let response = theme::with_face(ui, theme::PANEL, theme::INK, |ui| {
+            ui.add_sized(
+                vec2(width, 32.0),
+                egui::Button::new(RichText::new(word).size(13.0)).corner_radius(10),
+            )
+        });
         crate::tip::show_switch(
             &response,
             words::of(ui, Phrase::DropFrame),

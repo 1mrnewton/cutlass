@@ -769,20 +769,17 @@ fn header(ui: &mut egui::Ui, name: &str, recent: &[PathBuf]) -> Bar {
     }
 
     let file_ask = projects::file_button(ui, file_rect, recent);
-    let settings_clicked = ui
-        .put(
-            settings_rect,
-            Button::new(RichText::new(settings).color(theme::INK)).fill(theme::BAR),
-        )
-        .clicked();
-    let export_clicked = ui
-        .put(
+    let settings_clicked = theme::with_face(ui, theme::BAR, theme::INK, |ui| {
+        ui.put(settings_rect, Button::new(RichText::new(settings)))
+    })
+    .clicked();
+    let export_clicked = theme::with_face(ui, theme::EXPORT, theme::EXPORT_INK, |ui| {
+        ui.put(
             export_rect,
-            Button::new(RichText::new(export).color(theme::EXPORT_INK).strong())
-                .fill(theme::EXPORT)
-                .corner_radius(8),
+            Button::new(RichText::new(export).strong()).corner_radius(8),
         )
-        .clicked();
+    })
+    .clicked();
     Bar {
         export: export_clicked,
         settings: settings_clicked,

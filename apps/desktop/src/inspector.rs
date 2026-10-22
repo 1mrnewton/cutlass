@@ -522,13 +522,20 @@ fn mark_button(ui: &mut egui::Ui, id: SegmentId, mark: &Mark) -> bool {
         ui.scope_id().with((id, mark_salt(mark.property))),
         sense,
     );
-    let color = if !mark.enabled {
-        theme::FAINT
-    } else if mark.on {
-        theme::EXPORT
-    } else {
-        theme::INK
-    };
+    let (fill, color) = theme::face(
+        egui::Color32::TRANSPARENT,
+        if !mark.enabled {
+            theme::FAINT
+        } else if mark.on {
+            theme::EXPORT
+        } else {
+            theme::INK
+        },
+        mark.enabled && theme::hot(&response),
+    );
+    if fill.a() > 0 {
+        ui.painter().rect_filled(rect, 4.0, fill);
+    }
     icons::paint(ui.painter(), rect.center(), Icon::Keyframe, 14.0, color);
     crate::tip::show_switch(&response, &mark.name, mark.on, mark.enabled);
     mark.enabled && response.clicked()

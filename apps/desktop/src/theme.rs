@@ -1,5 +1,7 @@
 //! Chrome colors from `docs/desktop-layout.md`.
 
+use std::sync::Arc;
+
 use eframe::egui::{self, Color32, Frame, Margin, Stroke};
 
 pub const GAP: Color32 = Color32::from_rgb(0x14, 0x14, 0x14);
@@ -29,6 +31,8 @@ pub const MENU_OFF: Color32 = Color32::from_rgb(0x6f, 0x6f, 0x6f);
 pub const MENU_KEY: Color32 = Color32::from_rgb(0x8d, 0x8d, 0x8d);
 pub const MENU_KEY_OFF: Color32 = Color32::from_rgb(0x5c, 0x5c, 0x5c);
 pub const MENU_BADGE: Color32 = Color32::from_rgb(0x6d, 0x5e, 0xfc);
+/// Plate a clear button gains while the pointer is on it.
+const HOVER_PLATE: Color32 = Color32::from_rgb(0x2e, 0x2e, 0x2e);
 
 /// Dark gap between panels. That gap is the drag handle.
 pub const GAP_PX: i8 = 6;
@@ -52,11 +56,14 @@ pub fn install(ctx: &egui::Context) {
         style.visuals.extreme_bg_color = GAP;
         style.visuals.faint_bg_color = BAR;
         style.visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
-        // Hover is a light frame and press is a white one. The shell paints its own fills.
+        // No frame. A control that does not name its own fill steps to this plate.
         style.visuals.widgets.inactive.bg_stroke = Stroke::NONE;
         style.visuals.widgets.hovered.bg_stroke = Stroke::NONE;
         style.visuals.widgets.active.bg_stroke = Stroke::NONE;
         style.visuals.widgets.open.bg_stroke = Stroke::NONE;
+        style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+        style.visuals.widgets.active.weak_bg_fill = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+        style.visuals.widgets.open.weak_bg_fill = Color32::from_rgb(0x3a, 0x3a, 0x3a);
         // A panel draws its resize line from these strokes. Width 0 leaves the
         // gap with no color. The color is the scroll bar, so it stays faint.
         style.visuals.widgets.inactive.fg_stroke.color = FAINT;
@@ -70,6 +77,78 @@ pub fn install(ctx: &egui::Context) {
         scroll.active_background_opacity = 0.0;
         scroll.interact_background_opacity = 0.0;
     });
+}
+
+/// The pointer is on the control, or the button is held.
+pub fn hot(response: &egui::Response) -> bool {
+    response.hovered() || response.is_pointer_button_down_on()
+}
+
+/// Resting colors, or the same colors stepped lighter while `hot`.
+/// A clear fill becomes `#2e2e2e` instead of a near-black wash.
+pub fn face(fill: Color32, ink: Color32, hot: bool) -> (Color32, Color32) {
+    if hot {
+        (hover_fill(fill), hover_ink(ink))
+    } else {
+        (fill, ink)
+    }
+}
+
+/// Run `add` with a button face that lifts on hover and press.
+/// `Button::fill` would freeze the color, so the face lives on the widget style.
+pub fn with_face(
+    ui: &mut egui::Ui,
+    fill: Color32,
+    ink: Color32,
+    add: impl FnOnce(&mut egui::Ui) -> egui::Response,
+) -> egui::Response {
+    let previous = Arc::clone(ui.style());
+    tune(ui, fill, ink);
+    let response = add(ui);
+    ui.set_style(previous);
+    response
+}
+
+/// Rows in the File menu. Clear at rest. A plate and lighter text while hovered.
+pub fn tune_menu(ui: &mut egui::Ui) {
+    tune(ui, Color32::TRANSPARENT, INK);
+}
+
+fn tune(ui: &mut egui::Ui, fill: Color32, ink: Color32) {
+    let hot_fill = hover_fill(fill);
+    let hot_ink = hover_ink(ink);
+    let visuals = ui.visuals_mut();
+    paint_face(&mut visuals.widgets.inactive, fill, ink);
+    paint_face(&mut visuals.widgets.hovered, hot_fill, hot_ink);
+    paint_face(&mut visuals.widgets.active, hot_fill, hot_ink);
+    paint_face(&mut visuals.widgets.open, hot_fill, hot_ink);
+}
+
+fn paint_face(visual: &mut egui::style::WidgetVisuals, fill: Color32, ink: Color32) {
+    visual.weak_bg_fill = fill;
+    visual.fg_stroke.color = ink;
+    visual.bg_stroke = Stroke::NONE;
+}
+
+fn hover_fill(color: Color32) -> Color32 {
+    if color.a() == 0 {
+        HOVER_PLATE
+    } else {
+        lift(color, 0x12)
+    }
+}
+
+fn hover_ink(color: Color32) -> Color32 {
+    lift(color, 0x1c)
+}
+
+fn lift(color: Color32, by: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(
+        color.r().saturating_add(by),
+        color.g().saturating_add(by),
+        color.b().saturating_add(by),
+        color.a(),
+    )
 }
 
 pub fn bar() -> Frame {
@@ -105,4 +184,20 @@ pub fn gap_above() -> Frame {
         top: GAP_PX,
         bottom: 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BAR, INK, face};
+
+    #[test]
+    fn a_hovered_button_steps_lighter_and_a_clear_one_gains_a_plate() {
+        let (fill, ink) = face(BAR, INK, true);
+        assert!(fill.r() > BAR.r() && fill.g() > BAR.g() && fill.b() > BAR.b());
+        assert!(ink.r() > INK.r());
+        let (clear, _) = face(eframe::egui::Color32::TRANSPARENT, INK, true);
+        assert_eq!(clear, eframe::egui::Color32::from_rgb(0x2e, 0x2e, 0x2e));
+        let (rest, rest_ink) = face(BAR, INK, false);
+        assert_eq!((rest, rest_ink), (BAR, INK));
+    }
 }

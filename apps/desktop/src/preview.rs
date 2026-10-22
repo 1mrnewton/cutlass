@@ -158,10 +158,20 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
     let dim = if live { 1.0 } else { 0.35 };
     let play = Rect::from_center_size(rect.center(), Vec2::splat(36.0));
     let play_response = ui.interact(play, ui.scope_id().with("play"), Sense::hover());
+    let (disk, mark) = theme::face(
+        theme::INK,
+        Color32::from_rgb(0x12, 0x13, 0x0f),
+        live && theme::hot(&play_response),
+    );
     ui.painter()
-        .circle_filled(play.center(), 18.0, theme::INK.gamma_multiply(dim));
-    let mark = Color32::from_rgb(0x12, 0x13, 0x0f).gamma_multiply(dim);
-    icons::paint(ui.painter(), play.center(), Icon::Play, 16.0, mark);
+        .circle_filled(play.center(), 18.0, disk.gamma_multiply(dim));
+    icons::paint(
+        ui.painter(),
+        play.center(),
+        Icon::Play,
+        16.0,
+        mark.gamma_multiply(dim),
+    );
     crate::tip::show_enabled(
         &play_response,
         crate::words::of(ui, crate::words::Phrase::Play),
@@ -180,14 +190,19 @@ fn paint_transport(ui: &mut egui::Ui, rect: Rect, project: &Project, playhead_us
     if still_response.clicked() {
         crate::timeline::show_note(ui, still_toast(crate::words::active(ui), playhead_us));
     }
+    let (disk, mark) = theme::face(
+        theme::BAR,
+        theme::MUTED,
+        live && theme::hot(&still_response),
+    );
     ui.painter()
-        .circle_filled(still.center(), 16.0, theme::BAR.gamma_multiply(dim));
+        .circle_filled(still.center(), 16.0, disk.gamma_multiply(dim));
     icons::paint(
         ui.painter(),
         still.center(),
         Icon::Camera,
         16.0,
-        theme::MUTED.gamma_multiply(dim),
+        mark.gamma_multiply(dim),
     );
     crate::tip::show_enabled(
         &still_response,

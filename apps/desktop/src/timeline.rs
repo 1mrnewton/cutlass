@@ -1359,7 +1359,14 @@ fn zoom_controls(ui: &mut egui::Ui, ruler: Rect, live: bool) -> Option<ZoomStep>
         if live && response.clicked() {
             chosen = Some(steps[index]);
         }
-        let color = if live { theme::INK } else { theme::FAINT };
+        let (fill, color) = theme::face(
+            Color32::TRANSPARENT,
+            if live { theme::INK } else { theme::FAINT },
+            live && theme::hot(&response),
+        );
+        if fill.a() > 0 {
+            ui.painter().rect_filled(rects[index], 6.0, fill);
+        }
         ui.painter().text(
             rects[index].center(),
             Align2::CENTER_CENTER,
@@ -1838,9 +1845,6 @@ fn ruler_switch(
     if live && response.clicked() {
         *on = !*on;
     }
-    if *on {
-        ui.painter().rect_filled(button, 6.0, theme::ACTIVE);
-    }
     let color = if !live {
         theme::FAINT
     } else if *on {
@@ -1848,6 +1852,18 @@ fn ruler_switch(
     } else {
         theme::INK
     };
+    let (fill, color) = theme::face(
+        if *on {
+            theme::ACTIVE
+        } else {
+            Color32::TRANSPARENT
+        },
+        color,
+        live && theme::hot(&response),
+    );
+    if fill.a() > 0 {
+        ui.painter().rect_filled(button, 6.0, fill);
+    }
     ui.painter().text(
         button.center(),
         Align2::CENTER_CENTER,
@@ -1927,9 +1943,6 @@ fn mode_switch(
     if live && response.clicked() {
         *on = !*on;
     }
-    if *on {
-        ui.painter().rect_filled(button, 6.0, theme::ACTIVE);
-    }
     let color = if !live {
         theme::FAINT
     } else if *on {
@@ -1937,6 +1950,18 @@ fn mode_switch(
     } else {
         theme::INK
     };
+    let (fill, color) = theme::face(
+        if *on {
+            theme::ACTIVE
+        } else {
+            Color32::TRANSPARENT
+        },
+        color,
+        live && theme::hot(&response),
+    );
+    if fill.a() > 0 {
+        ui.painter().rect_filled(button, 6.0, fill);
+    }
     icons::paint(ui.painter(), button.center(), icon, 16.0, color);
     crate::tip::show_switch(&response, tip, *on, live);
     *on && !was
@@ -2221,10 +2246,18 @@ fn setting_switch(
     on: bool,
 ) -> bool {
     let response = ui.interact(button, ui.scope_id().with(salt), Sense::click());
-    if on {
-        ui.painter().rect_filled(button, 6.0, theme::ACTIVE);
+    let (fill, color) = theme::face(
+        if on {
+            theme::ACTIVE
+        } else {
+            Color32::TRANSPARENT
+        },
+        if on { theme::EXPORT } else { theme::INK },
+        theme::hot(&response),
+    );
+    if fill.a() > 0 {
+        ui.painter().rect_filled(button, 6.0, fill);
     }
-    let color = if on { theme::EXPORT } else { theme::INK };
     icons::paint(ui.painter(), button.center(), icon, 16.0, color);
     crate::tip::show_switch(&response, tip, on, true);
     response.clicked()
@@ -3572,7 +3605,14 @@ fn lane_button(
     engaged: bool,
 ) -> bool {
     let response = ui.interact(rect, id, Sense::click());
-    let color = if engaged { theme::INK } else { theme::FAINT };
+    let (fill, color) = theme::face(
+        Color32::TRANSPARENT,
+        if engaged { theme::INK } else { theme::FAINT },
+        theme::hot(&response),
+    );
+    if fill.a() > 0 {
+        ui.painter().rect_filled(rect, 6.0, fill);
+    }
     icons::paint(ui.painter(), rect.center(), icon, 14.0, color);
     crate::tip::show_switch(&response, tip, engaged, true);
     response.clicked()

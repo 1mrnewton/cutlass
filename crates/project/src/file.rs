@@ -17,7 +17,9 @@ use crate::curve::{SpeedCurve, SpeedPoint};
 use crate::id::{AssetId, SegmentId, TimelineId, TrackId};
 use crate::project::Project;
 use crate::rate::{FrameRate, SequenceRate};
-use crate::segment::{Blend, Channels, Crop, Easing, Keyframe, KeyframeValue, Segment, Transform};
+use crate::segment::{
+    BezierEase, Blend, Channels, Crop, Easing, Keyframe, KeyframeValue, Segment, Transform,
+};
 use crate::settings::{AspectRatio, Canvas, Color, ColorSpace, Settings};
 use crate::time::{Speed, TimeRange};
 use crate::timeline::Timeline;
@@ -957,68 +959,89 @@ fn transform_from(document: &TransformDoc) -> Result<Transform, Error> {
 fn key_doc(key: Keyframe) -> KeyDoc {
     let offset = key.offset().value;
     let easing = easing_name(key.easing());
+    let bezier = bezier_points(key.easing());
     match key.value() {
         KeyframeValue::Position { x, y } => KeyDoc::Position {
             offset,
             x,
             y,
             easing,
+            bezier,
         },
         KeyframeValue::Scale { x, y } => KeyDoc::Scale {
             offset,
             x,
             y,
             easing,
+            bezier,
         },
         KeyframeValue::Rotation(degrees) => KeyDoc::Rotation {
             offset,
             degrees,
             easing,
+            bezier,
         },
         KeyframeValue::Opacity(value) => KeyDoc::Opacity {
             offset,
             value,
             easing,
+            bezier,
         },
         KeyframeValue::Volume(value) => KeyDoc::Volume {
             offset,
             value,
             easing,
+            bezier,
         },
     }
 }
 
 fn key_from(document: &KeyDoc) -> Result<Keyframe, Error> {
-    let (offset, value, easing) = match document {
+    let (offset, value, easing, bezier) = match document {
         KeyDoc::Position {
             offset,
             x,
             y,
             easing,
-        } => (*offset, KeyframeValue::Position { x: *x, y: *y }, *easing),
+            bezier,
+        } => (
+            *offset,
+            KeyframeValue::Position { x: *x, y: *y },
+            *easing,
+            *bezier,
+        ),
         KeyDoc::Scale {
             offset,
             x,
             y,
             easing,
-        } => (*offset, KeyframeValue::Scale { x: *x, y: *y }, *easing),
+            bezier,
+        } => (
+            *offset,
+            KeyframeValue::Scale { x: *x, y: *y },
+            *easing,
+            *bezier,
+        ),
         KeyDoc::Rotation {
             offset,
             degrees,
             easing,
-        } => (*offset, KeyframeValue::Rotation(*degrees), *easing),
+            bezier,
+        } => (*offset, KeyframeValue::Rotation(*degrees), *easing, *bezier),
         KeyDoc::Opacity {
             offset,
             value,
             easing,
-        } => (*offset, KeyframeValue::Opacity(*value), *easing),
+            bezier,
+        } => (*offset, KeyframeValue::Opacity(*value), *easing, *bezier),
         KeyDoc::Volume {
             offset,
             value,
             easing,
-        } => (*offset, KeyframeValue::Volume(*value), *easing),
+            bezier,
+        } => (*offset, KeyframeValue::Volume(*value), *easing, *bezier),
     };
-    Ok(Keyframe::new(offset, value)?.with_easing(easing_from(easing)))
+    Ok(Keyframe::new(offset, value)?.with_easing(easing_from(easing, bezier)?))
 }
 
 fn easing_name(easing: Easing) -> EasingName {
@@ -1027,15 +1050,32 @@ fn easing_name(easing: Easing) -> EasingName {
         Easing::EaseIn => EasingName::EaseIn,
         Easing::EaseOut => EasingName::EaseOut,
         Easing::EaseInOut => EasingName::EaseInOut,
+        Easing::Bezier(_) => EasingName::Bezier,
     }
 }
 
-fn easing_from(name: EasingName) -> Easing {
+fn bezier_points(easing: Easing) -> Option<[f64; 4]> {
+    match easing {
+        Easing::Bezier(ease) => Some(ease.points()),
+        Easing::Linear | Easing::EaseIn | Easing::EaseOut | Easing::EaseInOut => None,
+    }
+}
+
+fn easing_from(name: EasingName, bezier: Option<[f64; 4]>) -> Result<Easing, Error> {
+    if let Some(points) = bezier {
+        if !matches!(name, EasingName::Bezier) {
+            return Err(Error::Bezier);
+        }
+        return Ok(Easing::Bezier(BezierEase::new(
+            points[0], points[1], points[2], points[3],
+        )?));
+    }
     match name {
-        EasingName::Linear => Easing::Linear,
-        EasingName::EaseIn => Easing::EaseIn,
-        EasingName::EaseOut => Easing::EaseOut,
-        EasingName::EaseInOut => Easing::EaseInOut,
+        EasingName::Linear => Ok(Easing::Linear),
+        EasingName::EaseIn => Ok(Easing::EaseIn),
+        EasingName::EaseOut => Ok(Easing::EaseOut),
+        EasingName::EaseInOut => Ok(Easing::EaseInOut),
+        EasingName::Bezier => Err(Error::Bezier),
     }
 }
 
@@ -1449,6 +1489,8 @@ enum KeyDoc {
         y: f64,
         #[serde(default, skip_serializing_if = "easing_is_linear")]
         easing: EasingName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bezier: Option<[f64; 4]>,
     },
     Scale {
         offset: i64,
@@ -1456,24 +1498,32 @@ enum KeyDoc {
         y: f64,
         #[serde(default, skip_serializing_if = "easing_is_linear")]
         easing: EasingName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bezier: Option<[f64; 4]>,
     },
     Rotation {
         offset: i64,
         degrees: f64,
         #[serde(default, skip_serializing_if = "easing_is_linear")]
         easing: EasingName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bezier: Option<[f64; 4]>,
     },
     Opacity {
         offset: i64,
         value: f64,
         #[serde(default, skip_serializing_if = "easing_is_linear")]
         easing: EasingName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bezier: Option<[f64; 4]>,
     },
     Volume {
         offset: i64,
         value: f64,
         #[serde(default, skip_serializing_if = "easing_is_linear")]
         easing: EasingName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bezier: Option<[f64; 4]>,
     },
 }
 
@@ -1499,6 +1549,7 @@ enum EasingName {
     EaseIn,
     EaseOut,
     EaseInOut,
+    Bezier,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -1575,7 +1626,9 @@ mod tests {
     use crate::id::{AssetId, ProjectId, TimelineId};
     use crate::project::Project;
     use crate::rate::{FrameRate, SequenceRate};
-    use crate::segment::{Blend, Channels, Easing, Keyframe, KeyframeValue, Segment, Transform};
+    use crate::segment::{
+        BezierEase, Blend, Channels, Easing, Keyframe, KeyframeValue, Segment, Transform,
+    };
     use crate::settings::{AspectRatio, Color, ColorSpace};
     use crate::time::{Speed, TimeRange};
     use crate::track::TrackKind;
@@ -1726,6 +1779,7 @@ mod tests {
             offset: 0,
             degrees: 1.0,
             easing: EasingName::Linear,
+            bezier: None,
         };
         assert_eq!(
             serde_json::to_string(&key).expect("key"),
@@ -1736,6 +1790,7 @@ mod tests {
             (EasingName::EaseIn, "\"ease-in\""),
             (EasingName::EaseOut, "\"ease-out\""),
             (EasingName::EaseInOut, "\"ease-in-out\""),
+            (EasingName::Bezier, "\"bezier\""),
         ];
         for (easing, text) in easings {
             assert_eq!(serde_json::to_string(&easing).expect("easing"), text);
@@ -1794,6 +1849,70 @@ mod tests {
                 json!("bounce");
         });
         assert_unreadable(&unknown);
+    }
+
+    #[test]
+    fn a_bezier_easing_round_trips_and_a_bad_handle_refuses_the_file() {
+        let (project, value) = cut_value();
+        let text = project.to_json().expect("save");
+        assert!(!text.contains("bezier"));
+
+        let eased = edit(&value, |value| {
+            let sample = &mut value["timeline"]["tracks"][1]["segments"][0]["keyframes"][0];
+            put(sample, "easing", json!("bezier"));
+            put(sample, "bezier", json!([0.0, 0.0, 1.0, 0.0]));
+        });
+        let loaded = Project::from_json(&eased).expect("load");
+        assert_eq!(
+            loaded.timeline().tracks()[1].segments()[0].keyframes()[0].easing(),
+            Easing::Bezier(BezierEase::new(0.0, 0.0, 1.0, 0.0).expect("handles"))
+        );
+        let saved = loaded.to_json().expect("save");
+        assert!(saved.contains("\"easing\": \"bezier\""));
+        assert!(saved.contains("\"bezier\""));
+        assert_same(&loaded, &Project::from_json(&saved).expect("reload"));
+
+        let over = edit(&value, |value| {
+            let sample = &mut value["timeline"]["tracks"][1]["segments"][0]["keyframes"][0];
+            put(sample, "easing", json!("bezier"));
+            put(sample, "bezier", json!([0.0, 2.0, 1.0, -1.0]));
+        });
+        let loaded = Project::from_json(&over).expect("load");
+        assert_eq!(
+            loaded.timeline().tracks()[1].segments()[0].keyframes()[0].easing(),
+            Easing::Bezier(BezierEase::new(0.0, 2.0, 1.0, -1.0).expect("handles"))
+        );
+        assert_same(
+            &loaded,
+            &Project::from_json(&loaded.to_json().expect("save")).expect("reload"),
+        );
+
+        let missing = edit(&value, |value| {
+            put(
+                &mut value["timeline"]["tracks"][1]["segments"][0]["keyframes"][0],
+                "easing",
+                json!("bezier"),
+            );
+        });
+        refuse(&missing, Error::Bezier);
+        let extra = edit(&value, |value| {
+            let sample = &mut value["timeline"]["tracks"][1]["segments"][0]["keyframes"][0];
+            put(sample, "easing", json!("ease-in"));
+            put(sample, "bezier", json!([0.0, 0.0, 1.0, 0.0]));
+        });
+        refuse(&extra, Error::Bezier);
+        let outside = edit(&value, |value| {
+            let sample = &mut value["timeline"]["tracks"][1]["segments"][0]["keyframes"][0];
+            put(sample, "easing", json!("bezier"));
+            put(sample, "bezier", json!([1.5, 0.0, 0.5, 1.0]));
+        });
+        refuse(&outside, Error::Bezier);
+        let short = edit(&value, |value| {
+            let sample = &mut value["timeline"]["tracks"][1]["segments"][0]["keyframes"][0];
+            put(sample, "easing", json!("bezier"));
+            put(sample, "bezier", json!([0.0, 0.0, 1.0]));
+        });
+        assert_unreadable(&short);
     }
 
     #[test]

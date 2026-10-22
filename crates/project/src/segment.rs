@@ -187,31 +187,67 @@ pub enum KeyframeProperty {
     Volume,
 }
 
+/// Two handles on a cubic bezier from `(0, 0)` to `(1, 1)`.
+///
+/// Each `x` is from `0` through `1`, so time moves forward. Each `y` is finite
+/// and may sit outside that span.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BezierEase {
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+}
+
+impl BezierEase {
+    /// Handles `(x1, y1)` and `(x2, y2)`.
+    ///
+    /// A non-finite number is refused. An `x` outside `0` through `1` is refused.
+    pub fn new(x1: f64, y1: f64, x2: f64, y2: f64) -> Result<Self, Error> {
+        if !x1.is_finite() || !y1.is_finite() || !x2.is_finite() || !y2.is_finite() {
+            return Err(Error::NonFinite);
+        }
+        if !(0.0..=1.0).contains(&x1) || !(0.0..=1.0).contains(&x2) {
+            return Err(Error::Bezier);
+        }
+        Ok(Self { x1, y1, x2, y2 })
+    }
+
+    /// `[x1, y1, x2, y2]`.
+    pub const fn points(self) -> [f64; 4] {
+        [self.x1, self.y1, self.x2, self.y2]
+    }
+}
+
 /// How one sample blends into the next sample of the same property.
 ///
 /// Linear is the start. Ease in starts slow and ends fast. Ease out starts
-/// fast and ends slow. Ease in and out is slow, fast, then slow. The last
-/// sample of a property has no next sample, so its easing is unused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// fast and ends slow. Ease in and out is slow, fast, then slow. A bezier
+/// easing bends through two handles. The last sample of a property has no
+/// next sample, so its easing is unused.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Easing {
     #[default]
     Linear,
     EaseIn,
     EaseOut,
     EaseInOut,
+    Bezier(BezierEase),
 }
 
 impl Easing {
     /// The portion of the way from this sample to the next.
     ///
     /// `t` is `0` at this sample and `1` at the next. Each curve is `0` at
-    /// the start and `1` at the end.
+    /// the start and `1` at the end. A bezier easing pulls a time outside that
+    /// span back onto it, and its result may leave `0..=1`.
     pub fn curve(self, t: f64) -> f64 {
         match self {
             Self::Linear => t,
             Self::EaseIn => t * t,
             Self::EaseOut => t * (2.0 - t),
             Self::EaseInOut => t * t * (3.0 - 2.0 * t),
+            Self::Bezier(ease) => bezier_blend(ease, t),
         }
     }
 }
@@ -1459,6 +1495,82 @@ fn own_value(segment: &Segment, property: KeyframeProperty) -> KeyframeValue {
     }
 }
 
+const BEZIER_NEWTON_STEPS: u32 = 8;
+const BEZIER_BISECT_STEPS: u32 = 20;
+const BEZIER_TOLERANCE: f64 = 1e-6;
+
+/// The blend at time `t`. The step count is fixed, so a flat slope cannot loop.
+fn bezier_blend(ease: BezierEase, t: f64) -> f64 {
+    if !t.is_finite() || t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+    let x = cubic(ease.x1, ease.x2);
+    let y = cubic(ease.y1, ease.y2);
+    sample_cubic(y, bezier_time(x, t))
+}
+
+fn bezier_time(x: Cubic, t: f64) -> f64 {
+    let mut u = t;
+    for _ in 0..BEZIER_NEWTON_STEPS {
+        let slope = slope_cubic(x, u);
+        if slope.abs() < BEZIER_TOLERANCE {
+            break;
+        }
+        let next = u - (sample_cubic(x, u) - t) / slope;
+        if !next.is_finite() {
+            break;
+        }
+        u = next.clamp(0.0, 1.0);
+        if (sample_cubic(x, u) - t).abs() < BEZIER_TOLERANCE {
+            return u;
+        }
+    }
+    let mut low = 0.0;
+    let mut high = 1.0;
+    u = t;
+    for _ in 0..BEZIER_BISECT_STEPS {
+        let at = sample_cubic(x, u);
+        if (at - t).abs() < BEZIER_TOLERANCE {
+            return u;
+        }
+        if at < t {
+            low = u;
+        } else {
+            high = u;
+        }
+        u = (low + high) * 0.5;
+    }
+    u
+}
+
+#[derive(Clone, Copy)]
+struct Cubic {
+    a: f64,
+    b: f64,
+    c: f64,
+}
+
+fn cubic(p1: f64, p2: f64) -> Cubic {
+    let c = 3.0 * p1;
+    let b = 3.0 * (p2 - p1) - c;
+    Cubic {
+        a: 1.0 - c - b,
+        b,
+        c,
+    }
+}
+
+fn sample_cubic(curve: Cubic, u: f64) -> f64 {
+    ((curve.a * u + curve.b) * u + curve.c) * u
+}
+
+fn slope_cubic(curve: Cubic, u: f64) -> f64 {
+    (3.0 * curve.a * u + 2.0 * curve.b) * u + curve.c
+}
+
 fn blend(from: KeyframeValue, to: KeyframeValue, portion: f64) -> KeyframeValue {
     match (from, to) {
         (
@@ -1886,15 +1998,70 @@ mod tests {
 
     #[test]
     fn each_easing_starts_at_zero_and_ends_at_one() {
+        let bezier = Easing::Bezier(BezierEase::new(0.0, 0.0, 1.0, 0.0).unwrap());
         for easing in [
             Easing::Linear,
             Easing::EaseIn,
             Easing::EaseOut,
             Easing::EaseInOut,
+            bezier,
         ] {
             assert_eq!(easing.curve(0.0), 0.0);
             assert_eq!(easing.curve(1.0), 1.0);
         }
+    }
+
+    #[test]
+    fn a_bezier_easing_bends_and_a_bad_handle_is_refused() {
+        let slow = Easing::Bezier(BezierEase::new(0.0, 0.0, 1.0, 0.0).unwrap());
+        assert_eq!(slow.curve(0.5), 0.125);
+        assert_eq!(slow.curve(-1.0), 0.0);
+        assert_eq!(slow.curve(2.0), 1.0);
+        let over = Easing::Bezier(BezierEase::new(0.0, 1.5, 1.0, 1.5).unwrap());
+        assert_eq!(over.curve(0.5), 1.25);
+        assert_eq!(
+            BezierEase::new(0.0, 2.0, 1.0, -1.0).unwrap().points(),
+            [0.0, 2.0, 1.0, -1.0]
+        );
+        assert_eq!(
+            BezierEase::new(1.5, 0.0, 0.5, 1.0).unwrap_err(),
+            Error::Bezier
+        );
+        assert_eq!(
+            BezierEase::new(-0.1, 0.0, 1.0, 1.0).unwrap_err(),
+            Error::Bezier
+        );
+        assert_eq!(
+            BezierEase::new(0.0, f64::NAN, 1.0, 1.0).unwrap_err(),
+            Error::NonFinite
+        );
+        assert_eq!(
+            BezierEase::new(0.0, f64::INFINITY, 1.0, 1.0).unwrap_err(),
+            Error::NonFinite
+        );
+
+        let mut segment = one_second();
+        segment
+            .push_keyframe(
+                Keyframe::new(0, KeyframeValue::Opacity(0.0))
+                    .unwrap()
+                    .with_easing(slow),
+            )
+            .unwrap();
+        segment
+            .push_keyframe(Keyframe::new(1_000_000, KeyframeValue::Opacity(1.0)).unwrap())
+            .unwrap();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Opacity, 500_000).unwrap(),
+            KeyframeValue::Opacity(0.125)
+        );
+        segment
+            .set_easing(0, KeyframeProperty::Opacity, over)
+            .unwrap();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Opacity, 500_000).unwrap(),
+            KeyframeValue::Opacity(1.25)
+        );
     }
 
     #[test]

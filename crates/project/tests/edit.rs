@@ -4,8 +4,8 @@ use std::num::NonZeroU32;
 
 use cutlass_core::Timestamp;
 use cutlass_project::{
-    Animation, AnimationKind, AspectRatio, Asset, AssetId, AssetKind, Attachment, Blend, Channels,
-    Color, ColorSpace, Command, Crop, Easing, Error, FrameRate, History, Keyframe,
+    Animation, AnimationKind, AspectRatio, Asset, AssetId, AssetKind, Attachment, BezierEase,
+    Blend, Channels, Color, ColorSpace, Command, Crop, Easing, Error, FrameRate, History, Keyframe,
     KeyframeProperty, KeyframeValue, Outcome, Parameter, ParameterValue, Project, ProjectId,
     Segment, SegmentId, SequenceRate, Speed, SpeedCurve, SpeedPoint, TimeRange, TimelineId,
     TrackId, TrackKind, Transform, TrimEdge, commands_for_trim,
@@ -1143,6 +1143,70 @@ fn a_keyframe_past_the_cut_moves_to_the_right_piece() -> Result<(), Error> {
     assert_eq!(right_keys[0].offset().value, 200_000);
     assert_eq!(right_keys[0].easing(), Easing::EaseIn);
     assert_eq!(left_keys[0].easing(), Easing::Linear);
+    Ok(())
+}
+
+#[test]
+fn a_split_keeps_bezier_handles() -> Result<(), Error> {
+    let slow = Easing::Bezier(BezierEase::new(0.0, 0.0, 1.0, 0.0)?);
+    let over = Easing::Bezier(BezierEase::new(0.0, 1.5, 1.0, 1.5)?);
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let mut segment = media(&cut.project, asset, 0, 30_000, Channels::Both)?;
+    segment.push_keyframe(Keyframe::new(200_000, KeyframeValue::Opacity(0.0))?)?;
+    segment
+        .push_keyframe(Keyframe::new(700_000, KeyframeValue::Opacity(1.0))?.with_easing(over))?;
+    let main = cut.main;
+    let left = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment,
+        },
+    )?);
+    run(
+        &mut cut,
+        Command::SetEasing {
+            segment: left,
+            offset_us: 200_000,
+            property: KeyframeProperty::Opacity,
+            easing: slow,
+        },
+    )?;
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(left)
+            .ok_or(Error::UnknownSegment(left))?
+            .keyframes()[0]
+            .easing(),
+        Easing::Linear
+    );
+    cut.history.redo(&mut cut.project)?;
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: left,
+            at: 500_000,
+        },
+    )?);
+    let left_keys = cut
+        .project
+        .timeline()
+        .segment(left)
+        .ok_or(Error::UnknownSegment(left))?
+        .keyframes();
+    let right_keys = cut
+        .project
+        .timeline()
+        .segment(right)
+        .ok_or(Error::UnknownSegment(right))?
+        .keyframes();
+    assert_eq!(left_keys.len(), 1);
+    assert_eq!(left_keys[0].easing(), slow);
+    assert_eq!(right_keys.len(), 1);
+    assert_eq!(right_keys[0].easing(), over);
     Ok(())
 }
 

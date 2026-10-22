@@ -121,6 +121,8 @@ pub enum Error {
     Marker,
     #[error("value is not finite")]
     NonFinite,
+    #[error("the bezier easing does not fit")]
+    Bezier,
     #[error("scale must be positive")]
     NonPositiveScale,
     #[error("frame rate {numerator}/{denominator} is not a project rate")]

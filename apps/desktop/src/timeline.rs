@@ -129,7 +129,7 @@ enum PickedStamp {
     Beat(usize),
 }
 
-/// Hide, mute, and lock for one lane. View state, until the project stores them.
+/// Hide, mute, and lock for one lane, copied from the track for this frame.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct LaneFlag {
     track: TrackId,
@@ -144,24 +144,33 @@ pub(crate) struct Lanes {
     rows: Vec<LaneFlag>,
 }
 
-fn lane_id() -> egui::Id {
-    egui::Id::unique("timeline-lanes")
+pub(crate) fn lanes_of(project: &Project) -> Lanes {
+    let mut lanes = Lanes::default();
+    for track in project.timeline().tracks() {
+        remember_lane(
+            &mut lanes,
+            LaneFlag {
+                track: track.id(),
+                locked: track.locked(),
+                hidden: track.hidden(),
+                muted: track.muted(),
+            },
+        );
+    }
+    lanes
 }
 
-pub(crate) fn lane_memory(ui: &egui::Ui) -> Lanes {
-    ui.data(|data| data.get_temp(lane_id())).unwrap_or_default()
+pub(crate) fn segment_locked(project: &Project, id: SegmentId) -> bool {
+    segment_lane_locked(project, &lanes_of(project), id)
 }
 
-pub(crate) fn segment_locked(ui: &egui::Ui, project: &Project, id: SegmentId) -> bool {
-    segment_lane_locked(project, &lane_memory(ui), id)
-}
-
-pub(crate) fn hidden_tracks(ui: &egui::Ui) -> Vec<TrackId> {
-    lane_memory(ui)
-        .rows
-        .into_iter()
-        .filter(|row| row.hidden)
-        .map(|row| row.track)
+pub(crate) fn hidden_tracks(project: &Project) -> Vec<TrackId> {
+    project
+        .timeline()
+        .tracks()
+        .iter()
+        .filter(|track| track.hidden())
+        .map(|track| track.id())
         .collect()
 }
 
@@ -527,7 +536,7 @@ pub fn show(
         beat = false;
     }
     let mark_times = stamp_times(project, &stamps);
-    let mut lanes = lane_memory(ui);
+    let mut lanes = lanes_of(project);
     retain_lanes(project, &mut lanes);
     let mut note = None;
     if let Some(key) = crate::keys::tool(ui) {
@@ -989,8 +998,11 @@ pub fn show(
             );
             let mut row = lane_row(&lanes, track.id());
             paint_lane_label(ui, head, words::say(words::active(ui), lane_phrase(track)));
-            if let Some(text) = paint_lane_flags(ui, head, track.id(), &mut row) {
-                note = Some(text);
+            if let Some(edit) = paint_lane_flags(ui, head, track.id(), &mut row) {
+                commands.push(edit.command);
+                if let Some(text) = edit.note {
+                    note = Some(text);
+                }
             }
             let dim = row.hidden || (row.muted && track.kind() == TrackKind::Audio);
             remember_lane(&mut lanes, row);
@@ -1040,7 +1052,6 @@ pub fn show(
             }
         }
     }
-    ui.data_mut(|data| data.insert_temp(lane_id(), lanes));
     paint_stamps(ui, project, tracks, ruler_rect, &stamps, view);
     for (response, text, picked) in clip_tips {
         crate::tip::show_selected(&response, &text, picked);
@@ -1124,6 +1135,7 @@ pub(crate) fn apply_note(error: &cutlass_project::Error, language: Language) -> 
         cutlass_project::Error::Overlap | cutlass_project::Error::LinkageOverlap(_) => {
             Phrase::SpotTaken
         }
+        cutlass_project::Error::Locked => Phrase::TrackIsLocked,
         cutlass_project::Error::WrongTrack => Phrase::WrongLane,
         cutlass_project::Error::SplitOutside => Phrase::CutTooClose,
         cutlass_project::Error::SourceOutsideAsset | cutlass_project::Error::RoundsToZero => {
@@ -3328,13 +3340,19 @@ fn flag_rects(head: Rect) -> [Rect; 3] {
     [hide, mute, lock]
 }
 
+struct FlagEdit {
+    command: Command,
+    note: Option<&'static str>,
+}
+
 fn paint_lane_flags(
     ui: &mut egui::Ui,
     head: Rect,
     track: TrackId,
     row: &mut LaneFlag,
-) -> Option<&'static str> {
+) -> Option<FlagEdit> {
     let [hide, mute, lock] = flag_rects(head);
+    let mut edit = None;
     let hide_icon = if row.hidden {
         Icon::ViewOff
     } else {
@@ -3357,6 +3375,13 @@ fn paint_lane_flags(
         row.hidden,
     ) {
         row.hidden = !row.hidden;
+        edit = Some(FlagEdit {
+            command: Command::SetHidden {
+                track,
+                on: row.hidden,
+            },
+            note: None,
+        });
     }
     let mute_icon = if row.muted {
         Icon::VolumeOff
@@ -3380,6 +3405,13 @@ fn paint_lane_flags(
         row.muted,
     ) {
         row.muted = !row.muted;
+        edit = Some(FlagEdit {
+            command: Command::SetMuted {
+                track,
+                on: row.muted,
+            },
+            note: None,
+        });
     }
     let lock_tip = words::of(
         ui,
@@ -3389,7 +3421,6 @@ fn paint_lane_flags(
             Phrase::Lock
         },
     );
-    let mut locked_note = None;
     if lane_button(
         ui,
         lock,
@@ -3399,16 +3430,22 @@ fn paint_lane_flags(
         row.locked,
     ) {
         row.locked = !row.locked;
-        locked_note = Some(words::of(
-            ui,
-            if row.locked {
-                Phrase::TrackLocked
-            } else {
-                Phrase::TrackUnlocked
+        edit = Some(FlagEdit {
+            command: Command::SetLocked {
+                track,
+                on: row.locked,
             },
-        ));
+            note: Some(words::of(
+                ui,
+                if row.locked {
+                    Phrase::TrackLocked
+                } else {
+                    Phrase::TrackUnlocked
+                },
+            )),
+        });
     }
-    locked_note
+    edit
 }
 
 fn lane_button(

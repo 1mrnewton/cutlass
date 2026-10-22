@@ -127,7 +127,7 @@ impl CutlassApp {
         if typing || !pressed {
             return;
         }
-        let lanes = timeline::lane_memory(ui);
+        let lanes = timeline::lanes_of(&self.project);
         let had = !self.selected_segments.is_empty();
         let removed = timeline::delete_selected(
             &mut self.history,
@@ -613,7 +613,7 @@ impl eframe::App for CutlassApp {
         egui::CentralPanel::default()
             .frame(theme::panel())
             .show(ui, |ui| {
-                let hidden = timeline::hidden_tracks(ui);
+                let hidden = timeline::hidden_tracks(&self.project);
                 let picture = self
                     .reel
                     .image(ui.ctx(), &self.project, self.playhead_us, &hidden);

@@ -550,7 +550,7 @@ fn guard(
     id: SegmentId,
     commands: Vec<Command>,
 ) -> Vec<Command> {
-    if commands.is_empty() || !crate::timeline::segment_locked(ui, project, id) {
+    if commands.is_empty() || !crate::timeline::segment_locked(project, id) {
         return commands;
     }
     crate::timeline::show_note(ui, words::of(ui, Phrase::TrackIsLocked));

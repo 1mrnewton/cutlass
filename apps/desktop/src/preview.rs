@@ -35,7 +35,7 @@ pub fn show(
     );
     let mut commands = Vec::new();
     if frame.height() > 0.0 && frame.width() > 0.0 {
-        let hidden = crate::timeline::hidden_tracks(ui);
+        let hidden = crate::timeline::hidden_tracks(project);
         let plate = fitted_canvas(
             frame,
             project.settings().width(),
@@ -575,13 +575,13 @@ fn gesture(
     selected: &mut Vec<SegmentId>,
     commands: &mut Vec<cutlass_project::Command>,
 ) -> Option<Drag> {
-    let hidden = crate::timeline::hidden_tracks(ui);
+    let hidden = crate::timeline::hidden_tracks(project);
     let mut live = ui.data(|data| data.get_temp::<Drag>(drag_id()));
     if response.drag_started()
         && !ui.input(|input| input.modifiers.shift)
         && let Some(origin) = ui.input(|input| input.pointer.press_origin())
     {
-        match begin_drag(ui, project, canvas, &hidden, selected, origin) {
+        match begin_drag(project, canvas, &hidden, selected, origin) {
             Begin::Drag(drag) => {
                 live = Some(drag);
                 ui.data_mut(|data| data.insert_temp(drag_id(), drag));
@@ -640,7 +640,6 @@ enum Begin {
 }
 
 fn begin_drag(
-    ui: &egui::Ui,
     project: &Project,
     canvas: &Canvas,
     hidden: &[TrackId],
@@ -653,7 +652,7 @@ fn begin_drag(
     let Some(grab) = grab_at(&layer, canvas.frame, origin) else {
         return Begin::None;
     };
-    if crate::timeline::segment_locked(ui, project, id) {
+    if crate::timeline::segment_locked(project, id) {
         return Begin::Locked;
     }
     let Some(segment) = project.timeline().segment(id) else {

@@ -387,7 +387,9 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::Reverse { segment }
         | Command::SetText { segment, .. }
         | Command::SetSticker { segment, .. }
-        | Command::SetAttachment { segment, .. } => segment_lane_locked(project, lanes, *segment),
+        | Command::SetAttachment { segment, .. }
+        | Command::SetTransition { segment, .. }
+        | Command::ClearTransition { segment } => segment_lane_locked(project, lanes, *segment),
         Command::SetSource { .. } => false,
         Command::DetachAudio { segment } => detach_blocked(project, lanes, *segment),
         _ => false,
@@ -1141,6 +1143,7 @@ pub(crate) fn apply_note(error: &cutlass_project::Error, language: Language) -> 
         cutlass_project::Error::Locked => Phrase::TrackIsLocked,
         cutlass_project::Error::WrongTrack => Phrase::WrongLane,
         cutlass_project::Error::SplitOutside => Phrase::CutTooClose,
+        cutlass_project::Error::InsideTransition => Phrase::CutInsideTransition,
         cutlass_project::Error::SourceOutsideAsset | cutlass_project::Error::RoundsToZero => {
             Phrase::TrimLeaves
         }
@@ -4579,6 +4582,14 @@ mod tests {
             segment: id,
             attachment: None,
         };
+        let transition = Command::SetTransition {
+            segment: id,
+            duration_us: 1,
+            overlap: false,
+            attachment: cutlass_project::Attachment::new("crossfade", "1", Vec::new())
+                .expect("attachment"),
+        };
+        let clear = Command::ClearTransition { segment: id };
         assert!(super::blocks_command(&cut, &locked, &volume));
         assert!(super::blocks_command(&cut, &locked, &hidden));
         assert!(super::blocks_command(&cut, &locked, &easing));
@@ -4593,6 +4604,8 @@ mod tests {
         assert!(super::blocks_command(&cut, &locked, &words));
         assert!(super::blocks_command(&cut, &locked, &sticker));
         assert!(super::blocks_command(&cut, &locked, &attachment));
+        assert!(super::blocks_command(&cut, &locked, &transition));
+        assert!(super::blocks_command(&cut, &locked, &clear));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),
@@ -4662,6 +4675,16 @@ mod tests {
             &cut,
             &super::Lanes::default(),
             &attachment
+        ));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &transition
+        ));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &clear
         ));
         let stored = cut.asset(asset).expect("asset");
         let away =
@@ -5133,6 +5156,10 @@ mod tests {
         assert_eq!(
             super::apply_note(&cutlass_project::Error::SplitOutside, Language::English),
             "That cut is too close to the edge."
+        );
+        assert_eq!(
+            super::apply_note(&cutlass_project::Error::InsideTransition, Language::English),
+            "That cut is inside a transition."
         );
         assert_eq!(
             super::apply_note(

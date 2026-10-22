@@ -127,6 +127,10 @@ impl Project {
     pub(crate) fn apply(&mut self, command: Command) -> Result<Outcome, Error> {
         match command {
             Command::AddAsset(asset) => Ok(Outcome::Asset(self.add_asset_now(asset)?)),
+            Command::RemoveAsset(id) => {
+                self.remove_asset_now(id)?;
+                Ok(Outcome::Unchanged)
+            }
             Command::SetSource { asset, source } => {
                 self.set_source_now(asset, source)?;
                 Ok(Outcome::Unchanged)
@@ -330,6 +334,29 @@ impl Project {
         }
         self.assets.push(asset);
         Ok(id)
+    }
+
+    fn remove_asset_now(&mut self, id: AssetId) -> Result<(), Error> {
+        if self.asset(id).is_none() {
+            return Err(Error::UnknownAsset(id));
+        }
+        if self.asset_in_use(id) {
+            return Err(Error::AssetInUse);
+        }
+        if self.assets.iter().any(|asset| asset.reverses() == Some(id)) {
+            return Err(Error::AssetInUse);
+        }
+        self.assets.retain(|asset| asset.id() != id);
+        Ok(())
+    }
+
+    fn asset_in_use(&self, id: AssetId) -> bool {
+        self.timeline.tracks().iter().any(|track| {
+            track
+                .segments()
+                .iter()
+                .any(|segment| segment.asset_id() == id)
+        })
     }
 
     fn set_magnet_now(&mut self, on: bool) -> Result<(), Error> {

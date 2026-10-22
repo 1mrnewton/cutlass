@@ -16,6 +16,8 @@ use crate::time::{self, Speed, TimeRange};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     AddAsset(Asset),
+    /// Drops one asset. A clip that uses it, or a reverse that names it, is refused.
+    RemoveAsset(AssetId),
     /// Replaces the source string. Kind, duration, and size stay. The project does not open the path.
     SetSource {
         asset: AssetId,

@@ -3622,3 +3622,77 @@ fn a_lock_blocks_a_follower_a_place_and_the_magnet() -> Result<(), Error> {
     );
     Ok(())
 }
+
+#[test]
+fn remove_drops_an_unused_asset_and_keeps_the_canvas() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let width = cut.project.settings().width();
+    let next = cut.project.next_id();
+    assert_eq!(width, 1280);
+    assert_eq!(
+        run(&mut cut, Command::RemoveAsset(asset))?,
+        Outcome::Unchanged
+    );
+    assert!(cut.project.asset(asset).is_none());
+    assert_eq!(cut.project.settings().width(), width);
+    assert_eq!(cut.project.next_id(), next);
+    let text = cut.project.to_json()?;
+    assert!(!text.contains("file:///v10.mp4"));
+    let loaded = Project::from_json(&text)?;
+    assert!(loaded.asset(asset).is_none());
+    cut.history.undo(&mut cut.project)?;
+    assert!(cut.project.asset(asset).is_some());
+    assert_eq!(cut.project.next_id(), next);
+    cut.history.redo(&mut cut.project)?;
+    assert!(cut.project.asset(asset).is_none());
+    let missing = AssetId::new(99).expect("id");
+    expect_err(
+        run(&mut cut, Command::RemoveAsset(missing)),
+        Error::UnknownAsset(missing),
+    );
+    assert_eq!(cut.project.next_id(), next);
+    Ok(())
+}
+
+#[test]
+fn a_used_asset_and_its_reverse_stay() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let clip = place_main(&mut cut, asset, 0, 30_000)?;
+    expect_err(
+        run(&mut cut, Command::RemoveAsset(asset)),
+        Error::AssetInUse,
+    );
+    assert!(cut.project.asset(asset).is_some());
+    assert!(cut.project.timeline().segment(clip).is_some());
+
+    let reverse = asset_id(run(&mut cut, Command::Reverse { segment: clip })?);
+    expect_err(
+        run(&mut cut, Command::RemoveAsset(reverse)),
+        Error::AssetInUse,
+    );
+    expect_err(
+        run(&mut cut, Command::RemoveAsset(asset)),
+        Error::AssetInUse,
+    );
+    assert_eq!(cut.project.assets().len(), 2);
+
+    run(&mut cut, Command::RemoveSegment(clip))?;
+    assert_eq!(
+        run(&mut cut, Command::RemoveAsset(reverse))?,
+        Outcome::Unchanged
+    );
+    assert!(cut.project.asset(reverse).is_none());
+    assert!(cut.project.asset(asset).is_some());
+    assert_eq!(
+        run(&mut cut, Command::RemoveAsset(asset))?,
+        Outcome::Unchanged
+    );
+    assert!(cut.project.asset(asset).is_none());
+    cut.history.undo(&mut cut.project)?;
+    assert!(cut.project.asset(asset).is_some());
+    assert!(cut.project.asset(reverse).is_none());
+    cut.history.undo(&mut cut.project)?;
+    assert!(cut.project.asset(reverse).is_some());
+    assert!(cut.project.timeline().segment(clip).is_none());
+    Ok(())
+}

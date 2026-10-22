@@ -79,6 +79,8 @@ pub enum Error {
     Reverse,
     #[error("the track is locked")]
     Locked,
+    #[error("the asset is still used")]
+    AssetInUse,
     #[error("value is not finite")]
     NonFinite,
     #[error("scale must be positive")]

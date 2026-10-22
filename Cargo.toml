@@ -3,6 +3,7 @@ members = [
     "crates/cutlass-analysis",
     "crates/cutlass-core",
     "crates/cutlass-decoder",
+    "crates/cutlass-codec-av1",
     "crates/cutlass-compositor",
     "crates/cutlass-text",
     "crates/cutlass-shapes",

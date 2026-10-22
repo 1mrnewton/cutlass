@@ -1364,3 +1364,198 @@ fn a_bad_keyframe_changes_nothing() -> Result<(), Error> {
     assert_eq!(kept.keyframes(), &[keyframe]);
     Ok(())
 }
+
+fn decorated(cut: &Cut, asset: AssetId) -> Result<Segment, Error> {
+    let stored = cut.project.asset(asset).ok_or(Error::UnknownAsset(asset))?;
+    let duration = stored.duration().ok_or(Error::ImageSource)?;
+    let source = TimeRange::new(
+        Timestamp::new(0, duration.timescale),
+        Timestamp::new(30_000, duration.timescale),
+    )?;
+    let mut segment = Segment::media(stored, source, 2_000_000, Channels::Both, Speed::new(2, 1)?)?;
+    segment.set_visible(false);
+    segment.set_volume(0.25)?;
+    segment.set_transform(Transform::new(
+        (0.1, -0.2),
+        (2.0, 3.0),
+        15.0,
+        0.4,
+        true,
+        false,
+    )?);
+    segment.push_keyframe(Keyframe::new(100_000, KeyframeValue::Opacity(0.2))?)?;
+    Ok(segment)
+}
+
+#[test]
+fn a_copy_keeps_the_clip_and_lands_where_it_ended() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let segment = decorated(&cut, asset)?;
+    let transform = segment.transform();
+    let keyframes = segment.keyframes().to_vec();
+    let source = segment.source();
+    let main = cut.main;
+    let id = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment,
+        },
+    )?);
+    let original = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?
+        .clone();
+    let copy = original.duplicate(original.timeline().end().value)?;
+    let placed = same_track(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: copy,
+        },
+    )?);
+    assert_ne!(placed, id);
+    assert_eq!(start(&cut, id)?, 2_000_000);
+    assert_eq!(start(&cut, placed)?, 2_500_000);
+    let kept = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert!(!kept.visible());
+    assert_eq!(kept.volume(), 0.25);
+    let next = cut
+        .project
+        .timeline()
+        .segment(placed)
+        .ok_or(Error::UnknownSegment(placed))?;
+    assert_eq!(next.asset_id(), asset);
+    assert_eq!(next.source(), source);
+    assert_eq!(next.channels(), Channels::Both);
+    assert_eq!(next.speed(), Speed::new(2, 1)?);
+    assert!(!next.visible());
+    assert_eq!(next.volume(), 0.25);
+    assert_eq!(next.transform(), transform);
+    assert_eq!(next.keyframes(), keyframes.as_slice());
+    Ok(())
+}
+
+#[test]
+fn a_copy_still_places_after_the_original_is_removed() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    let original = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?
+        .clone();
+    let copy = original.duplicate(original.timeline().end().value)?;
+    run(&mut cut, Command::RemoveSegment(id))?;
+    assert!(cut.project.timeline().segment(id).is_none());
+    let main = cut.main;
+    let placed = same_track(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: copy,
+        },
+    )?);
+    assert_ne!(placed, id);
+    assert_eq!(start(&cut, placed)?, 1_000_000);
+    let next = cut
+        .project
+        .timeline()
+        .segment(placed)
+        .ok_or(Error::UnknownSegment(placed))?;
+    assert_eq!(next.source(), original.source());
+    assert_eq!(next.asset_id(), asset);
+    Ok(())
+}
+
+#[test]
+fn a_taken_time_opens_a_track_for_the_copy() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let first = place_main(&mut cut, asset, 0, 30_000)?;
+    let second = place_main(&mut cut, asset, 1_500_000, 30_000)?;
+    let original = cut
+        .project
+        .timeline()
+        .segment(first)
+        .ok_or(Error::UnknownSegment(first))?
+        .clone();
+    let copy = original.duplicate(original.timeline().end().value)?;
+    let main = cut.main;
+    let (placed, track) = opened(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: copy,
+        },
+    )?);
+    assert_ne!(track, main);
+    assert_eq!(start(&cut, placed)?, 1_000_000);
+    assert_eq!(start(&cut, first)?, 0);
+    assert_eq!(start(&cut, second)?, 1_500_000);
+    assert_eq!(on_track(&cut, first), main);
+    assert_eq!(on_track(&cut, placed), track);
+    Ok(())
+}
+
+#[test]
+fn magnet_packs_the_copy_after_the_main_clip() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 5_000_000, 30_000)?;
+    assert_eq!(start(&cut, id)?, 0);
+    let original = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?
+        .clone();
+    let copy = original.duplicate(original.timeline().end().value)?;
+    let main = cut.main;
+    let placed = same_track(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: copy,
+        },
+    )?);
+    assert_eq!(start(&cut, id)?, 0);
+    assert_eq!(start(&cut, placed)?, 1_000_000);
+    assert_eq!(cut.project.duration().value, 2_000_000);
+    Ok(())
+}
+
+#[test]
+fn duplicating_a_main_clip_leaves_its_overlay() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let main_id = place_main(&mut cut, asset, 0, 30_000)?;
+    let (overlay, overlay_track) = open_picture(&mut cut, asset, 100, 30_000)?;
+    let original = cut
+        .project
+        .timeline()
+        .segment(main_id)
+        .ok_or(Error::UnknownSegment(main_id))?
+        .clone();
+    let copy = original.duplicate(original.timeline().end().value)?;
+    let main = cut.main;
+    let placed = same_track(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: copy,
+        },
+    )?);
+    assert_eq!(start(&cut, main_id)?, 0);
+    assert_eq!(start(&cut, placed)?, 1_000_000);
+    assert_eq!(start(&cut, overlay)?, 100);
+    assert_eq!(on_track(&cut, overlay), overlay_track);
+    Ok(())
+}

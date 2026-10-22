@@ -271,6 +271,18 @@ impl Segment {
         Ok(())
     }
 
+    /// A copy with no id, starting at `start` microseconds on the sequence.
+    ///
+    /// The source, channels, speed, visible flag, volume, transform, and
+    /// keyframes stay. Place assigns the id. A negative start is refused, and
+    /// so is a start that would overflow the sequence clock.
+    pub fn duplicate(&self, start: i64) -> Result<Self, Error> {
+        let mut copy = self.clone();
+        copy.id = SegmentId::raw(0);
+        copy.set_start(start)?;
+        Ok(copy)
+    }
+
     pub(crate) fn set_timeline_duration(&mut self, duration: i64) -> Result<(), Error> {
         self.finish_duration(Timestamp::new(duration, SEQUENCE_TIMESCALE))
     }
@@ -693,6 +705,61 @@ mod tests {
         assert_eq!(
             Keyframe::new(-1, KeyframeValue::Rotation(0.0)).unwrap_err(),
             Error::NegativeTime
+        );
+    }
+
+    #[test]
+    fn duplicate_keeps_the_clip_and_clears_its_id() {
+        let asset = video(true, 15_360);
+        let mut segment = Segment::media(
+            &asset,
+            source(0, 15_360),
+            2_000,
+            Channels::Both,
+            Speed::new(2, 1).unwrap(),
+        )
+        .unwrap();
+        segment.set_visible(false);
+        segment.set_volume(0.25).unwrap();
+        let transform = Transform::new((0.1, -0.2), (2.0, 3.0), 15.0, 0.4, true, false).unwrap();
+        segment.set_transform(transform);
+        segment
+            .push_keyframe(Keyframe::new(100_000, KeyframeValue::Opacity(0.2)).unwrap())
+            .unwrap();
+        segment.assign(SegmentId::raw(4));
+        let copy = segment.duplicate(8_000).unwrap();
+        assert_eq!(copy.id(), SegmentId::raw(0));
+        assert_eq!(segment.id(), SegmentId::raw(4));
+        assert_eq!(copy.timeline().start().value, 8_000);
+        assert_eq!(segment.timeline().start().value, 2_000);
+        assert_eq!(copy.timeline().duration(), segment.timeline().duration());
+        assert_eq!(copy.source(), segment.source());
+        assert_eq!(copy.channels(), Channels::Both);
+        assert_eq!(copy.speed(), Speed::new(2, 1).unwrap());
+        assert!(!copy.visible());
+        assert_eq!(copy.volume(), 0.25);
+        assert_eq!(copy.transform(), transform);
+        assert_eq!(copy.keyframes(), segment.keyframes());
+        assert_eq!(copy.asset_id(), segment.asset_id());
+    }
+
+    #[test]
+    fn duplicate_refuses_a_negative_start() {
+        let asset = video(true, 15_360);
+        let segment =
+            Segment::media(&asset, source(0, 15_360), 0, Channels::Picture, Speed::ONE).unwrap();
+        assert_eq!(segment.duplicate(-1).unwrap_err(), Error::NegativeTime);
+        assert_eq!(segment.timeline().start().value, 0);
+    }
+
+    #[test]
+    fn duplicate_refuses_a_start_past_the_end_of_the_clock() {
+        let asset = video(true, 15_360);
+        let segment =
+            Segment::media(&asset, source(0, 15_360), 0, Channels::Picture, Speed::ONE).unwrap();
+        assert_eq!(
+            segment.duplicate(i64::MAX).unwrap_err(),
+            Error::DurationOverflow
         );
     }
 }

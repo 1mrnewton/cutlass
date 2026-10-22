@@ -1,7 +1,7 @@
 //! AVI reader.
 //!
-//! The crate takes the file bytes and returns tracks. It does no I/O. Samples
-//! are not read yet. `docs/codecs.md` lists the containers.
+//! The crate takes the file bytes and returns tracks and samples. It does no
+//! I/O. `docs/codecs.md` lists the containers.
 
 #![deny(unsafe_code)]
 

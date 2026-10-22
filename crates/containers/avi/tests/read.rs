@@ -204,6 +204,256 @@ fn a_zero_channel_count_refuses_the_file() {
     );
 }
 
+#[test]
+fn a_header_without_a_movie_has_no_samples() {
+    let body = hdrl(1, &video_stream(b"MJPG", 4, 4, 1, 25, &[]));
+    let movie = Movie::parse(&avi(&body)).expect("header");
+    assert!(movie.tracks()[0].samples().is_empty());
+}
+
+#[test]
+fn two_frames_keep_stream_time() {
+    let header = hdrl(1, &video_stream(b"MJPG", 4, 4, 1, 25, &[]));
+    let mut frames = frame(0, b"dc", &[1, 2, 3]);
+    frames.extend(frame(0, b"dc", &[4]));
+    let movie = Movie::parse(&avi(&with_movie(&header, &frames, None))).expect("frames");
+    let samples = movie.tracks()[0].samples();
+    assert_eq!(samples[0].data, [1, 2, 3]);
+    assert_eq!(samples[0].pts.value, 0);
+    assert_eq!(samples[0].pts.timescale, scale(25));
+    assert!(samples[0].dts.is_none());
+    assert_eq!(samples[0].duration.map(|span| span.value), Some(1));
+    assert!(!samples[0].keyframe);
+    assert_eq!(samples[1].data, [4]);
+    assert_eq!(samples[1].pts.value, 1);
+    assert_eq!(samples[1].duration.map(|span| span.value), Some(1));
+    assert!(samples[1].dts.is_none());
+    assert!(!samples[1].keyframe);
+}
+
+#[test]
+fn an_uncompressed_frame_is_a_keyframe_without_an_index() {
+    let header = hdrl(1, &video_stream(b"MJPG", 4, 4, 1, 25, &[]));
+    let movie = Movie::parse(&avi(&with_movie(&header, &frame(0, b"db", &[7]), None))).expect("db");
+    let sample = &movie.tracks()[0].samples()[0];
+    assert!(sample.keyframe);
+    assert_eq!(sample.data, [7]);
+}
+
+#[test]
+fn an_index_keyframe_bit_marks_a_compressed_frame() {
+    let header = hdrl(1, &video_stream(b"MJPG", 4, 4, 1, 25, &[]));
+    let mut frames = frame(0, b"dc", &[1, 2, 3]);
+    frames.extend(frame(0, b"dc", &[4]));
+    let mut index = index_entry(*b"00dc", 0x10 | 0x100, 0xFFFF_FFFF, 3).to_vec();
+    index.extend(index_entry(*b"00dc", 0, 0, 1));
+    let movie = Movie::parse(&avi(&with_movie(&header, &frames, Some(&index)))).expect("index");
+    let samples = movie.tracks()[0].samples();
+    assert!(samples[0].keyframe);
+    assert!(!samples[1].keyframe);
+    assert_eq!(samples[1].pts.value, 1);
+}
+
+#[test]
+fn audio_bytes_are_samples() {
+    let header = hdrl(1, &audio_sized(1, 2, 48_000, 4, &[]));
+    let mut chunks = frame(0, b"wb", &[1, 2, 3, 4, 5, 6, 7, 8]);
+    chunks.extend(frame(0, b"wb", &[9, 10, 11, 12]));
+    let movie = Movie::parse(&avi(&with_movie(&header, &chunks, None))).expect("pcm");
+    let samples = movie.tracks()[0].samples();
+    assert_eq!(samples[0].pts.value, 0);
+    assert_eq!(samples[0].duration.map(|span| span.value), Some(2));
+    assert_eq!(samples[0].pts.timescale, scale(48_000));
+    assert!(samples[0].keyframe);
+    assert!(samples[0].dts.is_none());
+    assert_eq!(samples[1].pts.value, 2);
+    assert_eq!(samples[1].duration.map(|span| span.value), Some(1));
+    assert_eq!(samples[1].data, [9, 10, 11, 12]);
+}
+
+#[test]
+fn an_index_does_not_clear_an_audio_keyframe() {
+    let header = hdrl(1, &audio_sized(1, 1, 8_000, 1, &[]));
+    let index = index_entry(*b"00wb", 0, 0, 1);
+    let movie = Movie::parse(&avi(&with_movie(
+        &header,
+        &frame(0, b"wb", &[1]),
+        Some(&index),
+    )))
+    .expect("flag");
+    assert!(movie.tracks()[0].samples()[0].keyframe);
+}
+
+#[test]
+fn dw_start_shifts_the_first_sample() {
+    let mut body = stream_header(b"vids", 1, 25, 2, 0);
+    body.extend(bitmap(4, 4, b"MJPG", &[]));
+    let header = hdrl(1, &list(b"strl", &body));
+    let movie =
+        Movie::parse(&avi(&with_movie(&header, &frame(0, b"dc", &[1]), None))).expect("start");
+    assert_eq!(movie.tracks()[0].samples()[0].pts.value, 2);
+}
+
+#[test]
+fn a_reduced_clock_keeps_one_tick_per_frame() {
+    let header = hdrl(1, &video_stream(b"MJPG", 4, 4, 1000, 30_000, &[]));
+    let movie =
+        Movie::parse(&avi(&with_movie(&header, &frame(0, b"db", &[1]), None))).expect("gcd");
+    let sample = &movie.tracks()[0].samples()[0];
+    assert_eq!(movie.tracks()[0].timescale(), scale(30));
+    assert_eq!(sample.duration.map(|span| span.value), Some(1));
+    assert_eq!(sample.pts.value, 0);
+}
+
+#[test]
+fn an_odd_sized_chunk_stays_a_sample() {
+    let header = hdrl(1, &video_stream(b"MJPG", 4, 4, 1, 25, &[]));
+    let mut frames = frame(0, b"dc", &[9]);
+    frames.extend(frame(0, b"dc", &[8, 7]));
+    let movie = Movie::parse(&avi(&with_movie(&header, &frames, None))).expect("pad");
+    let samples = movie.tracks()[0].samples();
+    assert_eq!(samples[0].data, [9]);
+    assert_eq!(samples[1].data, [8, 7]);
+    assert_eq!(samples[1].pts.value, 1);
+}
+
+#[test]
+fn a_record_list_is_read() {
+    let header = hdrl(1, &video_stream(b"MJPG", 4, 4, 1, 25, &[]));
+    let frames = list(b"rec ", &frame(0, b"dc", &[3]));
+    let movie = Movie::parse(&avi(&with_movie(&header, &frames, None))).expect("rec");
+    assert_eq!(movie.tracks()[0].samples()[0].data, [3]);
+}
+
+#[test]
+fn four_nested_record_lists_are_read() {
+    let header = hdrl(1, &video_stream(b"MJPG", 4, 4, 1, 25, &[]));
+    let movie = Movie::parse(&avi(&with_movie(
+        &header,
+        &nest_rec(&frame(0, b"dc", &[3]), 4),
+        None,
+    )))
+    .expect("depth");
+    assert_eq!(movie.tracks()[0].samples()[0].data, [3]);
+}
+
+#[test]
+fn five_nested_record_lists_refuse_the_file() {
+    let header = hdrl(1, &video_stream(b"MJPG", 4, 4, 1, 25, &[]));
+    expect_err(
+        Movie::parse(&avi(&with_movie(
+            &header,
+            &nest_rec(&frame(0, b"dc", &[3]), 5),
+            None,
+        ))),
+        Error::Inconsistent("the record list is nested too deep"),
+    );
+}
+
+#[test]
+fn a_chunk_size_that_does_not_divide_refuses_the_file() {
+    let header = hdrl(1, &audio_sized(1, 1, 8_000, 4, &[]));
+    expect_err(
+        Movie::parse(&avi(&with_movie(
+            &header,
+            &frame(0, b"wb", &[1, 2, 3]),
+            None,
+        ))),
+        Error::Inconsistent("a chunk size is not a multiple of the sample size"),
+    );
+}
+
+#[test]
+fn an_index_that_does_not_match_refuses_the_file() {
+    let header = hdrl(1, &video_stream(b"MJPG", 4, 4, 1, 25, &[]));
+    let index = index_entry(*b"00dc", 0x10, 0, 9);
+    expect_err(
+        Movie::parse(&avi(&with_movie(
+            &header,
+            &frame(0, b"dc", &[1]),
+            Some(&index),
+        ))),
+        Error::Inconsistent("the index does not match the chunks"),
+    );
+}
+
+#[test]
+fn an_index_of_the_wrong_length_refuses_the_file() {
+    let header = hdrl(1, &video_stream(b"MJPG", 4, 4, 1, 25, &[]));
+    expect_err(
+        Movie::parse(&avi(&with_movie(
+            &header,
+            &frame(0, b"dc", &[1]),
+            Some(&[0; 8]),
+        ))),
+        Error::Inconsistent("the index is the wrong size"),
+    );
+}
+
+#[test]
+fn a_chunk_that_names_an_unknown_stream_refuses_the_file() {
+    let header = hdrl(1, &video_stream(b"MJPG", 4, 4, 1, 25, &[]));
+    expect_err(
+        Movie::parse(&avi(&with_movie(&header, &frame(1, b"dc", &[1]), None))),
+        Error::Inconsistent("a chunk names an unknown stream"),
+    );
+}
+
+#[test]
+fn interleaved_streams_keep_their_own_samples() {
+    let mut streams = video_stream(b"MJPG", 4, 4, 1, 10, &[]);
+    streams.extend(audio_sized(1, 1, 1_000, 2, &[]));
+    let header = hdrl(2, &streams);
+    let mut chunks = frame(0, b"dc", &[9]);
+    chunks.extend(frame(1, b"wb", &[1, 2, 3, 4]));
+    chunks.extend(frame(0, b"dc", &[8]));
+    let movie = Movie::parse(&avi(&with_movie(&header, &chunks, None))).expect("interleaved");
+    let video = movie.tracks()[0].samples();
+    let audio = movie.tracks()[1].samples();
+    assert_eq!(video[0].data, [9]);
+    assert_eq!(video[0].pts.value, 0);
+    assert_eq!(video[1].data, [8]);
+    assert_eq!(video[1].pts.value, 1);
+    assert_eq!(audio[0].data, [1, 2, 3, 4]);
+    assert_eq!(audio[0].pts.value, 0);
+    assert_eq!(audio[0].duration.map(|span| span.value), Some(2));
+    assert_eq!(audio[0].pts.timescale, scale(1_000));
+}
+
+#[test]
+fn a_palette_chunk_is_skipped() {
+    let header = hdrl(1, &video_stream(b"MJPG", 4, 4, 1, 25, &[]));
+    let mut chunks = chunk(b"00pc", &[1]);
+    chunks.extend(frame(0, b"dc", &[2, 3]));
+    let mut index = index_entry(*b"00pc", 0, 0, 1).to_vec();
+    index.extend(index_entry(*b"00dc", 0x10, 99, 2));
+    let movie = Movie::parse(&avi(&with_movie(&header, &chunks, Some(&index)))).expect("palette");
+    let samples = movie.tracks()[0].samples();
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].data, [2, 3]);
+    assert!(samples[0].keyframe);
+}
+
+#[test]
+fn a_second_movie_list_refuses_the_file() {
+    let mut body = with_movie(&hdrl(0, &[]), &[], None);
+    body.extend(list(b"movi", &[]));
+    expect_err(
+        Movie::parse(&avi(&body)),
+        Error::Inconsistent("the movie list is repeated"),
+    );
+}
+
+#[test]
+fn a_second_index_refuses_the_file() {
+    let mut body = with_movie(&hdrl(0, &[]), &[], Some(&[]));
+    body.extend(chunk(b"idx1", &[]));
+    expect_err(
+        Movie::parse(&avi(&body)),
+        Error::Inconsistent("the index is repeated"),
+    );
+}
+
 fn avi(body: &[u8]) -> Vec<u8> {
     let mut data = Vec::new();
     data.extend_from_slice(b"AVI ");
@@ -243,11 +493,54 @@ fn audio_stream(tag: u16, channels: u16, rate: u32, extra: &[u8]) -> Vec<u8> {
 }
 
 fn strh(kind: &[u8; 4], scale: u32, rate: u32) -> Vec<u8> {
+    stream_header(kind, scale, rate, 0, 0)
+}
+
+fn stream_header(kind: &[u8; 4], scale: u32, rate: u32, start: u32, sample_size: u32) -> Vec<u8> {
     let mut data = vec![0; 48];
     data[..4].copy_from_slice(kind);
     data[20..24].copy_from_slice(&scale.to_le_bytes());
     data[24..28].copy_from_slice(&rate.to_le_bytes());
+    data[28..32].copy_from_slice(&start.to_le_bytes());
+    data[44..48].copy_from_slice(&sample_size.to_le_bytes());
     chunk(b"strh", &data)
+}
+
+fn audio_sized(tag: u16, channels: u16, rate: u32, sample_size: u32, extra: &[u8]) -> Vec<u8> {
+    let mut body = stream_header(b"auds", 1, rate, 0, sample_size);
+    body.extend(wave(tag, channels, rate, extra));
+    list(b"strl", &body)
+}
+
+fn with_movie(header: &[u8], frames: &[u8], index: Option<&[u8]>) -> Vec<u8> {
+    let mut body = header.to_vec();
+    body.extend(list(b"movi", frames));
+    if let Some(index) = index {
+        body.extend(chunk(b"idx1", index));
+    }
+    body
+}
+
+fn frame(stream: u8, suffix: &[u8; 2], data: &[u8]) -> Vec<u8> {
+    let id = [b'0', b'0' + stream, suffix[0], suffix[1]];
+    chunk(&id, data)
+}
+
+fn index_entry(id: [u8; 4], flags: u32, offset: u32, size: u32) -> [u8; 16] {
+    let mut out = [0; 16];
+    out[..4].copy_from_slice(&id);
+    out[4..8].copy_from_slice(&flags.to_le_bytes());
+    out[8..12].copy_from_slice(&offset.to_le_bytes());
+    out[12..16].copy_from_slice(&size.to_le_bytes());
+    out
+}
+
+fn nest_rec(body: &[u8], depth: u32) -> Vec<u8> {
+    let mut data = body.to_vec();
+    for _ in 0..depth {
+        data = list(b"rec ", &data);
+    }
+    data
 }
 
 fn bitmap(width: i32, height: i32, compression: &[u8; 4], extra: &[u8]) -> Vec<u8> {

@@ -1,8 +1,10 @@
-//! AVI headers and streams.
+//! AVI headers, streams, and samples.
 
 use std::num::NonZeroU32;
 
-use cutlass_core::{AudioCodec, AudioStreamConfig, VideoCodec, VideoStreamConfig};
+use cutlass_core::{
+    AudioCodec, AudioStreamConfig, Packet, Timestamp, VideoCodec, VideoStreamConfig,
+};
 
 use crate::Error;
 use crate::riff::{self, Chunk, Cursor};
@@ -17,12 +19,18 @@ const STRH: [u8; 4] = *b"strh";
 const STRF: [u8; 4] = *b"strf";
 const VIDS: [u8; 4] = *b"vids";
 const AUDS: [u8; 4] = *b"auds";
+const MOVI: [u8; 4] = *b"movi";
+const REC: [u8; 4] = *b"rec ";
+const IDX1: [u8; 4] = *b"idx1";
 
 const MAIN_HEADER: usize = 56;
 const STREAM_HEADER: usize = 48;
 const BITMAP_HEADER: usize = 40;
 const WAVE_OLD: usize = 16;
+const INDEX_RECORD: usize = 16;
 const MAX_STREAMS: u32 = 100;
+const MAX_REC_DEPTH: u32 = 4;
+const KEYFRAME: u32 = 0x0000_0010;
 
 /// A parsed AVI file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,12 +71,17 @@ impl Movie {
     }
 }
 
-/// One stream.
+/// One stream. Samples are in the order the movie list stores them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Track {
     number: u32,
     timescale: NonZeroU32,
+    /// Ticks of one sample after the clock is reduced.
+    unit_ticks: i64,
+    sample_size: u32,
+    start: u32,
     kind: Kind,
+    samples: Vec<Packet>,
 }
 
 impl Track {
@@ -85,6 +98,11 @@ impl Track {
     /// Codec, and the settings a decoder needs.
     pub fn kind(&self) -> &Kind {
         &self.kind
+    }
+
+    /// Samples in stored order. `dts` is always none.
+    pub fn samples(&self) -> &[Packet] {
+        &self.samples
     }
 }
 
@@ -103,21 +121,50 @@ pub enum Kind {
 
 fn parse_form(file: &[u8], riff: &Chunk<'_>) -> Result<Movie, Error> {
     let mut cursor = riff::children(file, riff)?;
-    let mut header = None;
+    let mut tracks = None;
+    let mut movi = None;
+    let mut index = None;
     while let Some(chunk) = cursor.next_chunk()? {
-        if chunk.id != LIST {
-            continue;
+        match chunk.id {
+            LIST => {
+                let (kind, _) = riff::list_parts(&chunk)?;
+                if kind == HDRL {
+                    if tracks.is_some() {
+                        return Err(Error::Inconsistent("the header is repeated"));
+                    }
+                    tracks = Some(parse_header(file, &chunk)?);
+                } else if kind == MOVI {
+                    if movi.is_some() {
+                        return Err(Error::Inconsistent("the movie list is repeated"));
+                    }
+                    movi = Some(chunk);
+                }
+            }
+            IDX1 => {
+                if index.is_some() {
+                    return Err(Error::Inconsistent("the index is repeated"));
+                }
+                index = Some(chunk.data);
+            }
+            _ => {}
         }
-        let (kind, _) = riff::list_parts(&chunk)?;
-        if kind != HDRL {
-            continue;
-        }
-        if header.is_some() {
-            return Err(Error::Inconsistent("the header is repeated"));
-        }
-        header = Some(parse_header(file, &chunk)?);
     }
-    let tracks = header.ok_or(Error::Inconsistent("the file has no header"))?;
+    let mut tracks = tracks.ok_or(Error::Inconsistent("the file has no header"))?;
+    let indexed = index.is_some();
+    let chunks = match &movi {
+        Some(movi) => collect_samples(file, movi)?,
+        None => Vec::new(),
+    };
+    let entries = match index {
+        Some(data) => parse_index(data)?,
+        None => Vec::new(),
+    };
+    let index = if indexed {
+        Some(entries.as_slice())
+    } else {
+        None
+    };
+    assign(&mut tracks, &chunks, index)?;
     Ok(Movie { tracks })
 }
 
@@ -189,7 +236,9 @@ fn parse_stream(file: &[u8], list: &Chunk<'_>, number: u32) -> Result<Track, Err
     let handler = fourcc_at(header, 4)?;
     let scale = u32_at(header, 20)?;
     let rate = u32_at(header, 24)?;
-    let timescale = timescale_of(scale, rate)?;
+    let start = u32_at(header, 28)?;
+    let sample_size = u32_at(header, 44)?;
+    let clock = clock(scale, rate)?;
     let kind = match &stream_type {
         kind if *kind == VIDS => video_kind(format)?,
         kind if *kind == AUDS => audio_kind(format)?,
@@ -197,8 +246,12 @@ fn parse_stream(file: &[u8], list: &Chunk<'_>, number: u32) -> Result<Track, Err
     };
     Ok(Track {
         number,
-        timescale,
+        timescale: clock.timescale,
+        unit_ticks: clock.unit_ticks,
+        sample_size,
+        start,
         kind,
+        samples: Vec::new(),
     })
 }
 
@@ -345,14 +398,178 @@ fn audio_codec(tag: u16) -> Option<AudioCodec> {
     }
 }
 
-fn timescale_of(scale: u32, rate: u32) -> Result<NonZeroU32, Error> {
+struct Clock {
+    timescale: NonZeroU32,
+    unit_ticks: i64,
+}
+
+fn clock(scale: u32, rate: u32) -> Result<Clock, Error> {
     if scale == 0 || rate == 0 {
         return Err(Error::Inconsistent("the stream scale or rate is zero"));
     }
-    let timescale = rate / gcd(scale, rate);
-    match NonZeroU32::new(timescale) {
-        Some(timescale) => Ok(timescale),
-        None => Err(Error::Inconsistent("the stream scale or rate is zero")),
+    let divisor = gcd(scale, rate);
+    let timescale = match NonZeroU32::new(rate / divisor) {
+        Some(timescale) => timescale,
+        None => return Err(Error::Inconsistent("the stream scale or rate is zero")),
+    };
+    Ok(Clock {
+        timescale,
+        unit_ticks: i64::from(scale / divisor),
+    })
+}
+
+struct SampleChunk<'a> {
+    id: [u8; 4],
+    stream: u32,
+    suffix: [u8; 2],
+    data: &'a [u8],
+}
+
+struct IndexEntry {
+    id: [u8; 4],
+    keyframe: bool,
+    size: u32,
+}
+
+fn collect_samples<'a>(file: &'a [u8], movi: &Chunk<'a>) -> Result<Vec<SampleChunk<'a>>, Error> {
+    let mut out = Vec::new();
+    collect_list(file, movi, 0, &mut out)?;
+    Ok(out)
+}
+
+fn collect_list<'a>(
+    file: &'a [u8],
+    list: &Chunk<'a>,
+    depth: u32,
+    out: &mut Vec<SampleChunk<'a>>,
+) -> Result<(), Error> {
+    let mut cursor = riff::children(file, list)?;
+    while let Some(chunk) = cursor.next_chunk()? {
+        if let Some((stream, suffix)) = sample_id(chunk.id) {
+            out.push(SampleChunk {
+                id: chunk.id,
+                stream,
+                suffix,
+                data: chunk.data,
+            });
+            continue;
+        }
+        if chunk.id != LIST {
+            continue;
+        }
+        let (kind, _) = riff::list_parts(&chunk)?;
+        if kind != REC {
+            continue;
+        }
+        if depth == MAX_REC_DEPTH {
+            return Err(Error::Inconsistent("the record list is nested too deep"));
+        }
+        collect_list(file, &chunk, depth + 1, out)?;
+    }
+    Ok(())
+}
+
+fn sample_id(id: [u8; 4]) -> Option<(u32, [u8; 2])> {
+    let [tens, ones, left, right] = id;
+    if !tens.is_ascii_digit() || !ones.is_ascii_digit() {
+        return None;
+    }
+    let suffix = [left, right];
+    if !matches!(suffix, [b'd', b'b'] | [b'd', b'c'] | [b'w', b'b']) {
+        return None;
+    }
+    let stream = u32::from(tens - b'0') * 10 + u32::from(ones - b'0');
+    Some((stream, suffix))
+}
+
+fn parse_index(data: &[u8]) -> Result<Vec<IndexEntry>, Error> {
+    if !data.len().is_multiple_of(INDEX_RECORD) {
+        return Err(Error::Inconsistent("the index is the wrong size"));
+    }
+    let mut entries = Vec::new();
+    for record in data.chunks(INDEX_RECORD) {
+        let id = [record[0], record[1], record[2], record[3]];
+        if sample_id(id).is_none() {
+            continue;
+        }
+        entries.push(IndexEntry {
+            id,
+            keyframe: u32_at(record, 4)? & KEYFRAME != 0,
+            size: u32_at(record, 12)?,
+        });
+    }
+    Ok(entries)
+}
+
+fn assign(
+    tracks: &mut [Track],
+    chunks: &[SampleChunk<'_>],
+    index: Option<&[IndexEntry]>,
+) -> Result<(), Error> {
+    if let Some(entries) = index {
+        if entries.len() != chunks.len() {
+            return Err(Error::Inconsistent("the index does not match the chunks"));
+        }
+        for (entry, chunk) in entries.iter().zip(chunks) {
+            let size = usize::try_from(entry.size).map_err(|_| Error::TooLarge)?;
+            if entry.id != chunk.id || size != chunk.data.len() {
+                return Err(Error::Inconsistent("the index does not match the chunks"));
+            }
+        }
+    }
+    let mut next = Vec::with_capacity(tracks.len());
+    for track in tracks.iter() {
+        let start = i64::from(track.start)
+            .checked_mul(track.unit_ticks)
+            .ok_or(Error::TooLarge)?;
+        next.push(start);
+    }
+    for (index_n, chunk) in chunks.iter().enumerate() {
+        let stream = usize::try_from(chunk.stream).map_err(|_| Error::TooLarge)?;
+        if stream >= tracks.len() {
+            return Err(Error::Inconsistent("a chunk names an unknown stream"));
+        }
+        let sample_size = tracks[stream].sample_size;
+        let unit = tracks[stream].unit_ticks;
+        let timescale = tracks[stream].timescale;
+        let units = i64::try_from(chunk_units(chunk.data.len(), sample_size)?)
+            .map_err(|_| Error::TooLarge)?;
+        let duration = units.checked_mul(unit).ok_or(Error::TooLarge)?;
+        let pts = next[stream];
+        next[stream] = pts.checked_add(duration).ok_or(Error::TooLarge)?;
+        let indexed = index.map(|entries| entries[index_n].keyframe);
+        tracks[stream].samples.push(Packet {
+            data: chunk.data.to_vec(),
+            pts: Timestamp::new(pts, timescale),
+            dts: None,
+            duration: Some(Timestamp::new(duration, timescale)),
+            keyframe: is_keyframe(chunk.suffix, indexed),
+        });
+    }
+    Ok(())
+}
+
+fn chunk_units(len: usize, sample_size: u32) -> Result<u64, Error> {
+    if sample_size == 0 {
+        return Ok(1);
+    }
+    let len = u64::try_from(len).map_err(|_| Error::TooLarge)?;
+    let sample_size = u64::from(sample_size);
+    if !len.is_multiple_of(sample_size) {
+        return Err(Error::Inconsistent(
+            "a chunk size is not a multiple of the sample size",
+        ));
+    }
+    Ok(len / sample_size)
+}
+
+fn is_keyframe(suffix: [u8; 2], indexed: Option<bool>) -> bool {
+    if suffix == [b'w', b'b'] {
+        return true;
+    }
+    match indexed {
+        Some(flag) => flag,
+        None => suffix == [b'd', b'b'],
     }
 }
 

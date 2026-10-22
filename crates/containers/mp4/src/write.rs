@@ -26,7 +26,7 @@ impl MovieFile {
         }
     }
 
-    /// Add an H.264 track. Samples are in decode order.
+    /// Add an H.264 or HEVC track. Samples are in decode order.
     pub fn add_video(
         &mut self,
         timescale: NonZeroU32,
@@ -116,8 +116,8 @@ struct Sample {
 fn visual_boxes(codec: VideoCodec) -> Result<([u8; 4], [u8; 4]), Error> {
     match codec {
         VideoCodec::H264 => Ok((*b"avc1", *b"avcC")),
-        VideoCodec::Hevc
-        | VideoCodec::Vp8
+        VideoCodec::Hevc => Ok((*b"hvc1", *b"hvcC")),
+        VideoCodec::Vp8
         | VideoCodec::Vp9
         | VideoCodec::Av1
         | VideoCodec::Mpeg2

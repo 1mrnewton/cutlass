@@ -117,6 +117,29 @@ fn an_h264_track_round_trips() {
 }
 
 #[test]
+fn an_hevc_track_round_trips() {
+    let ticks = scale(1_000);
+    let mut config = h264(64, 64);
+    config.codec = VideoCodec::Hevc;
+    config.config_record = vec![1, 2, 3, 4];
+    let file = write_video(
+        1_000,
+        1_000,
+        config,
+        vec![packet(ticks, 0, 0, 40, &[9], true)],
+    )
+    .expect("hevc");
+    let movie = Movie::parse(&file).expect("read");
+    let Kind::Video(stored) = movie.tracks()[0].kind() else {
+        panic!("video track");
+    };
+    assert_eq!(stored.codec, VideoCodec::Hevc);
+    assert_eq!((stored.width, stored.height), (64, 64));
+    assert_eq!(stored.config_record, [1, 2, 3, 4]);
+    assert_eq!(movie.tracks()[0].samples()[0].data, [9]);
+}
+
+#[test]
 fn a_duration_change_is_kept() {
     let ticks = scale(1_000);
     let file = write_video(

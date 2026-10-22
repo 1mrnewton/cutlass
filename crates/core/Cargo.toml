@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Types shared across Cutlass crates: timestamps, codecs, packets, and frames."
+description = "Types shared across Cutlass crates: timestamps, codecs, packets, frames, and stills."
 
 [lints]
 workspace = true

@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Probes a file and chooses a decoder."
+description = "Probes a file, chooses a decoder, and asks Android and Linux which codecs the device has."
 
 [dependencies]
 cutlass-core.workspace = true
@@ -15,6 +15,13 @@ thiserror.workspace = true
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 cutlass-videotoolbox.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cutlass-nvcodec.workspace = true
+cutlass-vaapi.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+cutlass-mediacodec.workspace = true
 
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
 cutlass-test-fixtures.workspace = true

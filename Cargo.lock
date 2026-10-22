@@ -805,8 +805,11 @@ name = "cutlass-media"
 version = "0.1.0"
 dependencies = [
  "cutlass-core",
+ "cutlass-mediacodec",
  "cutlass-mp4",
+ "cutlass-nvcodec",
  "cutlass-test-fixtures",
+ "cutlass-vaapi",
  "cutlass-videotoolbox",
  "thiserror 2.0.21",
 ]

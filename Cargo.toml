@@ -28,9 +28,11 @@ cutlass-color = { path = "crates/color" }
 cutlass-compose = { path = "crates/compose" }
 cutlass-core = { path = "crates/core" }
 cutlass-media = { path = "crates/media" }
+cutlass-mediacodec = { path = "crates/codecs/native/mediacodec" }
 cutlass-output = { path = "crates/output" }
 cutlass-playback = { path = "crates/playback" }
 cutlass-mp4 = { path = "crates/containers/mp4" }
+cutlass-nvcodec = { path = "crates/codecs/native/nvcodec" }
 cutlass-project = { path = "crates/project" }
 eframe = { version = "0.37.0", default-features = false, features = [
     "accesskit",
@@ -44,6 +46,7 @@ eframe = { version = "0.37.0", default-features = false, features = [
 ] }
 uuid = { version = "1.11.0", features = ["v4"] }
 cutlass-test-fixtures = { path = "crates/testing/fixtures" }
+cutlass-vaapi = { path = "crates/codecs/native/vaapi" }
 cutlass-videotoolbox = { path = "crates/codecs/native/videotoolbox" }
 
 objc2 = "0.6.5"

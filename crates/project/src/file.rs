@@ -307,6 +307,8 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
         },
         visible: segment.visible(),
         volume: segment.volume(),
+        fade_in: segment.fade_in(),
+        fade_out: segment.fade_out(),
         transform: transform_doc(segment.transform()),
         keyframes: segment.keyframes().iter().copied().map(key_doc).collect(),
     }
@@ -330,6 +332,7 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
     segment.assign(id);
     segment.set_visible(document.visible);
     segment.set_volume(document.volume)?;
+    segment.set_fades(document.fade_in, document.fade_out)?;
     segment.set_transform(transform_from(&document.transform)?);
     for key in &document.keyframes {
         segment.push_keyframe(key_from(key)?)?;
@@ -489,6 +492,10 @@ fn easing_from(name: EasingName) -> Easing {
 
 fn easing_is_linear(easing: &EasingName) -> bool {
     matches!(easing, EasingName::Linear)
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 fn stamp_doc(time: Timestamp) -> Stamp {
@@ -682,6 +689,10 @@ struct SegmentDoc {
     speed: SpeedDoc,
     visible: bool,
     volume: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    fade_in: i64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    fade_out: i64,
     transform: TransformDoc,
     keyframes: Vec<KeyDoc>,
 }
@@ -1026,6 +1037,39 @@ mod tests {
                 json!("bounce");
         });
         assert_unreadable(&unknown);
+    }
+
+    #[test]
+    fn a_missing_fade_is_zero_and_a_long_one_is_refused() {
+        let (project, value) = cut_value();
+        let text = project.to_json().expect("save");
+        assert!(!text.contains("fade"));
+        let loaded = Project::from_json(&text).expect("load");
+        let clip = &loaded.timeline().tracks()[1].segments()[0];
+        assert_eq!(clip.fade_in(), 0);
+        assert_eq!(clip.fade_out(), 0);
+
+        let faded = edit(&value, |value| {
+            value["timeline"]["tracks"][1]["segments"][0]["fade_in"] = json!(100_000);
+        });
+        let loaded = Project::from_json(&faded).expect("load");
+        assert_eq!(
+            loaded.timeline().tracks()[1].segments()[0].fade_in(),
+            100_000
+        );
+        let saved = loaded.to_json().expect("save");
+        assert!(saved.contains("\"fade_in\": 100000"));
+        assert!(!saved.contains("fade_out"));
+        assert_same(&loaded, &Project::from_json(&saved).expect("reload"));
+
+        let negative = edit(&value, |value| {
+            value["timeline"]["tracks"][1]["segments"][0]["fade_out"] = json!(-1);
+        });
+        refuse(&negative, Error::NegativeTime);
+        let longer = edit(&value, |value| {
+            value["timeline"]["tracks"][1]["segments"][0]["fade_in"] = json!(500_001);
+        });
+        refuse(&longer, Error::FadeOutOfRange);
     }
 
     #[test]

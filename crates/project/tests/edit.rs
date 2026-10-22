@@ -1819,3 +1819,145 @@ fn easing_changes_the_blend_and_undo_restores_it() -> Result<(), Error> {
     assert_eq!(blend(&cut)?, KeyframeValue::Opacity(0.25));
     Ok(())
 }
+
+#[test]
+fn fades_scale_the_gain_and_undo_clears_them() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    let gain = |cut: &Cut, at: i64| -> Result<f64, Error> {
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .gain(at)
+    };
+    assert_eq!(gain(&cut, 250_000)?, 1.0);
+    assert_eq!(
+        run(
+            &mut cut,
+            Command::SetFades {
+                segment: id,
+                fade_in: 500_000,
+                fade_out: 500_000,
+            },
+        )?,
+        Outcome::Unchanged
+    );
+    assert_eq!(gain(&cut, 0)?, 0.0);
+    assert_eq!(gain(&cut, 250_000)?, 0.5);
+    assert_eq!(gain(&cut, 750_000)?, 0.5);
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(gain(&cut, 250_000)?, 1.0);
+    cut.history.redo(&mut cut.project)?;
+    assert_eq!(gain(&cut, 250_000)?, 0.5);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetFades {
+                segment: id,
+                fade_in: 1_000_001,
+                fade_out: 0,
+            },
+        ),
+        Error::FadeOutOfRange,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetFades {
+                segment: id,
+                fade_in: -1,
+                fade_out: 0,
+            },
+        ),
+        Error::NegativeTime,
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .fade_in(),
+        500_000
+    );
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetFades {
+                segment: missing,
+                fade_in: 0,
+                fade_out: 0,
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
+    Ok(())
+}
+
+#[test]
+fn a_split_keeps_each_fade_on_its_edge() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    run(
+        &mut cut,
+        Command::SetFades {
+            segment: id,
+            fade_in: 600_000,
+            fade_out: 100_000,
+        },
+    )?;
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: id,
+            at: 400_000,
+        },
+    )?);
+    let left = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(left.fade_in(), 400_000);
+    assert_eq!(left.fade_out(), 0);
+    let right = cut
+        .project
+        .timeline()
+        .segment(right)
+        .ok_or(Error::UnknownSegment(right))?;
+    assert_eq!(right.fade_in(), 200_000);
+    assert_eq!(right.fade_out(), 100_000);
+    Ok(())
+}
+
+#[test]
+fn a_faster_clip_clamps_its_fades() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    run(
+        &mut cut,
+        Command::SetFades {
+            segment: id,
+            fade_in: 800_000,
+            fade_out: 700_000,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetSpeed {
+            segment: id,
+            speed: Speed::new(2, 1)?,
+        },
+    )?;
+    let clip = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(clip.timeline().duration().value, 500_000);
+    assert_eq!(clip.fade_in(), 500_000);
+    assert_eq!(clip.fade_out(), 500_000);
+    Ok(())
+}

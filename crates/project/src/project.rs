@@ -180,6 +180,16 @@ impl Project {
                 self.timeline.segment_mut(segment)?.set_volume(volume)?;
                 Ok(Outcome::Unchanged)
             }
+            Command::SetFades {
+                segment,
+                fade_in,
+                fade_out,
+            } => {
+                self.timeline
+                    .segment_mut(segment)?
+                    .set_fades(fade_in, fade_out)?;
+                Ok(Outcome::Unchanged)
+            }
             Command::SetVisible { segment, visible } => {
                 self.timeline.segment_mut(segment)?.set_visible(visible);
                 Ok(Outcome::Unchanged)
@@ -428,6 +438,8 @@ impl Project {
 
     fn split_now(&mut self, id: SegmentId, at: i64) -> Result<SegmentId, Error> {
         let segment = self.timeline.segment(id).ok_or(Error::UnknownSegment(id))?;
+        let fade_in = segment.fade_in();
+        let fade_out = segment.fade_out();
         let range = segment.timeline();
         if at <= range.start().value || at >= range.end().value {
             return Err(Error::SplitOutside);
@@ -532,6 +544,12 @@ impl Project {
                 right.set_start(right_start)?;
             }
         }
+        let (left_in, left_out, right_in, right_out) =
+            crate::segment::parted_fades(fade_in, fade_out, left_dur, right_dur);
+        self.timeline
+            .segment_mut(id)?
+            .set_fades(left_in, left_out)?;
+        right.set_fades(right_in, right_out)?;
         self.timeline.track_mut(from)?.insert(right)?;
         if on_main && self.settings.magnet() {
             self.pack_main()?;

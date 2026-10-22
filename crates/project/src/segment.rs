@@ -205,6 +205,8 @@ pub struct Segment {
     speed: Speed,
     visible: bool,
     volume: f64,
+    fade_in: i64,
+    fade_out: i64,
     transform: Transform,
     keyframes: Vec<Keyframe>,
 }
@@ -261,6 +263,8 @@ impl Segment {
             speed,
             visible: true,
             volume: 1.0,
+            fade_in: 0,
+            fade_out: 0,
             transform: Transform::IDENTITY,
             keyframes: Vec::new(),
         }
@@ -307,6 +311,13 @@ impl Segment {
             return Err(Error::KeyframeOutOfRange);
         }
         self.timeline = TimeRange::new(self.timeline.start(), duration)?;
+        let span = duration.value;
+        if self.fade_in > span {
+            self.fade_in = span;
+        }
+        if self.fade_out > span {
+            self.fade_out = span;
+        }
         Ok(())
     }
 
@@ -317,7 +328,7 @@ impl Segment {
 
     /// A copy with no id, starting at `start` microseconds on the sequence.
     ///
-    /// The source, channels, speed, visible flag, volume, transform, and
+    /// The source, channels, speed, visible flag, volume, fades, transform, and
     /// keyframes stay. Place assigns the id. A negative start is refused, and
     /// so is a start that would overflow the sequence clock.
     pub fn duplicate(&self, start: i64) -> Result<Self, Error> {
@@ -360,6 +371,23 @@ impl Segment {
     pub fn set_volume(&mut self, volume: f64) -> Result<(), Error> {
         check_volume(volume)?;
         self.volume = volume;
+        Ok(())
+    }
+
+    /// Sets fade in and fade out, in microseconds from the segment edges.
+    ///
+    /// `0` is no fade. A negative duration, or one longer than the segment,
+    /// changes nothing.
+    pub(crate) fn set_fades(&mut self, fade_in: i64, fade_out: i64) -> Result<(), Error> {
+        if fade_in < 0 || fade_out < 0 {
+            return Err(Error::NegativeTime);
+        }
+        let duration = self.timeline.duration().value;
+        if fade_in > duration || fade_out > duration {
+            return Err(Error::FadeOutOfRange);
+        }
+        self.fade_in = fade_in;
+        self.fade_out = fade_out;
         Ok(())
     }
 
@@ -460,6 +488,14 @@ impl Segment {
         self.volume
     }
 
+    pub const fn fade_in(&self) -> i64 {
+        self.fade_in
+    }
+
+    pub const fn fade_out(&self) -> i64 {
+        self.fade_out
+    }
+
     pub const fn transform(&self) -> Transform {
         self.transform
     }
@@ -515,6 +551,24 @@ impl Segment {
             later.value(),
             earlier.easing().curve(portion),
         ))
+    }
+
+    /// The linear gain at `offset_us`, including the fades.
+    ///
+    /// The sampled volume is multiplied by the fade-in ramp and the fade-out
+    /// ramp. A fade of `0` leaves that edge at full gain. A negative offset,
+    /// or one past the segment, returns no value.
+    pub fn gain(&self, offset_us: i64) -> Result<f64, Error> {
+        let KeyframeValue::Volume(level) = self.sample(KeyframeProperty::Volume, offset_us)? else {
+            return Ok(self.volume);
+        };
+        Ok(level
+            * fade_ramps(
+                offset_us,
+                self.timeline.duration().value,
+                self.fade_in,
+                self.fade_out,
+            ))
     }
 }
 
@@ -650,6 +704,41 @@ fn blend(from: KeyframeValue, to: KeyframeValue, portion: f64) -> KeyframeValue 
 
 fn lerp(from: f64, to: f64, portion: f64) -> f64 {
     from + (to - from) * portion
+}
+
+fn fade_ramps(offset: i64, duration: i64, fade_in: i64, fade_out: i64) -> f64 {
+    let into = if fade_in <= 0 || offset >= fade_in {
+        1.0
+    } else {
+        offset as f64 / fade_in as f64
+    };
+    let out_start = duration.saturating_sub(fade_out);
+    let out = if fade_out <= 0 || offset <= out_start {
+        1.0
+    } else {
+        (duration - offset) as f64 / fade_out as f64
+    };
+    into * out
+}
+
+/// How a split divides the two fades. The left pair is first.
+pub(crate) fn parted_fades(
+    fade_in: i64,
+    fade_out: i64,
+    left: i64,
+    right: i64,
+) -> (i64, i64, i64, i64) {
+    (
+        fade_in.min(left),
+        crossed(fade_out, right).min(left),
+        crossed(fade_in, left).min(right),
+        fade_out.min(right),
+    )
+}
+
+/// The part of a fade that continues past `edge`. None, when the fade ends first.
+fn crossed(fade: i64, edge: i64) -> i64 {
+    if fade > edge { fade - edge } else { 0 }
 }
 
 #[cfg(test)]
@@ -894,6 +983,7 @@ mod tests {
         .unwrap();
         segment.set_visible(false);
         segment.set_volume(0.25).unwrap();
+        segment.set_fades(100_000, 50_000).unwrap();
         let transform = Transform::new((0.1, -0.2), (2.0, 3.0), 15.0, 0.4, true, false).unwrap();
         segment.set_transform(transform);
         segment
@@ -915,6 +1005,8 @@ mod tests {
         assert_eq!(copy.speed(), Speed::new(2, 1).unwrap());
         assert!(!copy.visible());
         assert_eq!(copy.volume(), 0.25);
+        assert_eq!(copy.fade_in(), 100_000);
+        assert_eq!(copy.fade_out(), 50_000);
         assert_eq!(copy.transform(), transform);
         assert_eq!(copy.keyframes(), segment.keyframes());
         assert_eq!(copy.asset_id(), segment.asset_id());
@@ -1138,6 +1230,51 @@ mod tests {
                 .sample(KeyframeProperty::Opacity, 1_000_000)
                 .unwrap(),
             KeyframeValue::Opacity(1.0)
+        );
+    }
+
+    #[test]
+    fn fades_ramp_the_gain_and_a_shorter_segment_clamps_them() {
+        let mut segment = one_second();
+        assert_eq!(segment.gain(0).unwrap(), 1.0);
+        assert_eq!(segment.gain(1_000_000).unwrap(), 1.0);
+        segment.set_fades(500_000, 500_000).unwrap();
+        assert_eq!(segment.gain(0).unwrap(), 0.0);
+        assert_eq!(segment.gain(250_000).unwrap(), 0.5);
+        assert_eq!(segment.gain(500_000).unwrap(), 1.0);
+        assert_eq!(segment.gain(750_000).unwrap(), 0.5);
+        assert_eq!(segment.gain(1_000_000).unwrap(), 0.0);
+        segment.set_fades(1_000_000, 1_000_000).unwrap();
+        assert_eq!(segment.gain(500_000).unwrap(), 0.25);
+        assert_eq!(
+            segment.set_fades(1_000_001, 0).unwrap_err(),
+            Error::FadeOutOfRange
+        );
+        assert_eq!(segment.set_fades(-1, 0).unwrap_err(), Error::NegativeTime);
+        assert_eq!(segment.fade_in(), 1_000_000);
+        segment.set_volume(0.5).unwrap();
+        segment.set_fades(500_000, 0).unwrap();
+        assert_eq!(segment.gain(250_000).unwrap(), 0.25);
+        segment
+            .push_keyframe(Keyframe::new(0, KeyframeValue::Volume(0.0)).unwrap())
+            .unwrap();
+        segment
+            .push_keyframe(Keyframe::new(1_000_000, KeyframeValue::Volume(1.0)).unwrap())
+            .unwrap();
+        segment.set_fades(1_000_000, 0).unwrap();
+        assert_eq!(segment.gain(500_000).unwrap(), 0.25);
+        let mut shorter = one_second();
+        shorter.set_fades(800_000, 700_000).unwrap();
+        shorter.set_timeline_duration(400_000).unwrap();
+        assert_eq!(shorter.fade_in(), 400_000);
+        assert_eq!(shorter.fade_out(), 400_000);
+        assert_eq!(
+            parted_fades(600_000, 100_000, 400_000, 600_000),
+            (400_000, 0, 200_000, 100_000)
+        );
+        assert_eq!(
+            parted_fades(200_000, 300_000, 500_000, 500_000),
+            (200_000, 0, 0, 300_000)
         );
     }
 }

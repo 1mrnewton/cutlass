@@ -65,6 +65,8 @@ pub enum Error {
     Opacity,
     #[error("volume is negative")]
     NegativeVolume,
+    #[error("fade is longer than the segment")]
+    FadeOutOfRange,
     #[error("value is not finite")]
     NonFinite,
     #[error("scale must be positive")]

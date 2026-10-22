@@ -68,6 +68,12 @@ pub enum Command {
         segment: SegmentId,
         volume: f64,
     },
+    /// Fade in and fade out, in microseconds. `0` is no fade.
+    SetFades {
+        segment: SegmentId,
+        fade_in: i64,
+        fade_out: i64,
+    },
     /// Shown when on. It does not move the segment.
     SetVisible {
         segment: SegmentId,

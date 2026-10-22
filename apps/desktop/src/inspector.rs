@@ -7,7 +7,7 @@ use eframe::egui::{self, Key, RichText, ScrollArea, Sense, TextEdit, UiBuilder, 
 
 use cutlass_project::{
     AspectRatio, Channels, ColorSpace, Command, FrameRate, Keyframe, KeyframeProperty,
-    KeyframeValue, Project, SegmentId, TrackKind, Transform,
+    KeyframeValue, Project, Segment, SegmentId, TrackKind, Transform,
 };
 
 use crate::icons::{self, Icon};
@@ -707,6 +707,36 @@ fn parse_number(text: &str) -> Option<f64> {
     value.is_finite().then_some(value)
 }
 
+fn pace_text(segment: &Segment) -> String {
+    let Some(curve) = segment.curve() else {
+        let speed = segment.speed();
+        return format!("{}/{}", speed.numerator(), speed.denominator().get());
+    };
+    curve
+        .points()
+        .iter()
+        .map(|point| {
+            let (numerator, denominator) = point.at();
+            let speed = point.speed();
+            format!(
+                "{} {}/{}",
+                whole_or_fraction(numerator, denominator),
+                speed.numerator(),
+                speed.denominator().get()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn whole_or_fraction(numerator: u32, denominator: u32) -> String {
+    if denominator == 1 {
+        numerator.to_string()
+    } else {
+        format!("{numerator}/{denominator}")
+    }
+}
+
 fn track_kind(project: &Project, id: SegmentId) -> Option<TrackKind> {
     project
         .timeline()
@@ -730,7 +760,6 @@ fn describe(
     let segment = track.segments().iter().find(|segment| segment.id() == id)?;
     let asset = project.asset(segment.asset_id()?)?;
     let range = segment.timeline();
-    let speed = segment.speed();
     let say = |phrase| words::say(language, phrase);
     let mut rows = vec![
         (say(Phrase::Name), file_name(asset.source()).to_string()),
@@ -742,10 +771,7 @@ fn describe(
             say(Phrase::Duration),
             card_time(range.duration().value, range.duration().timescale.get()),
         ),
-        (
-            say(Phrase::Speed),
-            format!("{}/{}", speed.numerator(), speed.denominator().get()),
-        ),
+        (say(Phrase::Speed), pace_text(segment)),
     ];
     if segment.channels() != Channels::Picture {
         rows.push((say(Phrase::Volume), number(segment.volume())));
@@ -849,7 +875,8 @@ mod tests {
     use cutlass_core::Timestamp;
     use cutlass_project::{
         Asset, Channels, Command, FrameRate, History, KeyframeProperty, KeyframeValue, Outcome,
-        Project, ProjectId, Segment, SequenceRate, Speed, TimeRange, Transform,
+        Project, ProjectId, Segment, SequenceRate, Speed, SpeedCurve, SpeedPoint, TimeRange,
+        Transform,
     };
 
     use super::{Slot, describe, edited_value, facts, parse_number};
@@ -974,6 +1001,33 @@ mod tests {
                 ("Volume", "1".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn a_speed_curve_lists_its_points() {
+        let (mut cut, id) = video_cut();
+        let mut history = History::new();
+        let curve = SpeedCurve::new(vec![
+            SpeedPoint::new(0, 1, Speed::ONE).expect("start"),
+            SpeedPoint::new(1, 1, Speed::new(2, 1).expect("fast")).expect("end"),
+        ])
+        .expect("curve");
+        history
+            .apply(
+                &mut cut,
+                &[Command::SetCurve {
+                    segment: id,
+                    curve: Some(curve),
+                }],
+            )
+            .expect("curve");
+        let panel = describe(&cut, id, Language::English, false).expect("panel");
+        let speed = panel
+            .rows
+            .iter()
+            .find(|(label, _)| *label == "Speed")
+            .expect("speed");
+        assert_eq!(speed.1, "0 1/1, 1 2/1");
     }
 
     #[test]

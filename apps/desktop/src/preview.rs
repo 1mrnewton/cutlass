@@ -352,7 +352,7 @@ fn layer_contains(layer: &LayerBox, point: Pos2) -> bool {
 }
 
 /// Source time at `playhead_us`. The start of the clip is the source start.
-/// A later playhead follows [`cutlass_project::Speed`].
+/// A later playhead follows the speed. A curve replaces the rational.
 pub(crate) fn media_time(
     segment: &cutlass_project::Segment,
     playhead_us: i64,
@@ -363,8 +363,7 @@ pub(crate) fn media_time(
         return None;
     }
     let offset = playhead_us.checked_sub(timeline.start().value)?;
-    let ticks =
-        cutlass_project::source_ticks(offset, source.start().timescale, segment.speed()).ok()?;
+    let ticks = segment.source_offset(offset).ok()?;
     let mut value = source.start().value.checked_add(ticks)?;
     let end = source.end().value;
     if value >= end {
@@ -1782,6 +1781,73 @@ mod tests {
         .expect("fast");
         let sped = super::media_time(&fast, 200_000).expect("sped");
         assert_eq!(sped.value, 18_000);
+    }
+
+    #[test]
+    fn a_speed_curve_seeks_ahead_of_the_constant_ramp() {
+        let scale = NonZeroU32::new(1_000_000).expect("scale");
+        let asset = Asset::video(
+            "file:///cuts/ramp.mp4",
+            Timestamp::new(1_000_000, scale),
+            16,
+            16,
+            true,
+        )
+        .expect("video");
+        let mut history = History::new();
+        let mut cut = project();
+        let asset = match history
+            .apply(&mut cut, &[Command::AddAsset(asset)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let source = TimeRange::new(Timestamp::new(0, scale), Timestamp::new(1_000_000, scale))
+            .expect("source");
+        let segment = Segment::media(
+            cut.asset(asset).expect("asset"),
+            source,
+            0,
+            Channels::Both,
+            Speed::ONE,
+        )
+        .expect("segment");
+        let main = cut.timeline().main_track().id();
+        let id = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Segment(id)] => *id,
+            other => panic!("expected a segment, got {other:?}"),
+        };
+        let curve = cutlass_project::SpeedCurve::new(vec![
+            cutlass_project::SpeedPoint::new(0, 1, Speed::ONE).expect("start"),
+            cutlass_project::SpeedPoint::new(1, 1, Speed::new(2, 1).expect("fast")).expect("end"),
+        ])
+        .expect("curve");
+        history
+            .apply(
+                &mut cut,
+                &[Command::SetCurve {
+                    segment: id,
+                    curve: Some(curve),
+                }],
+            )
+            .expect("curve");
+        let segment = cut.timeline().segment(id).expect("clip");
+        let mid = super::media_time(segment, 346_573).expect("mid");
+        assert_eq!(mid.value, 414_213);
+        assert_eq!(mid.timescale, scale);
+        assert_ne!(mid.value, 346_573);
     }
 
     #[test]

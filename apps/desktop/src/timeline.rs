@@ -372,6 +372,7 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::RemoveSegment(segment)
         | Command::Trim { segment, .. }
         | Command::SetSpeed { segment, .. }
+        | Command::SetCurve { segment, .. }
         | Command::Freeze { segment, .. } => blocks_edit(project, lanes, *segment),
         Command::SetTransform { segment, .. }
         | Command::SetVolume { segment, .. }
@@ -3646,6 +3647,14 @@ mod tests {
         Project::new(ProjectId::from_bytes([1; 16]), "Untitled")
     }
 
+    fn ramp() -> cutlass_project::SpeedCurve {
+        cutlass_project::SpeedCurve::new(vec![
+            cutlass_project::SpeedPoint::new(0, 1, Speed::ONE).expect("start"),
+            cutlass_project::SpeedPoint::new(1, 1, Speed::new(2, 1).expect("fast")).expect("end"),
+        ])
+        .expect("curve")
+    }
+
     fn fitted(tracks: Rect, duration: i64) -> super::View {
         super::View::fit((tracks.right() - lane_left(tracks)).max(0.0), duration)
     }
@@ -4513,6 +4522,16 @@ mod tests {
             &super::Lanes::default(),
             &freeze
         ));
+        let curve = Command::SetCurve {
+            segment: video,
+            curve: Some(ramp()),
+        };
+        assert!(super::blocks_command(&cut, &locked_audio, &curve));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &curve
+        ));
         let reverse = Command::Reverse { segment: video };
         assert!(!super::blocks_command(&cut, &locked_audio, &reverse));
         assert!(!super::blocks_command(
@@ -4692,6 +4711,10 @@ mod tests {
             segment: id,
             offset_us: 1,
         };
+        let curve = Command::SetCurve {
+            segment: id,
+            curve: Some(ramp()),
+        };
         assert!(super::blocks_command(&cut, &locked, &volume));
         assert!(super::blocks_command(&cut, &locked, &hidden));
         assert!(super::blocks_command(&cut, &locked, &easing));
@@ -4714,6 +4737,7 @@ mod tests {
         assert!(super::blocks_command(&cut, &locked, &beat_mark));
         assert!(super::blocks_command(&cut, &locked, &clear_mark));
         assert!(super::blocks_command(&cut, &locked, &clear_beat));
+        assert!(super::blocks_command(&cut, &locked, &curve));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),
@@ -4823,6 +4847,11 @@ mod tests {
             &cut,
             &super::Lanes::default(),
             &clear_beat
+        ));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &curve
         ));
         let stored = cut.asset(asset).expect("asset");
         let away =

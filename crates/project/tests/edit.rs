@@ -4,9 +4,9 @@ use std::num::NonZeroU32;
 
 use cutlass_core::Timestamp;
 use cutlass_project::{
-    AspectRatio, Asset, AssetId, Channels, Color, ColorSpace, Command, Error, FrameRate, History,
-    Keyframe, KeyframeProperty, KeyframeValue, Outcome, Project, ProjectId, Segment, SegmentId,
-    SequenceRate, Speed, TimeRange, TrackId, TrackKind, Transform,
+    AspectRatio, Asset, AssetId, Channels, Color, ColorSpace, Command, Easing, Error, FrameRate,
+    History, Keyframe, KeyframeProperty, KeyframeValue, Outcome, Project, ProjectId, Segment,
+    SegmentId, SequenceRate, Speed, TimeRange, TrackId, TrackKind, Transform,
 };
 
 fn scale(value: u32) -> NonZeroU32 {
@@ -1080,7 +1080,9 @@ fn a_keyframe_past_the_cut_moves_to_the_right_piece() -> Result<(), Error> {
     run(&mut cut, Command::SetMagnet(false))?;
     let mut segment = media(&cut.project, asset, 0, 30_000, Channels::Both)?;
     segment.push_keyframe(Keyframe::new(200_000, KeyframeValue::Opacity(0.25))?)?;
-    segment.push_keyframe(Keyframe::new(700_000, KeyframeValue::Opacity(0.5))?)?;
+    segment.push_keyframe(
+        Keyframe::new(700_000, KeyframeValue::Opacity(0.5))?.with_easing(Easing::EaseIn),
+    )?;
     let main = cut.main;
     let left = segment_id(run(
         &mut cut,
@@ -1112,6 +1114,8 @@ fn a_keyframe_past_the_cut_moves_to_the_right_piece() -> Result<(), Error> {
     assert_eq!(left_keys[0].offset().value, 200_000);
     assert_eq!(right_keys.len(), 1);
     assert_eq!(right_keys[0].offset().value, 200_000);
+    assert_eq!(right_keys[0].easing(), Easing::EaseIn);
+    assert_eq!(left_keys[0].easing(), Easing::Linear);
     Ok(())
 }
 
@@ -1728,5 +1732,90 @@ fn visible_hides_the_segment_and_undo_shows_it() -> Result<(), Error> {
         ),
         Error::UnknownSegment(missing),
     );
+    Ok(())
+}
+
+#[test]
+fn easing_changes_the_blend_and_undo_restores_it() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    run(
+        &mut cut,
+        Command::AddKeyframe {
+            segment: id,
+            keyframe: Keyframe::new(1_000_000, KeyframeValue::Opacity(1.0))?,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::AddKeyframe {
+            segment: id,
+            keyframe: Keyframe::new(0, KeyframeValue::Opacity(0.0))?,
+        },
+    )?;
+    let blend = |cut: &Cut| -> Result<KeyframeValue, Error> {
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .sample(KeyframeProperty::Opacity, 500_000)
+    };
+    assert_eq!(blend(&cut)?, KeyframeValue::Opacity(0.5));
+    assert_eq!(
+        run(
+            &mut cut,
+            Command::SetEasing {
+                segment: id,
+                offset_us: 0,
+                property: KeyframeProperty::Opacity,
+                easing: Easing::EaseIn,
+            },
+        )?,
+        Outcome::Unchanged
+    );
+    assert_eq!(blend(&cut)?, KeyframeValue::Opacity(0.25));
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(blend(&cut)?, KeyframeValue::Opacity(0.5));
+    cut.history.redo(&mut cut.project)?;
+    assert_eq!(blend(&cut)?, KeyframeValue::Opacity(0.25));
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetEasing {
+                segment: id,
+                offset_us: 1,
+                property: KeyframeProperty::Opacity,
+                easing: Easing::EaseOut,
+            },
+        ),
+        Error::MissingKeyframe,
+    );
+    assert_eq!(blend(&cut)?, KeyframeValue::Opacity(0.25));
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetEasing {
+                segment: id,
+                offset_us: -1,
+                property: KeyframeProperty::Volume,
+                easing: Easing::Linear,
+            },
+        ),
+        Error::NegativeTime,
+    );
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetEasing {
+                segment: missing,
+                offset_us: 0,
+                property: KeyframeProperty::Opacity,
+                easing: Easing::EaseIn,
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
+    assert_eq!(blend(&cut)?, KeyframeValue::Opacity(0.25));
     Ok(())
 }

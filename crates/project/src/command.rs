@@ -8,7 +8,7 @@ use crate::Error;
 use crate::asset::Asset;
 use crate::id::{AssetId, SegmentId, TrackId};
 use crate::rate::SequenceRate;
-use crate::segment::{Keyframe, KeyframeProperty, Segment, Transform};
+use crate::segment::{Easing, Keyframe, KeyframeProperty, Segment, Transform};
 use crate::settings::{AspectRatio, Color, ColorSpace};
 use crate::time::{self, Speed, TimeRange};
 
@@ -74,7 +74,7 @@ pub enum Command {
         visible: bool,
     },
     /// One sample. The offset is microseconds from the segment's timeline start.
-    /// The sample is stored and not read.
+    /// Its easing blends it into the next sample of the same property.
     AddKeyframe {
         segment: SegmentId,
         keyframe: Keyframe,
@@ -84,6 +84,13 @@ pub enum Command {
         segment: SegmentId,
         offset_us: i64,
         property: KeyframeProperty,
+    },
+    /// Sets how the sample at `offset_us` blends into the next one of `property`.
+    SetEasing {
+        segment: SegmentId,
+        offset_us: i64,
+        property: KeyframeProperty,
+        easing: Easing,
     },
 }
 

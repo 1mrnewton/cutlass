@@ -200,6 +200,17 @@ impl Project {
                     .remove_keyframe(offset_us, property)?;
                 Ok(Outcome::Unchanged)
             }
+            Command::SetEasing {
+                segment,
+                offset_us,
+                property,
+                easing,
+            } => {
+                self.timeline
+                    .segment_mut(segment)?
+                    .set_easing(offset_us, property, easing)?;
+                Ok(Outcome::Unchanged)
+            }
         }
     }
 

@@ -112,14 +112,47 @@ pub enum KeyframeProperty {
     Volume,
 }
 
+/// How one sample blends into the next sample of the same property.
+///
+/// Linear is the start. Ease in starts slow and ends fast. Ease out starts
+/// fast and ends slow. Ease in and out is slow, fast, then slow. The last
+/// sample of a property has no next sample, so its easing is unused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Easing {
+    #[default]
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+}
+
+impl Easing {
+    /// The portion of the way from this sample to the next.
+    ///
+    /// `t` is `0` at this sample and `1` at the next. Each curve is `0` at
+    /// the start and `1` at the end.
+    pub fn curve(self, t: f64) -> f64 {
+        match self {
+            Self::Linear => t,
+            Self::EaseIn => t * t,
+            Self::EaseOut => t * (2.0 - t),
+            Self::EaseInOut => t * t * (3.0 - 2.0 * t),
+        }
+    }
+}
+
 /// One sample of a segment property.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Keyframe {
     offset: Timestamp,
     value: KeyframeValue,
+    easing: Easing,
 }
 
 impl Keyframe {
+    /// A sample at `offset_us` microseconds from the segment start.
+    ///
+    /// The easing into the next sample of this property is linear.
     pub fn new(offset_us: i64, value: KeyframeValue) -> Result<Self, Error> {
         if offset_us < 0 {
             return Err(Error::NegativeTime);
@@ -128,7 +161,14 @@ impl Keyframe {
         Ok(Self {
             offset: Timestamp::new(offset_us, SEQUENCE_TIMESCALE),
             value,
+            easing: Easing::Linear,
         })
+    }
+
+    /// Sets the easing into the next sample of this property.
+    pub const fn with_easing(mut self, easing: Easing) -> Self {
+        self.easing = easing;
+        self
     }
 
     pub const fn offset(self) -> Timestamp {
@@ -137,6 +177,10 @@ impl Keyframe {
 
     pub const fn value(self) -> KeyframeValue {
         self.value
+    }
+
+    pub const fn easing(self) -> Easing {
+        self.easing
     }
 
     pub const fn property(self) -> KeyframeProperty {
@@ -296,7 +340,9 @@ impl Segment {
             if key.offset.value <= at_offset {
                 left.push(key);
             } else {
-                right.push(Keyframe::new(key.offset.value - at_offset, key.value)?);
+                right.push(
+                    Keyframe::new(key.offset.value - at_offset, key.value)?.with_easing(key.easing),
+                );
             }
         }
         self.keyframes = left;
@@ -355,6 +401,29 @@ impl Segment {
         Ok(())
     }
 
+    /// Sets the easing on the sample of `property` at `offset_us`.
+    ///
+    /// A missing sample changes nothing.
+    pub(crate) fn set_easing(
+        &mut self,
+        offset_us: i64,
+        property: KeyframeProperty,
+        easing: Easing,
+    ) -> Result<(), Error> {
+        if offset_us < 0 {
+            return Err(Error::NegativeTime);
+        }
+        let Some(key) = self
+            .keyframes
+            .iter_mut()
+            .find(|key| key.property() == property && key.offset.value == offset_us)
+        else {
+            return Err(Error::MissingKeyframe);
+        };
+        key.easing = easing;
+        Ok(())
+    }
+
     pub(crate) fn assign(&mut self, id: SegmentId) {
         self.id = id;
     }
@@ -397,6 +466,55 @@ impl Segment {
 
     pub fn keyframes(&self) -> &[Keyframe] {
         &self.keyframes
+    }
+
+    /// The value of `property` at `offset_us` microseconds from the segment start.
+    ///
+    /// With no sample of that property, the result is the segment's own value.
+    /// The first sample holds back to the start and the last holds through the
+    /// end. Between two samples, the earlier easing blends them. At a sample,
+    /// the result is that sample. A negative offset, or one past the segment,
+    /// returns no value.
+    pub fn sample(
+        &self,
+        property: KeyframeProperty,
+        offset_us: i64,
+    ) -> Result<KeyframeValue, Error> {
+        if offset_us < 0 {
+            return Err(Error::NegativeTime);
+        }
+        if offset_us > self.timeline.duration().value {
+            return Err(Error::KeyframeOutOfRange);
+        }
+        let mut keys: Vec<Keyframe> = self
+            .keyframes
+            .iter()
+            .copied()
+            .filter(|key| key.property() == property)
+            .collect();
+        if keys.is_empty() {
+            return Ok(own_value(self, property));
+        }
+        keys.sort_by_key(|key| key.offset().value);
+        let next = keys.partition_point(|key| key.offset().value <= offset_us);
+        if next == 0 {
+            return Ok(keys[0].value());
+        }
+        let earlier = keys[next - 1];
+        if earlier.offset().value == offset_us || next == keys.len() {
+            return Ok(earlier.value());
+        }
+        let later = keys[next];
+        let span = later.offset().value - earlier.offset().value;
+        if span <= 0 {
+            return Ok(earlier.value());
+        }
+        let portion = (offset_us - earlier.offset().value) as f64 / span as f64;
+        Ok(blend(
+            earlier.value(),
+            later.value(),
+            earlier.easing().curve(portion),
+        ))
     }
 }
 
@@ -477,6 +595,61 @@ fn finite(x: f64, y: f64) -> Result<(), Error> {
     } else {
         Err(Error::NonFinite)
     }
+}
+
+fn own_value(segment: &Segment, property: KeyframeProperty) -> KeyframeValue {
+    match property {
+        KeyframeProperty::Position => {
+            let (x, y) = segment.transform.position();
+            KeyframeValue::Position { x, y }
+        }
+        KeyframeProperty::Scale => {
+            let (x, y) = segment.transform.scale();
+            KeyframeValue::Scale { x, y }
+        }
+        KeyframeProperty::Rotation => KeyframeValue::Rotation(segment.transform.rotation()),
+        KeyframeProperty::Opacity => KeyframeValue::Opacity(segment.transform.opacity()),
+        KeyframeProperty::Volume => KeyframeValue::Volume(segment.volume),
+    }
+}
+
+fn blend(from: KeyframeValue, to: KeyframeValue, portion: f64) -> KeyframeValue {
+    match (from, to) {
+        (
+            KeyframeValue::Position {
+                x: from_x,
+                y: from_y,
+            },
+            KeyframeValue::Position { x: to_x, y: to_y },
+        ) => KeyframeValue::Position {
+            x: lerp(from_x, to_x, portion),
+            y: lerp(from_y, to_y, portion),
+        },
+        (
+            KeyframeValue::Scale {
+                x: from_x,
+                y: from_y,
+            },
+            KeyframeValue::Scale { x: to_x, y: to_y },
+        ) => KeyframeValue::Scale {
+            x: lerp(from_x, to_x, portion),
+            y: lerp(from_y, to_y, portion),
+        },
+        (KeyframeValue::Rotation(from), KeyframeValue::Rotation(to)) => {
+            KeyframeValue::Rotation(lerp(from, to, portion))
+        }
+        (KeyframeValue::Opacity(from), KeyframeValue::Opacity(to)) => {
+            KeyframeValue::Opacity(lerp(from, to, portion))
+        }
+        (KeyframeValue::Volume(from), KeyframeValue::Volume(to)) => {
+            KeyframeValue::Volume(lerp(from, to, portion))
+        }
+        (from, _) => from,
+    }
+}
+
+fn lerp(from: f64, to: f64, portion: f64) -> f64 {
+    from + (to - from) * portion
 }
 
 #[cfg(test)]
@@ -724,7 +897,11 @@ mod tests {
         let transform = Transform::new((0.1, -0.2), (2.0, 3.0), 15.0, 0.4, true, false).unwrap();
         segment.set_transform(transform);
         segment
-            .push_keyframe(Keyframe::new(100_000, KeyframeValue::Opacity(0.2)).unwrap())
+            .push_keyframe(
+                Keyframe::new(100_000, KeyframeValue::Opacity(0.2))
+                    .unwrap()
+                    .with_easing(Easing::EaseIn),
+            )
             .unwrap();
         segment.assign(SegmentId::raw(4));
         let copy = segment.duplicate(8_000).unwrap();
@@ -760,6 +937,207 @@ mod tests {
         assert_eq!(
             segment.duplicate(i64::MAX).unwrap_err(),
             Error::DurationOverflow
+        );
+    }
+
+    fn one_second() -> Segment {
+        let asset = video(true, 15_360);
+        Segment::media(&asset, source(0, 15_360), 0, Channels::Both, Speed::ONE).unwrap()
+    }
+
+    #[test]
+    fn each_easing_starts_at_zero_and_ends_at_one() {
+        for easing in [
+            Easing::Linear,
+            Easing::EaseIn,
+            Easing::EaseOut,
+            Easing::EaseInOut,
+        ] {
+            assert_eq!(easing.curve(0.0), 0.0);
+            assert_eq!(easing.curve(1.0), 1.0);
+        }
+    }
+
+    #[test]
+    fn no_samples_return_the_segments_own_value() {
+        let mut segment = one_second();
+        let transform = Transform::new((0.25, -0.5), (2.0, 3.0), 90.0, 0.4, false, false).unwrap();
+        segment.set_transform(transform);
+        segment.set_volume(0.25).unwrap();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Position, 0).unwrap(),
+            KeyframeValue::Position { x: 0.25, y: -0.5 }
+        );
+        assert_eq!(
+            segment.sample(KeyframeProperty::Scale, 500_000).unwrap(),
+            KeyframeValue::Scale { x: 2.0, y: 3.0 }
+        );
+        assert_eq!(
+            segment
+                .sample(KeyframeProperty::Rotation, 1_000_000)
+                .unwrap(),
+            KeyframeValue::Rotation(90.0)
+        );
+        assert_eq!(
+            segment.sample(KeyframeProperty::Opacity, 0).unwrap(),
+            KeyframeValue::Opacity(0.4)
+        );
+        assert_eq!(
+            segment.sample(KeyframeProperty::Volume, 1_000_000).unwrap(),
+            KeyframeValue::Volume(0.25)
+        );
+    }
+
+    #[test]
+    fn one_sample_holds_and_two_blend_by_the_earlier_easing() {
+        let mut segment = one_second();
+        segment
+            .push_keyframe(Keyframe::new(400_000, KeyframeValue::Opacity(0.25)).unwrap())
+            .unwrap();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Opacity, 0).unwrap(),
+            KeyframeValue::Opacity(0.25)
+        );
+        assert_eq!(
+            segment
+                .sample(KeyframeProperty::Opacity, 1_000_000)
+                .unwrap(),
+            KeyframeValue::Opacity(0.25)
+        );
+        assert_eq!(
+            segment.sample(KeyframeProperty::Volume, 500_000).unwrap(),
+            KeyframeValue::Volume(1.0)
+        );
+
+        let mut segment = one_second();
+        segment
+            .push_keyframe(
+                Keyframe::new(1_000_000, KeyframeValue::Opacity(1.0))
+                    .unwrap()
+                    .with_easing(Easing::EaseOut),
+            )
+            .unwrap();
+        segment
+            .push_keyframe(
+                Keyframe::new(0, KeyframeValue::Opacity(0.0))
+                    .unwrap()
+                    .with_easing(Easing::EaseIn),
+            )
+            .unwrap();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Opacity, 0).unwrap(),
+            KeyframeValue::Opacity(0.0)
+        );
+        assert_eq!(
+            segment
+                .sample(KeyframeProperty::Opacity, 1_000_000)
+                .unwrap(),
+            KeyframeValue::Opacity(1.0)
+        );
+        assert_eq!(
+            segment.sample(KeyframeProperty::Opacity, 500_000).unwrap(),
+            KeyframeValue::Opacity(0.25)
+        );
+        segment
+            .set_easing(0, KeyframeProperty::Opacity, Easing::EaseOut)
+            .unwrap();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Opacity, 500_000).unwrap(),
+            KeyframeValue::Opacity(0.75)
+        );
+        segment
+            .set_easing(0, KeyframeProperty::Opacity, Easing::Linear)
+            .unwrap();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Opacity, 250_000).unwrap(),
+            KeyframeValue::Opacity(0.25)
+        );
+        segment
+            .set_easing(0, KeyframeProperty::Opacity, Easing::EaseIn)
+            .unwrap();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Opacity, 250_000).unwrap(),
+            KeyframeValue::Opacity(0.0625)
+        );
+        segment
+            .set_easing(0, KeyframeProperty::Opacity, Easing::EaseOut)
+            .unwrap();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Opacity, 250_000).unwrap(),
+            KeyframeValue::Opacity(0.4375)
+        );
+        segment
+            .set_easing(0, KeyframeProperty::Opacity, Easing::EaseInOut)
+            .unwrap();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Opacity, 250_000).unwrap(),
+            KeyframeValue::Opacity(0.15625)
+        );
+
+        segment
+            .push_keyframe(Keyframe::new(0, KeyframeValue::Position { x: 0.0, y: 0.0 }).unwrap())
+            .unwrap();
+        segment
+            .push_keyframe(
+                Keyframe::new(1_000_000, KeyframeValue::Position { x: 1.0, y: -2.0 }).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Position, 500_000).unwrap(),
+            KeyframeValue::Position { x: 0.5, y: -1.0 }
+        );
+        segment
+            .push_keyframe(Keyframe::new(0, KeyframeValue::Scale { x: 1.0, y: 1.0 }).unwrap())
+            .unwrap();
+        segment
+            .push_keyframe(
+                Keyframe::new(1_000_000, KeyframeValue::Scale { x: 3.0, y: 1.0 }).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Scale, 500_000).unwrap(),
+            KeyframeValue::Scale { x: 2.0, y: 1.0 }
+        );
+        segment
+            .push_keyframe(Keyframe::new(0, KeyframeValue::Rotation(0.0)).unwrap())
+            .unwrap();
+        segment
+            .push_keyframe(Keyframe::new(1_000_000, KeyframeValue::Rotation(360.0)).unwrap())
+            .unwrap();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Rotation, 500_000).unwrap(),
+            KeyframeValue::Rotation(180.0)
+        );
+        segment
+            .push_keyframe(Keyframe::new(0, KeyframeValue::Volume(0.0)).unwrap())
+            .unwrap();
+        segment
+            .push_keyframe(Keyframe::new(1_000_000, KeyframeValue::Volume(1.0)).unwrap())
+            .unwrap();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Volume, 500_000).unwrap(),
+            KeyframeValue::Volume(0.5)
+        );
+    }
+
+    #[test]
+    fn a_sample_outside_the_segment_is_refused() {
+        let segment = one_second();
+        assert_eq!(
+            segment.sample(KeyframeProperty::Opacity, -1).unwrap_err(),
+            Error::NegativeTime
+        );
+        assert_eq!(
+            segment
+                .sample(KeyframeProperty::Opacity, 1_000_001)
+                .unwrap_err(),
+            Error::KeyframeOutOfRange
+        );
+        assert_eq!(
+            segment
+                .sample(KeyframeProperty::Opacity, 1_000_000)
+                .unwrap(),
+            KeyframeValue::Opacity(1.0)
         );
     }
 }

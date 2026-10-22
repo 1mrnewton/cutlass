@@ -14,7 +14,7 @@ use crate::asset::{Asset, AssetKind};
 use crate::id::{AssetId, SegmentId, TrackId};
 use crate::project::Project;
 use crate::rate::{FrameRate, SequenceRate};
-use crate::segment::{Channels, Keyframe, KeyframeValue, Segment, Transform};
+use crate::segment::{Channels, Easing, Keyframe, KeyframeValue, Segment, Transform};
 use crate::settings::{AspectRatio, Canvas, Color, ColorSpace, Settings};
 use crate::time::{Speed, TimeRange};
 use crate::timeline::Timeline;
@@ -404,24 +404,91 @@ fn transform_from(document: &TransformDoc) -> Result<Transform, Error> {
 
 fn key_doc(key: Keyframe) -> KeyDoc {
     let offset = key.offset().value;
+    let easing = easing_name(key.easing());
     match key.value() {
-        KeyframeValue::Position { x, y } => KeyDoc::Position { offset, x, y },
-        KeyframeValue::Scale { x, y } => KeyDoc::Scale { offset, x, y },
-        KeyframeValue::Rotation(degrees) => KeyDoc::Rotation { offset, degrees },
-        KeyframeValue::Opacity(value) => KeyDoc::Opacity { offset, value },
-        KeyframeValue::Volume(value) => KeyDoc::Volume { offset, value },
+        KeyframeValue::Position { x, y } => KeyDoc::Position {
+            offset,
+            x,
+            y,
+            easing,
+        },
+        KeyframeValue::Scale { x, y } => KeyDoc::Scale {
+            offset,
+            x,
+            y,
+            easing,
+        },
+        KeyframeValue::Rotation(degrees) => KeyDoc::Rotation {
+            offset,
+            degrees,
+            easing,
+        },
+        KeyframeValue::Opacity(value) => KeyDoc::Opacity {
+            offset,
+            value,
+            easing,
+        },
+        KeyframeValue::Volume(value) => KeyDoc::Volume {
+            offset,
+            value,
+            easing,
+        },
     }
 }
 
 fn key_from(document: &KeyDoc) -> Result<Keyframe, Error> {
-    let (offset, value) = match document {
-        KeyDoc::Position { offset, x, y } => (*offset, KeyframeValue::Position { x: *x, y: *y }),
-        KeyDoc::Scale { offset, x, y } => (*offset, KeyframeValue::Scale { x: *x, y: *y }),
-        KeyDoc::Rotation { offset, degrees } => (*offset, KeyframeValue::Rotation(*degrees)),
-        KeyDoc::Opacity { offset, value } => (*offset, KeyframeValue::Opacity(*value)),
-        KeyDoc::Volume { offset, value } => (*offset, KeyframeValue::Volume(*value)),
+    let (offset, value, easing) = match document {
+        KeyDoc::Position {
+            offset,
+            x,
+            y,
+            easing,
+        } => (*offset, KeyframeValue::Position { x: *x, y: *y }, *easing),
+        KeyDoc::Scale {
+            offset,
+            x,
+            y,
+            easing,
+        } => (*offset, KeyframeValue::Scale { x: *x, y: *y }, *easing),
+        KeyDoc::Rotation {
+            offset,
+            degrees,
+            easing,
+        } => (*offset, KeyframeValue::Rotation(*degrees), *easing),
+        KeyDoc::Opacity {
+            offset,
+            value,
+            easing,
+        } => (*offset, KeyframeValue::Opacity(*value), *easing),
+        KeyDoc::Volume {
+            offset,
+            value,
+            easing,
+        } => (*offset, KeyframeValue::Volume(*value), *easing),
     };
-    Keyframe::new(offset, value)
+    Ok(Keyframe::new(offset, value)?.with_easing(easing_from(easing)))
+}
+
+fn easing_name(easing: Easing) -> EasingName {
+    match easing {
+        Easing::Linear => EasingName::Linear,
+        Easing::EaseIn => EasingName::EaseIn,
+        Easing::EaseOut => EasingName::EaseOut,
+        Easing::EaseInOut => EasingName::EaseInOut,
+    }
+}
+
+fn easing_from(name: EasingName) -> Easing {
+    match name {
+        EasingName::Linear => Easing::Linear,
+        EasingName::EaseIn => Easing::EaseIn,
+        EasingName::EaseOut => Easing::EaseOut,
+        EasingName::EaseInOut => Easing::EaseInOut,
+    }
+}
+
+fn easing_is_linear(easing: &EasingName) -> bool {
+    matches!(easing, EasingName::Linear)
 }
 
 fn stamp_doc(time: Timestamp) -> Stamp {
@@ -656,11 +723,48 @@ struct TransformDoc {
 #[serde(tag = "property", rename_all = "lowercase")]
 #[serde(deny_unknown_fields)]
 enum KeyDoc {
-    Position { offset: i64, x: f64, y: f64 },
-    Scale { offset: i64, x: f64, y: f64 },
-    Rotation { offset: i64, degrees: f64 },
-    Opacity { offset: i64, value: f64 },
-    Volume { offset: i64, value: f64 },
+    Position {
+        offset: i64,
+        x: f64,
+        y: f64,
+        #[serde(default, skip_serializing_if = "easing_is_linear")]
+        easing: EasingName,
+    },
+    Scale {
+        offset: i64,
+        x: f64,
+        y: f64,
+        #[serde(default, skip_serializing_if = "easing_is_linear")]
+        easing: EasingName,
+    },
+    Rotation {
+        offset: i64,
+        degrees: f64,
+        #[serde(default, skip_serializing_if = "easing_is_linear")]
+        easing: EasingName,
+    },
+    Opacity {
+        offset: i64,
+        value: f64,
+        #[serde(default, skip_serializing_if = "easing_is_linear")]
+        easing: EasingName,
+    },
+    Volume {
+        offset: i64,
+        value: f64,
+        #[serde(default, skip_serializing_if = "easing_is_linear")]
+        easing: EasingName,
+    },
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum EasingName {
+    #[default]
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -725,7 +829,7 @@ mod tests {
     use cutlass_core::Timestamp;
     use serde_json::{Value, json};
 
-    use super::{ChannelName, FILE_VERSION, KeyDoc, KindName, RatioName, SpaceName};
+    use super::{ChannelName, EasingName, FILE_VERSION, KeyDoc, KindName, RatioName, SpaceName};
     use crate::Error;
     use crate::asset::{Asset, AssetKind};
     use crate::command::{Command, Outcome};
@@ -733,7 +837,7 @@ mod tests {
     use crate::id::ProjectId;
     use crate::project::Project;
     use crate::rate::{FrameRate, SequenceRate};
-    use crate::segment::{Channels, Keyframe, KeyframeValue, Segment, Transform};
+    use crate::segment::{Channels, Easing, Keyframe, KeyframeValue, Segment, Transform};
     use crate::settings::{AspectRatio, Color, ColorSpace};
     use crate::time::{Speed, TimeRange};
     use crate::track::TrackKind;
@@ -866,11 +970,21 @@ mod tests {
         let key = KeyDoc::Rotation {
             offset: 0,
             degrees: 1.0,
+            easing: EasingName::Linear,
         };
         assert_eq!(
             serde_json::to_string(&key).expect("key"),
             "{\"property\":\"rotation\",\"offset\":0,\"degrees\":1.0}"
         );
+        let easings = [
+            (EasingName::Linear, "\"linear\""),
+            (EasingName::EaseIn, "\"ease-in\""),
+            (EasingName::EaseOut, "\"ease-out\""),
+            (EasingName::EaseInOut, "\"ease-in-out\""),
+        ];
+        for (easing, text) in easings {
+            assert_eq!(serde_json::to_string(&easing).expect("easing"), text);
+        }
     }
 
     #[test]
@@ -882,6 +996,36 @@ mod tests {
         let loaded = Project::from_json(&text).expect("load");
         assert_same(&project, &loaded);
         assert_eq!(loaded.to_json().expect("again"), text);
+    }
+
+    #[test]
+    fn a_missing_easing_is_linear_and_an_unknown_one_is_refused() {
+        let (project, value) = cut_value();
+        let text = project.to_json().expect("save");
+        assert!(!text.contains("easing"));
+        let loaded = Project::from_json(&text).expect("load");
+        let key = loaded.timeline().tracks()[1].segments()[0].keyframes()[0];
+        assert_eq!(key.easing(), Easing::Linear);
+
+        let eased = edit(&value, |value| {
+            value["timeline"]["tracks"][1]["segments"][0]["keyframes"][0]["easing"] =
+                json!("ease-in");
+        });
+        let loaded = Project::from_json(&eased).expect("load");
+        assert_eq!(
+            loaded.timeline().tracks()[1].segments()[0].keyframes()[0].easing(),
+            Easing::EaseIn
+        );
+        let saved = loaded.to_json().expect("save");
+        assert!(saved.contains("\"easing\": \"ease-in\""));
+        assert_eq!(saved.matches("easing").count(), 1);
+        assert_same(&loaded, &Project::from_json(&saved).expect("reload"));
+
+        let unknown = edit(&value, |value| {
+            value["timeline"]["tracks"][1]["segments"][0]["keyframes"][0]["easing"] =
+                json!("bounce");
+        });
+        assert_unreadable(&unknown);
     }
 
     #[test]

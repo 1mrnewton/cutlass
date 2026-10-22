@@ -12,8 +12,6 @@ use cutlass_project::{Channels, Project, SegmentId, TrackId};
 use crate::icons::{self, Icon};
 use crate::ruler;
 use crate::theme;
-use crate::timeline::file_name;
-
 const TRANSPORT: f32 = 52.0;
 const ZOOM_MIN: f32 = 0.5;
 const ZOOM_MAX: f32 = 4.0;
@@ -117,35 +115,14 @@ pub fn show(
             );
             ui.set_clip_rect(outer);
         }
-        let rate = project.settings().rate();
-        let time = ruler::timecode(playhead_us, rate);
-        let label = match shot(project, playhead_us, &hidden) {
-            Some(name) => format!("{name} · {time}"),
-            None => format!(
-                "{} · {time}",
-                crate::words::of(ui, crate::words::Phrase::Empty)
-            ),
-        };
-        ui.painter().text(
-            frame.left_top() + vec2(12.0, 12.0),
-            Align2::LEFT_TOP,
-            &label,
-            FontId::new(11.0, FontFamily::Monospace),
-            theme::INK,
-        );
-        crate::tip::read(
-            ui,
-            Rect::from_min_size(frame.left_top() + vec2(12.0, 8.0), vec2(280.0, 18.0)),
-            ui.scope_id().with("preview-label"),
-            &label,
-        );
         let top = plate.and_then(|plate| top_layer(project, playhead_us, &hidden, plate));
+        let name = crate::words::of(ui, crate::words::Phrase::RegionPreview);
         canvas.widget_info(|| {
             egui::WidgetInfo::selected(
                 egui::accesskit::Role::Button,
                 true,
                 top.is_some_and(|id| selected.contains(&id)),
-                &label,
+                name,
             )
         });
     }
@@ -1108,41 +1085,6 @@ pub(crate) fn still_toast(language: crate::words::Language, playhead_us: i64) ->
     )
 }
 
-/// The topmost segment that covers `us`, named from its file. A hidden lane is skipped.
-fn shot<'a>(project: &'a Project, us: i64, hidden: &[cutlass_project::TrackId]) -> Option<&'a str> {
-    for track in project.timeline().tracks().iter().rev() {
-        if hidden.contains(&track.id()) {
-            continue;
-        }
-        for segment in track.segments() {
-            let range = segment.timeline();
-            if segment.visible() && range.start().value <= us && us < range.end().value {
-                if let Some(words) = segment.words() {
-                    return Some(words);
-                }
-                if let Some(name) = segment.sticker_name() {
-                    return Some(name);
-                }
-                if let Some(plugin) = segment.attachment().map(|attachment| attachment.plugin()) {
-                    return Some(plugin);
-                }
-                if segment.is_effect() {
-                    return Some("Effect");
-                }
-                if segment.is_filter() {
-                    return Some("Filter");
-                }
-                if segment.is_adjust() {
-                    return Some("Adjust");
-                }
-                let asset = project.asset(segment.asset_id()?)?;
-                return Some(file_name(asset.source()));
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
@@ -1152,56 +1094,8 @@ mod tests {
         Asset, Channels, Command, History, Outcome, Project, ProjectId, Segment, Speed, TimeRange,
     };
 
-    use super::shot;
-
     fn project() -> Project {
         Project::new(ProjectId::from_bytes([1; 16]), "Untitled")
-    }
-
-    #[test]
-    fn the_topmost_segment_under_the_playhead_names_the_frame() {
-        let mut history = History::new();
-        let mut cut = project();
-        let video = Asset::video(
-            "file:///cuts/v.mp4",
-            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
-            320,
-            180,
-            true,
-        )
-        .expect("video");
-        let placed = match history
-            .apply(&mut cut, &[Command::AddAsset(video)])
-            .expect("add")
-            .as_slice()
-        {
-            [Outcome::Asset(id)] => *id,
-            other => panic!("expected an asset, got {other:?}"),
-        };
-        let segment = {
-            let stored = cut.asset(placed).expect("asset");
-            let duration = stored.duration().expect("duration");
-            let source = TimeRange::new(
-                Timestamp::new(0, duration.timescale),
-                Timestamp::new(duration.value, duration.timescale),
-            )
-            .expect("source");
-            Segment::media(stored, source, 0, Channels::Both, Speed::ONE).expect("segment")
-        };
-        let main = cut.timeline().main_track().id();
-        history
-            .apply(
-                &mut cut,
-                &[Command::Place {
-                    track: Some(main),
-                    segment,
-                }],
-            )
-            .expect("place");
-        assert_eq!(shot(&cut, 0, &[]), Some("v.mp4"));
-        assert_eq!(shot(&cut, 1_000_000, &[]), None);
-        assert_eq!(shot(&project(), 0, &[]), None);
-        assert_eq!(shot(&cut, 0, &[main]), None);
     }
 
     #[test]
@@ -1405,7 +1299,7 @@ mod tests {
         let mut selected = Vec::new();
         let mut time = 0.0;
         let (tree, _) = frame(&ctx, &cut, &mut selected, &mut time, screen, vec![]);
-        let canvas = node_bounds(&tree, "v.mp4 · 00:00:00:00");
+        let canvas = canvas_bounds(&tree);
         let center = eframe::egui::pos2((canvas.0 + canvas.2) / 2.0, (canvas.1 + canvas.3) / 2.0);
         press(&ctx, &cut, &mut selected, &mut time, screen, center, false);
         let id = cut
@@ -1447,7 +1341,7 @@ mod tests {
         let mut selected = Vec::new();
         let mut time = 0.0;
         let (tree, _) = frame(&ctx, &cut, &mut selected, &mut time, screen, vec![]);
-        let canvas = node_bounds(&tree, "v.mp4 · 00:00:00:00");
+        let canvas = canvas_bounds(&tree);
         let center = eframe::egui::pos2((canvas.0 + canvas.2) / 2.0, (canvas.1 + canvas.3) / 2.0);
         press(&ctx, &cut, &mut selected, &mut time, screen, center, false);
         assert_eq!(selected.len(), 1);
@@ -1523,7 +1417,6 @@ mod tests {
             )
             .expect("place");
         assert!(super::layer_at(&cut, 0, &[], plate, plate.center()).is_none());
-        assert_eq!(super::shot(&cut, 0, &[]), Some("v.mp4"));
         let picture = {
             let stored = cut.asset(asset).expect("asset");
             let duration = stored.duration().expect("duration");
@@ -1568,7 +1461,6 @@ mod tests {
             )
             .expect("place");
         assert!(super::layer_at(&cut, 2_000_000, &[], plate, plate.center()).is_none());
-        assert!(super::shot(&cut, 2_000_000, &[]).is_none());
     }
 
     #[test]
@@ -1905,15 +1797,15 @@ mod tests {
         );
     }
 
-    fn node_bounds(
-        tree: &eframe::egui::accesskit::TreeUpdate,
-        label: &str,
-    ) -> (f32, f32, f32, f32) {
+    fn canvas_bounds(tree: &eframe::egui::accesskit::TreeUpdate) -> (f32, f32, f32, f32) {
         let (_, node) = tree
             .nodes
             .iter()
-            .find(|(_, node)| node.label() == Some(label))
-            .expect(label);
+            .find(|(_, node)| {
+                node.role() == eframe::egui::accesskit::Role::Button
+                    && node.label() == Some("Preview")
+            })
+            .expect("canvas");
         let rect = node.bounds().expect("bounds");
         (
             rect.x0 as f32,

@@ -33,8 +33,22 @@ pub(crate) enum Phrase {
     ZoomOut,
     ZoomToFit,
     ZoomIn,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the toolbar paints a fit icon; the short word stays in the catalog"
+        )
+    )]
     Fit,
     Split,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the toolbar tip says snap on or off; the short word stays in the catalog"
+        )
+    )]
     Snap,
     Marker,
     Beat,
@@ -179,6 +193,16 @@ pub(crate) enum Phrase {
     ProjectUnsaved,
     RestoreCut,
     Nest,
+    Undo,
+    Redo,
+    Select,
+    SnapOn,
+    SnapOff,
+    ShowGuides,
+    HideGuides,
+    LockGuides,
+    UnlockGuides,
+    CutUnchanged,
     Restore,
 }
 
@@ -345,6 +369,16 @@ impl Phrase {
         Self::ProjectUnsaved,
         Self::RestoreCut,
         Self::Nest,
+        Self::Undo,
+        Self::Redo,
+        Self::Select,
+        Self::SnapOn,
+        Self::SnapOff,
+        Self::ShowGuides,
+        Self::HideGuides,
+        Self::LockGuides,
+        Self::UnlockGuides,
+        Self::CutUnchanged,
         Self::Restore,
     ];
 }
@@ -510,6 +544,16 @@ const ENGLISH: &[&str] = &[
     "This project could not be saved.",
     "Restore this cut?",
     "Nest",
+    "Undo",
+    "Redo",
+    "Select",
+    "Snap on",
+    "Snap off",
+    "Show reference lines",
+    "Hide reference lines",
+    "Lock reference lines",
+    "Unlock reference lines",
+    "That does not change the cut yet.",
     "Restore",
 ];
 
@@ -674,6 +718,16 @@ const FRENCH: &[&str] = &[
     "Ce projet n'a pas pu être enregistré.",
     "Restaurer ce montage ?",
     "Imbriqué",
+    "Défaire",
+    "Rétablir",
+    "Sélectionner",
+    "Calage activé",
+    "Calage désactivé",
+    "Afficher les repères",
+    "Masquer les repères",
+    "Verrouiller les repères",
+    "Déverrouiller les repères",
+    "Cela ne change pas encore le montage.",
     "Restaurer",
 ];
 

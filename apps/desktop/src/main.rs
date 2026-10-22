@@ -128,6 +128,10 @@ impl CutlassApp {
         if typing || !pressed {
             return;
         }
+        self.remove_selection(ui);
+    }
+
+    fn remove_selection(&mut self, ui: &egui::Ui) {
         let lanes = timeline::lanes_of(&self.project);
         let had = !self.selected_segments.is_empty();
         let removed = timeline::delete_selected(
@@ -154,7 +158,10 @@ impl CutlassApp {
         let Some(step) = keys::history(ui) else {
             return;
         };
-        let undo = step == keys::Shortcut::Undo;
+        self.step_history(ui, step == keys::Shortcut::Undo);
+    }
+
+    fn step_history(&mut self, ui: &egui::Ui, undo: bool) {
         let result = if undo {
             self.history.undo(&mut self.project)
         } else {
@@ -549,8 +556,18 @@ impl eframe::App for CutlassApp {
                     &mut self.selected_segments,
                     &mut self.clip_drag,
                     &mut self.trim_drag,
-                    &mut self.split,
+                    timeline::Tools {
+                        split: &mut self.split,
+                        can_undo: self.history.can_undo(),
+                        can_redo: self.history.can_redo(),
+                    },
                 );
+                match timeline::take_tool(ui) {
+                    Some(timeline::ToolPress::Undo) => self.step_history(ui, true),
+                    Some(timeline::ToolPress::Redo) => self.step_history(ui, false),
+                    Some(timeline::ToolPress::Delete) => self.remove_selection(ui),
+                    None => {}
+                }
                 if !commands.is_empty() {
                     let select_placed = timeline::take_placed(ui);
                     match self.history.apply(&mut self.project, &commands) {

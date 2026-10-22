@@ -78,17 +78,6 @@ pub(crate) fn name(response: &egui::Response, text: &str) {
     control(response, egui::accesskit::Role::Button, text, true, None);
 }
 
-/// Split or Snap. The word is the name, and the tree says whether it is on.
-pub(crate) fn name_switch(response: &egui::Response, text: &str, on: bool, enabled: bool) {
-    control(
-        response,
-        egui::accesskit::Role::Switch,
-        text,
-        enabled,
-        Some(on),
-    );
-}
-
 /// A section that folds. `open` is whether the fields are shown.
 pub(crate) fn disclosure(response: &egui::Response, text: &str, open: bool) {
     control(

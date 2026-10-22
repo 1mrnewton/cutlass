@@ -1,4 +1,4 @@
-//! The project's tracks, drawn bottom to top, with the ruler above them.
+//! The project's tracks, drawn bottom to top, with the toolbar and ruler above them.
 
 use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, Sense, Stroke, pos2, vec2};
 
@@ -14,10 +14,22 @@ use crate::words::{self, Language, Phrase};
 
 const HEAD: f32 = 130.0;
 const COVER: f32 = 72.0;
+const TOOLBAR_HEIGHT: f32 = 36.0;
 const RULER_HEIGHT: f32 = 44.0;
 const MAIN_HEIGHT: f32 = 64.0;
 const LANE_HEIGHT: f32 = 40.0;
 const GAP: f32 = 8.0;
+const TOOL: f32 = 28.0;
+const TOOL_GAP: f32 = 4.0;
+/// Marker diamond and the snap line. The prototype uses this yellow.
+const MARK: Color32 = Color32::from_rgb(0xe4, 0xff, 0x57);
+const TICK: Color32 = Color32::from_rgb(0x5a, 0x5a, 0x5a);
+const CLIP_INK: Color32 = Color32::from_rgb(0xf6, 0xf3, 0xec);
+const TOOL_PLATE: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
+const TOAST_INK: Color32 = Color32::from_rgb(0x16, 0x16, 0x16);
+const VIDEO_KINDS: &[TrackKind] = &[TrackKind::Video];
+const TIMED_KINDS: &[TrackKind] = &[TrackKind::Video, TrackKind::Audio];
+const PICTURE_KINDS: &[TrackKind] = &[TrackKind::Video, TrackKind::Text, TrackKind::Sticker];
 
 struct Lane {
     main: bool,
@@ -89,13 +101,29 @@ enum Picked {
     Horizontal(usize),
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Guides {
     vertical: Vec<i64>,
     horizontal: Vec<f32>,
     selected: Option<Picked>,
     pull: Option<egui::Pos2>,
     row: Option<egui::Pos2>,
+    shown: bool,
+    locked: bool,
+}
+
+impl Default for Guides {
+    fn default() -> Self {
+        Self {
+            vertical: Vec::new(),
+            horizontal: Vec::new(),
+            selected: None,
+            pull: None,
+            row: None,
+            shown: true,
+            locked: false,
+        }
+    }
 }
 
 /// A keyframe diamond following the pointer. The offset is from the clip start.
@@ -453,6 +481,12 @@ enum Edge {
     End,
 }
 
+pub(crate) struct Tools<'a> {
+    pub split: &'a mut bool,
+    pub can_undo: bool,
+    pub can_redo: bool,
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     project: &Project,
@@ -460,14 +494,20 @@ pub fn show(
     selected: &mut Vec<SegmentId>,
     drag: &mut Option<ClipDrag>,
     trim: &mut Option<TrimDrag>,
-    split: &mut bool,
+    tools: Tools<'_>,
 ) -> Vec<Command> {
+    let Tools {
+        split,
+        can_undo,
+        can_redo,
+    } = tools;
     crate::tip::region(ui, words::of(ui, Phrase::RegionTimeline));
     // The panel stores the height this ui claims. Painting the lanes does not
     // claim it, so a drag would snap back to the minimum on release.
     ui.take_available_height();
     let full = ui.max_rect();
-    let ruler_rect = Rect::from_min_size(full.min, vec2(full.width(), RULER_HEIGHT));
+    let toolbar = Rect::from_min_size(full.min, vec2(full.width(), TOOLBAR_HEIGHT));
+    let ruler_rect = Rect::from_min_size(toolbar.left_bottom(), vec2(full.width(), RULER_HEIGHT));
     let tracks = Rect::from_min_max(ruler_rect.left_bottom(), full.max);
     selected.retain(|id| project.timeline().segment(*id).is_some());
     if drag
@@ -512,23 +552,7 @@ pub fn show(
         if let Some(point) = pointer.filter(|point| full.contains(*point)) {
             zoom_around(&mut view, lane, point.x, factor, lane_width, duration, rate);
         }
-        let anchor = view.x(lane, *playhead).clamp(lane, lane + lane_width);
-        match zoom_controls(ui, ruler_rect, true) {
-            Some(ZoomStep::In) => {
-                zoom_around(&mut view, lane, anchor, 2.0, lane_width, duration, rate);
-            }
-            Some(ZoomStep::Out) => {
-                zoom_around(&mut view, lane, anchor, 0.5, lane_width, duration, rate);
-            }
-            Some(ZoomStep::Fit) => {
-                view = View::fit(lane_width, duration);
-                clamp_view(&mut view, lane_width, duration, rate);
-            }
-            None => {}
-        }
         ui.data_mut(|data| data.insert_temp(zoom_id, view));
-    } else {
-        let _ = zoom_controls(ui, ruler_rect, false);
     }
     let marks_id = ui.scope_id().with("timeline-marks");
     let stored = ui
@@ -552,6 +576,39 @@ pub fn show(
     let mut lanes = lanes_of(project);
     retain_lanes(project, &mut lanes);
     let mut note = None;
+    let tools = paint_toolbar(
+        ui,
+        toolbar,
+        &mut Bar {
+            live: duration > 0,
+            can_undo,
+            can_redo,
+            project,
+            lanes: &lanes,
+            selected,
+            split,
+            snap: &mut snap,
+            marker: &mut marker,
+            beat: &mut beat,
+            guides: &mut guides,
+            view,
+            lane_width,
+            duration,
+            rate,
+            commands: &mut commands,
+        },
+    );
+    if let Some(text) = tools.note {
+        note = Some(text);
+    }
+    if duration > 0
+        && lane_width > 0.0
+        && let Some(step) = tools.zoom
+    {
+        let anchor = view.x(lane, *playhead).clamp(lane, lane + lane_width);
+        apply_zoom(&mut view, lane, anchor, step, lane_width, duration, rate);
+        ui.data_mut(|data| data.insert_temp(zoom_id, view));
+    }
     if let Some(key) = crate::keys::tool(ui) {
         match clip_edit(key, ui, project, &lanes, *playhead, selected, &mut commands) {
             ClipKey::Done => {}
@@ -582,18 +639,7 @@ pub fn show(
                     && let Some(step) = zoom
                 {
                     let anchor = view.x(lane, *playhead).clamp(lane, lane + lane_width);
-                    match step {
-                        ZoomStep::In => {
-                            zoom_around(&mut view, lane, anchor, 2.0, lane_width, duration, rate);
-                        }
-                        ZoomStep::Out => {
-                            zoom_around(&mut view, lane, anchor, 0.5, lane_width, duration, rate);
-                        }
-                        ZoomStep::Fit => {
-                            view = View::fit(lane_width, duration);
-                            clamp_view(&mut view, lane_width, duration, rate);
-                        }
-                    }
+                    apply_zoom(&mut view, lane, anchor, step, lane_width, duration, rate);
                     ui.data_mut(|data| data.insert_temp(zoom_id, view));
                 }
             }
@@ -609,12 +655,14 @@ pub fn show(
         if pressed && let Some(point) = pointer {
             held_locked = false;
             let mark = playhead_mark(ruler_rect, project, *playhead, view);
-            let on_buttons = on_tools(ruler_rect, point);
-            let on_ruler = ruler_rect.contains(point)
+            let on_buttons = on_toolbar(toolbar, point);
+            let on_ruler = !on_buttons
+                && ruler_rect.contains(point)
                 && point.x >= lane_left(ruler_rect)
                 && !mark.is_some_and(|mark| mark.contains(point));
             let on_corner =
                 ruler_rect.contains(point) && point.x < lane_left(ruler_rect) && !on_buttons;
+            let can_draw = guides.shown && !guides.locked;
             if on_ruler {
                 if let Some(index) = near_us(view, lane_left(ruler_rect), &stamps.ruler, point.x) {
                     stamps.selected = Some(PickedStamp::Ruler(stamps.ruler[index]));
@@ -622,7 +670,7 @@ pub fn show(
                     selected.clear();
                     guides.pull = None;
                     guides.row = None;
-                } else if !marker {
+                } else if !marker && can_draw {
                     guides.pull = Some(point);
                     guides.row = None;
                     *drag = None;
@@ -633,7 +681,7 @@ pub fn show(
                     *drag = None;
                     *trim = None;
                 }
-            } else if on_corner {
+            } else if on_corner && can_draw {
                 guides.row = Some(point);
                 guides.pull = None;
                 *drag = None;
@@ -643,6 +691,8 @@ pub fn show(
         let from_ruler = released && (guides.pull.is_some() || guides.row.is_some());
         if released
             && let Some(origin) = guides.pull.take()
+            && guides.shown
+            && !guides.locked
             && pointer.is_some_and(|point| point.y > ruler_rect.bottom() + 8.0)
         {
             let time = time_at(ruler_rect, project, origin.x, view);
@@ -651,6 +701,8 @@ pub fn show(
         }
         if released
             && guides.row.take().is_some()
+            && guides.shown
+            && !guides.locked
             && let Some(point) = pointer.filter(|point| point.y > ruler_rect.bottom() + 8.0)
         {
             let fraction = row_fraction(tracks, point.y);
@@ -698,7 +750,7 @@ pub fn show(
                         stamps.selected = None;
                     }
                 }
-                _ => match guides.selected {
+                _ if guides.shown && !guides.locked => match guides.selected {
                     Some(Picked::Vertical(index)) if index < guides.vertical.len() => {
                         guides.vertical.remove(index);
                         guides.selected = None;
@@ -709,6 +761,7 @@ pub fn show(
                     }
                     _ => {}
                 },
+                _ => {}
             }
         }
         if pressed
@@ -719,7 +772,9 @@ pub fn show(
             ui.data_mut(|data| data.remove::<BoxSelect>(box_id));
             guides.selected = None;
             stamps.selected = None;
-            if let Some(picked) = picked_guide(&guides, tracks, point, view) {
+            if guides.shown
+                && let Some(picked) = picked_guide(&guides, tracks, point, view)
+            {
                 guides.selected = Some(picked);
                 *drag = None;
                 *trim = None;
@@ -882,7 +937,7 @@ pub fn show(
             } else if clicked
                 && marker
                 && !on_locked_clip
-                && let Some(point) = pointer.filter(|point| !on_tools(ruler_rect, *point))
+                && let Some(point) = pointer.filter(|point| !on_toolbar(toolbar, *point))
             {
                 let (hit, command) = drop_marker(
                     project,
@@ -936,7 +991,7 @@ pub fn show(
                     &Align {
                         snap,
                         playhead: *playhead,
-                        guides: &guides.vertical,
+                        guides: if guides.shown { &guides.vertical } else { &[] },
                         marks: &mark_times,
                         view,
                     },
@@ -958,7 +1013,7 @@ pub fn show(
                     &Align {
                         snap,
                         playhead: *playhead,
-                        guides: &guides.vertical,
+                        guides: if guides.shown { &guides.vertical } else { &[] },
                         marks: &mark_times,
                         view,
                     },
@@ -978,15 +1033,6 @@ pub fn show(
         ui.data_mut(|data| data.insert_temp(held_id, held_locked));
     }
     paint_ruler(ui, ruler_rect, project, view);
-    let live = project.duration().value > 0;
-    if ruler_switches(ui, ruler_rect, live, split, &mut snap) {
-        marker = false;
-        beat = false;
-    }
-    if let Some(text) = project_switches(ui, ruler_rect, project, &lanes, &mut commands) {
-        note = Some(text);
-    }
-    mark_switches(ui, ruler_rect, live, &mut marker, &mut beat, split);
     ui.data_mut(|data| data.insert_temp(snap_id, snap));
     ui.data_mut(|data| data.insert_temp(guides_id, guides.clone()));
     ui.data_mut(|data| data.insert_temp(marker_id, marker));
@@ -1038,9 +1084,29 @@ pub fn show(
                 pos2(tracks.left(), lane.top),
                 pos2(tracks.left() + HEAD, lane.top + lane.height),
             );
+            ui.painter().rect_filled(
+                head,
+                0.0,
+                if lane.main { theme::LANE } else { theme::PANEL },
+            );
             let mut row = lane_row(&lanes, track.id());
-            paint_lane_label(ui, head, words::say(words::active(ui), lane_phrase(track)));
-            if let Some(edit) = paint_lane_flags(ui, head, track.id(), &mut row) {
+            let ink = if lane.main {
+                Color32::WHITE
+            } else {
+                theme::MUTED
+            };
+            paint_lane_label(
+                ui,
+                head,
+                kind_icon(track.kind()),
+                words::say(words::active(ui), lane_phrase(track)),
+                ink,
+            );
+            let shown = pointer.is_some_and(|point| head.contains(point))
+                || row.hidden
+                || row.muted
+                || row.locked;
+            if let Some(edit) = paint_lane_flags(ui, head, track.id(), &mut row, shown) {
                 commands.push(edit.command);
                 if let Some(text) = edit.note {
                     note = Some(text);
@@ -1064,7 +1130,7 @@ pub fn show(
                     pointer,
                     snap,
                     playhead: *playhead,
-                    guides: &guides.vertical,
+                    guides: if guides.shown { &guides.vertical } else { &[] },
                     marks: &mark_times,
                     dim,
                     lanes: &lanes,
@@ -1111,18 +1177,15 @@ pub fn show(
             &Align {
                 snap,
                 playhead: *playhead,
-                guides: &guides.vertical,
+                guides: if guides.shown { &guides.vertical } else { &[] },
                 marks: &mark_times,
                 view,
             },
         )
     {
         let bottom = tracks.bottom().max(ruler_rect.bottom());
-        ui.painter().vline(
-            x,
-            ruler_rect.bottom()..=bottom,
-            Stroke::new(1.0, theme::EXPORT),
-        );
+        ui.painter()
+            .vline(x, ruler_rect.bottom()..=bottom, Stroke::new(1.0, MARK));
     }
     if let Some(rect) = box_rect {
         ui.painter()
@@ -1212,20 +1275,24 @@ fn paint_note(ui: &egui::Ui, ruler: Rect) {
     let Some(alpha) = toast_alpha(age) else {
         return;
     };
-    let ink =
-        Color32::from_rgba_unmultiplied(theme::GAP.r(), theme::GAP.g(), theme::GAP.b(), alpha);
+    let ink = Color32::from_rgba_unmultiplied(TOAST_INK.r(), TOAST_INK.g(), TOAST_INK.b(), alpha);
     let galley = ui.painter().layout_no_wrap(
         note.text.to_owned(),
-        FontId::new(12.0, FontFamily::Proportional),
+        FontId::new(13.0, FontFamily::Proportional),
         ink,
     );
-    let size = galley.size() + vec2(24.0, 12.0);
-    let center = pos2(ruler.center().x, ruler.bottom() + 18.0 + size.y * 0.5);
+    let size = galley.size() + vec2(28.0, 14.0);
+    let center = pos2(ruler.center().x, ruler.bottom() + 40.0);
     let rect = Rect::from_center_size(center, size);
+    ui.painter().rect_filled(
+        rect.translate(vec2(0.0, 4.0)).expand(2.0),
+        999.0,
+        Color32::from_black_alpha(alpha / 4),
+    );
     ui.painter()
-        .rect_filled(rect, 99.0, Color32::from_white_alpha(alpha));
+        .rect_filled(rect, 999.0, Color32::from_white_alpha(alpha));
     ui.painter().galley(
-        pos2(rect.left() + 12.0, rect.center().y - galley.size().y * 0.5),
+        pos2(rect.left() + 14.0, rect.center().y - galley.size().y * 0.5),
         galley,
         ink,
     );
@@ -1332,50 +1399,473 @@ enum ZoomStep {
     In,
 }
 
-fn zoom_rects(ruler: Rect) -> [Rect; 3] {
-    let top = ruler.center().y - 13.0;
-    let x = ruler.left() + HEAD + 2.0;
-    [
-        Rect::from_min_size(pos2(x, top), vec2(18.0, 26.0)),
-        Rect::from_min_size(pos2(x + 20.0, top), vec2(28.0, 26.0)),
-        Rect::from_min_size(pos2(x + 50.0, top), vec2(18.0, 26.0)),
-    ]
+fn apply_zoom(
+    view: &mut View,
+    left: f32,
+    anchor: f32,
+    step: ZoomStep,
+    width: f32,
+    duration_us: i64,
+    rate: FrameRate,
+) {
+    match step {
+        ZoomStep::In => zoom_around(view, left, anchor, 2.0, width, duration_us, rate),
+        ZoomStep::Out => zoom_around(view, left, anchor, 0.5, width, duration_us, rate),
+        ZoomStep::Fit => {
+            *view = View::fit(width, duration_us);
+            clamp_view(view, width, duration_us, rate);
+        }
+    }
 }
 
-fn zoom_controls(ui: &mut egui::Ui, ruler: Rect, live: bool) -> Option<ZoomStep> {
-    let rects = zoom_rects(ruler);
-    let steps = [ZoomStep::Out, ZoomStep::Fit, ZoomStep::In];
-    let labels = ["−", words::of(ui, Phrase::Fit), "+"];
-    let names = [Phrase::ZoomOut, Phrase::ZoomToFit, Phrase::ZoomIn];
-    let salts = ["zoom-out", "zoom-fit", "zoom-in"];
-    let mut chosen = None;
-    for index in 0..rects.len() {
-        let response = ui.interact(
-            rects[index],
-            ui.scope_id().with(salts[index]),
-            Sense::click(),
-        );
-        crate::tip::show_enabled(&response, words::of(ui, names[index]), live);
-        if live && response.clicked() {
-            chosen = Some(steps[index]);
-        }
-        let (fill, color) = theme::face(
-            Color32::TRANSPARENT,
-            if live { theme::INK } else { theme::FAINT },
-            live && theme::hot(&response),
-        );
-        if fill.a() > 0 {
-            ui.painter().rect_filled(rects[index], 6.0, fill);
-        }
-        ui.painter().text(
-            rects[index].center(),
-            Align2::CENTER_CENTER,
-            labels[index],
-            FontId::new(11.0, FontFamily::Proportional),
-            color,
-        );
+/// Fit, zoom out, and zoom in. Out is off at the quarter-lane floor. In is off at the two-frame ceiling.
+fn zoom_ready(view: View, lane_width: f32, duration: i64, rate: FrameRate) -> (bool, bool, bool) {
+    if duration <= 0 || lane_width <= 0.0 || !(view.pixel_size.is_finite() && view.pixel_size > 0.0)
+    {
+        return (false, false, false);
     }
-    chosen
+    let floor = ruler::quarter_pixel_size(lane_width, duration);
+    let ceiling = ruler::finest_pixel_size(rate);
+    (
+        true,
+        view.pixel_size > floor + 1e-9,
+        ceiling > 0.0 && view.pixel_size + 1e-9 < ceiling,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolPress {
+    Undo,
+    Redo,
+    Delete,
+}
+
+fn tool_press_id() -> egui::Id {
+    egui::Id::unique("timeline-tool")
+}
+
+fn remember_tool(ui: &egui::Ui, press: ToolPress) {
+    ui.data_mut(|data| data.insert_temp(tool_press_id(), Some(press)));
+}
+
+pub(crate) fn take_tool(ui: &egui::Ui) -> Option<ToolPress> {
+    ui.data_mut(|data| data.remove_temp::<Option<ToolPress>>(tool_press_id()))
+        .flatten()
+}
+
+struct Picture {
+    salt: &'static str,
+    icon: Icon,
+    phrase: Phrase,
+    kinds: &'static [TrackKind],
+}
+
+const PICTURES: &[Picture] = &[
+    Picture {
+        salt: "freeze",
+        icon: Icon::Freeze,
+        phrase: Phrase::Freeze,
+        kinds: VIDEO_KINDS,
+    },
+    Picture {
+        salt: "reverse",
+        icon: Icon::Reverse,
+        phrase: Phrase::Reverse,
+        kinds: TIMED_KINDS,
+    },
+    Picture {
+        salt: "mirror",
+        icon: Icon::Mirror,
+        phrase: Phrase::Mirror,
+        kinds: PICTURE_KINDS,
+    },
+    Picture {
+        salt: "rotate",
+        icon: Icon::Rotate,
+        phrase: Phrase::Rotate,
+        kinds: PICTURE_KINDS,
+    },
+    Picture {
+        salt: "crop",
+        icon: Icon::Crop,
+        phrase: Phrase::Crop,
+        kinds: VIDEO_KINDS,
+    },
+    Picture {
+        salt: "transcribe",
+        icon: Icon::Transcribe,
+        phrase: Phrase::Transcribe,
+        kinds: TIMED_KINDS,
+    },
+    Picture {
+        salt: "split-scenes",
+        icon: Icon::SplitScenes,
+        phrase: Phrase::SplitScenes,
+        kinds: VIDEO_KINDS,
+    },
+];
+
+struct Bar<'a> {
+    live: bool,
+    can_undo: bool,
+    can_redo: bool,
+    project: &'a Project,
+    lanes: &'a Lanes,
+    selected: &'a [SegmentId],
+    split: &'a mut bool,
+    snap: &'a mut bool,
+    marker: &'a mut bool,
+    beat: &'a mut bool,
+    guides: &'a mut Guides,
+    view: View,
+    lane_width: f32,
+    duration: i64,
+    rate: FrameRate,
+    commands: &'a mut Vec<Command>,
+}
+
+struct BarResult {
+    zoom: Option<ZoomStep>,
+    note: Option<&'static str>,
+}
+
+struct Tool<'a> {
+    salt: &'a str,
+    icon: Icon,
+    tip: &'a str,
+    on: bool,
+    enabled: bool,
+    switch: bool,
+}
+
+struct Row<'a> {
+    ui: &'a mut egui::Ui,
+    x: f32,
+    top: f32,
+}
+
+impl Row<'_> {
+    fn tool(&mut self, tool: Tool<'_>) -> bool {
+        let rect = Rect::from_min_size(pos2(self.x, self.top), vec2(TOOL, TOOL));
+        self.x += TOOL + TOOL_GAP;
+        tool_button(self.ui, rect, tool)
+    }
+
+    fn separate(&mut self) {
+        self.x += 6.0;
+        let mid = self.top + TOOL * 0.5;
+        self.ui.painter().vline(
+            self.x,
+            (mid - 8.0)..=(mid + 8.0),
+            Stroke::new(1.0, theme::GAP),
+        );
+        self.x += 1.0 + 6.0 + TOOL_GAP;
+    }
+}
+
+fn paint_toolbar(ui: &mut egui::Ui, toolbar: Rect, bar: &mut Bar<'_>) -> BarResult {
+    ui.painter().hline(
+        toolbar.x_range(),
+        toolbar.bottom() - 0.5,
+        Stroke::new(1.0, theme::GAP),
+    );
+    if !bar.live {
+        *bar.split = false;
+        *bar.marker = false;
+        *bar.beat = false;
+    }
+    let mut note = None;
+    let mut zoom = None;
+    let mut row = Row {
+        ui,
+        x: toolbar.left() + 10.0,
+        top: toolbar.center().y - TOOL * 0.5,
+    };
+    if row.tool(Tool {
+        salt: "undo",
+        icon: Icon::Undo,
+        tip: words::of(row.ui, Phrase::Undo),
+        on: false,
+        enabled: bar.can_undo,
+        switch: false,
+    }) {
+        remember_tool(row.ui, ToolPress::Undo);
+    }
+    if row.tool(Tool {
+        salt: "redo",
+        icon: Icon::Redo,
+        tip: words::of(row.ui, Phrase::Redo),
+        on: false,
+        enabled: bar.can_redo,
+        switch: false,
+    }) {
+        remember_tool(row.ui, ToolPress::Redo);
+    }
+    row.separate();
+    let select_on = !*bar.split && !*bar.marker && !*bar.beat;
+    if row.tool(Tool {
+        salt: "select",
+        icon: Icon::Select,
+        tip: words::of(row.ui, Phrase::Select),
+        on: select_on,
+        enabled: true,
+        switch: true,
+    }) {
+        *bar.split = false;
+        *bar.marker = false;
+        *bar.beat = false;
+    }
+    if row.tool(Tool {
+        salt: "split-blade",
+        icon: Icon::Split,
+        tip: words::of(row.ui, Phrase::Split),
+        on: *bar.split,
+        enabled: bar.live,
+        switch: true,
+    }) {
+        *bar.split = !*bar.split;
+        if *bar.split {
+            *bar.marker = false;
+            *bar.beat = false;
+        }
+    }
+    if row.tool(Tool {
+        salt: "delete",
+        icon: Icon::Delete,
+        tip: words::of(row.ui, Phrase::Delete),
+        on: false,
+        enabled: !bar.selected.is_empty(),
+        switch: false,
+    }) {
+        remember_tool(row.ui, ToolPress::Delete);
+    }
+    let kinds = selected_kinds(bar.project, bar.selected);
+    let unchanged = words::of(row.ui, Phrase::CutUnchanged);
+    for picture in PICTURES {
+        if row.tool(Tool {
+            salt: picture.salt,
+            icon: picture.icon,
+            tip: words::of(row.ui, picture.phrase),
+            on: false,
+            enabled: allows(&kinds, picture.kinds),
+            switch: false,
+        }) {
+            note = Some(unchanged);
+        }
+    }
+    row.separate();
+    if row.tool(Tool {
+        salt: "marker-mode",
+        icon: Icon::Marker,
+        tip: words::of(row.ui, Phrase::Marker),
+        on: *bar.marker,
+        enabled: bar.live,
+        switch: true,
+    }) {
+        *bar.marker = !*bar.marker;
+        if *bar.marker {
+            *bar.beat = false;
+            *bar.split = false;
+        }
+    }
+    if row.tool(Tool {
+        salt: "beat-mode",
+        icon: Icon::Beat,
+        tip: words::of(row.ui, Phrase::Beat),
+        on: *bar.beat,
+        enabled: bar.live,
+        switch: true,
+    }) {
+        *bar.beat = !*bar.beat;
+        if *bar.beat {
+            *bar.marker = false;
+            *bar.split = false;
+        }
+    }
+    row.separate();
+    let snap_tip = words::of(
+        row.ui,
+        if *bar.snap {
+            Phrase::SnapOn
+        } else {
+            Phrase::SnapOff
+        },
+    );
+    if row.tool(Tool {
+        salt: "snap-switch",
+        icon: Icon::Snap,
+        tip: snap_tip,
+        on: *bar.snap,
+        enabled: true,
+        switch: true,
+    }) {
+        *bar.snap = !*bar.snap;
+    }
+    let magnet_on = bar.project.settings().magnet();
+    let magnet_tip = if main_locked(bar.project, bar.lanes) {
+        words::of(row.ui, Phrase::MagnetLocked)
+    } else if magnet_on {
+        words::of(row.ui, Phrase::MagnetOn)
+    } else {
+        words::of(row.ui, Phrase::MagnetOff)
+    };
+    if row.tool(Tool {
+        salt: "magnet-switch",
+        icon: Icon::Magnet,
+        tip: magnet_tip,
+        on: magnet_on,
+        enabled: true,
+        switch: true,
+    }) {
+        if let Some(command) = magnet_toggle(bar.project, bar.lanes) {
+            bar.commands.push(command);
+        } else {
+            note = magnet_refusal(bar.project, bar.lanes, words::active(row.ui));
+        }
+    }
+    let linkage_on = bar.project.settings().linkage();
+    let linkage_tip = words::of(
+        row.ui,
+        if linkage_on {
+            Phrase::LinkageOn
+        } else {
+            Phrase::LinkageOff
+        },
+    );
+    if row.tool(Tool {
+        salt: "linkage-switch",
+        icon: Icon::Linkage,
+        tip: linkage_tip,
+        on: linkage_on,
+        enabled: true,
+        switch: true,
+    }) {
+        bar.commands.push(linkage_toggle(bar.project));
+    }
+    let guides_tip = words::of(
+        row.ui,
+        if bar.guides.shown {
+            Phrase::HideGuides
+        } else {
+            Phrase::ShowGuides
+        },
+    );
+    if row.tool(Tool {
+        salt: "guides-shown",
+        icon: Icon::Guides,
+        tip: guides_tip,
+        on: bar.guides.shown,
+        enabled: true,
+        switch: true,
+    }) {
+        bar.guides.shown = !bar.guides.shown;
+    }
+    let lock_tip = words::of(
+        row.ui,
+        if bar.guides.locked {
+            Phrase::UnlockGuides
+        } else {
+            Phrase::LockGuides
+        },
+    );
+    if row.tool(Tool {
+        salt: "guides-locked",
+        icon: Icon::Lock,
+        tip: lock_tip,
+        on: bar.guides.locked,
+        enabled: true,
+        switch: true,
+    }) {
+        bar.guides.locked = !bar.guides.locked;
+    }
+    let (fit, out, inn) = zoom_ready(bar.view, bar.lane_width, bar.duration, bar.rate);
+    let zoom_width = TOOL * 3.0 + TOOL_GAP * 2.0;
+    row.x = (toolbar.right() - 10.0 - zoom_width).max(row.x);
+    if row.tool(Tool {
+        salt: "zoom-fit",
+        icon: Icon::ZoomFit,
+        tip: words::of(row.ui, Phrase::ZoomToFit),
+        on: false,
+        enabled: fit,
+        switch: false,
+    }) {
+        zoom = Some(ZoomStep::Fit);
+    }
+    if row.tool(Tool {
+        salt: "zoom-out",
+        icon: Icon::ZoomOut,
+        tip: words::of(row.ui, Phrase::ZoomOut),
+        on: false,
+        enabled: out,
+        switch: false,
+    }) {
+        zoom = Some(ZoomStep::Out);
+    }
+    if row.tool(Tool {
+        salt: "zoom-in",
+        icon: Icon::ZoomIn,
+        tip: words::of(row.ui, Phrase::ZoomIn),
+        on: false,
+        enabled: inn,
+        switch: false,
+    }) {
+        zoom = Some(ZoomStep::In);
+    }
+    BarResult { zoom, note }
+}
+
+fn tool_button(ui: &mut egui::Ui, rect: Rect, tool: Tool<'_>) -> bool {
+    let response = ui.interact(
+        rect,
+        ui.scope_id().with(tool.salt),
+        if tool.enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    let (mut fill, mut ink) = theme::face(
+        if tool.on {
+            TOOL_PLATE
+        } else {
+            Color32::TRANSPARENT
+        },
+        if tool.on {
+            Color32::WHITE
+        } else {
+            theme::MUTED
+        },
+        tool.enabled && theme::hot(&response),
+    );
+    if !tool.enabled {
+        fill = fill.gamma_multiply(0.35);
+        ink = ink.gamma_multiply(0.35);
+    }
+    if fill.a() > 0 {
+        ui.painter().rect_filled(rect, 8.0, fill);
+    }
+    icons::paint(ui.painter(), rect.center(), tool.icon, 18.0, ink);
+    if tool.switch {
+        crate::tip::show_switch(&response, tool.tip, tool.on, tool.enabled);
+    } else {
+        crate::tip::show_enabled(&response, tool.tip, tool.enabled);
+    }
+    tool.enabled && response.clicked()
+}
+
+fn selected_kinds(project: &Project, selected: &[SegmentId]) -> Vec<TrackKind> {
+    selected
+        .iter()
+        .filter_map(|id| segment_kind(project, *id))
+        .collect()
+}
+
+fn allows(kinds: &[TrackKind], accepted: &[TrackKind]) -> bool {
+    !kinds.is_empty() && kinds.iter().all(|kind| accepted.contains(kind))
+}
+
+fn on_toolbar(toolbar: Rect, point: egui::Pos2) -> bool {
+    toolbar.contains(point)
 }
 
 fn keep_line(lines: &mut Vec<i64>, time: i64) -> usize {
@@ -1751,7 +2241,7 @@ fn paint_guides(
     view: View,
 ) {
     let left = lane_left(tracks);
-    if tracks.height() <= 0.0 {
+    if !guides.shown || tracks.height() <= 0.0 {
         return;
     }
     if view.pixel_size.is_finite() && view.pixel_size > 0.0 {
@@ -1764,16 +2254,16 @@ fn paint_guides(
         };
         for (index, time) in guides.vertical.iter().enumerate() {
             let color = if guides.selected == Some(Picked::Vertical(index)) {
-                theme::INK
+                Color32::WHITE
             } else {
-                theme::FAINT
+                theme::EXPORT
             };
             draw(*time, color);
         }
         if let Some(origin) = guides.pull
             && pointer.is_some_and(|point| point.y > tracks.top())
         {
-            draw(time_at(tracks, project, origin.x, view), theme::EXPORT);
+            draw(time_at(tracks, project, origin.x, view), Color32::WHITE);
         }
     }
     let draw_row = |fraction: f32, color: Color32| {
@@ -1783,195 +2273,15 @@ fn paint_guides(
     };
     for (index, fraction) in guides.horizontal.iter().enumerate() {
         let color = if guides.selected == Some(Picked::Horizontal(index)) {
-            theme::INK
+            Color32::WHITE
         } else {
-            theme::FAINT
+            theme::EXPORT
         };
         draw_row(*fraction, color);
     }
     if let Some(point) = pointer.filter(|point| guides.row.is_some() && point.y > tracks.top()) {
-        draw_row(row_fraction(tracks, point.y), theme::EXPORT);
+        draw_row(row_fraction(tracks, point.y), Color32::WHITE);
     }
-}
-
-fn ruler_switches(
-    ui: &mut egui::Ui,
-    ruler: Rect,
-    split_live: bool,
-    split: &mut bool,
-    snap: &mut bool,
-) -> bool {
-    let [split_button, snap_button] = switch_rects(ruler);
-    let armed = ruler_switch(
-        ui,
-        split_button,
-        words::of(ui, Phrase::Split),
-        "split-blade",
-        split_live,
-        split,
-    );
-    ruler_switch(
-        ui,
-        snap_button,
-        words::of(ui, Phrase::Snap),
-        "snap-switch",
-        true,
-        snap,
-    );
-    armed
-}
-
-fn switch_rects(ruler: Rect) -> [Rect; 2] {
-    let top = ruler.center().y - 13.0;
-    [
-        Rect::from_min_size(pos2(ruler.left() + 6.0, top), vec2(58.0, 26.0)),
-        Rect::from_min_size(pos2(ruler.left() + 68.0, top), vec2(56.0, 26.0)),
-    ]
-}
-
-fn ruler_switch(
-    ui: &mut egui::Ui,
-    button: Rect,
-    label: &str,
-    salt: &str,
-    live: bool,
-    on: &mut bool,
-) -> bool {
-    if !live {
-        *on = false;
-    }
-    let response = ui.interact(button, ui.scope_id().with(salt), Sense::click());
-    let was = *on;
-    if live && response.clicked() {
-        *on = !*on;
-    }
-    let color = if !live {
-        theme::FAINT
-    } else if *on {
-        theme::EXPORT
-    } else {
-        theme::INK
-    };
-    let (fill, color) = theme::face(
-        if *on {
-            theme::ACTIVE
-        } else {
-            Color32::TRANSPARENT
-        },
-        color,
-        live && theme::hot(&response),
-    );
-    if fill.a() > 0 {
-        ui.painter().rect_filled(button, 6.0, fill);
-    }
-    ui.painter().text(
-        button.center(),
-        Align2::CENTER_CENTER,
-        label,
-        FontId::new(12.0, FontFamily::Proportional),
-        color,
-    );
-    crate::tip::name_switch(&response, label, *on, live);
-    *on && !was
-}
-
-fn mark_rects(ruler: Rect) -> [Rect; 2] {
-    let top = ruler.center().y - 13.0;
-    let beat = Rect::from_min_size(pos2(ruler.right() - 32.0, top), vec2(26.0, 26.0));
-    let marker = Rect::from_min_size(pos2(beat.left() - 30.0, top), vec2(26.0, 26.0));
-    [marker, beat]
-}
-
-fn on_tools(ruler: Rect, point: egui::Pos2) -> bool {
-    switch_rects(ruler)
-        .into_iter()
-        .chain(zoom_rects(ruler))
-        .chain(project_rects(ruler))
-        .chain(mark_rects(ruler))
-        .any(|button| button.contains(point))
-}
-
-fn mark_switches(
-    ui: &mut egui::Ui,
-    ruler: Rect,
-    live: bool,
-    marker: &mut bool,
-    beat: &mut bool,
-    split: &mut bool,
-) {
-    let [marker_rect, beat_rect] = mark_rects(ruler);
-    if mode_switch(
-        ui,
-        marker_rect,
-        Icon::Marker,
-        words::of(ui, Phrase::Marker),
-        "marker-mode",
-        live,
-        marker,
-    ) {
-        *beat = false;
-        *split = false;
-    }
-    if mode_switch(
-        ui,
-        beat_rect,
-        Icon::Beat,
-        words::of(ui, Phrase::Beat),
-        "beat-mode",
-        live,
-        beat,
-    ) {
-        *marker = false;
-        *split = false;
-    }
-}
-
-fn mode_switch(
-    ui: &mut egui::Ui,
-    button: Rect,
-    icon: Icon,
-    tip: &str,
-    salt: &str,
-    live: bool,
-    on: &mut bool,
-) -> bool {
-    if !live {
-        *on = false;
-    }
-    let response = ui.interact(button, ui.scope_id().with(salt), Sense::click());
-    let was = *on;
-    if live && response.clicked() {
-        *on = !*on;
-    }
-    let color = if !live {
-        theme::FAINT
-    } else if *on {
-        theme::EXPORT
-    } else {
-        theme::INK
-    };
-    let (fill, color) = theme::face(
-        if *on {
-            theme::ACTIVE
-        } else {
-            Color32::TRANSPARENT
-        },
-        color,
-        live && theme::hot(&response),
-    );
-    if fill.a() > 0 {
-        ui.painter().rect_filled(button, 6.0, fill);
-    }
-    icons::paint(ui.painter(), button.center(), icon, 16.0, color);
-    crate::tip::show_switch(&response, tip, *on, live);
-    *on && !was
-}
-
-fn project_rects(ruler: Rect) -> [Rect; 2] {
-    let [marker, _] = mark_rects(ruler);
-    let linkage = Rect::from_min_size(pos2(marker.left() - 30.0, marker.top()), vec2(26.0, 26.0));
-    let magnet = Rect::from_min_size(pos2(linkage.left() - 30.0, marker.top()), vec2(26.0, 26.0));
-    [magnet, linkage]
 }
 
 fn main_locked(project: &Project, lanes: &Lanes) -> bool {
@@ -2180,87 +2490,6 @@ fn magnet_toggle(project: &Project, lanes: &Lanes) -> Option<Command> {
 
 fn linkage_toggle(project: &Project) -> Command {
     Command::SetLinkage(!project.settings().linkage())
-}
-
-fn project_switches(
-    ui: &mut egui::Ui,
-    ruler: Rect,
-    project: &Project,
-    lanes: &Lanes,
-    commands: &mut Vec<Command>,
-) -> Option<&'static str> {
-    let [magnet_rect, linkage_rect] = project_rects(ruler);
-    let cover = Rect::from_min_max(
-        pos2(magnet_rect.left() - 4.0, ruler.top()),
-        ruler.right_bottom(),
-    );
-    ui.painter().rect_filled(cover, 0.0, theme::PANEL);
-    let magnet_on = project.settings().magnet();
-    let magnet_tip = if main_locked(project, lanes) {
-        words::of(ui, Phrase::MagnetLocked)
-    } else if magnet_on {
-        words::of(ui, Phrase::MagnetOn)
-    } else {
-        words::of(ui, Phrase::MagnetOff)
-    };
-    let mut refused = None;
-    if setting_switch(
-        ui,
-        magnet_rect,
-        Icon::Magnet,
-        magnet_tip,
-        "magnet-switch",
-        magnet_on,
-    ) {
-        if let Some(command) = magnet_toggle(project, lanes) {
-            commands.push(command);
-        } else {
-            refused = magnet_refusal(project, lanes, words::active(ui));
-        }
-    }
-    let linkage_on = project.settings().linkage();
-    let linkage_tip = if linkage_on {
-        words::of(ui, Phrase::LinkageOn)
-    } else {
-        words::of(ui, Phrase::LinkageOff)
-    };
-    if setting_switch(
-        ui,
-        linkage_rect,
-        Icon::Linkage,
-        linkage_tip,
-        "linkage-switch",
-        linkage_on,
-    ) {
-        commands.push(linkage_toggle(project));
-    }
-    refused
-}
-
-fn setting_switch(
-    ui: &mut egui::Ui,
-    button: Rect,
-    icon: Icon,
-    tip: &str,
-    salt: &str,
-    on: bool,
-) -> bool {
-    let response = ui.interact(button, ui.scope_id().with(salt), Sense::click());
-    let (fill, color) = theme::face(
-        if on {
-            theme::ACTIVE
-        } else {
-            Color32::TRANSPARENT
-        },
-        if on { theme::EXPORT } else { theme::INK },
-        theme::hot(&response),
-    );
-    if fill.a() > 0 {
-        ui.painter().rect_filled(button, 6.0, fill);
-    }
-    icons::paint(ui.painter(), button.center(), icon, 16.0, color);
-    crate::tip::show_switch(&response, tip, on, true);
-    response.clicked()
 }
 
 fn split_command(
@@ -2762,6 +2991,27 @@ fn stroke_clip(ui: &egui::Ui, rect: Rect) {
         Stroke::new(1.5, Color32::WHITE),
         egui::StrokeKind::Inside,
     );
+    paint_edge_marks(ui, rect);
+}
+
+fn paint_edge_marks(ui: &egui::Ui, rect: Rect) {
+    if rect.width() <= 16.0 {
+        return;
+    }
+    let top = rect.top() + 4.0;
+    let bottom = rect.bottom() - 4.0;
+    if bottom - top < 4.0 {
+        return;
+    }
+    let bar = |x: f32| {
+        ui.painter().rect_filled(
+            Rect::from_min_size(pos2(x, top), vec2(2.0, bottom - top)),
+            1.0,
+            Color32::WHITE,
+        );
+    };
+    bar(rect.left() + 2.0);
+    bar(rect.right() - 4.0);
 }
 
 fn clip_name(project: &Project, segment: &cutlass_project::Segment) -> String {
@@ -2800,7 +3050,7 @@ fn paint_name(ui: &egui::Ui, project: &Project, segment: &cutlass_project::Segme
         Align2::LEFT_CENTER,
         name,
         FontId::new(11.0, FontFamily::Proportional),
-        Color32::WHITE,
+        CLIP_INK,
     );
 }
 
@@ -3238,18 +3488,14 @@ fn paint_stamps(
     view: View,
 ) {
     let left = lane_left(ruler);
-    let covered = project_rects(ruler)[0].left() - 4.0;
     for (index, us) in stamps.ruler.iter().enumerate() {
-        if view.x(left, *us) >= covered {
-            continue;
-        }
         let color = if stamps.selected == Some(PickedStamp::Ruler(*us)) {
             theme::INK
         } else {
-            theme::STICKER
+            MARK
         };
-        let at = pos2(view.x(left, *us), ruler.top() + 14.0);
-        icons::paint(ui.painter(), at, Icon::Marker, 14.0, color);
+        let at = pos2(view.x(left, *us), ruler.top() + 6.0);
+        paint_diamond(ui.painter(), at, color);
         let hit = Rect::from_center_size(at, vec2(16.0, 16.0));
         let response = ui.interact(
             hit,
@@ -3292,8 +3538,7 @@ fn paint_stamps(
                     left,
                     view,
                     icon: Icon::Marker,
-                    y: rect.top() + 10.0,
-                    idle: theme::STICKER,
+                    idle: MARK,
                     chosen: theme::INK,
                     pick: PickedStamp::Clip,
                 },
@@ -3311,8 +3556,7 @@ fn paint_stamps(
                         left,
                         view,
                         icon: Icon::Beat,
-                        y: rect.bottom() - 10.0,
-                        idle: theme::INK,
+                        idle: Color32::WHITE,
                         chosen: theme::EXPORT,
                         pick: PickedStamp::Beat,
                     },
@@ -3349,9 +3593,16 @@ fn paint_bound(
         } else {
             place.idle
         };
-        let at = pos2(x, place.y);
-        icons::paint(ui.painter(), at, place.icon, 13.0, color);
         let beat = matches!(place.icon, Icon::Beat);
+        let at = if beat {
+            ui.painter()
+                .vline(x, place.rect.y_range(), Stroke::new(2.0, color));
+            pos2(x, place.rect.center().y)
+        } else {
+            let at = pos2(x, place.rect.top() + 6.0);
+            paint_diamond(ui.painter(), at, color);
+            at
+        };
         let hit = Rect::from_center_size(at, vec2(16.0, 16.0));
         let response = ui.interact(
             hit,
@@ -3374,10 +3625,23 @@ struct StampPlace {
     left: f32,
     view: View,
     icon: Icon,
-    y: f32,
     idle: Color32,
     chosen: Color32,
     pick: fn(ClipStamp) -> PickedStamp,
+}
+
+fn paint_diamond(painter: &egui::Painter, center: egui::Pos2, color: Color32) {
+    let d = 4.0;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            center + vec2(0.0, -d),
+            center + vec2(d, 0.0),
+            center + vec2(0.0, d),
+            center + vec2(-d, 0.0),
+        ],
+        color,
+        Stroke::NONE,
+    ));
 }
 
 fn paint_ruler(ui: &mut egui::Ui, ruler_rect: Rect, project: &Project, view: View) {
@@ -3392,17 +3656,14 @@ fn paint_ruler(ui: &mut egui::Ui, ruler_rect: Rect, project: &Project, view: Vie
     ) {
         let x = view.x(left, mark.us);
         let height = if mark.major { 12.0 } else { 6.0 };
-        ui.painter().vline(
-            x,
-            (bottom - height)..=bottom,
-            Stroke::new(1.0, theme::MUTED),
-        );
+        ui.painter()
+            .vline(x, (bottom - height)..=bottom, Stroke::new(1.0, TICK));
         if let Some(label) = mark.label {
             ui.painter().text(
                 pos2(x + 4.0, bottom - height - 2.0),
                 Align2::LEFT_BOTTOM,
                 label,
-                FontId::new(10.0, FontFamily::Proportional),
+                FontId::new(11.0, FontFamily::Monospace),
                 theme::MUTED,
             );
         }
@@ -3429,7 +3690,7 @@ fn paint_playhead(
     let color = if live {
         Color32::WHITE
     } else {
-        Color32::from_white_alpha(96)
+        Color32::from_white_alpha(89)
     };
     let bottom = ruler_rect.bottom();
     let x_of = |us: i64| {
@@ -3451,40 +3712,47 @@ fn paint_playhead(
     }
     let x = x_of(*playhead);
     let mark = Rect::from_center_size(pos2(x, bottom - 6.0), vec2(11.0, 12.0));
-    ui.painter().rect_filled(mark, 2.0, color);
+    ui.painter().rect_filled(mark, 4.0, color);
     if tracks.bottom() >= bottom {
         ui.painter()
             .vline(x, bottom..=tracks.bottom(), Stroke::new(1.0, color));
     }
 }
 
-fn paint_lane_label(ui: &mut egui::Ui, head: Rect, label: &str) {
-    let hide = flag_rects(head)[0];
-    let max_width = hide.left() - 8.0 - (head.left() + 12.0);
+fn paint_lane_label(ui: &mut egui::Ui, head: Rect, icon: Icon, label: &str, ink: Color32) {
+    let text_x = head.left() + 30.0;
+    let max_width = flag_rects(head)[0].left() - 4.0 - text_x;
+    icons::paint(
+        ui.painter(),
+        pos2(head.left() + 17.0, head.center().y),
+        icon,
+        14.0,
+        ink,
+    );
     if max_width <= 8.0 {
         return;
     }
     let mut job = egui::text::LayoutJob::simple(
         label.to_owned(),
-        FontId::new(12.0, FontFamily::Proportional),
-        theme::MUTED,
+        FontId::new(11.0, FontFamily::Proportional),
+        ink,
         max_width,
     );
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
     let galley = ui.painter().layout_job(job);
     ui.painter().galley(
-        pos2(head.left() + 12.0, head.center().y - galley.size().y * 0.5),
+        pos2(text_x, head.center().y - galley.size().y * 0.5),
         galley,
-        theme::MUTED,
+        ink,
     );
 }
 
 fn flag_rects(head: Rect) -> [Rect; 3] {
     let y = head.center().y;
-    let lock = Rect::from_center_size(pos2(head.right() - 16.0, y), vec2(22.0, 22.0));
-    let mute = Rect::from_center_size(pos2(lock.center().x - 24.0, y), vec2(22.0, 22.0));
-    let hide = Rect::from_center_size(pos2(mute.center().x - 24.0, y), vec2(22.0, 22.0));
+    let lock = Rect::from_center_size(pos2(head.right() - 16.0, y), vec2(16.0, 16.0));
+    let mute = Rect::from_center_size(pos2(lock.center().x - 18.0, y), vec2(16.0, 16.0));
+    let hide = Rect::from_center_size(pos2(mute.center().x - 18.0, y), vec2(16.0, 16.0));
     [hide, mute, lock]
 }
 
@@ -3498,6 +3766,7 @@ fn paint_lane_flags(
     head: Rect,
     track: TrackId,
     row: &mut LaneFlag,
+    shown: bool,
 ) -> Option<FlagEdit> {
     let [hide, mute, lock] = flag_rects(head);
     let mut edit = None;
@@ -3521,6 +3790,7 @@ fn paint_lane_flags(
         hide_tip,
         ui.scope_id().with(("hide", track)),
         row.hidden,
+        shown,
     ) {
         row.hidden = !row.hidden;
         edit = Some(FlagEdit {
@@ -3551,6 +3821,7 @@ fn paint_lane_flags(
         mute_tip,
         ui.scope_id().with(("mute", track)),
         row.muted,
+        shown,
     ) {
         row.muted = !row.muted;
         edit = Some(FlagEdit {
@@ -3576,6 +3847,7 @@ fn paint_lane_flags(
         lock_tip,
         ui.scope_id().with(("lock", track)),
         row.locked,
+        shown,
     ) {
         row.locked = !row.locked;
         edit = Some(FlagEdit {
@@ -3603,17 +3875,17 @@ fn lane_button(
     tip: &str,
     id: egui::Id,
     engaged: bool,
+    shown: bool,
 ) -> bool {
     let response = ui.interact(rect, id, Sense::click());
-    let (fill, color) = theme::face(
-        Color32::TRANSPARENT,
-        if engaged { theme::INK } else { theme::FAINT },
-        theme::hot(&response),
-    );
-    if fill.a() > 0 {
-        ui.painter().rect_filled(rect, 6.0, fill);
+    if shown || engaged {
+        let color = if engaged || theme::hot(&response) {
+            Color32::WHITE
+        } else {
+            theme::MUTED
+        };
+        icons::paint(ui.painter(), rect.center(), icon, 14.0, color);
     }
-    icons::paint(ui.painter(), rect.center(), icon, 14.0, color);
     crate::tip::show_switch(&response, tip, engaged, true);
     response.clicked()
 }
@@ -3676,6 +3948,19 @@ fn kind_phrase(kind: TrackKind) -> Phrase {
         TrackKind::Effect | TrackKind::PluginEffect => Phrase::Effect,
         TrackKind::Filter => Phrase::Filter,
         TrackKind::Adjust => Phrase::Adjust,
+    }
+}
+
+fn kind_icon(kind: TrackKind) -> Icon {
+    match kind {
+        TrackKind::Video => Icon::Video,
+        TrackKind::Audio => Icon::Audio,
+        TrackKind::Text => Icon::Text,
+        TrackKind::Sticker => Icon::Stickers,
+        TrackKind::Effect => Icon::Effects,
+        TrackKind::PluginEffect => Icon::Plugin,
+        TrackKind::Filter => Icon::Filters,
+        TrackKind::Adjust => Icon::Adjustments,
     }
 }
 
@@ -4357,6 +4642,23 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_tool_follows_every_selected_kind() {
+        assert!(super::allows(&[TrackKind::Video], super::VIDEO_KINDS));
+        assert!(super::allows(&[TrackKind::Audio], super::TIMED_KINDS));
+        assert!(super::allows(
+            &[TrackKind::Text, TrackKind::Sticker],
+            super::PICTURE_KINDS
+        ));
+        assert!(!super::allows(&[], super::VIDEO_KINDS));
+        assert!(!super::allows(
+            &[TrackKind::Video, TrackKind::Audio],
+            super::VIDEO_KINDS
+        ));
+        assert!(!super::allows(&[TrackKind::Text], super::TIMED_KINDS));
+        assert!(!super::allows(&[TrackKind::Text], super::VIDEO_KINDS));
+    }
+
+    #[test]
     fn a_horizontal_line_keeps_its_fraction_of_the_tracks() {
         let tracks = Rect::from_min_size(pos2(0.0, 44.0), vec2(600.0, 200.0));
         assert_eq!(super::row_fraction(tracks, 44.0), 0.0);
@@ -4373,12 +4675,8 @@ mod tests {
         assert_eq!(super::row_gap(&rows, tracks, pos2(10.0, 160.0)), None);
         let ruler = Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 44.0));
         let cover = pos2(super::HEAD + 10.0, 22.0);
+        assert!(ruler.contains(cover));
         assert!(cover.x < super::lane_left(ruler));
-        assert!(
-            super::switch_rects(ruler)
-                .iter()
-                .all(|button| !button.contains(cover))
-        );
     }
 
     #[test]
@@ -5779,7 +6077,11 @@ mod tests {
                         &mut selected,
                         &mut drag,
                         &mut trim,
-                        &mut split,
+                        super::Tools {
+                            split: &mut split,
+                            can_undo: false,
+                            can_redo: false,
+                        },
                     ));
                 },
             );

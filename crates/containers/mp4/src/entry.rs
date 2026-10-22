@@ -1,6 +1,8 @@
 //! Sample descriptions for video and audio.
 
-use cutlass_core::{AudioCodec, ColorTags, VideoCodec, VideoStreamConfig};
+use cutlass_core::{
+    AudioCodec, ColorTags, ContentLight, MasteringDisplay, VideoCodec, VideoStreamConfig,
+};
 
 use crate::read::{self, Atom, Reader};
 use crate::{Error, Fourcc};
@@ -47,6 +49,8 @@ impl Audio {
 pub(crate) struct VideoEntry {
     pub(crate) config: VideoStreamConfig,
     pub(crate) color: Option<ColorTags>,
+    pub(crate) mastering: Option<MasteringDisplay>,
+    pub(crate) content_light: Option<ContentLight>,
 }
 
 pub(crate) enum Description {
@@ -97,6 +101,8 @@ fn video(entry: &Atom<'_>) -> Result<VideoEntry, Error> {
             config_record,
         },
         color: color_tags(&children)?,
+        mastering: mastering_display(&children)?,
+        content_light: content_light(&children)?,
     })
 }
 
@@ -123,6 +129,45 @@ fn color_tags(children: &[Atom<'_>]) -> Result<Option<ColorTags>, Error> {
         b"rICC" | b"prof" => Ok(None),
         _ => Ok(None),
     }
+}
+
+fn mastering_display(children: &[Atom<'_>]) -> Result<Option<MasteringDisplay>, Error> {
+    let Some(atom) = read::only(children, *b"mdcv")? else {
+        return Ok(None);
+    };
+    let mut reader = record(atom, 24, "the mastering display box is the wrong size")?;
+    let mut primaries_x = [0; 3];
+    let mut primaries_y = [0; 3];
+    for (x, y) in primaries_x.iter_mut().zip(primaries_y.iter_mut()) {
+        *x = reader.u16()?;
+        *y = reader.u16()?;
+    }
+    Ok(Some(MasteringDisplay {
+        primaries_x,
+        primaries_y,
+        white_x: reader.u16()?,
+        white_y: reader.u16()?,
+        max_luminance: reader.u32()?,
+        min_luminance: reader.u32()?,
+    }))
+}
+
+fn content_light(children: &[Atom<'_>]) -> Result<Option<ContentLight>, Error> {
+    let Some(atom) = read::only(children, *b"clli")? else {
+        return Ok(None);
+    };
+    let mut reader = record(atom, 4, "the content light box is the wrong size")?;
+    Ok(Some(ContentLight {
+        max_content_light_level: reader.u16()?,
+        max_pic_average_light_level: reader.u16()?,
+    }))
+}
+
+fn record<'a>(atom: &Atom<'a>, len: usize, wrong: &'static str) -> Result<Reader<'a>, Error> {
+    if atom.payload.len() != len {
+        return Err(Error::Inconsistent(wrong));
+    }
+    Ok(Reader::new(atom.payload, atom.payload_base()?))
 }
 
 fn video_codec(kind: [u8; 4]) -> Option<VideoCodec> {

@@ -2,7 +2,7 @@
 
 use std::num::NonZeroU32;
 
-use cutlass_core::{ColorTags, Packet, VideoStreamConfig};
+use cutlass_core::{ColorTags, ContentLight, MasteringDisplay, Packet, VideoStreamConfig};
 
 use crate::entry::{self, Audio, Description};
 use crate::read::{self, Atom, Reader};
@@ -72,6 +72,8 @@ pub struct Track {
     samples: Vec<Packet>,
     frame_duration: Option<u32>,
     color: Option<ColorTags>,
+    mastering: Option<MasteringDisplay>,
+    content_light: Option<ContentLight>,
 }
 
 impl Track {
@@ -108,6 +110,16 @@ impl Track {
     /// Colour tags from the sample entry, when the file has `nclx` or `nclc`.
     pub fn color(&self) -> Option<ColorTags> {
         self.color
+    }
+
+    /// Mastering display from an `mdcv` box. `None` when the file has none.
+    pub fn mastering(&self) -> Option<MasteringDisplay> {
+        self.mastering
+    }
+
+    /// Content light level from a `clli` box. `None` when the file has none.
+    pub fn content_light(&self) -> Option<ContentLight> {
+        self.content_light
     }
 
     /// Display width from the track header, after rotation.
@@ -198,21 +210,33 @@ fn track(file: &[u8], trak: &Atom<'_>) -> Result<Track, Error> {
     let (timescale, duration) = media_header(read::required(&media, *b"mdhd")?)?;
     let handler = handler_type(read::required(&media, *b"hdlr")?)?;
     let edits = edits(&children)?;
-    let (kind, color, samples) = if handler == *b"vide" || handler == *b"soun" {
-        let minf = read::required(&media, *b"minf")?;
-        let minf_children = read::atoms(minf.payload, minf.payload_base()?)?;
-        let stbl = read::required(&minf_children, *b"stbl")?;
-        let tables_atoms = read::atoms(stbl.payload, stbl.payload_base()?)?;
-        let described = entry::description(read::required(&tables_atoms, *b"stsd")?, handler)?;
-        let (kind, color) = match described {
-            Description::Video(video) => (Kind::Video(video.config), video.color),
-            Description::Audio(audio) => (Kind::Audio(audio), None),
+    let (kind, color, mastering, content_light, samples) =
+        if handler == *b"vide" || handler == *b"soun" {
+            let minf = read::required(&media, *b"minf")?;
+            let minf_children = read::atoms(minf.payload, minf.payload_base()?)?;
+            let stbl = read::required(&minf_children, *b"stbl")?;
+            let tables_atoms = read::atoms(stbl.payload, stbl.payload_base()?)?;
+            let described = entry::description(read::required(&tables_atoms, *b"stsd")?, handler)?;
+            let (kind, color, mastering, content_light) = match described {
+                Description::Video(video) => (
+                    Kind::Video(video.config),
+                    video.color,
+                    video.mastering,
+                    video.content_light,
+                ),
+                Description::Audio(audio) => (Kind::Audio(audio), None, None, None),
+            };
+            let samples = tables::packets(file, timescale, &tables_atoms)?;
+            (kind, color, mastering, content_light, samples)
+        } else {
+            (
+                Kind::Other(Fourcc::new(handler)),
+                None,
+                None,
+                None,
+                Vec::new(),
+            )
         };
-        let samples = tables::packets(file, timescale, &tables_atoms)?;
-        (kind, color, samples)
-    } else {
-        (Kind::Other(Fourcc::new(handler)), None, Vec::new())
-    };
     Ok(Track {
         id: header.id,
         enabled: header.enabled,
@@ -226,6 +250,8 @@ fn track(file: &[u8], trak: &Atom<'_>) -> Result<Track, Error> {
         frame_duration: constant_duration(&samples),
         samples,
         color,
+        mastering,
+        content_light,
     })
 }
 

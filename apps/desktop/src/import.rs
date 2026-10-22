@@ -207,6 +207,8 @@ mod tests {
                 config_record: Vec::new(),
             },
             color: None,
+            mastering: None,
+            content_light: None,
         }
     }
 

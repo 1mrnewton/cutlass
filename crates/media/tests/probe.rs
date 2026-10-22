@@ -1,6 +1,6 @@
 //! Probe reads an MP4 and reports streams, timing, size, rotation, and HDR.
 
-use cutlass_core::{AudioCodec, ColorTags, VideoCodec};
+use cutlass_core::{AudioCodec, ColorTags, ContentLight, MasteringDisplay, VideoCodec};
 use cutlass_media::{Content, Error, FrameTiming, Probe};
 use cutlass_mp4::{Fourcc, Rotation};
 
@@ -23,7 +23,13 @@ fn a_file_reports_streams_timing_size_rotation_and_hdr() {
     assert_eq!(video.display_height, 32);
     assert_eq!(video.timing, FrameTiming::Variable);
     assert_eq!(video.hdr(), Some(true));
-    let Content::Video { config, color } = &video.content else {
+    let Content::Video {
+        config,
+        color,
+        mastering,
+        content_light,
+    } = &video.content
+    else {
         panic!("track 1 is video");
     };
     assert_eq!(config.codec, VideoCodec::H264);
@@ -36,6 +42,24 @@ fn a_file_reports_streams_timing_size_rotation_and_hdr() {
             matrix: 9,
             full_range: Some(false),
         }
+    );
+    assert_eq!(
+        *mastering,
+        Some(MasteringDisplay {
+            primaries_x: [1, 2, 3],
+            primaries_y: [4, 5, 6],
+            white_x: 7,
+            white_y: 8,
+            max_luminance: 10_000_000,
+            min_luminance: 0,
+        })
+    );
+    assert_eq!(
+        *content_light,
+        Some(ContentLight {
+            max_content_light_level: 1_000,
+            max_pic_average_light_level: 0,
+        })
     );
     assert_eq!(probe.samples(0).expect("video samples").len(), 2);
 
@@ -165,7 +189,10 @@ fn moov(payload_at: u32) -> Vec<u8> {
 }
 
 fn video_trak(offset: u32) -> Vec<u8> {
-    let entry = avc1(32, 18, &[1, 0x42, 0x00], &colr_nclx(16));
+    let mut extra = colr_nclx(16);
+    extra.extend(mdcv());
+    extra.extend(clli());
+    let entry = avc1(32, 18, &[1, 0x42, 0x00], &extra);
     let mut trak = tkhd(1, 300, MATRIX_90, 18, 32);
     let mut mdia = mdhd(1000, 300);
     mdia.extend(hdlr(b"vide"));
@@ -260,6 +287,26 @@ fn avc1(width: u16, height: u16, avcc: &[u8], extra: &[u8]) -> Vec<u8> {
     payload.extend(atom(b"avcC", avcc));
     payload.extend_from_slice(extra);
     atom(b"avc1", &payload)
+}
+
+fn mdcv() -> Vec<u8> {
+    let mut payload = Vec::with_capacity(24);
+    for (x, y) in [(1u16, 4u16), (2, 5), (3, 6)] {
+        payload.extend(x.to_be_bytes());
+        payload.extend(y.to_be_bytes());
+    }
+    payload.extend(7u16.to_be_bytes());
+    payload.extend(8u16.to_be_bytes());
+    payload.extend(10_000_000u32.to_be_bytes());
+    payload.extend(0u32.to_be_bytes());
+    atom(b"mdcv", &payload)
+}
+
+fn clli() -> Vec<u8> {
+    let mut payload = Vec::with_capacity(4);
+    payload.extend(1_000u16.to_be_bytes());
+    payload.extend(0u16.to_be_bytes());
+    atom(b"clli", &payload)
 }
 
 fn colr_nclx(transfer: u16) -> Vec<u8> {

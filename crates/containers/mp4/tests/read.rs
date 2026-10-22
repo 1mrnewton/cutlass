@@ -2,7 +2,7 @@
 
 use std::num::NonZeroU32;
 
-use cutlass_core::{ColorTags, Timestamp, VideoCodec};
+use cutlass_core::{ColorTags, ContentLight, MasteringDisplay, Timestamp, VideoCodec};
 use cutlass_mp4::{AudioCodec, Error, Fourcc, Kind, Movie, Rotation};
 
 fn scale(value: u32) -> NonZeroU32 {
@@ -48,6 +48,8 @@ fn a_movie_reports_tracks_samples_and_media_time() {
     assert_eq!(config.height, 180);
     assert_eq!(config.config_record, [1, 0x42, 0x00]);
     assert_eq!(video.color(), None);
+    assert_eq!(video.mastering(), None);
+    assert_eq!(video.content_light(), None);
 
     let samples = video.samples();
     assert_eq!(samples.len(), 3);
@@ -92,6 +94,58 @@ fn an_nclx_box_reports_pq_as_hdr() {
         }
     );
     assert!(color.is_hdr());
+    assert_eq!(movie.tracks()[0].mastering(), None);
+    assert_eq!(movie.tracks()[0].content_light(), None);
+}
+
+#[test]
+fn mastering_display_and_content_light_are_kept() {
+    let display = MasteringDisplay {
+        primaries_x: [1, 2, 3],
+        primaries_y: [4, 5, 6],
+        white_x: 7,
+        white_y: 8,
+        max_luminance: 10_000_000,
+        min_luminance: 0,
+    };
+    let light = ContentLight {
+        max_content_light_level: 1_000,
+        max_pic_average_light_level: 0,
+    };
+    let mut extra = mdcv();
+    extra.extend(clli());
+    let movie = Movie::parse(&entry_file(&extra)).expect("hdr metadata");
+    let video = &movie.tracks()[0];
+    assert_eq!(video.mastering(), Some(display));
+    assert_eq!(video.content_light(), Some(light));
+
+    let light_only = Movie::parse(&entry_file(&clli())).expect("content light only");
+    assert_eq!(light_only.tracks()[0].mastering(), None);
+    assert_eq!(light_only.tracks()[0].content_light(), Some(light));
+}
+
+#[test]
+fn a_bad_hdr_box_refuses_the_file() {
+    expect_err(
+        Movie::parse(&entry_file(&atom(b"mdcv", &[0]))),
+        Error::Inconsistent("the mastering display box is the wrong size"),
+    );
+    expect_err(
+        Movie::parse(&entry_file(&atom(b"clli", &[0, 1, 2, 3, 4]))),
+        Error::Inconsistent("the content light box is the wrong size"),
+    );
+    let mut two = mdcv();
+    two.extend(mdcv());
+    expect_err(
+        Movie::parse(&entry_file(&two)),
+        Error::DuplicateBox(Fourcc::new(*b"mdcv")),
+    );
+    let mut lights = clli();
+    lights.extend(clli());
+    expect_err(
+        Movie::parse(&entry_file(&lights)),
+        Error::DuplicateBox(Fourcc::new(*b"clli")),
+    );
 }
 
 #[test]
@@ -275,10 +329,14 @@ fn timecode_trak() -> Vec<u8> {
 }
 
 fn hdr_file() -> Vec<u8> {
+    entry_file(&colr_nclx(16, false))
+}
+
+fn entry_file(extra: &[u8]) -> Vec<u8> {
     let ftyp = atom(b"ftyp", b"isom\0\0\0\0isom");
     let mdat = atom(b"mdat", &[9]);
     let payload_at = u32::try_from(ftyp.len() + 8).expect("offset fits");
-    let entry = avc1_boxes(16, 16, &[1], &colr_nclx(16, false));
+    let entry = avc1_boxes(16, 16, &[1], extra);
     let mut trak = tkhd(0, 1, 1, MATRIX_0, 16, 16);
     let mut mdia = mdhd(0, 1000, 1);
     mdia.extend(hdlr(b"vide"));
@@ -505,6 +563,27 @@ fn avc1_boxes(width: u16, height: u16, avcc: &[u8], extra: &[u8]) -> Vec<u8> {
     payload.extend(atom(b"avcC", avcc));
     payload.extend_from_slice(extra);
     atom(b"avc1", &payload)
+}
+
+fn mdcv() -> Vec<u8> {
+    // Green, blue, red, then the white point, then max and min luminance.
+    let mut payload = Vec::with_capacity(24);
+    for (x, y) in [(1u16, 4u16), (2, 5), (3, 6)] {
+        payload.extend(x.to_be_bytes());
+        payload.extend(y.to_be_bytes());
+    }
+    payload.extend(7u16.to_be_bytes());
+    payload.extend(8u16.to_be_bytes());
+    payload.extend(10_000_000u32.to_be_bytes());
+    payload.extend(0u32.to_be_bytes());
+    atom(b"mdcv", &payload)
+}
+
+fn clli() -> Vec<u8> {
+    let mut payload = Vec::with_capacity(4);
+    payload.extend(1_000u16.to_be_bytes());
+    payload.extend(0u16.to_be_bytes());
+    atom(b"clli", &payload)
 }
 
 fn colr_nclx(transfer: u16, full_range: bool) -> Vec<u8> {

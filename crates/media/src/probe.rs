@@ -2,7 +2,9 @@
 
 use std::num::NonZeroU32;
 
-use cutlass_core::{AudioStreamConfig, ColorTags, Packet, VideoStreamConfig};
+use cutlass_core::{
+    AudioStreamConfig, ColorTags, ContentLight, MasteringDisplay, Packet, VideoStreamConfig,
+};
 use cutlass_mp4::{Fourcc, Kind, Movie, Rotation, Track};
 
 use crate::{DecoderKind, Error, VideoSession, choose_video_decoder};
@@ -136,6 +138,10 @@ pub enum Content {
         /// Encoded size and codec configuration. This size is not the display size.
         config: VideoStreamConfig,
         color: Option<ColorTags>,
+        /// Mastering display from an `mdcv` box. `None` when the file has none.
+        mastering: Option<MasteringDisplay>,
+        /// Content light level from a `clli` box. `None` when the file has none.
+        content_light: Option<ContentLight>,
     },
     /// A named audio codec and its stream config.
     Audio(AudioStreamConfig),
@@ -158,6 +164,8 @@ fn content(track: &Track) -> Content {
         Kind::Video(config) => Content::Video {
             config: config.clone(),
             color: track.color(),
+            mastering: track.mastering(),
+            content_light: track.content_light(),
         },
         Kind::Audio(audio) => match audio.codec() {
             Some(codec) => Content::Audio(AudioStreamConfig {
@@ -221,6 +229,8 @@ mod tests {
                 config_record: Vec::new(),
             },
             color: None,
+            mastering: None,
+            content_light: None,
         };
         assert_eq!(turned.picture_size(), Some((180, 320)));
     }
@@ -243,6 +253,8 @@ mod tests {
                     config_record: Vec::new(),
                 },
                 color,
+                mastering: None,
+                content_light: None,
             },
         }
     }

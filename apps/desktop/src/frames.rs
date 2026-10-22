@@ -308,7 +308,7 @@ fn open_clip(asset: AssetId, source: &str) -> Clip {
     else {
         return missing(asset, source);
     };
-    let Content::Video { config, color } = &probe.tracks()[index].content else {
+    let Content::Video { config, color, .. } = &probe.tracks()[index].content else {
         return missing(asset, source);
     };
     let Ok(matrix) = Matrix::resolve(

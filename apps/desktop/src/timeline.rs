@@ -364,6 +364,8 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::Trim { segment, .. }
         | Command::SetSpeed { segment, .. } => blocks_edit(project, lanes, *segment),
         Command::SetTransform { segment, .. }
+        | Command::SetVolume { segment, .. }
+        | Command::SetVisible { segment, .. }
         | Command::AddKeyframe { segment, .. }
         | Command::RemoveKeyframe { segment, .. } => segment_lane_locked(project, lanes, *segment),
         Command::SetSource { .. } => false,
@@ -4370,6 +4372,80 @@ mod tests {
         assert!(cut.timeline().segment(video).is_some());
         assert!(cut.timeline().segment(audio).is_none());
         assert_eq!(selected, vec![video]);
+    }
+
+    #[test]
+    fn a_locked_lane_refuses_volume_and_visible() {
+        let mut history = History::new();
+        let mut cut = project();
+        let picture = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let asset = match history
+            .apply(&mut cut, &[Command::AddAsset(picture)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let stored = cut.asset(asset).expect("asset");
+        let duration = stored.duration().expect("duration");
+        let source = TimeRange::new(
+            Timestamp::new(0, duration.timescale),
+            Timestamp::new(duration.value, duration.timescale),
+        )
+        .expect("source");
+        let segment =
+            Segment::media(stored, source, 0, Channels::Both, Speed::ONE).expect("segment");
+        let main = cut.timeline().main_track().id();
+        let id = match history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: Some(main),
+                    segment,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Segment(id)] => *id,
+            other => panic!("expected the same track, got {other:?}"),
+        };
+        let locked = super::Lanes {
+            rows: vec![super::LaneFlag {
+                track: main,
+                locked: true,
+                hidden: false,
+                muted: false,
+            }],
+        };
+        let volume = Command::SetVolume {
+            segment: id,
+            volume: 0.5,
+        };
+        let hidden = Command::SetVisible {
+            segment: id,
+            visible: false,
+        };
+        assert!(super::blocks_command(&cut, &locked, &volume));
+        assert!(super::blocks_command(&cut, &locked, &hidden));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &volume
+        ));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &hidden
+        ));
     }
 
     #[test]

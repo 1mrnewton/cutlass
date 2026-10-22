@@ -1,5 +1,6 @@
 //! The inspector. Nothing selected shows the project. Modify opens its settings.
-//! A video clip edits its placement. A mark stores a keyframe at the playhead.
+//! A video clip edits its placement and, when it has sound, its volume.
+//! A mark stores a keyframe at the playhead.
 //! `docs/inspector.md`.
 
 use eframe::egui::{self, Key, RichText, ScrollArea, Sense, TextEdit, UiBuilder, WidgetInfo, vec2};
@@ -112,15 +113,11 @@ fn video(
         opacity: None,
     };
     let mut hits = Vec::new();
+    let mut volume_edit = None;
     paint(ui, panel.title, "video", |ui| {
-        hits.extend(marked_rows(
-            ui,
-            id,
-            &panel.rows,
-            &sample,
-            playhead_us,
-            language,
-        ));
+        let (edited, row_hits) = marked_rows(ui, id, &panel.rows, &sample, playhead_us, language);
+        volume_edit = edited;
+        hits.extend(row_hits);
         section(ui, words::say(language, Phrase::Basic));
         let (next, more) = basic(ui, id, &sample, playhead_us, language);
         draft = next;
@@ -134,11 +131,18 @@ fn video(
             transform: next,
         });
     }
+    let gain = accepted_volume(sample.volume, volume_edit);
+    if let Some(volume) = gain {
+        commands.push(Command::SetVolume {
+            segment: id,
+            volume,
+        });
+    }
     commands.extend(key_commands(
         id,
         &hits,
         live,
-        sample.volume,
+        gain.unwrap_or(sample.volume),
         sample_offset(sample.start, sample.duration, playhead_us),
         &sample.keys,
     ));
@@ -159,29 +163,31 @@ fn audio(
         return Vec::new();
     };
     let mut hits = Vec::new();
+    let mut volume_edit = None;
     paint(ui, panel.title, "audio", |ui| {
-        hits.extend(marked_rows(
-            ui,
-            id,
-            &panel.rows,
-            &sample,
-            playhead_us,
-            language,
-        ));
+        let (edited, row_hits) = marked_rows(ui, id, &panel.rows, &sample, playhead_us, language);
+        volume_edit = edited;
+        hits.extend(row_hits);
     });
-    guard(
-        ui,
-        project,
+    let gain = accepted_volume(sample.volume, volume_edit);
+    let mut commands = key_commands(
         id,
-        key_commands(
-            id,
-            &hits,
-            sample.transform,
-            sample.volume,
-            sample_offset(sample.start, sample.duration, playhead_us),
-            &sample.keys,
-        ),
-    )
+        &hits,
+        sample.transform,
+        gain.unwrap_or(sample.volume),
+        sample_offset(sample.start, sample.duration, playhead_us),
+        &sample.keys,
+    );
+    if let Some(volume) = gain {
+        commands.insert(
+            0,
+            Command::SetVolume {
+                segment: id,
+                volume,
+            },
+        );
+    }
+    guard(ui, project, id, commands)
 }
 
 fn readout(ui: &mut egui::Ui, project: &Project, id: SegmentId, language: Language) {
@@ -448,46 +454,43 @@ fn marked_rows(
     sample: &Sample,
     playhead_us: i64,
     language: Language,
-) -> Vec<KeyframeProperty> {
+) -> (Option<f64>, Vec<KeyframeProperty>) {
     let volume = words::say(language, Phrase::Volume);
+    let mut edited = None;
     let mut hits = Vec::new();
     for (label, value) in rows {
         if *label == volume {
-            let mark = make_mark(
-                sample,
-                playhead_us,
-                KeyframeProperty::Volume,
-                volume,
-                language,
+            let (next, hit) = line(
+                ui,
+                id,
+                "volume",
+                sample.volume,
+                &make_mark(
+                    sample,
+                    playhead_us,
+                    KeyframeProperty::Volume,
+                    volume,
+                    language,
+                ),
             );
-            if mark_row(ui, id, label, value, &mark) {
+            edited = next;
+            if hit {
                 hits.push(KeyframeProperty::Volume);
             }
         } else {
             fact(ui, label, value);
         }
     }
-    hits
+    (edited, hits)
 }
 
-fn mark_row(ui: &mut egui::Ui, id: SegmentId, label: &str, value: &str, mark: &Mark) -> bool {
-    let width = ui.available_width();
-    let mut hit = false;
-    ui.horizontal(|ui| {
-        ui.set_max_width(width);
-        ui.spacing_mut().item_spacing.x = 8.0;
-        ui.add_sized(
-            [90.0, 18.0],
-            egui::Label::new(RichText::new(label).size(13.0).color(theme::MUTED)),
-        );
-        ui.vertical(|ui| {
-            ui.set_width((width - 128.0).max(40.0));
-            ui.add(egui::Label::new(RichText::new(value).size(13.0).color(theme::INK)).wrap());
-        });
-        hit = mark_button(ui, id, mark);
-    });
-    ui.add_space(4.0);
-    hit
+fn accepted_volume(current: f64, edited: Option<f64>) -> Option<f64> {
+    let value = edited?;
+    if !value.is_finite() || value < 0.0 || value == current {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn make_mark(
@@ -1037,6 +1040,16 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_volume_is_refused_and_zero_is_kept() {
+        assert_eq!(super::accepted_volume(1.0, Some(0.0)), Some(0.0));
+        assert_eq!(super::accepted_volume(1.0, Some(2.5)), Some(2.5));
+        assert!(super::accepted_volume(1.0, Some(1.0)).is_none());
+        assert!(super::accepted_volume(1.0, Some(-0.1)).is_none());
+        assert!(super::accepted_volume(1.0, Some(f64::NAN)).is_none());
+        assert!(super::accepted_volume(1.0, None).is_none());
+    }
+
+    #[test]
     fn a_bad_scale_or_opacity_is_refused() {
         assert!(edited_value(Transform::IDENTITY, Slot::Width, 0.0).is_none());
         assert!(edited_value(Transform::IDENTITY, Slot::Height, -1.0).is_none());
@@ -1127,6 +1140,78 @@ mod tests {
         assert_eq!(*segment, id);
         assert_eq!(transform.position(), (0.25, 0.0));
         assert_eq!(transform.scale(), (1.0, 1.0));
+    }
+
+    #[test]
+    fn a_volume_field_writes_the_gain() {
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, Language::English);
+        let (cut, id) = video_cut();
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(320.0, 800.0),
+        );
+        let mut time = 0.0;
+        let mut pass = |events: Vec<eframe::egui::Event>| {
+            time += 0.05;
+            let mut commands = Vec::new();
+            let mut output = ctx.run_ui(
+                eframe::egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    commands.clone_from(&super::show(ui, &cut, Some(id), 0));
+                },
+            );
+            let tree = output.platform_output.accesskit_update.take();
+            output.textures_delta.clear();
+            (tree.expect("the tree is built"), commands)
+        };
+        let (tree, _) = pass(vec![]);
+        let field = text_field(&tree, "Volume");
+        pass(vec![
+            eframe::egui::Event::PointerMoved(field),
+            eframe::egui::Event::PointerButton {
+                pos: field,
+                button: eframe::egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: eframe::egui::Modifiers::default(),
+            },
+        ]);
+        pass(vec![eframe::egui::Event::PointerButton {
+            pos: field,
+            button: eframe::egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: eframe::egui::Modifiers::default(),
+        }]);
+        let (_, commands) = pass(vec![
+            eframe::egui::Event::Key {
+                key: eframe::egui::Key::Backspace,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: eframe::egui::Modifiers::default(),
+            },
+            eframe::egui::Event::Text("0.5".to_string()),
+            eframe::egui::Event::Key {
+                key: eframe::egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: eframe::egui::Modifiers::default(),
+            },
+        ]);
+        assert_eq!(
+            commands,
+            vec![Command::SetVolume {
+                segment: id,
+                volume: 0.5,
+            }]
+        );
     }
 
     #[test]
@@ -1255,6 +1340,22 @@ mod tests {
         pass(vec![press(false)]);
         assert!(crate::modify::take_ask(&ctx));
         assert!(!crate::modify::take_ask(&ctx));
+    }
+
+    fn text_field(tree: &eframe::egui::accesskit::TreeUpdate, label: &str) -> eframe::egui::Pos2 {
+        let (_, node) = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == eframe::egui::accesskit::Role::TextInput
+                    && node.label() == Some(label)
+            })
+            .unwrap_or_else(|| panic!("missing {label}"));
+        let rect = node.bounds().expect("bounds");
+        eframe::egui::pos2(
+            ((rect.x0 + rect.x1) / 2.0) as f32,
+            ((rect.y0 + rect.y1) / 2.0) as f32,
+        )
     }
 
     fn center(tree: &eframe::egui::accesskit::TreeUpdate, label: &str) -> eframe::egui::Pos2 {

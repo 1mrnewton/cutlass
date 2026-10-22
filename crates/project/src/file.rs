@@ -309,6 +309,7 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
         volume: segment.volume(),
         fade_in: segment.fade_in(),
         fade_out: segment.fade_out(),
+        denoise: segment.denoise(),
         transform: transform_doc(segment.transform()),
         keyframes: segment.keyframes().iter().copied().map(key_doc).collect(),
     }
@@ -333,6 +334,7 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
     segment.set_visible(document.visible);
     segment.set_volume(document.volume)?;
     segment.set_fades(document.fade_in, document.fade_out)?;
+    segment.set_denoise(document.denoise)?;
     segment.set_transform(transform_from(&document.transform)?);
     for key in &document.keyframes {
         segment.push_keyframe(key_from(key)?)?;
@@ -496,6 +498,10 @@ fn easing_is_linear(easing: &EasingName) -> bool {
 
 fn is_zero(value: &i64) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn stamp_doc(time: Timestamp) -> Stamp {
@@ -693,6 +699,8 @@ struct SegmentDoc {
     fade_in: i64,
     #[serde(default, skip_serializing_if = "is_zero")]
     fade_out: i64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    denoise: bool,
     transform: TransformDoc,
     keyframes: Vec<KeyDoc>,
 }
@@ -1070,6 +1078,29 @@ mod tests {
             value["timeline"]["tracks"][1]["segments"][0]["fade_in"] = json!(500_001);
         });
         refuse(&longer, Error::FadeOutOfRange);
+    }
+
+    #[test]
+    fn a_missing_denoise_is_off_and_a_silent_segment_cannot_turn_it_on() {
+        let (project, value) = cut_value();
+        let text = project.to_json().expect("save");
+        assert!(!text.contains("denoise"));
+        let loaded = Project::from_json(&text).expect("load");
+        assert!(!loaded.timeline().tracks()[1].segments()[0].denoise());
+
+        let marked = edit(&value, |value| {
+            value["timeline"]["tracks"][1]["segments"][0]["denoise"] = json!(true);
+        });
+        let loaded = Project::from_json(&marked).expect("load");
+        assert!(loaded.timeline().tracks()[1].segments()[0].denoise());
+        let saved = loaded.to_json().expect("save");
+        assert!(saved.contains("\"denoise\": true"));
+        assert_same(&loaded, &Project::from_json(&saved).expect("reload"));
+
+        let silent = edit(&value, |value| {
+            value["timeline"]["tracks"][2]["segments"][0]["denoise"] = json!(true);
+        });
+        refuse(&silent, Error::NoSound);
     }
 
     #[test]

@@ -207,6 +207,7 @@ pub struct Segment {
     volume: f64,
     fade_in: i64,
     fade_out: i64,
+    denoise: bool,
     transform: Transform,
     keyframes: Vec<Keyframe>,
 }
@@ -265,6 +266,7 @@ impl Segment {
             volume: 1.0,
             fade_in: 0,
             fade_out: 0,
+            denoise: false,
             transform: Transform::IDENTITY,
             keyframes: Vec::new(),
         }
@@ -328,8 +330,8 @@ impl Segment {
 
     /// A copy with no id, starting at `start` microseconds on the sequence.
     ///
-    /// The source, channels, speed, visible flag, volume, fades, transform, and
-    /// keyframes stay. Place assigns the id. A negative start is refused, and
+    /// The source, channels, speed, visible flag, volume, fades, denoise,
+    /// transform, and keyframes stay. Place assigns the id. A negative start is refused, and
     /// so is a start that would overflow the sequence clock.
     pub fn duplicate(&self, start: i64) -> Result<Self, Error> {
         let mut copy = self.clone();
@@ -388,6 +390,17 @@ impl Segment {
         }
         self.fade_in = fade_in;
         self.fade_out = fade_out;
+        Ok(())
+    }
+
+    /// Turns noise reduction on or off.
+    ///
+    /// A segment with no sound cannot turn it on.
+    pub(crate) fn set_denoise(&mut self, on: bool) -> Result<(), Error> {
+        if on && self.channels == Channels::Picture {
+            return Err(Error::NoSound);
+        }
+        self.denoise = on;
         Ok(())
     }
 
@@ -494,6 +507,10 @@ impl Segment {
 
     pub const fn fade_out(&self) -> i64 {
         self.fade_out
+    }
+
+    pub const fn denoise(&self) -> bool {
+        self.denoise
     }
 
     pub const fn transform(&self) -> Transform {
@@ -984,6 +1001,7 @@ mod tests {
         segment.set_visible(false);
         segment.set_volume(0.25).unwrap();
         segment.set_fades(100_000, 50_000).unwrap();
+        segment.set_denoise(true).unwrap();
         let transform = Transform::new((0.1, -0.2), (2.0, 3.0), 15.0, 0.4, true, false).unwrap();
         segment.set_transform(transform);
         segment
@@ -1007,6 +1025,7 @@ mod tests {
         assert_eq!(copy.volume(), 0.25);
         assert_eq!(copy.fade_in(), 100_000);
         assert_eq!(copy.fade_out(), 50_000);
+        assert!(copy.denoise());
         assert_eq!(copy.transform(), transform);
         assert_eq!(copy.keyframes(), segment.keyframes());
         assert_eq!(copy.asset_id(), segment.asset_id());
@@ -1276,5 +1295,23 @@ mod tests {
             parted_fades(200_000, 300_000, 500_000, 500_000),
             (200_000, 0, 0, 300_000)
         );
+    }
+
+    #[test]
+    fn denoise_needs_sound() {
+        let mut sound = one_second();
+        assert!(!sound.denoise());
+        sound.set_denoise(true).unwrap();
+        assert!(sound.denoise());
+        sound.set_denoise(false).unwrap();
+        assert!(!sound.denoise());
+
+        let asset = video(false, 15_360);
+        let mut picture =
+            Segment::media(&asset, source(0, 15_360), 0, Channels::Picture, Speed::ONE).unwrap();
+        assert_eq!(picture.set_denoise(true).unwrap_err(), Error::NoSound);
+        assert!(!picture.denoise());
+        picture.set_denoise(false).unwrap();
+        assert!(!picture.denoise());
     }
 }

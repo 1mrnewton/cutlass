@@ -67,6 +67,8 @@ pub enum Error {
     NegativeVolume,
     #[error("fade is longer than the segment")]
     FadeOutOfRange,
+    #[error("the segment has no sound")]
+    NoSound,
     #[error("value is not finite")]
     NonFinite,
     #[error("scale must be positive")]

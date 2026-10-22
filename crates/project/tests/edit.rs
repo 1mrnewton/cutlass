@@ -1961,3 +1961,102 @@ fn a_faster_clip_clamps_its_fades() -> Result<(), Error> {
     assert_eq!(clip.fade_out(), 500_000);
     Ok(())
 }
+
+#[test]
+fn denoise_turns_on_for_sound_and_undo_turns_it_off() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    assert_eq!(
+        run(
+            &mut cut,
+            Command::SetDenoise {
+                segment: id,
+                on: true,
+            },
+        )?,
+        Outcome::Unchanged
+    );
+    assert!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .denoise()
+    );
+    cut.history.undo(&mut cut.project)?;
+    assert!(
+        !cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .denoise()
+    );
+    cut.history.redo(&mut cut.project)?;
+    assert!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .denoise()
+    );
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: id,
+            at: 500_000,
+        },
+    )?);
+    assert!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .denoise()
+    );
+    assert!(
+        cut.project
+            .timeline()
+            .segment(right)
+            .ok_or(Error::UnknownSegment(right))?
+            .denoise()
+    );
+
+    let picture = media(&cut.project, asset, 2_000_000, 30_000, Channels::Picture)?;
+    let main = cut.main;
+    let picture = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: picture,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetDenoise {
+                segment: picture,
+                on: true,
+            },
+        ),
+        Error::NoSound,
+    );
+    assert!(
+        !cut.project
+            .timeline()
+            .segment(picture)
+            .ok_or(Error::UnknownSegment(picture))?
+            .denoise()
+    );
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetDenoise {
+                segment: missing,
+                on: true,
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
+    Ok(())
+}

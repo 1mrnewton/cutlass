@@ -74,6 +74,11 @@ pub enum Command {
         fade_in: i64,
         fade_out: i64,
     },
+    /// Turns noise reduction on or off. A segment with no sound cannot turn it on.
+    SetDenoise {
+        segment: SegmentId,
+        on: bool,
+    },
     /// Shown when on. It does not move the segment.
     SetVisible {
         segment: SegmentId,

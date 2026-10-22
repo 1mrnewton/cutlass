@@ -190,6 +190,10 @@ impl Project {
                     .set_fades(fade_in, fade_out)?;
                 Ok(Outcome::Unchanged)
             }
+            Command::SetDenoise { segment, on } => {
+                self.timeline.segment_mut(segment)?.set_denoise(on)?;
+                Ok(Outcome::Unchanged)
+            }
             Command::SetVisible { segment, visible } => {
                 self.timeline.segment_mut(segment)?.set_visible(visible);
                 Ok(Outcome::Unchanged)

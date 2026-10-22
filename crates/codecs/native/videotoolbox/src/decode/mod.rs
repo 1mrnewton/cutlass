@@ -15,7 +15,9 @@ use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
-use cutlass_core::{ColorRange, Packet, PixelFormat, VideoCodec, VideoFrame, VideoStreamConfig};
+use cutlass_core::{
+    ColorRange, ColorTags, Packet, PixelFormat, VideoCodec, VideoFrame, VideoStreamConfig,
+};
 use objc2_core_foundation::{CFBoolean, CFData, CFDictionary, CFRetained, CFString, CFType};
 use objc2_core_media::{
     CMBlockBuffer, CMSampleBuffer, CMSampleTimingInfo, CMTime, CMVideoCodecType,
@@ -52,6 +54,8 @@ struct Description<'a> {
 pub struct DecoderOptions {
     /// Fail instead of decoding in software.
     pub require_hardware: bool,
+    /// Copied onto every frame. `None` leaves the frame untagged.
+    pub color: Option<ColorTags>,
 }
 
 /// A VideoToolbox decode session for one stream.
@@ -67,6 +71,7 @@ pub struct Decoder {
     /// session. `Drop` invalidates the session first.
     output: Arc<Queue<Decoded>>,
     reorder: Reorder<VideoFrame<PixelBuffer>>,
+    color: Option<ColorTags>,
 }
 
 // SAFETY: VideoToolbox sessions and format descriptions may be used from any
@@ -129,6 +134,7 @@ impl Decoder {
             format,
             output,
             reorder: Reorder::new(),
+            color: options.color,
         })
     }
 
@@ -160,7 +166,12 @@ impl Decoder {
                 Err(error) => return Some(Err(error)),
             }
         }
-        self.reorder.pop().map(Ok)
+        self.reorder.pop().map(|frame| Ok(self.tagged(frame)))
+    }
+
+    fn tagged(&self, mut frame: VideoFrame<PixelBuffer>) -> VideoFrame<PixelBuffer> {
+        frame.color = self.color;
+        frame
     }
 
     /// Releases every frame still held back. Call at the end of the stream;
@@ -308,6 +319,7 @@ unsafe extern "C-unwind" fn decoded(
     output.push(Ok(VideoFrame {
         pts,
         duration: from_cm_time(duration),
+        color: None,
         image: PixelBuffer::from_retained(image, writable),
     }));
 }

@@ -36,7 +36,7 @@ impl Decode for Session {
 #[test]
 fn a_real_stream_stays_a_few_frames_ahead_and_drops_what_the_playhead_passed() {
     let fixture = video("h264-high-bframes-128x72");
-    let mut session = Session(VideoSession::open(&fixture.config).expect("decoder"));
+    let mut session = Session(VideoSession::open(&fixture.config, None).expect("decoder"));
     let mut ahead = Ahead::new(NonZeroUsize::new(3).expect("limit"));
     let mut pending = fixture.packets.as_slice();
 
@@ -58,7 +58,7 @@ fn a_real_stream_stays_a_few_frames_ahead_and_drops_what_the_playhead_passed() {
 #[test]
 fn seek_shows_the_frame_from_the_keyframe_it_depends_on() {
     let fixture = video("h264-high-bframes-128x72");
-    let mut session = Session(VideoSession::open(&fixture.config).expect("decoder"));
+    let mut session = Session(VideoSession::open(&fixture.config, None).expect("decoder"));
     let mut ahead = Ahead::new(NonZeroUsize::new(3).expect("limit"));
 
     let in_the_first_group = fixture.frames[4].pts;

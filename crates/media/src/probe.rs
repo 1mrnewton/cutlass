@@ -50,7 +50,7 @@ impl Probe {
             return Err(Error::NotVideo(track.id()));
         };
         match choose_video_decoder(config.codec)? {
-            DecoderKind::System => VideoSession::open(config),
+            DecoderKind::System => VideoSession::open(config, track.color()),
             // No Rust video decoder is connected, so the picker does not return
             // this yet. Open that decoder here when one is.
             DecoderKind::Software => Err(Error::NoDecoder(config.codec)),

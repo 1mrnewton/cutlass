@@ -206,6 +206,7 @@ mod tests {
         VideoFrame {
             pts: time(ms),
             duration: None,
+            color: None,
             image: ms,
         }
     }

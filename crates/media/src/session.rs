@@ -3,7 +3,7 @@
 //! On Apple this is VideoToolbox. Elsewhere [`VideoSession::open`] returns
 //! [`Error::NoDecoder`] until that platform's codec crate is connected.
 
-use cutlass_core::VideoStreamConfig;
+use cutlass_core::{ColorTags, VideoStreamConfig};
 
 use crate::Error;
 
@@ -26,13 +26,17 @@ pub struct VideoSession {
 impl VideoSession {
     /// Opens the system decoder for `config`.
     ///
+    /// `color` is copied onto every frame. `None` leaves the frame untagged.
     /// The caller has already chosen [`crate::DecoderKind::System`]. A software
     /// session is not opened here, because no Rust video decoder is connected.
     #[cfg(target_vendor = "apple")]
-    pub fn open(config: &VideoStreamConfig) -> Result<Self, Error> {
+    pub fn open(config: &VideoStreamConfig, color: Option<ColorTags>) -> Result<Self, Error> {
         let decoder = cutlass_videotoolbox::Decoder::new(
             config,
-            cutlass_videotoolbox::DecoderOptions::default(),
+            cutlass_videotoolbox::DecoderOptions {
+                color,
+                ..cutlass_videotoolbox::DecoderOptions::default()
+            },
         )
         .map_err(from_videotoolbox)?;
         Ok(Self { decoder })
@@ -40,7 +44,8 @@ impl VideoSession {
 
     /// Opens the system decoder for `config`.
     #[cfg(not(target_vendor = "apple"))]
-    pub fn open(config: &VideoStreamConfig) -> Result<Self, Error> {
+    pub fn open(config: &VideoStreamConfig, color: Option<ColorTags>) -> Result<Self, Error> {
+        let _ = color;
         Err(Error::NoDecoder(config.codec))
     }
 }
@@ -97,7 +102,7 @@ mod tests {
             config_record: vec![1],
         };
         assert!(matches!(
-            VideoSession::open(&config),
+            VideoSession::open(&config, None),
             Err(Error::NoDecoder(cutlass_core::VideoCodec::H264))
         ));
     }

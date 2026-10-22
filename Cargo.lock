@@ -785,6 +785,14 @@ name = "cutlass-flac"
 version = "0.1.0"
 
 [[package]]
+name = "cutlass-flac-file"
+version = "0.1.0"
+dependencies = [
+ "cutlass-core",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cutlass-h264"
 version = "0.1.0"
 

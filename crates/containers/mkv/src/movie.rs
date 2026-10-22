@@ -2,9 +2,12 @@
 
 use std::num::NonZeroU32;
 
-use cutlass_core::{AudioCodec, AudioStreamConfig, VideoCodec, VideoStreamConfig};
+use cutlass_core::{
+    AudioCodec, AudioStreamConfig, Packet, Timestamp, VideoCodec, VideoStreamConfig,
+};
 
 use crate::Error;
+use crate::block::Block;
 use crate::ebml::{self, Element, Limits};
 
 const EBML: u64 = 0x1A45_DFA3;
@@ -27,6 +30,7 @@ const TRACK_TYPE: u64 = 0x83;
 const CODEC_ID: u64 = 0x86;
 const CODEC_PRIVATE: u64 = 0x63A2;
 const CONTENT_ENCODINGS: u64 = 0x6D80;
+const DEFAULT_DURATION: u64 = 0x0023_E383;
 
 const VIDEO: u64 = 0xE0;
 const PIXEL_WIDTH: u64 = 0xB0;
@@ -34,6 +38,14 @@ const PIXEL_HEIGHT: u64 = 0xBA;
 const AUDIO: u64 = 0xE1;
 const SAMPLING_FREQUENCY: u64 = 0xB5;
 const CHANNELS: u64 = 0x9F;
+
+const CLUSTER: u64 = 0x1F43_B675;
+const CLUSTER_TIME: u64 = 0xE7;
+const SIMPLE_BLOCK: u64 = 0xA3;
+const BLOCK_GROUP: u64 = 0xA0;
+const BLOCK: u64 = 0xA1;
+const BLOCK_DURATION: u64 = 0x9B;
+const REFERENCE_BLOCK: u64 = 0xFB;
 
 /// Nanoseconds in one second. A timestamp scale is also in nanoseconds.
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -51,7 +63,7 @@ pub enum DocType {
 
 /// A parsed MKV or WebM file.
 ///
-/// Timestamps use the segment clock. The timescale is ticks per second.
+/// Sample times are the segment clock. There is no decode time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Movie {
     doc_type: DocType,
@@ -78,7 +90,7 @@ impl Movie {
         if next_meaningful(&mut cursor, limits)?.is_some() {
             return Err(Error::Inconsistent("the file has data after the segment"));
         }
-        parse_segment(segment.body, segment.body_at, limits, doc_type)
+        parse_segment(data, segment.body, segment.body_at, limits, doc_type)
     }
 
     /// `matroska` or `webm`.
@@ -104,11 +116,15 @@ impl Movie {
     }
 }
 
-/// One track. Samples are not filled in yet.
+/// One track. Samples are in the order the clusters store them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Track {
     number: u64,
     kind: Kind,
+    /// Default duration in nanoseconds, before it is converted to ticks.
+    default_ns: Option<u64>,
+    default_ticks: Option<i64>,
+    samples: Vec<Packet>,
 }
 
 impl Track {
@@ -120,6 +136,11 @@ impl Track {
     /// Codec, and the settings a decoder needs.
     pub fn kind(&self) -> &Kind {
         &self.kind
+    }
+
+    /// Samples in stored order. `dts` is always none.
+    pub fn samples(&self) -> &[Packet] {
+        &self.samples
     }
 }
 
@@ -202,6 +223,7 @@ fn read_header(body: &[u8], body_at: u64) -> Result<(DocType, Limits), Error> {
 }
 
 fn parse_segment(
+    file: &[u8],
     body: &[u8],
     body_at: u64,
     limits: Limits,
@@ -210,6 +232,7 @@ fn parse_segment(
     let mut scale_ns = None;
     let mut duration = None;
     let mut tracks = None;
+    let mut clusters = Vec::new();
     ebml::for_each(body, body_at, limits, 1, |element| {
         match element.id {
             INFO => {
@@ -226,6 +249,10 @@ fn parse_segment(
                 }
                 tracks = Some(parse_tracks(element.body, element.body_at, limits)?);
             }
+            CLUSTER => clusters.push(Span {
+                at: element.body_at,
+                len: element.body.len(),
+            }),
             _ => {}
         }
         Ok(())
@@ -237,11 +264,32 @@ fn parse_segment(
         Some(value) => Some(i64::try_from(value).map_err(|_| Error::TooLarge)?),
         None => None,
     };
+    let mut tracks = tracks.unwrap_or_default();
+    set_default_ticks(&mut tracks, scale_ns)?;
+    for cluster in clusters {
+        let body = slice_at(file, cluster)?;
+        read_cluster(body, cluster.at, limits, &mut tracks, timescale)?;
+    }
     Ok(Movie {
         doc_type,
         timescale,
         duration,
-        tracks: tracks.unwrap_or_default(),
+        tracks,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct Span {
+    at: u64,
+    len: usize,
+}
+
+fn slice_at(file: &[u8], span: Span) -> Result<&[u8], Error> {
+    let start = usize::try_from(span.at).map_err(|_| Error::TooLarge)?;
+    let end = start.checked_add(span.len).ok_or(Error::TooLarge)?;
+    file.get(start..end).ok_or(Error::Truncated {
+        at: span.at,
+        need: u64::try_from(span.len).map_err(|_| Error::TooLarge)?,
     })
 }
 
@@ -304,6 +352,7 @@ struct Entry {
     codec_private: Vec<u8>,
     video: Option<(u32, u32)>,
     audio: Option<AudioSettings>,
+    default_ns: Option<u64>,
 }
 
 struct AudioSettings {
@@ -319,6 +368,7 @@ fn parse_entry(body: &[u8], body_at: u64, limits: Limits) -> Result<Track, Error
         codec_private: Vec::new(),
         video: None,
         audio: None,
+        default_ns: None,
     };
     let mut saw_private = false;
     ebml::for_each(body, body_at, limits, 3, |element| {
@@ -350,6 +400,13 @@ fn parse_entry(body: &[u8], body_at: u64, limits: Limits) -> Result<Track, Error
             }
             CONTENT_ENCODINGS => {
                 return Err(Error::Inconsistent("a track is compressed or encrypted"));
+            }
+            DEFAULT_DURATION => {
+                once(
+                    &mut entry.default_ns,
+                    ebml::uint(element.body)?,
+                    "the default duration is repeated",
+                )?;
             }
             VIDEO => {
                 if entry.video.is_some() {
@@ -454,7 +511,13 @@ fn finish_entry(entry: Entry) -> Result<Track, Error> {
             }
         }
     };
-    Ok(Track { number, kind })
+    Ok(Track {
+        number,
+        kind,
+        default_ns: entry.default_ns,
+        default_ticks: None,
+        samples: Vec::new(),
+    })
 }
 
 fn video_kind(
@@ -609,4 +672,192 @@ fn checked_limit(value: u64, max: u8, message: &'static str) -> Result<u8, Error
         return Err(Error::Inconsistent(message));
     }
     Ok(value)
+}
+
+fn set_default_ticks(tracks: &mut [Track], scale_ns: u64) -> Result<(), Error> {
+    for track in tracks {
+        track.default_ticks = match track.default_ns {
+            Some(ns) => Some(ns_to_ticks(ns, scale_ns)?),
+            None => None,
+        };
+    }
+    Ok(())
+}
+
+fn ns_to_ticks(ns: u64, scale_ns: u64) -> Result<i64, Error> {
+    if scale_ns == 0 || !ns.is_multiple_of(scale_ns) {
+        return Err(Error::Inconsistent(
+            "the default duration is not a whole number of timestamp units",
+        ));
+    }
+    i64::try_from(ns / scale_ns).map_err(|_| Error::TooLarge)
+}
+
+fn read_cluster(
+    body: &[u8],
+    body_at: u64,
+    limits: Limits,
+    tracks: &mut [Track],
+    timescale: NonZeroU32,
+) -> Result<(), Error> {
+    let mut timestamp = None;
+    let mut pending = Vec::new();
+    ebml::for_each(body, body_at, limits, 2, |element| {
+        match element.id {
+            CLUSTER_TIME => {
+                once(
+                    &mut timestamp,
+                    ebml::uint(element.body)?,
+                    "the cluster timestamp is repeated",
+                )?;
+            }
+            SIMPLE_BLOCK => pending.push(Pending {
+                block: crate::block::parse(element.body, element.body_at, limits)?,
+                simple: true,
+                duration: None,
+                reference: false,
+            }),
+            BLOCK_GROUP => pending.push(parse_group(element.body, element.body_at, limits)?),
+            _ => {}
+        }
+        Ok(())
+    })?;
+    let timestamp = timestamp.ok_or(Error::Inconsistent("a cluster has no timestamp"))?;
+    for item in pending {
+        push_block(item, timestamp, tracks, timescale)?;
+    }
+    Ok(())
+}
+
+struct Pending<'a> {
+    block: Block<'a>,
+    simple: bool,
+    duration: Option<u64>,
+    reference: bool,
+}
+
+fn parse_group<'a>(body: &'a [u8], body_at: u64, limits: Limits) -> Result<Pending<'a>, Error> {
+    let mut block = None;
+    let mut duration = None;
+    let mut saw_reference = false;
+    ebml::for_each(body, body_at, limits, 3, |element| {
+        match element.id {
+            BLOCK => {
+                if block.is_some() {
+                    return Err(Error::Inconsistent("a block group has two blocks"));
+                }
+                block = Some(crate::block::parse(element.body, element.body_at, limits)?);
+            }
+            SIMPLE_BLOCK => {
+                return Err(Error::Inconsistent("a block group holds a simple block"));
+            }
+            BLOCK_DURATION => {
+                once(
+                    &mut duration,
+                    ebml::uint(element.body)?,
+                    "the block duration is repeated",
+                )?;
+            }
+            REFERENCE_BLOCK => {
+                if saw_reference {
+                    return Err(Error::Inconsistent("the block reference is repeated"));
+                }
+                saw_reference = true;
+                // Presence marks a non-keyframe. The value is a signed offset.
+                ebml::uint(element.body)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+    let block = block.ok_or(Error::Inconsistent("a block group has no block"))?;
+    Ok(Pending {
+        block,
+        simple: false,
+        duration,
+        reference: saw_reference,
+    })
+}
+
+fn push_block(
+    item: Pending<'_>,
+    cluster_ts: u64,
+    tracks: &mut [Track],
+    timescale: NonZeroU32,
+) -> Result<(), Error> {
+    let index = tracks
+        .iter()
+        .position(|track| track.number == item.block.track)
+        .ok_or(Error::Inconsistent("a block names an unknown track"))?;
+    let audio = matches!(tracks[index].kind, Kind::Audio(_));
+    let step = tracks[index].default_ticks;
+    let frames = item.block.frames;
+    if frames.len() > 1 {
+        let step = step.ok_or(Error::Inconsistent("a laced block has no default duration"))?;
+        if let Some(duration) = item.duration {
+            let count = u64::try_from(frames.len()).map_err(|_| Error::TooLarge)?;
+            let step_ticks = u64::try_from(step).map_err(|_| Error::TooLarge)?;
+            let expected = step_ticks.checked_mul(count).ok_or(Error::TooLarge)?;
+            if duration != expected {
+                return Err(Error::Inconsistent(
+                    "the block duration does not match the lace",
+                ));
+            }
+        }
+    }
+    let mut time = block_time(cluster_ts, item.block.relative)?;
+    let mut packets = Vec::with_capacity(frames.len());
+    for (index, frame) in frames.iter().enumerate() {
+        if index > 0 {
+            let step = step.ok_or(Error::Inconsistent("a laced block has no default duration"))?;
+            time = time.checked_add(step).ok_or(Error::TooLarge)?;
+        }
+        let duration = sample_duration(frames.len(), item.duration, step)?;
+        packets.push(Packet {
+            data: frame.to_vec(),
+            pts: Timestamp::new(time, timescale),
+            dts: None,
+            duration: duration.map(|value| Timestamp::new(value, timescale)),
+            keyframe: is_keyframe(
+                audio,
+                item.simple,
+                item.block.keyframe_flag,
+                item.reference,
+                index,
+            ),
+        });
+    }
+    tracks[index].samples.append(&mut packets);
+    Ok(())
+}
+
+fn sample_duration(
+    count: usize,
+    block_duration: Option<u64>,
+    step: Option<i64>,
+) -> Result<Option<i64>, Error> {
+    if count > 1 {
+        return Ok(step);
+    }
+    match block_duration {
+        Some(duration) => Ok(Some(i64::try_from(duration).map_err(|_| Error::TooLarge)?)),
+        None => Ok(step),
+    }
+}
+
+fn is_keyframe(audio: bool, simple: bool, flag: bool, reference: bool, index: usize) -> bool {
+    if audio {
+        return true;
+    }
+    if index > 0 {
+        return false;
+    }
+    if simple { flag } else { !reference }
+}
+
+fn block_time(cluster: u64, relative: i16) -> Result<i64, Error> {
+    let cluster = i64::try_from(cluster).map_err(|_| Error::TooLarge)?;
+    cluster
+        .checked_add(i64::from(relative))
+        .ok_or(Error::TooLarge)
 }

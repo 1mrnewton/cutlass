@@ -63,7 +63,7 @@ impl<'a> Cursor<'a> {
         out
     }
 
-    fn read(&mut self, need: usize) -> Result<&'a [u8], Error> {
+    pub(crate) fn read(&mut self, need: usize) -> Result<&'a [u8], Error> {
         let Some(end) = self.pos.checked_add(need) else {
             return Err(Error::TooLarge);
         };
@@ -103,6 +103,7 @@ impl<'a> Cursor<'a> {
         if !strip {
             return Ok(RawVint {
                 value: raw,
+                width,
                 unknown: false,
             });
         }
@@ -114,14 +115,38 @@ impl<'a> Cursor<'a> {
         let value = raw & !marker;
         Ok(RawVint {
             value,
+            width,
             unknown: value == marker - 1,
+        })
+    }
+
+    pub(crate) fn remaining(&self) -> &'a [u8] {
+        &self.data[self.pos..]
+    }
+
+    /// A size whose width marker is removed. An unknown size is an error.
+    /// Lace sizes and block track numbers use this, not a master element.
+    pub(crate) fn data_vint(&mut self, max_width: u8) -> Result<DataVint, Error> {
+        let raw = self.vint(max_width, true)?;
+        if raw.unknown {
+            return Err(Error::Inconsistent("a block size is unknown"));
+        }
+        Ok(DataVint {
+            value: raw.value,
+            width: raw.width,
         })
     }
 }
 
 struct RawVint {
     value: u64,
+    width: usize,
     unknown: bool,
+}
+
+pub(crate) struct DataVint {
+    pub(crate) value: u64,
+    pub(crate) width: usize,
 }
 
 pub(crate) fn for_each<'a>(

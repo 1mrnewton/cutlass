@@ -1,10 +1,11 @@
 //! MKV and WebM reader.
 //!
-//! The crate takes the file bytes and returns tracks. It does no I/O. Sample
-//! bytes are not read yet. `docs/codecs.md` lists the containers.
+//! The crate takes the file bytes and returns tracks and samples. It does no
+//! I/O. `docs/codecs.md` lists the containers.
 
 #![deny(unsafe_code)]
 
+mod block;
 mod ebml;
 mod error;
 mod movie;

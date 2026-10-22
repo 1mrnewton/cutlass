@@ -2,7 +2,7 @@
 
 use std::num::NonZeroU32;
 
-use cutlass_core::{AudioCodec, VideoCodec};
+use cutlass_core::{AudioCodec, Timestamp, VideoCodec};
 use cutlass_mkv::{DocType, Error, Kind, Movie};
 
 fn scale(value: u32) -> NonZeroU32 {
@@ -250,6 +250,240 @@ fn a_short_file_is_truncated() {
     );
 }
 
+#[test]
+fn a_simple_block_keeps_media_time() {
+    let mut blocks = simple_block(1, 0, 0x80, &[1, 2, 3]);
+    blocks.extend(simple_block(1, 33, 0x00, &[4]));
+    let mut segment = tracks(&video_with_duration(33_000_000));
+    segment.extend(cluster(1_000, &blocks));
+    let movie = Movie::parse(&file("webm", &segment)).expect("blocks");
+    let samples = movie.tracks()[0].samples();
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0].data, [1, 2, 3]);
+    assert_eq!(samples[0].pts, ticks(1_000));
+    assert_eq!(samples[0].dts, None);
+    assert_eq!(samples[0].duration, Some(ticks(33)));
+    assert!(samples[0].keyframe);
+    assert_eq!(samples[1].data, [4]);
+    assert_eq!(samples[1].pts, ticks(1_033));
+    assert_eq!(samples[1].dts, None);
+    assert_eq!(samples[1].duration, Some(ticks(33)));
+    assert!(!samples[1].keyframe);
+}
+
+#[test]
+fn a_block_group_keyframe_follows_the_reference() {
+    let mut blocks = block_group(1, -20, &[9], Some(40), false);
+    blocks.extend(block_group(1, 20, &[8], Some(40), true));
+    let entry = track_entry(1, 1, "V_VP8", &[], &video_settings(16, 16));
+    let mut segment = tracks(&entry);
+    segment.extend(cluster(100, &blocks));
+    let movie = Movie::parse(&file("webm", &segment)).expect("group");
+    let samples = movie.tracks()[0].samples();
+    assert_eq!(samples[0].pts, ticks(80));
+    assert_eq!(samples[0].duration, Some(ticks(40)));
+    assert_eq!(samples[0].dts, None);
+    assert!(samples[0].keyframe);
+    assert_eq!(samples[1].data, [8]);
+    assert_eq!(samples[1].pts, ticks(120));
+    assert!(!samples[1].keyframe);
+}
+
+#[test]
+fn an_unlaced_block_prefers_the_group_duration() {
+    let mut extra = default_duration(10_000_000);
+    extra.extend(video_settings(8, 8));
+    let entry = track_entry(1, 1, "V_VP8", &[], &extra);
+    let mut segment = tracks(&entry);
+    segment.extend(cluster(0, &block_group(1, 0, &[1], Some(40), false)));
+    let movie = Movie::parse(&file("webm", &segment)).expect("duration");
+    assert_eq!(movie.tracks()[0].samples()[0].duration, Some(ticks(40)));
+}
+
+#[test]
+fn an_audio_block_is_a_keyframe() {
+    let entry = track_entry(1, 2, "A_OPUS", &[], &default_duration(20_000_000));
+    let mut segment = tracks(&entry);
+    segment.extend(cluster(0, &simple_block(1, 0, 0x00, &[1, 2])));
+    let movie = Movie::parse(&file("webm", &segment)).expect("audio");
+    let sample = &movie.tracks()[0].samples()[0];
+    assert!(sample.keyframe);
+    assert_eq!(sample.pts, ticks(0));
+    assert_eq!(sample.duration, Some(ticks(20)));
+}
+
+#[test]
+fn a_sample_with_no_duration_keeps_none() {
+    let entry = track_entry(1, 1, "V_VP8", &[], &video_settings(8, 8));
+    let mut segment = tracks(&entry);
+    segment.extend(cluster(0, &simple_block(1, 0, 0x80, &[1])));
+    let movie = Movie::parse(&file("webm", &segment)).expect("undetermined");
+    let sample = &movie.tracks()[0].samples()[0];
+    assert_eq!(sample.duration, None);
+    assert_eq!(sample.dts, None);
+    assert!(sample.keyframe);
+}
+
+#[test]
+fn an_invisible_or_discardable_frame_is_still_returned() {
+    let entry = track_entry(1, 1, "V_VP8", &[], &video_settings(8, 8));
+    let mut segment = tracks(&entry);
+    segment.extend(cluster(0, &simple_block(1, 0, 0x89, &[5])));
+    let movie = Movie::parse(&file("webm", &segment)).expect("flags");
+    assert_eq!(movie.tracks()[0].samples()[0].data, [5]);
+    assert!(movie.tracks()[0].samples()[0].keyframe);
+}
+
+#[test]
+fn a_block_group_with_two_blocks_refuses_the_file() {
+    let mut block = vint(1);
+    block.extend(0i16.to_be_bytes());
+    block.push(0x80);
+    block.push(1);
+    let mut group = element(BLOCK, &block);
+    group.extend(element(BLOCK, &block));
+    let entry = track_entry(1, 1, "V_VP8", &[], &video_settings(8, 8));
+    let mut segment = tracks(&entry);
+    segment.extend(cluster(0, &element(BLOCK_GROUP, &group)));
+    expect_err(
+        Movie::parse(&file("webm", &segment)),
+        Error::Inconsistent("a block group has two blocks"),
+    );
+}
+
+#[test]
+fn xiph_lacing_splits_the_block() {
+    let block = simple_block(1, 0, 0x82, &[1, 2, 0xAA, 0xBB, 0xCC]);
+    let mut extra = default_duration(10_000_000);
+    extra.extend(video_settings(16, 16));
+    let mut segment = tracks(&track_entry(1, 1, "V_VP8", &[], &extra));
+    segment.extend(cluster(50, &block));
+    let movie = Movie::parse(&file("webm", &segment)).expect("xiph");
+    let samples = movie.tracks()[0].samples();
+    assert_eq!(samples[0].data, [0xAA, 0xBB]);
+    assert_eq!(samples[1].data, [0xCC]);
+    assert_eq!(samples[0].pts, ticks(50));
+    assert_eq!(samples[1].pts, ticks(60));
+    assert!(samples[0].keyframe);
+    assert!(!samples[1].keyframe);
+    assert_eq!(samples[0].duration, Some(ticks(10)));
+}
+
+#[test]
+fn fixed_lacing_splits_the_block() {
+    let block = simple_block(1, 0, 0x84, &[1, 1, 2, 3, 4]);
+    let mut extra = default_duration(10_000_000);
+    extra.extend(video_settings(16, 16));
+    let mut segment = tracks(&track_entry(1, 1, "V_VP9", &[], &extra));
+    segment.extend(cluster(0, &block));
+    let movie = Movie::parse(&file("webm", &segment)).expect("fixed");
+    let samples = movie.tracks()[0].samples();
+    assert_eq!(samples[0].data, [1, 2]);
+    assert_eq!(samples[1].data, [3, 4]);
+    assert_eq!(samples[1].pts, ticks(10));
+}
+
+#[test]
+fn ebml_lacing_splits_the_block() {
+    // Sizes 2, then +1, then the remainder. The difference byte 0xC0 is +1.
+    let block = simple_block(1, 0, 0x86, &[2, 0x82, 0xC0, 1, 2, 3, 4, 5, 6]);
+    let mut extra = default_duration(10_000_000);
+    extra.extend(video_settings(16, 16));
+    let mut segment = tracks(&track_entry(1, 1, "V_VP8", &[], &extra));
+    segment.extend(cluster(0, &block));
+    let movie = Movie::parse(&file("webm", &segment)).expect("ebml");
+    let samples = movie.tracks()[0].samples();
+    assert_eq!(samples.len(), 3);
+    assert_eq!(samples[0].data, [1, 2]);
+    assert_eq!(samples[1].data, [3, 4, 5]);
+    assert_eq!(samples[2].data, [6]);
+    assert_eq!(samples[2].pts, ticks(20));
+    assert!(!samples[2].keyframe);
+}
+
+#[test]
+fn a_laced_block_without_a_default_duration_refuses_the_file() {
+    let entry = track_entry(1, 1, "V_VP8", &[], &video_settings(8, 8));
+    let mut segment = tracks(&entry);
+    segment.extend(cluster(0, &simple_block(1, 0, 0x02, &[1, 2, 1, 2, 3])));
+    expect_err(
+        Movie::parse(&file("webm", &segment)),
+        Error::Inconsistent("a laced block has no default duration"),
+    );
+}
+
+#[test]
+fn a_block_duration_that_does_not_match_the_lace_refuses_the_file() {
+    let mut block = vint(1);
+    block.extend(0i16.to_be_bytes());
+    block.push(0x02);
+    block.extend_from_slice(&[1, 2, 0xAA, 0xBB, 0xCC]);
+    let mut group = element(BLOCK, &block);
+    group.extend(uint_el(BLOCK_DURATION, &uint_bytes(15)));
+    let mut extra = default_duration(10_000_000);
+    extra.extend(video_settings(8, 8));
+    let mut segment = tracks(&track_entry(1, 1, "V_VP8", &[], &extra));
+    segment.extend(cluster(0, &element(BLOCK_GROUP, &group)));
+    expect_err(
+        Movie::parse(&file("webm", &segment)),
+        Error::Inconsistent("the block duration does not match the lace"),
+    );
+}
+
+#[test]
+fn a_block_for_an_unknown_track_refuses_the_file() {
+    let entry = track_entry(1, 1, "V_VP8", &[], &video_settings(8, 8));
+    let mut segment = tracks(&entry);
+    segment.extend(cluster(0, &simple_block(9, 0, 0x80, &[1])));
+    expect_err(
+        Movie::parse(&file("webm", &segment)),
+        Error::Inconsistent("a block names an unknown track"),
+    );
+}
+
+#[test]
+fn a_default_duration_that_is_not_a_whole_number_of_ticks_refuses_the_file() {
+    let entry = video_with_duration(1_500_000);
+    expect_err(
+        Movie::parse(&file("matroska", &tracks(&entry))),
+        Error::Inconsistent("the default duration is not a whole number of timestamp units"),
+    );
+}
+
+#[test]
+fn a_cluster_before_the_track_list_still_reads() {
+    let mut segment = cluster(5, &simple_block(1, 0, 0x80, &[7]));
+    segment.extend(tracks(&video_with_duration(1_000_000)));
+    let movie = Movie::parse(&file("webm", &segment)).expect("reordered");
+    let sample = &movie.tracks()[0].samples()[0];
+    assert_eq!(sample.data, [7]);
+    assert_eq!(sample.pts, ticks(5));
+    assert_eq!(sample.duration, Some(ticks(1)));
+}
+
+#[test]
+fn a_cluster_without_a_timestamp_refuses_the_file() {
+    let entry = track_entry(1, 1, "V_VP8", &[], &video_settings(8, 8));
+    let mut segment = tracks(&entry);
+    segment.extend(element(CLUSTER, &simple_block(1, 0, 0x80, &[1])));
+    expect_err(
+        Movie::parse(&file("webm", &segment)),
+        Error::Inconsistent("a cluster has no timestamp"),
+    );
+}
+
+#[test]
+fn an_unknown_size_cluster_reads_to_the_end_of_the_segment() {
+    let mut cluster_body = uint_el(CLUSTER_TIME, &uint_bytes(4));
+    cluster_body.extend(simple_block(1, 1, 0x80, &[9]));
+    let mut segment = tracks(&video_with_duration(1_000_000));
+    segment.extend(element_unknown(CLUSTER, &cluster_body));
+    let movie = Movie::parse(&file("matroska", &segment)).expect("unknown size");
+    let sample = &movie.tracks()[0].samples()[0];
+    assert_eq!(sample.data, [9]);
+    assert_eq!(sample.pts, ticks(5));
+}
+
 const EBML: &[u8] = &[0x1A, 0x45, 0xDF, 0xA3];
 const DOC_TYPE: &[u8] = &[0x42, 0x82];
 const EBML_READ_VERSION: &[u8] = &[0x42, 0xF7];
@@ -262,6 +496,13 @@ const TRACK_ENTRY: &[u8] = &[0xAE];
 const CONTENT_ENCODINGS: &[u8] = &[0x6D, 0x80];
 const VOID: &[u8] = &[0xEC];
 const CRC32: &[u8] = &[0xBF];
+const CLUSTER: &[u8] = &[0x1F, 0x43, 0xB6, 0x75];
+const CLUSTER_TIME: &[u8] = &[0xE7];
+const SIMPLE_BLOCK: &[u8] = &[0xA3];
+const BLOCK_GROUP: &[u8] = &[0xA0];
+const BLOCK: &[u8] = &[0xA1];
+const BLOCK_DURATION: &[u8] = &[0x9B];
+const REFERENCE_BLOCK: &[u8] = &[0xFB];
 
 fn file(doctype: &str, segment: &[u8]) -> Vec<u8> {
     let mut out = element(EBML, &string_el(DOC_TYPE, doctype));
@@ -337,6 +578,62 @@ fn element(id: &[u8], body: &[u8]) -> Vec<u8> {
     out.extend(vint(u64::try_from(body.len()).expect("length")));
     out.extend_from_slice(body);
     out
+}
+
+fn video_with_duration(ns: u64) -> Vec<u8> {
+    let mut extra = default_duration(ns);
+    extra.extend(video_settings(320, 180));
+    track_entry(1, 1, "V_VP8", &[], &extra)
+}
+
+fn default_duration(ns: u64) -> Vec<u8> {
+    uint_el(&[0x23, 0xE3, 0x83], &uint_bytes(ns))
+}
+
+fn simple_block(track: u64, relative: i16, flags: u8, data: &[u8]) -> Vec<u8> {
+    let mut body = vint(track);
+    body.extend(relative.to_be_bytes());
+    body.push(flags);
+    body.extend_from_slice(data);
+    element(SIMPLE_BLOCK, &body)
+}
+
+fn cluster(timestamp: u64, blocks: &[u8]) -> Vec<u8> {
+    let mut body = uint_el(CLUSTER_TIME, &uint_bytes(timestamp));
+    body.extend_from_slice(blocks);
+    element(CLUSTER, &body)
+}
+
+fn block_group(
+    track: u64,
+    relative: i16,
+    data: &[u8],
+    duration: Option<u64>,
+    reference: bool,
+) -> Vec<u8> {
+    let mut block = vint(track);
+    block.extend(relative.to_be_bytes());
+    block.push(0);
+    block.extend_from_slice(data);
+    let mut body = element(BLOCK, &block);
+    if let Some(duration) = duration {
+        body.extend(uint_el(BLOCK_DURATION, &uint_bytes(duration)));
+    }
+    if reference {
+        body.extend(element(REFERENCE_BLOCK, &[0xFF]));
+    }
+    element(BLOCK_GROUP, &body)
+}
+
+fn element_unknown(id: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut out = id.to_vec();
+    out.push(0xFF);
+    out.extend_from_slice(body);
+    out
+}
+
+fn ticks(value: i64) -> Timestamp {
+    Timestamp::new(value, scale(1_000))
 }
 
 fn vint(value: u64) -> Vec<u8> {

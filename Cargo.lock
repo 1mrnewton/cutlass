@@ -801,6 +801,14 @@ name = "cutlass-hevc"
 version = "0.1.0"
 
 [[package]]
+name = "cutlass-jpeg"
+version = "0.1.0"
+dependencies = [
+ "cutlass-core",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cutlass-media"
 version = "0.1.0"
 dependencies = [

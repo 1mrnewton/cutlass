@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "MP4 and MOV reader."
+description = "MP4 and MOV reader and writer."
 
 [dependencies]
 cutlass-core.workspace = true

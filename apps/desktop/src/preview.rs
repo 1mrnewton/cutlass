@@ -1,6 +1,7 @@
 //! The preview frame and the transport. The frame shows the project canvas.
 //! One selected layer can be moved, scaled, and rotated. On Apple the top
-//! picture is drawn in that box. `docs/preview.md`.
+//! picture is drawn in that box. A trackpad pinch over the frame zooms the
+//! canvas, and the point under the pointer stays put. `docs/preview.md`.
 
 use eframe::egui::{
     self, Align2, Color32, FontFamily, FontId, Pos2, Rect, Sense, Stroke, Vec2, pos2, vec2,
@@ -14,6 +15,8 @@ use crate::theme;
 use crate::timeline::file_name;
 
 const TRANSPORT: f32 = 52.0;
+const ZOOM_MIN: f32 = 0.5;
+const ZOOM_MAX: f32 = 4.0;
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -42,6 +45,23 @@ pub fn show(
             project.settings().width(),
             project.settings().height(),
         );
+        let plate = plate.map(|fit| {
+            let glass_id = ui.scope_id().with("preview-zoom");
+            let mut glass = ui
+                .data(|data| data.get_temp::<Glass>(glass_id))
+                .unwrap_or_default();
+            let dragging = ui.input(|input| input.pointer.is_decidedly_dragging());
+            if !dragging
+                && ui.rect_contains_pointer(frame)
+                && let Some(point) = ui.input(|input| input.pointer.hover_pos())
+            {
+                let factor = ui.input(|input| input.zoom_delta());
+                glass = zoom_glass(frame, fit.size(), glass, point, factor);
+            }
+            let (plate, glass) = placed_canvas(frame, fit.size(), glass);
+            ui.data_mut(|data| data.insert_temp(glass_id, glass));
+            plate
+        });
         let canvas = ui.interact(
             frame,
             ui.scope_id().with("preview-canvas"),
@@ -63,6 +83,8 @@ pub fn show(
         });
         let drag = drag.flatten();
         if let Some(plate) = plate {
+            let outer = ui.clip_rect();
+            ui.set_clip_rect(outer.intersect(frame));
             let (red, green, blue) = project.settings().background().channels();
             ui.painter()
                 .rect_filled(plate, 0.0, Color32::from_rgb(red, green, blue));
@@ -93,6 +115,7 @@ pub fn show(
                 selected,
                 drag.as_ref(),
             );
+            ui.set_clip_rect(outer);
         }
         let rate = project.settings().rate();
         let time = ruler::timecode(playhead_us, rate);
@@ -242,6 +265,92 @@ fn paint_transport(
 }
 
 /// The canvas, fitted inside `frame` and centered. The aspect is `width`/`height`.
+/// How far the canvas is zoomed, and where it sits in the frame.
+///
+/// `zoom` of 1 fits the canvas in the frame. The pan is in points, after the
+/// canvas has been centered.
+#[derive(Clone, Copy)]
+struct Glass {
+    zoom: f32,
+    pan: Vec2,
+}
+
+impl Default for Glass {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            pan: Vec2::ZERO,
+        }
+    }
+}
+
+/// The canvas rect for `glass`, with the pan held so a zoomed picture cannot
+/// leave a gap inside the frame.
+fn placed_canvas(well: Rect, fit: Vec2, glass: Glass) -> (Rect, Glass) {
+    let zoom = if glass.zoom.is_finite() {
+        glass.zoom.clamp(ZOOM_MIN, ZOOM_MAX)
+    } else {
+        1.0
+    };
+    let visual = fit * zoom;
+    if visual.x <= 0.0 || visual.y <= 0.0 || well.width() <= 0.0 || well.height() <= 0.0 {
+        return (
+            Rect::from_center_size(well.center(), fit),
+            Glass {
+                zoom: 1.0,
+                pan: Vec2::ZERO,
+            },
+        );
+    }
+    let max_x = ((visual.x - well.width()) * 0.5).max(0.0);
+    let max_y = ((visual.y - well.height()) * 0.5).max(0.0);
+    let pan = vec2(
+        if glass.pan.x.is_finite() {
+            glass.pan.x.clamp(-max_x, max_x)
+        } else {
+            0.0
+        },
+        if glass.pan.y.is_finite() {
+            glass.pan.y.clamp(-max_y, max_y)
+        } else {
+            0.0
+        },
+    );
+    (
+        Rect::from_min_size(well.center() - visual * 0.5 + pan, visual),
+        Glass { zoom, pan },
+    )
+}
+
+/// Scales the canvas by `factor` around `anchor`. Half size and four times are the stops.
+fn zoom_glass(well: Rect, fit: Vec2, glass: Glass, anchor: Pos2, factor: f32) -> Glass {
+    let (_, current) = placed_canvas(well, fit, glass);
+    if !(factor.is_finite() && factor > 0.0) || (factor - 1.0).abs() <= f32::EPSILON {
+        return current;
+    }
+    let next_zoom = (current.zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+    if (next_zoom - current.zoom).abs() <= 1.0e-4 {
+        return current;
+    }
+    let (before, _) = placed_canvas(well, fit, current);
+    let local = (anchor - before.min) / current.zoom;
+    let visual = fit * next_zoom;
+    let centered = well.center() - visual * 0.5;
+    let pan = vec2(
+        anchor.x - local.x * next_zoom - centered.x,
+        anchor.y - local.y * next_zoom - centered.y,
+    );
+    placed_canvas(
+        well,
+        fit,
+        Glass {
+            zoom: next_zoom,
+            pan,
+        },
+    )
+    .1
+}
+
 fn fitted_canvas(frame: Rect, width: u32, height: u32) -> Option<Rect> {
     if width == 0 || height == 0 || frame.width() <= 0.0 || frame.height() <= 0.0 {
         return None;
@@ -1123,6 +1232,39 @@ mod tests {
         assert!((plate.width() - 320.0).abs() < 0.01);
         assert!((plate.height() - 180.0).abs() < 0.01);
         assert!(super::fitted_canvas(exact, 0, 1080).is_none());
+    }
+
+    #[test]
+    fn a_pinch_keeps_the_point_under_the_pointer_and_stops_at_half_and_four() {
+        let well = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(400.0, 300.0),
+        );
+        let fit = eframe::egui::vec2(320.0, 180.0);
+        let start = super::Glass::default();
+        let (before, _) = super::placed_canvas(well, fit, start);
+        assert!((before.width() - 320.0).abs() < 0.01);
+        assert!((before.center() - well.center()).length() < 0.01);
+
+        let anchor = eframe::egui::pos2(180.0, 140.0);
+        let zoomed = super::zoom_glass(well, fit, start, anchor, 2.0);
+        assert!((zoomed.zoom - 2.0).abs() < 1.0e-4);
+        let (plate, _) = super::placed_canvas(well, fit, zoomed);
+        let local = (anchor - before.min) / start.zoom;
+        let stayed = plate.min + local * zoomed.zoom;
+        assert!(
+            (stayed - anchor).length() < 0.51,
+            "the point moved to {stayed:?}"
+        );
+
+        let tight = super::zoom_glass(well, fit, zoomed, anchor, 10.0);
+        assert!((tight.zoom - 4.0).abs() < 1.0e-4);
+        let wide = super::zoom_glass(well, fit, start, anchor, 0.1);
+        assert!((wide.zoom - 0.5).abs() < 1.0e-4);
+        assert_eq!(wide.pan, eframe::egui::Vec2::ZERO);
+        let same = super::zoom_glass(well, fit, zoomed, anchor, 1.0);
+        assert!((same.zoom - zoomed.zoom).abs() < 1.0e-4);
+        assert!((same.pan - zoomed.pan).length() < 0.01);
     }
 
     #[test]

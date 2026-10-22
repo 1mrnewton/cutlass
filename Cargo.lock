@@ -814,6 +814,9 @@ dependencies = [
 [[package]]
 name = "cutlass-mediacodec"
 version = "0.1.0"
+dependencies = [
+ "cutlass-core",
+]
 
 [[package]]
 name = "cutlass-mediafoundation"

@@ -1,8 +1,9 @@
 //! MP4 and MOV reader.
 //!
 //! The crate takes the file bytes and returns tracks and samples. It does no
-//! I/O. Sample timestamps are media time. An edit list is kept on the track
-//! and is not applied. `docs/codecs.md` lists the containers.
+//! I/O. Sample timestamps are media time when the track has no edit list. An
+//! edit list moves them onto the movie timeline. `docs/codecs.md` lists the
+//! containers.
 
 #![deny(unsafe_code)]
 

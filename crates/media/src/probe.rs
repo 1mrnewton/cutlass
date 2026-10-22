@@ -38,7 +38,10 @@ impl Probe {
         &self.tracks
     }
 
-    /// Samples for one track, in decode order. Timestamps are media time.
+    /// Samples for one track, in decode order.
+    ///
+    /// Times are media time when the track has no edit list. An edit list
+    /// moves them onto the movie timeline.
     pub fn samples(&self, index: usize) -> Option<&[Packet]> {
         self.movie.tracks().get(index).map(Track::samples)
     }

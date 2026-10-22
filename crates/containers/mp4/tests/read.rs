@@ -12,10 +12,6 @@ fn scale(value: u32) -> NonZeroU32 {
     }
 }
 
-fn time(value: i64) -> Timestamp {
-    Timestamp::new(value, scale(1000))
-}
-
 fn expect_err(result: Result<Movie, Error>, expected: Error) {
     match result {
         Err(error) if error == expected => {}
@@ -56,18 +52,20 @@ fn a_movie_reports_tracks_samples_and_media_time() {
     assert_eq!(samples[0].data, [1, 2, 3]);
     assert_eq!(samples[1].data, [4, 5]);
     assert_eq!(samples[2].data, [6]);
-    assert_eq!(samples[0].dts, Some(time(0)));
-    assert_eq!(samples[1].dts, Some(time(100)));
-    assert_eq!(samples[2].dts, Some(time(200)));
-    assert_eq!(samples[0].pts, time(200));
-    assert_eq!(samples[1].pts, time(100));
-    assert_eq!(samples[2].pts, time(200));
-    assert_eq!(samples[0].duration, Some(time(100)));
-    assert_eq!(samples[2].duration, Some(time(200)));
+    let timeline = scale(3000);
+    assert_eq!(samples[0].dts, Some(Timestamp::new(-300, timeline)));
+    assert_eq!(samples[1].dts, Some(Timestamp::new(0, timeline)));
+    assert_eq!(samples[2].dts, Some(Timestamp::new(300, timeline)));
+    assert_eq!(samples[0].pts, Timestamp::new(300, timeline));
+    assert_eq!(samples[1].pts, Timestamp::new(0, timeline));
+    assert_eq!(samples[2].pts, Timestamp::new(300, timeline));
+    assert_eq!(samples[0].duration, Some(Timestamp::new(300, timeline)));
+    assert_eq!(samples[1].duration, Some(Timestamp::new(250, timeline)));
+    assert_eq!(samples[2].duration, Some(Timestamp::new(600, timeline)));
     assert!(samples[0].keyframe);
     assert!(!samples[1].keyframe);
     assert!(!samples[2].keyframe);
-    // The edit list is stored and does not move the samples.
+    // The edit list is stored, and the sample times above are the movie timeline.
     assert_eq!(video.edits().len(), 1);
     assert_eq!(video.edits()[0].segment_duration(), 50);
     assert_eq!(video.edits()[0].media_time(), 100);
@@ -78,6 +76,57 @@ fn a_movie_reports_tracks_samples_and_media_time() {
         Kind::Video(_) | Kind::Audio(_) => panic!("timecode track"),
     }
     assert!(movie.tracks()[1].samples().is_empty());
+}
+
+#[test]
+fn a_track_without_an_edit_list_keeps_media_time() {
+    let movie = Movie::parse(&entry_file(&[])).expect("file");
+    let sample = &movie.tracks()[0].samples()[0];
+    assert!(movie.tracks()[0].edits().is_empty());
+    assert_eq!(sample.pts, Timestamp::new(0, scale(1000)));
+    assert_eq!(sample.dts, Some(Timestamp::new(0, scale(1000))));
+    assert_eq!(sample.duration, Some(Timestamp::new(1, scale(1000))));
+}
+
+#[test]
+fn a_gap_shifts_the_played_span() {
+    let movie = Movie::parse(&timed_file(
+        100,
+        &elst_entries(&[(500, -1, 0x0001_0000), (100, 0, 0x0001_0000)]),
+    ))
+    .expect("gapped file");
+    let sample = &movie.tracks()[0].samples()[0];
+    assert_eq!(sample.pts, Timestamp::new(500, scale(1000)));
+    assert_eq!(sample.dts, Some(Timestamp::new(500, scale(1000))));
+    assert_eq!(sample.duration, Some(Timestamp::new(100, scale(1000))));
+}
+
+#[test]
+fn a_sample_that_crosses_the_edit_is_shortened() {
+    let movie = Movie::parse(&timed_file(100, &elst(50, 40))).expect("trimmed file");
+    let sample = &movie.tracks()[0].samples()[0];
+    assert_eq!(sample.pts, Timestamp::new(0, scale(1000)));
+    assert_eq!(sample.dts, Some(Timestamp::new(0, scale(1000))));
+    assert_eq!(sample.duration, Some(Timestamp::new(50, scale(1000))));
+}
+
+#[test]
+fn an_edit_list_with_two_spans_or_another_rate_refuses_the_file() {
+    expect_err(
+        Movie::parse(&timed_file(
+            100,
+            &elst_entries(&[(50, 0, 0x0001_0000), (50, 50, 0x0001_0000)]),
+        )),
+        Error::Inconsistent("the edit list plays more than one span"),
+    );
+    expect_err(
+        Movie::parse(&timed_file(100, &elst_entries(&[(100, 0, 0)]))),
+        Error::Inconsistent("the edit list rate is not 1"),
+    );
+    expect_err(
+        Movie::parse(&timed_file(100, &elst_entries(&[(100, -2, 0x0001_0000)]))),
+        Error::Inconsistent("the edit list media time is negative"),
+    );
 }
 
 #[test]
@@ -332,6 +381,29 @@ fn hdr_file() -> Vec<u8> {
     entry_file(&colr_nclx(16, false))
 }
 
+fn timed_file(sample_duration: u32, edits: &[u8]) -> Vec<u8> {
+    let ftyp = atom(b"ftyp", b"isom\0\0\0\0isom");
+    let mdat = atom(b"mdat", &[9]);
+    let payload_at = u32::try_from(ftyp.len() + 8).expect("offset fits");
+    let mut trak = tkhd(0, 1, sample_duration, MATRIX_0, 16, 16);
+    trak.extend_from_slice(edits);
+    let mut mdia = mdhd(0, 1000, sample_duration);
+    mdia.extend(hdlr(b"vide"));
+    let mut stbl = stsd(&avc1(16, 16, &[1]));
+    stbl.extend(stts(&[(1, sample_duration)]));
+    stbl.extend(stsc(&[(1, 1, 1)]));
+    stbl.extend(stsz(&[1]));
+    stbl.extend(stco(&[payload_at]));
+    mdia.extend(atom(b"minf", &atom(b"stbl", &stbl)));
+    trak.extend(atom(b"mdia", &mdia));
+    let mut moov = mvhd(0, 1000, sample_duration);
+    moov.extend(atom(b"trak", &trak));
+    let mut file = ftyp;
+    file.extend(mdat);
+    file.extend(atom(b"moov", &moov));
+    file
+}
+
 fn entry_file(extra: &[u8]) -> Vec<u8> {
     let ftyp = atom(b"ftyp", b"isom\0\0\0\0isom");
     let mdat = atom(b"mdat", &[9]);
@@ -544,10 +616,19 @@ fn hdlr(kind: &[u8; 4]) -> Vec<u8> {
 }
 
 fn elst(duration: u32, media_time: i32) -> Vec<u8> {
-    let mut body = 1u32.to_be_bytes().to_vec();
-    body.extend_from_slice(&duration.to_be_bytes());
-    body.extend_from_slice(&media_time.to_be_bytes());
-    body.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    elst_entries(&[(duration, media_time, 0x0001_0000)])
+}
+
+fn elst_entries(entries: &[(u32, i32, u32)]) -> Vec<u8> {
+    let mut body = u32::try_from(entries.len())
+        .expect("count fits")
+        .to_be_bytes()
+        .to_vec();
+    for &(duration, media_time, rate) in entries {
+        body.extend_from_slice(&duration.to_be_bytes());
+        body.extend_from_slice(&media_time.to_be_bytes());
+        body.extend_from_slice(&rate.to_be_bytes());
+    }
     atom(b"edts", &full(b"elst", 0, 0, &body))
 }
 

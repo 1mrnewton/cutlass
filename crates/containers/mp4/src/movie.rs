@@ -3,7 +3,7 @@
 use std::num::NonZeroU32;
 
 use cutlass_core::{
-    ColorTags, ContentLight, MasteringDisplay, Packet, Rotation, VideoStreamConfig,
+    ColorTags, ContentLight, MasteringDisplay, Packet, Rotation, Timestamp, VideoStreamConfig,
 };
 
 use crate::entry::{self, Audio, Description};
@@ -13,8 +13,8 @@ use crate::{Error, Fourcc};
 
 /// A parsed MP4 or MOV file.
 ///
-/// Sample timestamps are media time. An edit list is stored on its track and
-/// is not applied.
+/// Sample timestamps are media time when the track has no edit list. An edit
+/// list moves them onto the movie timeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Movie {
     timescale: NonZeroU32,
@@ -34,7 +34,7 @@ impl Movie {
         let (timescale, duration) = movie_header(read::required(&children, *b"mvhd")?)?;
         let mut tracks = Vec::new();
         for trak in children.iter().filter(|atom| atom.kind == *b"trak") {
-            tracks.push(track(data, trak)?);
+            tracks.push(track(data, trak, timescale)?);
         }
         Ok(Self {
             timescale,
@@ -89,7 +89,8 @@ impl Track {
         self.enabled
     }
 
-    /// Media timescale. Sample timestamps use it.
+    /// Media timescale from the media header. The header duration uses it.
+    /// A sample timestamp carries its own timescale.
     pub fn timescale(&self) -> NonZeroU32 {
         self.timescale
     }
@@ -140,12 +141,16 @@ impl Track {
         &self.edits
     }
 
-    /// Samples in decode order. Timestamps are media time.
+    /// Samples in decode order.
+    ///
+    /// With no edit list, timestamps are media time. An edit list moves them
+    /// onto the movie timeline. A sample outside the played span stays, so a
+    /// decoder can still read it.
     pub fn samples(&self) -> &[Packet] {
         &self.samples
     }
 
-    /// `Some` when every sample has this duration, in [`Self::timescale`] units.
+    /// `Some` when every sample has this duration, in the samples' timescale.
     /// `None` when the track is empty or the durations differ.
     pub fn frame_duration(&self) -> Option<u32> {
         self.frame_duration
@@ -163,7 +168,7 @@ pub enum Kind {
     Other(Fourcc),
 }
 
-/// One edit-list entry, not applied to the samples.
+/// One edit-list entry. The list stays on the track after the samples move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Edit {
     segment_duration: u64,
@@ -189,7 +194,7 @@ impl Edit {
     }
 }
 
-fn track(file: &[u8], trak: &Atom<'_>) -> Result<Track, Error> {
+fn track(file: &[u8], trak: &Atom<'_>, movie_timescale: NonZeroU32) -> Result<Track, Error> {
     let children = read::atoms(trak.payload, trak.payload_base()?)?;
     let header = track_header(read::required(&children, *b"tkhd")?)?;
     let mdia = read::required(&children, *b"mdia")?;
@@ -197,7 +202,7 @@ fn track(file: &[u8], trak: &Atom<'_>) -> Result<Track, Error> {
     let (timescale, duration) = media_header(read::required(&media, *b"mdhd")?)?;
     let handler = handler_type(read::required(&media, *b"hdlr")?)?;
     let edits = edits(&children)?;
-    let (kind, color, mastering, content_light, samples) =
+    let (kind, color, mastering, content_light, mut samples) =
         if handler == *b"vide" || handler == *b"soun" {
             let minf = read::required(&media, *b"minf")?;
             let minf_children = read::atoms(minf.payload, minf.payload_base()?)?;
@@ -224,6 +229,7 @@ fn track(file: &[u8], trak: &Atom<'_>) -> Result<Track, Error> {
                 Vec::new(),
             )
         };
+    apply_edits(&mut samples, &edits, movie_timescale, timescale)?;
     Ok(Track {
         id: header.id,
         enabled: header.enabled,
@@ -400,6 +406,138 @@ fn rotation(matrix: [i32; 9]) -> Rotation {
         (0, b, c, 0) if b == -one && c == one => Rotation::Clockwise270,
         _ => Rotation::Other,
     }
+}
+
+const RATE_ONE: u32 = 0x0001_0000;
+
+/// Moves sample times onto the movie timeline.
+///
+/// Decode time moves with presentation time, so the delay between them stays.
+fn apply_edits(
+    packets: &mut [Packet],
+    edits: &[Edit],
+    movie_timescale: NonZeroU32,
+    track_timescale: NonZeroU32,
+) -> Result<(), Error> {
+    if edits.is_empty() {
+        return Ok(());
+    }
+    let mut composition = 0u64;
+    let mut played = None;
+    for edit in edits {
+        if edit.media_time < -1 {
+            return Err(Error::Inconsistent("the edit list media time is negative"));
+        }
+        if edit.media_time == -1 {
+            composition = composition
+                .checked_add(edit.segment_duration)
+                .ok_or(Error::TooLarge)?;
+            continue;
+        }
+        if edit.media_rate != RATE_ONE {
+            return Err(Error::Inconsistent("the edit list rate is not 1"));
+        }
+        if played.is_some() {
+            return Err(Error::Inconsistent(
+                "the edit list plays more than one span",
+            ));
+        }
+        played = Some((composition, edit.media_time, edit.segment_duration));
+    }
+    let Some((composition, media_time, segment)) = played else {
+        return Ok(());
+    };
+    if packets.is_empty() {
+        return Ok(());
+    }
+    let movie = movie_timescale.get();
+    let track = track_timescale.get();
+    let divisor = gcd(movie, track);
+    let movie_over = movie / divisor;
+    let track_over = track / divisor;
+    let scale = u32::try_from(
+        u64::from(movie_over)
+            .checked_mul(u64::from(track))
+            .ok_or(Error::TooLarge)?,
+    )
+    .map_err(|_| Error::TooLarge)?;
+    let timescale = NonZeroU32::new(scale).ok_or(Error::TooLarge)?;
+    let start = scale_u64(composition, track_over)?;
+    let span = scale_u64(segment, track_over)?;
+    for packet in packets {
+        let rel = packet
+            .pts
+            .value
+            .checked_sub(media_time)
+            .ok_or(Error::TooLarge)?;
+        let delay = match packet.dts {
+            Some(dts) => packet
+                .pts
+                .value
+                .checked_sub(dts.value)
+                .ok_or(Error::TooLarge)?,
+            None => 0,
+        };
+        let inside = rel >= 0
+            && i128::from(rel) * i128::from(movie) < i128::from(segment) * i128::from(track);
+        let (pts, duration) = match packet.duration.map(|duration| duration.value) {
+            Some(duration) => {
+                let end = rel.checked_add(duration).ok_or(Error::TooLarge)?;
+                if rel < 0 && end > 0 {
+                    let overlap = scale_i64(end, movie_over)?;
+                    (start, Some(overlap.min(span)))
+                } else if inside {
+                    let pts = start
+                        .checked_add(scale_i64(rel, movie_over)?)
+                        .ok_or(Error::TooLarge)?;
+                    let full = scale_i64(duration, movie_over)?;
+                    let used = scale_i64(rel, movie_over)?;
+                    let remaining = span.checked_sub(used).ok_or(Error::TooLarge)?;
+                    (pts, Some(full.min(remaining)))
+                } else {
+                    let pts = start
+                        .checked_add(scale_i64(rel, movie_over)?)
+                        .ok_or(Error::TooLarge)?;
+                    (pts, Some(scale_i64(duration, movie_over)?))
+                }
+            }
+            None => {
+                let pts = start
+                    .checked_add(scale_i64(rel, movie_over)?)
+                    .ok_or(Error::TooLarge)?;
+                (pts, None)
+            }
+        };
+        let dts = match packet.dts {
+            Some(_) => Some(Timestamp::new(
+                pts.checked_sub(scale_i64(delay, movie_over)?)
+                    .ok_or(Error::TooLarge)?,
+                timescale,
+            )),
+            None => None,
+        };
+        packet.pts = Timestamp::new(pts, timescale);
+        packet.dts = dts;
+        packet.duration = duration.map(|duration| Timestamp::new(duration, timescale));
+    }
+    Ok(())
+}
+
+fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        let next = a % b;
+        a = b;
+        b = next;
+    }
+    a
+}
+
+fn scale_i64(ticks: i64, by: u32) -> Result<i64, Error> {
+    i64::try_from(i128::from(ticks) * i128::from(by)).map_err(|_| Error::TooLarge)
+}
+
+fn scale_u64(ticks: u64, by: u32) -> Result<i64, Error> {
+    i64::try_from(i128::from(ticks) * i128::from(by)).map_err(|_| Error::TooLarge)
 }
 
 fn constant_duration(samples: &[Packet]) -> Option<u32> {

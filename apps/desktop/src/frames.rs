@@ -1,13 +1,13 @@
-//! The picture under the playhead.
+//! The pictures under the playhead.
 //!
-//! On Apple a worker decodes VideoToolbox frames ahead of the playhead. It
-//! keeps the decoder inside the current group of pictures, skips to a keyframe
+//! On Apple each video track has its own VideoToolbox reader and frame queue.
+//! The reader stays inside the current group of pictures, skips to a keyframe
 //! the clock has reached, and drops frames that are already late. The next
-//! clip opens on a side thread during the last second before the cut. The
-//! window samples the GPU texture for the frame that is due and does not copy
-//! it back. A failure is written to the app log. A seek, and a cut, keep the
-//! last picture until the new one is ready. Where no video decoder is linked,
-//! there is no picture.
+//! clip on a track opens while the hardware reader count is under the cap.
+//! The window draws those frames from the bottom track upward and does not
+//! copy them back. A failure is written to the app log. A seek, and a cut,
+//! keep the last picture until the new one is ready. Where no video decoder
+//! is linked, there is no picture.
 
 use cutlass_compose::Gpu;
 use cutlass_project::Project;
@@ -15,7 +15,7 @@ use cutlass_project::Project;
 #[cfg(target_vendor = "apple")]
 use cutlass_core::Timestamp;
 #[cfg(target_vendor = "apple")]
-use cutlass_project::AssetId;
+use cutlass_project::{AssetId, TrackId};
 #[cfg(target_vendor = "apple")]
 use std::path::Path;
 
@@ -43,24 +43,21 @@ const QUEUE_DEPTH: usize = 8;
 #[cfg(target_vendor = "apple")]
 const DECODE_BUDGET: usize = QUEUE_DEPTH;
 
-/// The open clip and the GPU the window already created.
+/// CapCut's preload scheduler stops at `hw reader count max`. The number was
+/// not recovered. A picture that is already on screen still gets a reader.
+#[cfg(target_vendor = "apple")]
+const HW_READER_CAP: usize = 8;
+
+/// The open readers and the GPU the window already created.
 pub struct Reel {
     gpu: Option<Gpu>,
     #[cfg(target_vendor = "apple")]
     bridge: Option<Bridge>,
-    /// GPU picture the preview samples. The texture stays here until the next frame.
+    /// One held picture per track, bottom to top as last asked.
     #[cfg(target_vendor = "apple")]
-    plate: Option<cutlass_compose::RgbImage>,
-    /// egui id for `plate`. The renderer does not own the wgpu texture.
-    #[cfg(target_vendor = "apple")]
-    native: Option<eframe::egui::TextureId>,
-    /// CPU fallback, used when the frame has no surface the GPU can sample.
-    #[cfg(target_vendor = "apple")]
-    texture: Option<eframe::egui::TextureHandle>,
+    held: Vec<Held>,
     #[cfg(target_vendor = "apple")]
     pending: Option<Ask>,
-    #[cfg(target_vendor = "apple")]
-    shown: Option<Shown>,
     #[cfg(target_vendor = "apple")]
     waiting: bool,
     #[cfg(target_vendor = "apple")]
@@ -73,6 +70,21 @@ pub struct Reel {
     dropped: bool,
 }
 
+#[cfg(target_vendor = "apple")]
+struct Held {
+    track: TrackId,
+    asset: AssetId,
+    source: String,
+    generation: u64,
+    /// GPU picture the preview samples. The texture stays until the next frame.
+    plate: Option<cutlass_compose::RgbImage>,
+    /// egui id for `plate`. The renderer does not own the wgpu texture.
+    native: Option<eframe::egui::TextureId>,
+    /// CPU fallback, used when the frame has no surface the GPU can sample.
+    texture: Option<eframe::egui::TextureHandle>,
+    shown: Option<Shown>,
+}
+
 impl Reel {
     /// `gpu` is the window's device. Without one, the plate stays the background.
     pub fn new(gpu: Option<Gpu>) -> Self {
@@ -81,15 +93,9 @@ impl Reel {
             bridge: gpu.is_some().then(Bridge::start),
             gpu,
             #[cfg(target_vendor = "apple")]
-            plate: None,
-            #[cfg(target_vendor = "apple")]
-            native: None,
-            #[cfg(target_vendor = "apple")]
-            texture: None,
+            held: Vec::new(),
             #[cfg(target_vendor = "apple")]
             pending: None,
-            #[cfg(target_vendor = "apple")]
-            shown: None,
             #[cfg(target_vendor = "apple")]
             waiting: false,
             #[cfg(target_vendor = "apple")]
@@ -106,9 +112,7 @@ impl Reel {
         #[cfg(target_vendor = "apple")]
         {
             self.pending = None;
-            self.shown = None;
-            self.plate = None;
-            self.texture = None;
+            self.held.clear();
             self.waiting = false;
             self.copied = false;
             self.dropped = false;
@@ -131,113 +135,174 @@ impl Reel {
         }
     }
 
-    /// The texture for the top picture at `playhead_us`, when one can be drawn.
-    pub fn image(
+    /// Textures for the pictures at `playhead_us`, bottom track first.
+    pub fn images(
         &mut self,
         ctx: &eframe::egui::Context,
         state: Option<&eframe::egui_wgpu::RenderState>,
         project: &Project,
         playhead_us: i64,
         hidden: &[cutlass_project::TrackId],
-    ) -> Option<eframe::egui::TextureId> {
-        self.gpu.as_ref()?;
+    ) -> Vec<crate::preview::DrawnPicture> {
+        if self.gpu.is_none() {
+            return Vec::new();
+        }
         #[cfg(target_vendor = "apple")]
         {
-            self.image_apple(ctx, state, project, playhead_us, hidden)
+            self.images_apple(ctx, state, project, playhead_us, hidden)
         }
         #[cfg(not(target_vendor = "apple"))]
         {
             let _ = (ctx, state, project, playhead_us, hidden);
-            None
+            Vec::new()
         }
     }
 
     #[cfg(target_vendor = "apple")]
-    fn image_apple(
+    fn images_apple(
         &mut self,
         ctx: &eframe::egui::Context,
         state: Option<&eframe::egui_wgpu::RenderState>,
         project: &Project,
         playhead_us: i64,
         hidden: &[cutlass_project::TrackId],
-    ) -> Option<eframe::egui::TextureId> {
-        let Some(segment) = crate::preview::picture_segment(project, playhead_us, hidden) else {
-            self.hide(state);
-            return None;
-        };
-        let Some(asset) = segment.asset_id() else {
-            self.hide(state);
-            return None;
-        };
-        let Some(time) = crate::preview::media_time(segment, playhead_us) else {
-            self.hide(state);
-            return None;
-        };
-        let Some(source) = project.asset(asset).map(|asset| asset.source()) else {
-            self.hide(state);
-            return None;
-        };
-        let next = crate::preview::upcoming_picture(project, playhead_us, hidden).map(
-            |(asset, source)| Next {
+    ) -> Vec<crate::preview::DrawnPicture> {
+        let layers = crate::preview::picture_layers(project, playhead_us, hidden);
+        let next = crate::preview::upcoming_layers(project, playhead_us, hidden);
+        self.retain(&layers, state);
+        self.ask(project, playhead_us, &layers, &next);
+        self.deliver(ctx, state);
+        let mut drawn = Vec::new();
+        for (track, _) in layers {
+            let Some(held) = self.held.iter().find(|held| held.track == track) else {
+                continue;
+            };
+            let Some(texture) = held.texture_id() else {
+                continue;
+            };
+            drawn.push(crate::preview::DrawnPicture { track, texture });
+        }
+        drawn
+    }
+
+    /// Drops pictures whose tracks are no longer under the playhead.
+    #[cfg(target_vendor = "apple")]
+    fn retain(
+        &mut self,
+        layers: &[(TrackId, &cutlass_project::Segment)],
+        state: Option<&eframe::egui_wgpu::RenderState>,
+    ) {
+        let mut kept = Vec::new();
+        for held in self.held.drain(..) {
+            if layers.iter().any(|(track, _)| *track == held.track) {
+                kept.push(held);
+            } else {
+                release(held, state);
+            }
+        }
+        self.held = kept;
+    }
+
+    #[cfg(target_vendor = "apple")]
+    fn ask(
+        &mut self,
+        project: &Project,
+        playhead_us: i64,
+        layers: &[(TrackId, &cutlass_project::Segment)],
+        next: &[(TrackId, AssetId, &str)],
+    ) {
+        let mut show = Vec::new();
+        for (track, segment) in layers {
+            let Some(asset) = segment.asset_id() else {
+                continue;
+            };
+            let Some(source) = project.asset(asset).map(|asset| asset.source()) else {
+                continue;
+            };
+            let Some(time) = crate::preview::media_time(segment, playhead_us) else {
+                continue;
+            };
+            let generation = self.prepare(*track, asset, source);
+            show.push(ShowLayer {
+                track: *track,
+                generation,
                 asset,
                 source: source.to_owned(),
-            },
-        );
-        self.ask(asset, source, time, next);
-        self.deliver(ctx, state);
-        if self.plate.is_some() {
-            return self.native;
+                time,
+            });
         }
-        self.texture.as_ref().map(|texture| texture.id())
-    }
-
-    #[cfg(target_vendor = "apple")]
-    fn hide(&mut self, state: Option<&eframe::egui_wgpu::RenderState>) {
-        self.pending = None;
-        self.shown = None;
-        self.plate = None;
-        self.texture = None;
-        self.free_native(state);
-        self.waiting = false;
-    }
-
-    #[cfg(target_vendor = "apple")]
-    fn ask(&mut self, asset: AssetId, source: &str, time: Timestamp, next: Option<Next>) {
-        if self.pending.as_ref().is_some_and(|pending| {
-            pending.asset == asset
-                && pending.source == source
-                && pending.time == time
-                && pending.next == next
-        }) {
-            return;
-        }
-        let same_clip = self
+        let next = next
+            .iter()
+            .map(|(track, asset, source)| ShowNext {
+                track: *track,
+                asset: *asset,
+                source: (*source).to_owned(),
+            })
+            .collect();
+        if self
             .pending
             .as_ref()
-            .is_some_and(|pending| pending.asset == asset && pending.source == source);
-        if !same_clip {
-            self.generation = self.generation.wrapping_add(1);
-            // The last frame stays until this clip's picture is imported.
-            // Dropping it here paints the empty plate across the cut.
-            self.shown = None;
+            .is_some_and(|pending| pending.layers == show && pending.next == next)
+        {
+            return;
         }
-        let ask = Ask {
-            generation: self.generation,
-            asset,
-            source: source.to_owned(),
-            time,
-            next,
-        };
+        let ask = Ask { layers: show, next };
         let posted = self
             .bridge
             .as_ref()
             .is_some_and(|bridge| bridge.post(Message::Show(ask.clone())));
         self.pending = Some(ask);
-        self.waiting = posted
-            && self
-                .shown
-                .as_ref()
-                .is_none_or(|shown| shown.requested != time);
+        if posted {
+            self.refresh_waiting();
+        } else {
+            self.waiting = false;
+        }
+    }
+
+    /// The generation for this track. A new file keeps the last picture.
+    #[cfg(target_vendor = "apple")]
+    fn prepare(&mut self, track: TrackId, asset: AssetId, source: &str) -> u64 {
+        if let Some(held) = self.held.iter_mut().find(|held| held.track == track) {
+            if held.asset != asset || held.source != source {
+                held.asset = asset;
+                held.source = source.to_owned();
+                self.generation = self.generation.wrapping_add(1);
+                held.generation = self.generation;
+                held.shown = None;
+            }
+            return held.generation;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        self.held.push(Held {
+            track,
+            asset,
+            source: source.to_owned(),
+            generation,
+            plate: None,
+            native: None,
+            texture: None,
+            shown: None,
+        });
+        generation
+    }
+
+    #[cfg(target_vendor = "apple")]
+    fn refresh_waiting(&mut self) {
+        let Some(pending) = &self.pending else {
+            self.waiting = false;
+            return;
+        };
+        self.waiting = pending.layers.iter().any(|layer| {
+            self.held
+                .iter()
+                .find(|held| held.track == layer.track)
+                .is_none_or(|held| {
+                    held.shown
+                        .as_ref()
+                        .is_none_or(|shown| shown.requested != layer.time)
+                })
+        });
     }
 
     #[cfg(target_vendor = "apple")]
@@ -249,40 +314,63 @@ impl Reel {
         let Some(state) = state else {
             return;
         };
-        let Some(picture) = self.bridge.as_ref().and_then(Bridge::take) else {
+        let Some(bridge) = &self.bridge else {
             return;
         };
-        let Some(pending) = self.pending.clone() else {
-            return;
-        };
-        if picture.generation != pending.generation {
-            return;
+        for frame in bridge.take_frames() {
+            self.import(ctx, state, frame);
         }
+        self.refresh_waiting();
+    }
+
+    #[cfg(target_vendor = "apple")]
+    fn import(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        state: &eframe::egui_wgpu::RenderState,
+        frame: LayerFrame,
+    ) {
+        let Some(asked) = self.pending.as_ref().and_then(|pending| {
+            pending
+                .layers
+                .iter()
+                .find(|layer| layer.track == frame.track)
+                .map(|layer| layer.time)
+        }) else {
+            return;
+        };
+        let Some(index) = self
+            .held
+            .iter()
+            .position(|held| held.track == frame.track && held.generation == frame.generation)
+        else {
+            return;
+        };
         let Body::Frame {
             buffer,
             matrix,
             pts,
-        } = picture.body
+        } = frame.body
         else {
-            if picture.requested == pending.time {
-                self.plate = None;
-                self.texture = None;
-                self.shown = None;
-                self.free_native(Some(state));
-                self.waiting = false;
+            if frame.requested == asked {
+                blank(&mut self.held[index], Some(state));
             }
             return;
         };
         // The playhead moved forward. This frame still covers it. A backward
         // seek is waiting for a different frame, so this one stays off the plate.
-        if picture.requested != pending.time && pts > pending.time {
+        if frame.requested != asked && pts > asked {
             return;
         }
-        if self.has_picture() && self.shown.as_ref().is_some_and(|shown| shown.pts == pts) {
-            if let Some(shown) = &mut self.shown {
-                shown.requested = pending.time;
+        if self.held[index].has_picture()
+            && self.held[index]
+                .shown
+                .as_ref()
+                .is_some_and(|shown| shown.pts == pts)
+        {
+            if let Some(shown) = &mut self.held[index].shown {
+                shown.requested = asked;
             }
-            self.waiting = false;
             return;
         }
         let imported = {
@@ -324,99 +412,121 @@ impl Reel {
         };
         match drawn {
             Drawn::Gpu(image) => {
-                self.bind(state, &image);
-                self.texture = None;
-                self.plate = Some(*image);
+                bind(&mut self.held[index].native, state, &image);
+                self.held[index].texture = None;
+                self.held[index].plate = Some(*image);
             }
             Drawn::Cpu(pixels, width, height) => {
-                if self.store(ctx, &pixels, width, height).is_none() {
+                if store(&mut self.held[index].texture, ctx, &pixels, width, height).is_none() {
                     if !self.dropped {
                         log::warn!("The preview dropped a frame. The CPU copy could not be shown.");
                         self.dropped = true;
                     }
-                    self.pending = None;
-                    self.waiting = true;
                     return;
                 }
-                self.plate = None;
-                self.free_native(Some(state));
+                self.held[index].plate = None;
+                free_native(&mut self.held[index].native, Some(state));
             }
-            Drawn::Failed => {
-                self.pending = None;
-                self.waiting = true;
-                return;
-            }
+            Drawn::Failed => return,
         }
-        self.shown = Some(Shown {
+        self.held[index].shown = Some(Shown {
             pts,
-            requested: pending.time,
+            requested: asked,
         });
-        self.waiting = false;
     }
+}
 
-    #[cfg(target_vendor = "apple")]
+#[cfg(target_vendor = "apple")]
+impl Held {
     fn has_picture(&self) -> bool {
         self.plate.is_some() || self.texture.is_some()
     }
 
-    /// Points the preview at `image`. The wgpu texture stays owned by the reel.
-    #[cfg(target_vendor = "apple")]
-    fn bind(&mut self, state: &eframe::egui_wgpu::RenderState, image: &cutlass_compose::RgbImage) {
-        let view = image
-            .texture()
-            .create_view(&eframe::wgpu::TextureViewDescriptor::default());
-        let mut renderer = state.renderer.write();
-        if let Some(id) = self.native {
-            renderer.update_egui_texture_from_wgpu_texture(
-                &state.device,
-                &view,
-                eframe::wgpu::FilterMode::Linear,
-                id,
-            );
-        } else {
-            self.native = Some(renderer.register_native_texture(
-                &state.device,
-                &view,
-                eframe::wgpu::FilterMode::Linear,
-            ));
-        }
-    }
-
-    #[cfg(target_vendor = "apple")]
-    fn free_native(&mut self, state: Option<&eframe::egui_wgpu::RenderState>) {
-        let Some(id) = self.native.take() else {
-            return;
-        };
-        let Some(state) = state else {
-            self.native = Some(id);
-            return;
-        };
-        state.renderer.write().free_texture(&id);
-    }
-
-    #[cfg(target_vendor = "apple")]
-    fn store(
-        &mut self,
-        ctx: &eframe::egui::Context,
-        pixels: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Option<eframe::egui::TextureId> {
-        let width = usize::try_from(width).ok()?;
-        let height = usize::try_from(height).ok()?;
-        let needed = width.checked_mul(height)?.checked_mul(4)?;
-        if width == 0 || height == 0 || pixels.len() != needed {
-            return None;
-        }
-        let image = eframe::egui::ColorImage::from_rgba_unmultiplied([width, height], pixels);
-        let options = eframe::egui::TextureOptions::LINEAR;
-        if let Some(texture) = &mut self.texture {
-            texture.set(image, options);
-        } else {
-            self.texture = Some(ctx.load_texture("preview-frame", image, options));
+    fn texture_id(&self) -> Option<eframe::egui::TextureId> {
+        if self.plate.is_some() {
+            return self.native;
         }
         self.texture.as_ref().map(|texture| texture.id())
     }
+}
+
+/// Points the preview at `image`. The wgpu texture stays owned by the reel.
+#[cfg(target_vendor = "apple")]
+fn bind(
+    native: &mut Option<eframe::egui::TextureId>,
+    state: &eframe::egui_wgpu::RenderState,
+    image: &cutlass_compose::RgbImage,
+) {
+    let view = image
+        .texture()
+        .create_view(&eframe::wgpu::TextureViewDescriptor::default());
+    let mut renderer = state.renderer.write();
+    if let Some(id) = *native {
+        renderer.update_egui_texture_from_wgpu_texture(
+            &state.device,
+            &view,
+            eframe::wgpu::FilterMode::Linear,
+            id,
+        );
+    } else {
+        *native = Some(renderer.register_native_texture(
+            &state.device,
+            &view,
+            eframe::wgpu::FilterMode::Linear,
+        ));
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn free_native(
+    native: &mut Option<eframe::egui::TextureId>,
+    state: Option<&eframe::egui_wgpu::RenderState>,
+) {
+    let Some(id) = native.take() else {
+        return;
+    };
+    let Some(state) = state else {
+        *native = Some(id);
+        return;
+    };
+    state.renderer.write().free_texture(&id);
+}
+
+#[cfg(target_vendor = "apple")]
+fn blank(held: &mut Held, state: Option<&eframe::egui_wgpu::RenderState>) {
+    held.plate = None;
+    held.texture = None;
+    held.shown = None;
+    free_native(&mut held.native, state);
+}
+
+#[cfg(target_vendor = "apple")]
+fn release(mut held: Held, state: Option<&eframe::egui_wgpu::RenderState>) {
+    blank(&mut held, state);
+}
+
+#[cfg(target_vendor = "apple")]
+fn store(
+    texture: &mut Option<eframe::egui::TextureHandle>,
+    ctx: &eframe::egui::Context,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+) -> Option<eframe::egui::TextureId> {
+    let width = usize::try_from(width).ok()?;
+    let height = usize::try_from(height).ok()?;
+    let needed = width.checked_mul(height)?.checked_mul(4)?;
+    if width == 0 || height == 0 || pixels.len() != needed {
+        return None;
+    }
+    let image = eframe::egui::ColorImage::from_rgba_unmultiplied([width, height], pixels);
+    let options = eframe::egui::TextureOptions::LINEAR;
+    if let Some(texture) = texture {
+        texture.set(image, options);
+    } else {
+        *texture = Some(ctx.load_texture("preview-frame", image, options));
+    }
+    texture.as_ref().map(|texture| texture.id())
 }
 
 /// A source string the shell can open. `file://` drops that prefix.
@@ -447,7 +557,6 @@ enum Drawn {
 
 #[cfg(target_vendor = "apple")]
 struct Open {
-    asset: AssetId,
     source: String,
     packets: Vec<Packet>,
     matrix: Matrix,
@@ -490,7 +599,7 @@ impl Decode for Session {
 }
 
 #[cfg(target_vendor = "apple")]
-fn open_clip(asset: AssetId, source: &str) -> Clip {
+fn open_clip(source: &str) -> Clip {
     let Some(path) = file_path(source) else {
         log::warn!("The preview skipped {source}: it is not a file.");
         return Clip::Missing;
@@ -552,7 +661,6 @@ fn open_clip(asset: AssetId, source: &str) -> Clip {
     };
     let depth = std::num::NonZeroUsize::new(QUEUE_DEPTH).expect("the queue holds a frame");
     Clip::Ready(Box::new(Open {
-        asset,
         source: source.to_owned(),
         packets,
         matrix,
@@ -567,7 +675,7 @@ fn open_clip(asset: AssetId, source: &str) -> Clip {
 #[cfg(target_vendor = "apple")]
 struct Bridge {
     ask: Arc<Note<Message>>,
-    picture: Arc<Slot<Picture>>,
+    board: Arc<Mutex<Vec<LayerFrame>>>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -575,14 +683,14 @@ struct Bridge {
 impl Bridge {
     fn start() -> Self {
         let ask = Arc::new(Note::new());
-        let picture = Arc::new(Slot::new());
+        let board = Arc::new(Mutex::new(Vec::new()));
         let ask_thread = Arc::clone(&ask);
-        let picture_thread = Arc::clone(&picture);
+        let board_thread = Arc::clone(&board);
         let join = std::thread::Builder::new()
             .name("cutlass-playback".to_owned())
-            .spawn(move || play_loop(ask_thread, picture_thread))
+            .spawn(move || direct_loop(ask_thread, board_thread))
             .ok();
-        Self { ask, picture, join }
+        Self { ask, board, join }
     }
 
     fn post(&self, message: Message) -> bool {
@@ -593,8 +701,12 @@ impl Bridge {
         true
     }
 
-    fn take(&self) -> Option<Picture> {
-        self.picture.take()
+    fn take_frames(&self) -> Vec<LayerFrame> {
+        let mut board = self
+            .board
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        std::mem::take(&mut *board)
     }
 }
 
@@ -685,34 +797,6 @@ impl<T> Note<T> {
 }
 
 #[cfg(target_vendor = "apple")]
-struct Slot<T> {
-    inner: Mutex<Option<T>>,
-}
-
-#[cfg(target_vendor = "apple")]
-impl<T> Slot<T> {
-    fn new() -> Self {
-        Self {
-            inner: Mutex::new(None),
-        }
-    }
-
-    fn publish(&self, value: T) {
-        *self.lock() = Some(value);
-    }
-
-    fn take(&self) -> Option<T> {
-        self.lock().take()
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Option<T>> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-    }
-}
-
-#[cfg(target_vendor = "apple")]
 enum Message {
     Show(Ask),
     Drop,
@@ -738,28 +822,52 @@ enum Chunk {
 }
 
 #[cfg(target_vendor = "apple")]
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct Ask {
+    layers: Vec<ShowLayer>,
+    next: Vec<ShowNext>,
+}
+
+#[cfg(target_vendor = "apple")]
+#[derive(Clone, PartialEq, Eq)]
+struct ShowLayer {
+    track: TrackId,
     generation: u64,
     asset: AssetId,
     source: String,
     time: Timestamp,
-    next: Option<Next>,
 }
 
-/// The picture that starts within a second of the playhead.
+/// A clip that starts within a second of the playhead.
 #[cfg(target_vendor = "apple")]
 #[derive(Clone, PartialEq, Eq)]
-struct Next {
+struct ShowNext {
+    track: TrackId,
     asset: AssetId,
     source: String,
 }
 
 #[cfg(target_vendor = "apple")]
-struct Picture {
+struct LayerFrame {
+    track: TrackId,
     generation: u64,
     requested: Timestamp,
     body: Body,
+}
+
+#[cfg(target_vendor = "apple")]
+enum ReaderMsg {
+    At { generation: u64, time: Timestamp },
+    Stop,
+}
+
+#[cfg(target_vendor = "apple")]
+struct Reader {
+    track: TrackId,
+    asset: AssetId,
+    source: String,
+    note: Arc<Note<ReaderMsg>>,
+    join: JoinHandle<()>,
 }
 
 #[cfg(target_vendor = "apple")]
@@ -773,112 +881,227 @@ enum Body {
 }
 
 #[cfg(target_vendor = "apple")]
-fn play_loop(ask: Arc<Note<Message>>, picture: Arc<Slot<Picture>>) {
-    let mut open = None;
-    let mut missed = None;
-    let mut warm = None;
+fn direct_loop(ask: Arc<Note<Message>>, board: Arc<Mutex<Vec<LayerFrame>>>) {
+    let mut readers = Vec::new();
+    let mut open = 0;
+    let mut delayed = false;
     while let Some(message) = ask.wait() {
         match message {
-            Message::Drop => release(&mut open, &mut missed, &mut warm),
+            Message::Drop => {
+                stop_readers(&mut readers);
+                note_readers(&mut open, 0);
+                delayed = false;
+            }
             Message::Show(show) => {
-                if !follow_show(&ask, &picture, &mut open, &mut missed, &mut warm, show) {
-                    break;
-                }
+                reconcile(&board, &mut readers, &mut open, &mut delayed, &show);
             }
         }
     }
-    join_warm(&mut warm);
+    stop_readers(&mut readers);
 }
 
 #[cfg(target_vendor = "apple")]
-fn follow_show(
-    ask: &Note<Message>,
-    picture: &Slot<Picture>,
-    open: &mut Option<Open>,
-    missed: &mut Option<String>,
-    warm: &mut Option<Warm>,
-    mut show: Ask,
-) -> bool {
-    loop {
-        let chunk = serve(open, missed, warm, picture, &show);
-        if chunk == Chunk::Covers {
-            warm_next(warm, open, show.next.as_ref());
-        }
-        match ask.poll() {
-            Inbox::Closed => return false,
-            Inbox::Message(Message::Drop) => {
-                release(open, missed, warm);
-                return true;
-            }
-            Inbox::Message(Message::Show(next)) => show = next,
-            Inbox::Empty => {
-                if chunk == Chunk::Short {
-                    continue;
-                }
-                return true;
-            }
-        }
-    }
-}
-
-#[cfg(target_vendor = "apple")]
-fn release(open: &mut Option<Open>, missed: &mut Option<String>, warm: &mut Option<Warm>) {
-    *open = None;
-    *missed = None;
-    join_warm(warm);
-}
-
-#[cfg(target_vendor = "apple")]
-fn serve(
-    open: &mut Option<Open>,
-    missed: &mut Option<String>,
-    warm: &mut Option<Warm>,
-    picture: &Slot<Picture>,
+fn reconcile(
+    board: &Arc<Mutex<Vec<LayerFrame>>>,
+    readers: &mut Vec<Reader>,
+    open: &mut usize,
+    delayed: &mut bool,
     show: &Ask,
-) -> Chunk {
-    let switched = open
-        .as_ref()
-        .is_none_or(|clip| clip.asset != show.asset || clip.source != show.source);
-    if switched {
-        match claim(warm, show.asset, &show.source) {
-            Claimed::Ready(clip) => {
-                *open = Some(*clip);
-                missed.take();
+) {
+    let mut index = 0;
+    while index < readers.len() {
+        let reader = &readers[index];
+        let kept = show
+            .layers
+            .iter()
+            .any(|layer| matches_reader(reader, layer.track, layer.asset, &layer.source))
+            || show
+                .next
+                .iter()
+                .any(|next| matches_reader(reader, next.track, next.asset, &next.source));
+        if kept {
+            index += 1;
+        } else {
+            let reader = readers.swap_remove(index);
+            reader.note.post(ReaderMsg::Stop);
+        }
+    }
+    for layer in &show.layers {
+        if let Some(reader) = readers
+            .iter()
+            .find(|reader| matches_reader(reader, layer.track, layer.asset, &layer.source))
+        {
+            reader.note.post(ReaderMsg::At {
+                generation: layer.generation,
+                time: layer.time,
+            });
+            continue;
+        }
+        spawn_reader(
+            readers,
+            Arc::clone(board),
+            layer.track,
+            layer.asset,
+            layer.source.clone(),
+            Some((layer.generation, layer.time)),
+        );
+    }
+    let mut skipped = false;
+    for next in &show.next {
+        if readers
+            .iter()
+            .any(|reader| matches_reader(reader, next.track, next.asset, &next.source))
+        {
+            continue;
+        }
+        if readers.len() >= HW_READER_CAP {
+            skipped = true;
+            continue;
+        }
+        spawn_reader(
+            readers,
+            Arc::clone(board),
+            next.track,
+            next.asset,
+            next.source.clone(),
+            None,
+        );
+    }
+    if skipped && !*delayed {
+        log::info!("The next clip stays closed. Hardware readers are at the cap.");
+        *delayed = true;
+    }
+    if !skipped {
+        *delayed = false;
+    }
+    note_readers(open, readers.len());
+}
+
+#[cfg(target_vendor = "apple")]
+fn matches_reader(reader: &Reader, track: TrackId, asset: AssetId, source: &str) -> bool {
+    reader.track == track && reader.asset == asset && reader.source == source
+}
+
+#[cfg(target_vendor = "apple")]
+fn note_readers(open: &mut usize, count: usize) {
+    if *open == count {
+        return;
+    }
+    *open = count;
+    log::info!("The preview is decoding {count} pictures.");
+}
+
+#[cfg(target_vendor = "apple")]
+fn spawn_reader(
+    readers: &mut Vec<Reader>,
+    board: Arc<Mutex<Vec<LayerFrame>>>,
+    track: TrackId,
+    asset: AssetId,
+    source: String,
+    first: Option<(u64, Timestamp)>,
+) {
+    let note = Arc::new(Note::new());
+    if let Some((generation, time)) = first {
+        note.post(ReaderMsg::At { generation, time });
+    }
+    let note_thread = Arc::clone(&note);
+    let source_thread = source.clone();
+    let spawned = std::thread::Builder::new()
+        .name("cutlass-decode".to_owned())
+        .spawn(move || decode_loop(note_thread, board, track, source_thread));
+    match spawned {
+        Ok(join) => readers.push(Reader {
+            track,
+            asset,
+            source,
+            note,
+            join,
+        }),
+        Err(error) => log::warn!("The preview could not open a picture reader: {error}."),
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn stop_readers(readers: &mut Vec<Reader>) {
+    for reader in readers.iter() {
+        reader.note.post(ReaderMsg::Stop);
+    }
+    for reader in readers.drain(..) {
+        let _ = reader.join.join();
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn decode_loop(
+    note: Arc<Note<ReaderMsg>>,
+    board: Arc<Mutex<Vec<LayerFrame>>>,
+    track: TrackId,
+    source: String,
+) {
+    let mut open = match open_clip(&source) {
+        Clip::Ready(open) => Some(*open),
+        Clip::Missing => None,
+    };
+    let mut target = None;
+    loop {
+        if target.is_none() {
+            match note.wait() {
+                None | Some(ReaderMsg::Stop) => return,
+                Some(ReaderMsg::At { generation, time }) => target = Some((generation, time)),
             }
-            Claimed::Missing => {
-                *open = None;
-                *missed = Some(show.source.clone());
+            continue;
+        }
+        let Some((generation, time)) = target else {
+            continue;
+        };
+        let Some(clip) = open.as_mut() else {
+            publish(
+                &board,
+                LayerFrame {
+                    track,
+                    generation,
+                    requested: time,
+                    body: Body::Unavailable,
+                },
+            );
+            target = None;
+            continue;
+        };
+        let chunk = step(clip, &board, track, generation, time);
+        match note.poll() {
+            Inbox::Closed | Inbox::Message(ReaderMsg::Stop) => return,
+            Inbox::Message(ReaderMsg::At { generation, time }) => {
+                target = Some((generation, time));
             }
-            Claimed::Elsewhere => {
-                if missed.as_deref() == Some(show.source.as_str()) {
-                    *open = None;
-                } else {
-                    *open = ready(show.asset, &show.source);
-                    if open.is_none() {
-                        *missed = Some(show.source.clone());
-                    } else {
-                        missed.take();
-                    }
+            Inbox::Empty => {
+                if chunk != Chunk::Short {
+                    target = None;
                 }
             }
         }
     }
-    let Some(clip) = open.as_mut() else {
-        picture.publish(unavailable(show));
-        return Chunk::Settled;
-    };
-    if clip.failed == Some(show.time) {
-        picture.publish(unavailable(show));
+}
+
+#[cfg(target_vendor = "apple")]
+fn step(
+    clip: &mut Open,
+    board: &Mutex<Vec<LayerFrame>>,
+    track: TrackId,
+    generation: u64,
+    time: Timestamp,
+) -> Chunk {
+    if clip.failed == Some(time) {
+        publish(board, missing(track, generation, time));
         return Chunk::Settled;
     }
-    let readable = match pump(clip, show.time) {
+    let readable = match pump(clip, time) {
         Ok(readable) => readable,
         Err(error) => {
             if clip.failed.is_none() {
                 log::warn!("The preview could not decode {}: {error}.", clip.source);
             }
-            clip.failed = Some(show.time);
-            picture.publish(unavailable(show));
+            clip.failed = Some(time);
+            publish(board, missing(track, generation, time));
             return Chunk::Settled;
         }
     };
@@ -886,13 +1109,14 @@ fn serve(
         if clip.failed.is_none() {
             log::warn!("The preview has no frame at this time in {}.", clip.source);
         }
-        clip.failed = Some(show.time);
-        picture.publish(unavailable(show));
+        clip.failed = Some(time);
+        publish(board, missing(track, generation, time));
         return Chunk::Settled;
     }
+    let matrix = clip.matrix;
     let taken = clip
         .ahead
-        .at(show.time)
+        .at(time)
         .map(|frame| (frame.pts, frame.image.clone()));
     let Some((pts, buffer)) = taken else {
         let finished =
@@ -904,38 +1128,45 @@ fn serve(
             if clip.failed.is_none() {
                 log::warn!("The preview has no frame at this time in {}.", clip.source);
             }
-            clip.failed = Some(show.time);
-            picture.publish(unavailable(show));
+            clip.failed = Some(time);
+            publish(board, missing(track, generation, time));
         }
         return Chunk::Settled;
     };
     clip.failed = None;
-    picture.publish(Picture {
-        generation: show.generation,
-        requested: show.time,
-        body: Body::Frame {
-            buffer,
-            matrix: clip.matrix,
-            pts,
+    publish(
+        board,
+        LayerFrame {
+            track,
+            generation,
+            requested: time,
+            body: Body::Frame {
+                buffer,
+                matrix,
+                pts,
+            },
         },
-    });
+    );
     Chunk::Covers
 }
 
 #[cfg(target_vendor = "apple")]
-fn unavailable(show: &Ask) -> Picture {
-    Picture {
-        generation: show.generation,
-        requested: show.time,
+fn missing(track: TrackId, generation: u64, time: Timestamp) -> LayerFrame {
+    LayerFrame {
+        track,
+        generation,
+        requested: time,
         body: Body::Unavailable,
     }
 }
 
 #[cfg(target_vendor = "apple")]
-fn ready(asset: AssetId, source: &str) -> Option<Open> {
-    match open_clip(asset, source) {
-        Clip::Ready(open) => Some(*open),
-        Clip::Missing => None,
+fn publish(board: &Mutex<Vec<LayerFrame>>, frame: LayerFrame) {
+    let mut board = board.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(existing) = board.iter_mut().find(|item| item.track == frame.track) {
+        *existing = frame;
+    } else {
+        board.push(frame);
     }
 }
 
@@ -963,84 +1194,6 @@ fn pump(clip: &mut Open, time: Timestamp) -> Result<bool, String> {
     clip.cursor = clip.packets.len() - pending.len();
     clip.followed = Some(time);
     Ok(true)
-}
-
-/// A clip opened before the playhead reaches it.
-#[cfg(target_vendor = "apple")]
-struct Warm {
-    asset: AssetId,
-    source: String,
-    join: JoinHandle<Clip>,
-}
-
-#[cfg(target_vendor = "apple")]
-enum Claimed {
-    Elsewhere,
-    Missing,
-    Ready(Box<Open>),
-}
-
-#[cfg(target_vendor = "apple")]
-fn claim(warm: &mut Option<Warm>, asset: AssetId, source: &str) -> Claimed {
-    let ready = warm
-        .as_ref()
-        .is_some_and(|warm| warm.asset == asset && warm.source == source);
-    if !ready {
-        return Claimed::Elsewhere;
-    }
-    let Some(warm) = warm.take() else {
-        return Claimed::Elsewhere;
-    };
-    match warm.join.join() {
-        Ok(Clip::Ready(open)) => Claimed::Ready(open),
-        _ => Claimed::Missing,
-    }
-}
-
-#[cfg(target_vendor = "apple")]
-fn warm_next(warm: &mut Option<Warm>, open: &Option<Open>, next: Option<&Next>) {
-    let Some(next) = next else {
-        return;
-    };
-    if open
-        .as_ref()
-        .is_some_and(|clip| clip.asset == next.asset && clip.source == next.source)
-    {
-        return;
-    }
-    if let Some(current) = warm.as_ref() {
-        if current.asset == next.asset && current.source == next.source {
-            return;
-        }
-        if !current.join.is_finished() {
-            return;
-        }
-    }
-    if let Some(done) = warm.take() {
-        let _ = done.join.join();
-    }
-    let asset = next.asset;
-    let source = next.source.clone();
-    let spawned = std::thread::Builder::new()
-        .name("cutlass-preload".to_owned())
-        .spawn(move || open_clip(asset, &source));
-    match spawned {
-        Ok(join) => {
-            *warm = Some(Warm {
-                asset: next.asset,
-                source: next.source.clone(),
-                join,
-            });
-        }
-        Err(error) => log::warn!("The preview could not prepare the next clip: {error}."),
-    }
-}
-
-#[cfg(target_vendor = "apple")]
-fn join_warm(warm: &mut Option<Warm>) {
-    if let Some(warm) = warm.take() {
-        let _ = warm.join.join();
-    }
 }
 
 #[cfg(test)]

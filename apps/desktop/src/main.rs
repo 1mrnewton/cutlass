@@ -741,7 +741,7 @@ impl eframe::App for CutlassApp {
             .frame(theme::panel())
             .show(ui, |ui| {
                 let hidden = timeline::hidden_tracks(&self.project);
-                let picture = self.reel.image(
+                let pictures = self.reel.images(
                     ui.ctx(),
                     frame.wgpu_render_state(),
                     &self.project,
@@ -754,7 +754,7 @@ impl eframe::App for CutlassApp {
                     self.playhead_us,
                     self.play.is_some(),
                     &mut self.selected_segments,
-                    picture,
+                    &pictures,
                 );
                 if !commands.is_empty()
                     && let Err(error) = self.history.apply(&mut self.project, &commands)

@@ -22,7 +22,7 @@ pub fn show(
     playhead_us: i64,
     playing: bool,
     selected: &mut Vec<SegmentId>,
-    picture: Option<egui::TextureId>,
+    pictures: &[DrawnPicture],
 ) -> Vec<cutlass_project::Command> {
     crate::tip::region(
         ui,
@@ -87,13 +87,17 @@ pub fn show(
             let (red, green, blue) = project.settings().background().channels();
             ui.painter()
                 .rect_filled(plate, 0.0, Color32::from_rgb(red, green, blue));
-            if let Some(id) = picture
-                && let Some(layer) = shown_box(project, playhead_us, &hidden, plate, drag.as_ref())
-            {
-                ui.set_clip_rect(well.intersect(plate));
-                paint_picture(ui, id, &layer);
-                ui.set_clip_rect(well);
+            ui.set_clip_rect(well.intersect(plate));
+            for drawn in pictures {
+                let Some(segment) = segment_on(project, drawn.track, playhead_us) else {
+                    continue;
+                };
+                let Some(layer) = picture_box(project, segment, plate, drag.as_ref()) else {
+                    continue;
+                };
+                paint_picture(ui, drawn.texture, &layer, segment.transform().opacity());
             }
+            ui.set_clip_rect(well);
             paint_selected(
                 ui,
                 project,
@@ -456,7 +460,7 @@ fn picture_corners(layer: &LayerBox) -> [Pos2; 4] {
     })
 }
 
-fn paint_picture(ui: &egui::Ui, id: egui::TextureId, layer: &LayerBox) {
+fn paint_picture(ui: &egui::Ui, id: egui::TextureId, layer: &LayerBox, opacity: f64) {
     let mut mesh = egui::Mesh::with_texture(id);
     let uvs = [
         pos2(0.0, 0.0),
@@ -464,11 +468,14 @@ fn paint_picture(ui: &egui::Ui, id: egui::TextureId, layer: &LayerBox) {
         pos2(1.0, 1.0),
         pos2(0.0, 1.0),
     ];
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round();
+    let alpha = u8::try_from(alpha as i64).unwrap_or(255);
+    let color = Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
     for (point, uv) in picture_corners(layer).into_iter().zip(uvs) {
         mesh.vertices.push(egui::epaint::Vertex {
             pos: point,
             uv,
-            color: Color32::WHITE,
+            color,
         });
     }
     mesh.add_triangle(0, 1, 2);
@@ -551,106 +558,113 @@ fn picture_box(
 /// How far ahead of the playhead the next picture is opened.
 const PRELOAD_US: i64 = 1_000_000;
 
-/// The next picture that starts within [`PRELOAD_US`] of the playhead.
+/// One decoded picture the preview can draw. The slice is bottom track first.
+pub(crate) struct DrawnPicture {
+    pub track: TrackId,
+    pub texture: egui::TextureId,
+}
+
+/// Every video picture under the playhead, bottom track first.
 ///
-/// The same file is not returned. The clip already open can seek inside it.
-pub(crate) fn upcoming_picture<'a>(
+/// Sound, stills, hidden lanes, and invisible segments are left out. Each
+/// returned segment is the one picture on that track at this time.
+pub(crate) fn picture_layers<'a>(
     project: &'a Project,
     playhead_us: i64,
     hidden: &[TrackId],
-) -> Option<(cutlass_project::AssetId, &'a str)> {
-    let current = picture_segment(project, playhead_us, hidden)?;
-    let end = current.timeline().end().value;
-    let horizon = playhead_us.saturating_add(PRELOAD_US);
-    if end > horizon {
-        return None;
-    }
-    let candidate = picture_segment(project, end, hidden).or_else(|| {
-        let start = next_picture_start(project, end, horizon, hidden)?;
-        picture_segment(project, start, hidden)
-    })?;
-    if candidate.id() == current.id() {
-        return None;
-    }
-    let asset = candidate.asset_id()?;
-    let source = project.asset(asset)?.source();
-    let current_asset = current.asset_id()?;
-    if source == project.asset(current_asset)?.source() {
-        return None;
-    }
-    Some((asset, source))
-}
-
-fn next_picture_start(
-    project: &Project,
-    end: i64,
-    horizon: i64,
-    hidden: &[TrackId],
-) -> Option<i64> {
-    let mut found: Option<i64> = None;
+) -> Vec<(TrackId, &'a cutlass_project::Segment)> {
+    let mut layers = Vec::new();
     for track in project.timeline().tracks() {
         if hidden.contains(&track.id()) {
             continue;
         }
-        for segment in track.segments() {
-            if segment.channels() == Channels::Sound || !segment.visible() {
-                continue;
-            }
-            let Some(asset) = segment.asset_id() else {
-                continue;
-            };
-            if project
-                .asset(asset)
-                .and_then(|asset| asset.visual_size())
-                .is_none()
-            {
-                continue;
-            }
-            let start = segment.timeline().start().value;
-            if start < end || start > horizon {
-                continue;
-            }
-            found = Some(match found {
-                Some(best) => best.min(start),
-                None => start,
-            });
-        }
+        let Some(segment) = track
+            .segments()
+            .iter()
+            .find(|segment| drawn_video(project, segment, playhead_us))
+        else {
+            continue;
+        };
+        layers.push((track.id(), segment));
     }
-    found
+    layers
 }
 
-/// The topmost picture under the playhead. Sound-only, hidden, and invisible
-/// segments are skipped.
-pub(crate) fn picture_segment<'a>(
+/// The next video on each track that starts within [`PRELOAD_US`].
+///
+/// A following clip of the file already showing on that track is left out.
+/// That reader seeks. The pair is the track and the asset source.
+pub(crate) fn upcoming_layers<'a>(
     project: &'a Project,
     playhead_us: i64,
     hidden: &[TrackId],
-) -> Option<&'a cutlass_project::Segment> {
-    project.timeline().tracks().iter().rev().find_map(|track| {
+) -> Vec<(TrackId, cutlass_project::AssetId, &'a str)> {
+    let horizon = playhead_us.saturating_add(PRELOAD_US);
+    let mut upcoming = Vec::new();
+    for track in project.timeline().tracks() {
         if hidden.contains(&track.id()) {
-            return None;
+            continue;
         }
-        track.segments().iter().find(|segment| {
-            covers(segment, playhead_us)
-                && segment.channels() != Channels::Sound
-                && segment
-                    .asset_id()
-                    .and_then(|id| project.asset(id))
-                    .and_then(|asset| asset.visual_size())
-                    .is_some()
-        })
-    })
+        let current = track
+            .segments()
+            .iter()
+            .find(|segment| drawn_video(project, segment, playhead_us));
+        let current_source = current.and_then(|segment| source_of(project, segment));
+        let Some(next) = track
+            .segments()
+            .iter()
+            .filter(|segment| {
+                let start = segment.timeline().start().value;
+                start > playhead_us && start <= horizon && video_clip(project, segment)
+            })
+            .min_by_key(|segment| segment.timeline().start().value)
+        else {
+            continue;
+        };
+        let Some(asset) = next.asset_id() else {
+            continue;
+        };
+        let Some(source) = project.asset(asset).map(|asset| asset.source()) else {
+            continue;
+        };
+        if current_source == Some(source) {
+            continue;
+        }
+        upcoming.push((track.id(), asset, source));
+    }
+    upcoming
 }
 
-fn shown_box(
+fn drawn_video(project: &Project, segment: &cutlass_project::Segment, playhead_us: i64) -> bool {
+    covers(segment, playhead_us) && video_clip(project, segment)
+}
+
+fn video_clip(project: &Project, segment: &cutlass_project::Segment) -> bool {
+    segment.channels() != Channels::Sound
+        && segment
+            .asset_id()
+            .and_then(|id| project.asset(id))
+            .is_some_and(|asset| asset.is_video())
+}
+
+fn source_of<'a>(project: &'a Project, segment: &cutlass_project::Segment) -> Option<&'a str> {
+    let asset = segment.asset_id()?;
+    project.asset(asset).map(|asset| asset.source())
+}
+
+fn segment_on(
     project: &Project,
+    track: TrackId,
     playhead_us: i64,
-    hidden: &[TrackId],
-    plate: Rect,
-    drag: Option<&Drag>,
-) -> Option<LayerBox> {
-    let segment = picture_segment(project, playhead_us, hidden)?;
-    picture_box(project, segment, plate, drag)
+) -> Option<&cutlass_project::Segment> {
+    project
+        .timeline()
+        .tracks()
+        .iter()
+        .find(|lane| lane.id() == track)?
+        .segments()
+        .iter()
+        .find(|segment| covers(segment, playhead_us) && segment.channels() != Channels::Sound)
 }
 
 /// The topmost picture under the playhead, whether or not it covers `point`.
@@ -1611,7 +1625,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    super::show(ui, project, 1_500_000, false, &mut Vec::new(), None);
+                    super::show(ui, project, 1_500_000, false, &mut Vec::new(), &[]);
                 },
             );
             let tree = output.platform_output.accesskit_update.take();
@@ -1766,7 +1780,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                commands.clone_from(&super::show(ui, cut, 0, false, selected, None));
+                commands.clone_from(&super::show(ui, cut, 0, false, selected, &[]));
             },
         );
         let tree = output.platform_output.accesskit_update.take();
@@ -2161,7 +2175,17 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                super::show(ui, &cut, 0, false, &mut Vec::new(), Some(texture.id()));
+                super::show(
+                    ui,
+                    &cut,
+                    0,
+                    false,
+                    &mut Vec::new(),
+                    &[super::DrawnPicture {
+                        track: cut.timeline().main_track().id(),
+                        texture: texture.id(),
+                    }],
+                );
             },
         );
         let clipped = output
@@ -2198,7 +2222,8 @@ mod tests {
             eframe::egui::pos2(0.0, 0.0),
             eframe::egui::vec2(400.0, 300.0),
         );
-        let painted = |picture| {
+        let track = cut.timeline().main_track().id();
+        let painted = |pictures: &[super::DrawnPicture]| {
             let mut output = ctx.run_ui(
                 eframe::egui::RawInput {
                     screen_rect: Some(screen),
@@ -2206,7 +2231,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    super::show(ui, &cut, 0, false, &mut Vec::new(), picture);
+                    super::show(ui, &cut, 0, false, &mut Vec::new(), pictures);
                 },
             );
             let found = output
@@ -2216,26 +2241,93 @@ mod tests {
             output.textures_delta.clear();
             found
         };
-        assert!(painted(Some(texture.id())));
-        assert!(!painted(None));
+        assert!(painted(&[super::DrawnPicture {
+            track,
+            texture: texture.id(),
+        }]));
+        assert!(!painted(&[]));
+    }
+
+    #[test]
+    fn every_video_under_the_playhead_is_listed_from_the_bottom() {
+        let mut history = History::new();
+        let mut cut = project();
+        history
+            .apply(&mut cut, &[Command::SetMagnet(false)])
+            .expect("magnet");
+        let main = cut.timeline().main_track().id();
+        place_span(&mut history, &mut cut, "file:///cuts/main.mp4", main, 0);
+        let overlay = Asset::video(
+            "file:///cuts/over.mp4",
+            Timestamp::new(90_000, NonZeroU32::new(30_000).expect("scale")),
+            16,
+            16,
+            false,
+        )
+        .expect("video");
+        let id = match history
+            .apply(&mut cut, &[Command::AddAsset(overlay)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let segment = {
+            let stored = cut.asset(id).expect("asset");
+            let duration = stored.duration().expect("duration");
+            let range = TimeRange::new(
+                Timestamp::new(0, duration.timescale),
+                Timestamp::new(duration.value, duration.timescale),
+            )
+            .expect("source");
+            Segment::media(stored, range, 0, Channels::Picture, Speed::ONE).expect("segment")
+        };
+        history
+            .apply(
+                &mut cut,
+                &[Command::Place {
+                    track: None,
+                    segment,
+                }],
+            )
+            .expect("overlay");
+        let layers = super::picture_layers(&cut, 0, &[]);
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0].0, main);
+        assert_eq!(
+            cut.asset(layers[0].1.asset_id().expect("asset"))
+                .expect("stored")
+                .source(),
+            "file:///cuts/main.mp4"
+        );
+        assert_eq!(
+            cut.asset(layers[1].1.asset_id().expect("asset"))
+                .expect("stored")
+                .source(),
+            "file:///cuts/over.mp4"
+        );
+        assert_eq!(super::picture_layers(&cut, 0, &[main]).len(), 1);
     }
 
     #[test]
     fn the_next_picture_is_ready_in_the_last_second() {
         let adjacent = two_pictures("file:///cuts/a.mp4", "file:///cuts/b.mp4", 3_000_000);
-        assert!(super::upcoming_picture(&adjacent, 0, &[]).is_none());
-        let upcoming = super::upcoming_picture(&adjacent, 2_100_000, &[]).expect("next");
-        assert_eq!(upcoming.1, "file:///cuts/b.mp4");
+        assert!(super::upcoming_layers(&adjacent, 0, &[]).is_empty());
+        let upcoming = super::upcoming_layers(&adjacent, 2_100_000, &[]);
+        assert_eq!(upcoming.len(), 1);
+        assert_eq!(upcoming[0].2, "file:///cuts/b.mp4");
         let main = adjacent.timeline().main_track().id();
-        assert!(super::upcoming_picture(&adjacent, 2_100_000, &[main]).is_none());
+        assert!(super::upcoming_layers(&adjacent, 2_100_000, &[main]).is_empty());
 
         let same = two_pictures("file:///cuts/a.mp4", "file:///cuts/a.mp4", 3_000_000);
-        assert!(super::upcoming_picture(&same, 2_100_000, &[]).is_none());
+        assert!(super::upcoming_layers(&same, 2_100_000, &[]).is_empty());
 
         let gap = two_pictures("file:///cuts/a.mp4", "file:///cuts/b.mp4", 3_400_000);
-        assert!(super::upcoming_picture(&gap, 2_000_000, &[]).is_none());
-        let upcoming = super::upcoming_picture(&gap, 2_500_000, &[]).expect("across the gap");
-        assert_eq!(upcoming.1, "file:///cuts/b.mp4");
+        assert!(super::upcoming_layers(&gap, 2_000_000, &[]).is_empty());
+        let upcoming = super::upcoming_layers(&gap, 2_500_000, &[]);
+        assert_eq!(upcoming.len(), 1);
+        assert_eq!(upcoming[0].2, "file:///cuts/b.mp4");
     }
 
     fn two_pictures(first: &str, second: &str, second_start: i64) -> Project {

@@ -369,7 +369,8 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::AddKeyframe { segment, .. }
         | Command::RemoveKeyframe { segment, .. }
         | Command::SetEasing { segment, .. }
-        | Command::SetFades { segment, .. } => segment_lane_locked(project, lanes, *segment),
+        | Command::SetFades { segment, .. }
+        | Command::SetDenoise { segment, .. } => segment_lane_locked(project, lanes, *segment),
         Command::SetSource { .. } => false,
         _ => false,
     }
@@ -4447,10 +4448,15 @@ mod tests {
             fade_in: 100_000,
             fade_out: 0,
         };
+        let denoise = Command::SetDenoise {
+            segment: id,
+            on: true,
+        };
         assert!(super::blocks_command(&cut, &locked, &volume));
         assert!(super::blocks_command(&cut, &locked, &hidden));
         assert!(super::blocks_command(&cut, &locked, &easing));
         assert!(super::blocks_command(&cut, &locked, &fades));
+        assert!(super::blocks_command(&cut, &locked, &denoise));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),
@@ -4470,6 +4476,11 @@ mod tests {
             &cut,
             &super::Lanes::default(),
             &fades
+        ));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &denoise
         ));
     }
 

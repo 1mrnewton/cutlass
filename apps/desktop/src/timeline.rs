@@ -389,7 +389,8 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::SetSticker { segment, .. }
         | Command::SetAttachment { segment, .. }
         | Command::SetTransition { segment, .. }
-        | Command::ClearTransition { segment } => segment_lane_locked(project, lanes, *segment),
+        | Command::ClearTransition { segment }
+        | Command::SetAnimation { segment, .. } => segment_lane_locked(project, lanes, *segment),
         Command::SetSource { .. } => false,
         Command::DetachAudio { segment } => detach_blocked(project, lanes, *segment),
         _ => false,
@@ -4590,6 +4591,11 @@ mod tests {
                 .expect("attachment"),
         };
         let clear = Command::ClearTransition { segment: id };
+        let animation = Command::SetAnimation {
+            segment: id,
+            kind: cutlass_project::AnimationKind::In,
+            animation: Some(cutlass_project::Animation::new("rise", 1).expect("animation")),
+        };
         assert!(super::blocks_command(&cut, &locked, &volume));
         assert!(super::blocks_command(&cut, &locked, &hidden));
         assert!(super::blocks_command(&cut, &locked, &easing));
@@ -4606,6 +4612,7 @@ mod tests {
         assert!(super::blocks_command(&cut, &locked, &attachment));
         assert!(super::blocks_command(&cut, &locked, &transition));
         assert!(super::blocks_command(&cut, &locked, &clear));
+        assert!(super::blocks_command(&cut, &locked, &animation));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),
@@ -4685,6 +4692,11 @@ mod tests {
             &cut,
             &super::Lanes::default(),
             &clear
+        ));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &animation
         ));
         let stored = cut.asset(asset).expect("asset");
         let away =

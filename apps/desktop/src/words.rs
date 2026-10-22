@@ -175,6 +175,8 @@ pub(crate) enum Phrase {
     SaveChanges,
     ProjectUnread,
     ProjectUnsaved,
+    RestoreCut,
+    Restore,
 }
 
 #[cfg(test)]
@@ -336,6 +338,8 @@ impl Phrase {
         Self::SaveChanges,
         Self::ProjectUnread,
         Self::ProjectUnsaved,
+        Self::RestoreCut,
+        Self::Restore,
     ];
 }
 
@@ -496,6 +500,8 @@ const ENGLISH: &[&str] = &[
     "Save changes to this project?",
     "This project could not be read.",
     "This project could not be saved.",
+    "Restore this cut?",
+    "Restore",
 ];
 
 const FRENCH: &[&str] = &[
@@ -655,6 +661,8 @@ const FRENCH: &[&str] = &[
     "Enregistrer les modifications de ce projet ?",
     "Ce projet n'a pas pu être lu.",
     "Ce projet n'a pas pu être enregistré.",
+    "Restaurer ce montage ?",
+    "Restaurer",
 ];
 
 /// The word for `phrase` in `language`.
@@ -845,7 +853,17 @@ mod tests {
             say(Language::French, Phrase::ProjectUnsaved),
             "Ce projet n'a pas pu être enregistré."
         );
-        assert_eq!(Phrase::ProjectUnsaved as usize, super::ENGLISH.len() - 1);
+        assert_eq!(
+            say(Language::English, Phrase::RestoreCut),
+            "Restore this cut?"
+        );
+        assert_eq!(
+            say(Language::French, Phrase::RestoreCut),
+            "Restaurer ce montage ?"
+        );
+        assert_eq!(say(Language::English, Phrase::Restore), "Restore");
+        assert_eq!(say(Language::French, Phrase::Restore), "Restaurer");
+        assert_eq!(Phrase::Restore as usize, super::ENGLISH.len() - 1);
         for phrase in Phrase::ALL {
             let english = say(Language::English, *phrase);
             let french = say(Language::French, *phrase);

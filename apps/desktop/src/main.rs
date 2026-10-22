@@ -58,6 +58,8 @@ struct CutlassApp {
     pending: Option<projects::Replace>,
     draft_slot: String,
     draft_text: Option<String>,
+    recovery: Option<projects::Recovery>,
+    recovery_shown: bool,
     playhead_us: i64,
     shelf: library::Shelf,
     media: library::MediaSource,
@@ -79,6 +81,9 @@ impl CutlassApp {
         theme::install(&cc.egui_ctx);
         icons::install(&cc.egui_ctx);
         let loaded = projects::blank();
+        let ours = std::process::id();
+        let recovery = projects::draft_dir()
+            .and_then(|dir| projects::find_recovery(&dir, ours, projects::process_running));
         Self {
             history: History::new(),
             project: loaded.project,
@@ -86,8 +91,10 @@ impl CutlassApp {
             checkpoint: loaded.checkpoint,
             recent: projects::load_recent(cc.storage),
             pending: None,
-            draft_slot: std::process::id().to_string(),
+            draft_slot: ours.to_string(),
             draft_text: None,
+            recovery,
+            recovery_shown: false,
             playhead_us: 0,
             shelf: library::Shelf::Media,
             media: library::MediaSource::Project,
@@ -236,6 +243,7 @@ impl CutlassApp {
             || self.modify.is_some()
             || self.app_dialog.is_some()
             || self.pending.is_some()
+            || self.recovery.is_some()
     }
 
     fn unsaved(&self) -> bool {
@@ -378,6 +386,54 @@ impl CutlassApp {
         self.modify = None;
         self.app_dialog = None;
         self.clear_draft();
+    }
+
+    fn finish_recovery(&mut self, ui: &egui::Ui, choice: Option<projects::RecoveryChoice>) {
+        let Some(choice) = choice else {
+            return;
+        };
+        let Some(found) = self.recovery.clone() else {
+            return;
+        };
+        match choice {
+            projects::RecoveryChoice::Discard => {
+                if let Some(dir) = projects::draft_dir() {
+                    projects::remove_draft(&dir, &found.slot);
+                }
+                self.recovery = None;
+            }
+            projects::RecoveryChoice::Restore => {
+                if self.restore_cut(ui, &found) {
+                    self.recovery = None;
+                }
+            }
+        }
+    }
+
+    /// The user's file stays the last Save. The old slot is removed only after
+    /// this process has its own copy.
+    fn restore_cut(&mut self, ui: &egui::Ui, found: &projects::Recovery) -> bool {
+        let Ok(loaded) = projects::read(&found.cutlass) else {
+            timeline::show_note(ui, words::of(ui, words::Phrase::ProjectUnread));
+            return false;
+        };
+        let checkpoint = projects::saved_checkpoint(found.source.as_deref());
+        let source = found.source.clone();
+        self.install(loaded, source);
+        self.checkpoint = checkpoint;
+        let Some(dir) = projects::draft_dir() else {
+            return true;
+        };
+        let Ok(text) = self.project.to_json() else {
+            return true;
+        };
+        let name = self.project.name().to_owned();
+        if projects::write_draft(&dir, &self.draft_slot, &text, &name, self.path.as_deref()).is_ok()
+        {
+            self.draft_text = Some(text);
+            projects::remove_draft(&dir, &found.slot);
+        }
+        true
     }
 
     /// A changed cut is copied beside the app. The user's file is not written.
@@ -604,6 +660,17 @@ impl eframe::App for CutlassApp {
             let choice = projects::show_guard(ui);
             if !opened_guard {
                 self.finish_guard(ui, choice);
+            }
+        }
+        let mut opened_recovery = false;
+        if self.recovery.is_some() && !self.recovery_shown {
+            opened_recovery = true;
+            self.recovery_shown = true;
+        }
+        if let Some(found) = self.recovery.clone() {
+            let choice = projects::show_recovery(ui, &found.name);
+            if !opened_recovery {
+                self.finish_recovery(ui, choice);
             }
         }
         if !self.blocked() {

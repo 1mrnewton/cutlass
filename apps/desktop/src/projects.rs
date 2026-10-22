@@ -3,7 +3,8 @@
 //! [`cutlass_project::Project`] turns a cut into version
 //! [`cutlass_project::FILE_VERSION`] text. This module reads and writes the
 //! path. The list of recent paths is not a project field. A changed cut is
-//! also copied to a sidecar. That copy is not the user's file.
+//! also copied to a sidecar. That copy is not the user's file. On launch the
+//! newest copy from a process that is no longer running is offered.
 
 use std::path::{Path, PathBuf};
 
@@ -104,7 +105,7 @@ pub(crate) fn read(path: &Path) -> Result<Loaded, ReadError> {
 ///
 /// The returned text is the checkpoint. On Windows a crash between moving the
 /// old file aside and moving the new one in can leave only the aside copy.
-/// That gap is the later crash-recovery work, not this write.
+/// That copy is not offered. Crash recovery offers the sidecar.
 pub(crate) fn write(path: &Path, project: &Project) -> Result<String, ()> {
     let text = project.to_json().map_err(|_| ())?;
     write_text(path, &text)?;
@@ -143,13 +144,102 @@ pub(crate) fn write_draft(
     Ok(())
 }
 
-/// Removes this process's copy. Another slot in `dir` stays.
+/// Removes one slot. Another slot in `dir` stays.
 pub(crate) fn remove_draft(dir: &Path, slot: &str) {
     if !slot_ok(slot) {
         return;
     }
     let _ = std::fs::remove_file(dir.join(format!("{slot}.cutlass")));
     let _ = std::fs::remove_file(dir.join(format!("{slot}.meta")));
+}
+
+/// A copy left by a process that is no longer running.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Recovery {
+    pub slot: String,
+    pub name: String,
+    pub source: Option<PathBuf>,
+    pub cutlass: PathBuf,
+}
+
+/// Restore keeps the cut. Discard removes that copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecoveryChoice {
+    Restore,
+    Discard,
+}
+
+/// The newest readable slot that is not `ours` and is not still running.
+///
+/// A copy that matches the user's file is removed and not offered. A copy
+/// this build cannot read is left in place. A missing note still offers the
+/// cut, with no source path.
+pub(crate) fn find_recovery(
+    dir: &Path,
+    ours: u32,
+    running: impl Fn(u32) -> bool,
+) -> Option<Recovery> {
+    let mut best: Option<(std::time::SystemTime, Recovery)> = None;
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(slot) = slot_of(&path) else {
+            continue;
+        };
+        let Ok(pid) = slot.parse::<u32>() else {
+            continue;
+        };
+        if pid == 0 || pid == ours || running(pid) {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else {
+            continue;
+        };
+        let Ok(loaded) = read(&path) else {
+            continue;
+        };
+        let note = std::fs::read_to_string(dir.join(format!("{slot}.meta")))
+            .ok()
+            .and_then(|text| decode_note(&text));
+        let source = note.as_ref().and_then(|note| note.source.clone());
+        if source.as_ref().is_some_and(|source| {
+            read(source)
+                .ok()
+                .is_some_and(|saved| saved.checkpoint == loaded.checkpoint)
+        }) {
+            remove_draft(dir, &slot);
+            continue;
+        }
+        let name = note
+            .as_ref()
+            .map(|note| note.name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| loaded.project.name().to_owned());
+        let recovery = Recovery {
+            slot,
+            name,
+            source,
+            cutlass: path,
+        };
+        if best.as_ref().is_none_or(|(time, _)| modified >= *time) {
+            best = Some((modified, recovery));
+        }
+    }
+    best.map(|(_, recovery)| recovery)
+}
+
+/// The text of the user's file, or empty when that file cannot be read.
+pub(crate) fn saved_checkpoint(source: Option<&Path>) -> String {
+    source
+        .and_then(|path| read(path).ok())
+        .map(|loaded| loaded.checkpoint)
+        .unwrap_or_default()
+}
+
+fn slot_of(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let slot = name.strip_suffix(".cutlass")?;
+    slot_ok(slot).then(|| slot.to_owned())
 }
 
 /// Puts `path` first and keeps at most ten.
@@ -318,6 +408,93 @@ pub(crate) fn show_guard(ui: &egui::Ui) -> Option<GuardChoice> {
     choice
 }
 
+/// Restore keeps the cut. Don't save removes that copy. A click outside
+/// does not choose, and neither does Escape.
+pub(crate) fn show_recovery(ui: &mut egui::Ui, name: &str) -> Option<RecoveryChoice> {
+    let mut choice = None;
+    let screen = ui.ctx().content_rect();
+    let question = words::of(ui, Phrase::RestoreCut);
+    let restore = words::of(ui, Phrase::Restore);
+    let discard = words::of(ui, Phrase::DontSave);
+    let font = FontId::new(13.0, FontFamily::Proportional);
+    let restore_w = words::control_width(ui, restore, font.clone(), 20.0, 72.0);
+    let discard_w = words::control_width(ui, discard, font.clone(), 20.0, 72.0);
+    let buttons = restore_w + discard_w + 8.0;
+    let question_w = ui
+        .painter()
+        .layout_no_wrap(question.to_owned(), font.clone(), theme::INK)
+        .size()
+        .x;
+    let name_w = ui
+        .painter()
+        .layout_no_wrap(name.to_owned(), font.clone(), theme::MUTED)
+        .size()
+        .x;
+    let width = (buttons + 48.0)
+        .max(question_w + 48.0)
+        .max(name_w + 48.0)
+        .max(360.0)
+        .min(screen.width() - 48.0);
+    let dialog = Rect::from_center_size(screen.center(), vec2(width, 176.0));
+    egui::Area::new(egui::Id::unique("restore-cut"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .movable(false)
+        .constrain(false)
+        .fade_in(false)
+        .accessible_name(question)
+        .role(egui::accesskit::Role::Dialog)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(screen);
+            ui.set_min_size(screen.size());
+            ui.painter()
+                .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(140));
+            let _scrim = ui.interact(screen, ui.scope_id().with("scrim"), Sense::click());
+            let _plate = ui.interact(dialog, ui.scope_id().with("plate"), Sense::click());
+            ui.painter().rect_filled(dialog, 12.0, theme::BAR);
+            let question_at = pos2(dialog.center().x, dialog.top() + 44.0);
+            ui.painter().text(
+                question_at,
+                Align2::CENTER_CENTER,
+                question,
+                font.clone(),
+                theme::INK,
+            );
+            crate::tip::read(
+                ui,
+                Rect::from_center_size(question_at, vec2(width - 32.0, 24.0)),
+                ui.scope_id().with("question"),
+                question,
+            );
+            let name_at = pos2(dialog.center().x, dialog.top() + 76.0);
+            ui.painter()
+                .text(name_at, Align2::CENTER_CENTER, name, font, theme::MUTED);
+            crate::tip::read(
+                ui,
+                Rect::from_center_size(name_at, vec2(width - 32.0, 24.0)),
+                ui.scope_id().with("name"),
+                name,
+            );
+            let y = dialog.bottom() - 42.0;
+            let mut x = dialog.center().x - buttons / 2.0;
+            choice = button_at(ui, pos2(x, y), discard_w, discard, theme::BAR, theme::INK)
+                .map(|()| RecoveryChoice::Discard)
+                .or(choice);
+            x += discard_w + 8.0;
+            choice = button_at(
+                ui,
+                pos2(x, y),
+                restore_w,
+                restore,
+                theme::EXPORT,
+                theme::EXPORT_INK,
+            )
+            .map(|()| RecoveryChoice::Restore)
+            .or(choice);
+        });
+    choice
+}
+
 fn button_at(
     ui: &mut egui::Ui,
     at: egui::Pos2,
@@ -479,6 +656,112 @@ fn escape_note(text: &str) -> String {
     out
 }
 
+struct Note {
+    name: String,
+    source: Option<PathBuf>,
+}
+
+fn decode_note(text: &str) -> Option<Note> {
+    let mut lines = text.lines();
+    if lines.next()? != "1" {
+        return None;
+    }
+    let name = unescape_note(lines.next()?)?;
+    let source = lines.next()?;
+    if lines.next().is_some() {
+        return None;
+    }
+    let source = if source.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(unescape_note(source)?))
+    };
+    Some(Note { name, source })
+}
+
+fn unescape_note(text: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut glyphs = text.chars();
+    while let Some(glyph) = glyphs.next() {
+        if glyph != '\\' {
+            out.push(glyph);
+            continue;
+        }
+        match glyphs.next()? {
+            '\\' => out.push('\\'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// `true` when `pid` is a process that is still running.
+pub(crate) fn process_running(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unix_running(pid)
+    }
+    #[cfg(windows)]
+    {
+        windows_running(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+#[cfg(unix)]
+#[expect(
+    unsafe_code,
+    reason = "signal 0 asks whether a process is still running"
+)]
+fn unix_running(pid: u32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 does not deliver a signal. It only reports whether
+    // `pid` exists.
+    let result = unsafe { kill(pid, 0) };
+    result == 0 || std::io::Error::last_os_error().kind() == std::io::ErrorKind::PermissionDenied
+}
+
+#[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "a limited process handle asks whether that process is still running"
+)]
+fn windows_running(pid: u32) -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut core::ffi::c_void;
+        fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
+        fn GetLastError() -> u32;
+    }
+    if pid == 0 {
+        return false;
+    }
+    const QUERY: u32 = 0x1000;
+    const ACCESS_DENIED: u32 = 5;
+    // SAFETY: query access does not change the process. A null handle means
+    // the call failed, and the error distinguishes a live process from a dead one.
+    let handle = unsafe { OpenProcess(QUERY, 0, pid) };
+    if !handle.is_null() {
+        unsafe { CloseHandle(handle) };
+        return true;
+    }
+    unsafe { GetLastError() == ACCESS_DENIED }
+}
+
 fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
     if std::fs::rename(from, to).is_ok() {
         return Ok(());
@@ -508,9 +791,11 @@ mod tests {
     use crate::words;
 
     use super::{
-        Ask, GuardChoice, PathBuf, ReadError, blank, changed, decode_recent, draft_needed,
-        encode_recent, ensure_suffix, file_button, file_title, forget, load_recent, needs_guard,
-        read, remember, remove_draft, row_label, show_guard, store_recent, write, write_draft,
+        Ask, GuardChoice, PathBuf, ReadError, RecoveryChoice, blank, changed, decode_note,
+        decode_recent, draft_needed, encode_recent, ensure_suffix, file_button, file_title,
+        find_recovery, forget, load_recent, needs_guard, process_running, read, remember,
+        remove_draft, row_label, saved_checkpoint, show_guard, show_recovery, store_recent, write,
+        write_draft,
     };
 
     #[test]
@@ -569,10 +854,10 @@ mod tests {
         assert!(!source.exists());
         let copy = read(&dir.0.join("autosave").join("42.cutlass")).expect("copy");
         assert_eq!(copy.project.name(), "Cut\nA\\B");
-        let note = std::fs::read_to_string(dir.0.join("autosave").join("42.meta")).expect("note");
-        let (name, path) = note_fields(&note).expect("note fields");
-        assert_eq!(name, "Cut\nA\\B");
-        assert_eq!(path.as_deref(), Some(source.to_str().expect("path")));
+        let text = std::fs::read_to_string(dir.0.join("autosave").join("42.meta")).expect("note");
+        let note = decode_note(&text).expect("note fields");
+        assert_eq!(note.name, "Cut\nA\\B");
+        assert_eq!(note.source.as_deref(), Some(source.as_path()));
         assert!(write_draft(&dir.0, "nope", &current, "Cut", None).is_err());
         remove_draft(&dir.0.join("autosave"), "42");
         assert!(!dir.0.join("autosave").join("42.cutlass").exists());
@@ -923,40 +1208,177 @@ mod tests {
         node.label() == Some(text) || node.value() == Some(text)
     }
 
-    fn note_fields(text: &str) -> Option<(String, Option<String>)> {
-        let mut lines = text.lines();
-        if lines.next()? != "1" {
-            return None;
-        }
-        let name = unescape_note(lines.next()?)?;
-        let source = lines.next()?;
-        if lines.next().is_some() {
-            return None;
-        }
-        let source = if source.is_empty() {
-            None
-        } else {
-            Some(unescape_note(source)?)
-        };
-        Some((name, source))
+    #[test]
+    fn launch_offers_the_newest_copy_from_a_dead_process() {
+        let dir = TempDir::new();
+        let autosave = dir.0.join("autosave");
+        let mut project = blank().project;
+        let mut history = History::new();
+        history
+            .apply(&mut project, &[Command::Rename("Cut A".to_owned())])
+            .expect("rename");
+        let renamed = project.to_json().expect("json");
+
+        write_draft(&autosave, "13", &renamed, "Ignored", None).expect("bare");
+        std::fs::remove_file(autosave.join("13.meta")).expect("drop note");
+        stamp(&autosave.join("13.cutlass"), 10);
+
+        write_draft(&autosave, "9", &renamed, "Older", None).expect("older");
+        stamp(&autosave.join("9.cutlass"), 20);
+
+        let other = dir.0.join("other.cutlass");
+        std::fs::write(&other, "nope").expect("other");
+        write_draft(&autosave, "11", &renamed, "Cut A", Some(&other)).expect("newer");
+        stamp(&autosave.join("11.cutlass"), 30);
+
+        write_draft(&autosave, "42", &renamed, "Ours", None).expect("ours");
+        stamp(&autosave.join("42.cutlass"), 40);
+
+        write_draft(&autosave, "7", &renamed, "Live", None).expect("live");
+        stamp(&autosave.join("7.cutlass"), 50);
+
+        std::fs::write(autosave.join("99.cutlass"), "nope").expect("junk");
+        stamp(&autosave.join("99.cutlass"), 60);
+
+        let saved = dir.0.join("saved.cutlass");
+        let same = write(&saved, &blank().project).expect("saved");
+        write_draft(&autosave, "15", &same, "Blank", Some(&saved)).expect("same");
+        stamp(&autosave.join("15.cutlass"), 70);
+
+        let running = |pid| pid == 7;
+        let found = find_recovery(&autosave, 42, running).expect("offer");
+        assert_eq!(found.slot, "11");
+        assert_eq!(found.name, "Cut A");
+        assert_eq!(found.source.as_deref(), Some(other.as_path()));
+        assert!(!autosave.join("15.cutlass").exists());
+        assert!(!autosave.join("15.meta").exists());
+        assert!(autosave.join("42.cutlass").is_file());
+        assert!(autosave.join("7.cutlass").is_file());
+        assert!(autosave.join("99.cutlass").is_file());
+
+        remove_draft(&autosave, "11");
+        remove_draft(&autosave, "9");
+        let bare = find_recovery(&autosave, 42, running).expect("bare offer");
+        assert_eq!(bare.slot, "13");
+        assert_eq!(bare.name, "Cut A");
+        assert!(bare.source.is_none());
     }
 
-    fn unescape_note(text: &str) -> Option<String> {
-        let mut out = String::new();
-        let mut glyphs = text.chars();
-        while let Some(glyph) = glyphs.next() {
-            if glyph != '\\' {
-                out.push(glyph);
-                continue;
-            }
-            match glyphs.next()? {
-                '\\' => out.push('\\'),
-                'n' => out.push('\n'),
-                'r' => out.push('\r'),
-                _ => return None,
-            }
-        }
-        Some(out)
+    #[test]
+    fn a_restored_cut_stays_dirty_against_the_users_file() {
+        let dir = TempDir::new();
+        let path = dir.0.join("film.cutlass");
+        let text = write(&path, &blank().project).expect("write");
+        assert_eq!(saved_checkpoint(Some(&path)), text);
+        assert_eq!(saved_checkpoint(Some(&dir.0.join("missing.cutlass"))), "");
+        assert_eq!(saved_checkpoint(None), "");
+    }
+
+    #[test]
+    fn this_process_is_running_and_an_impossible_pid_is_not() {
+        assert!(process_running(std::process::id()));
+        assert!(!process_running(u32::MAX));
+        assert!(!process_running(2_000_000_000));
+    }
+
+    #[test]
+    fn the_restore_dialog_names_the_cut_and_waits_for_a_choice() {
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::theme::install(&ctx);
+        words::install(&ctx, words::Language::English);
+        let mut time = 0.0;
+        let mut choice = None;
+        pass_recovery(&ctx, &mut time, "Cut A", &mut choice, vec![]);
+        let tree = pass_recovery(&ctx, &mut time, "Cut A", &mut choice, vec![]);
+        assert!(
+            tree.nodes
+                .iter()
+                .any(|(_, node)| named(node, "Restore this cut?"))
+        );
+        assert!(tree.nodes.iter().any(|(_, node)| named(node, "Cut A")));
+        pass_recovery(
+            &ctx,
+            &mut time,
+            "Cut A",
+            &mut choice,
+            vec![eframe::egui::Event::Key {
+                key: eframe::egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: eframe::egui::Modifiers::NONE,
+            }],
+        );
+        assert!(choice.is_none());
+        assert_eq!(click_recovery("Restore"), Some(RecoveryChoice::Restore));
+        assert_eq!(click_recovery("Don't save"), Some(RecoveryChoice::Discard));
+    }
+
+    fn stamp(path: &std::path::Path, secs: u64) {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("stamp");
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .expect("mtime");
+    }
+
+    fn click_recovery(item: &str) -> Option<RecoveryChoice> {
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::theme::install(&ctx);
+        words::install(&ctx, words::Language::English);
+        let mut time = 0.0;
+        let mut choice = None;
+        pass_recovery(&ctx, &mut time, "Cut A", &mut choice, vec![]);
+        let tree = pass_recovery(&ctx, &mut time, "Cut A", &mut choice, vec![]);
+        let at = center(&tree, item);
+        pass_recovery(
+            &ctx,
+            &mut time,
+            "Cut A",
+            &mut choice,
+            vec![eframe::egui::Event::PointerMoved(at), press(at, true)],
+        );
+        pass_recovery(
+            &ctx,
+            &mut time,
+            "Cut A",
+            &mut choice,
+            vec![press(at, false)],
+        );
+        choice
+    }
+
+    fn pass_recovery(
+        ctx: &eframe::egui::Context,
+        time: &mut f64,
+        name: &str,
+        choice: &mut Option<RecoveryChoice>,
+        events: Vec<eframe::egui::Event>,
+    ) -> TreeUpdate {
+        *time += 0.05;
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(1280.0, 800.0),
+        );
+        let mut output = ctx.run_ui(
+            eframe::egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(*time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                if let Some(next) = show_recovery(ui, name) {
+                    *choice = Some(next);
+                }
+            },
+        );
+        let tree = output.platform_output.accesskit_update.take();
+        output.textures_delta.clear();
+        tree.expect("the tree is built")
     }
 
     struct TempDir(PathBuf);

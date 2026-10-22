@@ -8,5 +8,8 @@ repository.workspace = true
 publish = false
 description = "NVDEC and NVENC video decode and encode for NVIDIA GPUs."
 
+[dependencies]
+cutlass-core.workspace = true
+
 [lints]
 workspace = true

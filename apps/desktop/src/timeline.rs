@@ -1114,6 +1114,8 @@ pub fn show(
             }
             let dim = row.hidden || (row.muted && track.kind() == TrackKind::Audio);
             remember_lane(&mut lanes, row);
+            let outer = ui.clip_rect();
+            ui.shrink_clip_rect(time_port(tracks));
             paint_segments(
                 ui,
                 track,
@@ -1137,6 +1139,7 @@ pub fn show(
                     tips: &mut clip_tips,
                 },
             );
+            ui.set_clip_rect(outer);
         }
         if let Some(choice) = menu {
             let locked = words::of(ui, Phrase::TrackIsLocked);
@@ -1160,10 +1163,9 @@ pub fn show(
             }
         }
     }
+    let outer = ui.clip_rect();
+    ui.shrink_clip_rect(sheet_port(ruler_rect, tracks));
     paint_stamps(ui, project, tracks, ruler_rect, &stamps, view);
-    for (response, text, picked) in clip_tips {
-        crate::tip::show_selected(&response, &text, picked);
-    }
     ui.data_mut(|data| data.insert_temp(marks_id, stamps.selected));
     paint_guides(ui, tracks, project, &guides, pointer, view);
     paint_playhead(ui, ruler_rect, tracks, project, playhead, view);
@@ -1196,6 +1198,10 @@ pub fn show(
             Stroke::new(1.0, Color32::WHITE),
             egui::StrokeKind::Outside,
         );
+    }
+    ui.set_clip_rect(outer);
+    for (response, text, picked) in clip_tips {
+        crate::tip::show_selected(&response, &text, picked);
     }
     if let Some(text) = note {
         show_note(ui, text);
@@ -1302,6 +1308,20 @@ fn paint_note(ui: &egui::Ui, ruler: Rect) {
 
 fn lane_left(area: Rect) -> f32 {
     area.left() + HEAD + COVER
+}
+
+/// The part of the ruler or the tracks that holds the sheet.
+/// The head and the cover stay outside it, so a zoomed clip cannot paint over them.
+fn time_port(area: Rect) -> Rect {
+    Rect::from_min_max(pos2(lane_left(area), area.top()), area.right_bottom())
+}
+
+/// The ruler view and the lanes, as one clip. The toolbar, the head, and the cover stay outside.
+fn sheet_port(ruler: Rect, tracks: Rect) -> Rect {
+    let left = lane_left(ruler);
+    let right = ruler.right().max(tracks.right());
+    let bottom = tracks.bottom().max(ruler.bottom());
+    Rect::from_min_max(pos2(left, ruler.top()), pos2(right, bottom))
 }
 
 #[derive(Clone, Copy)]
@@ -2268,8 +2288,11 @@ fn paint_guides(
     }
     let draw_row = |fraction: f32, color: Color32| {
         let y = tracks.top() + fraction * tracks.height();
-        ui.painter()
-            .hline(tracks.left()..=tracks.right(), y, Stroke::new(1.0, color));
+        ui.painter().hline(
+            lane_left(tracks)..=tracks.right(),
+            y,
+            Stroke::new(1.0, color),
+        );
     };
     for (index, fraction) in guides.horizontal.iter().enumerate() {
         let color = if guides.selected == Some(Picked::Horizontal(index)) {
@@ -3648,6 +3671,7 @@ fn paint_ruler(ui: &mut egui::Ui, ruler_rect: Rect, project: &Project, view: Vie
     let left = lane_left(ruler_rect);
     let width = (ruler_rect.right() - left).max(0.0);
     let bottom = ruler_rect.bottom();
+    let painter = ui.painter().with_clip_rect(time_port(ruler_rect));
     for mark in ruler::marks(
         project.settings().rate(),
         view.pixel_size,
@@ -3656,10 +3680,9 @@ fn paint_ruler(ui: &mut egui::Ui, ruler_rect: Rect, project: &Project, view: Vie
     ) {
         let x = view.x(left, mark.us);
         let height = if mark.major { 12.0 } else { 6.0 };
-        ui.painter()
-            .vline(x, (bottom - height)..=bottom, Stroke::new(1.0, TICK));
+        painter.vline(x, (bottom - height)..=bottom, Stroke::new(1.0, TICK));
         if let Some(label) = mark.label {
-            ui.painter().text(
+            painter.text(
                 pos2(x + 4.0, bottom - height - 2.0),
                 Align2::LEFT_BOTTOM,
                 label,
@@ -4656,6 +4679,21 @@ mod tests {
         ));
         assert!(!super::allows(&[TrackKind::Text], super::TIMED_KINDS));
         assert!(!super::allows(&[TrackKind::Text], super::VIDEO_KINDS));
+    }
+
+    #[test]
+    fn a_zoomed_clip_stays_out_of_the_head() {
+        let tracks = Rect::from_min_size(pos2(0.0, 80.0), vec2(800.0, 240.0));
+        let port = super::time_port(tracks);
+        let head = Rect::from_min_size(pos2(tracks.left(), 100.0), vec2(super::HEAD, 64.0));
+        assert!(port.left() >= head.right());
+        assert!(!port.intersects(head));
+        let lane = Rect::from_min_size(pos2(port.left(), 100.0), vec2(port.width(), 64.0));
+        let rect = super::clip_rect(lane, true, 0, 5_000_000, 0.001, 2_000_000);
+        assert!(rect.left() < head.right());
+        let visible = rect.intersect(port);
+        assert!(visible.width() > 0.0);
+        assert!(!visible.intersects(head));
     }
 
     #[test]

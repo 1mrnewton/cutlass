@@ -44,6 +44,13 @@ impl Gpu {
             ..Default::default()
         }))
         .map_err(|error| Error::Device(error.to_string()))?;
+        Ok(Self::with_device(device, queue))
+    }
+
+    /// Builds the YUV pipeline on a device the caller already opened.
+    ///
+    /// The desktop passes the window's device so the preview and the UI share it.
+    pub fn with_device(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("yuv"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -95,12 +102,22 @@ impl Gpu {
             multiview_mask: None,
             cache: None,
         });
-        Ok(Self {
+        Self {
             device,
             queue,
             pipeline,
             layout,
-        })
+        }
+    }
+
+    /// The device this compositor samples on.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// The queue that submits the conversion.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 
     /// Uploads `planes` and draws them into a new RGBA texture.
@@ -229,7 +246,9 @@ impl Gpu {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

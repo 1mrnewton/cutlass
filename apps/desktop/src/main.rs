@@ -11,6 +11,7 @@ use cutlass_project::{History, Project, SegmentId};
 mod app_settings;
 mod chrome;
 mod export;
+mod frames;
 mod gaps;
 mod icons;
 mod import;
@@ -41,6 +42,7 @@ fn main() -> eframe::Result {
         "Cutlass",
         eframe::NativeOptions {
             viewport,
+            renderer: eframe::Renderer::Wgpu,
             // The recent list is the only thing stored. The window is not restored.
             persist_window: false,
             ..Default::default()
@@ -61,6 +63,7 @@ struct CutlassApp {
     recovery: Option<projects::Recovery>,
     recovery_shown: bool,
     playhead_us: i64,
+    reel: frames::Reel,
     shelf: library::Shelf,
     media: library::MediaSource,
     bin: media_bin::Bin,
@@ -81,6 +84,9 @@ impl CutlassApp {
         theme::install(&cc.egui_ctx);
         icons::install(&cc.egui_ctx);
         let loaded = projects::blank();
+        let gpu = cc.wgpu_render_state.as_ref().map(|state| {
+            cutlass_compose::Gpu::with_device(state.device.clone(), state.queue.clone())
+        });
         let ours = std::process::id();
         let recovery = projects::draft_dir()
             .and_then(|dir| projects::find_recovery(&dir, ours, projects::process_running));
@@ -96,6 +102,7 @@ impl CutlassApp {
             recovery,
             recovery_shown: false,
             playhead_us: 0,
+            reel: frames::Reel::new(gpu),
             shelf: library::Shelf::Media,
             media: library::MediaSource::Project,
             bin: media_bin::Bin::new(),
@@ -385,6 +392,7 @@ impl CutlassApp {
         self.export = None;
         self.modify = None;
         self.app_dialog = None;
+        self.reel.clear();
         self.clear_draft();
     }
 
@@ -594,11 +602,16 @@ impl eframe::App for CutlassApp {
         egui::CentralPanel::default()
             .frame(theme::panel())
             .show(ui, |ui| {
+                let hidden = timeline::hidden_tracks(ui);
+                let picture = self
+                    .reel
+                    .image(ui.ctx(), &self.project, self.playhead_us, &hidden);
                 let commands = preview::show(
                     ui,
                     &self.project,
                     self.playhead_us,
                     &mut self.selected_segments,
+                    picture,
                 );
                 if !commands.is_empty()
                     && let Err(error) = self.history.apply(&mut self.project, &commands)

@@ -1,6 +1,6 @@
 //! The preview frame and the transport. The frame shows the project canvas.
-//! One selected layer can be moved, scaled, and rotated. A decoded picture is
-//! not drawn yet. `docs/preview.md`.
+//! One selected layer can be moved, scaled, and rotated. On Apple the top
+//! picture is drawn in that box. `docs/preview.md`.
 
 use eframe::egui::{
     self, Align2, Color32, FontFamily, FontId, Pos2, Rect, Sense, Stroke, Vec2, pos2, vec2,
@@ -20,6 +20,7 @@ pub fn show(
     project: &Project,
     playhead_us: i64,
     selected: &mut Vec<SegmentId>,
+    picture: Option<egui::TextureId>,
 ) -> Vec<cutlass_project::Command> {
     crate::tip::region(
         ui,
@@ -64,6 +65,11 @@ pub fn show(
             let (red, green, blue) = project.settings().background().channels();
             ui.painter()
                 .rect_filled(plate, 0.0, Color32::from_rgb(red, green, blue));
+            if let Some(id) = picture
+                && let Some(layer) = shown_box(project, playhead_us, &hidden, plate, drag.as_ref())
+            {
+                paint_picture(ui, id, &layer);
+            }
             paint_selected(
                 ui,
                 project,
@@ -300,6 +306,42 @@ fn layer_box(
     })
 }
 
+fn picture_corners(layer: &LayerBox) -> [Pos2; 4] {
+    let (sin, cos) = (-layer.rotation).to_radians().sin_cos();
+    let half = layer.size / 2.0;
+    [
+        vec2(-half.x, -half.y),
+        vec2(half.x, -half.y),
+        vec2(half.x, half.y),
+        vec2(-half.x, half.y),
+    ]
+    .map(|local| {
+        let dx = local.x * cos + local.y * sin;
+        let dy = -local.x * sin + local.y * cos;
+        layer.center + vec2(dx, dy)
+    })
+}
+
+fn paint_picture(ui: &egui::Ui, id: egui::TextureId, layer: &LayerBox) {
+    let mut mesh = egui::Mesh::with_texture(id);
+    let uvs = [
+        pos2(0.0, 0.0),
+        pos2(1.0, 0.0),
+        pos2(1.0, 1.0),
+        pos2(0.0, 1.0),
+    ];
+    for (point, uv) in picture_corners(layer).into_iter().zip(uvs) {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: point,
+            uv,
+            color: Color32::WHITE,
+        });
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
 fn layer_contains(layer: &LayerBox, point: Pos2) -> bool {
     let (sin, cos) = (-layer.rotation).to_radians().sin_cos();
     let dx = point.x - layer.center.x;
@@ -307,6 +349,34 @@ fn layer_contains(layer: &LayerBox, point: Pos2) -> bool {
     let local_x = dx * cos - dy * sin;
     let local_y = dx * sin + dy * cos;
     local_x.abs() <= layer.size.x / 2.0 && local_y.abs() <= layer.size.y / 2.0
+}
+
+/// Source time at `playhead_us`. The start of the clip is the source start.
+/// A later playhead follows [`cutlass_project::Speed`].
+pub(crate) fn media_time(
+    segment: &cutlass_project::Segment,
+    playhead_us: i64,
+) -> Option<cutlass_core::Timestamp> {
+    let source = segment.source()?;
+    let timeline = segment.timeline();
+    if playhead_us < timeline.start().value || playhead_us >= timeline.end().value {
+        return None;
+    }
+    let offset = playhead_us.checked_sub(timeline.start().value)?;
+    let ticks =
+        cutlass_project::source_ticks(offset, source.start().timescale, segment.speed()).ok()?;
+    let mut value = source.start().value.checked_add(ticks)?;
+    let end = source.end().value;
+    if value >= end {
+        if end <= source.start().value {
+            return None;
+        }
+        value = end - 1;
+    }
+    Some(cutlass_core::Timestamp::new(
+        value,
+        source.start().timescale,
+    ))
 }
 
 fn covers(segment: &cutlass_project::Segment, us: i64) -> bool {
@@ -343,6 +413,39 @@ fn picture_box(
         scale,
         rotation,
     )
+}
+
+/// The topmost picture under the playhead. Sound-only, hidden, and invisible
+/// segments are skipped.
+pub(crate) fn picture_segment<'a>(
+    project: &'a Project,
+    playhead_us: i64,
+    hidden: &[TrackId],
+) -> Option<&'a cutlass_project::Segment> {
+    project.timeline().tracks().iter().rev().find_map(|track| {
+        if hidden.contains(&track.id()) {
+            return None;
+        }
+        track.segments().iter().find(|segment| {
+            covers(segment, playhead_us)
+                && segment.channels() != Channels::Sound
+                && project
+                    .asset(segment.asset_id())
+                    .and_then(|asset| asset.visual_size())
+                    .is_some()
+        })
+    })
+}
+
+fn shown_box(
+    project: &Project,
+    playhead_us: i64,
+    hidden: &[TrackId],
+    plate: Rect,
+    drag: Option<&Drag>,
+) -> Option<LayerBox> {
+    let segment = picture_segment(project, playhead_us, hidden)?;
+    picture_box(project, segment, plate, drag)
 }
 
 /// The topmost picture under the playhead, whether or not it covers `point`.
@@ -1337,7 +1440,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    super::show(ui, project, 1_500_000, &mut Vec::new());
+                    super::show(ui, project, 1_500_000, &mut Vec::new(), None);
                 },
             );
             let tree = output.platform_output.accesskit_update.take();
@@ -1492,7 +1595,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                commands.clone_from(&super::show(ui, cut, 0, selected));
+                commands.clone_from(&super::show(ui, cut, 0, selected, None));
             },
         );
         let tree = output.platform_output.accesskit_update.take();
@@ -1627,5 +1730,122 @@ mod tests {
             ((rect.x0 + rect.x1) / 2.0) as f32,
             ((rect.y0 + rect.y1) / 2.0) as f32,
         )
+    }
+
+    #[test]
+    fn media_time_follows_the_playhead_and_the_speed() {
+        let scale = NonZeroU32::new(30_000).expect("scale");
+        let asset = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, scale),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let source = TimeRange::new(Timestamp::new(6_000, scale), Timestamp::new(24_000, scale))
+            .expect("source");
+        let segment =
+            Segment::media(&asset, source, 1_000_000, Channels::Both, Speed::ONE).expect("segment");
+        assert!(super::media_time(&segment, 0).is_none());
+        let start = super::media_time(&segment, 1_000_000).expect("start");
+        assert_eq!(start.value, 6_000);
+        assert_eq!(start.timescale, scale);
+        let mid = super::media_time(&segment, 1_400_000).expect("mid");
+        assert_eq!(mid.value, 18_000);
+
+        let fast = Segment::media(
+            &asset,
+            source,
+            0,
+            Channels::Both,
+            Speed::new(2, 1).expect("speed"),
+        )
+        .expect("fast");
+        let sped = super::media_time(&fast, 200_000).expect("sped");
+        assert_eq!(sped.value, 18_000);
+    }
+
+    #[test]
+    fn a_rotated_picture_stays_inside_its_box() {
+        let flat = super::LayerBox {
+            center: eframe::egui::pos2(100.0, 80.0),
+            size: eframe::egui::vec2(40.0, 20.0),
+            rotation: 0.0,
+        };
+        for corner in super::picture_corners(&flat) {
+            assert!(super::layer_contains(&flat, corner));
+        }
+        let layer = super::LayerBox {
+            center: eframe::egui::pos2(100.0, 80.0),
+            size: eframe::egui::vec2(40.0, 20.0),
+            rotation: 37.0,
+        };
+        let (sin, cos) = (-layer.rotation).to_radians().sin_cos();
+        for corner in super::picture_corners(&layer) {
+            let dx = corner.x - layer.center.x;
+            let dy = corner.y - layer.center.y;
+            let local_x = dx * cos - dy * sin;
+            let local_y = dx * sin + dy * cos;
+            assert!(
+                (local_x.abs() - layer.size.x / 2.0).abs() < 1e-3,
+                "local x {local_x}"
+            );
+            assert!(
+                (local_y.abs() - layer.size.y / 2.0).abs() < 1e-3,
+                "local y {local_y}"
+            );
+            let toward = eframe::egui::pos2(
+                layer.center.x + (corner.x - layer.center.x) * 0.99,
+                layer.center.y + (corner.y - layer.center.y) * 0.99,
+            );
+            assert!(super::layer_contains(&layer, toward));
+        }
+        assert!(!super::layer_contains(
+            &layer,
+            layer.center + eframe::egui::vec2(80.0, 80.0)
+        ));
+    }
+
+    #[test]
+    fn a_picture_is_painted_only_when_a_frame_is_ready() {
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, crate::words::Language::English);
+        let image = eframe::egui::ColorImage::filled([2, 2], eframe::egui::Color32::WHITE);
+        let texture = ctx.load_texture("test-frame", image, eframe::egui::TextureOptions::LINEAR);
+        let cut = placed();
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(400.0, 300.0),
+        );
+        let painted = |picture| {
+            let mut output = ctx.run_ui(
+                eframe::egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(1.0),
+                    ..Default::default()
+                },
+                |ui| {
+                    super::show(ui, &cut, 0, &mut Vec::new(), picture);
+                },
+            );
+            let found = output
+                .shapes
+                .iter()
+                .any(|clipped| uses_texture(&clipped.shape, texture.id()));
+            output.textures_delta.clear();
+            found
+        };
+        assert!(painted(Some(texture.id())));
+        assert!(!painted(None));
+    }
+
+    fn uses_texture(shape: &eframe::egui::Shape, id: eframe::egui::TextureId) -> bool {
+        match shape {
+            eframe::egui::Shape::Mesh(mesh) => mesh.texture_id == id,
+            eframe::egui::Shape::Vec(shapes) => shapes.iter().any(|shape| uses_texture(shape, id)),
+            _ => false,
+        }
     }
 }

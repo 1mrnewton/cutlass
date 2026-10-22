@@ -13,6 +13,7 @@ name = "cutlass"
 path = "src/main.rs"
 
 [dependencies]
+cutlass-compose.workspace = true
 cutlass-core.workspace = true
 cutlass-media.workspace = true
 cutlass-project.workspace = true
@@ -22,6 +23,11 @@ uuid.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rfd = { workspace = true, features = ["xdg-portal"] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+cutlass-color.workspace = true
+cutlass-playback.workspace = true
+cutlass-videotoolbox.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
@@ -36,6 +42,9 @@ raw-window-handle = "0.6.2"
 
 [dev-dependencies]
 cutlass-mp4.workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+cutlass-test-fixtures.workspace = true
 
 [lints]
 workspace = true

@@ -29,6 +29,31 @@ fn an_uploaded_nv12_frame_matches_the_cpu_conversion() {
 }
 
 #[test]
+fn a_supplied_device_uploads_the_same_nv12_frame() {
+    let Some(gpu) = open_gpu() else {
+        return;
+    };
+    let supplied = Gpu::with_device(gpu.device().clone(), gpu.queue().clone());
+    let y = [16u8, 235, 235, 16];
+    let chroma = [90u8, 240];
+    let planes = YuvPlanes {
+        format: PixelFormat::Nv12,
+        range: ColorRange::Limited,
+        matrix: Matrix::Bt709,
+        width: 2,
+        height: 2,
+        y: &y,
+        y_stride: 2,
+        chroma: &chroma,
+        chroma_stride: 2,
+    };
+    let expected = to_rgba(&planes).expect("cpu conversion");
+    let image = supplied.render(&planes).expect("upload");
+    let actual = supplied.read_rgba(&image).expect("readback");
+    assert_close(&actual, &expected);
+}
+
+#[test]
 fn an_uploaded_p010_frame_matches_the_cpu_conversion() {
     let Some(gpu) = open_gpu() else {
         return;

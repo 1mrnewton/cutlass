@@ -748,10 +748,15 @@ version = "0.1.0"
 name = "cutlass-desktop"
 version = "0.1.0"
 dependencies = [
+ "cutlass-color",
+ "cutlass-compose",
  "cutlass-core",
  "cutlass-media",
  "cutlass-mp4",
+ "cutlass-playback",
  "cutlass-project",
+ "cutlass-test-fixtures",
+ "cutlass-videotoolbox",
  "eframe",
  "objc2-app-kit 0.3.2",
  "raw-window-handle",

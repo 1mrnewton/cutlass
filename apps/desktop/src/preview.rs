@@ -548,6 +548,77 @@ fn picture_box(
     )
 }
 
+/// How far ahead of the playhead the next picture is opened.
+const PRELOAD_US: i64 = 1_000_000;
+
+/// The next picture that starts within [`PRELOAD_US`] of the playhead.
+///
+/// The same file is not returned. The clip already open can seek inside it.
+pub(crate) fn upcoming_picture<'a>(
+    project: &'a Project,
+    playhead_us: i64,
+    hidden: &[TrackId],
+) -> Option<(cutlass_project::AssetId, &'a str)> {
+    let current = picture_segment(project, playhead_us, hidden)?;
+    let end = current.timeline().end().value;
+    let horizon = playhead_us.saturating_add(PRELOAD_US);
+    if end > horizon {
+        return None;
+    }
+    let candidate = picture_segment(project, end, hidden).or_else(|| {
+        let start = next_picture_start(project, end, horizon, hidden)?;
+        picture_segment(project, start, hidden)
+    })?;
+    if candidate.id() == current.id() {
+        return None;
+    }
+    let asset = candidate.asset_id()?;
+    let source = project.asset(asset)?.source();
+    let current_asset = current.asset_id()?;
+    if source == project.asset(current_asset)?.source() {
+        return None;
+    }
+    Some((asset, source))
+}
+
+fn next_picture_start(
+    project: &Project,
+    end: i64,
+    horizon: i64,
+    hidden: &[TrackId],
+) -> Option<i64> {
+    let mut found: Option<i64> = None;
+    for track in project.timeline().tracks() {
+        if hidden.contains(&track.id()) {
+            continue;
+        }
+        for segment in track.segments() {
+            if segment.channels() == Channels::Sound || !segment.visible() {
+                continue;
+            }
+            let Some(asset) = segment.asset_id() else {
+                continue;
+            };
+            if project
+                .asset(asset)
+                .and_then(|asset| asset.visual_size())
+                .is_none()
+            {
+                continue;
+            }
+            let start = segment.timeline().start().value;
+            if start < end || start > horizon {
+                continue;
+            }
+            found = Some(match found {
+                Some(best) => best.min(start),
+                None => start,
+            });
+        }
+    }
+    found
+}
+
 /// The topmost picture under the playhead. Sound-only, hidden, and invisible
 /// segments are skipped.
 pub(crate) fn picture_segment<'a>(
@@ -2147,6 +2218,80 @@ mod tests {
         };
         assert!(painted(Some(texture.id())));
         assert!(!painted(None));
+    }
+
+    #[test]
+    fn the_next_picture_is_ready_in_the_last_second() {
+        let adjacent = two_pictures("file:///cuts/a.mp4", "file:///cuts/b.mp4", 3_000_000);
+        assert!(super::upcoming_picture(&adjacent, 0, &[]).is_none());
+        let upcoming = super::upcoming_picture(&adjacent, 2_100_000, &[]).expect("next");
+        assert_eq!(upcoming.1, "file:///cuts/b.mp4");
+        let main = adjacent.timeline().main_track().id();
+        assert!(super::upcoming_picture(&adjacent, 2_100_000, &[main]).is_none());
+
+        let same = two_pictures("file:///cuts/a.mp4", "file:///cuts/a.mp4", 3_000_000);
+        assert!(super::upcoming_picture(&same, 2_100_000, &[]).is_none());
+
+        let gap = two_pictures("file:///cuts/a.mp4", "file:///cuts/b.mp4", 3_400_000);
+        assert!(super::upcoming_picture(&gap, 2_000_000, &[]).is_none());
+        let upcoming = super::upcoming_picture(&gap, 2_500_000, &[]).expect("across the gap");
+        assert_eq!(upcoming.1, "file:///cuts/b.mp4");
+    }
+
+    fn two_pictures(first: &str, second: &str, second_start: i64) -> Project {
+        let mut history = History::new();
+        let mut cut = project();
+        history
+            .apply(&mut cut, &[Command::SetMagnet(false)])
+            .expect("magnet");
+        let main = cut.timeline().main_track().id();
+        place_span(&mut history, &mut cut, first, main, 0);
+        place_span(&mut history, &mut cut, second, main, second_start);
+        cut
+    }
+
+    fn place_span(
+        history: &mut History,
+        cut: &mut Project,
+        source: &str,
+        track: cutlass_project::TrackId,
+        start: i64,
+    ) {
+        let asset = Asset::video(
+            source,
+            Timestamp::new(90_000, NonZeroU32::new(30_000).expect("scale")),
+            16,
+            16,
+            false,
+        )
+        .expect("video");
+        let id = match history
+            .apply(cut, &[Command::AddAsset(asset)])
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(id)] => *id,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        let segment = {
+            let stored = cut.asset(id).expect("asset");
+            let duration = stored.duration().expect("duration");
+            let range = TimeRange::new(
+                Timestamp::new(0, duration.timescale),
+                Timestamp::new(duration.value, duration.timescale),
+            )
+            .expect("source");
+            Segment::media(stored, range, start, Channels::Picture, Speed::ONE).expect("segment")
+        };
+        history
+            .apply(
+                cut,
+                &[Command::Place {
+                    track: Some(track),
+                    segment,
+                }],
+            )
+            .expect("place");
     }
 
     fn uses_texture(shape: &eframe::egui::Shape, id: eframe::egui::TextureId) -> bool {

@@ -1,6 +1,9 @@
 //! The picture under the playhead.
 //!
-//! On Apple a worker decodes VideoToolbox frames ahead of the playhead. The
+//! On Apple a worker decodes VideoToolbox frames ahead of the playhead. It
+//! keeps the decoder inside the current group of pictures, skips to a keyframe
+//! the clock has reached, and drops frames that are already late. The next
+//! clip opens on a side thread during the last second before the cut. The
 //! window samples the GPU texture for the frame that is due and does not copy
 //! it back. A failure is written to the app log. A seek keeps the last picture
 //! until the new one is ready. Where no video decoder is linked, there is no
@@ -9,7 +12,7 @@
 use cutlass_compose::Gpu;
 use cutlass_project::Project;
 
-#[cfg(any(test, target_vendor = "apple"))]
+#[cfg(target_vendor = "apple")]
 use cutlass_core::Timestamp;
 #[cfg(target_vendor = "apple")]
 use cutlass_project::AssetId;
@@ -28,7 +31,7 @@ use cutlass_core::Packet;
 #[cfg(target_vendor = "apple")]
 use cutlass_media::{Content, Probe, VideoSession};
 #[cfg(target_vendor = "apple")]
-use cutlass_playback::{Ahead, Decode};
+use cutlass_playback::{Ahead, Decode, Reach};
 #[cfg(target_vendor = "apple")]
 use cutlass_videotoolbox::PixelBuffer;
 
@@ -36,9 +39,9 @@ use cutlass_videotoolbox::PixelBuffer;
 #[cfg(target_vendor = "apple")]
 const QUEUE_DEPTH: usize = 8;
 
-/// A forward jump longer than this seeks from a keyframe instead of decoding through.
-#[cfg(any(test, target_vendor = "apple"))]
-const SEEK_GAP_SECS: f64 = 1.0;
+/// How many new frames one pass decodes before it looks at the playhead again.
+#[cfg(target_vendor = "apple")]
+const DECODE_BUDGET: usize = QUEUE_DEPTH;
 
 /// The open clip and the GPU the window already created.
 pub struct Reel {
@@ -174,7 +177,13 @@ impl Reel {
             self.hide(state);
             return None;
         };
-        self.ask(asset, source, time);
+        let next = crate::preview::upcoming_picture(project, playhead_us, hidden).map(
+            |(asset, source)| Next {
+                asset,
+                source: source.to_owned(),
+            },
+        );
+        self.ask(asset, source, time, next);
         self.deliver(ctx, state);
         if self.plate.is_some() {
             return self.native;
@@ -193,9 +202,12 @@ impl Reel {
     }
 
     #[cfg(target_vendor = "apple")]
-    fn ask(&mut self, asset: AssetId, source: &str, time: Timestamp) {
+    fn ask(&mut self, asset: AssetId, source: &str, time: Timestamp, next: Option<Next>) {
         if self.pending.as_ref().is_some_and(|pending| {
-            pending.asset == asset && pending.source == source && pending.time == time
+            pending.asset == asset
+                && pending.source == source
+                && pending.time == time
+                && pending.next == next
         }) {
             return;
         }
@@ -214,6 +226,7 @@ impl Reel {
             asset,
             source: source.to_owned(),
             time,
+            next,
         };
         let posted = self
             .bridge
@@ -242,7 +255,7 @@ impl Reel {
         let Some(pending) = self.pending.clone() else {
             return;
         };
-        if picture.generation != pending.generation || picture.requested != pending.time {
+        if picture.generation != pending.generation {
             return;
         }
         let Body::Frame {
@@ -251,9 +264,16 @@ impl Reel {
             pts,
         } = picture.body
         else {
-            self.waiting = false;
+            if picture.requested == pending.time {
+                self.waiting = false;
+            }
             return;
         };
+        // The playhead moved forward. This frame still covers it. A backward
+        // seek is waiting for a different frame, so this one stays off the plate.
+        if picture.requested != pending.time && pts > pending.time {
+            return;
+        }
         if self.has_picture() && self.shown.as_ref().is_some_and(|shown| shown.pts == pts) {
             if let Some(shown) = &mut self.shown {
                 shown.requested = pending.time;
@@ -623,6 +643,19 @@ impl<T> Note<T> {
         self.wake.notify_one();
     }
 
+    /// The newest message, when one is waiting. Does not block.
+    fn poll(&self) -> Inbox<T> {
+        let mut state = self.lock();
+        if let Some(value) = state.value.take() {
+            return Inbox::Message(value);
+        }
+        if state.closed {
+            Inbox::Closed
+        } else {
+            Inbox::Empty
+        }
+    }
+
     fn close(&self) {
         let mut state = self.lock();
         state.closed = true;
@@ -682,12 +715,40 @@ enum Message {
 }
 
 #[cfg(target_vendor = "apple")]
+enum Inbox<T> {
+    Message(T),
+    Empty,
+    Closed,
+}
+
+/// What one decode pass did for the requested time.
+#[cfg(target_vendor = "apple")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Chunk {
+    /// A frame at or before the request is queued.
+    Covers,
+    /// More packets can still produce that frame.
+    Short,
+    /// Decoding will not produce a frame at or before the request.
+    Settled,
+}
+
+#[cfg(target_vendor = "apple")]
 #[derive(Clone)]
 struct Ask {
     generation: u64,
     asset: AssetId,
     source: String,
     time: Timestamp,
+    next: Option<Next>,
+}
+
+/// The picture that starts within a second of the playhead.
+#[cfg(target_vendor = "apple")]
+#[derive(Clone, PartialEq, Eq)]
+struct Next {
+    asset: AssetId,
+    source: String,
 }
 
 #[cfg(target_vendor = "apple")]
@@ -711,57 +772,138 @@ enum Body {
 fn play_loop(ask: Arc<Note<Message>>, picture: Arc<Slot<Picture>>) {
     let mut open = None;
     let mut missed = None;
+    let mut warm = None;
     while let Some(message) = ask.wait() {
         match message {
-            Message::Drop => {
-                open = None;
-                missed = None;
+            Message::Drop => release(&mut open, &mut missed, &mut warm),
+            Message::Show(show) => {
+                if !follow_show(&ask, &picture, &mut open, &mut missed, &mut warm, show) {
+                    break;
+                }
             }
-            Message::Show(show) => serve(&mut open, &mut missed, &picture, show),
+        }
+    }
+    join_warm(&mut warm);
+}
+
+#[cfg(target_vendor = "apple")]
+fn follow_show(
+    ask: &Note<Message>,
+    picture: &Slot<Picture>,
+    open: &mut Option<Open>,
+    missed: &mut Option<String>,
+    warm: &mut Option<Warm>,
+    mut show: Ask,
+) -> bool {
+    loop {
+        let chunk = serve(open, missed, warm, picture, &show);
+        if chunk == Chunk::Covers {
+            warm_next(warm, open, show.next.as_ref());
+        }
+        match ask.poll() {
+            Inbox::Closed => return false,
+            Inbox::Message(Message::Drop) => {
+                release(open, missed, warm);
+                return true;
+            }
+            Inbox::Message(Message::Show(next)) => show = next,
+            Inbox::Empty => {
+                if chunk == Chunk::Short {
+                    continue;
+                }
+                return true;
+            }
         }
     }
 }
 
 #[cfg(target_vendor = "apple")]
-fn serve(open: &mut Option<Open>, missed: &mut Option<String>, picture: &Slot<Picture>, show: Ask) {
+fn release(open: &mut Option<Open>, missed: &mut Option<String>, warm: &mut Option<Warm>) {
+    *open = None;
+    *missed = None;
+    join_warm(warm);
+}
+
+#[cfg(target_vendor = "apple")]
+fn serve(
+    open: &mut Option<Open>,
+    missed: &mut Option<String>,
+    warm: &mut Option<Warm>,
+    picture: &Slot<Picture>,
+    show: &Ask,
+) -> Chunk {
     let switched = open
         .as_ref()
         .is_none_or(|clip| clip.asset != show.asset || clip.source != show.source);
-    if switched && missed.as_deref() != Some(show.source.as_str()) {
-        *open = ready(show.asset, &show.source);
-        if open.is_none() {
-            *missed = Some(show.source.clone());
-        } else {
-            missed.take();
+    if switched {
+        match claim(warm, show.asset, &show.source) {
+            Claimed::Ready(clip) => {
+                *open = Some(*clip);
+                missed.take();
+            }
+            Claimed::Missing => {
+                *open = None;
+                *missed = Some(show.source.clone());
+            }
+            Claimed::Elsewhere => {
+                if missed.as_deref() == Some(show.source.as_str()) {
+                    *open = None;
+                } else {
+                    *open = ready(show.asset, &show.source);
+                    if open.is_none() {
+                        *missed = Some(show.source.clone());
+                    } else {
+                        missed.take();
+                    }
+                }
+            }
         }
     }
     let Some(clip) = open.as_mut() else {
-        picture.publish(unavailable(&show));
-        return;
+        picture.publish(unavailable(show));
+        return Chunk::Settled;
     };
     if clip.failed == Some(show.time) {
-        picture.publish(unavailable(&show));
-        return;
+        picture.publish(unavailable(show));
+        return Chunk::Settled;
     }
-    if let Err(error) = pump(clip, show.time) {
+    let readable = match pump(clip, show.time) {
+        Ok(readable) => readable,
+        Err(error) => {
+            if clip.failed.is_none() {
+                log::warn!("The preview could not decode {}: {error}.", clip.source);
+            }
+            clip.failed = Some(show.time);
+            picture.publish(unavailable(show));
+            return Chunk::Settled;
+        }
+    };
+    if !readable {
         if clip.failed.is_none() {
-            log::warn!("The preview could not decode {}: {error}.", clip.source);
+            log::warn!("The preview has no frame at this time in {}.", clip.source);
         }
         clip.failed = Some(show.time);
-        picture.publish(unavailable(&show));
-        return;
+        picture.publish(unavailable(show));
+        return Chunk::Settled;
     }
     let taken = clip
         .ahead
         .at(show.time)
         .map(|frame| (frame.pts, frame.image.clone()));
     let Some((pts, buffer)) = taken else {
-        if clip.failed.is_none() {
-            log::warn!("The preview has no frame at this time in {}.", clip.source);
+        let finished =
+            clip.ahead.is_full() || (clip.cursor >= clip.packets.len() && clip.ahead.drained());
+        if !finished {
+            return Chunk::Short;
         }
-        clip.failed = Some(show.time);
-        picture.publish(unavailable(&show));
-        return;
+        if clip.ahead.is_empty() {
+            if clip.failed.is_none() {
+                log::warn!("The preview has no frame at this time in {}.", clip.source);
+            }
+            clip.failed = Some(show.time);
+            picture.publish(unavailable(show));
+        }
+        return Chunk::Settled;
     };
     clip.failed = None;
     picture.publish(Picture {
@@ -773,6 +915,7 @@ fn serve(open: &mut Option<Open>, missed: &mut Option<String>, picture: &Slot<Pi
             pts,
         },
     });
+    Chunk::Covers
 }
 
 #[cfg(target_vendor = "apple")]
@@ -793,25 +936,107 @@ fn ready(asset: AssetId, source: &str) -> Option<Open> {
 }
 
 #[cfg(target_vendor = "apple")]
-fn pump(clip: &mut Open, time: Timestamp) -> Result<(), String> {
-    let jump = jumps(clip.followed, time) || clip.ahead.is_empty();
-    if jump {
-        let rest = clip
-            .ahead
-            .seek_to(&mut clip.session, &clip.packets, time)
-            .map_err(|error| error.to_string())?;
-        clip.cursor = clip.packets.len() - rest.len();
-    } else {
-        let _ = clip.ahead.at(time);
-        let start = clip.cursor.min(clip.packets.len());
-        let mut rest = &clip.packets[start..];
-        clip.ahead
-            .fill(&mut clip.session, &mut rest)
-            .map_err(|error| error.to_string())?;
-        clip.cursor = clip.packets.len() - rest.len();
-    }
+fn pump(clip: &mut Open, time: Timestamp) -> Result<bool, String> {
+    let (start, restart) =
+        match cutlass_playback::reach(&clip.packets, clip.cursor, clip.followed, time) {
+            None => {
+                clip.followed = Some(time);
+                return Ok(false);
+            }
+            Some(Reach::Keyframe(index)) => (index, true),
+            Some(Reach::Forward) => (clip.cursor.min(clip.packets.len()), false),
+        };
+    let mut pending = &clip.packets[start..];
+    clip.ahead
+        .follow(
+            &mut clip.session,
+            &mut pending,
+            time,
+            DECODE_BUDGET,
+            restart,
+        )
+        .map_err(|error| error.to_string())?;
+    clip.cursor = clip.packets.len() - pending.len();
     clip.followed = Some(time);
-    Ok(())
+    Ok(true)
+}
+
+/// A clip opened before the playhead reaches it.
+#[cfg(target_vendor = "apple")]
+struct Warm {
+    asset: AssetId,
+    source: String,
+    join: JoinHandle<Clip>,
+}
+
+#[cfg(target_vendor = "apple")]
+enum Claimed {
+    Elsewhere,
+    Missing,
+    Ready(Box<Open>),
+}
+
+#[cfg(target_vendor = "apple")]
+fn claim(warm: &mut Option<Warm>, asset: AssetId, source: &str) -> Claimed {
+    let ready = warm
+        .as_ref()
+        .is_some_and(|warm| warm.asset == asset && warm.source == source);
+    if !ready {
+        return Claimed::Elsewhere;
+    }
+    let Some(warm) = warm.take() else {
+        return Claimed::Elsewhere;
+    };
+    match warm.join.join() {
+        Ok(Clip::Ready(open)) => Claimed::Ready(open),
+        _ => Claimed::Missing,
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn warm_next(warm: &mut Option<Warm>, open: &Option<Open>, next: Option<&Next>) {
+    let Some(next) = next else {
+        return;
+    };
+    if open
+        .as_ref()
+        .is_some_and(|clip| clip.asset == next.asset && clip.source == next.source)
+    {
+        return;
+    }
+    if let Some(current) = warm.as_ref() {
+        if current.asset == next.asset && current.source == next.source {
+            return;
+        }
+        if !current.join.is_finished() {
+            return;
+        }
+    }
+    if let Some(done) = warm.take() {
+        let _ = done.join.join();
+    }
+    let asset = next.asset;
+    let source = next.source.clone();
+    let spawned = std::thread::Builder::new()
+        .name("cutlass-preload".to_owned())
+        .spawn(move || open_clip(asset, &source));
+    match spawned {
+        Ok(join) => {
+            *warm = Some(Warm {
+                asset: next.asset,
+                source: next.source.clone(),
+                join,
+            });
+        }
+        Err(error) => log::warn!("The preview could not prepare the next clip: {error}."),
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+fn join_warm(warm: &mut Option<Warm>) {
+    if let Some(warm) = warm.take() {
+        let _ = warm.join.join();
+    }
 }
 
 #[cfg(test)]
@@ -871,18 +1096,6 @@ fn cpu_image(gpu: &Gpu, buffer: &PixelBuffer, matrix: Matrix) -> Option<cutlass_
         .flatten()
 }
 
-/// `true` when `time` is behind the last request, or more than a second ahead of it.
-#[cfg(any(test, target_vendor = "apple"))]
-fn jumps(followed: Option<Timestamp>, time: Timestamp) -> bool {
-    let Some(prev) = followed else {
-        return true;
-    };
-    if time < prev {
-        return true;
-    }
-    time.as_secs_f64() - prev.as_secs_f64() > SEEK_GAP_SECS
-}
-
 #[cfg(test)]
 mod tests {
     use super::file_path;
@@ -898,18 +1111,6 @@ mod tests {
         assert_eq!(file_path("content://media/1"), None);
         assert_eq!(file_path(""), None);
         assert_eq!(file_path("file://"), None);
-    }
-
-    #[test]
-    fn a_backward_or_long_jump_seeks() {
-        use std::num::NonZeroU32;
-
-        let scale = NonZeroU32::new(1_000).expect("scale");
-        let at = |ms| super::Timestamp::new(ms, scale);
-        assert!(super::jumps(None, at(0)));
-        assert!(super::jumps(Some(at(1_000)), at(0)));
-        assert!(!super::jumps(Some(at(0)), at(500)));
-        assert!(super::jumps(Some(at(0)), at(2_000)));
     }
 
     #[cfg(target_vendor = "apple")]

@@ -85,6 +85,11 @@ impl<I> Ahead<I> {
         self.queue.is_full()
     }
 
+    /// The decoder was flushed and no frame is waiting to enter the queue.
+    pub fn drained(&self) -> bool {
+        self.flushed && self.held.is_none()
+    }
+
     /// Sends from `pending` until the queue is full or the decoder is drained.
     ///
     /// `pending` keeps the packets the decoder has not taken. Call this again
@@ -163,6 +168,55 @@ impl<I> Ahead<I> {
             let drained = pending.is_empty() && self.flushed && self.held.is_none();
             if drained || self.held.is_some() || self.queue.is_full() {
                 return Ok(pending);
+            }
+        }
+    }
+
+    /// Decodes toward `time`, dropping frames the playhead has already passed.
+    ///
+    /// At most `budget` new frames are taken from the decoder. A full queue
+    /// stops the work sooner. `restart` clears the queue and the decoder, then
+    /// reads `pending` from its first packet. The caller chooses that packet
+    /// with [`crate::reach`].
+    pub fn follow<D>(
+        &mut self,
+        decoder: &mut D,
+        pending: &mut &[Packet],
+        time: Timestamp,
+        budget: usize,
+        restart: bool,
+    ) -> Result<(), FillError<I, D::Error>>
+    where
+        D: Decode<Image = I>,
+    {
+        if restart {
+            self.seek();
+            decoder.reset().map_err(FillError::Decode)?;
+        }
+        let mut decoded = 0;
+        loop {
+            self.queue.discard_until(time);
+            if let Some(frame) = self.held.take() {
+                self.accept(frame)?;
+            }
+            if self.held.is_some() || self.queue.is_full() || decoded >= budget {
+                return Ok(());
+            }
+            match decoder.receive().map_err(FillError::Decode)? {
+                Some(frame) => {
+                    self.accept(frame)?;
+                    decoded += 1;
+                }
+                None if pending.is_empty() && self.flushed => return Ok(()),
+                None if pending.is_empty() => {
+                    decoder.flush().map_err(FillError::Decode)?;
+                    self.flushed = true;
+                }
+                None => {
+                    let packet = &pending[0];
+                    decoder.send(packet).map_err(FillError::Decode)?;
+                    *pending = &pending[1..];
+                }
             }
         }
     }
@@ -367,6 +421,66 @@ mod tests {
             .expect("seek back");
         assert_eq!(lag.resets, 2);
         assert_eq!(ahead.at(time(0)).expect("frame").image, 0);
+    }
+
+    #[test]
+    fn follow_drops_frames_the_playhead_passed_and_stops_at_the_budget() {
+        let packets = [
+            packet(0),
+            packet(10),
+            packet(20),
+            packet(30),
+            packet(40),
+            packet(50),
+        ];
+        let mut pending = packets.as_slice();
+        let mut ahead = Ahead::new(NonZeroUsize::new(4).expect("limit"));
+        let mut lag = Lag::default();
+        ahead
+            .follow(&mut lag, &mut pending, time(50), 2, false)
+            .expect("follow");
+        assert_eq!(lag.resets, 0);
+        assert_eq!(ahead.at(time(50)).expect("frame").image, 10);
+        assert!(!pending.is_empty());
+        assert!(!ahead.drained());
+    }
+
+    #[test]
+    fn follow_stops_when_the_queue_already_covers_the_playhead() {
+        let packets = [packet(0), packet(10), packet(20), packet(30)];
+        let mut pending = packets.as_slice();
+        let mut ahead = Ahead::new(NonZeroUsize::new(2).expect("limit"));
+        ahead
+            .follow(&mut Lag::default(), &mut pending, time(0), 10, false)
+            .expect("follow");
+        assert!(ahead.is_full());
+        assert_eq!(ahead.at(time(0)).expect("frame").image, 0);
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn follow_restarts_only_when_asked() {
+        let packets = [packet(0), packet(10)];
+        let mut ahead = Ahead::new(NonZeroUsize::new(4).expect("limit"));
+        let mut lag = Lag::default();
+        let mut pending = packets.as_slice();
+        ahead
+            .follow(&mut lag, &mut pending, time(0), 4, true)
+            .expect("restart");
+        assert_eq!(lag.resets, 1);
+        assert!(ahead.drained());
+        let sent = lag.sent.len();
+        let mut pending = [].as_slice();
+        ahead
+            .follow(&mut lag, &mut pending, time(0), 4, false)
+            .expect("continue");
+        assert_eq!(lag.resets, 1);
+        assert_eq!(lag.sent.len(), sent);
+        let mut pending = packets.as_slice();
+        ahead
+            .follow(&mut lag, &mut pending, time(0), 4, true)
+            .expect("restart again");
+        assert_eq!(lag.resets, 2);
     }
 
     #[test]

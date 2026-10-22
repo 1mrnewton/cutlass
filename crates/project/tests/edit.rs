@@ -2645,3 +2645,454 @@ fn a_free_audio_track_keeps_the_sound_and_a_taken_one_opens_another() -> Result<
     );
     Ok(())
 }
+
+#[test]
+fn freeze_inserts_one_source_tick_and_shifts_the_rest() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let id = place_main(&mut cut, asset, 1_000_000, 30_000)?;
+    let crop = Crop::new(0.1, 0.0, 0.0, 0.25)?;
+    let transform = Transform::new((0.2, -0.1), (1.5, 1.5), 10.0, 0.8, false, true)?;
+    run(&mut cut, Command::SetCrop { segment: id, crop })?;
+    run(
+        &mut cut,
+        Command::SetBlend {
+            segment: id,
+            blend: Blend::Screen,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetTransform {
+            segment: id,
+            transform,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetVisible {
+            segment: id,
+            visible: false,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::AddKeyframe {
+            segment: id,
+            keyframe: Keyframe::new(100_000, KeyframeValue::Opacity(0.2))?,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::AddKeyframe {
+            segment: id,
+            keyframe: Keyframe::new(600_000, KeyframeValue::Opacity(0.4))?,
+        },
+    )?;
+    let later = place_main(&mut cut, asset, 3_000_000, 30_000)?;
+    let (overlay, _) = open_picture(&mut cut, asset, 1_600_000, 3_000)?;
+    let freeze = same_track(run(
+        &mut cut,
+        Command::Freeze {
+            segment: id,
+            at: 1_500_000,
+            hold: 2_000_000,
+        },
+    )?);
+    let scale = cut
+        .project
+        .asset(asset)
+        .ok_or(Error::UnknownAsset(asset))?
+        .duration()
+        .ok_or(Error::ImageSource)?
+        .timescale;
+    let left = cut
+        .project
+        .timeline()
+        .segment(id)
+        .ok_or(Error::UnknownSegment(id))?;
+    assert_eq!(left.timeline().start().value, 1_000_000);
+    assert_eq!(left.timeline().duration().value, 500_000);
+    assert_eq!(left.channels(), Channels::Both);
+    assert!(!left.frozen());
+    assert_eq!(left.keyframes().len(), 1);
+    assert_eq!(left.keyframes()[0].offset().value, 100_000);
+    assert_eq!(
+        left.source(),
+        Some(TimeRange::new(
+            Timestamp::new(0, scale),
+            Timestamp::new(15_000, scale),
+        )?)
+    );
+    let still = cut
+        .project
+        .timeline()
+        .segment(freeze)
+        .ok_or(Error::UnknownSegment(freeze))?;
+    assert!(still.frozen());
+    assert_eq!(still.channels(), Channels::Picture);
+    assert_eq!(still.speed(), Speed::ONE);
+    assert_eq!(still.asset_id(), asset);
+    assert_eq!(still.timeline().start().value, 1_500_000);
+    assert_eq!(still.timeline().duration().value, 2_000_000);
+    assert_eq!(still.volume(), 1.0);
+    assert_eq!(still.fade_in(), 0);
+    assert_eq!(still.fade_out(), 0);
+    assert!(!still.denoise());
+    assert!(still.keep_pitch());
+    assert!(!still.visible());
+    assert_eq!(still.crop(), crop);
+    assert_eq!(still.blend(), Blend::Screen);
+    assert_eq!(still.transform(), transform);
+    assert!(still.keyframes().is_empty());
+    assert_eq!(
+        still.source(),
+        Some(TimeRange::new(
+            Timestamp::new(15_000, scale),
+            Timestamp::new(1, scale),
+        )?)
+    );
+    let right = cut
+        .project
+        .timeline()
+        .main_track()
+        .segments()
+        .iter()
+        .find(|segment| segment.timeline().start().value == 3_500_000)
+        .expect("right piece")
+        .id();
+    let right = cut
+        .project
+        .timeline()
+        .segment(right)
+        .ok_or(Error::UnknownSegment(right))?;
+    assert_eq!(right.channels(), Channels::Both);
+    assert!(!right.frozen());
+    assert_eq!(right.timeline().duration().value, 500_000);
+    assert_eq!(right.keyframes().len(), 1);
+    assert_eq!(right.keyframes()[0].offset().value, 100_000);
+    assert_eq!(
+        right.source(),
+        Some(TimeRange::new(
+            Timestamp::new(15_000, scale),
+            Timestamp::new(15_000, scale),
+        )?)
+    );
+    assert_eq!(start(&cut, later)?, 5_000_000);
+    assert_eq!(start(&cut, overlay)?, 3_600_000);
+    assert_eq!(on_track(&cut, freeze), cut.main);
+    let text = cut.project.to_json()?;
+    assert_eq!(text.matches("\"frozen\": true").count(), 1);
+    let loaded = Project::from_json(&text)?;
+    assert!(
+        loaded
+            .timeline()
+            .segment(freeze)
+            .ok_or(Error::UnknownSegment(freeze))?
+            .frozen()
+    );
+    assert_eq!(
+        loaded
+            .timeline()
+            .segment(freeze)
+            .ok_or(Error::UnknownSegment(freeze))?
+            .timeline()
+            .duration()
+            .value,
+        2_000_000
+    );
+
+    cut.history.undo(&mut cut.project)?;
+    assert!(
+        !cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .frozen()
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .timeline()
+            .duration()
+            .value,
+        1_000_000
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .channels(),
+        Channels::Both
+    );
+    assert!(cut.project.timeline().segment(freeze).is_none());
+    assert_eq!(start(&cut, later)?, 3_000_000);
+    assert_eq!(start(&cut, overlay)?, 1_600_000);
+    assert!(!cut.project.to_json()?.contains("\"frozen\""));
+    cut.history.redo(&mut cut.project)?;
+    assert!(
+        cut.project
+            .timeline()
+            .segment(freeze)
+            .ok_or(Error::UnknownSegment(freeze))?
+            .frozen()
+    );
+    assert_eq!(start(&cut, freeze)?, 1_500_000);
+    let frame = cut
+        .project
+        .timeline()
+        .segment(freeze)
+        .ok_or(Error::UnknownSegment(freeze))?
+        .source()
+        .expect("frame");
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetSpeed {
+                segment: freeze,
+                speed: Speed::new(2, 1)?,
+            },
+        ),
+        Error::Freeze,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::Trim {
+                segment: freeze,
+                source: frame,
+            },
+        ),
+        Error::Freeze,
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(freeze)
+            .ok_or(Error::UnknownSegment(freeze))?
+            .timeline()
+            .duration()
+            .value,
+        2_000_000
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::Split {
+                segment: freeze,
+                at: 1_500_001,
+            },
+        ),
+        Error::SplitOutside,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::Freeze {
+                segment: freeze,
+                at: 2_000_000,
+                hold: 1_000,
+            },
+        ),
+        Error::SplitOutside,
+    );
+    Ok(())
+}
+
+#[test]
+fn magnet_packs_a_freeze_from_zero() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    run(&mut cut, Command::SetMagnet(false))?;
+    let id = place_main(&mut cut, asset, 2_000_000, 30_000)?;
+    run(&mut cut, Command::SetMagnet(true))?;
+    assert_eq!(start(&cut, id)?, 0);
+    let freeze = same_track(run(
+        &mut cut,
+        Command::Freeze {
+            segment: id,
+            at: 400_000,
+            hold: 1_000_000,
+        },
+    )?);
+    assert_eq!(start(&cut, id)?, 0);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .timeline()
+            .duration()
+            .value,
+        400_000
+    );
+    assert_eq!(start(&cut, freeze)?, 400_000);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(freeze)
+            .ok_or(Error::UnknownSegment(freeze))?
+            .timeline()
+            .duration()
+            .value,
+        1_000_000
+    );
+    let right = cut
+        .project
+        .timeline()
+        .main_track()
+        .segments()
+        .iter()
+        .find(|segment| segment.id() != id && segment.id() != freeze)
+        .expect("right piece")
+        .id();
+    assert_eq!(start(&cut, right)?, 1_400_000);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(right)
+            .ok_or(Error::UnknownSegment(right))?
+            .timeline()
+            .duration()
+            .value,
+        600_000
+    );
+    Ok(())
+}
+
+#[test]
+fn a_freeze_needs_a_picture_with_a_source() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let id = place_main(&mut cut, asset, 0, 30_000)?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Freeze {
+                segment: id,
+                at: 0,
+                hold: 1_000_000,
+            },
+        ),
+        Error::SplitOutside,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::Freeze {
+                segment: id,
+                at: 1_000_000,
+                hold: 1_000_000,
+            },
+        ),
+        Error::SplitOutside,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::Freeze {
+                segment: id,
+                at: 500_000,
+                hold: 0,
+            },
+        ),
+        Error::ZeroDuration,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::Freeze {
+                segment: id,
+                at: 500_000,
+                hold: -1,
+            },
+        ),
+        Error::NegativeTime,
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .timeline()
+            .duration()
+            .value,
+        1_000_000
+    );
+    assert_eq!(cut.project.timeline().main_track().segments().len(), 1);
+
+    let (sound, _) = open_sound(&mut cut, asset, 0)?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Freeze {
+                segment: sound,
+                at: 500_000,
+                hold: 1_000,
+            },
+        ),
+        Error::NoPicture,
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(sound)
+            .ok_or(Error::UnknownSegment(sound))?
+            .channels(),
+        Channels::Sound
+    );
+
+    run(&mut cut, Command::SetMagnet(false))?;
+    let image = asset_id(run(
+        &mut cut,
+        Command::AddAsset(Asset::image("file:///still.png", 8, 8)?),
+    )?);
+    let image_segment = {
+        let stored = cut.project.asset(image).ok_or(Error::UnknownAsset(image))?;
+        Segment::image(stored, 5_000_000, 5_000_000)?
+    };
+    let main = cut.main;
+    let image_id = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: image_segment,
+        },
+    )?);
+    expect_err(
+        run(
+            &mut cut,
+            Command::Freeze {
+                segment: image_id,
+                at: 6_000_000,
+                hold: 1_000_000,
+            },
+        ),
+        Error::ImageSource,
+    );
+    assert_eq!(start(&cut, image_id)?, 5_000_000);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(image_id)
+            .ok_or(Error::UnknownSegment(image_id))?
+            .timeline()
+            .duration()
+            .value,
+        5_000_000
+    );
+    let missing = SegmentId::new(99).expect("id");
+    expect_err(
+        run(
+            &mut cut,
+            Command::Freeze {
+                segment: missing,
+                at: 500_000,
+                hold: 1_000,
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
+    Ok(())
+}

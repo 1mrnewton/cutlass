@@ -10,7 +10,7 @@ use crate::command::{Command, Outcome};
 use crate::id::{AssetId, ProjectId, SegmentId, TimelineId, TrackId};
 use crate::segment::{Channels, Segment};
 use crate::settings::{AspectRatio, Canvas, Settings};
-use crate::time::{TimeRange, source_ticks, timeline_duration};
+use crate::time::{Speed, TimeRange, source_ticks, timeline_duration};
 use crate::timeline::Timeline;
 use crate::track::{Band, Track, TrackKind};
 
@@ -220,6 +220,7 @@ impl Project {
                 Ok(Outcome::Unchanged)
             }
             Command::DetachAudio { segment } => self.detach_now(segment),
+            Command::Freeze { segment, at, hold } => self.freeze_now(segment, at, hold),
             Command::SetVisible { segment, visible } => {
                 self.timeline.segment_mut(segment)?.set_visible(visible);
                 Ok(Outcome::Unchanged)
@@ -473,6 +474,10 @@ impl Project {
     }
 
     fn split_now(&mut self, id: SegmentId, at: i64) -> Result<SegmentId, Error> {
+        self.split_at(id, at, true)
+    }
+
+    fn split_at(&mut self, id: SegmentId, at: i64, pack: bool) -> Result<SegmentId, Error> {
         let segment = self.timeline.segment(id).ok_or(Error::UnknownSegment(id))?;
         let fade_in = segment.fade_in();
         let fade_out = segment.fade_out();
@@ -587,10 +592,90 @@ impl Project {
             .set_fades(left_in, left_out)?;
         right.set_fades(right_in, right_out)?;
         self.timeline.track_mut(from)?.insert(right)?;
-        if on_main && self.settings.magnet() {
+        if pack && on_main && self.settings.magnet() {
             self.pack_main()?;
         }
         Ok(right_id)
+    }
+
+    fn freeze_now(&mut self, id: SegmentId, at: i64, hold: i64) -> Result<Outcome, Error> {
+        if hold < 0 {
+            return Err(Error::NegativeTime);
+        }
+        if hold == 0 {
+            return Err(Error::ZeroDuration);
+        }
+        let segment = self.timeline.segment(id).ok_or(Error::UnknownSegment(id))?;
+        if segment.channels() == Channels::Sound {
+            return Err(Error::NoPicture);
+        }
+        if segment.source().is_none() {
+            return Err(Error::ImageSource);
+        }
+        let from = self
+            .timeline
+            .track_of(id)
+            .ok_or(Error::UnknownSegment(id))?;
+        let right_id = self.split_at(id, at, false)?;
+        let on_main = self.timeline.track(from).is_some_and(Track::is_main);
+        let before = if on_main {
+            Some(self.timeline.main_track().ranges())
+        } else {
+            None
+        };
+        let right = self
+            .timeline
+            .segment(right_id)
+            .ok_or(Error::UnknownSegment(right_id))?
+            .clone();
+        let cut = right.timeline().start().value;
+        let source = right.source().ok_or(Error::MediaSource)?;
+        let frame = TimeRange::new(source.start(), Timestamp::new(1, source.start().timescale))?;
+        let asset_id = right.asset_id();
+        let asset = self
+            .asset(asset_id)
+            .ok_or(Error::UnknownAsset(asset_id))?
+            .clone();
+        let (visible, crop, blend, transform) = {
+            let left = self.timeline.segment(id).ok_or(Error::UnknownSegment(id))?;
+            (left.visible(), left.crop(), left.blend(), left.transform())
+        };
+        let mut still = Segment::media(&asset, frame, cut, Channels::Picture, Speed::ONE)?;
+        still.set_visible(visible);
+        still.set_crop(crop)?;
+        still.set_blend(blend)?;
+        still.set_transform(transform);
+        still.hold_frame(hold)?;
+
+        let movers: Vec<(SegmentId, i64)> = self
+            .timeline
+            .track(from)
+            .ok_or(Error::UnknownTrack(from))?
+            .segments()
+            .iter()
+            .filter(|segment| segment.timeline().start().value >= cut)
+            .map(|segment| (segment.id(), segment.timeline().start().value))
+            .collect();
+        for (segment_id, start) in movers {
+            let next = start.checked_add(hold).ok_or(Error::DurationOverflow)?;
+            self.timeline.track_mut(from)?.set_start(segment_id, next)?;
+        }
+        self.timeline.track_mut(from)?.sort_by_start();
+
+        let freeze_id = SegmentId::raw(self.allocate()?);
+        still.assign(freeze_id);
+        self.prepare(&still)?;
+        self.timeline.track_mut(from)?.insert(still)?;
+
+        if on_main && self.settings.magnet() {
+            self.pack_main()?;
+        }
+        if let Some(before) = before.filter(|_| self.settings.linkage()) {
+            let after = self.timeline.main_track().ranges();
+            let deltas = moved_starts(&before, &after)?;
+            self.shift_followers(&before, &deltas)?;
+        }
+        Ok(Outcome::Segment(freeze_id))
     }
 
     fn collides(
@@ -740,6 +825,27 @@ fn magnet_index(segments: &[Segment], start: i64) -> usize {
         .iter()
         .position(|segment| segment.timeline().start().value >= start)
         .unwrap_or(segments.len())
+}
+
+fn moved_starts(
+    before: &[(SegmentId, TimeRange)],
+    after: &[(SegmentId, TimeRange)],
+) -> Result<Vec<(SegmentId, i64)>, Error> {
+    let mut deltas = Vec::new();
+    for (id, range) in before {
+        let Some((_, later)) = after.iter().find(|(later_id, _)| later_id == id) else {
+            continue;
+        };
+        let delta = later
+            .start()
+            .value
+            .checked_sub(range.start().value)
+            .ok_or(Error::DurationOverflow)?;
+        if delta != 0 {
+            deltas.push((*id, delta));
+        }
+    }
+    Ok(deltas)
 }
 
 fn sole_owner(range: TimeRange, mains: &[(SegmentId, TimeRange)]) -> Option<SegmentId> {

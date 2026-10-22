@@ -98,6 +98,15 @@ pub enum Command {
     DetachAudio {
         segment: SegmentId,
     },
+    /// Splits the segment at `at` and inserts a still of one source tick.
+    ///
+    /// `at` is a sequence time strictly inside the segment. `hold` is how long
+    /// the still sits, in microseconds.
+    Freeze {
+        segment: SegmentId,
+        at: i64,
+        hold: i64,
+    },
     /// Shown when on. It does not move the segment.
     SetVisible {
         segment: SegmentId,

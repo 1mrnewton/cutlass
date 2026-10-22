@@ -282,6 +282,7 @@ pub struct Segment {
     keep_pitch: bool,
     crop: Crop,
     blend: Blend,
+    frozen: bool,
     transform: Transform,
     keyframes: Vec<Keyframe>,
 }
@@ -344,6 +345,7 @@ impl Segment {
             keep_pitch: true,
             crop: Crop::WHOLE,
             blend: Blend::Normal,
+            frozen: false,
             transform: Transform::IDENTITY,
             keyframes: Vec::new(),
         }
@@ -366,6 +368,9 @@ impl Segment {
     }
 
     pub(crate) fn trim_source(&mut self, asset: &Asset, source: TimeRange) -> Result<(), Error> {
+        if self.frozen {
+            return Err(Error::Freeze);
+        }
         check_media(asset, source, self.channels)?;
         let duration = timeline_duration(source.duration(), self.speed)?;
         self.finish_duration(duration)?;
@@ -374,6 +379,9 @@ impl Segment {
     }
 
     pub(crate) fn change_speed(&mut self, speed: Speed) -> Result<(), Error> {
+        if self.frozen {
+            return Err(Error::Freeze);
+        }
         let source = self.source.ok_or(Error::ImageSource)?;
         let duration = timeline_duration(source.duration(), speed)?;
         self.finish_duration(duration)?;
@@ -408,7 +416,7 @@ impl Segment {
     /// A copy with no id, starting at `start` microseconds on the sequence.
     ///
     /// The source, channels, speed, visible flag, volume, fades, denoise,
-    /// keep pitch, crop, blend, transform, and keyframes stay. Place assigns the id.
+    /// keep pitch, crop, blend, freeze, transform, and keyframes stay. Place assigns the id.
     /// A negative start is refused, and so is a start that would overflow the
     /// sequence clock.
     pub fn duplicate(&self, start: i64) -> Result<Self, Error> {
@@ -513,6 +521,22 @@ impl Segment {
             return Err(Error::NoPicture);
         }
         self.blend = blend;
+        Ok(())
+    }
+
+    /// Holds one source tick for `duration_us` microseconds.
+    ///
+    /// The segment must already be picture, at speed 1/1, with a one-tick source.
+    pub(crate) fn hold_frame(&mut self, duration_us: i64) -> Result<(), Error> {
+        if self.channels != Channels::Picture {
+            return Err(Error::NoPicture);
+        }
+        let source = self.source.ok_or(Error::MediaSource)?;
+        if source.duration().value != 1 || self.speed != Speed::ONE {
+            return Err(Error::Freeze);
+        }
+        self.finish_duration(Timestamp::new(duration_us, SEQUENCE_TIMESCALE))?;
+        self.frozen = true;
         Ok(())
     }
 
@@ -667,6 +691,11 @@ impl Segment {
 
     pub const fn blend(&self) -> Blend {
         self.blend
+    }
+
+    /// True when this segment holds one source tick for its timeline duration.
+    pub const fn frozen(&self) -> bool {
+        self.frozen
     }
 
     pub const fn transform(&self) -> Transform {
@@ -1189,9 +1218,55 @@ mod tests {
         assert!(!copy.keep_pitch());
         assert_eq!(copy.crop(), crop);
         assert_eq!(copy.blend(), Blend::Multiply);
+        assert!(!copy.frozen());
         assert_eq!(copy.transform(), transform);
         assert_eq!(copy.keyframes(), segment.keyframes());
         assert_eq!(copy.asset_id(), segment.asset_id());
+    }
+
+    #[test]
+    fn a_freeze_holds_one_tick_for_the_named_duration() {
+        let asset = video(true, 15_360);
+        let mut segment =
+            Segment::media(&asset, source(100, 1), 0, Channels::Picture, Speed::ONE).unwrap();
+        assert_eq!(segment.hold_frame(0).unwrap_err(), Error::ZeroDuration);
+        assert!(!segment.frozen());
+        segment.hold_frame(3_000_000).unwrap();
+        assert!(segment.frozen());
+        assert_eq!(segment.timeline().duration().value, 3_000_000);
+        assert_eq!(segment.source().expect("source").duration().value, 1);
+        assert_eq!(
+            segment.change_speed(Speed::new(2, 1).unwrap()).unwrap_err(),
+            Error::Freeze
+        );
+        assert_eq!(segment.timeline().duration().value, 3_000_000);
+        assert_eq!(
+            segment.trim_source(&asset, source(0, 1)).unwrap_err(),
+            Error::Freeze
+        );
+        assert_eq!(segment.source().expect("source").start().value, 100);
+        let copy = segment.duplicate(10).unwrap();
+        assert!(copy.frozen());
+        assert_eq!(copy.timeline().duration().value, 3_000_000);
+        assert_eq!(copy.source(), segment.source());
+
+        let mut long =
+            Segment::media(&asset, source(0, 15_360), 0, Channels::Picture, Speed::ONE).unwrap();
+        assert_eq!(long.hold_frame(1_000).unwrap_err(), Error::Freeze);
+        let mut both = one_second();
+        assert_eq!(both.hold_frame(1_000).unwrap_err(), Error::NoPicture);
+        let mut fast = Segment::media(
+            &asset,
+            source(0, 1),
+            0,
+            Channels::Picture,
+            Speed::new(2, 1).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fast.hold_frame(1_000).unwrap_err(), Error::Freeze);
+        let mut sound =
+            Segment::media(&asset, source(0, 1), 0, Channels::Sound, Speed::ONE).unwrap();
+        assert_eq!(sound.hold_frame(1_000).unwrap_err(), Error::NoPicture);
     }
 
     #[test]

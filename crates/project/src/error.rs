@@ -73,6 +73,8 @@ pub enum Error {
     NoPicture,
     #[error("the crop leaves no picture")]
     Crop,
+    #[error("a freeze holds one frame")]
+    Freeze,
     #[error("value is not finite")]
     NonFinite,
     #[error("scale must be positive")]

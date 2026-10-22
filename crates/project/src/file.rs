@@ -313,6 +313,7 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
         keep_pitch: segment.keep_pitch(),
         crop: crop_doc(segment.crop()),
         blend: blend_name(segment.blend()),
+        frozen: segment.frozen(),
         transform: transform_doc(segment.transform()),
         keyframes: segment.keyframes().iter().copied().map(key_doc).collect(),
     }
@@ -328,7 +329,12 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
     let speed = Speed::new(document.speed.numerator, document.speed.denominator)?;
     let channels = channels_from(document.channels);
     let mut segment = match asset.kind() {
-        AssetKind::Image { .. } => image_segment(asset, document, speed, channels)?,
+        AssetKind::Image { .. } => {
+            if document.frozen {
+                return Err(Error::ImageSource);
+            }
+            image_segment(asset, document, speed, channels)?
+        }
         AssetKind::Video { .. } | AssetKind::Audio => {
             media_segment(asset, document, speed, channels)?
         }
@@ -377,7 +383,11 @@ fn media_segment(
         Timestamp::new(source.start, scale(source.timescale)?),
         Timestamp::new(source.duration, scale(source.timescale)?),
     )?;
-    let segment = Segment::media(asset, range, document.timeline.start, channels, speed)?;
+    let mut segment = Segment::media(asset, range, document.timeline.start, channels, speed)?;
+    if document.frozen {
+        segment.hold_frame(document.timeline.duration)?;
+        return Ok(segment);
+    }
     let expected = segment.timeline().duration().value;
     if document.timeline.duration != expected {
         return Err(Error::TimelineDuration {
@@ -769,6 +779,8 @@ struct SegmentDoc {
     crop: CropDoc,
     #[serde(default, skip_serializing_if = "blend_is_normal")]
     blend: BlendName,
+    #[serde(default, skip_serializing_if = "is_false")]
+    frozen: bool,
     transform: TransformDoc,
     keyframes: Vec<KeyDoc>,
 }
@@ -1493,6 +1505,56 @@ mod tests {
             }),
             Error::ImageSource,
         );
+    }
+
+    #[test]
+    fn a_freeze_is_one_picture_tick() {
+        let (_project, value) = cut_value();
+        refuse(
+            &edit(&value, |value| {
+                let segment = &mut value["timeline"]["tracks"][1]["segments"][0];
+                segment["channels"] = json!("picture");
+                segment["frozen"] = json!(true);
+            }),
+            Error::Freeze,
+        );
+        refuse(
+            &edit(&value, |value| {
+                value["timeline"]["tracks"][2]["segments"][0]["frozen"] = json!(true);
+            }),
+            Error::ImageSource,
+        );
+        refuse(
+            &edit(&value, |value| {
+                let segment = &mut value["timeline"]["tracks"][1]["segments"][0];
+                segment["channels"] = json!("picture");
+                segment["frozen"] = json!(true);
+                segment["source"]["duration"] = json!(1);
+                segment["timeline"]["duration"] = json!(3_000_000);
+                segment["speed"]["numerator"] = json!(2);
+            }),
+            Error::Freeze,
+        );
+        let text = edit(&value, |value| {
+            let segment = &mut value["timeline"]["tracks"][1]["segments"][0];
+            segment["channels"] = json!("picture");
+            segment["frozen"] = json!(true);
+            segment["source"]["duration"] = json!(1);
+            segment["speed"]["numerator"] = json!(1);
+            segment["timeline"]["duration"] = json!(3_000_000);
+        });
+        let loaded = Project::from_json(&text).expect("freeze");
+        let segment = &loaded.timeline().main_track().segments()[0];
+        assert!(segment.frozen());
+        assert_eq!(segment.channels(), Channels::Picture);
+        assert_eq!(segment.timeline().duration().value, 3_000_000);
+        assert_eq!(segment.source().expect("source").duration().value, 1);
+        assert_eq!(segment.speed(), Speed::ONE);
+        let saved = loaded.to_json().expect("save");
+        assert!(saved.contains("\"frozen\": true"));
+        let again = Project::from_json(&saved).expect("reload");
+        assert!(again.timeline().main_track().segments()[0].frozen());
+        assert!(!again.to_json().expect("save").contains("\"frozen\": false"));
     }
 
     fn cut_value() -> (Project, Value) {

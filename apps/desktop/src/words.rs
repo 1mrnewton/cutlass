@@ -80,6 +80,7 @@ pub(crate) enum Phrase {
     Adjustments,
     Templates,
     OnTimeline,
+    AddToTimeline,
     Empty,
     Details,
     Name,
@@ -245,6 +246,7 @@ impl Phrase {
         Self::Adjustments,
         Self::Templates,
         Self::OnTimeline,
+        Self::AddToTimeline,
         Self::Empty,
         Self::Details,
         Self::Name,
@@ -409,6 +411,7 @@ const ENGLISH: &[&str] = &[
     "Adjustments",
     "Templates",
     "On timeline",
+    "Add to timeline",
     "Empty",
     "Details",
     "Name",
@@ -572,6 +575,7 @@ const FRENCH: &[&str] = &[
     "Réglages",
     "Modèles",
     "Au montage",
+    "Ajouter au montage",
     "Vide",
     "Détails",
     "Nom",
@@ -805,6 +809,14 @@ mod tests {
         );
         assert_eq!(say(Language::English, Phrase::FreeStock), "Free stock");
         assert_eq!(say(Language::French, Phrase::FreeStock), "Stock libre");
+        assert_eq!(
+            say(Language::English, Phrase::AddToTimeline),
+            "Add to timeline"
+        );
+        assert_eq!(
+            say(Language::French, Phrase::AddToTimeline),
+            "Ajouter au montage"
+        );
         assert_eq!(say(Language::English, Phrase::Basic), "Basic");
         assert_eq!(say(Language::French, Phrase::Basic), "Basique");
         assert_eq!(say(Language::English, Phrase::Opacity), "Opacity");

@@ -569,22 +569,37 @@ impl eframe::App for CutlassApp {
             });
 
         let mut import = false;
+        let mut placed = Vec::new();
         egui::Panel::left("library")
             .resizable(false)
             .exact_size(self.panes.library())
             .frame(theme::gap_right())
             .show_separator_line(false)
             .show(ui, |ui| {
-                import = library::show(
+                let action = library::show(
                     ui,
                     &self.project,
                     &mut self.shelf,
                     &mut self.media,
                     &mut self.bin,
                 );
+                import = action.import;
+                placed = action.commands;
             });
         if import && !self.blocked() {
             self.import_chosen(ui);
+        }
+        if !placed.is_empty() && !self.blocked() {
+            match self.history.apply(&mut self.project, &placed) {
+                Ok(outcomes) => {
+                    if let Some(id) = timeline::placed_segment(&outcomes) {
+                        self.selected_segments = vec![id];
+                    }
+                }
+                Err(error) => {
+                    timeline::show_note(ui, timeline::apply_note(&error, words::active(ui)));
+                }
+            }
         }
         if let Some(id) = library::take_relink(ui.ctx())
             && !self.blocked()

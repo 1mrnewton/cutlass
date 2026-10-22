@@ -5,7 +5,11 @@ use eframe::egui::{
     vec2,
 };
 
-use cutlass_project::{Asset, AssetId, AssetKind, Project};
+use cutlass_core::Timestamp;
+use cutlass_project::{
+    Asset, AssetId, AssetKind, Channels, Command, Error, Project, Segment, Speed, TimeRange,
+    TrackId, TrackKind,
+};
 
 use crate::icons::{self, Icon};
 use crate::media_bin::{Bin, CardId, FileInfo, Sort};
@@ -83,13 +87,19 @@ pub enum MediaSource {
     Stock,
 }
 
+/// Import opens the picker. Commands place a library clip.
+pub struct ShelfAction {
+    pub import: bool,
+    pub commands: Vec<Command>,
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     project: &Project,
     shelf: &mut Shelf,
     source: &mut MediaSource,
     bin: &mut Bin,
-) -> bool {
+) -> ShelfAction {
     crate::tip::region(ui, words::of(ui, Phrase::RegionLibrary));
     let full = ui.max_rect();
     ui.allocate_rect(full, Sense::hover());
@@ -98,12 +108,9 @@ pub fn show(
     ui.painter().rect_filled(hairline, 0.0, theme::GAP);
     paint_rail(ui, rail, shelf);
     let assets = Rect::from_min_max(hairline.right_top(), full.max).shrink(12.0);
-    match *shelf {
+    let (import, commands) = match *shelf {
         Shelf::Media => paint_media(ui, assets, project, bin, source),
-        Shelf::Audio => {
-            paint_audio(ui, assets, project, bin);
-            false
-        }
+        Shelf::Audio => (false, paint_audio(ui, assets, project, bin)),
         Shelf::Text
         | Shelf::Stickers
         | Shelf::Effects
@@ -112,9 +119,10 @@ pub fn show(
         | Shelf::Adjustments
         | Shelf::Templates => {
             paint_empty(ui, assets);
-            false
+            (false, Vec::new())
         }
-    }
+    };
+    ShelfAction { import, commands }
 }
 
 fn paint_rail(ui: &mut egui::Ui, rect: Rect, shelf: &mut Shelf) {
@@ -153,19 +161,19 @@ fn paint_media(
     project: &Project,
     bin: &mut Bin,
     source: &mut MediaSource,
-) -> bool {
+) -> (bool, Vec<Command>) {
     let switch = Rect::from_min_size(rect.min, vec2(rect.width(), f32::min(32.0, rect.height())));
     paint_source(ui, switch, source);
     let top = switch.bottom() + 8.0;
     if top >= rect.bottom() {
-        return false;
+        return (false, Vec::new());
     }
     let rest = Rect::from_min_max(pos2(rect.left(), top), rect.max);
     match *source {
         MediaSource::Project => paint_bin(ui, rest, project, bin),
         MediaSource::Stock => {
             paint_empty(ui, rest);
-            false
+            (false, Vec::new())
         }
     }
 }
@@ -226,7 +234,12 @@ fn source_button(
     response
 }
 
-fn paint_bin(ui: &mut egui::Ui, rect: Rect, project: &Project, bin: &mut Bin) -> bool {
+fn paint_bin(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    project: &Project,
+    bin: &mut Bin,
+) -> (bool, Vec<Command>) {
     let row = f32::min(32.0, rect.height());
     let label = words::of(ui, Phrase::Import);
     let width = words::control_width(
@@ -246,12 +259,14 @@ fn paint_bin(ui: &mut egui::Ui, rect: Rect, project: &Project, bin: &mut Bin) ->
     }
     let clicked = import_button(ui, button, label);
     let top = path.bottom() + 8.0;
-    if top < rect.bottom() {
+    let commands = if top < rect.bottom() {
         let grid = Rect::from_min_max(pos2(rect.left(), top), rect.max);
-        paint_grid(ui, grid, project, bin);
-    }
+        paint_grid(ui, grid, project, bin)
+    } else {
+        Vec::new()
+    };
     paint_ghost(ui, project);
-    clicked
+    (clicked, commands)
 }
 
 fn import_button(ui: &mut egui::Ui, rect: Rect, label: &str) -> bool {
@@ -324,24 +339,24 @@ fn path_crumb(
     }
 }
 
-fn paint_audio(ui: &mut egui::Ui, rect: Rect, project: &Project, bin: &mut Bin) {
+fn paint_audio(ui: &mut egui::Ui, rect: Rect, project: &Project, bin: &mut Bin) -> Vec<Command> {
     let order = {
         let infos = audio_infos(project);
         bin.flat(&infos)
     };
-    paint_cards(ui, rect, project, bin, &order, "library-audio", false);
+    paint_cards(ui, rect, project, bin, &order, "library-audio", false)
 }
 
 fn paint_empty(ui: &mut egui::Ui, rect: Rect) {
     paint_empty_word(ui, rect);
 }
 
-fn paint_grid(ui: &mut egui::Ui, rect: Rect, project: &Project, bin: &mut Bin) {
+fn paint_grid(ui: &mut egui::Ui, rect: Rect, project: &Project, bin: &mut Bin) -> Vec<Command> {
     let order = {
         let infos = file_infos(project);
         bin.visible(&infos)
     };
-    paint_cards(ui, rect, project, bin, &order, "library-cards", true);
+    paint_cards(ui, rect, project, bin, &order, "library-cards", true)
 }
 
 fn paint_cards(
@@ -352,7 +367,8 @@ fn paint_cards(
     order: &[CardId],
     salt: &'static str,
     media: bool,
-) {
+) -> Vec<Command> {
+    let mut commands = Vec::new();
     let mut column = ui.new_child(UiBuilder::new().max_rect(rect));
     ScrollArea::vertical()
         .id_salt(salt)
@@ -375,9 +391,12 @@ fn paint_cards(
                         handle_folder(ui, bin, order, card, folder, &mut picked);
                     }
                     CardId::File(asset) => {
-                        let response =
+                        let (response, command, plus_hot) =
                             handle_file(ui, project, bin, order, card, asset, &mut picked);
-                        if media {
+                        if let Some(command) = command {
+                            commands.push(command);
+                        }
+                        if media && !plus_hot {
                             let modifiers = ui.input(|input| input.modifiers);
                             if !modifiers.shift && !modifiers.command && !modifiers.ctrl {
                                 response.dnd_set_drag_payload(asset);
@@ -395,6 +414,7 @@ fn paint_cards(
             }
             background.context_menu(|ui| empty_menu(ui, bin, media));
         });
+    commands
 }
 
 fn paint_empty_word(ui: &mut egui::Ui, rect: Rect) {
@@ -535,19 +555,29 @@ fn handle_file(
     rect: Rect,
     asset_id: AssetId,
     picked: &mut bool,
-) -> egui::Response {
+) -> (egui::Response, Option<Command>, bool) {
     let Some(asset) = project.asset(asset_id) else {
-        return ui.interact(
-            rect,
-            ui.scope_id().with(CardId::File(asset_id)),
-            Sense::hover(),
+        return (
+            ui.interact(
+                rect,
+                ui.scope_id().with(CardId::File(asset_id)),
+                Sense::hover(),
+            ),
+            None,
+            false,
         );
     };
     let name = file_name(asset.source()).to_owned();
     let placed = on_timeline(project, asset_id);
     let id = CardId::File(asset_id);
     let response = ui.interact(rect, ui.scope_id().with(id), Sense::click_and_drag());
-    if response.clicked() {
+    let plus = offer_plus(ui, project, rect, asset, asset_id);
+    let plus_clicked = plus.response.as_ref().is_some_and(|plus| plus.clicked());
+    let plus_hot = plus.response.as_ref().is_some_and(|plus| plus.hovered());
+    if plus_clicked {
+        *picked = true;
+    }
+    if response.clicked() && !plus_clicked {
         *picked = true;
         let modifiers = ui.input(|input| input.modifiers);
         bin.choose(
@@ -573,7 +603,79 @@ fn handle_file(
     if bin.is_selected(id) {
         selected_edge(ui, rect);
     }
-    response
+    if let Some(plus) = plus.response {
+        paint_plus(ui, plus.rect);
+        crate::tip::show(&plus, words::of(ui, Phrase::AddToTimeline));
+    }
+    (response, plus.command, plus_hot)
+}
+
+struct PlusHit {
+    response: Option<egui::Response>,
+    command: Option<Command>,
+}
+
+fn offer_plus(
+    ui: &mut egui::Ui,
+    project: &Project,
+    rect: Rect,
+    asset: &Asset,
+    asset_id: AssetId,
+) -> PlusHit {
+    if !pointer_inside(ui, rect) || dragging(ui) || !can_place(asset) {
+        return PlusHit {
+            response: None,
+            command: None,
+        };
+    }
+    let response = ui.interact(
+        plus_rect(rect),
+        ui.scope_id().with(("card-plus", asset_id)),
+        Sense::click(),
+    );
+    let command = if response.clicked() {
+        place_at_end(project, asset_id).ok()
+    } else {
+        None
+    };
+    PlusHit {
+        response: Some(response),
+        command,
+    }
+}
+
+fn pointer_inside(ui: &egui::Ui, rect: Rect) -> bool {
+    ui.input(|input| input.pointer.hover_pos())
+        .is_some_and(|pos| rect.contains(pos))
+}
+
+fn dragging(ui: &egui::Ui) -> bool {
+    ui.ctx().dragged_id().is_some()
+}
+
+fn can_place(asset: &Asset) -> bool {
+    asset.duration().is_some() && matches!(asset.kind(), AssetKind::Video { .. } | AssetKind::Audio)
+}
+
+const PLUS: f32 = 22.0;
+
+fn plus_rect(card: Rect) -> Rect {
+    Rect::from_min_size(
+        pos2(card.right() - 8.0 - PLUS, card.top() + 8.0),
+        vec2(PLUS, PLUS),
+    )
+}
+
+fn paint_plus(ui: &egui::Ui, rect: Rect) {
+    ui.painter()
+        .rect_filled(rect, PLUS / 2.0, Color32::from_black_alpha(170));
+    icons::paint(
+        ui.painter(),
+        rect.center(),
+        Icon::Plus,
+        14.0,
+        Color32::WHITE,
+    );
 }
 
 fn rename_field(ui: &mut egui::Ui, bin: &mut Bin, id: u64, rect: Rect) {
@@ -885,13 +987,66 @@ fn on_timeline(project: &Project, id: AssetId) -> bool {
     })
 }
 
+/// One clip covering the whole asset, starting after the last clip on its lane.
+fn place_at_end(project: &Project, id: AssetId) -> Result<Command, Error> {
+    let Some(asset) = project.asset(id) else {
+        return Err(Error::UnknownAsset(id));
+    };
+    let channels = match asset.kind() {
+        AssetKind::Video {
+            has_audio: true, ..
+        } => Channels::Both,
+        AssetKind::Video { .. } => Channels::Picture,
+        AssetKind::Audio => Channels::Sound,
+        AssetKind::Image { .. } => return Err(Error::ImageSource),
+    };
+    let Some(duration) = asset.duration() else {
+        return Err(Error::ZeroDuration);
+    };
+    let source = TimeRange::new(Timestamp::new(0, duration.timescale), duration)?;
+    let track = match channels {
+        Channels::Picture | Channels::Both => Some(project.timeline().main_track().id()),
+        Channels::Sound => sound_track(project),
+    };
+    let start = track.map(|id| lane_end(project, id)).unwrap_or(0);
+    let segment = Segment::media(asset, source, start, channels, Speed::ONE)?;
+    Ok(Command::Place { track, segment })
+}
+
+fn sound_track(project: &Project) -> Option<TrackId> {
+    project
+        .timeline()
+        .tracks()
+        .iter()
+        .find(|track| track.kind() == TrackKind::Audio)
+        .map(|track| track.id())
+}
+
+fn lane_end(project: &Project, id: TrackId) -> i64 {
+    project
+        .timeline()
+        .tracks()
+        .iter()
+        .find(|track| track.id() == id)
+        .and_then(|track| {
+            track
+                .segments()
+                .iter()
+                .map(|segment| segment.timeline().end().value)
+                .max()
+        })
+        .unwrap_or(0)
+        .max(0)
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
 
     use cutlass_core::Timestamp;
     use cutlass_project::{
-        Asset, Channels, Command, History, Outcome, Project, ProjectId, Segment, Speed, TimeRange,
+        Asset, Channels, Command, Error, History, Outcome, Project, ProjectId, Segment, Speed,
+        TimeRange, TrackKind,
     };
     use eframe::egui::pos2;
 
@@ -901,6 +1056,21 @@ mod tests {
 
     fn project() -> Project {
         Project::new(ProjectId::from_bytes([1; 16]), "Untitled")
+    }
+
+    fn node_center(tree: &eframe::egui::accesskit::TreeUpdate, label: &str) -> eframe::egui::Pos2 {
+        let (_, node) = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some(label))
+            .unwrap_or_else(|| panic!("missing {label}"));
+        let bounds = node
+            .bounds()
+            .unwrap_or_else(|| panic!("{label} has no bounds"));
+        eframe::egui::pos2(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        )
     }
 
     #[test]
@@ -993,6 +1163,241 @@ mod tests {
             swatch(cut.asset(unused).expect("audio").kind()),
             theme::AUDIO
         );
+    }
+
+    #[test]
+    fn the_plus_places_a_clip_at_the_end_of_its_lane() {
+        let mut history = History::new();
+        let mut cut = project();
+        let video = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let quiet = Asset::video(
+            "file:///cuts/quiet.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            false,
+        )
+        .expect("quiet");
+        let sound = Asset::audio(
+            "file:///cuts/a.wav",
+            Timestamp::new(48_000, NonZeroU32::new(48_000).expect("scale")),
+        )
+        .expect("audio");
+        let still = Asset::image("file:///cuts/still.png", 320, 180).expect("image");
+        let (video_id, quiet_id, audio_id, image_id) = match history
+            .apply(
+                &mut cut,
+                &[
+                    Command::AddAsset(video),
+                    Command::AddAsset(quiet),
+                    Command::AddAsset(sound),
+                    Command::AddAsset(still),
+                ],
+            )
+            .expect("add")
+            .as_slice()
+        {
+            [
+                Outcome::Asset(video),
+                Outcome::Asset(quiet),
+                Outcome::Asset(audio),
+                Outcome::Asset(image),
+            ] => (*video, *quiet, *audio, *image),
+            other => panic!("expected four assets, got {other:?}"),
+        };
+        let main = cut.timeline().main_track().id();
+        let first = super::place_at_end(&cut, video_id).expect("first");
+        match &first {
+            Command::Place {
+                track: Some(id),
+                segment,
+            } => {
+                assert_eq!(*id, main);
+                assert_eq!(segment.channels(), Channels::Both);
+                assert_eq!(segment.asset_id(), Some(video_id));
+                assert_eq!(segment.timeline().start().value, 0);
+                let source = segment.source().expect("source");
+                assert_eq!(source.start().value, 0);
+                assert_eq!(source.duration().value, 30_000);
+            }
+            other => panic!("expected the main track, got {other:?}"),
+        }
+        history.apply(&mut cut, &[first]).expect("place");
+        let again = super::place_at_end(&cut, video_id).expect("again");
+        match &again {
+            Command::Place { segment, .. } => {
+                assert_eq!(segment.timeline().start().value, 1_000_000);
+            }
+            other => panic!("expected a second place, got {other:?}"),
+        }
+        history.apply(&mut cut, &[again]).expect("second");
+        assert_eq!(cut.timeline().main_track().segments().len(), 2);
+        let quiet_place = super::place_at_end(&cut, quiet_id).expect("quiet");
+        match &quiet_place {
+            Command::Place {
+                track: Some(id),
+                segment,
+            } => {
+                assert_eq!(*id, main);
+                assert_eq!(segment.channels(), Channels::Picture);
+                assert_eq!(segment.timeline().start().value, 2_000_000);
+            }
+            other => panic!("expected a silent picture, got {other:?}"),
+        }
+        history
+            .apply(
+                &mut cut,
+                &[Command::SetLocked {
+                    track: main,
+                    on: true,
+                }],
+            )
+            .expect("lock");
+        let blocked = super::place_at_end(&cut, video_id).expect("locked command");
+        assert!(matches!(
+            history.apply(&mut cut, &[blocked]),
+            Err(Error::Locked)
+        ));
+        assert_eq!(cut.timeline().main_track().segments().len(), 2);
+        let opening = super::place_at_end(&cut, audio_id).expect("open audio");
+        match &opening {
+            Command::Place {
+                track: None,
+                segment,
+            } => {
+                assert_eq!(segment.channels(), Channels::Sound);
+                assert_eq!(segment.timeline().start().value, 0);
+            }
+            other => panic!("expected a new audio lane, got {other:?}"),
+        }
+        history.apply(&mut cut, &[opening]).expect("open");
+        let appended = super::place_at_end(&cut, audio_id).expect("append");
+        match &appended {
+            Command::Place {
+                track: Some(id),
+                segment,
+            } => {
+                assert_eq!(segment.timeline().start().value, 1_000_000);
+                assert_eq!(segment.channels(), Channels::Sound);
+                let lane = cut
+                    .timeline()
+                    .tracks()
+                    .iter()
+                    .find(|track| track.id() == *id)
+                    .expect("audio lane");
+                assert_eq!(lane.kind(), TrackKind::Audio);
+            }
+            other => panic!("expected the audio lane, got {other:?}"),
+        }
+        assert!(matches!(
+            super::place_at_end(&cut, image_id),
+            Err(Error::ImageSource)
+        ));
+    }
+
+    #[test]
+    fn hovering_a_card_shows_a_plus_that_places_it() {
+        let mut history = History::new();
+        let mut cut = project();
+        let video = Asset::video(
+            "file:///cuts/v.mp4",
+            Timestamp::new(30_000, NonZeroU32::new(30_000).expect("scale")),
+            320,
+            180,
+            true,
+        )
+        .expect("video");
+        let still = Asset::image("file:///cuts/still.png", 320, 180).expect("image");
+        let (video_id, image_id) = match history
+            .apply(
+                &mut cut,
+                &[Command::AddAsset(video), Command::AddAsset(still)],
+            )
+            .expect("add")
+            .as_slice()
+        {
+            [Outcome::Asset(video), Outcome::Asset(image)] => (*video, *image),
+            other => panic!("expected two assets, got {other:?}"),
+        };
+        let ctx = eframe::egui::Context::default();
+        ctx.enable_accesskit();
+        crate::words::install(&ctx, crate::words::Language::English);
+        let mut bin = crate::media_bin::Bin::new();
+        let mut shelf = super::Shelf::Media;
+        let mut source = super::MediaSource::Project;
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(400.0, 500.0),
+        );
+        let commands = {
+            let mut time = 0.0;
+            let mut pass = |events: Vec<eframe::egui::Event>| {
+                time += 0.05;
+                let mut frame = Vec::new();
+                let mut output = ctx.run_ui(
+                    eframe::egui::RawInput {
+                        screen_rect: Some(screen),
+                        time: Some(time),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let action = super::show(ui, &cut, &mut shelf, &mut source, &mut bin);
+                        frame = action.commands;
+                    },
+                );
+                let tree = output.platform_output.accesskit_update.take();
+                output.textures_delta.clear();
+                (tree, frame)
+            };
+            let (tree, _) = pass(vec![]);
+            let tree = tree.expect("the tree is built");
+            let still_at = node_center(&tree, "still.png");
+            let video_at = node_center(&tree, "v.mp4");
+            let (over_still, _) = pass(vec![eframe::egui::Event::PointerMoved(still_at)]);
+            let over_still = over_still.expect("still");
+            assert!(
+                over_still
+                    .nodes
+                    .iter()
+                    .all(|(_, node)| node.label() != Some("Add to timeline"))
+            );
+            let (over_video, _) = pass(vec![eframe::egui::Event::PointerMoved(video_at)]);
+            let over_video = over_video.expect("video");
+            let plus_at = node_center(&over_video, "Add to timeline");
+            pass(vec![
+                eframe::egui::Event::PointerMoved(plus_at),
+                eframe::egui::Event::PointerButton {
+                    pos: plus_at,
+                    button: eframe::egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: eframe::egui::Modifiers::default(),
+                },
+            ]);
+            let (_, commands) = pass(vec![eframe::egui::Event::PointerButton {
+                pos: plus_at,
+                button: eframe::egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: eframe::egui::Modifiers::default(),
+            }]);
+            let expected = super::place_at_end(&cut, video_id).expect("place");
+            assert_eq!(commands, vec![expected]);
+            commands
+        };
+        assert!(!bin.is_selected(crate::media_bin::CardId::File(video_id)));
+        assert!(!bin.is_selected(crate::media_bin::CardId::File(image_id)));
+        history
+            .apply(&mut cut, &commands)
+            .expect("the plus places the clip");
+        assert!(on_timeline(&cut, video_id));
+        assert!(!on_timeline(&cut, image_id));
     }
 
     #[test]

@@ -265,12 +265,15 @@ impl Keyframe {
     }
 }
 
-/// What a segment points at. Exactly one of a file, words, or a sticker name.
+/// What a segment points at. Exactly one of a file, words, a sticker name, or a grade.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Content {
     Media(AssetId),
     Text(String),
     Sticker(String),
+    Effect,
+    Filter,
+    Adjust,
 }
 
 /// One use of an asset, a title, or a sticker.
@@ -364,6 +367,41 @@ impl Segment {
         }
         Ok(Self::new(
             Content::Sticker(name),
+            None,
+            TimeRange::sequence(timeline_start_us, timeline_duration_us)?,
+            Channels::Picture,
+            Speed::ONE,
+        ))
+    }
+
+    /// An effect on the sequence. The duration is named, in microseconds.
+    ///
+    /// There is no file and no name. Speed is `1/1` and the channels are picture.
+    pub fn effect(timeline_start_us: i64, timeline_duration_us: i64) -> Result<Self, Error> {
+        Self::plain(Content::Effect, timeline_start_us, timeline_duration_us)
+    }
+
+    /// A filter on the sequence. The duration is named, in microseconds.
+    ///
+    /// There is no file and no name. Speed is `1/1` and the channels are picture.
+    pub fn filter(timeline_start_us: i64, timeline_duration_us: i64) -> Result<Self, Error> {
+        Self::plain(Content::Filter, timeline_start_us, timeline_duration_us)
+    }
+
+    /// An adjustment on the sequence. The duration is named, in microseconds.
+    ///
+    /// There is no file and no name. Speed is `1/1` and the channels are picture.
+    pub fn adjust(timeline_start_us: i64, timeline_duration_us: i64) -> Result<Self, Error> {
+        Self::plain(Content::Adjust, timeline_start_us, timeline_duration_us)
+    }
+
+    fn plain(
+        content: Content,
+        timeline_start_us: i64,
+        timeline_duration_us: i64,
+    ) -> Result<Self, Error> {
+        Ok(Self::new(
+            content,
             None,
             TimeRange::sequence(timeline_start_us, timeline_duration_us)?,
             Channels::Picture,
@@ -720,10 +758,13 @@ impl Segment {
         Ok(())
     }
 
-    fn refuse_no_file(&self) -> Result<(), Error> {
+    pub(crate) fn refuse_no_file(&self) -> Result<(), Error> {
         match &self.content {
             Content::Text(_) => Err(Error::Text),
             Content::Sticker(_) => Err(Error::Sticker),
+            Content::Effect => Err(Error::Effect),
+            Content::Filter => Err(Error::Filter),
+            Content::Adjust => Err(Error::Adjust),
             Content::Media(_) => Ok(()),
         }
     }
@@ -735,7 +776,11 @@ impl Segment {
     pub const fn asset_id(&self) -> Option<AssetId> {
         match &self.content {
             Content::Media(id) => Some(*id),
-            Content::Text(_) | Content::Sticker(_) => None,
+            Content::Text(_)
+            | Content::Sticker(_)
+            | Content::Effect
+            | Content::Filter
+            | Content::Adjust => None,
         }
     }
 
@@ -743,7 +788,11 @@ impl Segment {
     pub fn words(&self) -> Option<&str> {
         match &self.content {
             Content::Text(words) => Some(words),
-            Content::Media(_) | Content::Sticker(_) => None,
+            Content::Media(_)
+            | Content::Sticker(_)
+            | Content::Effect
+            | Content::Filter
+            | Content::Adjust => None,
         }
     }
 
@@ -755,12 +804,28 @@ impl Segment {
     pub fn sticker_name(&self) -> Option<&str> {
         match &self.content {
             Content::Sticker(name) => Some(name),
-            Content::Media(_) | Content::Text(_) => None,
+            Content::Media(_)
+            | Content::Text(_)
+            | Content::Effect
+            | Content::Filter
+            | Content::Adjust => None,
         }
     }
 
     pub const fn is_sticker(&self) -> bool {
         matches!(&self.content, Content::Sticker(_))
+    }
+
+    pub const fn is_effect(&self) -> bool {
+        matches!(&self.content, Content::Effect)
+    }
+
+    pub const fn is_filter(&self) -> bool {
+        matches!(&self.content, Content::Filter)
+    }
+
+    pub const fn is_adjust(&self) -> bool {
+        matches!(&self.content, Content::Adjust)
     }
 
     pub const fn source(&self) -> Option<TimeRange> {

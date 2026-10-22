@@ -354,6 +354,9 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
         asset: segment.asset_id().map(|id| id.to_string()),
         text: segment.words().map(str::to_owned),
         sticker: segment.sticker_name().map(str::to_owned),
+        effect: segment.is_effect(),
+        filter: segment.is_filter(),
+        adjust: segment.is_adjust(),
         source: segment.source().map(range_doc),
         timeline: SpanDoc {
             start: segment.timeline().start().value,
@@ -381,7 +384,7 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
 fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Error> {
     let id: SegmentId = document.id.parse()?;
     if document.text.is_some() {
-        if document.asset.is_some() || document.sticker.is_some() {
+        if document.asset.is_some() || document.sticker.is_some() || graded(document) {
             return Err(Error::Text);
         }
         let mut segment = text_segment(document)?;
@@ -390,10 +393,19 @@ fn segment_from(document: &SegmentDoc, assets: &[Asset]) -> Result<Segment, Erro
         return Ok(segment);
     }
     if document.sticker.is_some() {
-        if document.asset.is_some() {
+        if document.asset.is_some() || graded(document) {
             return Err(Error::Sticker);
         }
         let mut segment = sticker_segment(document)?;
+        segment.assign(id);
+        finish_segment(&mut segment, document)?;
+        return Ok(segment);
+    }
+    if let Some(grade) = grade_of(document)? {
+        if document.asset.is_some() {
+            return Err(grade.error());
+        }
+        let mut segment = grade_segment(document, grade)?;
         segment.assign(id);
         finish_segment(&mut segment, document)?;
         return Ok(segment);
@@ -471,6 +483,63 @@ fn sticker_segment(document: &SegmentDoc) -> Result<Segment, Error> {
         return Err(Error::Channels);
     }
     Segment::sticker(name, document.timeline.start, document.timeline.duration)
+}
+
+fn graded(document: &SegmentDoc) -> bool {
+    document.effect || document.filter || document.adjust
+}
+
+fn grade_of(document: &SegmentDoc) -> Result<Option<Grade>, Error> {
+    match (document.effect, document.filter, document.adjust) {
+        (false, false, false) => Ok(None),
+        (true, false, false) => Ok(Some(Grade::Effect)),
+        (false, true, false) => Ok(Some(Grade::Filter)),
+        (false, false, true) => Ok(Some(Grade::Adjust)),
+        _ => Err(Error::Effect),
+    }
+}
+
+fn grade_segment(document: &SegmentDoc, grade: Grade) -> Result<Segment, Error> {
+    if document.source.is_some()
+        || document.frozen
+        || document.text.is_some()
+        || document.sticker.is_some()
+    {
+        return Err(grade.error());
+    }
+    let speed = Speed::new(document.speed.numerator, document.speed.denominator)?;
+    if speed != Speed::ONE {
+        return Err(grade.error());
+    }
+    if channels_from(document.channels) != Channels::Picture {
+        return Err(Error::Channels);
+    }
+    grade.build(document.timeline.start, document.timeline.duration)
+}
+
+#[derive(Clone, Copy)]
+enum Grade {
+    Effect,
+    Filter,
+    Adjust,
+}
+
+impl Grade {
+    fn error(self) -> Error {
+        match self {
+            Grade::Effect => Error::Effect,
+            Grade::Filter => Error::Filter,
+            Grade::Adjust => Error::Adjust,
+        }
+    }
+
+    fn build(self, start: i64, duration: i64) -> Result<Segment, Error> {
+        match self {
+            Grade::Effect => Segment::effect(start, duration),
+            Grade::Filter => Segment::filter(start, duration),
+            Grade::Adjust => Segment::adjust(start, duration),
+        }
+    }
 }
 
 fn image_segment(
@@ -892,6 +961,12 @@ struct SegmentDoc {
     text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sticker: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    effect: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    filter: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    adjust: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<RangeDoc>,
     timeline: SpanDoc,
@@ -1897,6 +1972,88 @@ mod tests {
             "timescale": 30000
         });
         refuse(&value.to_string(), Error::Sticker);
+    }
+
+    #[test]
+    fn an_effect_filter_or_adjustment_has_no_file() {
+        let mut project = Project::from_json(EMPTY).expect("load");
+        let mut history = History::new();
+        history
+            .apply(
+                &mut project,
+                &[Command::Place {
+                    track: None,
+                    segment: Segment::effect(0, 1_000_000).expect("effect"),
+                }],
+            )
+            .expect("place");
+        let saved = project.to_json().expect("json");
+        assert!(saved.contains("\"effect\": true"));
+        assert!(!saved.contains("\"filter\""));
+        assert!(!saved.contains("\"adjust\""));
+        assert!(!saved.contains("\"asset\""));
+        let loaded = Project::from_json(&saved).expect("load");
+        assert!(loaded.timeline().tracks()[1].segments()[0].is_effect());
+        let mut value: Value = serde_json::from_str(&saved).expect("value");
+        grade_field(&mut value, "filter", json!(true));
+        refuse(&value.to_string(), Error::Effect);
+        grade_field(&mut value, "filter", json!(false));
+        grade_field(&mut value, "asset", json!("asset-9"));
+        refuse(&value.to_string(), Error::Effect);
+        value["timeline"]["tracks"][1]["segments"][0]
+            .as_object_mut()
+            .expect("segment")
+            .remove("asset");
+        grade_field(&mut value, "text", json!("Hi"));
+        refuse(&value.to_string(), Error::Text);
+        value["timeline"]["tracks"][1]["segments"][0]
+            .as_object_mut()
+            .expect("segment")
+            .remove("text");
+        grade_field(
+            &mut value,
+            "source",
+            json!({
+                "start": 0,
+                "duration": 1,
+                "timescale": 30000
+            }),
+        );
+        refuse(&value.to_string(), Error::Effect);
+        value["timeline"]["tracks"][1]["segments"][0]
+            .as_object_mut()
+            .expect("segment")
+            .remove("source");
+        value["timeline"]["tracks"][1]["segments"][0]["speed"]["numerator"] = json!(2);
+        refuse(&value.to_string(), Error::Effect);
+        value["timeline"]["tracks"][1]["segments"][0]["speed"]["numerator"] = json!(1);
+        grade_field(&mut value, "channels", json!("sound"));
+        refuse(&value.to_string(), Error::Channels);
+        grade_field(&mut value, "channels", json!("picture"));
+        grade_field(&mut value, "effect", json!(false));
+        grade_field(&mut value, "filter", json!(true));
+        grade_field(
+            &mut value,
+            "source",
+            json!({
+                "start": 0,
+                "duration": 1,
+                "timescale": 30000
+            }),
+        );
+        refuse(&value.to_string(), Error::Filter);
+        value["timeline"]["tracks"][1]["segments"][0]
+            .as_object_mut()
+            .expect("segment")
+            .remove("source");
+        grade_field(&mut value, "filter", json!(false));
+        grade_field(&mut value, "adjust", json!(true));
+        grade_field(&mut value, "frozen", json!(true));
+        refuse(&value.to_string(), Error::Adjust);
+    }
+
+    fn grade_field(value: &mut Value, key: &str, next: Value) {
+        value["timeline"]["tracks"][1]["segments"][0][key] = next;
     }
 
     fn cut_value() -> (Project, Value) {

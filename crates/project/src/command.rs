@@ -197,12 +197,7 @@ pub fn commands_for_trim(
     edge: TrimEdge,
     delta_us: i64,
 ) -> Result<Vec<Command>, Error> {
-    if segment.is_text() {
-        return Err(Error::Text);
-    }
-    if segment.is_sticker() {
-        return Err(Error::Sticker);
-    }
+    segment.refuse_no_file()?;
     let Some(id) = segment.asset_id() else {
         return Err(Error::Text);
     };

@@ -2644,6 +2644,15 @@ fn clip_name(project: &Project, segment: &cutlass_project::Segment) -> String {
     if let Some(name) = segment.sticker_name() {
         return name.to_owned();
     }
+    if segment.is_effect() {
+        return "Effect".to_owned();
+    }
+    if segment.is_filter() {
+        return "Filter".to_owned();
+    }
+    if segment.is_adjust() {
+        return "Adjust".to_owned();
+    }
     segment
         .asset_id()
         .and_then(|id| project.asset(id))

@@ -89,6 +89,12 @@ pub enum Error {
     Sticker,
     #[error("the segment is not a sticker")]
     NotSticker,
+    #[error("an effect segment has no file")]
+    Effect,
+    #[error("a filter segment has no file")]
+    Filter,
+    #[error("an adjustment has no file")]
+    Adjust,
     #[error("value is not finite")]
     NonFinite,
     #[error("scale must be positive")]

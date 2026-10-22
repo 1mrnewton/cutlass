@@ -4045,3 +4045,183 @@ fn a_sticker_keeps_its_name_on_a_sticker_track() -> Result<(), Error> {
     );
     Ok(())
 }
+
+#[test]
+fn an_effect_a_filter_and_an_adjustment_open_their_own_tracks() -> Result<(), Error> {
+    let mut cut = bare();
+    let (effect, effect_track) = opened(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::effect(0, 2_000_000)?,
+        },
+    )?);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .track(effect_track)
+            .ok_or(Error::UnknownTrack(effect_track))?
+            .kind(),
+        TrackKind::Effect
+    );
+    assert!(
+        cut.project
+            .timeline()
+            .segment(effect)
+            .ok_or(Error::UnknownSegment(effect))?
+            .is_effect()
+    );
+    assert!(
+        cut.project
+            .timeline()
+            .segment(effect)
+            .ok_or(Error::UnknownSegment(effect))?
+            .asset_id()
+            .is_none()
+    );
+    let (filter, filter_track) = opened(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::filter(0, 1_000_000)?,
+        },
+    )?);
+    assert_ne!(filter_track, effect_track);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .track(filter_track)
+            .ok_or(Error::UnknownTrack(filter_track))?
+            .kind(),
+        TrackKind::Filter
+    );
+    let (adjust, adjust_track) = opened(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::adjust(0, 1_000_000)?,
+        },
+    )?);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .track(adjust_track)
+            .ok_or(Error::UnknownTrack(adjust_track))?
+            .kind(),
+        TrackKind::Adjust
+    );
+    let (_, another) = opened(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: Segment::effect(0, 500_000)?,
+        },
+    )?);
+    assert_ne!(another, effect_track);
+    let main = cut.main;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Place {
+                track: Some(main),
+                segment: Segment::effect(3_000_000, 1_000_000)?,
+            },
+        ),
+        Error::WrongTrack,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::Place {
+                track: Some(effect_track),
+                segment: Segment::filter(3_000_000, 1_000_000)?,
+            },
+        ),
+        Error::WrongTrack,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::Place {
+                track: Some(adjust_track),
+                segment: Segment::text("No", 3_000_000, 1_000_000)?,
+            },
+        ),
+        Error::WrongTrack,
+    );
+    let video = add_video(&mut cut, 10, 1280, 720)?;
+    let clip = media(&cut.project, video, 0, 30_000, Channels::Both)?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Place {
+                track: Some(filter_track),
+                segment: clip,
+            },
+        ),
+        Error::WrongTrack,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetSpeed {
+                segment: effect,
+                speed: Speed::new(2, 1)?,
+            },
+        ),
+        Error::Effect,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::Reverse { segment: filter },
+        ),
+        Error::Filter,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::Freeze {
+                segment: adjust,
+                at: 500_000,
+                hold: 1_000_000,
+            },
+        ),
+        Error::Adjust,
+    );
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: effect,
+            at: 1_000_000,
+        },
+    )?);
+    assert!(
+        cut.project
+            .timeline()
+            .segment(right)
+            .ok_or(Error::UnknownSegment(right))?
+            .is_effect()
+    );
+    let saved = cut.project.to_json()?;
+    assert!(saved.contains("\"effect\": true"));
+    assert!(saved.contains("\"filter\": true"));
+    assert!(saved.contains("\"adjust\": true"));
+    assert!(!saved.contains("\"asset\":"));
+    let loaded = Project::from_json(&saved)?;
+    assert!(
+        loaded
+            .timeline()
+            .segment(effect)
+            .ok_or(Error::UnknownSegment(effect))?
+            .is_effect()
+    );
+    assert!(
+        loaded
+            .timeline()
+            .segment(adjust)
+            .ok_or(Error::UnknownSegment(adjust))?
+            .is_adjust()
+    );
+    Ok(())
+}

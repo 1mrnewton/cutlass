@@ -737,12 +737,7 @@ impl Project {
         }
         {
             let segment = self.timeline.segment(id).ok_or(Error::UnknownSegment(id))?;
-            if segment.is_text() {
-                return Err(Error::Text);
-            }
-            if segment.is_sticker() {
-                return Err(Error::Sticker);
-            }
+            segment.refuse_no_file()?;
             if segment.channels() == Channels::Sound {
                 return Err(Error::NoPicture);
             }
@@ -823,12 +818,7 @@ impl Project {
             .segment(id)
             .ok_or(Error::UnknownSegment(id))?
             .clone();
-        if segment.is_text() {
-            return Err(Error::Text);
-        }
-        if segment.is_sticker() {
-            return Err(Error::Sticker);
-        }
+        segment.refuse_no_file()?;
         if segment.frozen() {
             return Err(Error::Freeze);
         }
@@ -891,7 +881,7 @@ impl Project {
     }
 
     fn prepare(&self, segment: &Segment) -> Result<(), Error> {
-        if segment.is_text() || segment.is_sticker() {
+        if segment.asset_id().is_none() {
             return Ok(());
         }
         let id = segment.asset_id().ok_or(Error::Text)?;
@@ -986,6 +976,9 @@ enum Body {
     Media,
     Text,
     Sticker,
+    Effect,
+    Filter,
+    Adjust,
 }
 
 fn body(segment: &Segment) -> Body {
@@ -993,8 +986,30 @@ fn body(segment: &Segment) -> Body {
         Body::Text
     } else if segment.is_sticker() {
         Body::Sticker
+    } else if segment.is_effect() {
+        Body::Effect
+    } else if segment.is_filter() {
+        Body::Filter
+    } else if segment.is_adjust() {
+        Body::Adjust
     } else {
         Body::Media
+    }
+}
+
+fn restored_kind(segment: &Segment) -> Option<TrackKind> {
+    if segment.is_text() {
+        Some(TrackKind::Text)
+    } else if segment.is_sticker() {
+        Some(TrackKind::Sticker)
+    } else if segment.is_effect() {
+        Some(TrackKind::Effect)
+    } else if segment.is_filter() {
+        Some(TrackKind::Filter)
+    } else if segment.is_adjust() {
+        Some(TrackKind::Adjust)
+    } else {
+        None
     }
 }
 
@@ -1002,6 +1017,9 @@ fn kind_for(segment: &Segment) -> TrackKind {
     match body(segment) {
         Body::Text => TrackKind::Text,
         Body::Sticker => TrackKind::Sticker,
+        Body::Effect => TrackKind::Effect,
+        Body::Filter => TrackKind::Filter,
+        Body::Adjust => TrackKind::Adjust,
         Body::Media => match segment.channels() {
             Channels::Sound => TrackKind::Audio,
             Channels::Picture | Channels::Both => TrackKind::Video,
@@ -1013,6 +1031,9 @@ fn accepts(kind: TrackKind, channels: Channels, body: Body) -> bool {
     match body {
         Body::Text => return kind == TrackKind::Text,
         Body::Sticker => return kind == TrackKind::Sticker,
+        Body::Effect => return kind == TrackKind::Effect,
+        Body::Filter => return kind == TrackKind::Filter,
+        Body::Adjust => return kind == TrackKind::Adjust,
         Body::Media => {}
     }
     match (kind, channels) {
@@ -1229,14 +1250,8 @@ fn check_restored(assets: &[Asset], timeline: &Timeline, next_id: u64) -> Result
         previous = Some(track.band());
         for segment in track.segments() {
             claim(&mut seen, segment.id().get())?;
-            if segment.is_text() {
-                if track.kind() != TrackKind::Text {
-                    return Err(Error::WrongTrack);
-                }
-                continue;
-            }
-            if segment.is_sticker() {
-                if track.kind() != TrackKind::Sticker {
+            if let Some(expected) = restored_kind(segment) {
+                if track.kind() != expected {
                     return Err(Error::WrongTrack);
                 }
                 continue;

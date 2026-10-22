@@ -370,7 +370,8 @@ fn blocks_command(project: &Project, lanes: &Lanes, command: &Command) -> bool {
         | Command::RemoveKeyframe { segment, .. }
         | Command::SetEasing { segment, .. }
         | Command::SetFades { segment, .. }
-        | Command::SetDenoise { segment, .. } => segment_lane_locked(project, lanes, *segment),
+        | Command::SetDenoise { segment, .. }
+        | Command::SetKeepPitch { segment, .. } => segment_lane_locked(project, lanes, *segment),
         Command::SetSource { .. } => false,
         _ => false,
     }
@@ -4452,11 +4453,16 @@ mod tests {
             segment: id,
             on: true,
         };
+        let pitch = Command::SetKeepPitch {
+            segment: id,
+            keep: false,
+        };
         assert!(super::blocks_command(&cut, &locked, &volume));
         assert!(super::blocks_command(&cut, &locked, &hidden));
         assert!(super::blocks_command(&cut, &locked, &easing));
         assert!(super::blocks_command(&cut, &locked, &fades));
         assert!(super::blocks_command(&cut, &locked, &denoise));
+        assert!(super::blocks_command(&cut, &locked, &pitch));
         assert!(!super::blocks_command(
             &cut,
             &super::Lanes::default(),
@@ -4481,6 +4487,11 @@ mod tests {
             &cut,
             &super::Lanes::default(),
             &denoise
+        ));
+        assert!(!super::blocks_command(
+            &cut,
+            &super::Lanes::default(),
+            &pitch
         ));
     }
 

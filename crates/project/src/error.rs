@@ -107,6 +107,8 @@ pub enum Error {
     InsideTransition,
     #[error("the segment cannot take this animation")]
     Animation,
+    #[error("the cut cannot take this mark")]
+    Marker,
     #[error("value is not finite")]
     NonFinite,
     #[error("scale must be positive")]

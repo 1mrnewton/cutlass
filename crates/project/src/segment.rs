@@ -8,6 +8,7 @@ use crate::animation::{Animation, AnimationKind, AnimationSlots};
 use crate::asset::{Asset, AssetKind};
 use crate::attachment::Attachment;
 use crate::id::{AssetId, SegmentId};
+use crate::mark::StampList;
 use crate::time::{SEQUENCE_TIMESCALE, TimeRange, timeline_duration};
 
 /// Picture, sound, or both.
@@ -299,6 +300,7 @@ pub struct Segment {
     transform: Transform,
     keyframes: Vec<Keyframe>,
     animations: Option<Box<AnimationSlots>>,
+    stamps: Option<Box<StampList>>,
 }
 
 impl Segment {
@@ -450,6 +452,7 @@ impl Segment {
             transform: Transform::IDENTITY,
             keyframes: Vec::new(),
             animations: None,
+            stamps: None,
         }
     }
 
@@ -531,8 +534,8 @@ impl Segment {
     /// A copy with no id, starting at `start` microseconds on the sequence.
     ///
     /// The source, channels, speed, visible flag, volume, fades, denoise,
-    /// keep pitch, crop, blend, freeze, transform, keyframes, and animations
-    /// stay. Place assigns the id.
+    /// keep pitch, crop, blend, freeze, transform, keyframes, animations,
+    /// clip markers, and beats stay. Place assigns the id.
     /// A negative start is refused, and so is a start that would overflow the
     /// sequence clock.
     pub fn duplicate(&self, start: i64) -> Result<Self, Error> {
@@ -678,6 +681,7 @@ impl Segment {
             .keyframes
             .retain(|key| key.property() == KeyframeProperty::Volume);
         sound.animations = None;
+        sound.stamps = None;
 
         self.channels = Channels::Picture;
         self.volume = 1.0;
@@ -858,6 +862,96 @@ impl Segment {
         slots.set(kind, None);
         if slots.is_empty() {
             self.animations = None;
+        }
+    }
+
+    /// Clip-marker offsets, in microseconds from the segment start.
+    pub fn markers(&self) -> &[i64] {
+        self.stamps
+            .as_ref()
+            .map(|stamps| stamps.markers.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Beat offsets, in microseconds from the segment start.
+    pub fn beats(&self) -> &[i64] {
+        self.stamps
+            .as_ref()
+            .map(|stamps| stamps.beats.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub(crate) fn insert_marker(&mut self, offset: i64) {
+        let stamps = self.stamp_slot();
+        crate::mark::insert(&mut stamps.markers, offset);
+    }
+
+    pub(crate) fn remove_marker(&mut self, offset: i64) {
+        if let Some(stamps) = self.stamps.as_mut() {
+            crate::mark::remove(&mut stamps.markers, offset);
+        }
+        self.drop_stamps_if_empty();
+    }
+
+    pub(crate) fn insert_beat(&mut self, offset: i64) {
+        let stamps = self.stamp_slot();
+        crate::mark::insert(&mut stamps.beats, offset);
+    }
+
+    pub(crate) fn remove_beat(&mut self, offset: i64) {
+        if let Some(stamps) = self.stamps.as_mut() {
+            crate::mark::remove(&mut stamps.beats, offset);
+        }
+        self.drop_stamps_if_empty();
+    }
+
+    /// Offsets before `at` stay. The rest are returned, measured from `at`.
+    pub(crate) fn split_stamps(&mut self, at: i64) -> (Vec<i64>, Vec<i64>) {
+        let split = if let Some(stamps) = self.stamps.as_mut() {
+            let markers = crate::mark::split(&mut stamps.markers, at);
+            let beats = crate::mark::split(&mut stamps.beats, at);
+            (markers, beats)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        self.drop_stamps_if_empty();
+        split
+    }
+
+    pub(crate) fn set_marks(&mut self, markers: Vec<i64>, beats: Vec<i64>) {
+        if markers.is_empty() && beats.is_empty() {
+            self.stamps = None;
+            return;
+        }
+        self.stamps = Some(Box::new(StampList { markers, beats }));
+    }
+
+    /// Drops a mark that no longer fits. Beats stay only on an audio segment.
+    pub(crate) fn retain_stamps(&mut self, audio: bool) {
+        let span = self.timeline.duration().value;
+        if let Some(stamps) = self.stamps.as_mut() {
+            crate::mark::retain_inside(&mut stamps.markers, span);
+            if audio {
+                crate::mark::retain_inside(&mut stamps.beats, span);
+            } else {
+                stamps.beats.clear();
+            }
+        }
+        self.drop_stamps_if_empty();
+    }
+
+    fn stamp_slot(&mut self) -> &mut StampList {
+        self.stamps.get_or_insert_with(|| {
+            Box::new(StampList {
+                markers: Vec::new(),
+                beats: Vec::new(),
+            })
+        })
+    }
+
+    fn drop_stamps_if_empty(&mut self) {
+        if self.stamps.as_deref().is_some_and(StampList::is_empty) {
+            self.stamps = None;
         }
     }
 

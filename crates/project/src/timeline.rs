@@ -13,6 +13,7 @@ use crate::track::Track;
 pub struct Timeline {
     id: TimelineId,
     tracks: Vec<Track>,
+    markers: Vec<i64>,
 }
 
 impl Timeline {
@@ -20,7 +21,33 @@ impl Timeline {
         Self {
             id,
             tracks: vec![Track::main(main_track)],
+            markers: Vec::new(),
         }
+    }
+
+    /// Ruler markers, in microseconds from the start of the timeline.
+    pub fn markers(&self) -> &[i64] {
+        &self.markers
+    }
+
+    pub(crate) fn set_markers(&mut self, markers: Vec<i64>) {
+        self.markers = markers;
+    }
+
+    pub(crate) fn insert_marker(&mut self, time: i64) {
+        crate::mark::insert(&mut self.markers, time);
+    }
+
+    pub(crate) fn remove_marker(&mut self, time: i64) {
+        crate::mark::remove(&mut self.markers, time);
+    }
+
+    pub(crate) fn retain_markers(&mut self, end: i64) {
+        crate::mark::retain_through(&mut self.markers, end);
+    }
+
+    pub(crate) fn tracks_mut(&mut self) -> &mut [Track] {
+        &mut self.tracks
     }
 
     pub const fn id(&self) -> TimelineId {

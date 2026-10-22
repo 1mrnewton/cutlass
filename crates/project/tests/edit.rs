@@ -5120,3 +5120,398 @@ fn a_shorter_segment_clamps_in_and_out() -> Result<(), Error> {
     );
     Ok(())
 }
+
+#[test]
+fn a_marker_sits_on_the_ruler_and_a_beat_sits_on_audio() -> Result<(), Error> {
+    let mut cut = bare();
+    expect_err(
+        run(&mut cut, Command::AddMarker { time_us: 0 }),
+        Error::Marker,
+    );
+    let id = place_still(&mut cut, "file:///a.png", 0, 2_000_000)?;
+    let video = add_video(&mut cut, 10, 1280, 720)?;
+    let sound = media(&cut.project, video, 0, 60_000, Channels::Sound)?;
+    let (audio, audio_track) = opened(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: sound,
+        },
+    )?);
+    for time in [2_000_000, 0, 0] {
+        run(&mut cut, Command::AddMarker { time_us: time })?;
+    }
+    assert_eq!(cut.project.timeline().markers(), &[0, 2_000_000]);
+    expect_err(
+        run(&mut cut, Command::AddMarker { time_us: -1 }),
+        Error::NegativeTime,
+    );
+    expect_err(
+        run(&mut cut, Command::AddMarker { time_us: 2_000_001 }),
+        Error::Marker,
+    );
+    run(
+        &mut cut,
+        Command::AddClipMarker {
+            segment: id,
+            offset_us: 100,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::AddBeat {
+            segment: audio,
+            offset_us: 100,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::AddClipMarker {
+            segment: audio,
+            offset_us: 100,
+        },
+    )?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::AddBeat {
+                segment: id,
+                offset_us: 100,
+            },
+        ),
+        Error::Marker,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::AddClipMarker {
+                segment: id,
+                offset_us: 2_000_000,
+            },
+        ),
+        Error::Marker,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::AddClipMarker {
+                segment: id,
+                offset_us: -1,
+            },
+        ),
+        Error::NegativeTime,
+    );
+    let saved = cut.project.to_json()?;
+    assert!(saved.contains("\"markers\""));
+    assert!(saved.contains("\"beats\""));
+    let loaded = Project::from_json(&saved)?;
+    assert_eq!(loaded.timeline().markers(), &[0, 2_000_000]);
+    assert_eq!(
+        loaded
+            .timeline()
+            .segment(audio)
+            .ok_or(Error::UnknownSegment(audio))?
+            .beats(),
+        &[100]
+    );
+    run(
+        &mut cut,
+        Command::Move {
+            segment: audio,
+            track: None,
+            start: 500_000,
+        },
+    )?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(audio)
+            .ok_or(Error::UnknownSegment(audio))?
+            .timeline()
+            .start()
+            .value,
+        500_000
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(audio)
+            .ok_or(Error::UnknownSegment(audio))?
+            .markers(),
+        &[100]
+    );
+    assert_eq!(cut.project.timeline().markers(), &[0, 2_000_000]);
+    let copy = cut
+        .project
+        .timeline()
+        .segment(audio)
+        .ok_or(Error::UnknownSegment(audio))?
+        .duplicate(3_000_000)?;
+    let copied = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(audio_track),
+            segment: copy,
+        },
+    )?);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(copied)
+            .ok_or(Error::UnknownSegment(copied))?
+            .beats(),
+        &[100]
+    );
+    run(
+        &mut cut,
+        Command::RemoveBeat {
+            segment: audio,
+            offset_us: 100,
+        },
+    )?;
+    assert!(
+        cut.project
+            .timeline()
+            .segment(audio)
+            .ok_or(Error::UnknownSegment(audio))?
+            .beats()
+            .is_empty()
+    );
+    run(
+        &mut cut,
+        Command::RemoveBeat {
+            segment: audio,
+            offset_us: 100,
+        },
+    )?;
+    cut.history.undo(&mut cut.project)?;
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(audio)
+            .ok_or(Error::UnknownSegment(audio))?
+            .beats(),
+        &[100]
+    );
+    let main = cut.main;
+    run(
+        &mut cut,
+        Command::SetLocked {
+            track: main,
+            on: true,
+        },
+    )?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::AddClipMarker {
+                segment: id,
+                offset_us: 200,
+            },
+        ),
+        Error::Locked,
+    );
+    run(&mut cut, Command::AddMarker { time_us: 1_000_000 })?;
+    assert_eq!(cut.project.timeline().markers(), &[0, 1_000_000, 2_000_000]);
+    run(
+        &mut cut,
+        Command::SetLocked {
+            track: audio_track,
+            on: true,
+        },
+    )?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::RemoveBeat {
+                segment: audio,
+                offset_us: 100,
+            },
+        ),
+        Error::Locked,
+    );
+    let missing = SegmentId::new(9_999)?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::AddClipMarker {
+                segment: missing,
+                offset_us: 0,
+            },
+        ),
+        Error::UnknownSegment(missing),
+    );
+
+    let mut held = bare();
+    let video = add_video(&mut held, 4, 320, 180)?;
+    let clip = media(&held.project, video, 0, 60_000, Channels::Both)?;
+    let main = held.main;
+    let picture = segment_id(run(
+        &mut held,
+        Command::Place {
+            track: Some(main),
+            segment: clip,
+        },
+    )?);
+    run(
+        &mut held,
+        Command::AddClipMarker {
+            segment: picture,
+            offset_us: 100,
+        },
+    )?;
+    let sound_piece = segment_id(run(&mut held, Command::DetachAudio { segment: picture })?);
+    assert_eq!(
+        held.project
+            .timeline()
+            .segment(picture)
+            .ok_or(Error::UnknownSegment(picture))?
+            .markers(),
+        &[100]
+    );
+    assert!(
+        held.project
+            .timeline()
+            .segment(sound_piece)
+            .ok_or(Error::UnknownSegment(sound_piece))?
+            .markers()
+            .is_empty()
+    );
+    assert!(
+        held.project
+            .timeline()
+            .segment(sound_piece)
+            .ok_or(Error::UnknownSegment(sound_piece))?
+            .beats()
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn a_split_keeps_a_mark_on_the_piece_that_holds_it() -> Result<(), Error> {
+    let mut cut = bare();
+    let video = add_video(&mut cut, 10, 1280, 720)?;
+    let sound = media(&cut.project, video, 0, 60_000, Channels::Sound)?;
+    let audio = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: None,
+            segment: sound,
+        },
+    )?);
+    run(&mut cut, Command::AddMarker { time_us: 500_000 })?;
+    for offset in [1_500_000, 100, 1_000_000] {
+        run(
+            &mut cut,
+            Command::AddClipMarker {
+                segment: audio,
+                offset_us: offset,
+            },
+        )?;
+        run(
+            &mut cut,
+            Command::AddBeat {
+                segment: audio,
+                offset_us: offset,
+            },
+        )?;
+    }
+    let right = segment_id(run(
+        &mut cut,
+        Command::Split {
+            segment: audio,
+            at: 1_000_000,
+        },
+    )?);
+    let left = cut
+        .project
+        .timeline()
+        .segment(audio)
+        .ok_or(Error::UnknownSegment(audio))?;
+    assert_eq!(left.markers(), &[100]);
+    assert_eq!(left.beats(), &[100]);
+    let piece = cut
+        .project
+        .timeline()
+        .segment(right)
+        .ok_or(Error::UnknownSegment(right))?;
+    assert_eq!(piece.markers(), &[0, 500_000]);
+    assert_eq!(piece.beats(), &[0, 500_000]);
+    assert_eq!(cut.project.timeline().markers(), &[500_000]);
+    Ok(())
+}
+
+#[test]
+fn a_shorter_cut_drops_a_mark_and_undo_puts_it_back() -> Result<(), Error> {
+    let mut cut = bare();
+    let video = add_video(&mut cut, 10, 1280, 720)?;
+    let clip = media(&cut.project, video, 0, 60_000, Channels::Picture)?;
+    let main = cut.main;
+    let id = segment_id(run(
+        &mut cut,
+        Command::Place {
+            track: Some(main),
+            segment: clip,
+        },
+    )?);
+    for time in [0, 1_000_000, 1_500_000] {
+        run(&mut cut, Command::AddMarker { time_us: time })?;
+    }
+    run(
+        &mut cut,
+        Command::AddClipMarker {
+            segment: id,
+            offset_us: 100,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::AddClipMarker {
+            segment: id,
+            offset_us: 1_500_000,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetSpeed {
+            segment: id,
+            speed: Speed::new(2, 1)?,
+        },
+    )?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .timeline()
+            .duration()
+            .value,
+        1_000_000
+    );
+    assert_eq!(cut.project.timeline().markers(), &[0, 1_000_000]);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .markers(),
+        &[100]
+    );
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(cut.project.timeline().markers(), &[0, 1_000_000, 1_500_000]);
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .markers(),
+        &[100, 1_500_000]
+    );
+    run(&mut cut, Command::RemoveSegment(id))?;
+    assert!(cut.project.timeline().markers().is_empty());
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(cut.project.timeline().markers(), &[0, 1_000_000, 1_500_000]);
+    Ok(())
+}

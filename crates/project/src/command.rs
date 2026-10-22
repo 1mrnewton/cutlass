@@ -147,6 +147,34 @@ pub enum Command {
         kind: AnimationKind,
         animation: Option<Animation>,
     },
+    /// Adds a ruler marker. The time is microseconds from the timeline start.
+    AddMarker {
+        time_us: i64,
+    },
+    /// Removes a ruler marker at that time.
+    RemoveMarker {
+        time_us: i64,
+    },
+    /// Adds a clip marker. The offset is microseconds from the segment start.
+    AddClipMarker {
+        segment: SegmentId,
+        offset_us: i64,
+    },
+    /// Removes a clip marker at that offset.
+    RemoveClipMarker {
+        segment: SegmentId,
+        offset_us: i64,
+    },
+    /// Adds a beat on an audio segment.
+    AddBeat {
+        segment: SegmentId,
+        offset_us: i64,
+    },
+    /// Removes a beat at that offset.
+    RemoveBeat {
+        segment: SegmentId,
+        offset_us: i64,
+    },
     /// Locks the track when on. A locked track refuses an edit.
     SetLocked {
         track: TrackId,

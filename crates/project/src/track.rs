@@ -220,6 +220,10 @@ impl Track {
         &self.segments
     }
 
+    pub(crate) fn segments_mut(&mut self) -> &mut [Segment] {
+        &mut self.segments
+    }
+
     /// Transitions on this track. Only the main track holds any.
     pub fn transitions(&self) -> &[Transition] {
         &self.transitions

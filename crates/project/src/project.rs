@@ -292,6 +292,30 @@ impl Project {
                     .set_animation(kind, animation)?;
                 Ok(Outcome::Unchanged)
             }
+            Command::AddMarker { time_us } => {
+                self.add_marker_now(time_us)?;
+                Ok(Outcome::Unchanged)
+            }
+            Command::RemoveMarker { time_us } => {
+                self.remove_marker_now(time_us)?;
+                Ok(Outcome::Unchanged)
+            }
+            Command::AddClipMarker { segment, offset_us } => {
+                self.add_clip_marker_now(segment, offset_us)?;
+                Ok(Outcome::Unchanged)
+            }
+            Command::RemoveClipMarker { segment, offset_us } => {
+                self.remove_clip_marker_now(segment, offset_us)?;
+                Ok(Outcome::Unchanged)
+            }
+            Command::AddBeat { segment, offset_us } => {
+                self.add_beat_now(segment, offset_us)?;
+                Ok(Outcome::Unchanged)
+            }
+            Command::RemoveBeat { segment, offset_us } => {
+                self.remove_beat_now(segment, offset_us)?;
+                Ok(Outcome::Unchanged)
+            }
             Command::SetVisible { segment, visible } => {
                 self.refuse_lane(segment)?;
                 self.timeline.segment_mut(segment)?.set_visible(visible);
@@ -330,8 +354,109 @@ impl Project {
         };
         if outcome.is_ok() {
             self.repair_transitions();
+            self.repair_marks();
         }
         outcome
+    }
+
+    fn add_marker_now(&mut self, time: i64) -> Result<(), Error> {
+        if time < 0 {
+            return Err(Error::NegativeTime);
+        }
+        let end = self.timeline.duration().value;
+        if end <= 0 || time > end {
+            return Err(Error::Marker);
+        }
+        self.timeline.insert_marker(time);
+        Ok(())
+    }
+
+    fn remove_marker_now(&mut self, time: i64) -> Result<(), Error> {
+        if time < 0 {
+            return Err(Error::NegativeTime);
+        }
+        self.timeline.remove_marker(time);
+        Ok(())
+    }
+
+    fn add_clip_marker_now(&mut self, id: SegmentId, offset: i64) -> Result<(), Error> {
+        self.refuse_lane(id)?;
+        self.offset_fits(id, offset)?;
+        self.timeline.segment_mut(id)?.insert_marker(offset);
+        Ok(())
+    }
+
+    fn remove_clip_marker_now(&mut self, id: SegmentId, offset: i64) -> Result<(), Error> {
+        self.refuse_lane(id)?;
+        if offset < 0 {
+            return Err(Error::NegativeTime);
+        }
+        self.timeline.segment_mut(id)?.remove_marker(offset);
+        Ok(())
+    }
+
+    fn add_beat_now(&mut self, id: SegmentId, offset: i64) -> Result<(), Error> {
+        self.refuse_lane(id)?;
+        self.require_audio(id)?;
+        self.offset_fits(id, offset)?;
+        self.timeline.segment_mut(id)?.insert_beat(offset);
+        Ok(())
+    }
+
+    fn remove_beat_now(&mut self, id: SegmentId, offset: i64) -> Result<(), Error> {
+        self.refuse_lane(id)?;
+        self.require_audio(id)?;
+        if offset < 0 {
+            return Err(Error::NegativeTime);
+        }
+        self.timeline.segment_mut(id)?.remove_beat(offset);
+        Ok(())
+    }
+
+    fn require_audio(&self, id: SegmentId) -> Result<(), Error> {
+        let track = self
+            .timeline
+            .track_of(id)
+            .ok_or(Error::UnknownSegment(id))?;
+        let kind = self
+            .timeline
+            .track(track)
+            .ok_or(Error::UnknownTrack(track))?
+            .kind();
+        if kind == TrackKind::Audio {
+            Ok(())
+        } else {
+            Err(Error::Marker)
+        }
+    }
+
+    fn offset_fits(&self, id: SegmentId, offset: i64) -> Result<(), Error> {
+        if offset < 0 {
+            return Err(Error::NegativeTime);
+        }
+        let span = self
+            .timeline
+            .segment(id)
+            .ok_or(Error::UnknownSegment(id))?
+            .timeline()
+            .duration()
+            .value;
+        if offset >= span {
+            Err(Error::Marker)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn repair_marks(&mut self) {
+        let end = self.timeline.duration().value;
+        self.timeline.retain_markers(end);
+        for track in self.timeline.tracks_mut() {
+            let audio = track.kind() == TrackKind::Audio;
+            for segment in track.segments_mut() {
+                segment.retain_stamps(audio);
+            }
+        }
     }
 
     fn set_transition_now(
@@ -902,6 +1027,7 @@ impl Project {
             .segment_mut(id)?
             .clear_animation(AnimationKind::Out);
         let keys = self.timeline.segment_mut(id)?.split_keyframes(left_dur)?;
+        let (right_markers, right_beats) = self.timeline.segment_mut(id)?.split_stamps(left_dur);
         match left_source {
             Some(source) => {
                 let asset = asset.as_ref().ok_or(Error::Text)?;
@@ -913,6 +1039,7 @@ impl Project {
                 .set_timeline_duration(left_dur)?,
         }
         right.replace_keyframes(keys);
+        right.set_marks(right_markers, right_beats);
         right.assign(right_id);
         right.clear_animation(AnimationKind::In);
         match right_source {

@@ -16,6 +16,7 @@ mod error;
 mod file;
 mod history;
 mod id;
+mod mark;
 mod project;
 mod rate;
 mod segment;

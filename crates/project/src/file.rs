@@ -76,6 +76,7 @@ fn document_from(project: &Project) -> Document {
         timeline: TimelineDoc {
             id: project.timeline().id().to_string(),
             tracks: project.timeline().tracks().iter().map(track_doc).collect(),
+            markers: project.timeline().markers().to_vec(),
         },
     }
 }
@@ -287,7 +288,35 @@ fn timeline_from(document: &TimelineDoc, assets: &[Asset]) -> Result<Timeline, E
     if stored != expected {
         return Err(Error::TrackOrder);
     }
+    if !document.markers.is_empty() {
+        let end = timeline.duration().value;
+        timeline.set_markers(take_times(&document.markers, end, true)?);
+    }
     Ok(timeline)
+}
+
+fn take_times(times: &[i64], span: i64, through_end: bool) -> Result<Vec<i64>, Error> {
+    if times.is_empty() {
+        return Ok(Vec::new());
+    }
+    if through_end && span <= 0 {
+        return Err(Error::Marker);
+    }
+    let mut stored = Vec::with_capacity(times.len());
+    for time in times {
+        if *time < 0 {
+            return Err(Error::NegativeTime);
+        }
+        let fits = if through_end {
+            *time <= span
+        } else {
+            span > 0 && *time < span
+        };
+        if !fits || !crate::mark::insert(&mut stored, *time) {
+            return Err(Error::Marker);
+        }
+    }
+    Ok(stored)
 }
 
 fn check_track_order(tracks: &[Track]) -> Result<(), Error> {
@@ -413,6 +442,9 @@ fn track_from(document: &TrackDoc, assets: &[Asset]) -> Result<Track, Error> {
     for segment in &document.segments {
         segments.push(segment_from(segment, assets)?);
     }
+    if kind != TrackKind::Audio && segments.iter().any(|segment| !segment.beats().is_empty()) {
+        return Err(Error::Marker);
+    }
     if document.main {
         let mut track = Track::main(id);
         for segment in segments {
@@ -475,6 +507,8 @@ fn segment_doc(segment: &Segment) -> SegmentDoc {
                 })
             })
             .collect(),
+        markers: segment.markers().to_vec(),
+        beats: segment.beats().to_vec(),
     }
 }
 
@@ -591,6 +625,11 @@ fn finish_segment(segment: &mut Segment, document: &SegmentDoc) -> Result<(), Er
             Some(Animation::new(animation.name.clone(), animation.duration)?),
         )?;
     }
+    let span = segment.timeline().duration().value;
+    segment.set_marks(
+        take_times(&document.markers, span, false)?,
+        take_times(&document.beats, span, false)?,
+    );
     Ok(())
 }
 
@@ -1140,6 +1179,8 @@ struct Stamp {
 struct TimelineDoc {
     id: String,
     tracks: Vec<TrackDoc>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    markers: Vec<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1213,6 +1254,10 @@ struct SegmentDoc {
     keyframes: Vec<KeyDoc>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     animations: Vec<AnimationDoc>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    markers: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    beats: Vec<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2485,6 +2530,118 @@ mod tests {
             .expect("animations")
             .push(repeat);
         refuse(&value.to_string(), Error::Animation);
+    }
+
+    #[test]
+    fn a_mark_round_trips_and_a_bad_one_refuses_the_file() {
+        let mut project = Project::from_json(EMPTY).expect("load");
+        let mut history = History::new();
+        let image = Asset::image("file:///a.png", 8, 8).expect("image");
+        history
+            .apply(&mut project, &[Command::AddAsset(image)])
+            .expect("add");
+        let stored = project.assets().last().expect("asset");
+        let still = Segment::image(stored, 0, 1_000_000).expect("still");
+        let main = project.timeline().main_track().id();
+        let picture = match history
+            .apply(
+                &mut project,
+                &[Command::Place {
+                    track: Some(main),
+                    segment: still,
+                }],
+            )
+            .expect("place")
+            .as_slice()
+        {
+            [Outcome::Segment(id)] => *id,
+            other => panic!("expected the main track, got {other:?}"),
+        };
+        let scale = NonZeroU32::new(48_000).expect("scale");
+        let audio = Asset::audio("file:///a.wav", Timestamp::new(48_000, scale)).expect("audio");
+        history
+            .apply(&mut project, &[Command::AddAsset(audio)])
+            .expect("add");
+        let stored = project.assets().last().expect("asset");
+        let duration = stored.duration().expect("duration");
+        let source =
+            TimeRange::new(Timestamp::new(0, duration.timescale), duration).expect("source");
+        let sound = Segment::media(stored, source, 0, Channels::Sound, Speed::ONE).expect("sound");
+        let audio_id = match history
+            .apply(
+                &mut project,
+                &[Command::Place {
+                    track: None,
+                    segment: sound,
+                }],
+            )
+            .expect("audio")
+            .as_slice()
+        {
+            [Outcome::Opened { segment, .. }] => *segment,
+            other => panic!("expected an audio track, got {other:?}"),
+        };
+        history
+            .apply(
+                &mut project,
+                &[
+                    Command::AddMarker { time_us: 1_000_000 },
+                    Command::AddClipMarker {
+                        segment: picture,
+                        offset_us: 100,
+                    },
+                    Command::AddBeat {
+                        segment: audio_id,
+                        offset_us: 100,
+                    },
+                ],
+            )
+            .expect("marks");
+        let saved = project.to_json().expect("json");
+        let loaded = Project::from_json(&saved).expect("load");
+        assert_eq!(loaded.timeline().markers(), &[1_000_000]);
+        assert_eq!(
+            loaded.timeline().main_track().segments()[0].markers(),
+            &[100]
+        );
+        assert_eq!(loaded.timeline().tracks()[0].segments()[0].beats(), &[100]);
+        let value: Value = serde_json::from_str(&saved).expect("value");
+        refuse(
+            &edit(&value, |value| {
+                value["timeline"]["markers"]
+                    .as_array_mut()
+                    .expect("markers")
+                    .push(json!(1_000_000));
+            }),
+            Error::Marker,
+        );
+        refuse(
+            &edit(&value, |value| {
+                value["timeline"]["markers"][0] = json!(9_000_000);
+            }),
+            Error::Marker,
+        );
+        refuse(
+            &edit(&value, |value| {
+                value["timeline"]["markers"][0] = json!(-1);
+            }),
+            Error::NegativeTime,
+        );
+        refuse(
+            &edit(&value, |value| {
+                value["timeline"]["tracks"][1]["segments"][0]["beats"] = json!([100]);
+            }),
+            Error::Marker,
+        );
+        refuse(
+            &edit(&value, |value| {
+                value["timeline"]["tracks"][1]["segments"][0]["markers"] = json!([1_000_000]);
+            }),
+            Error::Marker,
+        );
+        let mut empty: Value = serde_json::from_str(EMPTY).expect("empty");
+        empty["timeline"]["markers"] = json!([0]);
+        refuse(&empty.to_string(), Error::Marker);
     }
 
     fn grade_field(value: &mut Value, key: &str, next: Value) {

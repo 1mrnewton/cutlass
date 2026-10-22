@@ -16,8 +16,8 @@ use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
 use cutlass_core::{
-    ColorRange, ColorTags, ContentLight, MasteringDisplay, Packet, PixelFormat, VideoCodec,
-    VideoFrame, VideoStreamConfig,
+    ColorRange, ColorTags, ContentLight, MasteringDisplay, Packet, PixelFormat, Rotation,
+    VideoCodec, VideoFrame, VideoStreamConfig,
 };
 use objc2_core_foundation::{CFBoolean, CFData, CFDictionary, CFRetained, CFString, CFType};
 use objc2_core_media::{
@@ -61,6 +61,8 @@ pub struct DecoderOptions {
     pub mastering: Option<MasteringDisplay>,
     /// Copied onto every frame. `None` when the container had no content light level.
     pub content_light: Option<ContentLight>,
+    /// Copied onto every frame. [`Rotation::Zero`] leaves the picture upright.
+    pub rotation: Rotation,
 }
 
 /// A VideoToolbox decode session for one stream.
@@ -79,6 +81,7 @@ pub struct Decoder {
     color: Option<ColorTags>,
     mastering: Option<MasteringDisplay>,
     content_light: Option<ContentLight>,
+    rotation: Rotation,
 }
 
 // SAFETY: VideoToolbox sessions and format descriptions may be used from any
@@ -144,6 +147,7 @@ impl Decoder {
             color: options.color,
             mastering: options.mastering,
             content_light: options.content_light,
+            rotation: options.rotation,
         })
     }
 
@@ -182,6 +186,7 @@ impl Decoder {
         frame.color = self.color;
         frame.mastering = self.mastering;
         frame.content_light = self.content_light;
+        frame.rotation = self.rotation;
         frame
     }
 
@@ -333,6 +338,7 @@ unsafe extern "C-unwind" fn decoded(
         color: None,
         mastering: None,
         content_light: None,
+        rotation: Rotation::Zero,
         image: PixelBuffer::from_retained(image, writable),
     }));
 }

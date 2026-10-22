@@ -184,7 +184,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::num::{NonZeroU32, NonZeroUsize};
 
-    use cutlass_core::{Packet, Timestamp, VideoFrame};
+    use cutlass_core::{Packet, Rotation, Timestamp, VideoFrame};
 
     use super::{Ahead, Decode, FillError};
 
@@ -209,6 +209,7 @@ mod tests {
             color: None,
             mastering: None,
             content_light: None,
+            rotation: Rotation::Zero,
             image: ms,
         }
     }

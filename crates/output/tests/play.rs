@@ -6,7 +6,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cutlass_core::{AudioSamples, Timestamp, VideoFrame};
+use cutlass_core::{AudioSamples, Rotation, Timestamp, VideoFrame};
 use cutlass_output::Output;
 use cutlass_playback::Queue;
 
@@ -43,6 +43,7 @@ fn silence_is_handed_to_the_device() {
             color: None,
             mastering: None,
             content_light: None,
+            rotation: Rotation::Zero,
             image: 0,
         })
         .expect("push");
@@ -53,6 +54,7 @@ fn silence_is_handed_to_the_device() {
             color: None,
             mastering: None,
             content_light: None,
+            rotation: Rotation::Zero,
             image: 1,
         })
         .expect("push");

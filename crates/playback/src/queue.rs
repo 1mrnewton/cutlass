@@ -100,7 +100,7 @@ impl<I> Queue<I> {
 mod tests {
     use std::num::{NonZeroU32, NonZeroUsize};
 
-    use cutlass_core::{Timestamp, VideoFrame};
+    use cutlass_core::{Rotation, Timestamp, VideoFrame};
 
     use super::{PushError, Queue};
 
@@ -111,6 +111,7 @@ mod tests {
             color: None,
             mastering: None,
             content_light: None,
+            rotation: Rotation::Zero,
             image: ms,
         }
     }

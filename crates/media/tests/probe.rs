@@ -94,20 +94,19 @@ fn an_h264_fixture_decodes_through_the_probe() {
         Ok(DecoderKind::System)
     );
     let probe = Probe::parse(&fixture_file(&fixture)).expect("fixture file");
+    assert_eq!(probe.tracks()[0].rotation, Rotation::Clockwise90);
     let mut session = probe.open_video(0).expect("open the system decoder");
     let mut frames = 0usize;
     for packet in probe.samples(0).expect("samples") {
         session.send_packet(packet).expect("send a packet");
-        while session.receive_frame().expect("receive a frame").is_some() {
+        while let Some(frame) = session.receive_frame().expect("receive a frame") {
+            assert_eq!(frame.rotation, Rotation::Clockwise90);
             frames += 1;
         }
     }
     session.flush().expect("flush the decoder");
-    while session
-        .receive_frame()
-        .expect("receive a flushed frame")
-        .is_some()
-    {
+    while let Some(frame) = session.receive_frame().expect("receive a flushed frame") {
+        assert_eq!(frame.rotation, Rotation::Clockwise90);
         frames += 1;
     }
     assert_eq!(frames, fixture.frames.len());
@@ -149,7 +148,7 @@ fn fixture_file(fixture: &cutlass_test_fixtures::VideoFixture) -> Vec<u8> {
     let mut trak = tkhd(
         1,
         duration,
-        MATRIX_0,
+        MATRIX_90,
         fixture.config.width,
         fixture.config.height,
     );

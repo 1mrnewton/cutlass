@@ -3,7 +3,7 @@
 //! On Apple this is VideoToolbox. Elsewhere [`VideoSession::open`] returns
 //! [`Error::NoDecoder`] until that platform's codec crate is connected.
 
-use cutlass_core::{ColorTags, ContentLight, MasteringDisplay, VideoStreamConfig};
+use cutlass_core::{ColorTags, ContentLight, MasteringDisplay, Rotation, VideoStreamConfig};
 
 use crate::Error;
 
@@ -26,8 +26,9 @@ pub struct VideoSession {
 impl VideoSession {
     /// Opens the system decoder for `config`.
     ///
-    /// `color`, `mastering`, and `content_light` are copied onto every frame.
-    /// `None` leaves that part unset. The caller has already chosen
+    /// `color`, `mastering`, `content_light`, and `rotation` are copied onto
+    /// every frame. `None` leaves that colour part unset. [`Rotation::Zero`]
+    /// leaves the picture upright. The caller has already chosen
     /// [`crate::DecoderKind::System`]. A software session is not opened here,
     /// because no Rust video decoder is connected.
     #[cfg(target_vendor = "apple")]
@@ -36,6 +37,7 @@ impl VideoSession {
         color: Option<ColorTags>,
         mastering: Option<MasteringDisplay>,
         content_light: Option<ContentLight>,
+        rotation: Rotation,
     ) -> Result<Self, Error> {
         let decoder = cutlass_videotoolbox::Decoder::new(
             config,
@@ -43,6 +45,7 @@ impl VideoSession {
                 color,
                 mastering,
                 content_light,
+                rotation,
                 ..cutlass_videotoolbox::DecoderOptions::default()
             },
         )
@@ -52,15 +55,17 @@ impl VideoSession {
 
     /// Opens the system decoder for `config`.
     ///
-    /// No system decoder is linked here, so the colour arguments are ignored.
+    /// No system decoder is linked here, so the colour and rotation arguments
+    /// are ignored.
     #[cfg(not(target_vendor = "apple"))]
     pub fn open(
         config: &VideoStreamConfig,
         color: Option<ColorTags>,
         mastering: Option<MasteringDisplay>,
         content_light: Option<ContentLight>,
+        rotation: Rotation,
     ) -> Result<Self, Error> {
-        let _ = (color, mastering, content_light);
+        let _ = (color, mastering, content_light, rotation);
         Err(Error::NoDecoder(config.codec))
     }
 }
@@ -117,7 +122,7 @@ mod tests {
             config_record: vec![1],
         };
         assert!(matches!(
-            VideoSession::open(&config, None, None, None),
+            VideoSession::open(&config, None, None, None, Rotation::Zero),
             Err(Error::NoDecoder(cutlass_core::VideoCodec::H264))
         ));
     }

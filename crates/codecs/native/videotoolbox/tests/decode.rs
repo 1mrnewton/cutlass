@@ -6,7 +6,9 @@
 
 mod support;
 
-use cutlass_core::{ColorTags, ContentLight, MasteringDisplay, VideoCodec, VideoStreamConfig};
+use cutlass_core::{
+    ColorTags, ContentLight, MasteringDisplay, Rotation, VideoCodec, VideoStreamConfig,
+};
 use cutlass_test_fixtures::VideoFixture;
 use cutlass_videotoolbox::{Decoder, DecoderOptions, Error};
 use support::{decode_all, frame_crc};
@@ -52,6 +54,12 @@ fn assert_matches_reference(fixture: &VideoFixture) {
             "{}: an untagged stream leaves the frame untagged",
             fixture.name
         );
+        assert_eq!(
+            frame.rotation,
+            Rotation::Zero,
+            "{}: an upright stream stays upright",
+            fixture.name
+        );
     }
 }
 
@@ -82,6 +90,7 @@ fn a_frame_keeps_the_colour_it_was_opened_with() {
             color: Some(tags),
             mastering: Some(display),
             content_light: Some(light),
+            rotation: Rotation::Clockwise90,
             ..DecoderOptions::default()
         },
     )
@@ -92,6 +101,7 @@ fn a_frame_keeps_the_colour_it_was_opened_with() {
         assert_eq!(frame.color, Some(tags));
         assert_eq!(frame.mastering, Some(display));
         assert_eq!(frame.content_light, Some(light));
+        assert_eq!(frame.rotation, Rotation::Clockwise90);
     }
 }
 

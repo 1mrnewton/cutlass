@@ -1,5 +1,6 @@
 //! Decoded frames.
 
+use crate::Rotation;
 use crate::Timestamp;
 use crate::color::{ColorTags, ContentLight, MasteringDisplay};
 
@@ -20,5 +21,8 @@ pub struct VideoFrame<I> {
     /// Content light level from a `clli` box. `None` when the container had
     /// none. The decoder copies this. It does not read the bitstream.
     pub content_light: Option<ContentLight>,
+    /// Clockwise rotation from the track matrix. The decoder copies this. It
+    /// does not read the bitstream, and it does not turn the picture.
+    pub rotation: Rotation,
     pub image: I,
 }

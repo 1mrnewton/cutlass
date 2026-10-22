@@ -57,6 +57,7 @@ impl Probe {
                 track.color(),
                 track.mastering(),
                 track.content_light(),
+                track.rotation(),
             ),
             // No Rust video decoder is connected, so the picker does not return
             // this yet. Open that decoder here when one is.

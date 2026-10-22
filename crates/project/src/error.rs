@@ -77,6 +77,8 @@ pub enum Error {
     Freeze,
     #[error("the reverse does not match its asset")]
     Reverse,
+    #[error("the track is locked")]
+    Locked,
     #[error("value is not finite")]
     NonFinite,
     #[error("scale must be positive")]

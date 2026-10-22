@@ -271,6 +271,9 @@ fn timeline_from(document: &TimelineDoc, assets: &[Asset]) -> Result<Timeline, E
     for segment in main.segments() {
         timeline.main_mut().insert(segment.clone())?;
     }
+    timeline.main_mut().set_locked(main.locked());
+    timeline.main_mut().set_hidden(main.hidden());
+    timeline.main_mut().set_muted(main.muted());
     for track in tracks {
         timeline.insert(track)?;
     }
@@ -302,8 +305,17 @@ fn track_doc(track: &Track) -> TrackDoc {
         id: track.id().to_string(),
         kind: kind_name(track.kind()),
         main: track.is_main(),
+        locked: track.locked(),
+        hidden: track.hidden(),
+        muted: track.muted(),
         segments: track.segments().iter().map(segment_doc).collect(),
     }
+}
+
+fn apply_flags(track: &mut Track, document: &TrackDoc) {
+    track.set_locked(document.locked);
+    track.set_hidden(document.hidden);
+    track.set_muted(document.muted);
 }
 
 fn track_from(document: &TrackDoc, assets: &[Asset]) -> Result<Track, Error> {
@@ -321,6 +333,7 @@ fn track_from(document: &TrackDoc, assets: &[Asset]) -> Result<Track, Error> {
         for segment in segments {
             track.insert(segment)?;
         }
+        apply_flags(&mut track, document);
         return Ok(track);
     }
     let mut rest = segments.into_iter();
@@ -331,6 +344,7 @@ fn track_from(document: &TrackDoc, assets: &[Asset]) -> Result<Track, Error> {
     for segment in rest {
         track.insert(segment)?;
     }
+    apply_flags(&mut track, document);
     Ok(track)
 }
 
@@ -797,6 +811,12 @@ struct TrackDoc {
     id: String,
     kind: KindName,
     main: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    locked: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    hidden: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    muted: bool,
     segments: Vec<SegmentDoc>,
 }
 
@@ -1696,6 +1716,43 @@ mod tests {
             &serde_json::to_string(&chained).expect("json"),
             Error::Reverse,
         );
+    }
+
+    #[test]
+    fn a_track_flag_is_left_out_when_it_is_off() {
+        let project = Project::from_json(EMPTY).expect("load");
+        assert!(!project.timeline().main_track().locked());
+        assert!(!project.timeline().main_track().hidden());
+        assert!(!project.timeline().main_track().muted());
+        assert!(!project.to_json().expect("json").contains("\"locked\""));
+
+        let marked = EMPTY.replace(
+            "\"main\": true,",
+            "\"main\": true, \"locked\": true, \"hidden\": true, \"muted\": true,",
+        );
+        let loaded = Project::from_json(&marked).expect("flags");
+        assert!(loaded.timeline().main_track().locked());
+        assert!(loaded.timeline().main_track().hidden());
+        assert!(loaded.timeline().main_track().muted());
+        let text = loaded.to_json().expect("json");
+        assert!(text.contains("\"locked\": true"));
+        assert!(text.contains("\"hidden\": true"));
+        assert!(text.contains("\"muted\": true"));
+
+        let missing = crate::id::TrackId::new(99).expect("id");
+        let mut history = History::new();
+        let mut project = loaded;
+        let err = history
+            .apply(
+                &mut project,
+                &[Command::SetLocked {
+                    track: missing,
+                    on: false,
+                }],
+            )
+            .expect_err("missing track");
+        assert_eq!(err, Error::UnknownTrack(missing));
+        assert!(project.timeline().main_track().locked());
     }
 
     fn cut_value() -> (Project, Value) {

@@ -3437,3 +3437,188 @@ fn a_reverse_needs_a_source() -> Result<(), Error> {
     );
     Ok(())
 }
+
+#[test]
+fn a_locked_track_keeps_its_clips() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let clip = place_main(&mut cut, asset, 0, 60_000)?;
+    let main = cut.main;
+    run(
+        &mut cut,
+        Command::SetLocked {
+            track: main,
+            on: true,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetHidden {
+            track: main,
+            on: true,
+        },
+    )?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::SetVolume {
+                segment: clip,
+                volume: 0.5,
+            },
+        ),
+        Error::Locked,
+    );
+    expect_err(
+        run(
+            &mut cut,
+            Command::Move {
+                segment: clip,
+                track: None,
+                start: 1_000_000,
+            },
+        ),
+        Error::Locked,
+    );
+    expect_err(
+        run(&mut cut, Command::Reverse { segment: clip }),
+        Error::Locked,
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(clip)
+            .ok_or(Error::UnknownSegment(clip))?
+            .volume(),
+        1.0
+    );
+    assert_eq!(start(&cut, clip)?, 0);
+    run(
+        &mut cut,
+        Command::SetSource {
+            asset,
+            source: "file:///renamed.mp4".to_owned(),
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetLocked {
+            track: main,
+            on: false,
+        },
+    )?;
+    run(
+        &mut cut,
+        Command::SetVolume {
+            segment: clip,
+            volume: 0.5,
+        },
+    )?;
+    let track = cut
+        .project
+        .timeline()
+        .track(main)
+        .ok_or(Error::UnknownTrack(main))?;
+    assert!(!track.locked());
+    assert!(track.hidden());
+    assert!(!track.muted());
+    cut.history.undo(&mut cut.project)?;
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(clip)
+            .ok_or(Error::UnknownSegment(clip))?
+            .volume(),
+        1.0
+    );
+    cut.history.undo(&mut cut.project)?;
+    assert!(
+        cut.project
+            .timeline()
+            .track(main)
+            .ok_or(Error::UnknownTrack(main))?
+            .locked()
+    );
+    cut.history.redo(&mut cut.project)?;
+    assert!(
+        !cut.project
+            .timeline()
+            .track(main)
+            .ok_or(Error::UnknownTrack(main))?
+            .locked()
+    );
+    Ok(())
+}
+
+#[test]
+fn a_lock_blocks_a_follower_a_place_and_the_magnet() -> Result<(), Error> {
+    let (mut cut, asset) = load()?;
+    let clip = place_main(&mut cut, asset, 0, 60_000)?;
+    let both = place_main(&mut cut, asset, 8_000_000, 30_000)?;
+    let (_, audio) = open_sound(&mut cut, asset, 0)?;
+    run(
+        &mut cut,
+        Command::SetLocked {
+            track: audio,
+            on: true,
+        },
+    )?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Move {
+                segment: clip,
+                track: None,
+                start: 1_000_000,
+            },
+        ),
+        Error::Locked,
+    );
+    assert_eq!(start(&cut, clip)?, 0);
+    run(&mut cut, Command::SetMagnet(false))?;
+    assert!(!cut.project.settings().magnet());
+    expect_err(run(&mut cut, Command::SetMagnet(true)), Error::Locked);
+    assert!(!cut.project.settings().magnet());
+
+    let (overlay_clip, overlay) = open_picture(&mut cut, asset, 4_000_000, 30_000)?;
+    run(
+        &mut cut,
+        Command::SetLocked {
+            track: overlay,
+            on: true,
+        },
+    )?;
+    let segment = media(&cut.project, asset, 6_000_000, 30_000, Channels::Both)?;
+    expect_err(
+        run(
+            &mut cut,
+            Command::Place {
+                track: Some(overlay),
+                segment,
+            },
+        ),
+        Error::Locked,
+    );
+    assert!(cut.project.timeline().segment(overlay_clip).is_some());
+    assert_eq!(
+        cut.project
+            .timeline()
+            .track(overlay)
+            .ok_or(Error::UnknownTrack(overlay))?
+            .segments()
+            .len(),
+        1
+    );
+
+    expect_err(
+        run(&mut cut, Command::DetachAudio { segment: both }),
+        Error::Locked,
+    );
+    assert_eq!(
+        cut.project
+            .timeline()
+            .segment(both)
+            .ok_or(Error::UnknownSegment(both))?
+            .channels(),
+        Channels::Both
+    );
+    Ok(())
+}

@@ -33,6 +33,9 @@ pub struct Track {
     id: TrackId,
     kind: TrackKind,
     main: bool,
+    locked: bool,
+    hidden: bool,
+    muted: bool,
     segments: Vec<Segment>,
 }
 
@@ -42,6 +45,9 @@ impl Track {
             id,
             kind: TrackKind::Video,
             main: true,
+            locked: false,
+            hidden: false,
+            muted: false,
             segments: Vec::new(),
         }
     }
@@ -51,6 +57,9 @@ impl Track {
             id,
             kind,
             main: false,
+            locked: false,
+            hidden: false,
+            muted: false,
             segments: Vec::new(),
         };
         track.insert(segment)?;
@@ -63,6 +72,9 @@ impl Track {
             id,
             kind,
             main: false,
+            locked: false,
+            hidden: false,
+            muted: false,
             segments: Vec::new(),
         }
     }
@@ -170,6 +182,33 @@ impl Track {
 
     pub const fn is_main(&self) -> bool {
         self.main
+    }
+
+    /// A locked track refuses an edit.
+    pub const fn locked(&self) -> bool {
+        self.locked
+    }
+
+    /// The preview skips a hidden track.
+    pub const fn hidden(&self) -> bool {
+        self.hidden
+    }
+
+    /// Stored for the mix. Nothing plays it yet.
+    pub const fn muted(&self) -> bool {
+        self.muted
+    }
+
+    pub(crate) fn set_locked(&mut self, on: bool) {
+        self.locked = on;
+    }
+
+    pub(crate) fn set_hidden(&mut self, on: bool) {
+        self.hidden = on;
+    }
+
+    pub(crate) fn set_muted(&mut self, on: bool) {
+        self.muted = on;
     }
 
     pub fn segments(&self) -> &[Segment] {

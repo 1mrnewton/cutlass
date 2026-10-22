@@ -163,6 +163,18 @@ impl Project {
                 self.set_magnet_now(on)?;
                 Ok(Outcome::Unchanged)
             }
+            Command::SetLocked { track, on } => {
+                self.timeline.track_mut(track)?.set_locked(on);
+                Ok(Outcome::Unchanged)
+            }
+            Command::SetHidden { track, on } => {
+                self.timeline.track_mut(track)?.set_hidden(on);
+                Ok(Outcome::Unchanged)
+            }
+            Command::SetMuted { track, on } => {
+                self.timeline.track_mut(track)?.set_muted(on);
+                Ok(Outcome::Unchanged)
+            }
             Command::Place { track, segment } => self.place_now(track, segment),
             Command::RemoveSegment(id) => {
                 self.remove_now(id)?;
@@ -186,10 +198,12 @@ impl Project {
             }
             Command::Split { segment, at } => Ok(Outcome::Segment(self.split_now(segment, at)?)),
             Command::SetTransform { segment, transform } => {
+                self.refuse_lane(segment)?;
                 self.timeline.segment_mut(segment)?.set_transform(transform);
                 Ok(Outcome::Unchanged)
             }
             Command::SetVolume { segment, volume } => {
+                self.refuse_lane(segment)?;
                 self.timeline.segment_mut(segment)?.set_volume(volume)?;
                 Ok(Outcome::Unchanged)
             }
@@ -198,24 +212,29 @@ impl Project {
                 fade_in,
                 fade_out,
             } => {
+                self.refuse_lane(segment)?;
                 self.timeline
                     .segment_mut(segment)?
                     .set_fades(fade_in, fade_out)?;
                 Ok(Outcome::Unchanged)
             }
             Command::SetDenoise { segment, on } => {
+                self.refuse_lane(segment)?;
                 self.timeline.segment_mut(segment)?.set_denoise(on)?;
                 Ok(Outcome::Unchanged)
             }
             Command::SetKeepPitch { segment, keep } => {
+                self.refuse_lane(segment)?;
                 self.timeline.segment_mut(segment)?.set_keep_pitch(keep)?;
                 Ok(Outcome::Unchanged)
             }
             Command::SetCrop { segment, crop } => {
+                self.refuse_lane(segment)?;
                 self.timeline.segment_mut(segment)?.set_crop(crop)?;
                 Ok(Outcome::Unchanged)
             }
             Command::SetBlend { segment, blend } => {
+                self.refuse_lane(segment)?;
                 self.timeline.segment_mut(segment)?.set_blend(blend)?;
                 Ok(Outcome::Unchanged)
             }
@@ -223,10 +242,12 @@ impl Project {
             Command::Freeze { segment, at, hold } => self.freeze_now(segment, at, hold),
             Command::Reverse { segment } => self.reverse_now(segment),
             Command::SetVisible { segment, visible } => {
+                self.refuse_lane(segment)?;
                 self.timeline.segment_mut(segment)?.set_visible(visible);
                 Ok(Outcome::Unchanged)
             }
             Command::AddKeyframe { segment, keyframe } => {
+                self.refuse_lane(segment)?;
                 self.timeline
                     .segment_mut(segment)?
                     .push_keyframe(keyframe)?;
@@ -237,6 +258,7 @@ impl Project {
                 offset_us,
                 property,
             } => {
+                self.refuse_lane(segment)?;
                 self.timeline
                     .segment_mut(segment)?
                     .remove_keyframe(offset_us, property)?;
@@ -248,6 +270,7 @@ impl Project {
                 property,
                 easing,
             } => {
+                self.refuse_lane(segment)?;
                 self.timeline
                     .segment_mut(segment)?
                     .set_easing(offset_us, property, easing)?;
@@ -310,6 +333,12 @@ impl Project {
     }
 
     fn set_magnet_now(&mut self, on: bool) -> Result<(), Error> {
+        if self.timeline.main_track().locked() {
+            return Err(Error::Locked);
+        }
+        if on && self.settings.linkage() && self.locked_follower() {
+            return Err(Error::Locked);
+        }
         self.settings.set_magnet(on);
         if on {
             self.pack_main()?;
@@ -326,19 +355,28 @@ impl Project {
         let target = match track_id {
             None => None,
             Some(track_id) => {
-                let track = self
-                    .timeline
-                    .track(track_id)
-                    .ok_or(Error::UnknownTrack(track_id))?;
-                if !accepts(track.kind(), segment.channels()) {
+                let (kind, main, locked, overlaps) = {
+                    let track = self
+                        .timeline
+                        .track(track_id)
+                        .ok_or(Error::UnknownTrack(track_id))?;
+                    (
+                        track.kind(),
+                        track.is_main(),
+                        track.locked(),
+                        track.overlaps_range(segment.timeline()),
+                    )
+                };
+                if !accepts(kind, segment.channels()) {
                     return Err(Error::WrongTrack);
                 }
-                Some((
-                    track_id,
-                    track.kind(),
-                    track.is_main(),
-                    track.overlaps_range(segment.timeline()),
-                ))
+                if locked {
+                    return Err(Error::Locked);
+                }
+                if main && self.settings.magnet() && self.packing_hits_a_lock() {
+                    return Err(Error::Locked);
+                }
+                Some((track_id, kind, main, overlaps))
             }
         };
         let segment_id = SegmentId::raw(self.allocate()?);
@@ -374,8 +412,21 @@ impl Project {
     }
 
     fn detach_now(&mut self, id: SegmentId) -> Result<Outcome, Error> {
+        self.refuse_lane(id)?;
+        let (channels, range) = {
+            let segment = self.timeline.segment(id).ok_or(Error::UnknownSegment(id))?;
+            (segment.channels(), segment.timeline())
+        };
+        match channels {
+            Channels::Picture => return Err(Error::NoSound),
+            Channels::Sound => return Err(Error::NoPicture),
+            Channels::Both => {}
+        }
+        let home = self.audio_track_with_room(range);
+        if home.is_some_and(|track| self.track_is_locked(track)) {
+            return Err(Error::Locked);
+        }
         let sound = self.timeline.segment_mut(id)?.take_sound()?;
-        let home = self.audio_track_with_room(sound.timeline());
         self.place_now(home, sound)
     }
 
@@ -383,6 +434,7 @@ impl Project {
         if self.timeline.segment(id).is_none() {
             return Err(Error::UnknownSegment(id));
         }
+        self.refuse_edit(id)?;
         let on_main = self
             .timeline
             .main_track()
@@ -409,6 +461,7 @@ impl Project {
             .segment(id)
             .ok_or(Error::UnknownSegment(id))?
             .asset_id();
+        self.refuse_edit(id)?;
         let on_main = self
             .timeline
             .main_track()
@@ -433,6 +486,7 @@ impl Project {
         if self.timeline.segment(id).is_none() {
             return Err(Error::UnknownSegment(id));
         }
+        self.refuse_edit(id)?;
         self.timeline.segment_mut(id)?.change_speed(speed)?;
         self.reflow(id, on_main)
     }
@@ -450,14 +504,20 @@ impl Project {
         let channels = segment.channels();
         let duration = segment.timeline().duration().value;
         let old_start = segment.timeline().start().value;
-        let dest = self.timeline.track(to).ok_or(Error::UnknownTrack(to))?;
-        if !accepts(dest.kind(), channels) {
-            return Err(Error::WrongTrack);
-        }
-        let to_main = dest.is_main();
+        let (to_main, dest_locked) = {
+            let dest = self.timeline.track(to).ok_or(Error::UnknownTrack(to))?;
+            if !accepts(dest.kind(), channels) {
+                return Err(Error::WrongTrack);
+            }
+            (dest.is_main(), dest.locked())
+        };
         let from_main = self.timeline.track(from).is_some_and(Track::is_main);
         if start.checked_add(duration).is_none() {
             return Err(Error::DurationOverflow);
+        }
+        self.refuse_edit(id)?;
+        if dest_locked {
+            return Err(Error::Locked);
         }
 
         if to_main && self.settings.magnet() {
@@ -495,6 +555,7 @@ impl Project {
     }
 
     fn split_now(&mut self, id: SegmentId, at: i64) -> Result<SegmentId, Error> {
+        self.refuse_edit(id)?;
         self.split_at(id, at, true)
     }
 
@@ -626,13 +687,16 @@ impl Project {
         if hold == 0 {
             return Err(Error::ZeroDuration);
         }
-        let segment = self.timeline.segment(id).ok_or(Error::UnknownSegment(id))?;
-        if segment.channels() == Channels::Sound {
-            return Err(Error::NoPicture);
+        {
+            let segment = self.timeline.segment(id).ok_or(Error::UnknownSegment(id))?;
+            if segment.channels() == Channels::Sound {
+                return Err(Error::NoPicture);
+            }
+            if segment.source().is_none() {
+                return Err(Error::ImageSource);
+            }
         }
-        if segment.source().is_none() {
-            return Err(Error::ImageSource);
-        }
+        self.refuse_edit(id)?;
         let from = self
             .timeline
             .track_of(id)
@@ -709,6 +773,7 @@ impl Project {
             return Err(Error::Freeze);
         }
         let source = segment.source().ok_or(Error::ImageSource)?;
+        self.refuse_lane(id)?;
         let current_id = segment.asset_id();
         let current = self
             .asset(current_id)
@@ -922,6 +987,98 @@ fn moved_starts(
         }
     }
     Ok(deltas)
+}
+
+impl Project {
+    fn track_is_locked(&self, id: TrackId) -> bool {
+        self.timeline.track(id).is_some_and(Track::locked)
+    }
+
+    /// The segment's own track is locked.
+    fn refuse_lane(&self, id: SegmentId) -> Result<(), Error> {
+        let track = self
+            .timeline
+            .track_of(id)
+            .ok_or(Error::UnknownSegment(id))?;
+        if self.track_is_locked(track) {
+            return Err(Error::Locked);
+        }
+        Ok(())
+    }
+
+    /// A main edit would move a clip on a locked track.
+    fn ripples_locked(&self, id: SegmentId) -> bool {
+        let on_main = self
+            .timeline
+            .main_track()
+            .segments()
+            .iter()
+            .any(|segment| segment.id() == id);
+        if !on_main {
+            return false;
+        }
+        let magnet = self.settings.magnet();
+        let linkage = self.settings.linkage();
+        if !magnet && !linkage {
+            return false;
+        }
+        let mains: Vec<_> = self
+            .timeline
+            .main_track()
+            .segments()
+            .iter()
+            .map(|segment| (segment.id(), segment.timeline()))
+            .collect();
+        for track in self.timeline.tracks() {
+            if track.is_main() || !track.locked() {
+                continue;
+            }
+            for segment in track.segments() {
+                let owner = sole_owner(segment.timeline(), &mains);
+                let follows = (magnet && owner.is_some()) || (linkage && owner == Some(id));
+                if follows {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn refuse_edit(&self, id: SegmentId) -> Result<(), Error> {
+        self.refuse_lane(id)?;
+        if self.ripples_locked(id) {
+            return Err(Error::Locked);
+        }
+        Ok(())
+    }
+
+    /// Magnet on the main track would slide a clip on a locked track.
+    fn packing_hits_a_lock(&self) -> bool {
+        self.timeline
+            .main_track()
+            .segments()
+            .iter()
+            .any(|segment| self.ripples_locked(segment.id()))
+    }
+
+    /// A locked lane holds a clip that follows one main clip.
+    fn locked_follower(&self) -> bool {
+        let mains: Vec<_> = self
+            .timeline
+            .main_track()
+            .segments()
+            .iter()
+            .map(|segment| (segment.id(), segment.timeline()))
+            .collect();
+        self.timeline.tracks().iter().any(|track| {
+            !track.is_main()
+                && track.locked()
+                && track
+                    .segments()
+                    .iter()
+                    .any(|segment| sole_owner(segment.timeline(), &mains).is_some())
+        })
+    }
 }
 
 fn sole_owner(range: TimeRange, mains: &[(SegmentId, TimeRange)]) -> Option<SegmentId> {

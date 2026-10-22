@@ -111,6 +111,21 @@ pub enum Command {
     Reverse {
         segment: SegmentId,
     },
+    /// Locks the track when on. A locked track refuses an edit.
+    SetLocked {
+        track: TrackId,
+        on: bool,
+    },
+    /// Hides the track when on. The preview skips it.
+    SetHidden {
+        track: TrackId,
+        on: bool,
+    },
+    /// Mutes the track when on. The mix does not play it yet.
+    SetMuted {
+        track: TrackId,
+        on: bool,
+    },
     /// Shown when on. It does not move the segment.
     SetVisible {
         segment: SegmentId,

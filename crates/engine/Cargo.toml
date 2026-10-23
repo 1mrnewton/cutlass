@@ -6,11 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "The session the shells share. The clock moves the playhead and the mix sums the clips."
+description = "The session the shells share. The clock, the mix, and the picture readers."
 
 [dependencies]
 cutlass-core.workspace = true
 cutlass-project.workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+cutlass-color.workspace = true
+cutlass-media.workspace = true
+cutlass-playback.workspace = true
+cutlass-videotoolbox.workspace = true
+log.workspace = true
 
 [lints]
 workspace = true

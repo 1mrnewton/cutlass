@@ -789,8 +789,13 @@ dependencies = [
 name = "cutlass-engine"
 version = "0.1.0"
 dependencies = [
+ "cutlass-color",
  "cutlass-core",
+ "cutlass-media",
+ "cutlass-playback",
  "cutlass-project",
+ "cutlass-videotoolbox",
+ "log",
 ]
 
 [[package]]

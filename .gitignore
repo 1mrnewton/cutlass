@@ -11,3 +11,5 @@ proxy/
 .cutlass/
 librry/
 run.sh
+xcuserdata/
+*.xcuserstate

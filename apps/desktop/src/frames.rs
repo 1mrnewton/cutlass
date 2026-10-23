@@ -646,7 +646,15 @@ mod tests {
         };
         let fixture = cutlass_test_fixtures::video("h264-high-bframes-128x72");
         let mut session = Session(
-            VideoSession::open(&fixture.config, None, None, None, Rotation::Zero).expect("decoder"),
+            VideoSession::open(
+                &fixture.config,
+                None,
+                None,
+                None,
+                Rotation::Zero,
+                &fixture.packets,
+            )
+            .expect("decoder"),
         );
         let mut ahead = Ahead::new(NonZeroUsize::new(2).expect("depth"));
         let time = fixture.frames[0].pts;

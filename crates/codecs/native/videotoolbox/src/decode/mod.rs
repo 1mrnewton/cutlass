@@ -63,14 +63,20 @@ pub struct DecoderOptions {
     pub content_light: Option<ContentLight>,
     /// Copied onto every frame. [`Rotation::Zero`] leaves the picture upright.
     pub rotation: Rotation,
+    /// Smallest presentation time minus decode time in the track, in that
+    /// timescale. `0` when every frame is shown at or after it is decoded.
+    /// A negative value is how far a B-frame can be shown ahead of its decode
+    /// time. A positive value is ignored.
+    pub composition_offset: i64,
 }
 
 /// A VideoToolbox decode session for one stream.
 ///
 /// Frames come out in presentation order as IOSurface-backed
 /// [`PixelBuffer`]s, in NV12, or P010 for streams that can carry more than 8
-/// bits. Packets with decode times come out after the fewest frames of delay;
-/// without them, after up to 16.
+/// bits. [`DecoderOptions::composition_offset`] is how early a frame may be
+/// shown relative to its decode time. Without decode times, frames wait for
+/// up to 16.
 pub struct Decoder {
     session: CFRetained<VTDecompressionSession>,
     format: CFRetained<CMVideoFormatDescription>,
@@ -78,6 +84,12 @@ pub struct Decoder {
     /// session. `Drop` invalidates the session first.
     output: Arc<Queue<Decoded>>,
     reorder: Reorder<VideoFrame<PixelBuffer>>,
+    /// Length of each HEVC NAL size prefix. `None` for every other codec.
+    nal_length: Option<usize>,
+    /// This span has sent a picture. A seek starts closed.
+    open: bool,
+    /// The clean random access that opened this span is still dropping RASL.
+    drop_rasl: bool,
     color: Option<ColorTags>,
     mastering: Option<MasteringDisplay>,
     content_light: Option<ContentLight>,
@@ -143,7 +155,10 @@ impl Decoder {
             session,
             format,
             output,
-            reorder: Reorder::new(),
+            reorder: Reorder::new(options.composition_offset),
+            nal_length: hevc_nal_length(config),
+            open: false,
+            drop_rasl: false,
             color: options.color,
             mastering: options.mastering,
             content_light: options.content_light,
@@ -153,6 +168,9 @@ impl Decoder {
 
     /// Decodes one packet. Packets go in decode order, starting at a keyframe.
     pub fn send_packet(&mut self, packet: &Packet) -> Result<(), Error> {
+        if self.skip_leading(packet) {
+            return Ok(());
+        }
         let sample = self.sample_buffer(packet)?;
         self.reorder.packet_sent(packet.dts);
         let mut info = VTDecodeInfoFlags::empty();
@@ -208,7 +226,21 @@ impl Decoder {
         check("VTDecompressionSessionWaitForAsynchronousFrames", status)?;
         self.output.clear();
         self.reorder.clear();
+        self.open = false;
+        self.drop_rasl = false;
         Ok(())
+    }
+
+    /// A seek that starts on a CRA must not feed the RASL pictures after it.
+    fn skip_leading(&mut self, packet: &Packet) -> bool {
+        let Some(length) = self.nal_length else {
+            return false;
+        };
+        hevc::skip_leading(
+            &mut self.open,
+            &mut self.drop_rasl,
+            hevc::picture(&packet.data, length),
+        )
     }
 
     /// False when VideoToolbox picked a software decoder.
@@ -346,6 +378,35 @@ unsafe extern "C-unwind" fn decoded(
 /// True when this crate can open a decoder for `codec`.
 pub fn decodes(codec: VideoCodec) -> bool {
     matches!(codec, VideoCodec::H264 | VideoCodec::Hevc)
+}
+
+/// Smallest presentation time minus decode time in `packets`.
+///
+/// The result is never positive. `0` means every frame is shown at or after
+/// its decode time. A negative value is a B-frame shown before it is decoded.
+/// The reorder buffer needs this before the first packet, or a later picture
+/// can come out first.
+pub fn composition_offset(packets: &[Packet]) -> i64 {
+    let mut offset = 0i64;
+    for packet in packets {
+        let Some(dts) = packet.dts else {
+            continue;
+        };
+        if packet.pts.timescale != dts.timescale {
+            continue;
+        }
+        offset = offset.min(packet.pts.value.saturating_sub(dts.value));
+    }
+    offset
+}
+
+fn hevc_nal_length(config: &VideoStreamConfig) -> Option<usize> {
+    if config.codec != VideoCodec::Hevc {
+        return None;
+    }
+    let header = config.config_record.get(..23)?;
+    let size = usize::from((header[21] & 0b11) + 1);
+    if size == 3 { None } else { Some(size) }
 }
 
 fn describe(config: &VideoStreamConfig) -> Result<Description<'_>, Error> {

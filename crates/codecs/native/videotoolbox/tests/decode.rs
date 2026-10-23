@@ -131,6 +131,37 @@ fn hevc_main10_decodes_to_p010() {
 }
 
 #[test]
+fn hevc_b_frames_stay_in_order_when_decode_time_starts_at_zero() {
+    let fixture = cutlass_test_fixtures::video("hevc-main-bframes-128x72");
+    let shift = fixture
+        .packets
+        .iter()
+        .filter_map(|packet| packet.dts.map(|time| time.value))
+        .min()
+        .unwrap();
+    let mut packets = fixture.packets.clone();
+    for packet in &mut packets {
+        if let Some(time) = packet.dts.as_mut() {
+            time.value -= shift;
+        }
+    }
+    let offset = cutlass_videotoolbox::composition_offset(&packets);
+    assert!(offset < 0);
+    let mut decoder = Decoder::new(
+        &fixture.config,
+        DecoderOptions {
+            composition_offset: offset,
+            ..DecoderOptions::default()
+        },
+    )
+    .unwrap();
+    let frames = decode_all(&mut decoder, &packets);
+    let pts: Vec<_> = frames.iter().map(|frame| frame.pts).collect();
+    let expected: Vec<_> = fixture.frames.iter().map(|frame| frame.pts).collect();
+    assert_eq!(pts, expected);
+}
+
+#[test]
 fn reset_then_second_gop_matches_reference() {
     let fixture = cutlass_test_fixtures::video("h264-high-bframes-128x72");
     let mut decoder = Decoder::new(&fixture.config, DecoderOptions::default()).unwrap();

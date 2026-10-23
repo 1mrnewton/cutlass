@@ -274,6 +274,7 @@ fn try_open(source: &str, key: &str, path: &str, caches: &Caches) -> Option<Clip
         parsed.mastering,
         parsed.content_light,
         parsed.rotation,
+        &parsed.packets,
     ) {
         Ok(session) => session,
         Err(error) => {

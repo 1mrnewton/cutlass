@@ -15,7 +15,7 @@ mod queue;
 mod time;
 
 pub use caps::{Capabilities, EncoderInfo};
-pub use decode::{Decoder, DecoderOptions, decodes};
+pub use decode::{Decoder, DecoderOptions, composition_offset, decodes};
 pub use encode::{Encoder, EncoderConfig};
 pub use error::Error;
 pub use pixel_buffer::{PixelBuffer, Plane, PlaneMut};

@@ -45,6 +45,79 @@ pub(super) fn describe(hvcc: &[u8]) -> Result<Description<'_>, Error> {
     })
 }
 
+/// An HEVC sample, as far as a seek needs to know.
+pub(super) enum Picture {
+    /// CRA or a BLA that can be followed by RASL pictures.
+    Clean,
+    /// A leading picture that still refers to the group before the clean point.
+    Rasl,
+    /// A picture a decoder can keep after a clean random access.
+    Coded,
+    /// No picture NAL.
+    Empty,
+}
+
+/// Classifies the VCL NALs in one length-prefixed sample.
+pub(super) fn picture(data: &[u8], length: usize) -> Picture {
+    if length == 0 || length > 4 {
+        return Picture::Empty;
+    }
+    let mut clean = false;
+    let mut rasl = false;
+    let mut coded = false;
+    let mut rest = data;
+    while rest.len() >= length {
+        let mut size = 0usize;
+        for byte in &rest[..length] {
+            size = (size << 8) | usize::from(*byte);
+        }
+        rest = &rest[length..];
+        if size == 0 || size > rest.len() {
+            break;
+        }
+        match (rest[0] >> 1) & 0x3f {
+            16 | 21 => clean = true,
+            8 | 9 => rasl = true,
+            0..=31 => coded = true,
+            _ => {}
+        }
+        rest = &rest[size..];
+    }
+    if clean && !coded {
+        Picture::Clean
+    } else if rasl && !coded && !clean {
+        Picture::Rasl
+    } else if coded || clean {
+        Picture::Coded
+    } else {
+        Picture::Empty
+    }
+}
+
+/// `true` when this sample must not be decoded.
+///
+/// `open` is set once this span has sent a picture. A seek starts closed, so
+/// the clean random access it starts on drops the RASL pictures after it.
+/// Those pictures still need the group the seek did not decode. A clean
+/// random access reached during playback keeps them, because that group is
+/// already decoded.
+pub(super) fn skip_leading(open: &mut bool, drop_rasl: &mut bool, picture: Picture) -> bool {
+    match picture {
+        Picture::Rasl if *drop_rasl => true,
+        Picture::Clean if !*open => {
+            *open = true;
+            *drop_rasl = true;
+            false
+        }
+        Picture::Clean | Picture::Coded | Picture::Rasl => {
+            *open = true;
+            *drop_rasl = false;
+            false
+        }
+        Picture::Empty => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +158,29 @@ mod tests {
         let mut record = hvcc(0);
         record[22] = 2;
         assert!(describe(&record).is_err());
+    }
+
+    #[test]
+    fn rasl_after_a_clean_random_access_is_skipped() {
+        let cra = sample(4, 21);
+        let rasl = sample(4, 8);
+        let trail = sample(4, 1);
+        let mut open = false;
+        let mut drop = false;
+        assert!(!skip_leading(&mut open, &mut drop, picture(&cra, 4)));
+        assert!(drop);
+        assert!(skip_leading(&mut open, &mut drop, picture(&rasl, 4)));
+        assert!(!skip_leading(&mut open, &mut drop, picture(&trail, 4)));
+        assert!(!drop);
+        assert!(!skip_leading(&mut open, &mut drop, picture(&cra, 4)));
+        assert!(!drop);
+        assert!(!skip_leading(&mut open, &mut drop, picture(&rasl, 4)));
+    }
+
+    fn sample(length: usize, nal_type: u8) -> Vec<u8> {
+        let mut bytes = vec![0; length + 2];
+        bytes[length - 1] = 2;
+        bytes[length] = nal_type << 1;
+        bytes
     }
 }

@@ -344,8 +344,15 @@ fn open_source(path: &str) -> Result<Opened, String> {
 
 impl Opened {
     fn session(&self) -> Result<VideoSession, String> {
-        VideoSession::open(&self.config, self.color, None, None, self.rotation)
-            .map_err(decode_error)
+        VideoSession::open(
+            &self.config,
+            self.color,
+            None,
+            None,
+            self.rotation,
+            self.probe.samples(self.index).unwrap_or(&[]),
+        )
+        .map_err(decode_error)
     }
 }
 

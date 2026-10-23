@@ -26,11 +26,14 @@ pub struct VideoSession {
 impl VideoSession {
     /// Opens the system decoder for `config`.
     ///
-    /// `color`, `mastering`, `content_light`, and `rotation` are copied onto
-    /// every frame. `None` leaves that colour part unset. [`Rotation::Zero`]
-    /// leaves the picture upright. The caller has already chosen
-    /// [`crate::DecoderKind::System`]. A software session is not opened here,
-    /// because no Rust video decoder is connected.
+    /// `packets` supplies the presentation and decode times. A B-frame can be
+    /// shown before its decode time, and the session keeps that delay so the
+    /// pictures come out in presentation order. `color`, `mastering`,
+    /// `content_light`, and `rotation` are copied onto every frame. `None`
+    /// leaves that colour part unset. [`Rotation::Zero`] leaves the picture
+    /// upright. The caller has already chosen [`crate::DecoderKind::System`].
+    /// A software session is not opened here, because no Rust video decoder
+    /// is connected.
     #[cfg(target_vendor = "apple")]
     pub fn open(
         config: &VideoStreamConfig,
@@ -38,6 +41,7 @@ impl VideoSession {
         mastering: Option<MasteringDisplay>,
         content_light: Option<ContentLight>,
         rotation: Rotation,
+        packets: &[Packet],
     ) -> Result<Self, Error> {
         let decoder = cutlass_videotoolbox::Decoder::new(
             config,
@@ -46,6 +50,7 @@ impl VideoSession {
                 mastering,
                 content_light,
                 rotation,
+                composition_offset: cutlass_videotoolbox::composition_offset(packets),
                 ..cutlass_videotoolbox::DecoderOptions::default()
             },
         )
@@ -64,8 +69,9 @@ impl VideoSession {
         mastering: Option<MasteringDisplay>,
         content_light: Option<ContentLight>,
         rotation: Rotation,
+        packets: &[cutlass_core::Packet],
     ) -> Result<Self, Error> {
-        let _ = (color, mastering, content_light, rotation);
+        let _ = (color, mastering, content_light, rotation, packets);
         Err(Error::NoDecoder(config.codec))
     }
 }
@@ -122,7 +128,7 @@ mod tests {
             config_record: vec![1],
         };
         assert!(matches!(
-            VideoSession::open(&config, None, None, None, Rotation::Zero),
+            VideoSession::open(&config, None, None, None, Rotation::Zero, &[]),
             Err(Error::NoDecoder(cutlass_core::VideoCodec::H264))
         ));
     }

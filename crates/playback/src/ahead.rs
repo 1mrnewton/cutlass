@@ -96,6 +96,15 @@ impl<I> Ahead<I> {
         self.flushed && self.held.is_none()
     }
 
+    /// The oldest frame still held, queued or waiting to enter the queue.
+    pub fn earliest(&self) -> Option<Timestamp> {
+        self.queue
+            .iter()
+            .next()
+            .or(self.held.as_ref())
+            .map(|frame| frame.pts)
+    }
+
     /// Sends from `pending` until the queue is full or the decoder is drained.
     ///
     /// `pending` keeps the packets the decoder has not taken. Call this again
@@ -167,7 +176,7 @@ impl<I> Ahead<I> {
         let mut pending = &packets[start..];
         loop {
             self.fill(decoder, &mut pending)?;
-            self.queue.discard_until(time);
+            let _passed = self.queue.discard_until(time);
             if self.held.is_some() && !self.queue.is_full() {
                 continue;
             }
@@ -178,12 +187,13 @@ impl<I> Ahead<I> {
         }
     }
 
-    /// Decodes toward `time`, dropping frames the playhead has already passed.
+    /// Decodes toward `time`, handing back frames the playhead has passed.
     ///
     /// At most `budget` new frames are taken from the decoder. A full queue
-    /// stops the work sooner. `restart` clears the queue and the decoder, then
-    /// reads `pending` from its first packet. The caller chooses that packet
-    /// with [`crate::reach`].
+    /// stops the work sooner. `restart` returns the frames still queued, clears
+    /// the decoder, then reads `pending` from its first packet. The caller
+    /// chooses that packet with [`crate::reach`]. The returned frames start
+    /// earliest. A frame still on screen is not among them.
     pub fn follow<D>(
         &mut self,
         decoder: &mut D,
@@ -191,29 +201,34 @@ impl<I> Ahead<I> {
         time: Timestamp,
         budget: usize,
         restart: bool,
-    ) -> Result<(), FillError<I, D::Error>>
+    ) -> Result<Vec<VideoFrame<I>>, FillError<I, D::Error>>
     where
         D: Decode<Image = I>,
     {
+        let mut passed = Vec::new();
         if restart {
-            self.seek();
+            passed.extend(self.queue.drain());
+            if let Some(frame) = self.held.take() {
+                passed.push(frame);
+            }
+            self.flushed = false;
             decoder.reset().map_err(FillError::Decode)?;
         }
         let mut decoded = 0;
         loop {
-            self.queue.discard_until(time);
+            passed.extend(self.queue.discard_until(time));
             if let Some(frame) = self.held.take() {
                 self.accept(frame)?;
             }
             if self.held.is_some() || self.queue.is_full() || decoded >= budget {
-                return Ok(());
+                return Ok(passed);
             }
             match decoder.receive().map_err(FillError::Decode)? {
                 Some(frame) => {
                     self.accept(frame)?;
                     decoded += 1;
                 }
-                None if pending.is_empty() && self.flushed => return Ok(()),
+                None if pending.is_empty() && self.flushed => return Ok(passed),
                 None if pending.is_empty() => {
                     decoder.flush().map_err(FillError::Decode)?;
                     self.flushed = true;
@@ -442,9 +457,13 @@ mod tests {
         let mut pending = packets.as_slice();
         let mut ahead = Ahead::new(NonZeroUsize::new(4).expect("limit"));
         let mut lag = Lag::default();
-        ahead
+        let passed = ahead
             .follow(&mut lag, &mut pending, time(50), 2, false)
             .expect("follow");
+        assert_eq!(
+            passed.iter().map(|frame| frame.image).collect::<Vec<_>>(),
+            vec![0]
+        );
         assert_eq!(lag.resets, 0);
         assert_eq!(ahead.at(time(50)).expect("frame").image, 10);
         assert!(!pending.is_empty());

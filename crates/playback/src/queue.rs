@@ -81,17 +81,30 @@ impl<I> Queue<I> {
     /// The frame to draw at `time`, dropping any frame an earlier one has replaced.
     ///
     /// A frame that has not started stays queued. The frame on screen stays
-    /// until a later frame is due.
+    /// until a later frame is due. Frames dropped here are not returned; the
+    /// caller that needs them uses [`Self::discard_until`].
     pub fn at(&mut self, time: Timestamp) -> Option<&VideoFrame<I>> {
-        self.discard_until(time);
+        let _passed = self.discard_until(time);
         self.frames.front().filter(|frame| frame.pts <= time)
     }
 
     /// Drops frames a later one has already replaced at `time`.
-    pub(crate) fn discard_until(&mut self, time: Timestamp) {
+    ///
+    /// The returned frames start earliest. The frame still on screen stays.
+    pub(crate) fn discard_until(&mut self, time: Timestamp) -> Vec<VideoFrame<I>> {
+        let mut passed = Vec::new();
         while self.frames.len() >= 2 && self.frames[1].pts <= time {
-            self.frames.pop_front();
+            if let Some(frame) = self.frames.pop_front() {
+                passed.push(frame);
+            }
         }
+        passed
+    }
+
+    /// Removes every queued frame, earliest first.
+    pub(crate) fn drain(&mut self) -> Vec<VideoFrame<I>> {
+        self.last = None;
+        self.frames.drain(..).collect()
     }
 
     /// Drops every frame. The next [`Self::push`] may start at any time.

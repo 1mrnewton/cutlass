@@ -258,9 +258,16 @@ impl<I> FramePool<I> {
         self.clips.get(key)?.find(time, tolerance)
     }
 
-    /// Stores `frame` under `key` and drops the end farthest from it past the cap.
-    pub fn put(&mut self, key: &str, frame: VideoFrame<I>) {
-        let around = frame.pts;
+    /// Stores `frame` under `key` when it is closer to `around` than the frame
+    /// the pool would drop. A full pool leaves a farther frame unstored.
+    pub fn put(&mut self, key: &str, frame: VideoFrame<I>, around: Timestamp) {
+        if self.stored >= self.maximum.get() {
+            if let Some((_, start)) = self.farthest(around) {
+                if micros_between(around, frame.pts) >= micros_between(around, start) {
+                    return;
+                }
+            }
+        }
         let maximum = self.maximum;
         let cache = self
             .clips
@@ -488,9 +495,21 @@ mod tests {
     #[test]
     fn the_pool_drops_the_picture_farthest_from_the_new_one() {
         let mut pool = FramePool::new(NonZeroUsize::new(2).expect("maximum"));
-        pool.put("a", frame(0, 10));
-        pool.put("a", frame(100, 10));
-        pool.put("a", frame(110, 10));
+        pool.put("a", frame(0, 10), time(0));
+        pool.put("a", frame(100, 10), time(100));
+        pool.put("a", frame(110, 10), time(110));
+        assert_eq!(pool.len(), 2);
+        assert!(pool.find("a", time(0), time(0)).is_none());
+        assert!(pool.find("a", time(100), time(0)).is_some());
+        assert!(pool.find("a", time(110), time(0)).is_some());
+    }
+
+    #[test]
+    fn the_pool_keeps_a_near_picture_when_a_far_one_arrives() {
+        let mut pool = FramePool::new(NonZeroUsize::new(2).expect("maximum"));
+        pool.put("a", frame(100, 10), time(110));
+        pool.put("a", frame(110, 10), time(110));
+        pool.put("a", frame(0, 10), time(110));
         assert_eq!(pool.len(), 2);
         assert!(pool.find("a", time(0), time(0)).is_none());
         assert!(pool.find("a", time(100), time(0)).is_some());

@@ -676,12 +676,12 @@ impl PicturePool {
             .cloned()
     }
 
-    fn put_all(&mut self, key: &str, frames: Vec<VideoFrame<PixelBuffer>>) {
+    fn put_all(&mut self, key: &str, around: Timestamp, frames: Vec<VideoFrame<PixelBuffer>>) {
         if frames.is_empty() {
             return;
         }
         for frame in frames {
-            self.frames.put(key, frame);
+            self.frames.put(key, frame, around);
         }
         self.note();
     }
@@ -1355,14 +1355,14 @@ impl Drop for ParkPictures<'_> {
             return;
         };
         let frames = clip.pictures.drain();
-        if frames.is_empty() {
+        let Some(around) = frames.last().map(|frame| frame.pts) else {
             return;
-        }
+        };
         let mut pool = self
             .pool
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        pool.put_all(&clip.source, frames);
+        pool.put_all(&clip.source, around, frames);
     }
 }
 
@@ -1389,8 +1389,8 @@ fn step(
         publish(board, missing(track, generation, time));
         return Chunk::Settled;
     }
-    let readable = match pump(clip, time) {
-        Ok(readable) => readable,
+    let (readable, passed) = match pump(clip, time) {
+        Ok(read) => read,
         Err(error) => {
             if hit.is_some() {
                 return Chunk::Covers;
@@ -1414,7 +1414,7 @@ fn step(
         publish(board, missing(track, generation, time));
         return Chunk::Settled;
     }
-    remember(clip, pool, time, playing);
+    remember(clip, pool, time, playing, passed);
     let matrix = clip.parsed.matrix;
     let taken = clip
         .ahead
@@ -1479,31 +1479,44 @@ fn cached_frame(
     if !extra.is_empty() {
         pool.lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .put_all(&clip.source, extra);
+            .put_all(&clip.source, time, extra);
     }
     Some(frame)
 }
 
 #[cfg(target_vendor = "apple")]
-fn remember(clip: &mut Open, pool: &Mutex<PicturePool>, time: Timestamp, playing: bool) {
-    let queued: Vec<_> = clip.ahead.frames().cloned().collect();
-    if queued.is_empty() {
-        return;
-    }
+fn remember(
+    clip: &mut Open,
+    pool: &Mutex<PicturePool>,
+    time: Timestamp,
+    playing: bool,
+    passed: Vec<VideoFrame<PixelBuffer>>,
+) {
     let mut extra = Vec::new();
-    for frame in queued {
-        let remembered = clip.pictures.insert(frame, time, playing);
-        extra.extend(remembered.evicted);
-        if let Some(refused) = remembered.refused {
-            extra.push(refused);
-        }
+    let queued: Vec<_> = clip.ahead.frames().cloned().collect();
+    for frame in passed.into_iter().chain(queued) {
+        keep(clip, time, playing, frame, &mut extra);
     }
     if extra.is_empty() {
         return;
     }
     pool.lock()
         .unwrap_or_else(|poison| poison.into_inner())
-        .put_all(&clip.source, extra);
+        .put_all(&clip.source, time, extra);
+}
+
+fn keep(
+    clip: &mut Open,
+    time: Timestamp,
+    playing: bool,
+    frame: VideoFrame<PixelBuffer>,
+    extra: &mut Vec<VideoFrame<PixelBuffer>>,
+) {
+    let remembered = clip.pictures.insert(frame, time, playing);
+    extra.extend(remembered.evicted);
+    if let Some(refused) = remembered.refused {
+        extra.push(refused);
+    }
 }
 
 #[cfg(target_vendor = "apple")]
@@ -1551,18 +1564,25 @@ fn publish(board: &Mutex<Vec<LayerFrame>>, frame: LayerFrame) {
 }
 
 #[cfg(target_vendor = "apple")]
-fn pump(clip: &mut Open, time: Timestamp) -> Result<bool, String> {
-    let (start, restart) =
-        match cutlass_playback::reach(&clip.parsed.packets, clip.cursor, clip.followed, time) {
-            None => {
-                clip.followed = Some(time);
-                return Ok(false);
-            }
-            Some(Reach::Keyframe(index)) => (index, true),
-            Some(Reach::Forward) => (clip.cursor.min(clip.parsed.packets.len()), false),
-        };
+fn pump(clip: &mut Open, time: Timestamp) -> Result<(bool, Vec<VideoFrame<PixelBuffer>>), String> {
+    let (start, restart) = match cutlass_playback::reach(
+        &clip.parsed.packets,
+        clip.cursor,
+        clip.followed,
+        clip.ahead.earliest(),
+        clip.ahead.drained(),
+        time,
+    ) {
+        None => {
+            clip.followed = Some(time);
+            return Ok((false, Vec::new()));
+        }
+        Some(Reach::Keyframe(index)) => (index, true),
+        Some(Reach::Forward) => (clip.cursor.min(clip.parsed.packets.len()), false),
+    };
     let mut pending = &clip.parsed.packets[start..];
-    clip.ahead
+    let passed = clip
+        .ahead
         .follow(
             &mut clip.session,
             &mut pending,
@@ -1573,7 +1593,7 @@ fn pump(clip: &mut Open, time: Timestamp) -> Result<bool, String> {
         .map_err(|error| error.to_string())?;
     clip.cursor = clip.parsed.packets.len() - pending.len();
     clip.followed = Some(time);
-    Ok(true)
+    Ok((true, passed))
 }
 
 #[cfg(test)]

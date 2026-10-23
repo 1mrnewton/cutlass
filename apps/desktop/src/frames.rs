@@ -10,8 +10,9 @@
 //! while the hardware reader count is under the cap.
 //! The window draws those frames from the bottom track upward and does not
 //! copy them back. A failure is written to the app log. A seek, and a cut,
-//! keep the last picture until the new one is ready. Where no video decoder
-//! is linked, there is no picture.
+//! keep the last picture until the new one is ready. A fast backward scrub
+//! shows a decoded frame that is closer to the playhead before that exact
+//! frame is ready. Where no video decoder is linked, there is no picture.
 
 use cutlass_compose::Gpu;
 use cutlass_project::Project;
@@ -360,12 +361,12 @@ impl Reel {
         state: &eframe::egui_wgpu::RenderState,
         frame: LayerFrame,
     ) {
-        let Some(asked) = self.pending.as_ref().and_then(|pending| {
+        let Some((asked, playing)) = self.pending.as_ref().and_then(|pending| {
             pending
                 .layers
                 .iter()
                 .find(|layer| layer.track == frame.track)
-                .map(|layer| layer.time)
+                .map(|layer| (layer.time, pending.playing))
         }) else {
             return;
         };
@@ -387,9 +388,12 @@ impl Reel {
             }
             return;
         };
-        // The playhead moved forward. This frame still covers it. A backward
-        // seek is waiting for a different frame, so this one stays off the plate.
-        if frame.requested != asked && pts > asked {
+        // The playhead moved. A frame that still covers it is shown. While
+        // scrubbing backward, a frame that is only closer than the one on
+        // screen is shown too, so a fast drag does not sit still. Playback
+        // still ignores a frame that is ahead of the clock.
+        let shown = self.held[index].shown.as_ref().map(|shown| shown.pts);
+        if !stale_frame_shows(playing, asked, pts, frame.requested, shown) {
             return;
         }
         if self.held[index].has_picture()
@@ -398,7 +402,11 @@ impl Reel {
                 .as_ref()
                 .is_some_and(|shown| shown.pts == pts)
         {
-            if let Some(shown) = &mut self.held[index].shown {
+            // A frame still ahead of a backward scrub is not the one the
+            // playhead asked for, so the window keeps asking.
+            if pts <= asked
+                && let Some(shown) = &mut self.held[index].shown
+            {
                 shown.requested = asked;
             }
             return;
@@ -461,7 +469,7 @@ impl Reel {
         }
         self.held[index].shown = Some(Shown {
             pts,
-            requested: asked,
+            requested: if pts <= asked { asked } else { frame.requested },
         });
     }
 }
@@ -1464,8 +1472,7 @@ fn step(
         if hit.is_some() {
             return Chunk::Covers;
         }
-        let finished = clip.ahead.is_full()
-            || (clip.cursor >= clip.parsed.packets.len() && clip.ahead.drained());
+        let finished = chase_finished(clip);
         if !finished {
             return Chunk::Short;
         }
@@ -1581,6 +1588,40 @@ fn show_frame(
             },
         },
     );
+}
+
+/// Whether a frame decoded for `requested` still belongs on the plate.
+///
+/// A frame at or before `asked` covers a playhead that moved forward. While
+/// scrubbing, a frame still ahead of the playhead is shown when it is closer
+/// than the picture already there. Playback does not show that frame.
+#[cfg(target_vendor = "apple")]
+fn stale_frame_shows(
+    playing: bool,
+    asked: Timestamp,
+    pts: Timestamp,
+    requested: Timestamp,
+    shown: Option<Timestamp>,
+) -> bool {
+    if requested == asked || pts <= asked {
+        return true;
+    }
+    if playing {
+        return false;
+    }
+    shown.is_none_or(|shown| apart(pts, asked) < apart(shown, asked))
+}
+
+#[cfg(target_vendor = "apple")]
+fn apart(left: Timestamp, right: Timestamp) -> i128 {
+    let left_ticks = i128::from(left.value) * i128::from(right.timescale.get());
+    let right_ticks = i128::from(right.value) * i128::from(left.timescale.get());
+    (left_ticks - right_ticks).abs()
+}
+
+#[cfg(target_vendor = "apple")]
+fn chase_finished(clip: &Open) -> bool {
+    clip.ahead.is_full() || (clip.cursor >= clip.parsed.packets.len() && clip.ahead.drained())
 }
 
 #[cfg(target_vendor = "apple")]
@@ -1811,5 +1852,79 @@ mod tests {
         let pixels_len =
             usize::try_from(width).expect("width") * usize::try_from(height).expect("height") * 4;
         assert_eq!(pixels.len(), pixels_len);
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_fast_backward_scrub_keeps_a_closer_frame() {
+        use std::num::NonZeroU32;
+
+        let scale = NonZeroU32::new(1_000).expect("scale");
+        let at = |ms| cutlass_core::Timestamp::new(ms, scale);
+        let asked = at(1_000);
+        let on_screen = Some(at(4_000));
+        assert!(super::stale_frame_shows(
+            false,
+            asked,
+            at(2_000),
+            at(4_000),
+            on_screen,
+        ));
+        assert!(!super::stale_frame_shows(
+            false,
+            asked,
+            at(7_000),
+            at(4_000),
+            on_screen,
+        ));
+        assert!(!super::stale_frame_shows(
+            true,
+            asked,
+            at(2_000),
+            at(4_000),
+            on_screen,
+        ));
+        assert!(!super::stale_frame_shows(
+            false,
+            asked,
+            at(2_000),
+            at(4_000),
+            Some(at(0)),
+        ));
+        assert!(super::stale_frame_shows(
+            false,
+            asked,
+            at(1_000),
+            at(4_000),
+            on_screen,
+        ));
+        assert!(super::stale_frame_shows(
+            true,
+            asked,
+            at(900),
+            at(4_000),
+            on_screen,
+        ));
+        assert!(super::stale_frame_shows(
+            true,
+            asked,
+            at(2_000),
+            asked,
+            on_screen,
+        ));
+        assert!(super::stale_frame_shows(
+            false,
+            asked,
+            at(2_000),
+            at(4_000),
+            None,
+        ));
+        assert!(!super::stale_frame_shows(
+            true,
+            asked,
+            at(2_000),
+            at(4_000),
+            None,
+        ));
     }
 }

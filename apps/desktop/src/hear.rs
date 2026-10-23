@@ -511,15 +511,15 @@ impl Live {
         };
         let at = clock_us(self.origin_us, time);
         let elapsed = u64::try_from(at.saturating_sub(self.origin_us).max(0)).unwrap_or(u64::MAX);
-        match crate::play::advance(
+        match cutlass_engine::advance(
             self.origin_us,
             Duration::from_micros(elapsed),
             duration_us,
             rate,
         ) {
-            crate::play::Motion::Running(us) => Lead::Running(us),
-            crate::play::Motion::Finished(us) => Lead::Finished(us),
-            crate::play::Motion::Idle => Lead::Silent,
+            cutlass_engine::Motion::Running(us) => Lead::Running(us),
+            cutlass_engine::Motion::Finished(us) => Lead::Finished(us),
+            cutlass_engine::Motion::Idle => Lead::Silent,
         }
     }
 }

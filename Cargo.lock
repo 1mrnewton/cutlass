@@ -768,6 +768,7 @@ dependencies = [
  "cutlass-color",
  "cutlass-compose",
  "cutlass-core",
+ "cutlass-engine",
  "cutlass-media",
  "cutlass-mp4",
  "cutlass-output",
@@ -782,6 +783,13 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "uuid",
+]
+
+[[package]]
+name = "cutlass-engine"
+version = "0.1.0"
+dependencies = [
+ "cutlass-project",
 ]
 
 [[package]]

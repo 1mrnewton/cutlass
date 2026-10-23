@@ -23,7 +23,6 @@ mod logs;
 mod media_bin;
 mod menu;
 mod modify;
-mod play;
 mod preview;
 #[cfg(target_vendor = "apple")]
 mod preview_file;
@@ -85,7 +84,7 @@ struct CutlassApp {
     recovery: Option<projects::Recovery>,
     recovery_shown: bool,
     playhead_us: i64,
-    play: Option<play::Run>,
+    play: Option<cutlass_engine::Run>,
     hear: hear::Hear,
     reel: frames::Reel,
     shelf: library::Shelf,
@@ -518,7 +517,7 @@ impl CutlassApp {
     fn toggle_play(&mut self) {
         let rate = self.project.settings().rate().rate();
         let duration = self.project.duration().value;
-        self.playhead_us = play::toggle(&mut self.play, self.playhead_us, duration, rate);
+        self.playhead_us = cutlass_engine::toggle(&mut self.play, self.playhead_us, duration, rate);
         if self.play.is_some() {
             self.hear.start(&self.project, self.playhead_us);
         } else {
@@ -538,23 +537,23 @@ impl CutlassApp {
             return;
         };
         match self.hear.follow(&self.project, duration, rate) {
-            hear::Lead::Silent => match play::advance(origin, elapsed, duration, rate) {
-                play::Motion::Running(us) => {
+            hear::Lead::Silent => match cutlass_engine::advance(origin, elapsed, duration, rate) {
+                cutlass_engine::Motion::Running(us) => {
                     self.playhead_us = us;
-                    ctx.request_repaint_after(play::frame_wait(rate));
+                    ctx.request_repaint_after(cutlass_engine::frame_wait(rate));
                 }
-                play::Motion::Finished(us) => {
+                cutlass_engine::Motion::Finished(us) => {
                     self.playhead_us = us;
                     self.play = None;
                 }
-                play::Motion::Idle => self.play = None,
+                cutlass_engine::Motion::Idle => self.play = None,
             },
             hear::Lead::Waiting => {
                 ctx.request_repaint();
             }
             hear::Lead::Running(us) => {
                 self.playhead_us = us;
-                ctx.request_repaint_after(play::frame_wait(rate));
+                ctx.request_repaint_after(cutlass_engine::frame_wait(rate));
             }
             hear::Lead::Finished(us) => {
                 self.playhead_us = us;
@@ -770,7 +769,8 @@ impl eframe::App for CutlassApp {
         }
         if self.play.is_some() {
             let rate = self.project.settings().rate().rate();
-            ui.ctx().request_repaint_after(play::frame_wait(rate));
+            ui.ctx()
+                .request_repaint_after(cutlass_engine::frame_wait(rate));
         }
         if self.reel.waiting() {
             ui.ctx().request_repaint();

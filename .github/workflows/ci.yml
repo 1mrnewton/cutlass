@@ -119,7 +119,7 @@ jobs:
         shell: bash
         run: |
           mapfile -t packages < <(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.manifest_path | contains("/crates/codecs/software/") or contains("/crates/project/") or contains("/crates/containers/") or contains("/crates/media/") or contains("/crates/color/") or contains("/crates/playback/")) | "--package=" + .name')
+            | jq -r '.packages[] | select(.manifest_path | contains("/crates/codecs/software/") or contains("/crates/project/") or contains("/crates/containers/") or contains("/crates/media/") or contains("/crates/color/") or contains("/crates/playback/") or contains("/crates/engine/")) | "--package=" + .name')
           cargo clippy --target wasm32-unknown-unknown "${packages[@]}" -- -D warnings
 
   deny:

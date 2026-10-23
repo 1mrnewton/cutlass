@@ -10,6 +10,7 @@ members = [
     "crates/media",
     "crates/output",
     "crates/playback",
+    "crates/engine",
     "crates/project",
     "crates/testing/*",
     "apps/desktop",
@@ -27,6 +28,7 @@ cutlass-audiotoolbox = { path = "crates/codecs/native/audiotoolbox" }
 cutlass-color = { path = "crates/color" }
 cutlass-compose = { path = "crates/compose" }
 cutlass-core = { path = "crates/core" }
+cutlass-engine = { path = "crates/engine" }
 cutlass-media = { path = "crates/media" }
 cutlass-mediacodec = { path = "crates/codecs/native/mediacodec" }
 cutlass-output = { path = "crates/output" }

@@ -247,38 +247,18 @@ fn minor_frames(rate: FrameRate, step: Step) -> i64 {
 
 /// Sequence time of a nominal frame, truncating toward zero.
 fn frame_us(frame: i64, rate: FrameRate) -> Option<i64> {
-    let numer = i128::from(rate.numerator());
-    let denom = i128::from(rate.denominator());
-    let us = i128::from(frame)
-        .checked_mul(1_000_000)?
-        .checked_mul(denom)?
-        / numer;
-    i64::try_from(us).ok()
+    cutlass_engine::frame_time(frame, rate)
 }
 
 /// The frame that contains `us`. Tick times use `frame_us`, so a time that is
 /// itself a tick maps back to that tick.
 fn frame_at(us: i64, rate: FrameRate) -> i64 {
-    if us <= 0 {
-        return 0;
-    }
-    let numer = i128::from(rate.numerator());
-    let denom = i128::from(rate.denominator());
-    let raw = i128::from(us) * numer / (1_000_000 * denom);
-    let Ok(frame) = i64::try_from(raw) else {
-        return i64::MAX;
-    };
-    match frame_us(frame.saturating_add(1), rate) {
-        Some(next) if next <= us => frame.saturating_add(1),
-        _ => frame,
-    }
+    cutlass_engine::frame_index(us, rate)
 }
 
 /// Sequence time of the frame under `us`, clamped to the cut.
 pub fn seek(us: i64, rate: FrameRate, duration_us: i64) -> i64 {
-    let end = duration_us.max(0);
-    let snapped = frame_us(frame_at(us.clamp(0, end), rate), rate).unwrap_or(0);
-    snapped.min(end)
+    cutlass_engine::snap(us, rate, duration_us)
 }
 
 /// Pixels per microsecond for the opening view.

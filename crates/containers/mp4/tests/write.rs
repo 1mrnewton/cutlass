@@ -3,7 +3,7 @@
 use std::num::NonZeroU32;
 
 use cutlass_core::{
-    AudioCodec, AudioStreamConfig, Packet, Timestamp, VideoCodec, VideoStreamConfig,
+    AudioCodec, AudioStreamConfig, ColorTags, Packet, Timestamp, VideoCodec, VideoStreamConfig,
 };
 use cutlass_mp4::{Error, Fourcc, Kind, Movie, MovieFile, ProRes, Rotation};
 
@@ -125,6 +125,48 @@ fn an_h264_track_round_trips() {
     assert_eq!(samples[1].data, [4]);
     assert_eq!(samples[1].pts.value, 100);
     assert_eq!(samples[1].dts.map(|time| time.value), Some(100));
+}
+
+#[test]
+fn a_video_track_keeps_its_colour_tags() {
+    let ticks = scale(1_000);
+    let tags = ColorTags {
+        primaries: 9,
+        transfer: 18,
+        matrix: 9,
+        full_range: Some(false),
+    };
+    let mut file = MovieFile::new(ticks);
+    file.add_video_color(
+        ticks,
+        h264(320, 180),
+        tags,
+        vec![packet(ticks, 0, 0, 100, &[1], true)],
+    )
+    .expect("write");
+    let movie = Movie::parse(&file.to_bytes().expect("bytes")).expect("read");
+    assert_eq!(movie.tracks()[0].color(), Some(tags));
+}
+
+#[test]
+fn a_video_track_can_leave_the_range_out() {
+    let ticks = scale(1_000);
+    let tags = ColorTags {
+        primaries: 1,
+        transfer: 1,
+        matrix: 1,
+        full_range: None,
+    };
+    let mut file = MovieFile::new(ticks);
+    file.add_video_color(
+        ticks,
+        h264(64, 64),
+        tags,
+        vec![packet(ticks, 0, 0, 100, &[1], true)],
+    )
+    .expect("write");
+    let movie = Movie::parse(&file.to_bytes().expect("bytes")).expect("read");
+    assert_eq!(movie.tracks()[0].color(), Some(tags));
 }
 
 #[test]

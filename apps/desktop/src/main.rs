@@ -25,6 +25,8 @@ mod menu;
 mod modify;
 mod play;
 mod preview;
+#[cfg(target_vendor = "apple")]
+mod preview_file;
 mod projects;
 mod ruler;
 mod theme;

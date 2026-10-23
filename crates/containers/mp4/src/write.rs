@@ -3,7 +3,9 @@
 
 use std::num::NonZeroU32;
 
-use cutlass_core::{AudioCodec, AudioStreamConfig, Packet, VideoCodec, VideoStreamConfig};
+use cutlass_core::{
+    AudioCodec, AudioStreamConfig, ColorTags, Packet, VideoCodec, VideoStreamConfig,
+};
 
 use crate::Error;
 
@@ -65,6 +67,30 @@ impl MovieFile {
         config: VideoStreamConfig,
         samples: Vec<Packet>,
     ) -> Result<(), Error> {
+        self.add_coded_video(timescale, config, None, samples)
+    }
+
+    /// Add an H.264 or HEVC track and a `colr` box.
+    ///
+    /// `nclx` when the range is known, `nclc` when it is not. Samples are in
+    /// decode order. The config record is the `avcC` or `hvcC` payload.
+    pub fn add_video_color(
+        &mut self,
+        timescale: NonZeroU32,
+        config: VideoStreamConfig,
+        color: ColorTags,
+        samples: Vec<Packet>,
+    ) -> Result<(), Error> {
+        self.add_coded_video(timescale, config, Some(color), samples)
+    }
+
+    fn add_coded_video(
+        &mut self,
+        timescale: NonZeroU32,
+        config: VideoStreamConfig,
+        color: Option<ColorTags>,
+        samples: Vec<Packet>,
+    ) -> Result<(), Error> {
         let (entry, config_box) = visual_boxes(config.codec)?;
         let (width, height) = pixel_size(config.width, config.height)?;
         self.add_visual(
@@ -79,6 +105,7 @@ impl MovieFile {
                 depth: 0x0018,
                 name: "",
                 quicktime: false,
+                color,
             },
             samples,
         )
@@ -108,6 +135,7 @@ impl MovieFile {
                 depth,
                 name,
                 quicktime: true,
+                color: None,
             },
             samples,
         )
@@ -278,6 +306,7 @@ struct Visual {
     depth: u16,
     name: &'static str,
     quicktime: bool,
+    color: Option<ColorTags>,
 }
 
 #[derive(Debug)]
@@ -695,8 +724,32 @@ fn write_stsd_visual(buf: &mut Buf, video: &Visual) -> Result<(), Error> {
         buf.push_bytes(&video.config);
         buf.close(config_at)?;
     }
+    if let Some(color) = video.color {
+        write_colr(buf, color)?;
+    }
     buf.close(sample)?;
     buf.close(stsd)
+}
+
+fn write_colr(buf: &mut Buf, color: ColorTags) -> Result<(), Error> {
+    let start = buf.open(b"colr");
+    match color.full_range {
+        Some(full) => {
+            buf.push_fourcc(b"nclx");
+            buf.push_u16(color.primaries);
+            buf.push_u16(color.transfer);
+            buf.push_u16(color.matrix);
+            // The range is the high bit. The low seven bits stay zero.
+            buf.push_u8(if full { 0x80 } else { 0 });
+        }
+        None => {
+            buf.push_fourcc(b"nclc");
+            buf.push_u16(color.primaries);
+            buf.push_u16(color.transfer);
+            buf.push_u16(color.matrix);
+        }
+    }
+    buf.close(start)
 }
 
 fn push_compressor_name(buf: &mut Buf, name: &str) -> Result<(), Error> {

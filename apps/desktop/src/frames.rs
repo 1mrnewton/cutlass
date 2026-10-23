@@ -5,7 +5,9 @@
 //! the clock has reached, and drops frames that are already late. Pictures it
 //! has already decoded stay in a per-track cache, and the ones that cache
 //! drops stay in a shared pool. A file that was opened before is parsed once.
-//! The next clip on a track opens while the hardware reader count is under the cap.
+//! A source clip is also prepared as an H.264 file, and a later open plays
+//! that file. The sound stays on the source. The next clip on a track opens
+//! while the hardware reader count is under the cap.
 //! The window draws those frames from the bottom track upward and does not
 //! copy them back. A failure is written to the app log. A seek, and a cut,
 //! keep the last picture until the new one is ready. Where no video decoder
@@ -755,14 +757,27 @@ impl DemuxCache {
 }
 
 #[cfg(target_vendor = "apple")]
-fn open_clip(source: &str, caches: &Caches) -> Clip {
+fn open_clip(source: &str, caches: &Caches, prepared: bool) -> Clip {
     let Some(path) = file_path(source) else {
         log::warn!("The preview skipped {source}: it is not a file.");
         return Clip::Missing;
     };
-    let Some(parsed) = load_parsed(caches, source, path) else {
-        return Clip::Missing;
-    };
+    // The prepared file uses its own demuxer key, so a cached source parse is
+    // not reused as the proxy. `prepared` is the decision from spawn, so this
+    // open and the reader flag agree.
+    crate::preview_file::ensure(source);
+    if prepared && let Some(file) = crate::preview_file::ready(source) {
+        if let Some(clip) = try_open(source, &file, &file, caches) {
+            return clip;
+        }
+        crate::preview_file::discard(source);
+    }
+    try_open(source, source, path, caches).unwrap_or(Clip::Missing)
+}
+
+#[cfg(target_vendor = "apple")]
+fn try_open(source: &str, key: &str, path: &str, caches: &Caches) -> Option<Clip> {
+    let parsed = load_parsed(caches, key, path)?;
     let session = match VideoSession::open(
         &parsed.config,
         parsed.color,
@@ -773,7 +788,7 @@ fn open_clip(source: &str, caches: &Caches) -> Clip {
         Ok(session) => session,
         Err(error) => {
             log::warn!("The preview could not decode {path}: {error}.");
-            return Clip::Missing;
+            return None;
         }
     };
     let depth = NonZeroUsize::new(QUEUE_DEPTH).expect("the queue holds a frame");
@@ -781,7 +796,7 @@ fn open_clip(source: &str, caches: &Caches) -> Clip {
         NonZeroUsize::new(FRAME_CACHE_MAX).expect("the cache holds a frame"),
         FRAME_CACHE_MIN,
     );
-    Clip::Ready(Box::new(Open {
+    Some(Clip::Ready(Box::new(Open {
         source: source.to_owned(),
         parsed,
         session: Session(session),
@@ -790,7 +805,7 @@ fn open_clip(source: &str, caches: &Caches) -> Clip {
         cursor: 0,
         followed: None,
         failed: None,
-    }))
+    })))
 }
 
 #[cfg(target_vendor = "apple")]
@@ -1096,6 +1111,9 @@ struct Reader {
     track: TrackId,
     asset: AssetId,
     source: String,
+    /// This reader was opened on the prepared file. A play that is already
+    /// running stays on the file it started with.
+    prepared: bool,
     note: Arc<Note<ReaderMsg>>,
     join: JoinHandle<()>,
 }
@@ -1150,14 +1168,18 @@ fn reconcile(
     let mut index = 0;
     while index < readers.len() {
         let reader = &readers[index];
-        let kept = show
-            .layers
+        let kept = show.layers.iter().any(|layer| {
+            matches_reader(
+                reader,
+                layer.track,
+                layer.asset,
+                &layer.source,
+                show.playing,
+            )
+        }) || show
+            .next
             .iter()
-            .any(|layer| matches_reader(reader, layer.track, layer.asset, &layer.source))
-            || show
-                .next
-                .iter()
-                .any(|next| matches_reader(reader, next.track, next.asset, &next.source));
+            .any(|next| matches_reader(reader, next.track, next.asset, &next.source, show.playing));
         if kept {
             index += 1;
         } else {
@@ -1166,10 +1188,15 @@ fn reconcile(
         }
     }
     for layer in &show.layers {
-        if let Some(reader) = readers
-            .iter()
-            .find(|reader| matches_reader(reader, layer.track, layer.asset, &layer.source))
-        {
+        if let Some(reader) = readers.iter().find(|reader| {
+            matches_reader(
+                reader,
+                layer.track,
+                layer.asset,
+                &layer.source,
+                show.playing,
+            )
+        }) {
             reader.note.post(ReaderMsg::At {
                 generation: layer.generation,
                 time: layer.time,
@@ -1189,10 +1216,9 @@ fn reconcile(
     }
     let mut skipped = false;
     for next in &show.next {
-        if readers
-            .iter()
-            .any(|reader| matches_reader(reader, next.track, next.asset, &next.source))
-        {
+        if readers.iter().any(|reader| {
+            matches_reader(reader, next.track, next.asset, &next.source, show.playing)
+        }) {
             continue;
         }
         if readers.len() >= HW_READER_CAP {
@@ -1220,8 +1246,17 @@ fn reconcile(
 }
 
 #[cfg(target_vendor = "apple")]
-fn matches_reader(reader: &Reader, track: TrackId, asset: AssetId, source: &str) -> bool {
-    reader.track == track && reader.asset == asset && reader.source == source
+fn matches_reader(
+    reader: &Reader,
+    track: TrackId,
+    asset: AssetId,
+    source: &str,
+    playing: bool,
+) -> bool {
+    reader.track == track
+        && reader.asset == asset
+        && reader.source == source
+        && (reader.prepared == crate::preview_file::ready(source).is_some() || playing)
 }
 
 #[cfg(target_vendor = "apple")]
@@ -1253,17 +1288,21 @@ fn spawn_reader(
     }
     let note_thread = Arc::clone(&note);
     let source_thread = source.clone();
+    let prepared = crate::preview_file::ready(&source).is_some();
     let spawned = std::thread::Builder::new()
         .name("cutlass-decode".to_owned())
-        .spawn(move || decode_loop(note_thread, board, caches, track, source_thread));
+        .spawn(move || decode_loop(note_thread, board, caches, track, source_thread, prepared));
     match spawned {
-        Ok(join) => readers.push(Reader {
-            track,
-            asset,
-            source,
-            note,
-            join,
-        }),
+        Ok(join) => {
+            readers.push(Reader {
+                track,
+                asset,
+                source,
+                prepared,
+                note,
+                join,
+            });
+        }
         Err(error) => log::warn!("The preview could not open a picture reader: {error}."),
     }
 }
@@ -1285,8 +1324,9 @@ fn decode_loop(
     caches: Arc<Caches>,
     track: TrackId,
     source: String,
+    prepared: bool,
 ) {
-    let mut open = match open_clip(&source, &caches) {
+    let mut open = match open_clip(&source, &caches, prepared) {
         Clip::Ready(open) => Some(*open),
         Clip::Missing => None,
     };

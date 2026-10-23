@@ -6,9 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "The session the shells share. The clock moves the playhead."
+description = "The session the shells share. The clock moves the playhead and the mix sums the clips."
 
 [dependencies]
+cutlass-core.workspace = true
 cutlass-project.workspace = true
 
 [lints]

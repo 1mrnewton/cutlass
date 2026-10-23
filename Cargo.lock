@@ -789,6 +789,7 @@ dependencies = [
 name = "cutlass-engine"
 version = "0.1.0"
 dependencies = [
+ "cutlass-core",
  "cutlass-project",
 ]
 

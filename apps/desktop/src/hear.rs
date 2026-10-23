@@ -5,8 +5,8 @@
 //! app log, and the cut stays on the wall clock. A fade, a mute, and a scrub
 //! are not heard. Other systems keep the wall clock.
 
-use cutlass_core::AudioSamples;
-use cutlass_project::{Channels, Project, Segment, SegmentId};
+use cutlass_engine::Lead;
+use cutlass_project::Project;
 
 #[cfg(target_vendor = "apple")]
 use std::collections::{HashMap, HashSet};
@@ -21,6 +21,8 @@ use std::time::Duration;
 use cutlass_audiotoolbox::{Decoder, decodes};
 #[cfg(target_vendor = "apple")]
 use cutlass_core::{AudioStreamConfig, Packet};
+#[cfg(target_vendor = "apple")]
+use cutlass_engine::{Cue, MixClip, Piece, clock_us, cues, mix, pieces, ticks_to_samples};
 #[cfg(target_vendor = "apple")]
 use cutlass_media::{Content, Probe};
 #[cfg(target_vendor = "apple")]
@@ -37,204 +39,6 @@ const AHEAD_US: i64 = 400_000;
 /// The device is opened stereo. A mono clip is copied to both sides.
 #[cfg(target_vendor = "apple")]
 const OUT_CHANNELS: u16 = 2;
-
-/// What the playhead should do while play is running.
-pub(crate) enum Lead {
-    /// The cut has no sound the device can play. The wall clock moves it.
-    Silent,
-    /// The first samples are still opening. Hold the playhead.
-    Waiting,
-    /// The device clock, snapped to a frame.
-    Running(i64),
-    /// The clock reached the end of the cut.
-    Finished(i64),
-}
-
-/// One decoded clip, spread across its timeline span.
-struct MixClip {
-    origin_us: i64,
-    span_us: i64,
-    volume: f32,
-    channels: u16,
-    /// Channel-major planes.
-    planar: Vec<f32>,
-}
-
-/// Samples for `[from_us, until_us)` at `rate`, in `channels` planes.
-fn mix(clips: &[MixClip], from_us: i64, until_us: i64, rate: u32, channels: u16) -> AudioSamples {
-    let frames = frames_in(from_us, until_us, rate);
-    let channels_n = usize::from(channels);
-    let mut planar = vec![0f32; frames.saturating_mul(channels_n)];
-    if frames == 0 || channels == 0 || rate == 0 {
-        return AudioSamples::new(rate.max(1), channels.max(1), Vec::new()).unwrap_or_else(|_| {
-            AudioSamples::new(48_000, 1, Vec::new()).expect("an empty buffer is valid")
-        });
-    }
-    for clip in clips {
-        if clip.span_us <= 0 || clip.volume == 0.0 || clip.channels == 0 {
-            continue;
-        }
-        let clip_frames = clip.planar.len() / usize::from(clip.channels);
-        if clip_frames == 0 {
-            continue;
-        }
-        for frame in 0..frames {
-            let time = from_us.saturating_add(frame_us(frame, rate));
-            let rel = time.saturating_sub(clip.origin_us);
-            if rel < 0 || rel >= clip.span_us {
-                continue;
-            }
-            let pos = (rel as f64) / (clip.span_us as f64) * (clip_frames as f64);
-            for channel in 0..channels_n {
-                let sample = clip_sample(clip, channel, pos) * clip.volume;
-                let slot = channel * frames + frame;
-                planar[slot] = (planar[slot] + sample).clamp(-1.0, 1.0);
-            }
-        }
-    }
-    AudioSamples::new(rate, channels, planar).unwrap_or_else(|_| {
-        AudioSamples::new(rate, channels, vec![0.0; frames * channels_n])
-            .expect("a zeroed buffer matches the frame count")
-    })
-}
-
-fn frames_in(from_us: i64, until_us: i64, rate: u32) -> usize {
-    let span = until_us.saturating_sub(from_us).max(0) as u128;
-    let frames = span.saturating_mul(u128::from(rate)) / 1_000_000;
-    usize::try_from(frames).unwrap_or(0)
-}
-
-fn frame_us(frame: usize, rate: u32) -> i64 {
-    if rate == 0 {
-        return 0;
-    }
-    let us = (frame as u128).saturating_mul(1_000_000) / u128::from(rate);
-    i64::try_from(us).unwrap_or(i64::MAX)
-}
-
-fn clip_sample(clip: &MixClip, channel: usize, pos: f64) -> f32 {
-    let source = usize::from(clip.channels);
-    let frames = clip.planar.len() / source;
-    let index = if source == 1 {
-        0
-    } else if channel < source {
-        channel
-    } else {
-        0
-    };
-    let plane = &clip.planar[index * frames..(index + 1) * frames];
-    sample_at(plane, pos)
-}
-
-fn sample_at(plane: &[f32], pos: f64) -> f32 {
-    if plane.is_empty() || !pos.is_finite() {
-        return 0.0;
-    }
-    if pos <= 0.0 {
-        return plane[0];
-    }
-    let last = plane.len() - 1;
-    if pos >= last as f64 {
-        return plane[last];
-    }
-    let index = pos.floor() as usize;
-    let frac = (pos - index as f64) as f32;
-    plane[index] * (1.0 - frac) + plane[index + 1] * frac
-}
-
-struct Cue {
-    segment: SegmentId,
-    source: String,
-    start_us: i64,
-    end_us: i64,
-    source_start: i64,
-    source_scale: u32,
-}
-
-struct PieceAsk {
-    source: String,
-    clip_start_us: i64,
-    volume: f64,
-    origin_us: i64,
-    span_us: i64,
-    first_tick: i64,
-    last_tick: i64,
-    tick_scale: u32,
-}
-
-fn cues(project: &Project) -> Vec<Cue> {
-    let mut found = Vec::new();
-    for track in project.timeline().tracks() {
-        for segment in track.segments() {
-            if let Some(cue) = cue_of(project, segment) {
-                found.push(cue);
-            }
-        }
-    }
-    found
-}
-
-fn cue_of(project: &Project, segment: &Segment) -> Option<Cue> {
-    if segment.channels() == Channels::Picture || !segment.visible() {
-        return None;
-    }
-    let asset = project.asset(segment.asset_id()?)?;
-    let source = segment.source()?;
-    let timeline = segment.timeline();
-    Some(Cue {
-        segment: segment.id(),
-        source: asset.source().to_owned(),
-        start_us: timeline.start().value,
-        end_us: timeline.end().value,
-        source_start: source.start().value,
-        source_scale: source.start().timescale.get(),
-    })
-}
-
-fn pieces(project: &Project, cues: &[Cue], from_us: i64, until_us: i64) -> Vec<PieceAsk> {
-    let mut asks = Vec::new();
-    for cue in cues {
-        let Some(segment) = project.timeline().segment(cue.segment) else {
-            continue;
-        };
-        if let Some(ask) = piece_ask(segment, cue, from_us, until_us) {
-            asks.push(ask);
-        }
-    }
-    asks
-}
-
-fn piece_ask(segment: &Segment, cue: &Cue, from_us: i64, until_us: i64) -> Option<PieceAsk> {
-    if !segment.visible() || segment.channels() == Channels::Picture {
-        return None;
-    }
-    let origin = from_us.max(cue.start_us);
-    let end = until_us.min(cue.end_us);
-    if end <= origin {
-        return None;
-    }
-    let into = origin.checked_sub(cue.start_us)?;
-    let span = end.checked_sub(cue.start_us)?;
-    let first = cue
-        .source_start
-        .checked_add(segment.source_offset(into).ok()?)?;
-    let last = cue
-        .source_start
-        .checked_add(segment.source_offset(span).ok()?)?;
-    if last <= first {
-        return None;
-    }
-    Some(PieceAsk {
-        source: cue.source.clone(),
-        clip_start_us: cue.start_us,
-        volume: segment.volume(),
-        origin_us: origin,
-        span_us: end - origin,
-        first_tick: first,
-        last_tick: last,
-        tick_scale: cue.source_scale,
-    })
-}
 
 /// Plays the audible clips, or stays quiet when this system has no output.
 pub(crate) struct Hear {
@@ -418,7 +222,11 @@ impl Live {
             generation: self.generation,
             from_us: self.filled_us,
             until_us: until,
-            sources: self.cues.iter().map(|cue| cue.source.clone()).collect(),
+            sources: self
+                .cues
+                .iter()
+                .map(|cue| cue.source().to_owned())
+                .collect(),
             pieces: pieces(project, &self.cues, self.filled_us, until),
         };
         let posted = bridge.post(Message::Fill(fill));
@@ -511,27 +319,13 @@ impl Live {
         };
         let at = clock_us(self.origin_us, time);
         let elapsed = u64::try_from(at.saturating_sub(self.origin_us).max(0)).unwrap_or(u64::MAX);
-        match cutlass_engine::advance(
+        Lead::from(cutlass_engine::advance(
             self.origin_us,
             Duration::from_micros(elapsed),
             duration_us,
             rate,
-        ) {
-            cutlass_engine::Motion::Running(us) => Lead::Running(us),
-            cutlass_engine::Motion::Finished(us) => Lead::Finished(us),
-            cutlass_engine::Motion::Idle => Lead::Silent,
-        }
+        ))
     }
-}
-
-#[cfg(target_vendor = "apple")]
-fn clock_us(origin_us: i64, time: cutlass_core::Timestamp) -> i64 {
-    let scale = i128::from(time.timescale.get());
-    if scale <= 0 {
-        return origin_us;
-    }
-    let us = i128::from(time.value).saturating_mul(1_000_000) / scale;
-    origin_us.saturating_add(i64::try_from(us).unwrap_or(i64::MAX))
 }
 
 #[cfg(target_vendor = "apple")]
@@ -546,7 +340,7 @@ struct Fill {
     from_us: i64,
     until_us: i64,
     sources: Vec<String>,
-    pieces: Vec<PieceAsk>,
+    pieces: Vec<Piece>,
 }
 
 #[cfg(target_vendor = "apple")]
@@ -695,7 +489,7 @@ impl Worker {
         Some(())
     }
 
-    fn clip(&mut self, ask: &PieceAsk) -> Option<MixClip> {
+    fn clip(&mut self, ask: &Piece) -> Option<MixClip> {
         self.open(&ask.source)?;
         let key = (ask.source.clone(), ask.clip_start_us);
         if !self.tapes.contains_key(&key) {
@@ -712,13 +506,13 @@ impl Worker {
         let tape = self.tapes.get_mut(&key)?;
         let planar = tape.pull(first, count)?;
         let channels = tape.channels;
-        Some(MixClip {
-            origin_us: ask.origin_us,
-            span_us: ask.span_us,
-            volume: ask.volume as f32,
+        Some(MixClip::new(
+            ask.origin_us,
+            ask.span_us,
+            ask.volume as f32,
             channels,
             planar,
-        })
+        ))
     }
 }
 
@@ -758,15 +552,6 @@ fn read_audio(source: &str) -> Result<Opened, String> {
         config: config.clone(),
         packets,
     })
-}
-
-#[cfg(target_vendor = "apple")]
-fn ticks_to_samples(ticks: i64, scale: u32, rate: u32) -> Option<u64> {
-    if scale == 0 || rate == 0 || ticks <= 0 {
-        return Some(0);
-    }
-    let samples = u128::from(ticks as u64).saturating_mul(u128::from(rate)) / u128::from(scale);
-    u64::try_from(samples).ok()
 }
 
 #[cfg(target_vendor = "apple")]
@@ -1026,171 +811,14 @@ impl<T> Slot<T> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_vendor = "apple"))]
 mod tests {
     use std::num::NonZeroU32;
-
-    use cutlass_core::Timestamp;
-    use cutlass_project::{
-        Asset, Channels, Command, History, Outcome, Project, ProjectId, Segment, Speed, TimeRange,
-    };
-
-    use super::{MixClip, cue_of, frames_in, mix};
-
-    fn project() -> Project {
-        Project::new(ProjectId::from_bytes([2; 16]), "Untitled")
-    }
 
     fn scale(value: u32) -> NonZeroU32 {
         NonZeroU32::new(value).expect("scale")
     }
 
-    fn place(channels: Channels, speed: Speed) -> (Project, cutlass_project::SegmentId) {
-        let mut history = History::new();
-        let mut cut = project();
-        let audio = Asset::audio("file:///cuts/a.m4a", Timestamp::new(96_000, scale(48_000)))
-            .expect("audio");
-        let id = match history
-            .apply(&mut cut, &[Command::AddAsset(audio)])
-            .expect("add")
-            .as_slice()
-        {
-            [Outcome::Asset(id)] => *id,
-            other => panic!("expected an asset, got {other:?}"),
-        };
-        let segment = {
-            let stored = cut.asset(id).expect("asset");
-            let source = TimeRange::new(
-                Timestamp::new(0, scale(48_000)),
-                Timestamp::new(96_000, scale(48_000)),
-            )
-            .expect("source");
-            Segment::media(stored, source, 0, channels, speed).expect("segment")
-        };
-        history
-            .apply(
-                &mut cut,
-                &[Command::Place {
-                    track: None,
-                    segment,
-                }],
-            )
-            .expect("place");
-        let segment = cut
-            .timeline()
-            .tracks()
-            .iter()
-            .flat_map(|track| track.segments())
-            .next()
-            .expect("segment")
-            .id();
-        (cut, segment)
-    }
-
-    #[test]
-    fn a_picture_is_not_a_voice_and_a_faster_clip_covers_more_source() {
-        let (cut, sound) = place(Channels::Sound, Speed::new(2, 1).expect("speed"));
-        let video = Asset::video(
-            "file:///cuts/v.mp4",
-            Timestamp::new(30_000, scale(30_000)),
-            320,
-            180,
-            false,
-        )
-        .expect("video");
-        let mut history = History::new();
-        let mut cut = cut;
-        let video_id = match history
-            .apply(&mut cut, &[Command::AddAsset(video)])
-            .expect("add")
-            .as_slice()
-        {
-            [Outcome::Asset(id)] => *id,
-            other => panic!("expected an asset, got {other:?}"),
-        };
-        let picture = {
-            let stored = cut.asset(video_id).expect("asset");
-            let source = TimeRange::new(
-                Timestamp::new(0, scale(30_000)),
-                Timestamp::new(30_000, scale(30_000)),
-            )
-            .expect("source");
-            Segment::media(stored, source, 0, Channels::Picture, Speed::ONE).expect("segment")
-        };
-        let main = cut.timeline().main_track().id();
-        history
-            .apply(
-                &mut cut,
-                &[Command::Place {
-                    track: Some(main),
-                    segment: picture,
-                }],
-            )
-            .expect("place");
-        let cues = super::cues(&cut);
-        assert_eq!(cues.len(), 1);
-        assert_eq!(cues[0].segment, sound);
-        let segment = cut.timeline().segment(sound).expect("sound");
-        let ask = super::piece_ask(segment, &cues[0], 0, 250_000).expect("window");
-        assert_eq!(ask.first_tick, 0);
-        assert_eq!(ask.last_tick, 24_000);
-        assert!(
-            cue_of(
-                &cut,
-                cut.timeline()
-                    .tracks()
-                    .iter()
-                    .flat_map(|track| track.segments())
-                    .find(|segment| segment.channels() == Channels::Picture)
-                    .expect("picture")
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn volume_scales_and_a_later_clip_stays_silent_until_it_starts() {
-        let tone = MixClip {
-            origin_us: 0,
-            span_us: 1_000_000,
-            volume: 0.5,
-            channels: 1,
-            planar: vec![1.0; 8],
-        };
-        let mixed = mix(&[tone], 0, 1_000, 1_000, 2);
-        assert_eq!(mixed.frames(), 1);
-        assert!((mixed.plane(0).expect("left")[0] - 0.5).abs() < 1e-4);
-        assert!((mixed.plane(1).expect("right")[0] - 0.5).abs() < 1e-4);
-
-        let later = MixClip {
-            origin_us: 1_000,
-            span_us: 1_000,
-            volume: 1.0,
-            channels: 1,
-            planar: vec![1.0],
-        };
-        let mixed = mix(&[later], 0, 2_000, 1_000, 1);
-        assert_eq!(frames_in(0, 2_000, 1_000), 2);
-        assert_eq!(mixed.plane(0).expect("mono")[0], 0.0);
-        assert!((mixed.plane(0).expect("mono")[1] - 1.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn overlapping_clips_sum_and_stop_at_full_scale() {
-        let clip = |volume: f32| MixClip {
-            origin_us: 0,
-            span_us: 1_000,
-            volume,
-            channels: 1,
-            planar: vec![1.0],
-        };
-        let mixed = mix(&[clip(0.25), clip(0.25)], 0, 1_000, 1_000, 1);
-        assert!((mixed.plane(0).expect("sum")[0] - 0.5).abs() < 1e-4);
-        let mixed = mix(&[clip(1.0), clip(1.0)], 0, 1_000, 1_000, 1);
-        assert_eq!(mixed.plane(0).expect("clamped")[0], 1.0);
-    }
-
-    #[cfg(target_vendor = "apple")]
     #[test]
     fn a_constant_survives_a_pull_from_the_start_and_from_later() {
         use cutlass_audiotoolbox::Encoder;

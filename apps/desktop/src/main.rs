@@ -537,25 +537,27 @@ impl CutlassApp {
             return;
         };
         match self.hear.follow(&self.project, duration, rate) {
-            hear::Lead::Silent => match cutlass_engine::advance(origin, elapsed, duration, rate) {
-                cutlass_engine::Motion::Running(us) => {
-                    self.playhead_us = us;
-                    ctx.request_repaint_after(cutlass_engine::frame_wait(rate));
+            cutlass_engine::Lead::Silent => {
+                match cutlass_engine::advance(origin, elapsed, duration, rate) {
+                    cutlass_engine::Motion::Running(us) => {
+                        self.playhead_us = us;
+                        ctx.request_repaint_after(cutlass_engine::frame_wait(rate));
+                    }
+                    cutlass_engine::Motion::Finished(us) => {
+                        self.playhead_us = us;
+                        self.play = None;
+                    }
+                    cutlass_engine::Motion::Idle => self.play = None,
                 }
-                cutlass_engine::Motion::Finished(us) => {
-                    self.playhead_us = us;
-                    self.play = None;
-                }
-                cutlass_engine::Motion::Idle => self.play = None,
-            },
-            hear::Lead::Waiting => {
+            }
+            cutlass_engine::Lead::Waiting => {
                 ctx.request_repaint();
             }
-            hear::Lead::Running(us) => {
+            cutlass_engine::Lead::Running(us) => {
                 self.playhead_us = us;
                 ctx.request_repaint_after(cutlass_engine::frame_wait(rate));
             }
-            hear::Lead::Finished(us) => {
+            cutlass_engine::Lead::Finished(us) => {
                 self.playhead_us = us;
                 self.play = None;
                 self.hear.stop();

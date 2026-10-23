@@ -1,0 +1,31 @@
+[package]
+name = "cutlass-export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Writes the cut to a file."
+
+[dependencies]
+cutlass-core.workspace = true
+cutlass-engine.workspace = true
+cutlass-project.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+cutlass-audiotoolbox.workspace = true
+cutlass-color.workspace = true
+cutlass-media.workspace = true
+cutlass-mp4.workspace = true
+cutlass-playback.workspace = true
+cutlass-videotoolbox.workspace = true
+
+[dev-dependencies]
+cutlass-media.workspace = true
+cutlass-mp4.workspace = true
+cutlass-test-fixtures.workspace = true
+
+[lints]
+workspace = true

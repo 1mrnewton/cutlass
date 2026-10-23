@@ -383,6 +383,10 @@ impl Sheet {
         }
     }
 
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
     fn set_resolution(&mut self, resolution: Resolution) {
         self.resolution = resolution;
         if !self.bitrate_custom {
@@ -472,9 +476,17 @@ fn digits(text: &str) -> String {
         .collect()
 }
 
-/// Draws the dialog. `true` means it should close. Nothing is written.
-pub(crate) fn show(ui: &egui::Ui, sheet: &mut Sheet, duration: &str) -> bool {
-    let mut close = false;
+/// What the dialog wants the shell to do.
+pub(crate) enum Dismiss {
+    Stay,
+    Close,
+    /// Write the cut. The shell asks for a path.
+    Export,
+}
+
+/// Draws the dialog. The shell writes the file when this returns [`Dismiss::Export`].
+pub(crate) fn show(ui: &egui::Ui, sheet: &mut Sheet, duration: &str) -> Dismiss {
+    let mut dismiss = Dismiss::Stay;
     let screen = ui.ctx().content_rect();
     egui::Area::new(Id::unique("export-dialog"))
         .order(egui::Order::Foreground)
@@ -495,7 +507,7 @@ pub(crate) fn show(ui: &egui::Ui, sheet: &mut Sheet, duration: &str) -> bool {
             let scrim = ui.interact(screen, ui.scope_id().with("scrim"), Sense::click());
             let _plate = ui.interact(dialog, ui.scope_id().with("plate"), Sense::click());
             if scrim.clicked() {
-                close = true;
+                dismiss = Dismiss::Close;
             }
             ui.painter().rect_filled(dialog, 12.0, DIALOG);
             let head = Rect::from_min_size(dialog.min, vec2(dialog.width(), 40.0));
@@ -506,17 +518,61 @@ pub(crate) fn show(ui: &egui::Ui, sheet: &mut Sheet, duration: &str) -> bool {
             let body = Rect::from_min_max(head.left_bottom(), foot.right_top());
             ui.painter().rect_filled(body, 0.0, theme::BAR);
             if paint_head(ui, head) {
-                close = true;
+                dismiss = Dismiss::Close;
             }
             paint_body(ui, body, sheet);
-            if paint_foot(ui, foot, duration) {
-                close = true;
+            match paint_foot(ui, foot, duration) {
+                Foot::Cancel => dismiss = Dismiss::Close,
+                Foot::Export => dismiss = Dismiss::Export,
+                Foot::None => {}
             }
         });
     if ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
-        close = true;
+        dismiss = Dismiss::Close;
     }
-    close
+    dismiss
+}
+
+/// A path to write. Cancel returns nothing. A missing `.mp4` suffix is added.
+pub(crate) fn pick_path(name: &str) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("MP4", &["mp4"])
+        .set_file_name(file_name(name))
+        .save_file()
+        .map(ensure_mp4)
+}
+
+fn file_name(name: &str) -> String {
+    let name = name.trim();
+    let name = if name.is_empty() { "Cutlass" } else { name };
+    let mut clean = String::new();
+    for glyph in name.chars() {
+        if glyph.is_control() || matches!(glyph, '/' | '\\' | ':') {
+            clean.push('-');
+        } else {
+            clean.push(glyph);
+        }
+    }
+    if clean.to_ascii_lowercase().ends_with(".mp4") {
+        clean
+    } else {
+        clean.push_str(".mp4");
+        clean
+    }
+}
+
+fn ensure_mp4(path: std::path::PathBuf) -> std::path::PathBuf {
+    let mp4 = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
+    if mp4 {
+        path
+    } else {
+        let mut name = path.into_os_string();
+        name.push(".mp4");
+        std::path::PathBuf::from(name)
+    }
 }
 
 /// `M:SS.t` for the footer. The transport keeps timecode.
@@ -540,7 +596,13 @@ fn paint_head(ui: &mut egui::Ui, head: Rect) -> bool {
     response.clicked()
 }
 
-fn paint_foot(ui: &mut egui::Ui, foot: Rect, duration: &str) -> bool {
+enum Foot {
+    None,
+    Cancel,
+    Export,
+}
+
+fn paint_foot(ui: &mut egui::Ui, foot: Rect, duration: &str) -> Foot {
     ui.painter().text(
         pos2(foot.left() + 16.0, foot.center().y),
         Align2::LEFT_CENTER,
@@ -603,7 +665,13 @@ fn paint_foot(ui: &mut egui::Ui, foot: Rect, duration: &str) -> bool {
         FontId::new(13.0, FontFamily::Proportional),
         export_ink,
     );
-    cancel_response.clicked() || export_response.clicked()
+    if cancel_response.clicked() {
+        Foot::Cancel
+    } else if export_response.clicked() {
+        Foot::Export
+    } else {
+        Foot::None
+    }
 }
 
 fn paint_body(ui: &mut egui::Ui, body: Rect, sheet: &mut Sheet) {

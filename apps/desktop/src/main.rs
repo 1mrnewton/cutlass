@@ -514,6 +514,34 @@ impl CutlassApp {
         self.draft_text = None;
     }
 
+    fn begin_export(&mut self) {
+        if self.project.duration().value <= 0 {
+            log::warn!("The cut is empty. Nothing was exported.");
+            self.export = None;
+            return;
+        }
+        let name = self
+            .export
+            .as_ref()
+            .map(|sheet| sheet.name().to_owned())
+            .unwrap_or_default();
+        let Some(path) = export::pick_path(&name) else {
+            return;
+        };
+        let project = self.project.clone();
+        let started = std::thread::Builder::new()
+            .name("cutlass-export".to_owned())
+            .spawn(move || match cutlass_export::write(&project, &path) {
+                Ok(()) => log::info!("Exported {}.", path.display()),
+                Err(error) => log::warn!("Export failed ({}): {error}.", path.display()),
+            });
+        if started.is_err() {
+            log::warn!("Export did not start.");
+            return;
+        }
+        self.export = None;
+    }
+
     fn toggle_play(&mut self) {
         let rate = self.project.settings().rate().rate();
         let duration = self.project.duration().value;
@@ -781,12 +809,16 @@ impl eframe::App for CutlassApp {
 
         let span = self.project.duration();
         let label = export::duration_label(span.value, span.timescale.get());
-        let close = self
+        let dismiss = self
             .export
             .as_mut()
-            .is_some_and(|sheet| export::show(ui, sheet, &label));
-        if close && !opened {
-            self.export = None;
+            .map(|sheet| export::show(ui, sheet, &label));
+        if !opened {
+            match dismiss {
+                Some(export::Dismiss::Close) => self.export = None,
+                Some(export::Dismiss::Export) => self.begin_export(),
+                Some(export::Dismiss::Stay) | None => {}
+            }
         }
 
         let asked = modify::take_ask(ui.ctx());

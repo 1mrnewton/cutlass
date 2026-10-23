@@ -769,6 +769,7 @@ dependencies = [
  "cutlass-compose",
  "cutlass-core",
  "cutlass-engine",
+ "cutlass-export",
  "cutlass-media",
  "cutlass-mp4",
  "cutlass-output",
@@ -796,6 +797,23 @@ dependencies = [
  "cutlass-project",
  "cutlass-videotoolbox",
  "log",
+]
+
+[[package]]
+name = "cutlass-export"
+version = "0.1.0"
+dependencies = [
+ "cutlass-audiotoolbox",
+ "cutlass-color",
+ "cutlass-core",
+ "cutlass-engine",
+ "cutlass-media",
+ "cutlass-mp4",
+ "cutlass-playback",
+ "cutlass-project",
+ "cutlass-test-fixtures",
+ "cutlass-videotoolbox",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

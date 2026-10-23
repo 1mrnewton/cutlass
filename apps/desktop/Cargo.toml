@@ -16,6 +16,7 @@ path = "src/main.rs"
 cutlass-compose.workspace = true
 cutlass-core.workspace = true
 cutlass-engine.workspace = true
+cutlass-export.workspace = true
 cutlass-media.workspace = true
 cutlass-project.workspace = true
 eframe.workspace = true

@@ -760,28 +760,8 @@ fn open_clip(source: &str, caches: &Caches) -> Clip {
         log::warn!("The preview skipped {source}: it is not a file.");
         return Clip::Missing;
     };
-    let parsed = match lock_demux(caches).fetch(source) {
-        Some(parsed) => {
-            log::info!("The preview reused a cached demuxer for {path}.");
-            parsed
-        }
-        None => {
-            let Some(parsed) = read_clip(path) else {
-                return Clip::Missing;
-            };
-            match lock_demux(caches).store(source.to_owned(), Arc::clone(&parsed)) {
-                DemuxStore::Evicted(previous) => {
-                    log::info!(
-                        "The preview dropped the cached demuxer for {previous}. The demuxer cache is full."
-                    );
-                }
-                DemuxStore::Full => {
-                    log::info!("The preview opened {path} and the demuxer cache is full.");
-                }
-                DemuxStore::Stored => {}
-            }
-            parsed
-        }
+    let Some(parsed) = load_parsed(caches, source, path) else {
+        return Clip::Missing;
     };
     let session = match VideoSession::open(
         &parsed.config,
@@ -814,6 +794,42 @@ fn open_clip(source: &str, caches: &Caches) -> Clip {
 }
 
 #[cfg(target_vendor = "apple")]
+/// The lookup lock ends before `read`. Holding it across the disk read, then
+/// locking again to store, waits forever: a mutex does not lock twice on the
+/// same thread.
+fn load_parsed(caches: &Caches, source: &str, path: &str) -> Option<Arc<ParsedClip>> {
+    load_parsed_with(caches, source, path, read_clip)
+}
+
+fn load_parsed_with(
+    caches: &Caches,
+    source: &str,
+    path: &str,
+    read: impl FnOnce(&str) -> Option<Arc<ParsedClip>>,
+) -> Option<Arc<ParsedClip>> {
+    if let Some(parsed) = fetch_parsed(caches, source) {
+        log::info!("The preview reused a cached demuxer for {path}.");
+        return Some(parsed);
+    }
+    let parsed = read(path)?;
+    match lock_demux(caches).store(source.to_owned(), Arc::clone(&parsed)) {
+        DemuxStore::Evicted(previous) => {
+            log::info!(
+                "The preview dropped the cached demuxer for {previous}. The demuxer cache is full."
+            );
+        }
+        DemuxStore::Full => {
+            log::info!("The preview opened {path} and the demuxer cache is full.");
+        }
+        DemuxStore::Stored => {}
+    }
+    Some(parsed)
+}
+
+fn fetch_parsed(caches: &Caches, source: &str) -> Option<Arc<ParsedClip>> {
+    lock_demux(caches).fetch(source)
+}
+
 fn lock_demux(caches: &Caches) -> MutexGuard<'_, DemuxCache> {
     caches
         .demux
@@ -1632,6 +1648,20 @@ mod tests {
         assert_eq!(file_path("content://media/1"), None);
         assert_eq!(file_path(""), None);
         assert_eq!(file_path("file://"), None);
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_miss_reads_the_file_without_holding_the_demuxer_cache() {
+        let caches = super::Caches::new();
+        let parsed = super::load_parsed_with(&caches, "file:///cuts/a.mp4", "/cuts/a.mp4", |_| {
+            assert!(
+                caches.demux.try_lock().is_ok(),
+                "the demuxer cache stayed locked while the file was read"
+            );
+            None
+        });
+        assert!(parsed.is_none());
     }
 
     #[cfg(target_vendor = "apple")]

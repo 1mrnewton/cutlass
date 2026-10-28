@@ -1,8 +1,9 @@
 //! Load-time report.
 //!
-//! Repair names a missing main track, a bad track order, a range conflict, or
-//! a transition window that runs past a segment. It does not move segments,
-//! and it does not change the transition material.
+//! Repair names a missing main track, a bad track order, a range conflict, a
+//! transition window that runs past a segment, or a speed whose target
+//! duration is not the mapped source duration. It does not move segments,
+//! and it does not change the transition material or the speed points.
 //!
 //! File order is the row order, from the top of the timeline to the bottom.
 //! Audio is the bottom block. The main track sits just above it. Overlay,
@@ -14,8 +15,9 @@
 use std::collections::BTreeSet;
 
 use cutlass_model::{
-    Draft, MaterialId, MaterialRef, MaterialTransition, Segment, SegmentId, Track, TrackId,
-    TrackType,
+    ConstantSpeedError, Draft, MaterialId, MaterialRef, MaterialSpeed, MaterialTransition, Micros,
+    Segment, SegmentId, SpeedMode, SpeedPoint, Track, TrackId, TrackType, constant_target_duration,
+    curve_speed_factor,
 };
 
 /// One problem found on open. The draft that was read is not changed.
@@ -38,6 +40,18 @@ pub enum RepairNote {
         segment_id: SegmentId,
         material_id: MaterialId,
     },
+    /// The stored target duration is not the source duration mapped by speed.
+    /// The segment and the speed points are left as stored.
+    SpeedDuration {
+        track_id: TrackId,
+        segment_id: SegmentId,
+    },
+    /// Curve mode has fewer than two usable points, so the constant speed number stays in force.
+    CurveUnused { material_id: MaterialId },
+    /// A curve point lies outside x in 0 to 1. The point stays stored.
+    SpeedPointOutside { material_id: MaterialId },
+    /// A curve point has a speed at or below 0, or a non-finite coordinate.
+    SpeedPoint { material_id: MaterialId },
     /// The top draft and the main timeline differ. The timeline folder was loaded.
     OutwardCopyDiffers,
     /// This timeline folder's draft id is not the directory name. It was not loaded.
@@ -66,6 +80,7 @@ pub fn repair(draft: &Draft) -> Vec<RepairNote> {
     for track in &draft.tracks {
         range_conflicts(track, &mut notes);
         transition_windows(draft, track, &mut notes);
+        speed_durations(draft, track, &mut notes);
     }
     notes
 }
@@ -171,12 +186,12 @@ fn window_overruns(track: &Track, segment: &Segment, transition: &MaterialTransi
     else {
         return true;
     };
-    let (left, right) = if transition.is_overlap {
-        let left = duration / 2;
-        (left, duration - left)
-    } else {
-        (duration, 0)
+    let Some((left, right)) = cutlass_model::blend_extents(Micros(duration), transition.is_overlap)
+    else {
+        return false;
     };
+    let left = left.0;
+    let right = right.0;
     let Some(window_start) = cut.checked_sub(left) else {
         return true;
     };
@@ -205,6 +220,107 @@ fn window_overruns(track: &Track, segment: &Segment, transition: &MaterialTransi
         return true;
     };
     window_end > incoming_end
+}
+
+/// Names a duration the speed mapping does not produce. Points stay stored.
+fn speed_durations(draft: &Draft, track: &Track, notes: &mut Vec<RepairNote>) {
+    for segment in &track.segments {
+        if let Some(speed) = curve_material(draft, segment) {
+            report_curve(track, segment, speed, notes);
+        } else if let Some(source) = &segment.source_range {
+            report_constant(track, segment, source.duration, segment.speed, notes);
+        }
+    }
+}
+
+fn curve_material<'a>(draft: &'a Draft, segment: &Segment) -> Option<&'a MaterialSpeed> {
+    segment.extra_material_refs.iter().find_map(|material_id| {
+        match draft.materials.get(material_id.as_str()) {
+            Some(MaterialRef::Speed(speed)) if speed.mode == SpeedMode::Curve => Some(speed),
+            _ => None,
+        }
+    })
+}
+
+fn report_curve(
+    track: &Track,
+    segment: &Segment,
+    speed: &MaterialSpeed,
+    notes: &mut Vec<RepairNote>,
+) {
+    let points = speed
+        .curve_speed
+        .as_ref()
+        .map(|curve| curve.speed_points.as_slice())
+        .unwrap_or(&[]);
+    for point in points {
+        if point.x.is_finite() && !(0.0..=1.0).contains(&point.x) {
+            notes.push(RepairNote::SpeedPointOutside {
+                material_id: speed.id.clone(),
+            });
+        }
+    }
+    match curve_speed_factor(points) {
+        Err(ConstantSpeedError::TooFewPoints) => {
+            notes.push(RepairNote::CurveUnused {
+                material_id: speed.id.clone(),
+            });
+        }
+        Err(ConstantSpeedError::NonPositiveSpeed | ConstantSpeedError::Unrepresentable) => {
+            notes.push(RepairNote::SpeedPoint {
+                material_id: speed.id.clone(),
+            });
+            return;
+        }
+        Ok(_) | Err(ConstantSpeedError::NonPositiveDuration | ConstantSpeedError::Curve) => {}
+    }
+    let Some(source) = &segment.source_range else {
+        return;
+    };
+    let mapped = if matches!(
+        curve_speed_factor(points),
+        Err(ConstantSpeedError::TooFewPoints)
+    ) {
+        constant_target_duration(source.duration, segment.speed).ok()
+    } else {
+        curve_target_duration_ok(source.duration, points)
+    };
+    if let Some(mapped) = mapped
+        && mapped != segment.target.duration
+    {
+        notes.push(RepairNote::SpeedDuration {
+            track_id: track.id.clone(),
+            segment_id: segment.id.clone(),
+        });
+    }
+}
+
+fn curve_target_duration_ok(source: Micros, points: &[SpeedPoint]) -> Option<Micros> {
+    cutlass_model::curve_target_duration(source, points).ok()
+}
+
+fn report_constant(
+    track: &Track,
+    segment: &Segment,
+    source: Micros,
+    speed: f64,
+    notes: &mut Vec<RepairNote>,
+) {
+    let disagrees = match constant_target_duration(source, speed) {
+        Ok(mapped) => mapped != segment.target.duration,
+        Err(ConstantSpeedError::NonPositiveSpeed | ConstantSpeedError::Unrepresentable) => true,
+        Err(
+            ConstantSpeedError::NonPositiveDuration
+            | ConstantSpeedError::Curve
+            | ConstantSpeedError::TooFewPoints,
+        ) => false,
+    };
+    if disagrees {
+        notes.push(RepairNote::SpeedDuration {
+            track_id: track.id.clone(),
+            segment_id: segment.id.clone(),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -460,5 +576,104 @@ mod tests {
         main.segments = vec![segment];
         draft.tracks = vec![main];
         assert!(repair(&draft).is_empty());
+    }
+
+    #[test]
+    fn a_constant_speed_duration_that_disagrees_is_reported_and_left_stored() {
+        let mut draft = Draft::empty("D");
+        let mut main = Track::main("main");
+        let mut wrong = clip("a", 0, 2_000_000);
+        wrong.source_range = Some(TimeRange::new(0, 2_000_000));
+        wrong.speed = 2.0;
+        let mut matched = clip("b", 2_000_000, 1_000_000);
+        matched.source_range = Some(TimeRange::new(0, 2_000_000));
+        matched.speed = 2.0;
+        let mut curved = clip("c", 3_000_000, 2_000_000);
+        curved.source_range = Some(TimeRange::new(0, 2_000_000));
+        curved.speed = 2.0;
+        curved.extra_material_refs.push(MaterialId::new("curve"));
+        main.segments = vec![wrong, matched, curved];
+        draft.tracks = vec![main];
+        draft.materials.speeds.push(cutlass_model::MaterialSpeed {
+            id: MaterialId::new("curve"),
+            mode: cutlass_model::SpeedMode::Curve,
+            speed: 2.0,
+            ..cutlass_model::MaterialSpeed::default()
+        });
+        let before = draft.clone();
+        assert_eq!(
+            repair(&draft),
+            vec![
+                RepairNote::SpeedDuration {
+                    track_id: TrackId::new("main"),
+                    segment_id: SegmentId::new("a"),
+                },
+                RepairNote::CurveUnused {
+                    material_id: MaterialId::new("curve"),
+                },
+                RepairNote::SpeedDuration {
+                    track_id: TrackId::new("main"),
+                    segment_id: SegmentId::new("c"),
+                },
+            ]
+        );
+        assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn a_curve_disagreement_is_reported_and_the_points_stay() {
+        let mut draft = Draft::empty("D");
+        let mut main = Track::main("main");
+        let mut segment = clip("a", 0, 500_000);
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        segment.speed = 2.0;
+        segment.extra_material_refs.push(MaterialId::new("curve"));
+        main.segments = vec![segment];
+        draft.tracks = vec![main];
+        draft.materials.speeds.push(cutlass_model::MaterialSpeed {
+            id: MaterialId::new("curve"),
+            mode: cutlass_model::SpeedMode::Curve,
+            speed: 2.0,
+            curve_speed: Some(cutlass_model::CurveSpeed {
+                speed_points: vec![
+                    cutlass_model::SpeedPoint {
+                        x: -0.25,
+                        y: 1.0,
+                        rest: serde_json::Map::new(),
+                    },
+                    cutlass_model::SpeedPoint {
+                        x: 1.25,
+                        y: 1.0,
+                        rest: serde_json::Map::new(),
+                    },
+                ],
+                ..cutlass_model::CurveSpeed::default()
+            }),
+            ..cutlass_model::MaterialSpeed::default()
+        });
+        let before = draft.clone();
+        assert_eq!(
+            repair(&draft),
+            vec![
+                RepairNote::SpeedPointOutside {
+                    material_id: MaterialId::new("curve"),
+                },
+                RepairNote::SpeedPointOutside {
+                    material_id: MaterialId::new("curve"),
+                },
+                RepairNote::SpeedDuration {
+                    track_id: TrackId::new("main"),
+                    segment_id: SegmentId::new("a"),
+                },
+            ]
+        );
+        assert_eq!(draft, before);
+        assert_eq!(
+            draft.materials.speeds[0]
+                .curve_speed
+                .as_ref()
+                .map(|curve| curve.speed_points.len()),
+            Some(2)
+        );
     }
 }

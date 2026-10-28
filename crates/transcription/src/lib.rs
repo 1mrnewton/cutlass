@@ -4,18 +4,26 @@
 //! boundary: the file reader is the first source, and `container` plus
 //! `decode` replace it when they can return PCM for a range.
 //!
-//! Speech stays local. A remote submit-and-query recognizer is another
-//! implementor of [`Recognizer`] and is not built while that switch is off.
+//! Speech stays local. [`LocalRecognizer`] is that path: log-mel frames, the
+//! acoustic model on a device handle, then CTC. This build passes the CPU
+//! device. A later Apple build can pass a Metal device through the same
+//! handle. A remote submit-and-query recognizer is another implementor of
+//! [`Recognizer`] and is not built while that switch is off.
 
 #![forbid(unsafe_code)]
 
+mod features;
 mod file;
 mod job;
+mod model;
 mod prepare;
+mod search;
+mod timestamp;
 mod words;
 
 pub use file::FileSource;
 pub use job::{Job, JobError};
+pub use model::{AcousticModel, AcousticWeights, LocalRecognizer, ModelError};
 pub use prepare::{Pcm, PcmSource, PrepareError, fit};
 pub use words::{RecognizedWord, Utterance, WordError, columns};
 

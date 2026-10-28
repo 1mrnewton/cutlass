@@ -10,6 +10,12 @@ all-features = true
 [advisories]
 unmaintained = "all"
 unsound = "all"
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "gemm and tokenizers still depend on paste, and the advisory has no upgrade." },
+    { id = "RUSTSEC-2026-0367", reason = "candle-core reads and writes zip entries for npy. It does not call extract, which is the vulnerable API. Transcription loads safetensors." },
+    { id = "RUSTSEC-2026-0368", reason = "candle-core reads and writes zip entries for npy. It does not call extract, which is the vulnerable API. Transcription loads safetensors." },
+    { id = "RUSTSEC-2026-0369", reason = "candle-core reads and writes zip entries for npy. It does not call extract, which is the vulnerable API. Transcription loads safetensors." },
+]
 
 [licenses]
 confidence-threshold = 0.93
@@ -40,3 +46,5 @@ deny = [
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+allow-git = ["https://github.com/huggingface/candle"]
+required-git-spec = "rev"

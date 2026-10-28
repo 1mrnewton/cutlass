@@ -2,54 +2,25 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Italiano](README.it.md) · [Русский](README.ru.md) · [العربية](README.ar.md) · [हिन्दी](README.hi.md) · **Bahasa Indonesia**
 
-Cutlass adalah editor video berbasis linimasa. Desktop, iOS, dan Android memakai satu draf dan satu sesi. Gestur di kulit mana pun menjadi permintaan yang sama. Pemutaran dan ekspor melihat bingkai yang sama untuk draf dan waktu yang sama.
+Editor video lengkap dan gratis, agar siapa pun dapat membuat apa pun.
 
-Waktu dalam dokumen adalah hitungan mikrodetik bertanda. Sebuah segmen menyimpan dua rentang dalam satuan itu. Rentang sumber adalah bagian media yang dipakai. Rentang target adalah tempatnya di linimasa.
+Cutlass punya semua yang Anda butuhkan untuk membuat video, dengan AI di dalamnya. Penyuntingan yang luwes, dan asisten yang bisa diajak bicara. Buat video yang ada di benak Anda.
 
-Bila terjemahan ini dan pohon ini berbeda, [README bahasa Inggris](README.md) yang menjadi acuan.
+Bawa rekaman, audio, dan gambar. Pangkas, belah, dan susun di linimasa dengan banyak trek. Tambahkan teks, stiker, bentuk, efek, dan transisi. Atur warna, kecepatan, dan potongan, lalu animasikan dengan keyframe. Putar, lalu ekspor video yang sudah jadi.
 
-## Status
+Mulai dari yang sederhana, atau lanjut lebih jauh. Editor yang sama menangani potongan cepat dan potongan yang teliti.
 
-Workspace ini masih awal.
+Anda juga bisa mengatakan apa yang Anda inginkan. Jelaskan suntingan dengan bahasa biasa, dan Cutlass membuatnya di linimasa, tempat Anda bisa mengubah atau membatalkannya. Editor tetap selengkap itu saat Anda mengerjakan sendiri.
 
-| Bagian | Status |
-| --- | --- |
-| `cutlass-model` | Draf: trek, segmen, kumpulan materi, dan waktu mikrodetik |
-| `cutlass-session` | Menempatkan, memindahkan, dan memangkas sebagai satu langkah pembatalan. Permintaan yang gagal membiarkan draf tetap. Batalkan dan ulangi menaikkan revisi |
-| Krate lain | Anggota kosong. Mereka menyiapkan tempat untuk mesin, kontainer, kodek, pemutaran, ekspor, dan agen |
-| `apps/desktop` | Mencetak `cutlass` lalu kembali. Jendela menyusul |
-| `apps/ios`, `apps/android` | Masuk ke pohon ini nanti |
+Unduh Cutlass dan pasang hari ini dari halaman [rilis](https://github.com/1mrnewton/cutlass/releases). Siap dipakai di Mac dan Windows.
 
-Kontainer dan kodek adalah Rust asli, satu krate per keluarga atau kodek. Di Apple, Windows, dan Android, kerangka media platform adalah jalur cepat. Linux memakai kodek Rust dan pratinjau perangkat lunak.
-
-## Tata letak
-
-```text
-apps/desktop/          egui dan eframe
-crates/                satu komponen per krate
-crates/containers/     satu keluarga kontainer per krate
-crates/codecs/         satu kodek per krate
-```
-
-Nama krate memakai awalan `cutlass-`. Biner desktop menautkan krate secara langsung. Kulit telepon hanya menautkan `cutlass-ffi`.
-
-## Bangun
-
-Pasang Rust stable. `rust-toolchain.toml` memilih kanal, Clippy, dan rustfmt.
-
-```sh
-cargo test --workspace
-cargo fmt --all -- --check
-cargo lint
-```
-
-`cargo lint` menjalankan Clippy pada workspace dan menolak peringatan. CI Ubuntu menjalankan pemeriksaan ini dan `cargo deny`.
+Kami sedang menulis ulang Cutlass agar versi berikutnya lebih baik. Repositori ini adalah pekerjaan itu.
 
 ## Lisensi
 
-Cutlass tersedia, menurut pilihan Anda, di bawah salah satu lisensi berikut:
+Cutlass gratis di bawah salah satu dari dua lisensi. Pilih satu.
 
-* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) atau <https://www.apache.org/licenses/LICENSE-2.0>)
-* Lisensi MIT ([LICENSE-MIT](LICENSE-MIT) atau <https://opensource.org/licenses/MIT>)
+* [Apache License 2.0](LICENSE-APACHE)
+* [MIT License](LICENSE-MIT)
 
-Copyright (c) 2026 Emmanuel Aidoo
+Copyright (c) 2026 1mrnewton

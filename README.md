@@ -12,7 +12,7 @@ Start simple, or go further. The same editor covers a quick cut and a careful on
 
 You can also say what you want. Describe the edit in plain language, and Cutlass makes it on the timeline, where you can change it or undo it. The editor is just as complete when you do the work yourself.
 
-Download Cutlass and install it today from the [releases](https://github.com/1mrnewton/cutlass/releases) page on GitHub. It is a real video editor, ready to use on Mac and Windows.
+Download Cutlass and install it today from the [releases](https://github.com/1mrnewton/cutlass/releases) page. Ready to use on Mac and Windows.
 
 We are rewriting Cutlass to make the next version better. This repository is that work.
 

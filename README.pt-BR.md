@@ -2,54 +2,25 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · **Português** · [Français](README.fr.md) · [Deutsch](README.de.md) · [Italiano](README.it.md) · [Русский](README.ru.md) · [العربية](README.ar.md) · [हिन्दी](README.hi.md) · [Bahasa Indonesia](README.id.md)
 
-Cutlass é um editor de vídeo em linha do tempo. O desktop, o iOS e o Android compartilham um rascunho e uma sessão. Um gesto em qualquer interface vira o mesmo pedido. A reprodução e a exportação veem o mesmo quadro para o mesmo rascunho e o mesmo instante.
+Editor de vídeo completo e gratuito, para todo mundo criar qualquer coisa.
 
-O tempo no documento é uma contagem com sinal de microssegundos. Um segmento guarda dois intervalos nessa unidade. O intervalo de origem é a parte da mídia que ele usa. O intervalo de destino é o lugar na linha do tempo.
+O Cutlass tem tudo o que você precisa para fazer um vídeo, com IA incluída. Edição flexível, e um assistente com quem você pode falar. Faça o vídeo que você tem em mente.
 
-Quando esta tradução e a árvore divergem, vale o [README em inglês](README.md).
+Traga filmagens, áudio e imagens. Corte, divida e organize numa linha do tempo com várias faixas. Adicione texto, figurinhas, formas, efeitos e transições. Ajuste cor, velocidade e corte, e anime com quadros-chave. Reproduza e exporte um vídeo pronto.
 
-## Estado
+Comece simples, ou vá além. O mesmo editor cobre um corte rápido e um cuidadoso.
 
-O workspace ainda é o começo.
+Você também pode dizer o que quer. Descreva a edição em linguagem comum, e o Cutlass faz isso na linha do tempo, onde você pode mudar ou desfazer. O editor fica igualmente completo quando você mesmo faz o trabalho.
 
-| Peça | Estado |
-| --- | --- |
-| `cutlass-model` | O rascunho: trilhas, segmentos, conjuntos de materiais e tempo em microssegundos |
-| `cutlass-session` | Colocar, mover e aparar como um único passo de desfazer. Um pedido que falha deixa o rascunho como estava. Desfazer e refazer avançam a revisão |
-| Os outros crates | Membros vazios. Reservam o motor, os contêineres, os codecs, a reprodução, a exportação e o agente |
-| `apps/desktop` | Imprime `cutlass` e retorna. A janela vem depois |
-| `apps/ios`, `apps/android` | Entram nesta árvore mais adiante |
+Baixe o Cutlass e instale hoje pela página de [versões](https://github.com/1mrnewton/cutlass/releases). Pronto para usar no Mac e no Windows.
 
-Contêineres e codecs são Rust nativo, um crate por família ou codec. Na Apple, no Windows e no Android, os frameworks de mídia da plataforma são o caminho rápido. O Linux usa os codecs em Rust e uma prévia em software.
-
-## Disposição
-
-```text
-apps/desktop/          egui e eframe
-crates/                um componente por crate
-crates/containers/     uma família de contêiner por crate
-crates/codecs/         um codec por crate
-```
-
-Os nomes dos crates usam o prefixo `cutlass-`. O binário de desktop liga os crates diretamente. As interfaces do telefone ligam apenas `cutlass-ffi`.
-
-## Compilação
-
-Instale o Rust stable. `rust-toolchain.toml` escolhe o canal, o Clippy e o rustfmt.
-
-```sh
-cargo test --workspace
-cargo fmt --all -- --check
-cargo lint
-```
-
-`cargo lint` roda o Clippy no workspace e recusa avisos. A CI no Ubuntu roda essas verificações e o `cargo deny`.
+Estamos reescrevendo o Cutlass para a próxima versão ficar melhor. Este repositório é esse trabalho.
 
 ## Licença
 
-O Cutlass está disponível, à sua escolha, sob uma destas licenças:
+O Cutlass é gratuito sob qualquer uma das duas licenças. Escolha uma.
 
-* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) ou <https://www.apache.org/licenses/LICENSE-2.0>)
-* Licença MIT ([LICENSE-MIT](LICENSE-MIT) ou <https://opensource.org/licenses/MIT>)
+* [Apache License 2.0](LICENSE-APACHE)
+* [MIT License](LICENSE-MIT)
 
-Copyright (c) 2026 Emmanuel Aidoo
+Copyright (c) 2026 1mrnewton

@@ -1,7 +1,7 @@
 //! Brands this crate will open. An unknown major brand with no known
 //! compatible brand is a typed error.
 
-use cutlass_container::Error;
+use crate::legacy::Error;
 
 const KNOWN: &[&[u8; 4]] = &[
     b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b"iso7", b"iso8", b"iso9", b"mp41",

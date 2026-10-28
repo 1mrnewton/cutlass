@@ -1,8 +1,8 @@
 //! Box headers. Size 0 extends to the parent. Size 1 is a 64-bit size.
 //! A `uuid` box carries 16 extra type bytes and is skipped by its size.
 
+use crate::legacy::Error;
 use crate::limits::MAX_ATOMS;
-use cutlass_container::Error;
 
 pub struct Reader<'a> {
     data: &'a [u8],
@@ -199,7 +199,7 @@ pub struct FileHeader {
 
 /// Read one box header at `at` without reading its payload.
 pub fn file_header(
-    source: &mut dyn cutlass_container::Source,
+    source: &mut dyn crate::legacy::Source,
     at: u64,
     file_len: u64,
 ) -> Result<Option<FileHeader>, Error> {
@@ -261,7 +261,7 @@ pub fn file_header(
 }
 
 pub fn load_payload(
-    source: &mut dyn cutlass_container::Source,
+    source: &mut dyn crate::legacy::Source,
     header: &FileHeader,
     cap: u64,
 ) -> Result<Vec<u8>, Error> {
@@ -295,7 +295,7 @@ pub fn enter(depth: u32) -> Result<u32, Error> {
 #[cfg(test)]
 mod tests {
     use super::atoms;
-    use cutlass_container::Error;
+    use crate::legacy::Error;
 
     #[test]
     fn largesize_and_a_size_past_the_parent_are_distinct() {

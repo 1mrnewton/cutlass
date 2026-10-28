@@ -1,11 +1,9 @@
 //! Sample descriptions. Configuration records stay bytes: `avcC`, `hvcC`,
 //! `av1C`, and the decoder-specific info inside `esds`. Nothing here decodes them.
 
+use crate::legacy::{AudioParams, CodecId, ColorTags, Error, MediaKind, SampleFormat, VideoParams};
 use crate::limits::MAX_STSD;
 use crate::parse::{self, Reader};
-use cutlass_container::{
-    AudioParams, CodecId, ColorTags, Error, MediaKind, SampleFormat, VideoParams,
-};
 
 pub struct SampleDesc {
     pub fourcc: [u8; 4],

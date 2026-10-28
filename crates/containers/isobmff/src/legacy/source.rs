@@ -1,4 +1,4 @@
-use crate::Error;
+use super::Error;
 
 /// Random access to a container file.
 ///

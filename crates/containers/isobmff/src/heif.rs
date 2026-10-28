@@ -2,11 +2,11 @@
 //! with the codec; this crate returns the grid payload and the coded tiles.
 
 use crate::index::Sample;
+use crate::legacy::{Error, MediaKind, Stream, StreamParams, Timescale, VideoParams};
 use crate::limits::{MAX_PACKET_BYTES, MAX_SAMPLES, MAX_TRACKS};
 use crate::movie::BuiltTrack;
 use crate::parse::{self, Reader};
 use crate::stsd::codec_for;
-use cutlass_container::{Error, MediaKind, Stream, StreamParams, Timescale, VideoParams};
 
 struct Item {
     id: u32,

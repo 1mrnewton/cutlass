@@ -1,30 +1,41 @@
-use crate::Error;
-use crate::source::Source;
-use crate::stream::Stream;
-use cutlass_codec::{Packet, Timescale};
+//! The demux trait.
+//!
+//! A demuxer owns its input, publishes streams only after open succeeds,
+//! and returns one access unit per read, in decode order. Timestamps stay
+//! in the file timescale.
 
-/// Where a seek landed, in the track's file timescale.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SeekAt {
-    pub track_id: u32,
-    /// Decode time of the sample the next read returns.
-    pub dts: i64,
-    pub keyframe: bool,
-    /// The landing used a sample table or a fragment index.
-    pub used_index: bool,
-    /// Sample distance from this sync sample to the sample that contains the
-    /// requested time. Zero when the sync sample itself contains that time.
-    pub preroll: u32,
-}
+use crate::error::ReadError;
+use crate::seek::{SeekLanding, SeekTo};
+use crate::stream::{Gap, Stream};
+use cutlass_codec::{ContainerId, Packet};
 
-/// Reads packets from a container.
+/// One open file: streams out, then packets out.
 ///
-/// `seek` moves the read cursor. A failed seek leaves the cursor where it was.
-/// Packets before the landing sample are not returned.
+/// The trait is object-safe so `engine` can hold `Box<dyn Demux>`.
+/// Open stays on the concrete type because it consumes the input.
 pub trait Demux {
-    fn movie_timescale(&self) -> Timescale;
+    fn family(&self) -> ContainerId;
+
+    /// Streams published by a successful open.
     fn streams(&self) -> &[Stream];
-    fn read_packet(&mut self, source: &mut dyn Source) -> Result<Option<Packet>, Error>;
-    fn seek(&mut self, source: &mut dyn Source, track_id: u32, ticks: i64)
-    -> Result<SeekAt, Error>;
+
+    /// Gaps in the file timescale. They are not applied to packet timestamps.
+    fn gaps(&self) -> &[Gap];
+
+    /// The next access unit in decode order, or [`None`] at the end.
+    ///
+    /// One call returns one packet. There is no internal queue.
+    fn read_packet(&mut self) -> Result<Option<Packet>, ReadError>;
+
+    /// Moves the next read to `to` in the file timescale.
+    ///
+    /// On failure the read position does not change. Packets from before
+    /// the landing are not returned after a successful seek.
+    fn seek(&mut self, to: SeekTo) -> Result<SeekLanding, ReadError>;
+
+    /// The next read or seek returns [`ReadError::Cancelled`].
+    fn cancel(&mut self);
+
+    /// Bytes read from the owned input. A seek does not increase this.
+    fn consumed(&self) -> u64;
 }

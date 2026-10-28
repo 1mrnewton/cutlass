@@ -4,10 +4,10 @@
 //! at `tfdt` when that box is present.
 
 use crate::index::Sample;
+use crate::legacy::Error;
 use crate::limits::{MAX_PACKET_BYTES, MAX_SAMPLES};
 use crate::movie::Trex;
 use crate::parse::{self, Reader};
-use cutlass_container::Error;
 
 const TFHD_BASE_DATA_OFFSET: u32 = 0x01;
 const TFHD_STSD_ID: u32 = 0x02;
@@ -410,7 +410,7 @@ fn add_delta(base: u64, delta: i32) -> Result<u64, Error> {
 #[cfg(test)]
 mod tests {
     use super::parse_sidx;
-    use cutlass_container::Error;
+    use crate::legacy::Error;
 
     #[test]
     fn sidx_version_0_locates_the_reference_and_rejects_a_nested_index() {

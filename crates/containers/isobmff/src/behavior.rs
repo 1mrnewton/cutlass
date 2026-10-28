@@ -3,8 +3,8 @@
 //! sync table, and hostile boxes. Mux round trips cover the writer.
 
 use crate::{
-    CodecId, Demux, Edit, Error, FileBrand, IsoBmff, IsoBmffMux, MediaKind, Mux, MuxOptions,
-    Packet, SliceSource, StreamParams, Timescale,
+    CodecId, Demux, Edit, Error, FileBrand, IsoBmff, IsoBmffFile, IsoBmffMux, MediaKind, Mux,
+    MuxOptions, Packet, SliceSource, StreamParams, Timescale,
 };
 use std::io::{Cursor, Seek, SeekFrom, Write};
 
@@ -74,6 +74,83 @@ fn read_all(bytes: &[u8]) -> Vec<Packet> {
         packets.push(packet);
     }
     packets
+}
+
+#[test]
+fn the_shared_demux_returns_the_same_sample_bytes() {
+    let bytes = write_movie(
+        MuxOptions::default(),
+        vec![(video(), vec![packet(0, 3, 1, &[9, 8, 7], true, 30)])],
+    );
+    let mut file = IsoBmffFile::open(Cursor::new(bytes)).expect("open");
+    assert_eq!(
+        cutlass_container::Demux::family(&file),
+        cutlass_codec::ContainerId::Isobmff
+    );
+    let streams = cutlass_container::Demux::streams(&file);
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0].timescale().ticks_per_second(), 30);
+    assert_eq!(
+        streams[0].params().codec(),
+        &cutlass_codec::StreamCodec::Known(cutlass_codec::CodecId::H264)
+    );
+    assert_eq!(streams[0].params().extradata(), &[1, 66, 0, 10]);
+    let before = cutlass_container::Demux::consumed(&file);
+    let packet = cutlass_container::Demux::read_packet(&mut file)
+        .expect("read")
+        .expect("packet");
+    assert_eq!(packet.bytes(), &[9, 8, 7]);
+    assert_eq!(packet.timestamp().decode(), Some(0));
+    assert_eq!(packet.timestamp().presentation(), Some(3));
+    assert_eq!(packet.timestamp().duration(), Some(1));
+    assert_eq!(packet.timescale().ticks_per_second(), 30);
+    assert!(packet.keyframe());
+    assert!(cutlass_container::Demux::consumed(&file) > before);
+    let consumed = cutlass_container::Demux::consumed(&file);
+    let landing = cutlass_container::Demux::seek(
+        &mut file,
+        cutlass_container::SeekTo {
+            track: packet.stream(),
+            time: 0,
+            end: None,
+        },
+    )
+    .expect("seek");
+    assert!(landing.index_used);
+    assert!(landing.entries_visited > 0);
+    assert_eq!(landing.payload_scans, 0);
+    assert_eq!(cutlass_container::Demux::consumed(&file), consumed);
+    match landing.landing {
+        cutlass_container::Landing::Packet {
+            time,
+            keyframe,
+            byte_position,
+            ..
+        } => {
+            assert_eq!(time, 3);
+            assert!(keyframe);
+            assert!(byte_position > 0);
+        }
+        cutlass_container::Landing::End => panic!("seek landed at the end"),
+    }
+    let again = cutlass_container::Demux::read_packet(&mut file)
+        .expect("read")
+        .expect("packet");
+    assert_eq!(again.bytes(), &[9, 8, 7]);
+    let failed = cutlass_container::Demux::seek(
+        &mut file,
+        cutlass_container::SeekTo {
+            track: 99,
+            time: 0,
+            end: None,
+        },
+    );
+    assert!(matches!(
+        failed,
+        Err(cutlass_container::ReadError::Seek(
+            cutlass_container::SeekError::UnknownTrack
+        ))
+    ));
 }
 
 #[test]

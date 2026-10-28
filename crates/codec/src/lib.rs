@@ -1,18 +1,17 @@
-//! Codec ids, packets, and parameters.
+//! Codec ids, packets, and stream parameters.
 //!
-//! This crate names a payload. It does not open a file and it does not decode.
-//! Timestamps on a [`Packet`] are ticks of a file timescale, not microseconds.
+//! This crate does not open a file and it does not decode. A container
+//! turns a file into packets. A codec crate turns those packets into
+//! pictures or samples.
 
 #![forbid(unsafe_code)]
 
 mod id;
 mod packet;
 mod params;
-mod pixel;
-mod sample;
 
-pub use id::{CodecId, ContainerId};
-pub use packet::{Packet, Timescale};
-pub use params::{AudioParams, MediaKind, StreamParams, VideoParams};
-pub use pixel::{ColorTags, PixelFormat};
-pub use sample::SampleFormat;
+pub use id::{CodecId, ContainerId, StreamCodec, TagError, UnknownCodec};
+pub use packet::{Packet, PacketError, Timescale, Timestamp};
+pub use params::{
+    AudioParamsError, ChannelsError, FrameSize, FrameSizeError, RateError, StreamParams,
+};

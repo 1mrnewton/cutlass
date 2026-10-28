@@ -11,18 +11,20 @@ mod demux;
 mod fragment;
 mod heif;
 mod index;
+mod legacy;
 mod limits;
 mod movie;
 mod mux;
 mod parse;
+mod shared;
 mod stsd;
 
 pub use brand::probe;
-pub use demux::IsoBmff;
+pub use demux::{IsoBmff, IsoBmffFile};
 pub use limits::{MAX_METADATA_BYTES, MAX_PACKET_BYTES, MAX_SAMPLES, PROBE_BYTES};
 pub use mux::{FileBrand, IsoBmffMux, MuxOptions};
 
-pub use cutlass_container::{
+pub use legacy::{
     AudioParams, CodecId, ColorTags, Demux, Edit, Error, FileSource, MediaKind, Mux, Packet,
     SampleFormat, SeekAt, SliceSource, Source, Stream, StreamParams, Timescale, VideoParams,
 };

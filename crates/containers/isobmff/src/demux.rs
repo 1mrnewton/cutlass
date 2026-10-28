@@ -5,10 +5,11 @@ use crate::brand::{self, parse_ftyp};
 use crate::fragment::{self, SidxRef, Tfra};
 use crate::heif;
 use crate::index::Sample;
+use crate::legacy::{Demux, Error, Packet, SeekAt, Source, Stream, Timescale};
 use crate::limits::{MAX_METADATA_BYTES, MAX_SAMPLES};
 use crate::movie::{self, BuiltTrack, Trex};
 use crate::parse::{self, file_header};
-use cutlass_container::{Demux, Error, Packet, SeekAt, Source, Stream, Timescale};
+use std::io::{Read, Seek, SeekFrom};
 
 struct Runtime {
     samples: Vec<Sample>,
@@ -35,6 +36,7 @@ pub struct IsoBmff {
     media: Vec<(u64, u64)>,
     fragments: Option<Fragments>,
     file_len: u64,
+    index_entries_visited: u32,
 }
 
 impl IsoBmff {
@@ -191,6 +193,7 @@ fn from_tracks(
         media,
         fragments,
         file_len,
+        index_entries_visited: 0,
     }
 }
 
@@ -244,6 +247,146 @@ impl Demux for IsoBmff {
             }
         }
         self.place(index, ticks)
+    }
+}
+
+/// An opened ISO base media file that owns its reader.
+///
+/// [`IsoBmff`] still takes a source on each read. This type is the shared
+/// demux: one owner, one access unit per call, timestamps in the track timescale.
+pub struct IsoBmffFile<R> {
+    movie: IsoBmff,
+    source: crate::shared::RandomSource<R>,
+    shared: Vec<cutlass_container::Stream>,
+    cancelled: bool,
+}
+
+impl<R: Read + Seek> IsoBmffFile<R> {
+    /// Reads the file header and publishes streams only after that succeeds.
+    pub fn open(mut reader: R) -> Result<Self, cutlass_container::OpenError> {
+        let length = reader.seek(SeekFrom::End(0)).map_err(|error| {
+            cutlass_container::OpenError::Source {
+                message: error.to_string(),
+            }
+        })?;
+        reader
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| cutlass_container::OpenError::Source {
+                message: error.to_string(),
+            })?;
+        let mut source = crate::shared::RandomSource::new(
+            cutlass_container::Input::random(reader, length, cutlass_container::Limits::standard()),
+            length,
+        );
+        let movie = IsoBmff::open(&mut source).map_err(crate::shared::map_open)?;
+        let shared = crate::shared::map_streams(movie.movie_timescale.get(), &movie.streams)?;
+        Ok(Self {
+            movie,
+            source,
+            shared,
+            cancelled: false,
+        })
+    }
+}
+
+impl<R: Read + Seek> cutlass_container::Demux for IsoBmffFile<R> {
+    fn family(&self) -> cutlass_codec::ContainerId {
+        cutlass_codec::ContainerId::Isobmff
+    }
+
+    fn streams(&self) -> &[cutlass_container::Stream] {
+        &self.shared
+    }
+
+    fn gaps(&self) -> &[cutlass_container::Gap] {
+        &[]
+    }
+
+    fn read_packet(
+        &mut self,
+    ) -> Result<Option<cutlass_codec::Packet>, cutlass_container::ReadError> {
+        if self.cancelled {
+            return Err(cutlass_container::ReadError::Cancelled);
+        }
+        match Demux::read_packet(&mut self.movie, &mut self.source) {
+            Ok(Some(packet)) => Ok(Some(crate::shared::to_shared(packet)?)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(crate::shared::map_read(error)),
+        }
+    }
+
+    fn seek(
+        &mut self,
+        to: cutlass_container::SeekTo,
+    ) -> Result<cutlass_container::SeekLanding, cutlass_container::ReadError> {
+        if self.cancelled {
+            return Err(cutlass_container::ReadError::Cancelled);
+        }
+        let Some(index) = self
+            .movie
+            .streams
+            .iter()
+            .position(|stream| stream.params.track_id == to.track)
+        else {
+            return Err(cutlass_container::ReadError::Seek(
+                cutlass_container::SeekError::UnknownTrack,
+            ));
+        };
+        let track_end = self.movie.tracks.get(index).and_then(|track| {
+            track
+                .samples
+                .last()
+                .map(|sample| sample.dts.saturating_add(i64::from(sample.duration)))
+        });
+        let time = if to.end.is_some_and(|end| to.time >= end) {
+            track_end.unwrap_or(to.time)
+        } else {
+            to.time
+        };
+        let at = Demux::seek(&mut self.movie, &mut self.source, to.track, time)
+            .map_err(crate::shared::map_read)?;
+        let cursor = self
+            .movie
+            .tracks
+            .get(index)
+            .map(|track| track.cursor)
+            .unwrap_or(0);
+        let sample = self
+            .movie
+            .tracks
+            .get(index)
+            .and_then(|track| track.samples.get(cursor));
+        let Some(sample) = sample else {
+            return Ok(cutlass_container::SeekLanding {
+                landing: cutlass_container::Landing::End,
+                index_used: at.used_index,
+                payload_scans: 0,
+                entries_visited: self.movie.index_entries_visited,
+            });
+        };
+        let ordinal = u32::try_from(cursor).map_err(|_| cutlass_container::ReadError::Source {
+            message: "sample index does not fit".to_owned(),
+        })?;
+        Ok(cutlass_container::SeekLanding {
+            landing: cutlass_container::Landing::Packet {
+                ordinal,
+                time: sample.pts,
+                keyframe: sample.keyframe,
+                preroll: at.preroll,
+                byte_position: sample.offset,
+            },
+            index_used: at.used_index,
+            payload_scans: 0,
+            entries_visited: self.movie.index_entries_visited,
+        })
+    }
+
+    fn cancel(&mut self) {
+        self.cancelled = true;
+    }
+
+    fn consumed(&self) -> u64 {
+        self.source.consumed()
     }
 }
 
@@ -353,6 +496,7 @@ impl IsoBmff {
         let Some(stream) = self.streams.get(index) else {
             return Err(Error::Missing { what: "track" });
         };
+        self.index_entries_visited = landing.visited;
         Ok(SeekAt {
             track_id: stream.params.track_id,
             dts: landing.dts,
@@ -644,6 +788,7 @@ struct Landing {
     dts: i64,
     keyframe: bool,
     preroll: u32,
+    visited: u32,
 }
 
 fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
@@ -662,6 +807,7 @@ fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
             reason: "track has no sample index",
         });
     };
+    let mut visited = 1u32;
     let end = last.dts.saturating_add(i64::from(last.duration));
     if ticks >= end {
         return Ok(Landing {
@@ -669,11 +815,13 @@ fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
             dts: end,
             keyframe: false,
             preroll: 0,
+            visited,
         });
     }
     let mut lo = 0usize;
     let mut hi = samples.len();
     while lo + 1 < hi {
+        visited = visited.saturating_add(1);
         let mid = lo + (hi - lo) / 2;
         let Some(sample) = samples.get(mid) else {
             break;
@@ -685,10 +833,12 @@ fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
         }
     }
     if ticks < samples.first().map(|sample| sample.dts).unwrap_or(0) {
+        visited = visited.saturating_add(1);
         lo = 0;
     }
     let mut cursor = lo;
     while cursor > 0 && samples.get(cursor).is_some_and(|sample| !sample.keyframe) {
+        visited = visited.saturating_add(1);
         cursor -= 1;
     }
     let Some(sample) = samples.get(cursor) else {
@@ -705,6 +855,7 @@ fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
         dts: sample.dts,
         keyframe: true,
         preroll,
+        visited,
     })
 }
 

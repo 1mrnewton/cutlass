@@ -9,11 +9,11 @@
 //! duration. Presentation time may differ; that difference is the composition
 //! offset.
 
+use crate::legacy::{CodecId, Edit, Error, MediaKind, Mux, Packet, SampleFormat, StreamParams};
 use crate::limits::{
     DEFAULT_SAMPLES_PER_FRAGMENT, MAX_BUFFERED_MUX_BYTES, MAX_PACKET_BYTES, MAX_TRACKS,
 };
 use crate::movie::pack_language;
-use cutlass_container::{CodecId, Edit, Error, MediaKind, Mux, Packet, SampleFormat, StreamParams};
 use std::io::{Seek, SeekFrom, Write};
 
 /// Brand written in `ftyp`.

@@ -3,10 +3,10 @@
 //! Edit lists are stored on the track. They are not applied to packet timestamps.
 
 use crate::index::{self, ChunkMap, CtsRun, Run, Sample, Sizes, Sync, Tables};
+use crate::legacy::{Edit, Error, MediaKind, Stream, StreamParams, Timescale, VideoParams};
 use crate::limits::{MAX_EDITS, MAX_SAMPLES, MAX_TABLE_ROWS, MAX_TRACKS};
 use crate::parse::{self, Reader};
 use crate::stsd::{self, SampleDesc};
-use cutlass_container::{Edit, Error, MediaKind, Stream, StreamParams, Timescale, VideoParams};
 
 #[derive(Clone, Copy)]
 pub struct Trex {

@@ -3,8 +3,8 @@
 //! Offsets are computed once. A later seek binary-searches this table and does
 //! not walk the media payload.
 
+use crate::legacy::Error;
 use crate::limits::{MAX_PACKET_BYTES, MAX_SAMPLES};
-use cutlass_container::Error;
 
 #[derive(Clone, Debug)]
 pub struct Sample {

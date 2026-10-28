@@ -18,10 +18,12 @@
 mod api;
 mod latm;
 mod m4a;
+mod shared;
 
 pub use api::{Demuxer, Muxer, StreamInfo};
 pub use latm::{LatmDemuxer, LatmMuxer};
 pub use m4a::{Mp4Demuxer, Mp4Muxer};
+pub use shared::{AdtsFile, LatmFile};
 
 use std::collections::VecDeque;
 
@@ -680,10 +682,8 @@ fn named_profile(profile: u8) -> CodecError {
 #[cfg(test)]
 mod tests {
     use super::{AdtsDemuxer, AdtsMuxer, Demuxer, Muxer};
-    use cutlass_codec::access::{
-        ChannelLayout, CodecError, CodecParams, Packet, SideData,
-    };
     use cutlass_codec::CodecId;
+    use cutlass_codec::access::{ChannelLayout, CodecError, CodecParams, Packet, SideData};
 
     fn mono() -> CodecParams {
         CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono())
@@ -716,6 +716,57 @@ mod tests {
         assert_eq!(packets[1].data, vec![5, 6]);
         assert_eq!(packets[0].timescale, 48_000);
         assert_eq!(packets[1].pts, 1024);
+    }
+
+    #[test]
+    fn the_shared_demux_returns_the_same_access_unit() {
+        let mut mux = AdtsMuxer::new();
+        mux.add_stream(mono()).unwrap();
+        mux.write_packet(&Packet::audio(vec![1, 2, 3, 4], 0, 1024, 48_000))
+            .unwrap();
+        mux.write_packet(&Packet::audio(vec![5, 6], 1024, 1024, 48_000))
+            .unwrap();
+        let bytes = mux.finish().unwrap();
+        let mut file = crate::AdtsFile::open(std::io::Cursor::new(bytes)).expect("open");
+        assert_eq!(
+            cutlass_container::Demux::family(&file),
+            cutlass_codec::ContainerId::Adts
+        );
+        let streams = cutlass_container::Demux::streams(&file);
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].timescale().ticks_per_second(), 48_000);
+        assert_eq!(streams[0].params().channels(), Some(1));
+        let first = cutlass_container::Demux::read_packet(&mut file)
+            .expect("read")
+            .expect("packet");
+        assert_eq!(first.bytes(), &[1, 2, 3, 4]);
+        assert_eq!(first.timestamp().presentation(), Some(0));
+        assert_eq!(first.timestamp().duration(), Some(1024));
+        assert!(cutlass_container::Demux::consumed(&file) > 0);
+        let seek = cutlass_container::Demux::seek(
+            &mut file,
+            cutlass_container::SeekTo {
+                track: 0,
+                time: 0,
+                end: None,
+            },
+        );
+        assert!(matches!(
+            seek,
+            Err(cutlass_container::ReadError::Seek(
+                cutlass_container::SeekError::ForwardOnly
+            ))
+        ));
+        let second = cutlass_container::Demux::read_packet(&mut file)
+            .expect("read")
+            .expect("packet");
+        assert_eq!(second.bytes(), &[5, 6]);
+        assert_eq!(second.timestamp().presentation(), Some(1024));
+        assert!(
+            cutlass_container::Demux::read_packet(&mut file)
+                .expect("read")
+                .is_none()
+        );
     }
 
     #[test]

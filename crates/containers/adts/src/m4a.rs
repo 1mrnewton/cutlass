@@ -11,9 +11,7 @@
 use std::collections::VecDeque;
 
 use crate::api::{Demuxer, Muxer, StreamInfo};
-use cutlass_codec::access::{
-    Channel, ChannelLayout, CodecError, CodecParams, Packet, SideData,
-};
+use cutlass_codec::access::{Channel, ChannelLayout, CodecError, CodecParams, Packet, SideData};
 use cutlass_codec::{CodecId, ContainerId};
 
 const MAX_FILE: usize = 32 << 20;
@@ -1526,10 +1524,8 @@ fn looks_like_adts(sample: &[u8]) -> bool {
 mod tests {
     use super::{Mp4Demuxer, Mp4Muxer};
     use crate::{Demuxer, Muxer};
-    use cutlass_codec::access::{
-        ChannelLayout, CodecError, CodecParams, Packet, SideData,
-    };
     use cutlass_codec::CodecId;
+    use cutlass_codec::access::{ChannelLayout, CodecError, CodecParams, Packet, SideData};
 
     fn params() -> CodecParams {
         let mut params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono());

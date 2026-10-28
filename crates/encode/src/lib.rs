@@ -12,10 +12,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
     Channel, ChannelLayout, CodecError, CodecParams, Packet, Pcm, SampleFormat, SideData,
 };
-pub use cutlass_codec::CodecId;
 
 /// PCM presented to an encoder, contiguous with the samples already accepted.
 ///
@@ -94,8 +94,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    use cutlass_codec::access::{ChannelLayout, CodecError, CodecParams, Packet, Pcm};
     use cutlass_codec::CodecId;
+    use cutlass_codec::access::{ChannelLayout, CodecError, CodecParams, Packet, Pcm};
 
     struct Copy;
 

@@ -14,10 +14,10 @@
 
 #![forbid(unsafe_code)]
 
+pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
     Channel, ChannelLayout, CodecError, CodecParams, Packet, Pcm, SampleFormat, SideData,
 };
-pub use cutlass_codec::CodecId;
 
 /// One decoded audio buffer.
 ///
@@ -95,10 +95,10 @@ impl Default for DecodeFactory {
 #[cfg(test)]
 mod tests {
     use super::{AudioOutput, DecodeFactory, Decoder};
+    use cutlass_codec::CodecId;
     use cutlass_codec::access::{
         ChannelLayout, CodecError, CodecParams, Packet, Pcm, SampleFormat,
     };
-    use cutlass_codec::CodecId;
 
     struct Silent;
 

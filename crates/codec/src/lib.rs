@@ -1,23 +1,19 @@
-//! Codec ids, packets, parameters, and PCM.
+//! Codec ids, packets, and stream parameters.
 //!
-//! This crate does not open files and it does not decode. A container crate
-//! turns a file into [`Packet`] values. A codec crate turns packets into
-//! [`Pcm`] or the reverse.
+//! This crate does not open a file and it does not decode. A container
+//! turns a file into packets. A codec crate turns those packets into
+//! pictures or samples.
 
 #![forbid(unsafe_code)]
 
 pub mod access;
 
-mod error;
 mod id;
 mod packet;
 mod params;
-mod pixel;
-mod sample;
 
-pub use error::CodecError;
-pub use id::{CodecId, ContainerId};
-pub use packet::{Packet, SideData};
-pub use params::CodecParams;
-pub use pixel::{ColorPrimaries, PixelFormat, Transfer};
-pub use sample::{Channel, ChannelLayout, Pcm, SampleFormat};
+pub use id::{CodecId, ContainerId, StreamCodec, TagError, UnknownCodec};
+pub use packet::{Packet, PacketError, Timescale, Timestamp};
+pub use params::{
+    AudioParamsError, ChannelsError, FrameSize, FrameSizeError, RateError, StreamParams,
+};

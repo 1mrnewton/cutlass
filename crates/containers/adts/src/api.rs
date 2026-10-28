@@ -3,8 +3,8 @@
 //! ADTS, LOAS, and the M4A writer use these. The shared demux trait is
 //! implemented beside them and does not replace them.
 
-use cutlass_codec::access::{CodecError, CodecParams, Packet};
 use cutlass_codec::ContainerId;
+use cutlass_codec::access::{CodecError, CodecParams, Packet};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamInfo {

@@ -2,7 +2,7 @@
 //!
 //! The support record is `STATUS.md` next to this crate. Spectral band
 //! replication, parametric stereo, Main, SSR, LTP, and xHE are unsupported.
-//! Transport framing lives in `cutlass-adts` and `cutlass-isobmff`.
+//! Transport framing lives in `cutlass-adts`.
 
 #![forbid(unsafe_code)]
 

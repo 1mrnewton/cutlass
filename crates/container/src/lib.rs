@@ -1,133 +1,79 @@
 //! Demux and mux traits.
 //!
-//! Timestamps inside a container stay in the file timescale. A demuxer
-//! yields one [`Packet`] at a time. A muxer takes those packets back.
-//! Incremental byte streams that are not yet a whole packet return
-//! [`CodecError::NeedMoreData`] from the container that owns the framing.
+//! A container owns framing: which bytes are one packet, which bytes are
+//! extradata, which codec id that stream has, and the timestamps in the
+//! file timescale. It does not decode pictures or samples, and it does not
+//! convert those timestamps to microseconds. Format parsers live under
+//! `crates/containers`. `engine` and `export` call these traits.
+//!
+//! # Scope
+//!
+//! This crate is the shared contract. It does not open MP4, MP3, or any
+//! other file format. [`ListDemux`] and [`MuxDraft`] hold packets the
+//! caller already split so the contract can run without a family crate.
+//! `engine`'s reader and `export`'s writer are still empty; those paths
+//! are not exercised here.
+//!
+//! Timestamps are ticks of a [`cutlass_codec::Timescale`]. An edit list,
+//! encoder delay, trailing padding, and gaps are exposed on the stream and
+//! are not applied to packet timestamps. One read returns one access unit,
+//! in decode order. An unknown codec is [`cutlass_codec::StreamCodec::Unknown`]
+//! on that stream. A failed mux is a [`FailedMux`], which has no durations.
+//!
+//! # Limits
+//!
+//! [`Limits::standard`] caps one header, one access unit, the track count,
+//! one extradata blob, one edit list, and one index. It does not cap the
+//! length of a file. The input is not buffered whole.
+//!
+//! # Capability matrix
+//!
+//! | Capability | Demux | Mux | Status |
+//! | --- | --- | --- | --- |
+//! | Probe window | Accept, refuse, or need more bytes | Outside this crate | Verified on the trait |
+//! | Owned input | Random or forward, consumed bytes, hostile size refused before allocation | Writes stay in the draft until finish | Verified |
+//! | Streams | Track, codec, extradata, timescale, language, frame size or rate and channels | Add stream, reject unknown codec | Verified |
+//! | Unknown codec | Typed [`cutlass_codec::StreamCodec::Unknown`], stream kept | [`MuxError::UnknownCodec`], not complete | Verified |
+//! | Packets | One access unit, decode order, file timescale | Payload bytes unchanged | Verified |
+//! | Edit, trim, gaps | Exposed, not applied to timestamps | Not a document clock | Verified |
+//! | Seek | Keyframe landing, preroll, index or scan, stale packets dropped | Outside this crate | Verified |
+//! | Open failure | No streams published | — | Verified |
+//! | Read failure | No packet from that call, streams remain | — | Verified |
+//! | Finish | — | Durations only on [`FinishedMux`] | Verified |
+//! | Fragmented output | Outside this crate | Mode is distinct from progressive | Verified as a flag |
+//! | Real file formats | Outside this crate | Outside this crate | Not run |
+//!
+//! A family crate fills the format rows. Fuzzing a byte parser is not run
+//! here because this crate does not parse one.
 
 #![forbid(unsafe_code)]
 
-pub use cutlass_codec::{
-    Channel, ChannelLayout, CodecError, CodecId, CodecParams, ContainerId, Packet, SideData,
+mod demux;
+mod error;
+mod input;
+mod limits;
+mod list;
+mod mux;
+mod probe;
+mod seek;
+mod stream;
+mod time;
+
+pub use demux::Demux;
+pub use error::{MuxError, OpenError, ReadError, SeekError, SourceError};
+pub use input::{Access, Input};
+pub use limits::Limits;
+pub use list::{ListDemux, ListRequest, OpenFailure, PacketPlan};
+pub use mux::{
+    FailedMux, FinishedMux, IndexPlace, Mux, MuxDraft, MuxMode, MuxStatus, NewStream, TrackDuration,
 };
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct StreamInfo {
-    pub index: u32,
-    pub params: CodecParams,
-    pub timescale: u32,
-}
-
-pub trait Demuxer {
-    fn id(&self) -> ContainerId;
-
-    fn streams(&self) -> &[StreamInfo];
-
-    fn next_packet(&mut self) -> Result<Option<Packet>, CodecError>;
-}
-
-pub trait Muxer {
-    fn id(&self) -> ContainerId;
-
-    fn add_stream(&mut self, params: CodecParams) -> Result<u32, CodecError>;
-
-    fn write_packet(&mut self, packet: &Packet) -> Result<(), CodecError>;
-
-    /// Finishes the file. A second call returns [`CodecError::InvalidApi`].
-    fn finish(&mut self) -> Result<Vec<u8>, CodecError>;
-}
+pub use probe::{HeaderVerdict, Probe, ProbeResult, decide_probe};
+pub use seek::{
+    IndexEntry, Landing, ScanEntry, SeekLanding, SeekTo, ensure_index_sorted, reserve_index,
+    seek_by_scan, seek_with_index, suppress_stale,
+};
+pub use stream::{Edit, EditError, Gap, GapError, Language, LanguageError, Stream, TrackId, Trim};
+pub use time::{CompareError, compare_ticks};
 
 #[cfg(test)]
-mod tests {
-    use super::{Demuxer, Muxer, StreamInfo};
-    use cutlass_codec::{ChannelLayout, CodecError, CodecId, CodecParams, ContainerId, Packet};
-
-    struct Mem {
-        streams: Vec<StreamInfo>,
-        packets: Vec<Packet>,
-        cursor: usize,
-        done: bool,
-    }
-
-    impl Demuxer for Mem {
-        fn id(&self) -> ContainerId {
-            ContainerId::Adts
-        }
-
-        fn streams(&self) -> &[StreamInfo] {
-            &self.streams
-        }
-
-        fn next_packet(&mut self) -> Result<Option<Packet>, CodecError> {
-            if self.cursor >= self.packets.len() {
-                return Ok(None);
-            }
-            let packet = self.packets[self.cursor].clone();
-            self.cursor += 1;
-            Ok(Some(packet))
-        }
-    }
-
-    impl Muxer for Mem {
-        fn id(&self) -> ContainerId {
-            ContainerId::Adts
-        }
-
-        fn add_stream(&mut self, params: CodecParams) -> Result<u32, CodecError> {
-            let index = u32::try_from(self.streams.len())
-                .map_err(|_| CodecError::Limit { what: "streams" })?;
-            self.streams.push(StreamInfo {
-                index,
-                timescale: params.sample_rate,
-                params,
-            });
-            Ok(index)
-        }
-
-        fn write_packet(&mut self, packet: &Packet) -> Result<(), CodecError> {
-            if self.done {
-                return Err(CodecError::InvalidApi {
-                    what: "write after finish",
-                });
-            }
-            self.packets.push(packet.clone());
-            Ok(())
-        }
-
-        fn finish(&mut self) -> Result<Vec<u8>, CodecError> {
-            if self.done {
-                return Err(CodecError::InvalidApi {
-                    what: "second finish",
-                });
-            }
-            self.done = true;
-            Ok(self.packets.iter().flat_map(|p| p.data.clone()).collect())
-        }
-    }
-
-    #[test]
-    fn mux_then_demux_returns_the_same_packet_bytes() {
-        let mut mux = Mem {
-            streams: Vec::new(),
-            packets: Vec::new(),
-            cursor: 0,
-            done: false,
-        };
-        let params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono());
-        mux.add_stream(params).expect("stream");
-        mux.write_packet(&Packet::audio(vec![9, 8, 7], 0, 1024, 48_000))
-            .expect("write");
-        let bytes = mux.finish().expect("finish");
-        assert_eq!(bytes, vec![9, 8, 7]);
-        assert!(mux.finish().is_err());
-        let mut demux = Mem {
-            streams: mux.streams.clone(),
-            packets: mux.packets.clone(),
-            cursor: 0,
-            done: false,
-        };
-        let packet = demux.next_packet().expect("packet").expect("some");
-        assert_eq!(packet.data, vec![9, 8, 7]);
-        assert!(demux.next_packet().expect("end").is_none());
-    }
-}
+mod contract;

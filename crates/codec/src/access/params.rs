@@ -1,6 +1,6 @@
-use crate::CodecId;
 use super::pixel::{ColorPrimaries, PixelFormat, Transfer};
 use super::sample::{ChannelLayout, SampleFormat};
+use crate::CodecId;
 
 /// Parameters a factory needs before it opens a codec.
 ///

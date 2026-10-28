@@ -571,15 +571,11 @@ impl BitOut {
 mod tests {
     use super::{LatmDemuxer, LatmMuxer};
     use crate::{Demuxer, Muxer};
-    use cutlass_codec::access::{ChannelLayout, CodecError, CodecParams, Packet};
     use cutlass_codec::CodecId;
+    use cutlass_codec::access::{ChannelLayout, CodecError, CodecParams, Packet};
 
     fn params() -> CodecParams {
-        let mut params = CodecParams::audio(
-            CodecId::Aac,
-            48_000,
-            ChannelLayout::mono(),
-        );
+        let mut params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono());
         params.extra = vec![0x11, 0x88];
         params
     }

@@ -124,8 +124,9 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
-        ConstantSpeedError, Draft, MaterialAudioFade, MaterialId, MaterialSpeed, Micros, Segment,
-        SpeedMode, SpeedPoint, TimeRange, Track, TrackAttribute, TrackId,
+        ConstantSpeedError, Draft, MaterialAudioFade, MaterialId, MaterialSpeed,
+        MaterialTransition, Micros, Segment, SpeedMode, SpeedPoint, TimeRange, Track,
+        TrackAttribute, TrackId,
     };
 
     use super::*;
@@ -858,5 +859,269 @@ mod tests {
         session.rollback().unwrap();
         assert_eq!(session.draft().tracks[0].segments.len(), 1);
         assert_eq!(session.revision(), 1);
+    }
+
+    fn blend(id: &str, duration: i64, overlap: bool) -> MaterialTransition {
+        MaterialTransition {
+            id: MaterialId::new(id),
+            duration: Micros(duration),
+            is_overlap: overlap,
+            ..MaterialTransition::default()
+        }
+    }
+
+    #[test]
+    fn a_blend_stays_on_the_outgoing_segment_and_a_split_inside_it_is_refused() {
+        let (mut session, track) = session();
+        let mut outgoing = Segment::new("a", "media", TimeRange::new(0, 1_000_000));
+        outgoing.source_range = Some(TimeRange::new(0, 1_000_000));
+        outgoing.volume = 0.4;
+        session
+            .apply(
+                0,
+                &[
+                    Request::Place {
+                        track_id: track.clone(),
+                        segment: Box::new(outgoing),
+                    },
+                    place(&track, "b", 1_000_000, 1_000_000),
+                ],
+            )
+            .unwrap();
+        session
+            .apply(
+                1,
+                &[Request::SetTransition {
+                    segment_id: "a".into(),
+                    transition: Box::new(blend("blend", 200_000, false)),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            session.draft().tracks[0].segments[0].target,
+            TimeRange::new(0, 1_000_000)
+        );
+        assert_eq!(
+            session.draft().tracks[0].segments[1].target,
+            TimeRange::new(1_000_000, 1_000_000)
+        );
+        assert_eq!(session.draft().tracks[0].segments[0].volume, 0.4);
+        assert_eq!(session.draft().materials.transitions[0].path, "");
+        assert_eq!(
+            session.draft().materials.transitions[0].duration,
+            Micros(200_000)
+        );
+        assert!(!session.draft().materials.transitions[0].is_overlap);
+        let before = session.draft().clone();
+        let error = session
+            .apply(
+                2,
+                &[Request::Split {
+                    segment_id: "a".into(),
+                    at: Micros(800_000),
+                    right_id: "a-right".into(),
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::TransitionWindow);
+        assert_eq!(session.draft(), &before);
+        let error = session
+            .apply(
+                2,
+                &[
+                    Request::SetTransition {
+                        segment_id: "a".into(),
+                        transition: Box::new(blend("other", 10, false)),
+                    },
+                    Request::Split {
+                        segment_id: "a".into(),
+                        at: Micros(999_995),
+                        right_id: "a-right".into(),
+                    },
+                ],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::TransitionWindow);
+        assert_eq!(session.draft(), &before);
+        session
+            .apply(
+                2,
+                &[Request::Split {
+                    segment_id: "a".into(),
+                    at: Micros(700_000),
+                    right_id: "a-right".into(),
+                }],
+            )
+            .unwrap();
+        let segments = &session.draft().tracks[0].segments;
+        assert_eq!(segments[0].target, TimeRange::new(0, 700_000));
+        assert_eq!(segments[0].source_range, Some(TimeRange::new(0, 700_000)));
+        assert!(segments[0].extra_material_refs.is_empty());
+        assert_eq!(segments[0].volume, 0.4);
+        assert_eq!(segments[1].target, TimeRange::new(700_000, 300_000));
+        assert_eq!(
+            segments[1].source_range,
+            Some(TimeRange::new(700_000, 300_000))
+        );
+        assert_eq!(
+            segments[1].extra_material_refs,
+            vec![MaterialId::new("blend")]
+        );
+        assert_eq!(segments[1].volume, 0.4);
+        assert_eq!(segments[2].target.start, Micros(1_000_000));
+        assert_eq!(session.draft().materials.transitions[0].path, "");
+    }
+
+    #[test]
+    fn an_overlap_window_crosses_the_cut_and_a_split_there_leaves_the_draft() {
+        let (mut session, track) = session();
+        session
+            .apply(
+                0,
+                &[
+                    place(&track, "a", 0, 1_000_000),
+                    place(&track, "b", 1_000_000, 1_000_000),
+                ],
+            )
+            .unwrap();
+        session
+            .apply(
+                1,
+                &[Request::SetTransition {
+                    segment_id: "a".into(),
+                    transition: Box::new(blend("blend", 101, true)),
+                }],
+            )
+            .unwrap();
+        assert!(session.draft().materials.transitions[0].is_overlap);
+        assert_eq!(
+            session.draft().tracks[0].segments[0].target.end(),
+            session.draft().tracks[0].segments[1].target.start
+        );
+        let before = session.draft().clone();
+        for (segment_id, at) in [("a", 999_950_i64), ("b", 1_000_050)] {
+            let error = session
+                .apply(
+                    2,
+                    &[Request::Split {
+                        segment_id: segment_id.into(),
+                        at: Micros(at),
+                        right_id: "right".into(),
+                    }],
+                )
+                .unwrap_err();
+            assert_eq!(error, EditError::TransitionWindow);
+            assert_eq!(session.draft(), &before);
+        }
+    }
+
+    #[test]
+    fn a_hard_cut_keeps_a_missing_package_and_still_splits() {
+        let (mut session, track) = session();
+        session
+            .apply(0, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap();
+        session
+            .apply(
+                1,
+                &[Request::SetTransition {
+                    segment_id: "a".into(),
+                    transition: Box::new(blend("blend", 0, false)),
+                }],
+            )
+            .unwrap();
+        session
+            .apply(
+                2,
+                &[Request::Split {
+                    segment_id: "a".into(),
+                    at: Micros(400_000),
+                    right_id: "a-right".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(session.draft().materials.transitions[0].duration, Micros(0));
+        assert_eq!(session.draft().materials.transitions[0].path, "");
+        assert_eq!(
+            session.draft().tracks[0].segments[0].target,
+            TimeRange::new(0, 400_000)
+        );
+        assert_eq!(
+            session.draft().tracks[0].segments[1].target,
+            TimeRange::new(400_000, 600_000)
+        );
+        assert_eq!(
+            session.draft().tracks[0].segments[1].extra_material_refs,
+            vec![MaterialId::new("blend")]
+        );
+    }
+
+    #[test]
+    fn a_negative_duration_is_stored_and_played_as_a_hard_cut() {
+        let (mut session, track) = session();
+        session
+            .apply(0, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap();
+        session
+            .apply(
+                1,
+                &[Request::SetTransition {
+                    segment_id: "a".into(),
+                    transition: Box::new(blend("blend", -5, true)),
+                }],
+            )
+            .unwrap();
+        let stored = session.draft().clone();
+        session
+            .apply(
+                2,
+                &[Request::Split {
+                    segment_id: "a".into(),
+                    at: Micros(500_000),
+                    right_id: "a-right".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            session.draft().materials.transitions,
+            stored.materials.transitions
+        );
+        assert_eq!(
+            session.draft().materials.transitions[0].duration,
+            Micros(-5)
+        );
+    }
+
+    #[test]
+    fn a_locked_track_refuses_the_blend_and_the_split() {
+        let (mut session, track) = session();
+        session
+            .apply(0, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap();
+        session.draft.tracks[0].attribute = TrackAttribute(TrackAttribute::LOCK);
+        let before = session.draft().clone();
+        let error = session
+            .apply(
+                1,
+                &[Request::SetTransition {
+                    segment_id: "a".into(),
+                    transition: Box::new(blend("blend", 10, false)),
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::LockedTrack);
+        assert_eq!(session.draft(), &before);
+        let error = session
+            .apply(
+                1,
+                &[Request::Split {
+                    segment_id: "a".into(),
+                    at: Micros(400_000),
+                    right_id: "a-right".into(),
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::LockedTrack);
+        assert_eq!(session.draft(), &before);
     }
 }

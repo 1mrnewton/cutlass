@@ -176,7 +176,7 @@ pub fn set_constant_speed(
     Ok(())
 }
 
-fn locate(draft: &Draft, segment_id: &SegmentId) -> Result<(usize, usize), EditError> {
+pub(super) fn locate(draft: &Draft, segment_id: &SegmentId) -> Result<(usize, usize), EditError> {
     for (track_index, track) in draft.tracks.iter().enumerate() {
         if let Some(segment_index) = track
             .segments

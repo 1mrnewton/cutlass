@@ -1,4 +1,6 @@
-use cutlass_model::{MaterialId, Micros, Segment, SegmentId, SpeedPoint, TrackId};
+use cutlass_model::{
+    MaterialId, MaterialTransition, Micros, Segment, SegmentId, SpeedPoint, TrackId,
+};
 
 /// Which edge of a segment a trim moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,5 +44,16 @@ pub enum Request {
         segment_id: SegmentId,
         speed_id: MaterialId,
         points: Vec<SpeedPoint>,
+    },
+    /// Store a blend on the outgoing segment. Target ranges still only touch.
+    SetTransition {
+        segment_id: SegmentId,
+        transition: Box<MaterialTransition>,
+    },
+    /// Split `segment_id` at `at`. The time must sit outside every blend window on the track.
+    Split {
+        segment_id: SegmentId,
+        at: Micros,
+        right_id: SegmentId,
     },
 }

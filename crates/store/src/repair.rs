@@ -15,8 +15,8 @@
 use std::collections::BTreeSet;
 
 use cutlass_model::{
-    ConstantSpeedError, Draft, MaterialId, MaterialRef, MaterialSpeed, MaterialTransition, Segment,
-    SegmentId, SpeedMode, SpeedPoint, Track, TrackId, TrackType, constant_target_duration,
+    ConstantSpeedError, Draft, MaterialId, MaterialRef, MaterialSpeed, MaterialTransition, Micros,
+    Segment, SegmentId, SpeedMode, SpeedPoint, Track, TrackId, TrackType, constant_target_duration,
     curve_speed_factor,
 };
 
@@ -186,12 +186,12 @@ fn window_overruns(track: &Track, segment: &Segment, transition: &MaterialTransi
     else {
         return true;
     };
-    let (left, right) = if transition.is_overlap {
-        let left = duration / 2;
-        (left, duration - left)
-    } else {
-        (duration, 0)
+    let Some((left, right)) = cutlass_model::blend_extents(Micros(duration), transition.is_overlap)
+    else {
+        return false;
     };
+    let left = left.0;
+    let right = right.0;
     let Some(window_start) = cut.checked_sub(left) else {
         return true;
     };
@@ -295,17 +295,14 @@ fn report_curve(
     }
 }
 
-fn curve_target_duration_ok(
-    source: cutlass_model::Micros,
-    points: &[SpeedPoint],
-) -> Option<cutlass_model::Micros> {
+fn curve_target_duration_ok(source: Micros, points: &[SpeedPoint]) -> Option<Micros> {
     cutlass_model::curve_target_duration(source, points).ok()
 }
 
 fn report_constant(
     track: &Track,
     segment: &Segment,
-    source: cutlass_model::Micros,
+    source: Micros,
     speed: f64,
     notes: &mut Vec<RepairNote>,
 ) {

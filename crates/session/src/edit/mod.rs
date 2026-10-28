@@ -1,7 +1,9 @@
 mod move_segment;
 mod place;
 mod speed;
+mod split;
 mod track;
+mod transition;
 mod trim;
 
 use cutlass_model::{Draft, Micros, RangeError, TrackAttribute};
@@ -22,7 +24,7 @@ pub enum EditError {
     },
     MissingTrack,
     MissingSegment,
-    /// The segment id is already on the draft.
+    /// The segment id is empty or already on the draft.
     DuplicateSegment,
     /// The track attribute has the lock bit set.
     LockedTrack,
@@ -44,6 +46,8 @@ pub enum EditError {
     MissingMaterial,
     /// The material id is already in a pool.
     DuplicateMaterial,
+    /// The split time falls inside a blend window.
+    TransitionWindow,
 }
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {
@@ -70,6 +74,15 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             speed_id,
             points,
         } => speed::set_curve_speed(draft, segment_id, speed_id, points),
+        Request::SetTransition {
+            segment_id,
+            transition,
+        } => transition::set_transition(draft, segment_id, (**transition).clone()),
+        Request::Split {
+            segment_id,
+            at,
+            right_id,
+        } => split::split(draft, segment_id, *at, right_id),
     }
 }
 

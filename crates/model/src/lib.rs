@@ -36,8 +36,8 @@ pub use materials::{
     MaterialCanvas, MaterialColorConfig, MaterialDraft, MaterialEffect, MaterialHsl,
     MaterialPictureAdjust, MaterialPluginEffect, MaterialRef, MaterialShape, MaterialSpeed,
     MaterialText, MaterialTransition, MaterialVideo, MaterialVideoEffect, Materials, RawMaterial,
-    SpeedPoint, StickerAnimation, WordColumns, constant_target_duration, curve_speed_factor,
-    curve_target_duration,
+    SpeedPoint, StickerAnimation, WordColumns, blend_extents, blend_window,
+    constant_target_duration, curve_speed_factor, curve_target_duration,
 };
 pub use meta::MetaType;
 pub use segment::{HdrSettings, ResponsiveLayout, Segment};

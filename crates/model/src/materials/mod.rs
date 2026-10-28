@@ -28,7 +28,7 @@ pub use speed::{
     curve_speed_factor, curve_target_duration,
 };
 pub use text::MaterialText;
-pub use transition::MaterialTransition;
+pub use transition::{MaterialTransition, blend_extents, blend_window};
 pub use video::MaterialVideo;
 pub use words::WordColumns;
 

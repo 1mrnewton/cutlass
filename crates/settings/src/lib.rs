@@ -4,11 +4,17 @@
 //! The local model switch is on. The cloud model switch is off. The local
 //! sandbox is on. The online sandbox is off. This crate has no draft types
 //! and does not open a socket.
+//!
+//! A load returns the generation stored in the file. A save sends that
+//! generation. A mismatch writes nothing. A successful save stores the
+//! next generation.
 
 #![forbid(unsafe_code)]
 
+mod file;
 mod shortcuts;
 
+pub use file::{Loaded, SettingsError, load, save};
 pub use shortcuts::Shortcut;
 
 use serde::{Deserialize, Serialize};

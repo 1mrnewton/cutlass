@@ -7,5 +7,9 @@
 #![forbid(unsafe_code)]
 
 mod id;
+mod params;
 
 pub use id::{CodecId, ContainerId, StreamCodec, TagError, UnknownCodec};
+pub use params::{
+    AudioParamsError, ChannelsError, FrameSize, FrameSizeError, RateError, StreamParams,
+};

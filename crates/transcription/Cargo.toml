@@ -11,6 +11,20 @@ cutlass-model = { path = "../model", version = "0.1.0" }
 cutlass-session = { path = "../session", version = "0.1.0" }
 cutlass-container = { path = "../container", version = "0.1.0" }
 cutlass-decode = { path = "../decode", version = "0.1.0" }
+symphonia = { version = "0.6.1", default-features = false, features = [
+    "aac",
+    "aiff",
+    "alac",
+    "caf",
+    "flac",
+    "isomp4",
+    "mkv",
+    "mp3",
+    "ogg",
+    "pcm",
+    "vorbis",
+    "wav",
+] }
 
 [lints]
 workspace = true

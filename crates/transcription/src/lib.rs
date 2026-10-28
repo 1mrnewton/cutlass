@@ -9,10 +9,12 @@
 
 #![forbid(unsafe_code)]
 
+mod file;
 mod job;
 mod prepare;
 mod words;
 
+pub use file::FileSource;
 pub use job::{Job, JobError};
 pub use prepare::{Pcm, PcmSource, PrepareError, fit};
 pub use words::{RecognizedWord, Utterance, WordError, columns};

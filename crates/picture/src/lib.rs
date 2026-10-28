@@ -32,6 +32,12 @@ impl fmt::Display for PictureError {
 
 impl std::error::Error for PictureError {}
 
+/// Four bytes per pixel, or nothing when an edge is past the device limit.
+#[must_use]
+pub fn rgba_len(width: u32, height: u32) -> Option<usize> {
+    Extent { width, height }.rgba_len()
+}
+
 /// RGBA bytes, four per pixel, tightly packed, row by row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CpuBytes {
@@ -43,7 +49,7 @@ impl CpuBytes {
     /// `rgba` must be exactly four bytes times `width` times `height`.
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Result<Self, PictureError> {
         let extent = Extent { width, height };
-        let len = extent.rgba_len().ok_or(PictureError::Extent)?;
+        let len = rgba_len(width, height).ok_or(PictureError::Extent)?;
         if rgba.len() != len {
             return Err(PictureError::Length);
         }

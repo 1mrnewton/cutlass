@@ -27,7 +27,7 @@ use crate::config::{
     AudioConfig, ElementKind, EncoderConfig, MAX_FRAME_BITS_PER_CHANNEL, RateControl,
     default_bitrate,
 };
-use crate::filterbank::{Sequence, Windows, analyze};
+use crate::filterbank::{FULL_SCALE, Sequence, Windows, analyze};
 use crate::huffman::{
     pair_index, quad_index, scale_code, signed_pair_index, spectral_code, write_code, write_escape,
 };
@@ -336,7 +336,11 @@ impl AacEncoder {
             .history
             .get(index)
             .ok_or(CodecError::InvalidApi { what: "channel" })?;
-        analyze(&self.windows, history, current, seq, self.prev_kbd, true)
+        let mut spec = analyze(&self.windows, history, current, seq, self.prev_kbd, true)?;
+        for bin in &mut spec {
+            *bin *= FULL_SCALE;
+        }
+        Ok(spec)
     }
 
     fn take_planes(&mut self) -> Result<Vec<Vec<f32>>, CodecError> {
@@ -624,13 +628,13 @@ fn band_bases(spec: &[f32], bands: &[u16]) -> Result<Vec<Option<i32>>, CodecErro
     let peak = energy.iter().copied().fold(0.0f32, f32::max);
     // A side channel left after mid/side can be numerical dust. Coding that
     // dust to a tight ratio spends the frame budget and coarsens the mid.
-    if peak < 1.0e-5 {
+    if peak < 1.0e-5 * FULL_SCALE * FULL_SCALE {
         return Ok(vec![None; energy.len()]);
     }
     let floor = peak * 1.0e-4;
     let mut bases = Vec::with_capacity(energy.len());
     for (index, band_energy) in energy.iter().copied().enumerate() {
-        if band_energy < 1.0e-8 || band_energy < floor {
+        if band_energy < 1.0e-8 * FULL_SCALE * FULL_SCALE || band_energy < floor {
             bases.push(None);
             continue;
         }
@@ -647,7 +651,7 @@ fn band_bases(spec: &[f32], bands: &[u16]) -> Result<Vec<Option<i32>>, CodecErro
 fn mask_sf(coeffs: &[f32]) -> Option<i32> {
     let energy = coeffs.iter().map(|coef| coef * coef).sum::<f32>();
     let peak = coeffs.iter().fold(0.0f32, |max, coef| max.max(coef.abs()));
-    if energy < 1.0e-8 || peak < 1.0e-6 {
+    if energy < 1.0e-8 * FULL_SCALE * FULL_SCALE || peak < 1.0e-6 * FULL_SCALE {
         return None;
     }
     // 16^(4/3) is the dequant magnitude of quantizer step 16. Aiming the peak
@@ -735,7 +739,7 @@ fn correlated(left: &[f32], right: &[f32]) -> bool {
         rr += r * r;
         lr += l * r;
     }
-    if ll < 1.0e-6 || rr < 1.0e-6 {
+    if ll < 1.0e-6 * FULL_SCALE * FULL_SCALE || rr < 1.0e-6 * FULL_SCALE * FULL_SCALE {
         return false;
     }
     let denom = ll.sqrt() * rr.sqrt();
@@ -1567,5 +1571,209 @@ mod tests {
         .audio()
         .unwrap_err();
         assert!(matches!(err, cutlass_decode::CodecError::InvalidApi { .. }));
+    }
+
+    #[test]
+    fn ffmpeg_decodes_our_access_units() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            require_or_skip("ffmpeg");
+            return;
+        };
+        let samples = sine(48_000, 8_192, 1_000.0, 0.5, 1);
+        let mut encoder = AacEncoder::open(&params(48_000, ChannelLayout::mono(), 96_000)).unwrap();
+        let pcm =
+            cutlass_decode::Pcm::from_f32(48_000, ChannelLayout::mono(), samples.clone()).unwrap();
+        let mut packets = encoder.push(&AudioInput { pcm }).unwrap();
+        packets.extend(encoder.drain().unwrap());
+        let adts = packets
+            .iter()
+            .flat_map(|packet| adts_frame(&packet.data))
+            .collect::<Vec<_>>();
+        let foreign = ffmpeg_pcm(&ffmpeg, &adts);
+        let mut decoder = AacDecoder::open(&CodecParams::audio(
+            CodecId::Aac,
+            48_000,
+            ChannelLayout::mono(),
+        ))
+        .unwrap();
+        let mut ours = Vec::new();
+        for packet in &packets {
+            for output in decoder.push(packet).unwrap() {
+                ours.extend_from_slice(output.pcm.as_f32().unwrap());
+            }
+        }
+        if let Some(tail) = decoder.drain().unwrap().pop() {
+            ours.extend_from_slice(tail.pcm.as_f32().unwrap());
+        }
+        let (score, lag, ratio) = aligned_snr(&ours, &foreign);
+        assert!(
+            score >= 40.0 && lag <= 1024,
+            "snr {score} lag {lag} rms ratio {ratio}"
+        );
+    }
+
+    #[test]
+    fn we_decode_an_ffmpeg_stream() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            require_or_skip("ffmpeg");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cutlass-aac-oracle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let adts = dir.join("ffmpeg.aac");
+        let status = std::process::Command::new(&ffmpeg)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:sample_rate=48000:duration=0.25",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "96k",
+                "-f",
+                "adts",
+            ])
+            .arg(&adts)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "{status:?}");
+        let bytes = std::fs::read(&adts).unwrap();
+        let foreign = ffmpeg_pcm(&ffmpeg, &bytes);
+        let units = split_adts(&bytes);
+        let mut decoder = AacDecoder::open(&CodecParams::audio(
+            CodecId::Aac,
+            48_000,
+            ChannelLayout::mono(),
+        ))
+        .unwrap();
+        let mut ours = Vec::new();
+        for unit in &units {
+            let packet = cutlass_decode::Packet::audio(unit.clone(), 0, 1024, 48_000);
+            ours.extend(decoder.push_packet(&packet).unwrap());
+        }
+        if let Some(tail) = decoder.drain_pcm().unwrap() {
+            ours.extend(tail);
+        }
+        let (score, lag, ratio) = aligned_snr(&ours, &foreign);
+        assert!(
+            score >= 40.0 && lag <= 1024,
+            "snr {score} lag {lag} rms ratio {ratio} frames {}",
+            units.len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn require_or_skip(tool: &str) {
+        if std::env::var_os("AAC_REQUIRE_ORACLES").is_some() {
+            panic!("{tool} is required");
+        }
+        eprintln!("skipped {tool} oracle: {tool} was not found");
+    }
+
+    fn ffmpeg_bin() -> Option<std::path::PathBuf> {
+        for candidate in [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "ffmpeg",
+        ] {
+            let path = std::path::PathBuf::from(candidate);
+            if std::process::Command::new(&path)
+                .arg("-version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+            {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    fn ffmpeg_pcm(ffmpeg: &std::path::Path, adts: &[u8]) -> Vec<f32> {
+        let dir = std::env::temp_dir().join(format!(
+            "cutlass-aac-pcm-{}-{}",
+            std::process::id(),
+            adts.len()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("in.aac");
+        let output = dir.join("out.f32");
+        std::fs::write(&input, adts).unwrap();
+        let status = std::process::Command::new(ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&input)
+            .args(["-f", "f32le", "-ac", "1", "-ar", "48000"])
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "{status:?}");
+        let bytes = std::fs::read(&output).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect()
+    }
+
+    fn adts_frame(payload: &[u8]) -> Vec<u8> {
+        let frame_len = payload.len() + 7;
+        let mut bytes = vec![0u8; frame_len];
+        bytes[0] = 0xFF;
+        bytes[1] = 0xF1;
+        bytes[2] = (1 << 6) | (3 << 2);
+        bytes[3] = (1 << 6) | u8::try_from((frame_len >> 11) & 0b11).unwrap_or(0);
+        bytes[4] = u8::try_from((frame_len >> 3) & 0xFF).unwrap_or(0);
+        bytes[5] = u8::try_from((frame_len & 0b111) << 5).unwrap_or(0) | 0x1F;
+        bytes[6] = 0xFC;
+        bytes[7..].copy_from_slice(payload);
+        bytes
+    }
+
+    fn split_adts(mut data: &[u8]) -> Vec<Vec<u8>> {
+        let mut units = Vec::new();
+        while data.len() >= 7 {
+            assert_eq!(data[0], 0xFF);
+            let frame_len = (usize::from(data[3] & 0b11) << 11)
+                | (usize::from(data[4]) << 3)
+                | (usize::from(data[5]) >> 5);
+            assert!(frame_len >= 7 && frame_len <= data.len());
+            units.push(data[7..frame_len].to_vec());
+            data = &data[frame_len..];
+        }
+        units
+    }
+
+    fn aligned_snr(ours: &[f32], foreign: &[f32]) -> (f32, usize, f32) {
+        let mut best = (f32::MIN, 0usize, 0.0f32);
+        let limit = 1024.min(ours.len()).min(foreign.len());
+        for lag in 0..=limit {
+            let (left, right) = if ours.len() >= foreign.len() {
+                (&ours[lag..], foreign)
+            } else {
+                (ours, &foreign[lag..])
+            };
+            let count = left.len().min(right.len());
+            if count < 1024 {
+                continue;
+            }
+            let score = snr(&left[..count], &right[..count]);
+            if score > best.0 {
+                let left_rms = rms(&left[..count]);
+                let right_rms = rms(&right[..count]);
+                let ratio = if right_rms == 0.0 {
+                    0.0
+                } else {
+                    left_rms / right_rms
+                };
+                best = (score, lag, ratio);
+            }
+        }
+        best
+    }
+
+    fn rms(samples: &[f32]) -> f32 {
+        let energy = samples.iter().map(|sample| sample * sample).sum::<f32>();
+        (energy / samples.len() as f32).sqrt()
     }
 }

@@ -9,7 +9,7 @@ use cutlass_decode::{AudioOutput, CodecError, CodecId, CodecParams, Decoder, Pac
 
 use crate::bits::BitReader;
 use crate::config::{AudioConfig, ElementKind};
-use crate::filterbank::{Overlap, Sequence, Windows, synthesize};
+use crate::filterbank::{FULL_SCALE, Overlap, Sequence, Windows, synthesize};
 use crate::huffman::{
     pair_digits, quad_digits, read_escape, read_scale_delta, read_spectral as read_huff,
     signed_pair,
@@ -164,10 +164,14 @@ fn decode_unit(
     }
     let mut pcm = Vec::with_capacity(channels.len());
     for (channel, overlap) in channels.iter().zip(overlaps.iter_mut()) {
+        let mut spec = channel.spec.clone();
+        for bin in &mut spec {
+            *bin /= FULL_SCALE;
+        }
         pcm.push(synthesize(
             windows,
             overlap,
-            &channel.spec,
+            &spec,
             channel.ics.seq,
             channel.ics.kbd,
         )?);

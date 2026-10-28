@@ -157,6 +157,15 @@ impl Overlap {
     }
 }
 
+/// Gain between this unnormalized `2/N` pair and the float AAC pair that
+/// scales analysis by 32768 and synthesis by `1/(N·32768)`.
+///
+/// A sample of 1.0 in float PCM is full scale for those codecs. Multiplying
+/// analysis coefficients by this factor and dividing synthesis coefficients
+/// by it leaves this pair reconstructing the same samples, and puts an
+/// access unit on the amplitude an independent decoder expects.
+pub(crate) const FULL_SCALE: f32 = 65536.0;
+
 pub fn analyze(
     windows: &Windows,
     history: &[f32],

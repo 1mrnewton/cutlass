@@ -239,8 +239,8 @@ impl Device for SoftwareDevice {
 }
 
 fn fill_rgba(destination: &mut [u8], pixel: [u8; 4]) {
-    for chunk in destination.chunks_exact_mut(4) {
-        chunk.copy_from_slice(&pixel);
+    for chunk in destination.as_chunks_mut::<4>().0 {
+        *chunk = pixel;
     }
 }
 
@@ -249,19 +249,18 @@ fn fill_rgba(destination: &mut [u8], pixel: [u8; 4]) {
 /// Alpha is the stored byte divided by 255, with the remainder truncated.
 /// A channel past 255 is clamped. The bytes are not premultiplied first.
 fn blend_over(destination: &mut [u8], source: &[u8]) {
-    for (dst, src) in destination.chunks_exact_mut(4).zip(source.chunks_exact(4)) {
-        let Ok(src) = <[u8; 4]>::try_from(src) else {
-            continue;
-        };
-        let Ok(current) = <[u8; 4]>::try_from(&dst[..]) else {
-            continue;
-        };
+    for (dst, src) in destination
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(source.as_chunks::<4>().0)
+    {
         let alpha = src[3];
         let mut mixed = [0; 4];
         for channel in 0..4 {
-            mixed[channel] = blend_channel(src[channel], current[channel], alpha);
+            mixed[channel] = blend_channel(src[channel], dst[channel], alpha);
         }
-        dst.copy_from_slice(&mixed);
+        *dst = mixed;
     }
 }
 

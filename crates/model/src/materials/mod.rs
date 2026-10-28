@@ -25,10 +25,11 @@ pub use effect::{
 pub use shape::MaterialShape;
 pub use speed::{
     ConstantSpeedError, CurveSpeed, MaterialSpeed, SpeedPoint, constant_target_duration,
+    curve_speed_factor, curve_target_duration,
 };
 pub use text::MaterialText;
-pub use transition::MaterialTransition;
-pub use video::MaterialVideo;
+pub use transition::{MaterialTransition, blend_extents, blend_window};
+pub use video::{Crop, FreezeInfo, MaterialVideo};
 pub use words::WordColumns;
 
 /// A material this model does not name field by field. `id` and `type` are lifted out.

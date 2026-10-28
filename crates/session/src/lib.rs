@@ -1,7 +1,7 @@
 //! The open cut and its history.
 //!
 //! One apply is a list of requests and one undo step. A failed request
-//! leaves the draft as it was. Magnet and linkage are not applied here.
+//! leaves the draft as it was. Magnet is not applied here.
 
 #![forbid(unsafe_code)]
 

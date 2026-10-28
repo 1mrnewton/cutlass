@@ -56,4 +56,11 @@ pub enum Request {
         at: Micros,
         right_id: SegmentId,
     },
+    /// Store a linkage pair. `owner` is the segment the request names.
+    Link {
+        owner: SegmentId,
+        dependent: SegmentId,
+    },
+    /// Remove one segment. An owner takes its dependents with it when follow is on.
+    Remove { segment_id: SegmentId },
 }

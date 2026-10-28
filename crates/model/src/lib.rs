@@ -16,8 +16,10 @@ mod draft;
 mod enums;
 mod id;
 mod keyframe;
+mod linkage;
 mod materials;
 mod meta;
+mod relationship;
 mod segment;
 mod serde_util;
 mod time;
@@ -31,6 +33,7 @@ pub use enums::{
 };
 pub use id::{DraftId, MaterialId, SegmentId, TrackId};
 pub use keyframe::{CommonKeyframe, CommonKeyframeGroup};
+pub use linkage::{KindSwitches, LinkageSettings, linkage_from_biz};
 pub use materials::{
     ConstantSpeedError, CurveSpeed, MaterialAnimations, MaterialAudio, MaterialAudioFade,
     MaterialCanvas, MaterialColorConfig, MaterialDraft, MaterialEffect, MaterialHsl,
@@ -40,6 +43,7 @@ pub use materials::{
     constant_target_duration, curve_speed_factor, curve_target_duration,
 };
 pub use meta::MetaType;
+pub use relationship::{LinkPair, Relationship};
 pub use segment::{HdrSettings, ResponsiveLayout, Segment};
 pub use time::{FrameError, FrameRate, Micros, RangeError, TimeRange, TimecodeLabel};
 pub use track::Track;

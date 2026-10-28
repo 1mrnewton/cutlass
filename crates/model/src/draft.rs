@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 use crate::enums::CanvasRatio;
 use crate::id::DraftId;
 use crate::materials::Materials;
+use crate::relationship::Relationship;
 use crate::time::{FrameRate, Micros, TimecodeLabel};
 use crate::track::Track;
 
@@ -120,6 +121,8 @@ pub struct Draft {
     pub tracks: Vec<Track>,
     #[serde(default)]
     pub materials: Materials,
+    #[serde(default, deserialize_with = "crate::serde_util::null_as_default")]
+    pub relationships: Vec<Relationship>,
     #[serde(default)]
     pub render_index_track_mode_on: bool,
     #[serde(default)]
@@ -157,6 +160,7 @@ impl Draft {
             },
             tracks: vec![Track::main("")],
             materials: Materials::default(),
+            relationships: Vec::new(),
             render_index_track_mode_on: false,
             free_render_index_mode_on: false,
             mixed_track_mode_on: false,
@@ -200,6 +204,13 @@ mod tests {
         assert!(draft.main_track().unwrap().is_main());
         let back: Draft = serde_json::from_str(&serde_json::to_string(&draft).unwrap()).unwrap();
         assert_eq!(back, draft);
+    }
+
+    #[test]
+    fn a_null_relationship_list_is_empty() {
+        let draft: Draft =
+            serde_json::from_str(r#"{"id":"D","version":360000,"relationships":null}"#).unwrap();
+        assert!(draft.relationships.is_empty());
     }
 
     #[test]

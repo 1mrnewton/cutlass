@@ -1,3 +1,4 @@
+mod linkage;
 mod move_segment;
 mod place;
 mod speed;
@@ -6,7 +7,7 @@ mod track;
 mod transition;
 mod trim;
 
-use cutlass_model::{Draft, Micros, RangeError, TrackAttribute};
+use cutlass_model::{Draft, LinkageSettings, Micros, RangeError, TrackAttribute};
 
 use crate::request::Request;
 
@@ -48,6 +49,8 @@ pub enum EditError {
     DuplicateMaterial,
     /// The split time falls inside a blend window.
     TransitionWindow,
+    /// The dependent already has an owner, or it is an owner itself.
+    AlreadyLinked,
 }
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {
@@ -83,12 +86,20 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             at,
             right_id,
         } => split::split(draft, segment_id, *at, right_id),
+        Request::Link { owner, dependent } => linkage::link(draft, owner, dependent),
+        Request::Remove { segment_id } => linkage::remove(draft, segment_id),
     }
 }
 
-pub fn apply_all(draft: &mut Draft, requests: &[Request]) -> Result<(), EditError> {
+pub fn apply_all(
+    draft: &mut Draft,
+    requests: &[Request],
+    linkage: &LinkageSettings,
+) -> Result<(), EditError> {
     for request in requests {
+        let before = draft.clone();
         apply_request(draft, request)?;
+        linkage::after_request(draft, &before, linkage)?;
     }
     sync_duration(draft);
     Ok(())

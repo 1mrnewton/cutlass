@@ -1,4 +1,4 @@
-use cutlass_model::Draft;
+use cutlass_model::{Draft, LinkageSettings};
 
 use crate::edit::{EditError, apply_all};
 use crate::history::History;
@@ -10,6 +10,7 @@ pub struct Session {
     draft: Draft,
     revision: u64,
     history: History,
+    linkage: LinkageSettings,
 }
 
 impl Session {
@@ -20,7 +21,19 @@ impl Session {
             draft,
             revision: 0,
             history: History::default(),
+            linkage: LinkageSettings::default(),
         }
+    }
+
+    /// Follow and cut switches. A new draft starts with all of them on.
+    #[must_use]
+    pub fn linkage(&self) -> LinkageSettings {
+        self.linkage
+    }
+
+    /// Replace the switches. The open draft and its pairs stay as they are.
+    pub fn set_linkage(&mut self, linkage: LinkageSettings) {
+        self.linkage = linkage;
     }
 
     #[must_use]
@@ -48,7 +61,7 @@ impl Session {
             return Ok(self.revision);
         }
         let mut next = self.draft.clone();
-        apply_all(&mut next, requests)?;
+        apply_all(&mut next, requests, &self.linkage)?;
         self.history
             .push_undo(std::mem::replace(&mut self.draft, next));
         self.history.clear_redo();

@@ -6,5 +6,9 @@
 #![forbid(unsafe_code)]
 
 mod lane;
+mod zoom;
 
 pub use lane::{Lane, lane_category, lanes};
+pub use zoom::{
+    Zoom, ZoomBounds, fit_pixel_size, last_accuracy_step, minimum_pixel_size, quarter_lane,
+};

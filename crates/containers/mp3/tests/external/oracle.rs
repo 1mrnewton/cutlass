@@ -13,8 +13,8 @@ use std::io::Cursor;
 use std::process::Command;
 
 use crate::support::{ProbePacket, ffprobe, marker, mpeg1_frame, output, tool_on_path};
-use cutlass_codec::{CodecId, CodecParams, Packet};
-use cutlass_container::{Demux, Mux};
+use cutlass_mp3_container::{CodecId, CodecParams, Packet};
+use cutlass_mp3_container::{Demux, Mux};
 use cutlass_mp3_container::{Mp3Demux, Mp3Mux};
 
 #[test]

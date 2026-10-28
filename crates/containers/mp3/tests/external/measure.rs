@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::support::mpeg1_frame;
-use cutlass_codec::{CodecId, CodecParams, Packet};
-use cutlass_container::{Demux, Mux};
+use cutlass_mp3_container::{CodecId, CodecParams, Packet};
+use cutlass_mp3_container::{Demux, Mux};
 use cutlass_mp3_container::{Mp3Demux, Mp3Mux};
 
 struct Meter {

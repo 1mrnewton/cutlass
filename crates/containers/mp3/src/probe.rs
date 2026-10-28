@@ -4,10 +4,10 @@
 //! matches when a second compatible header confirms it. Four bytes of sync
 //! alone do not match: that pattern occurs inside other media.
 
+use crate::api::{ContainerError, Probe};
 use crate::header::{compatible, parse_header};
 use crate::id3::{id3v2_tag_bytes, is_id3v2};
 use crate::limits::{MAX_FRAME_BYTES, MAX_RESYNC_BYTES};
-use cutlass_container::{ContainerError, Probe};
 
 #[must_use]
 pub fn probe(prefix: &[u8]) -> Probe {
@@ -120,8 +120,8 @@ fn read_raw(buf: &[u8]) -> Option<crate::header::Header> {
 #[cfg(test)]
 mod tests {
     use super::probe;
+    use crate::api::Probe;
     use crate::header::{MpegVersion, synthetic_frame};
-    use cutlass_container::Probe;
 
     #[test]
     fn id3_header_matches_and_a_movie_box_does_not() {

@@ -7,8 +7,8 @@
 
 use std::io::{BufReader, Read, Seek, SeekFrom};
 
-use cutlass_codec::{CodecId, CodecParams, ContainerId, Packet};
-use cutlass_container::{ContainerError, Demux, SeekLanding, Stream, Trim};
+use crate::api::{CodecId, CodecParams, ContainerId, Packet};
+use crate::api::{ContainerError, Demux, SeekLanding, Stream, Trim};
 
 use crate::header::{Header, MpegVersion, compatible, parse_header, side_info_len};
 use crate::id3::{ape_tag_bytes, id3v2_tag_bytes, is_id3v1, is_id3v2};
@@ -61,11 +61,13 @@ struct Hit {
 pub struct Mp3Demux<R: Read + Seek> {
     reader: BufReader<R>,
     reader_at: u64,
+    consumed_bytes: u64,
     audio_end: u64,
     audio_start: u64,
     pos: u64,
     frame_index: u64,
     streams: Vec<Stream>,
+    shared: Vec<cutlass_container::Stream>,
     version: MpegVersion,
     sample_rate: u32,
     channels: u16,
@@ -174,11 +176,13 @@ impl<R: Read + Seek> Mp3Demux<R> {
         let mut demux = Self {
             reader,
             reader_at: u64::MAX,
+            consumed_bytes: 0,
             audio_end,
             audio_start,
             pos: audio_start,
             frame_index: 0,
             streams: Vec::new(),
+            shared: Vec::new(),
             version: hit.header.version,
             sample_rate: hit.header.sample_rate,
             channels: hit.header.channels,
@@ -354,6 +358,7 @@ impl<R: Read + Seek> Mp3Demux<R> {
             reservoir_preroll: self.reservoir_preroll,
             params,
         });
+        self.shared = crate::shared::shared_streams(&self.streams)?;
         self.pos = self.audio_start;
         self.frame_index = 0;
         Ok(())
@@ -395,10 +400,12 @@ impl<R: Read + Seek> Mp3Demux<R> {
             self.reader_at = pos;
         }
         self.reader.read_exact(buf)?;
+        let amount = u64::try_from(buf.len()).unwrap_or(0);
         self.reader_at = self
             .reader_at
-            .checked_add(u64::try_from(buf.len()).unwrap_or(0))
+            .checked_add(amount)
             .ok_or(ContainerError::Limit { what: "read" })?;
+        self.consumed_bytes = self.consumed_bytes.saturating_add(amount);
         Ok(())
     }
 
@@ -742,6 +749,68 @@ impl<R: Read + Seek> Demux for Mp3Demux<R> {
     }
 }
 
+impl<R: Read + Seek> cutlass_container::Demux for Mp3Demux<R> {
+    fn family(&self) -> ContainerId {
+        ContainerId::Mp3
+    }
+
+    fn streams(&self) -> &[cutlass_container::Stream] {
+        &self.shared
+    }
+
+    fn gaps(&self) -> &[cutlass_container::Gap] {
+        &[]
+    }
+
+    fn read_packet(
+        &mut self,
+    ) -> Result<Option<cutlass_codec::Packet>, cutlass_container::ReadError> {
+        match Demux::next_packet(self) {
+            Ok(Some(packet)) => Ok(Some(crate::shared::to_shared(packet)?)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(crate::shared::map_read(error)),
+        }
+    }
+
+    fn seek(
+        &mut self,
+        to: cutlass_container::SeekTo,
+    ) -> Result<cutlass_container::SeekLanding, cutlass_container::ReadError> {
+        if to.track != 0 {
+            return Err(cutlass_container::ReadError::Seek(
+                cutlass_container::SeekError::UnknownTrack,
+            ));
+        }
+        let landing = Demux::seek(self, to.time).map_err(crate::shared::map_read)?;
+        let ended = Demux::duration(self).is_some_and(|duration| landing.pts >= duration);
+        let where_landed = if ended {
+            cutlass_container::Landing::End
+        } else {
+            cutlass_container::Landing::Packet {
+                ordinal: u32::try_from(self.frame_index).unwrap_or(u32::MAX),
+                time: landing.pts,
+                keyframe: true,
+                preroll: landing.preroll_frames,
+                byte_position: self.pos,
+            }
+        };
+        Ok(cutlass_container::SeekLanding {
+            landing: where_landed,
+            index_used: self.index_kind != IndexKind::None,
+            payload_scans: 0,
+            entries_visited: 0,
+        })
+    }
+
+    fn cancel(&mut self) {
+        Demux::cancel(self);
+    }
+
+    fn consumed(&self) -> u64 {
+        self.consumed_bytes
+    }
+}
+
 fn preroll_frames(version: MpegVersion) -> u32 {
     // MPEG-1 `main_data_begin` is 9 bits. The smallest Layer III frame there
     // is 96 bytes, so nine frames cover the reservoir. MPEG-2 and MPEG-2.5
@@ -930,14 +999,14 @@ mod tests {
     use std::io::{Cursor, Read, Seek, SeekFrom};
 
     use super::{IndexKind, Mp3Demux};
+    use crate::api::{ContainerError, Demux};
     use crate::header::{MpegVersion, frame_index, synthetic_frame};
-    use cutlass_container::{ContainerError, Demux};
 
     fn open_bytes(bytes: &[u8]) -> Result<Mp3Demux<Cursor<Vec<u8>>>, ContainerError> {
         Mp3Demux::open(Cursor::new(bytes.to_vec()))
     }
 
-    fn collect(bytes: &[u8]) -> Result<Vec<cutlass_codec::Packet>, ContainerError> {
+    fn collect(bytes: &[u8]) -> Result<Vec<crate::api::Packet>, ContainerError> {
         let mut demux = open_bytes(bytes)?;
         let mut out = Vec::new();
         while let Some(packet) = demux.next_packet()? {
@@ -963,10 +1032,44 @@ mod tests {
         assert!(packets[0].keyframe);
         let demux = open_bytes(&file).expect("open");
         assert_eq!(demux.streams()[0].params.channels, 2);
-        assert_eq!(demux.streams()[0].params.codec, cutlass_codec::CodecId::Mp3);
+        assert_eq!(demux.streams()[0].params.codec, crate::api::CodecId::Mp3);
         assert!(demux.streams()[0].params.extra.is_empty());
         assert_eq!(demux.streams()[0].reservoir_preroll, 9);
         assert_eq!(demux.index_kind(), IndexKind::ConstantBitrate);
+    }
+
+    #[test]
+    fn the_shared_demux_returns_the_same_frame_bytes() {
+        let mut file = synthetic_frame(MpegVersion::Mpeg1, 128, 48_000, 2, 0);
+        file.extend(synthetic_frame(MpegVersion::Mpeg1, 128, 48_000, 2, 1));
+        let mut demux = open_bytes(&file).expect("open");
+        let packet = cutlass_container::Demux::read_packet(&mut demux)
+            .expect("read")
+            .expect("frame");
+        assert_eq!(packet.bytes().len(), 384);
+        assert_eq!(packet.timestamp().presentation(), Some(0));
+        assert_eq!(packet.timestamp().duration(), Some(1152));
+        assert_eq!(packet.timescale().ticks_per_second(), 48_000);
+        assert!(packet.keyframe());
+        assert!(cutlass_container::Demux::consumed(&demux) > 0);
+        assert_eq!(
+            cutlass_container::Demux::family(&demux),
+            crate::api::ContainerId::Mp3
+        );
+        let landing = cutlass_container::Demux::seek(
+            &mut demux,
+            cutlass_container::SeekTo {
+                track: 0,
+                time: 1152,
+                end: None,
+            },
+        )
+        .expect("seek");
+        assert!(landing.index_used);
+        let next = cutlass_container::Demux::read_packet(&mut demux)
+            .expect("read")
+            .expect("second");
+        assert_eq!(next.timestamp().presentation(), Some(1152));
     }
 
     #[test]

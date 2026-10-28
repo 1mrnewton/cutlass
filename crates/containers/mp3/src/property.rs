@@ -3,12 +3,12 @@
 
 use std::io::Cursor;
 
+use crate::api::{CodecId, CodecParams, Packet};
+use crate::api::{ContainerError, Demux, Mux};
 use crate::demux::Mp3Demux;
 use crate::header::{MpegVersion, frame_index, parse_header, synthetic_frame};
 use crate::mux::Mp3Mux;
 use crate::probe::probe;
-use cutlass_codec::{CodecId, CodecParams, Packet};
-use cutlass_container::{ContainerError, Demux, Mux};
 
 struct Rng {
     state: u64,

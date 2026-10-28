@@ -14,15 +14,20 @@
 
 #![forbid(unsafe_code)]
 
+mod api;
 mod demux;
 mod header;
 mod id3;
 mod limits;
 mod mux;
 mod probe;
+mod shared;
 mod tag;
 
-pub use cutlass_container::{ContainerError, Demux, Mux, Probe, SeekLanding, Stream, Trim};
+pub use api::{
+    CodecId, CodecParams, ContainerError, ContainerId, Demux, Mux, Packet, Probe, SeekLanding,
+    Stream, Trim,
+};
 pub use demux::{IndexKind, Mp3Demux};
 pub use limits::{MAX_FRAME_BYTES, MAX_ID3_BYTES, MAX_RESYNC_BYTES, SEEK_WINDOW_BYTES};
 pub use mux::Mp3Mux;

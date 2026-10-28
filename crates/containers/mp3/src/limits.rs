@@ -5,7 +5,7 @@
 
 /// Largest ID3v2 tag this demuxer will skip.
 ///
-/// The tag is not loaded. A larger declared size is [`cutlass_container::ContainerError::Limit`].
+/// The tag is not loaded. A larger declared size is [`crate::ContainerError::Limit`].
 pub const MAX_ID3_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Largest APEv2 footer span this demuxer will skip.

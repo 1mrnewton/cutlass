@@ -6,7 +6,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 
 use crate::support::{ffprobe, tool_on_path};
-use cutlass_container::Demux;
+use cutlass_mp3_container::Demux;
 use cutlass_mp3_container::Mp3Demux;
 
 fn local_root() -> Option<PathBuf> {

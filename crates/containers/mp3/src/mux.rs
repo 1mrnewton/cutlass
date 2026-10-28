@@ -8,8 +8,8 @@
 
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 
-use cutlass_codec::{CodecId, CodecParams, ContainerId, Packet};
-use cutlass_container::{ContainerError, Mux};
+use crate::api::{CodecId, CodecParams, ContainerId, Packet};
+use crate::api::{ContainerError, Mux};
 
 use crate::header::{
     Header, MpegVersion, classify_rate, compatible, encode_layer3, layer3_bitrate_index,
@@ -368,10 +368,10 @@ mod tests {
     use std::io::Cursor;
 
     use super::Mp3Mux;
+    use crate::api::{CodecId, CodecParams, Packet};
+    use crate::api::{ContainerError, Demux, Mux};
     use crate::demux::Mp3Demux;
     use crate::header::{MpegVersion, frame_index, synthetic_frame};
-    use cutlass_codec::{CodecId, CodecParams, Packet};
-    use cutlass_container::{ContainerError, Demux, Mux};
 
     fn params(rate: u32, channels: u16) -> CodecParams {
         CodecParams::audio(CodecId::Mp3, rate, channels)

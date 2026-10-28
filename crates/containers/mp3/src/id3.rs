@@ -7,8 +7,8 @@
 //! ID3v2.4.0 structure). A footer flag adds another 10 bytes. ID3v1 is the
 //! 128-byte `TAG` record at the end of the file.
 
+use crate::api::ContainerError;
 use crate::limits::{MAX_APE_BYTES, MAX_ID3_BYTES};
-use cutlass_container::ContainerError;
 
 /// Byte length of a leading ID3v2 tag, including its header and optional footer.
 ///
@@ -120,7 +120,7 @@ mod tests {
         header[9] = 0x7F;
         assert_eq!(
             id3v2_tag_bytes(&header),
-            Err(cutlass_container::ContainerError::Limit { what: "id3" })
+            Err(crate::api::ContainerError::Limit { what: "id3" })
         );
     }
 

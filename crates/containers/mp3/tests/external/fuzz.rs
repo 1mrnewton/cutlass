@@ -8,8 +8,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 
 use crate::support::mpeg1_frame;
-use cutlass_codec::{CodecId, CodecParams, Packet};
-use cutlass_container::{Demux, Mux};
+use cutlass_mp3_container::{CodecId, CodecParams, Packet};
+use cutlass_mp3_container::{Demux, Mux};
 use cutlass_mp3_container::{MAX_ID3_BYTES, Mp3Demux, Mp3Mux, probe};
 
 struct Rng {
@@ -110,7 +110,7 @@ fn hostile_id3() -> Vec<u8> {
     let err = Mp3Demux::open(Cursor::new(header.clone())).expect_err("limit");
     assert!(matches!(
         err,
-        cutlass_container::ContainerError::Limit { .. }
+        cutlass_mp3_container::ContainerError::Limit { .. }
     ));
     assert!(header.len() < usize::try_from(MAX_ID3_BYTES).unwrap_or(usize::MAX));
     header

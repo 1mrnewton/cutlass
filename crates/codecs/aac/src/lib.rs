@@ -1,8 +1,8 @@
-//! AAC-LC decoder and, as the encoder module lands, the matching encoder.
+//! AAC-LC encoder and decoder.
 //!
-//! Profiles other than AAC-LC, including spectral band replication, parametric
-//! stereo, Main, SSR, LTP, and xHE, are reported as unsupported. The transform
-//! and the bitstream parser live in this crate. Transport framing does not.
+//! The support record is `STATUS.md` next to this crate. Spectral band
+//! replication, parametric stereo, Main, SSR, LTP, and xHE are unsupported.
+//! Transport framing lives in `cutlass-adts` and `cutlass-isobmff`.
 
 #![forbid(unsafe_code)]
 

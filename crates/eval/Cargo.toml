@@ -15,5 +15,8 @@ cutlass-generated = { path = "../generated", version = "0.1.0" }
 cutlass-captions = { path = "../captions", version = "0.1.0" }
 cutlass-effects = { path = "../effects", version = "0.1.0" }
 
+[dev-dependencies]
+cutlass-renderer-software = { path = "../renderer-software", version = "0.1.0" }
+
 [lints]
 workspace = true

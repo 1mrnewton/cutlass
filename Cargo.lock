@@ -113,6 +113,7 @@ dependencies = [
 name = "cutlass-adts"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
  "cutlass-container",
 ]
 

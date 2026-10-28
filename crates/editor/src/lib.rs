@@ -7,10 +7,12 @@
 
 mod hit;
 mod lane;
+mod snap;
 mod zoom;
 
 pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
 pub use lane::{Lane, lane_category, lanes};
+pub use snap::{SnapKind, SnapTarget, snap, transition_middle};
 pub use zoom::{
     Zoom, ZoomBounds, fit_pixel_size, last_accuracy_step, minimum_pixel_size, quarter_lane,
 };

@@ -194,6 +194,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-model",
  "cutlass-session",
+ "serde_json",
 ]
 
 [[package]]

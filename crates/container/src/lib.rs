@@ -7,7 +7,9 @@
 
 #![forbid(unsafe_code)]
 
-use cutlass_codec::{CodecError, CodecParams, ContainerId, Packet};
+pub use cutlass_codec::{
+    Channel, ChannelLayout, CodecError, CodecId, CodecParams, ContainerId, Packet,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamInfo {

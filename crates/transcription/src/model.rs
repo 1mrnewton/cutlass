@@ -116,11 +116,8 @@ fn f32_tensor(tensors: &SafeTensors<'_>, name: &str) -> Result<LoadedTensor, Mod
         return Err(ModelError::Weights);
     }
     let mut values = Vec::with_capacity(tensor.data().len() / 4);
-    for chunk in tensor.data().chunks_exact(4) {
-        let Some(bytes) = chunk.try_into().ok() else {
-            return Err(ModelError::Weights);
-        };
-        values.push(f32::from_le_bytes(bytes));
+    for chunk in tensor.data().as_chunks::<4>().0 {
+        values.push(f32::from_le_bytes(*chunk));
     }
     Ok(LoadedTensor {
         shape: tensor.shape().to_vec(),

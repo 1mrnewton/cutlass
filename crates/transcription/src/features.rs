@@ -11,7 +11,8 @@ pub const WINDOW: usize = 400;
 pub const HOP: usize = 160;
 /// FFT size. The window is zero-padded to this length.
 pub const N_FFT: usize = 512;
-/// Mel bins the acoustic model reads.
+/// Mel bins the CTC head and the fixture head read. The unified model reads
+/// 128 bins from the filterbank stored with its checkpoint.
 pub const N_MELS: usize = 80;
 /// One frame, in milliseconds. This matches [`HOP`].
 pub const HOP_MS: i64 = 10;
@@ -77,6 +78,8 @@ pub fn mel_center_hz(index: usize) -> Option<f32> {
 pub enum FeatureError {
     /// A sample was NaN or infinite.
     Samples,
+    /// The window or filterbank does not match the FFT.
+    Bank,
 }
 
 fn fill_window(samples: &[f32], frame: usize, window: &mut [f32]) {
@@ -339,6 +342,132 @@ fn build_slaney_bank() -> Vec<MelFilter> {
     filters
 }
 
+/// NeMo log-mel, row-major `[frames, n_mels]`.
+///
+/// `window` is the 400-point analysis window stored with the checkpoint.
+/// `filterbank` is row-major `[n_mels, N_FFT / 2 + 1]`. The transform is a
+/// centered reflect-padded STFT. Eval leaves dither off. Fewer than two
+/// frames cannot be normalized, so that input yields none.
+pub fn nemo_mel(
+    samples: &[f32],
+    window: &[f32],
+    filterbank: &[f32],
+    n_mels: usize,
+) -> Result<Vec<f32>, FeatureError> {
+    let bins = N_FFT / 2 + 1;
+    if window.len() != WINDOW || n_mels == 0 || filterbank.len() != n_mels * bins {
+        return Err(FeatureError::Bank);
+    }
+    if samples.iter().any(|sample| !sample.is_finite()) {
+        return Err(FeatureError::Samples);
+    }
+    let frames = nemo_frames(samples.len());
+    if frames == 0 {
+        return Ok(Vec::new());
+    }
+    let emphasized = preemphasis(samples);
+    let mut planner = FftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(N_FFT);
+    let mut spectrum = vec![Complex::new(0.0, 0.0); N_FFT];
+    let mut power = vec![0.0; bins];
+    let mut mel = vec![0.0; frames * n_mels];
+    let left = (N_FFT - WINDOW) / 2;
+    for frame in 0..frames {
+        reflect_spectrum(
+            &emphasized,
+            frame,
+            window,
+            left,
+            fft.as_ref(),
+            &mut spectrum,
+            &mut power,
+        );
+        let row = frame * n_mels;
+        for mel_index in 0..n_mels {
+            let mut energy = 0.0;
+            let weights = &filterbank[mel_index * bins..(mel_index + 1) * bins];
+            for (bin, weight) in weights.iter().enumerate() {
+                energy += power[bin] * weight;
+            }
+            mel[row + mel_index] = (energy + LOG_GUARD).ln();
+        }
+    }
+    normalize_rows(&mut mel, frames, n_mels);
+    Ok(mel)
+}
+
+/// How many NeMo mel frames `samples` produces.
+///
+/// Centered STFT keeps the extra frame. Fewer than two frames cannot be
+/// normalized.
+#[must_use]
+pub fn nemo_frames(samples: usize) -> usize {
+    let frames = samples / HOP + 1;
+    if frames < 2 { 0 } else { frames }
+}
+
+fn reflect_index(at: isize, len: usize) -> usize {
+    let Some(last) = len.checked_sub(1) else {
+        return 0;
+    };
+    let last = last as isize;
+    let at = if at < 0 { -at } else { at };
+    let at = if at > last { last * 2 - at } else { at };
+    at.clamp(0, last) as usize
+}
+
+fn reflect_spectrum(
+    samples: &[f32],
+    frame: usize,
+    window: &[f32],
+    left: usize,
+    fft: &dyn Fft<f32>,
+    spectrum: &mut [Complex<f32>],
+    power: &mut [f32],
+) {
+    let origin = frame * HOP;
+    let pad = N_FFT / 2;
+    for (index, bin) in spectrum.iter_mut().enumerate() {
+        let weight = index
+            .checked_sub(left)
+            .and_then(|offset| window.get(offset))
+            .copied()
+            .unwrap_or(0.0);
+        let sample_at = origin + index;
+        let at = sample_at as isize - pad as isize;
+        let sample = samples
+            .get(reflect_index(at, samples.len()))
+            .copied()
+            .unwrap_or(0.0);
+        *bin = Complex::new(sample * weight, 0.0);
+    }
+    fft.process(spectrum);
+    for (bin, value) in power.iter_mut().zip(spectrum.iter()) {
+        *bin = value.re.mul_add(value.re, value.im * value.im);
+    }
+}
+
+fn normalize_rows(mel: &mut [f32], frames: usize, n_mels: usize) {
+    let divisor = (frames - 1) as f32;
+    for bin in 0..n_mels {
+        let mut sum = 0.0;
+        for frame in 0..frames {
+            sum += mel[frame * n_mels + bin];
+        }
+        let mean = sum / frames as f32;
+        let mut square = 0.0;
+        for frame in 0..frames {
+            let delta = mel[frame * n_mels + bin] - mean;
+            square += delta * delta;
+        }
+        let scale = (square / divisor).sqrt() + NORM_EPS;
+        for frame in 0..frames {
+            let value = &mut mel[frame * n_mels + bin];
+            *value = (*value - mean) / scale;
+        }
+    }
+}
+
 fn hz_to_mel_slaney(hz: f32) -> f32 {
     let step = 200.0 / 3.0;
     let min_log_hz = 1_000.0;
@@ -431,5 +560,32 @@ mod tests {
         assert_eq!(mel.len(), 100 * N_MELS);
         assert!(mel.iter().all(|value| value.is_finite()));
         assert!(mel.iter().any(|value| value.abs() > 0.1));
+    }
+
+    #[test]
+    fn reflection_does_not_repeat_the_edge() {
+        assert_eq!(
+            (-2..6).map(|at| reflect_index(at, 4)).collect::<Vec<_>>(),
+            vec![2, 1, 0, 1, 2, 3, 2, 1]
+        );
+    }
+
+    #[test]
+    fn a_nemo_second_keeps_the_centered_frame() {
+        let window = vec![1.0; WINDOW];
+        let bank = vec![1.0; 2 * (N_FFT / 2 + 1)];
+        let mel = nemo_mel(&vec![0.0; 16_000], &window, &bank, 2).unwrap();
+        assert_eq!(mel.len(), 101 * 2);
+        assert!(mel.iter().all(|value| value.is_finite()));
+        let peak = mel.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+        assert!(peak < 1.0, "peak {peak}");
+    }
+
+    #[test]
+    fn a_short_bank_is_refused() {
+        assert_eq!(
+            nemo_mel(&[0.0; 16_000], &[1.0; WINDOW], &[1.0], 2).unwrap_err(),
+            FeatureError::Bank
+        );
     }
 }

@@ -12,17 +12,17 @@ use crate::search::{self, Span};
 use crate::words::{RecognizedWord, Utterance};
 use crate::{ModelError, RecognizeError, Recognizer};
 
-const HIDDEN: usize = 1024;
+pub(crate) const HIDDEN: usize = 1024;
 const HEADS: usize = 8;
 const HEAD_DIM: usize = 128;
-const INTERMEDIATE: usize = 4096;
+pub(crate) const INTERMEDIATE: usize = 4096;
 const VOCAB: usize = 1025;
 const BLANK: usize = 1024;
-const LAYERS: usize = 24;
-const SUB_CHANNELS: usize = 256;
+pub(crate) const LAYERS: usize = 24;
+pub(crate) const SUB_CHANNELS: usize = 256;
 const SUB_FLAT: usize = 2560;
 const INPUT_SCALE: f64 = 32.0;
-const NORM_EPS: f64 = 1.0e-5;
+pub(crate) const NORM_EPS: f64 = 1.0e-5;
 /// Word-piece boundary in the vocabulary.
 const BOUNDARY: char = '\u{2581}';
 
@@ -40,47 +40,47 @@ pub struct Parakeet {
     vocab: Vec<String>,
 }
 
-struct Subsampling {
-    conv: Conv2d,
-    depthwise1: Conv2d,
-    pointwise1: Conv2d,
-    depthwise2: Conv2d,
-    pointwise2: Conv2d,
-    linear: Linear,
+pub(crate) struct Subsampling {
+    pub(crate) conv: Conv2d,
+    pub(crate) depthwise1: Conv2d,
+    pub(crate) pointwise1: Conv2d,
+    pub(crate) depthwise2: Conv2d,
+    pub(crate) pointwise2: Conv2d,
+    pub(crate) linear: Linear,
 }
 
-struct FeedForward {
-    up: Linear,
-    down: Linear,
+pub(crate) struct FeedForward {
+    pub(crate) up: Linear,
+    pub(crate) down: Linear,
 }
 
-struct Attention {
-    query: Linear,
-    key: Linear,
-    value: Linear,
-    output: Linear,
-    relative: Linear,
-    bias_u: Tensor,
-    bias_v: Tensor,
+pub(crate) struct Attention {
+    pub(crate) query: Linear,
+    pub(crate) key: Linear,
+    pub(crate) value: Linear,
+    pub(crate) output: Linear,
+    pub(crate) relative: Linear,
+    pub(crate) bias_u: Tensor,
+    pub(crate) bias_v: Tensor,
 }
 
-struct Convolution {
-    expand: Conv1d,
-    depthwise: Conv1d,
-    norm: BatchNorm,
-    project: Conv1d,
+pub(crate) struct Convolution {
+    pub(crate) expand: Conv1d,
+    pub(crate) depthwise: Conv1d,
+    pub(crate) norm: BatchNorm,
+    pub(crate) project: Conv1d,
 }
 
-struct Block {
-    feed_forward1: FeedForward,
-    feed_forward2: FeedForward,
-    attention: Attention,
-    convolution: Convolution,
-    norm_feed_forward1: LayerNorm,
-    norm_attention: LayerNorm,
-    norm_convolution: LayerNorm,
-    norm_feed_forward2: LayerNorm,
-    norm_out: LayerNorm,
+pub(crate) struct Block {
+    pub(crate) feed_forward1: FeedForward,
+    pub(crate) feed_forward2: FeedForward,
+    pub(crate) attention: Attention,
+    pub(crate) convolution: Convolution,
+    pub(crate) norm_feed_forward1: LayerNorm,
+    pub(crate) norm_attention: LayerNorm,
+    pub(crate) norm_convolution: LayerNorm,
+    pub(crate) norm_feed_forward2: LayerNorm,
+    pub(crate) norm_out: LayerNorm,
 }
 
 impl Parakeet {
@@ -154,7 +154,7 @@ impl Recognizer for Parakeet {
             .map_err(|_| RecognizeError::Model)?;
         let rows = self.logits(&mel).map_err(|_| RecognizeError::Model)?;
         let spans = search::collapse(&rows, VOCAB, BLANK).map_err(|_| RecognizeError::Search)?;
-        let words = pieces_to_words(&spans, &self.vocab, ENCODER_HOP_MS)
+        let words = pieces_to_words(&spans, &self.vocab, ENCODER_HOP_MS, false)
             .map_err(|_| RecognizeError::Search)?;
         if words.is_empty() {
             Ok(Vec::new())
@@ -164,10 +164,11 @@ impl Recognizer for Parakeet {
     }
 }
 
-fn pieces_to_words(
+pub(crate) fn pieces_to_words(
     spans: &[Span],
     vocab: &[String],
     hop_ms: i64,
+    lone_boundary_splits: bool,
 ) -> Result<Vec<RecognizedWord>, search::SearchError> {
     let mut open: Option<OpenWord> = None;
     let mut words = Vec::new();
@@ -182,11 +183,14 @@ fn pieces_to_words(
             Some(body) => (true, body),
             None => (false, piece.as_str()),
         };
-        if body.is_empty() || body == "<unk>" {
+        if body == "<unk>" {
             continue;
         }
-        if boundary {
+        if boundary && (lone_boundary_splits || !body.is_empty()) {
             finish_word(&mut words, open.take(), hop_ms)?;
+        }
+        if body.is_empty() {
+            continue;
         }
         match open.as_mut() {
             Some(word) => {
@@ -232,7 +236,7 @@ fn finish_word(
     Ok(())
 }
 
-fn subsample(layer: &Subsampling, mel: &Tensor) -> Result<Tensor, ModelError> {
+pub(crate) fn subsample(layer: &Subsampling, mel: &Tensor) -> Result<Tensor, ModelError> {
     let mut hidden = mel.unsqueeze(1).map_err(|_| ModelError::Device)?;
     hidden = conv2d_relu(&layer.conv, &hidden)?;
     hidden = layer
@@ -247,12 +251,12 @@ fn subsample(layer: &Subsampling, mel: &Tensor) -> Result<Tensor, ModelError> {
     hidden = conv2d_relu(&layer.pointwise2, &hidden)?;
     let time = hidden.dim(2).map_err(|_| ModelError::Shape)?;
     let freq = hidden.dim(3).map_err(|_| ModelError::Shape)?;
-    if freq * SUB_CHANNELS != SUB_FLAT {
+    let Some(flat) = freq.checked_mul(SUB_CHANNELS) else {
         return Err(ModelError::Shape);
-    }
+    };
     let hidden = hidden
         .transpose(1, 2)
-        .and_then(|hidden| hidden.reshape((1, time, SUB_FLAT)))
+        .and_then(|hidden| hidden.reshape((1, time, flat)))
         .map_err(|_| ModelError::Device)?;
     let hidden = layer
         .linear
@@ -270,7 +274,11 @@ fn conv2d_relu(layer: &Conv2d, hidden: &Tensor) -> Result<Tensor, ModelError> {
         .map_err(|_| ModelError::Device)
 }
 
-fn block_forward(block: &Block, hidden: &Tensor, positions: &Tensor) -> Result<Tensor, ModelError> {
+pub(crate) fn block_forward(
+    block: &Block,
+    hidden: &Tensor,
+    positions: &Tensor,
+) -> Result<Tensor, ModelError> {
     let ff1 = feed_forward(&block.feed_forward1, &block.norm_feed_forward1, hidden)?;
     let hidden = scaled_add(hidden, &ff1, 0.5)?;
     let normed = block
@@ -443,7 +451,7 @@ fn glu(hidden: &Tensor) -> Result<Tensor, ModelError> {
     left.broadcast_mul(&gate).map_err(|_| ModelError::Device)
 }
 
-fn positions(inv_freq: &Tensor, time: usize) -> Result<Tensor, ModelError> {
+pub(crate) fn positions(inv_freq: &Tensor, time: usize) -> Result<Tensor, ModelError> {
     if time == 0 {
         return Err(ModelError::Shape);
     }
@@ -473,7 +481,7 @@ fn positions(inv_freq: &Tensor, time: usize) -> Result<Tensor, ModelError> {
         .map_err(|_| ModelError::Device)
 }
 
-fn inv_freq(device: &Device) -> Result<Tensor, ModelError> {
+pub(crate) fn inv_freq(device: &Device) -> Result<Tensor, ModelError> {
     let mut values = Vec::with_capacity(HIDDEN / 2);
     for index in 0..HIDDEN / 2 {
         let exponent = (2 * index) as f32 / HIDDEN as f32;
@@ -826,11 +834,8 @@ fn f32_tensor(
         return Err(ModelError::Weights);
     }
     let mut values = Vec::with_capacity(tensor.data().len() / 4);
-    for chunk in tensor.data().chunks_exact(4) {
-        let Some(bytes) = chunk.try_into().ok() else {
-            return Err(ModelError::Weights);
-        };
-        values.push(f32::from_le_bytes(bytes));
+    for chunk in tensor.data().as_chunks::<4>().0 {
+        values.push(f32::from_le_bytes(*chunk));
     }
     Tensor::from_vec(values, shape, device).map_err(|_| ModelError::Device)
 }
@@ -873,7 +878,7 @@ mod tests {
                 end: 4,
             },
         ];
-        let words = pieces_to_words(&spans, &vocab, 80).unwrap();
+        let words = pieces_to_words(&spans, &vocab, 80, false).unwrap();
         assert_eq!(words.len(), 2);
         assert_eq!(words[0].text, "google");
         assert_eq!((words[0].start_ms, words[0].end_ms), (0, 240));

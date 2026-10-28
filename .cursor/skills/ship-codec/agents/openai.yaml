@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ship Codec"
+  short_description: "Build native Rust codecs with evidence-based validation"
+  default_prompt: "Use $ship-codec to ship the requested codec decoder, encoder, or both with comprehensive validation."

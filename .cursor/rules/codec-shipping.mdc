@@ -1,0 +1,27 @@
+---
+description: Route native media codec implementation and shipping requests through the project's ship-codec skill.
+alwaysApply: true
+---
+
+# Codec implementation and shipping
+
+Activate this workflow when asked to implement, build, finish, harden, or ship an audio, video, or image codec decoder, encoder, or both, or to complete a codec implementation already in progress. Do not apply it to networking codecs, text encodings, or unrelated serialization.
+
+Before changing codec code, read `.cursor/skills/ship-codec/SKILL.md` and follow its applicable references. Resolve the requested codec and direction from the request and active task. Preserve decoder-only or encoder-only scope; “both” requires independently validated encode and decode paths.
+
+Read all project rules under `.cursor/rules`, their scope and referenced instructions, applicable `AGENTS.md`, manifests, dependency policy, and relevant CI. Respect the instructions governing each path; this rule supplements existing architecture/style requirements. Report missing instructions accurately and proceed with available requirements when safe.
+
+For Cutlass, preserve native safe Rust, one codec crate per codec, inherited lints, dependency policy, and separate codec/container/platform boundaries. Do not substitute another complete codec, foreign library/binary, subprocess, or platform implementation for the requested native software codec. Test oracles are isolated, project-permitted validation tools.
+
+Before implementing, record an explicit profile/tool/configuration support matrix, unsupported cases, resource limits, and measurable acceptance gates. Avoid silently reducing an unqualified playback codec to a restricted keyframe/lossless/own-encoder-only demo. State justified scope assumptions and proceed.
+
+Implement real algorithms, integrate through actual engine/container APIs, and verify independently:
+- Decoder: independently produced streams and normative/reference output.
+- Encoder: independent decoding, valid emitted bitstreams, useful quality, and actual rate behavior.
+- Both: both independent paths, with self round trips as supplementary coverage.
+
+Require applicable conformance, malformed-input/lifecycle/integration tests, recorded fuzz runs, release performance/resource measurements, and the project's CI checks. Keep unavailable/skipped/failed checks visible. Do not weaken tests, lints, thresholds, or required scope to claim completion.
+
+Use “partial,” “unsupported,” “not run,” or “blocked” honestly. “Ship” requests completed implementation and validation; it does not by itself authorize publishing, merging, or releasing.
+
+If the skill is missing, report the missing path, apply these core requirements, and continue non-blocked work. Do not claim the full skill was loaded.

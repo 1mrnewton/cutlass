@@ -1,29 +1,29 @@
-//! A recovery copy of the draft file.
+//! Recovery copies beside the project files.
 //!
-//! `.bak` is a byte copy of `draft_info.json` and of no other file. It is not
-//! the undo stack.
+//! `draft_info.json.bak` is a byte copy of `draft_info.json`.
+//! `project.json.bak` is a byte copy of `project.json`. No other name is
+//! copied. Neither file is the undo stack.
 
 use std::path::Path;
 
 use crate::StoreError;
 
-const DRAFT_FILE: &str = "draft_info.json";
-const BACKUP_FILE: &str = "draft_info.json.bak";
+const BACKED_UP: &[&str] = &["draft_info.json", "project.json"];
 
-/// Copy `draft_info.json` onto `draft_info.json.bak` beside it.
-pub fn copy_draft_backup(draft_path: &Path) -> Result<(), StoreError> {
-    let Some(name) = draft_path.file_name().and_then(|name| name.to_str()) else {
+/// Copy `draft_info.json` or `project.json` onto the `.bak` file beside it.
+pub fn copy_backup(path: &Path) -> Result<(), StoreError> {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return Err(StoreError::BackupRefused {
-            path: draft_path.to_path_buf(),
+            path: path.to_path_buf(),
         });
     };
-    if name != DRAFT_FILE {
+    if !BACKED_UP.contains(&name) {
         return Err(StoreError::BackupRefused {
-            path: draft_path.to_path_buf(),
+            path: path.to_path_buf(),
         });
     }
-    let bak = draft_path.with_file_name(BACKUP_FILE);
-    std::fs::copy(draft_path, &bak).map_err(|error| StoreError::Io {
+    let bak = path.with_file_name(format!("{name}.bak"));
+    std::fs::copy(path, &bak).map_err(|error| StoreError::Io {
         path: bak,
         message: error.to_string(),
     })?;
@@ -36,7 +36,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::copy_draft_backup;
+    use super::copy_backup;
     use crate::StoreError;
 
     struct Temp {
@@ -66,31 +66,41 @@ mod tests {
         let draft = temp.path.join("draft_info.json");
         let bytes = b"{\"id\":\"D\"}\n";
         fs::write(&draft, bytes).unwrap();
-        fs::write(temp.path.join("project.json"), b"{\"other\":true}\n").unwrap();
-        copy_draft_backup(&draft).unwrap();
+        copy_backup(&draft).unwrap();
         assert_eq!(
             fs::read(temp.path.join("draft_info.json.bak")).unwrap(),
             bytes
         );
-        assert!(!temp.path.join("project.json.bak").exists());
+    }
+
+    #[test]
+    fn the_project_file_backup_is_a_byte_copy() {
+        let temp = Temp::new();
+        let project = temp.path.join("project.json");
+        let bytes = b"{\"main_timeline_id\":\"D\"}\n";
+        fs::write(&project, bytes).unwrap();
+        copy_backup(&project).unwrap();
+        assert_eq!(fs::read(temp.path.join("project.json.bak")).unwrap(), bytes);
+        assert!(!temp.path.join("draft_info.json.bak").exists());
     }
 
     #[test]
     fn another_file_is_not_backed_up() {
         let temp = Temp::new();
-        let project = temp.path.join("project.json");
-        fs::write(&project, b"{}\n").unwrap();
-        let error = copy_draft_backup(&project).unwrap_err();
+        let notes = temp.path.join("notes.json");
+        fs::write(&notes, b"{}\n").unwrap();
+        let error = copy_backup(&notes).unwrap_err();
         assert!(matches!(error, StoreError::BackupRefused { .. }));
-        assert!(!temp.path.join("project.json.bak").exists());
+        assert!(!temp.path.join("notes.json.bak").exists());
         assert!(!temp.path.join("draft_info.json.bak").exists());
+        assert!(!temp.path.join("project.json.bak").exists());
     }
 
     #[test]
     fn a_missing_draft_file_fails_and_writes_no_backup() {
         let temp = Temp::new();
         let draft = temp.path.join("draft_info.json");
-        let error = copy_draft_backup(&draft).unwrap_err();
+        let error = copy_backup(&draft).unwrap_err();
         assert!(matches!(error, StoreError::Io { .. }));
         assert!(!temp.path.join("draft_info.json.bak").exists());
     }

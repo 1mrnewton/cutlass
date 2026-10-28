@@ -10,6 +10,7 @@
 use std::path::Path;
 
 use cutlass_model::Draft;
+use serde_json::Value;
 
 use crate::StoreError;
 
@@ -25,6 +26,24 @@ pub fn parse_draft(bytes: &[u8], path: &Path) -> Result<Draft, StoreError> {
 pub fn write_draft(draft: &Draft) -> Result<Vec<u8>, StoreError> {
     let mut bytes = serde_json::to_vec(draft).map_err(|error| StoreError::Json {
         path: Path::new("draft_info.json").to_path_buf(),
+        message: error.to_string(),
+    })?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+/// Read one JSON value stored beside the draft.
+pub fn parse_value(bytes: &[u8], path: &Path) -> Result<Value, StoreError> {
+    serde_json::from_slice(bytes).map_err(|error| StoreError::Json {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })
+}
+
+/// Write one JSON value and a trailing newline.
+pub fn write_value(value: &Value, path: &Path) -> Result<Vec<u8>, StoreError> {
+    let mut bytes = serde_json::to_vec(value).map_err(|error| StoreError::Json {
+        path: path.to_path_buf(),
         message: error.to_string(),
     })?;
     bytes.push(b'\n');

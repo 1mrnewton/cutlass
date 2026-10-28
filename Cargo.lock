@@ -233,6 +233,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-model",
  "cutlass-session",
+ "serde_json",
 ]
 
 [[package]]
@@ -537,6 +538,10 @@ dependencies = [
 [[package]]
 name = "cutlass-settings"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "cutlass-still"
@@ -559,6 +564,7 @@ name = "cutlass-store"
 version = "0.1.0"
 dependencies = [
  "cutlass-model",
+ "serde",
  "serde_json",
 ]
 

@@ -77,7 +77,10 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{Draft, Micros, Segment, TimeRange, TrackAttribute, TrackId};
+    use cutlass_model::{
+        Draft, MaterialId, MaterialText, Micros, Segment, TimeRange, TrackAttribute, TrackId,
+        WordColumns,
+    };
 
     use super::*;
     use crate::request::{Request, TrimEdge};
@@ -264,6 +267,57 @@ mod tests {
             segment.source_range.as_ref().map(|range| range.duration),
             Some(Micros(1_500_000))
         );
+    }
+
+    #[test]
+    fn set_words_is_one_undo_and_a_failed_combo_keeps_the_material() {
+        let (mut session, track) = session();
+        let material_id = MaterialId::new("caption");
+        session
+            .draft
+            .materials
+            .texts
+            .push(MaterialText::new(material_id.clone()));
+        session
+            .apply(
+                0,
+                &[Request::SetWords {
+                    material_id: material_id.clone(),
+                    words: WordColumns {
+                        start_time: vec![0],
+                        end_time: vec![250],
+                        text: vec!["hi".to_owned()],
+                        rest: Default::default(),
+                    },
+                }],
+            )
+            .unwrap();
+        assert_eq!(session.draft().materials.texts[0].content, "hi");
+        assert_eq!(session.revision(), 1);
+        let error = session
+            .apply(
+                1,
+                &[
+                    Request::SetWords {
+                        material_id,
+                        words: WordColumns {
+                            start_time: vec![0],
+                            end_time: vec![10],
+                            text: vec!["no".to_owned()],
+                            rest: Default::default(),
+                        },
+                    },
+                    place(&track, "overlap-a", 0, 1_000_000),
+                    place(&track, "overlap-b", 0, 1_000_000),
+                ],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::Overlap);
+        assert_eq!(session.draft().materials.texts[0].content, "hi");
+        assert_eq!(session.revision(), 1);
+        session.undo().unwrap();
+        assert!(session.draft().materials.texts[0].content.is_empty());
+        assert!(session.draft().materials.texts[0].words.text.is_empty());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use cutlass_model::{Micros, Segment, SegmentId, TrackId};
+use cutlass_model::{MaterialId, Micros, Segment, SegmentId, TrackId, WordColumns};
 
 /// Which edge of a segment a trim moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,5 +28,13 @@ pub enum Request {
         segment_id: SegmentId,
         edge: TrimEdge,
         time: Micros,
+    },
+    /// Replace the recognized words and the current words on one text material.
+    ///
+    /// Word times are milliseconds. The caption string becomes those words
+    /// joined by spaces. Both word arrays receive this result.
+    SetWords {
+        material_id: MaterialId,
+        words: WordColumns,
     },
 }

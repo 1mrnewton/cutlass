@@ -1,6 +1,7 @@
 mod move_segment;
 mod place;
 mod trim;
+mod words;
 
 use cutlass_model::{Draft, Micros, RangeError, TrackAttribute};
 
@@ -9,6 +10,7 @@ use crate::request::Request;
 pub use move_segment::move_segment;
 pub use place::place;
 pub use trim::trim;
+pub use words::set_words;
 
 /// Why one request did not change the draft.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +30,10 @@ pub enum EditError {
     Overlap,
     /// The source range is set and speed is not 1, so the trim has no mapping yet.
     SpeedUnmapped,
+    /// No text material has this id.
+    MissingMaterial,
+    /// Word columns disagree, or a word ends before it starts.
+    WordShape,
     Range(RangeError),
     EmptyUndo,
     EmptyRedo,
@@ -46,6 +52,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             edge,
             time,
         } => trim(draft, segment_id, *edge, *time),
+        Request::SetWords { material_id, words } => set_words(draft, material_id, words.clone()),
     }
 }
 

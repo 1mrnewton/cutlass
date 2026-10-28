@@ -195,6 +195,7 @@ dependencies = [
  "cutlass-gpu",
  "cutlass-model",
  "cutlass-picture",
+ "cutlass-renderer-software",
 ]
 
 [[package]]
@@ -283,6 +284,7 @@ dependencies = [
  "cutlass-engine",
  "cutlass-generated",
  "cutlass-model",
+ "cutlass-renderer-software",
  "cutlass-text",
 ]
 

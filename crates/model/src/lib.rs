@@ -35,11 +35,11 @@ pub use id::{DraftId, MaterialId, SegmentId, TrackId};
 pub use keyframe::{CommonKeyframe, CommonKeyframeGroup};
 pub use linkage::{KindSwitches, LinkageSettings, linkage_from_biz};
 pub use materials::{
-    ConstantSpeedError, CurveSpeed, MaterialAnimations, MaterialAudio, MaterialAudioFade,
-    MaterialCanvas, MaterialColorConfig, MaterialDraft, MaterialEffect, MaterialHsl,
-    MaterialPictureAdjust, MaterialPluginEffect, MaterialRef, MaterialShape, MaterialSpeed,
-    MaterialText, MaterialTransition, MaterialVideo, MaterialVideoEffect, Materials, RawMaterial,
-    SpeedPoint, StickerAnimation, WordColumns, blend_extents, blend_window,
+    ConstantSpeedError, CurveSpeed, FreezeInfo, MaterialAnimations, MaterialAudio,
+    MaterialAudioFade, MaterialCanvas, MaterialColorConfig, MaterialDraft, MaterialEffect,
+    MaterialHsl, MaterialPictureAdjust, MaterialPluginEffect, MaterialRef, MaterialShape,
+    MaterialSpeed, MaterialText, MaterialTransition, MaterialVideo, MaterialVideoEffect, Materials,
+    RawMaterial, SpeedPoint, StickerAnimation, WordColumns, blend_extents, blend_window,
     constant_target_duration, curve_speed_factor, curve_target_duration,
 };
 pub use meta::MetaType;

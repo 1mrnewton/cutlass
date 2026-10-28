@@ -1,5 +1,5 @@
 use cutlass_model::{
-    MaterialId, MaterialTransition, Micros, Segment, SegmentId, SpeedPoint, TrackId,
+    FreezeInfo, MaterialId, MaterialTransition, Micros, Segment, SegmentId, SpeedPoint, TrackId,
 };
 
 /// Which edge of a segment a trim moves.
@@ -68,5 +68,10 @@ pub enum Request {
         segment_id: SegmentId,
         reverse: bool,
         path: String,
+    },
+    /// Store a freeze mapping on the video material. This does not seek.
+    SetFreeze {
+        segment_id: SegmentId,
+        freeze: Option<FreezeInfo>,
     },
 }

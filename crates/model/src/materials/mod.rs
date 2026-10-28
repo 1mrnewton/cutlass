@@ -29,7 +29,7 @@ pub use speed::{
 };
 pub use text::MaterialText;
 pub use transition::{MaterialTransition, blend_extents, blend_window};
-pub use video::MaterialVideo;
+pub use video::{FreezeInfo, MaterialVideo};
 pub use words::WordColumns;
 
 /// A material this model does not name field by field. `id` and `type` are lifted out.

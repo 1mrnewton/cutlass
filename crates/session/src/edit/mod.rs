@@ -1,3 +1,4 @@
+mod freeze;
 mod linkage;
 mod move_segment;
 mod place;
@@ -94,6 +95,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             reverse,
             path,
         } => reverse::set_reverse(draft, segment_id, *reverse, path),
+        Request::SetFreeze { segment_id, freeze } => {
+            freeze::set_freeze(draft, segment_id, freeze.clone())
+        }
     }
 }
 

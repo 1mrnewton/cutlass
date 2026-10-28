@@ -36,6 +36,24 @@ pub struct MaterialVideo {
     pub reverse_path: String,
     #[serde(default)]
     pub reverse_intensifies_path: String,
+    /// Held source frame. Absent and null stay unset.
+    #[serde(default)]
+    pub freeze: Option<FreezeInfo>,
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+/// The source frame a freeze holds across the segment's target range.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct FreezeInfo {
+    #[serde(default)]
+    pub source_material_id: String,
+    #[serde(default)]
+    pub source_material_path: String,
+    #[serde(default)]
+    pub reverse_material_path: String,
+    #[serde(default)]
+    pub timestamp: Micros,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
 }
@@ -66,6 +84,7 @@ impl Default for MaterialVideo {
             crop_scale: 1.0,
             reverse_path: String::new(),
             reverse_intensifies_path: String::new(),
+            freeze: None,
             rest: Map::new(),
         }
     }
@@ -86,5 +105,15 @@ mod tests {
         assert_ne!(video.duration, MaterialVideo::MAPPING_DURATION);
         assert_eq!(MaterialVideo::new("clip").id.as_str(), "clip");
         assert_eq!(MaterialVideo::new("clip").duration, Micros(0));
+        assert!(video.freeze.is_none());
+        let cleared: MaterialVideo = serde_json::from_str(r#"{"freeze":null}"#).unwrap();
+        assert!(cleared.freeze.is_none());
+        let held: MaterialVideo = serde_json::from_str(
+            r#"{"freeze":{"source_material_id":"src","source_material_path":"clip","reverse_material_path":"","timestamp":1500}}"#,
+        )
+        .unwrap();
+        let freeze = held.freeze.unwrap();
+        assert_eq!(freeze.source_material_id, "src");
+        assert_eq!(freeze.timestamp, Micros(1500));
     }
 }

@@ -119,6 +119,185 @@ fn ffmpeg_and_gstreamer_see_the_same_packets() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn ffmpeg_reads_files_this_muxer_wrote() {
+    let Some(ffmpeg) = tool("ffmpeg") else {
+        eprintln!("not available: ffmpeg");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("isobmff-mux-oracle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("source.mp4");
+    run(
+        &ffmpeg,
+        &[
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=0.5:size=32x32:rate=10",
+            "-c:v",
+            "libx264",
+            "-bf",
+            "2",
+            "-g",
+            "5",
+            "-pix_fmt",
+            "yuv420p",
+            "-an",
+            source.to_str().unwrap(),
+        ],
+    );
+    let (mut params, mut packets) = packets_of(&source);
+    rebase(&mut packets);
+    let layouts = [
+        (
+            "moov-end.mp4",
+            "v:0",
+            crate::MuxOptions {
+                moov_at_end: true,
+                ..crate::MuxOptions::default()
+            },
+        ),
+        (
+            "moov-start.mp4",
+            "v:0",
+            crate::MuxOptions {
+                moov_at_end: false,
+                ..crate::MuxOptions::default()
+            },
+        ),
+        (
+            "fragmented.mp4",
+            "v:0",
+            crate::MuxOptions {
+                fragmented: true,
+                samples_per_fragment: 2,
+                ..crate::MuxOptions::default()
+            },
+        ),
+        (
+            "movie.mov",
+            "v:0",
+            crate::MuxOptions {
+                brand: crate::FileBrand::Mov,
+                moov_at_end: true,
+                ..crate::MuxOptions::default()
+            },
+        ),
+    ];
+    for (name, stream, options) in layouts {
+        let path = dir.join(name);
+        write_remux(&path, &params, &packets, options);
+        assert_ffmpeg_sees_packets(&ffmpeg, &path, &packets, stream);
+    }
+    let audio_source = dir.join("source.m4a");
+    run(
+        &ffmpeg,
+        &[
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=stereo",
+            "-c:a",
+            "aac",
+            "-t",
+            "0.2",
+            audio_source.to_str().unwrap(),
+        ],
+    );
+    (params, packets) = packets_of(&audio_source);
+    rebase(&mut packets);
+    let audio_path = dir.join("remux.m4a");
+    write_remux(
+        &audio_path,
+        &params,
+        &packets,
+        crate::MuxOptions {
+            brand: crate::FileBrand::M4a,
+            ..crate::MuxOptions::default()
+        },
+    );
+    assert_ffmpeg_sees_packets(&ffmpeg, &audio_path, &packets, "a:0");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn packets_of(path: &Path) -> (crate::StreamParams, Vec<crate::Packet>) {
+    let bytes = std::fs::read(path).unwrap();
+    let mut source = SliceSource::new(&bytes);
+    let mut movie = IsoBmff::open(&mut source).unwrap();
+    let params = movie.streams()[0].params.clone();
+    let mut packets = Vec::new();
+    while let Some(packet) = movie.read_packet(&mut source).unwrap() {
+        if packet.track_id == params.track_id {
+            packets.push(packet);
+        }
+    }
+    assert!(!packets.is_empty(), "{}", path.display());
+    (params, packets)
+}
+
+fn rebase(packets: &mut [crate::Packet]) {
+    let Some(origin) = packets.iter().map(|packet| packet.dts).min() else {
+        return;
+    };
+    for packet in packets {
+        packet.dts -= origin;
+        packet.pts -= origin;
+    }
+}
+
+fn write_remux(
+    path: &Path,
+    params: &crate::StreamParams,
+    packets: &[crate::Packet],
+    options: crate::MuxOptions,
+) {
+    let mut mux = crate::IsoBmffMux::new(std::io::Cursor::new(Vec::new()), options);
+    let mut stored = params.clone();
+    stored.track_id = 0;
+    let id = mux.add_stream(&stored).unwrap();
+    for packet in packets {
+        let mut packet = packet.clone();
+        packet.track_id = id;
+        packet.timescale = stored.timescale;
+        mux.write_packet(&packet)
+            .unwrap_or_else(|err| panic!("write {}: {err}", path.display()));
+    }
+    let bytes = mux
+        .finish_into()
+        .unwrap_or_else(|err| panic!("finish {}: {err}", path.display()))
+        .into_inner();
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn assert_ffmpeg_sees_packets(ffmpeg: &Path, path: &Path, packets: &[crate::Packet], stream: &str) {
+    let hashed = framehash(ffmpeg, path, stream);
+    assert_eq!(hashed.len(), packets.len(), "{}", path.display());
+    let shift = packets[0].dts - hashed[0].dts;
+    for (packet, hashed) in packets.iter().zip(&hashed) {
+        assert_eq!(sha256(&packet.payload), hashed.hash, "{}", path.display());
+        assert_eq!(packet.duration, hashed.duration, "{}", path.display());
+        assert_eq!(packet.dts - hashed.dts, shift, "{}", path.display());
+        assert_eq!(packet.pts - hashed.pts, shift, "{}", path.display());
+        assert_eq!(
+            packet.pts - packet.dts,
+            hashed.pts - hashed.dts,
+            "{}",
+            path.display()
+        );
+        assert_eq!(packet.keyframe, hashed.keyframe, "{}", path.display());
+    }
+}
+
 fn compare_file(ffmpeg: &Path, ffprobe: &Path, path: &Path) {
     let bytes = std::fs::read(path).unwrap();
     let mut source = SliceSource::new(&bytes);
@@ -137,7 +316,7 @@ fn compare_file(ffmpeg: &Path, ffprobe: &Path, path: &Path) {
             ours.push(packet);
         }
     }
-    let hashed = framehash(ffmpeg, path);
+    let hashed = framehash(ffmpeg, path, "v:0");
     assert_eq!(ours.len(), hashed.len(), "{}", path.display());
     let shift = ours[0].dts - hashed[0].dts;
     for (ours, theirs) in ours.iter().zip(&hashed) {
@@ -168,7 +347,7 @@ fn compare_file(ffmpeg: &Path, ffprobe: &Path, path: &Path) {
     let _ = ffprobe;
 }
 
-fn framehash(ffmpeg: &Path, path: &Path) -> Vec<OraclePacket> {
+fn framehash(ffmpeg: &Path, path: &Path, stream: &str) -> Vec<OraclePacket> {
     let output = Command::new(ffmpeg)
         .args(["-hide_banner", "-loglevel", "error", "-i"])
         .arg(path)
@@ -204,7 +383,7 @@ fn framehash(ffmpeg: &Path, path: &Path) -> Vec<OraclePacket> {
             "-v",
             "error",
             "-select_streams",
-            "v:0",
+            stream,
             "-show_entries",
             "packet=flags",
             "-of",

@@ -5,7 +5,9 @@
 //! Prediction in LC, coupling, gain control, and spectral band replication are
 //! errors rather than something the decoder skips.
 
-use cutlass_decode::{AudioOutput, CodecError, CodecId, CodecParams, Decoder, Packet, Pcm};
+use cutlass_decode::{
+    AudioOutput, CodecError, CodecId, CodecParams, Decoded, Decoder, Packet, Pcm,
+};
 
 use crate::bits::BitReader;
 use crate::config::{AudioConfig, ElementKind};
@@ -1067,18 +1069,18 @@ impl Decoder for AacDecoder {
         CodecId::Aac
     }
 
-    fn push(&mut self, packet: &Packet) -> Result<Vec<AudioOutput>, CodecError> {
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Decoded>, CodecError> {
         let samples = self.push_packet(packet)?;
         let index = self.frame_index.saturating_sub(1);
-        Ok(vec![self.output(samples, index)?])
+        Ok(vec![Decoded::Audio(self.output(samples, index)?)])
     }
 
-    fn drain(&mut self) -> Result<Vec<AudioOutput>, CodecError> {
+    fn drain(&mut self) -> Result<Vec<Decoded>, CodecError> {
         let Some(samples) = self.drain_pcm()? else {
             return Ok(Vec::new());
         };
         let index = self.frame_index.saturating_sub(1);
-        Ok(vec![self.output(samples, index)?])
+        Ok(vec![Decoded::Audio(self.output(samples, index)?)])
     }
 
     fn reset(&mut self) {

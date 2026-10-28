@@ -16,7 +16,8 @@
 
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
-    Channel, ChannelLayout, CodecError, CodecParams, Packet, Pcm, SampleFormat, SideData,
+    Channel, ChannelLayout, CodecError, CodecParams, Packet, Pcm, Plane, SampleFormat, SideData,
+    Yuv420,
 };
 
 /// One decoded audio buffer.
@@ -37,12 +38,50 @@ pub struct AudioOutput {
     pub concealed: bool,
 }
 
+/// One decoded picture. The planes are the samples a display would show,
+/// after any output-only synthesis the codec applies. Reference frames stay
+/// inside the decoder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoOutput {
+    pub picture: Yuv420,
+    pub pts: i64,
+    pub duration: i64,
+    pub timescale: u32,
+    pub keyframe: bool,
+}
+
+/// A decoder returns audio or a picture. A codec that only does one of them
+/// never produces the other.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Decoded {
+    Audio(AudioOutput),
+    Video(VideoOutput),
+}
+
+impl Decoded {
+    #[must_use]
+    pub fn as_audio(&self) -> Option<&AudioOutput> {
+        match self {
+            Self::Audio(audio) => Some(audio),
+            Self::Video(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_video(&self) -> Option<&VideoOutput> {
+        match self {
+            Self::Video(video) => Some(video),
+            Self::Audio(_) => None,
+        }
+    }
+}
+
 pub trait Decoder: Send {
     fn codec(&self) -> CodecId;
 
-    fn push(&mut self, packet: &Packet) -> Result<Vec<AudioOutput>, CodecError>;
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Decoded>, CodecError>;
 
-    fn drain(&mut self) -> Result<Vec<AudioOutput>, CodecError>;
+    fn drain(&mut self) -> Result<Vec<Decoded>, CodecError>;
 
     fn reset(&mut self);
 }
@@ -94,7 +133,7 @@ impl Default for DecodeFactory {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioOutput, DecodeFactory, Decoder};
+    use super::{AudioOutput, DecodeFactory, Decoded, Decoder};
     use cutlass_codec::CodecId;
     use cutlass_codec::access::{
         ChannelLayout, CodecError, CodecParams, Packet, Pcm, SampleFormat,
@@ -107,7 +146,7 @@ mod tests {
             CodecId::Pcm
         }
 
-        fn push(&mut self, packet: &Packet) -> Result<Vec<AudioOutput>, CodecError> {
+        fn push(&mut self, packet: &Packet) -> Result<Vec<Decoded>, CodecError> {
             if packet.data.is_empty() {
                 return Err(CodecError::InvalidApi {
                     what: "empty packet",
@@ -115,17 +154,17 @@ mod tests {
             }
             let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.0]).expect("pcm");
             assert_eq!(pcm.format, SampleFormat::F32);
-            Ok(vec![AudioOutput {
+            Ok(vec![Decoded::Audio(AudioOutput {
                 pcm,
                 pts: packet.pts,
                 timescale: packet.timescale,
                 skip_leading: 0,
                 skip_trailing: 0,
                 concealed: false,
-            }])
+            })])
         }
 
-        fn drain(&mut self) -> Result<Vec<AudioOutput>, CodecError> {
+        fn drain(&mut self) -> Result<Vec<Decoded>, CodecError> {
             Ok(Vec::new())
         }
 
@@ -150,7 +189,7 @@ mod tests {
         let packet = Packet::audio(vec![0], 0, 1, 48_000);
         let out = decoder.push(&packet).expect("push");
         assert_eq!(out.len(), 1);
-        assert!(!out[0].concealed);
+        assert!(!out[0].as_audio().expect("audio").concealed);
         assert!(decoder.drain().expect("drain").is_empty());
     }
 

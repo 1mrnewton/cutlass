@@ -14,7 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
-    Channel, ChannelLayout, CodecError, CodecParams, Packet, Pcm, SampleFormat, SideData,
+    Channel, ChannelLayout, CodecError, CodecParams, Packet, Pcm, Plane, SampleFormat, SideData,
+    Yuv420,
 };
 
 /// PCM presented to an encoder, contiguous with the samples already accepted.
@@ -26,10 +27,28 @@ pub struct AudioInput {
     pub pcm: Pcm,
 }
 
+/// One picture presented to an encoder. `pts` is the presentation time.
+/// A repeated picture is still a push: the encoder decides whether the
+/// bitstream shows an existing frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoInput {
+    pub picture: Yuv420,
+    pub pts: i64,
+    pub duration: i64,
+    pub timescale: u32,
+}
+
 pub trait Encoder: Send {
     fn codec(&self) -> CodecId;
 
     fn push(&mut self, input: &AudioInput) -> Result<Vec<Packet>, CodecError>;
+
+    /// Picture codecs override this. An audio encoder leaves the default,
+    /// which refuses the call and emits nothing.
+    fn push_picture(&mut self, input: &VideoInput) -> Result<Vec<Packet>, CodecError> {
+        let _ = input;
+        Err(CodecError::Unsupported { what: "picture" })
+    }
 
     fn drain(&mut self) -> Result<Vec<Packet>, CodecError>;
 

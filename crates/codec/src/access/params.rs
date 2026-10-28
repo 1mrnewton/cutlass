@@ -1,4 +1,4 @@
-use super::pixel::{ColorPrimaries, PixelFormat, Transfer};
+use super::pixel::{ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat, Transfer};
 use super::sample::{ChannelLayout, SampleFormat};
 use crate::CodecId;
 
@@ -20,6 +20,8 @@ pub struct CodecParams {
     pub pixel: PixelFormat,
     pub primaries: ColorPrimaries,
     pub transfer: Transfer,
+    pub range: ColorRange,
+    pub matrix: MatrixCoefficients,
 }
 
 impl CodecParams {
@@ -37,13 +39,36 @@ impl CodecParams {
             pixel: PixelFormat::None,
             primaries: ColorPrimaries::Unspecified,
             transfer: Transfer::Unspecified,
+            range: ColorRange::Unspecified,
+            matrix: MatrixCoefficients::Unspecified,
+        }
+    }
+
+    /// A progressive picture. `extra` is the codec configuration, empty when
+    /// the access units carry their own sequence header.
+    #[must_use]
+    pub fn video(codec: CodecId, width: u32, height: u32) -> Self {
+        Self {
+            codec,
+            extra: Vec::new(),
+            sample_rate: 0,
+            layout: None,
+            sample_format: None,
+            bitrate: 0,
+            width,
+            height,
+            pixel: PixelFormat::Yuv420p,
+            primaries: ColorPrimaries::Unspecified,
+            transfer: Transfer::Unspecified,
+            range: ColorRange::Limited,
+            matrix: MatrixCoefficients::Bt709,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::pixel::PixelFormat;
+    use super::super::pixel::{ColorRange, PixelFormat};
     use super::super::sample::ChannelLayout;
     use super::CodecParams;
     use crate::CodecId;
@@ -56,5 +81,15 @@ mod tests {
         assert_eq!(params.pixel, PixelFormat::None);
         assert!(params.extra.is_empty());
         assert_eq!(params.bitrate, 0);
+        assert_eq!(params.range, ColorRange::Unspecified);
+    }
+
+    #[test]
+    fn video_params_name_a_picture() {
+        let params = CodecParams::video(CodecId::Av1, 320, 180);
+        assert_eq!(params.pixel, PixelFormat::Yuv420p);
+        assert_eq!(params.width, 320);
+        assert_eq!(params.sample_rate, 0);
+        assert!(params.layout.is_none());
     }
 }

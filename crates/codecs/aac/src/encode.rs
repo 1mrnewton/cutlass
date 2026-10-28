@@ -1422,7 +1422,7 @@ mod tests {
         let mut decoded = Vec::new();
         for packet in &packets {
             for output in decoder.push(packet).unwrap() {
-                decoded.extend_from_slice(output.pcm.as_f32().unwrap());
+                decoded.extend_from_slice(output.as_audio().unwrap().pcm.as_f32().unwrap());
             }
         }
         let (delay, padding) = gapless(packets.last().unwrap());
@@ -1607,11 +1607,11 @@ mod tests {
         let mut ours = Vec::new();
         for packet in &packets {
             for output in decoder.push(packet).unwrap() {
-                ours.extend_from_slice(output.pcm.as_f32().unwrap());
+                ours.extend_from_slice(output.as_audio().unwrap().pcm.as_f32().unwrap());
             }
         }
         if let Some(tail) = decoder.drain().unwrap().pop() {
-            ours.extend_from_slice(tail.pcm.as_f32().unwrap());
+            ours.extend_from_slice(tail.as_audio().unwrap().pcm.as_f32().unwrap());
         }
         let (score, lag, ratio) = aligned_snr(&ours, &foreign);
         assert!(
@@ -1955,11 +1955,11 @@ mod tests {
         let mut decoded = Vec::new();
         for packet in &packets {
             for output in decoder.push(packet).unwrap() {
-                decoded.extend_from_slice(output.pcm.as_f32().unwrap());
+                decoded.extend_from_slice(output.as_audio().unwrap().pcm.as_f32().unwrap());
             }
         }
         if let Some(tail) = decoder.drain().unwrap().pop() {
-            decoded.extend_from_slice(tail.pcm.as_f32().unwrap());
+            decoded.extend_from_slice(tail.as_audio().unwrap().pcm.as_f32().unwrap());
         }
         let (delay, padding) = gapless(packets.last().unwrap());
         let start = delay as usize;

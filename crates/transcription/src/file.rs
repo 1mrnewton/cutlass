@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn a_local_media_file_yields_pcm_for_the_opening() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../local-files");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
         if !root.is_dir() {
             return;
         }
@@ -338,6 +338,19 @@ mod tests {
         assert!(pcm.sample_rate > 0);
         assert!(!pcm.samples.is_empty());
         assert!(pcm.samples.iter().all(|sample| sample.is_finite()));
+    }
+
+    fn audio_rank(path: &Path) -> u8 {
+        match path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "wav" | "mp3" | "m4a" | "flac" | "ogg" | "aac" | "aiff" | "caf" => 0,
+            _ => 1,
+        }
     }
 
     fn local_audio(root: &Path) -> Option<PathBuf> {
@@ -359,7 +372,11 @@ mod tests {
                 files.push(path);
             }
         }
-        files.sort();
+        files.sort_by(|left, right| {
+            audio_rank(left)
+                .cmp(&audio_rank(right))
+                .then(left.cmp(right))
+        });
         files.into_iter().next()
     }
 }

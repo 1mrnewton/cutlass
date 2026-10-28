@@ -955,4 +955,48 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn random_bytes_fail_closed() {
+        let mut state = 0xA5A5_1357u32;
+        for _ in 0..128 {
+            let mut demux = AdtsDemuxer::new();
+            let len = usize::try_from(next_bits(&mut state) % 80).unwrap_or(1) + 1;
+            let mut data = vec![0u8; len];
+            for byte in &mut data {
+                *byte = u8::try_from(next_bits(&mut state) & 0xFF).unwrap_or(0);
+            }
+            let _ = demux.push_bytes(&data);
+            let _ = demux.finish_bytes();
+            while demux.next_packet().ok().flatten().is_some() {}
+        }
+    }
+
+    fn next_bits(state: &mut u32) -> u32 {
+        *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *state
+    }
+
+    /// Thirty minutes of deterministic garbage. Run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn thirty_minute_adts_campaign() {
+        let started = std::time::Instant::now();
+        let mut state = 0xAD75_0001u32;
+        let mut chunks = 0u64;
+        while started.elapsed() < std::time::Duration::from_secs(30 * 60) {
+            let mut demux = AdtsDemuxer::new();
+            let len = usize::try_from(next_bits(&mut state) % 300).unwrap_or(1) + 1;
+            let mut data = vec![0u8; len];
+            for byte in &mut data {
+                *byte = u8::try_from(next_bits(&mut state) & 0xFF).unwrap_or(0);
+            }
+            let _ = demux.push_bytes(&data);
+            let _ = demux.finish_bytes();
+            while demux.next_packet().ok().flatten().is_some() {}
+            chunks += 1;
+        }
+        eprintln!("adts campaign chunks={chunks}");
+        assert!(chunks > 1_000);
+    }
 }

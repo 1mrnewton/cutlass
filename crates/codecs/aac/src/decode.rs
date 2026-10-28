@@ -1165,4 +1165,71 @@ mod tests {
         assert!(decoder.push_packet(&packet).is_err());
         assert_eq!(decoder.frame_index(), 0);
     }
+
+    #[test]
+    fn random_access_units_fail_closed() {
+        let mut state = 0xA5A5_1357u32;
+        let mut failures = 0u32;
+        for _ in 0..256 {
+            let params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono());
+            let mut decoder = AacDecoder::open(&params).unwrap();
+            let len = (next(&mut state) % 64) + 1;
+            let mut data = Vec::new();
+            for _ in 0..len {
+                data.push((next(&mut state) & 0xFF) as u8);
+            }
+            let before = decoder.frame_index();
+            match decoder.push_packet(&Packet::audio(data, 0, 1024, 48_000)) {
+                Ok(pcm) => {
+                    assert_eq!(pcm.len(), 1024);
+                    assert!(pcm.iter().all(|sample| sample.is_finite()));
+                }
+                Err(_) => {
+                    assert_eq!(decoder.frame_index(), before);
+                    failures += 1;
+                }
+            }
+        }
+        assert!(failures > 200, "{failures}");
+    }
+
+    /// Thirty minutes of deterministic garbage. `cargo test --release -- --ignored
+    /// thirty_minute_decoder_campaign --nocapture` records the run.
+    #[test]
+    #[ignore]
+    fn thirty_minute_decoder_campaign() {
+        let started = std::time::Instant::now();
+        let mut state = 0xC0FF_EE01u32;
+        let mut packets = 0u64;
+        let mut failures = 0u64;
+        let params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::stereo());
+        let mut decoder = AacDecoder::open(&params).unwrap();
+        while started.elapsed() < std::time::Duration::from_secs(30 * 60) {
+            let len = usize::try_from(next(&mut state) % 512).unwrap_or(1) + 1;
+            let mut data = vec![0u8; len];
+            for byte in &mut data {
+                *byte = u8::try_from(next(&mut state) & 0xFF).unwrap_or(0);
+            }
+            let before = decoder.frame_index();
+            match decoder.push_packet(&Packet::audio(data, 0, 1024, 48_000)) {
+                Ok(pcm) => {
+                    assert_eq!(pcm.len(), 2048);
+                    assert!(pcm.iter().all(|sample| sample.is_finite()));
+                }
+                Err(_) => {
+                    assert_eq!(decoder.frame_index(), before);
+                    failures += 1;
+                    decoder = AacDecoder::open(&params).unwrap();
+                }
+            }
+            packets += 1;
+        }
+        eprintln!("aac campaign packets={packets} failures={failures}");
+        assert!(packets > 1_000);
+    }
+
+    fn next(state: &mut u32) -> u32 {
+        *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *state
+    }
 }

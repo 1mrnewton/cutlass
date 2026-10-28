@@ -2,6 +2,7 @@ use cutlass_model::{Draft, Micros, Segment, SegmentId, TimeRange};
 
 use crate::request::TrimEdge;
 
+use super::speed::map_timeline_to_source;
 use super::{EditError, ensure_unlocked};
 
 pub fn trim(
@@ -23,10 +24,6 @@ pub fn trim(
 }
 
 fn apply_edge(segment: &mut Segment, edge: TrimEdge, time: Micros) -> Result<(), EditError> {
-    let speed_blocks_source = segment.source_range.is_some() && segment.speed != 1.0;
-    if speed_blocks_source {
-        return Err(EditError::SpeedUnmapped);
-    }
     let end = segment
         .target
         .start
@@ -49,8 +46,11 @@ fn apply_edge(segment: &mut Segment, edge: TrimEdge, time: Micros) -> Result<(),
                 .ok_or(EditError::Range(cutlass_model::RangeError::EndOverflow))?;
             segment.target.start = time;
             segment.target.duration = Micros(duration);
+            let speed = segment.speed;
             if let Some(source) = segment.source_range.as_mut() {
-                shift_source_start(source, delta, duration)?;
+                let source_delta = map_timeline_to_source(delta, speed)?;
+                let source_duration = map_timeline_to_source(duration, speed)?;
+                shift_source_start(source, source_delta, source_duration)?;
             }
         }
         TrimEdge::End => {
@@ -64,8 +64,15 @@ fn apply_edge(segment: &mut Segment, edge: TrimEdge, time: Micros) -> Result<(),
                 ));
             }
             segment.target.duration = Micros(duration);
+            let speed = segment.speed;
             if let Some(source) = segment.source_range.as_mut() {
-                source.duration = Micros(duration);
+                let source_duration = map_timeline_to_source(duration, speed)?;
+                if source_duration <= 0 {
+                    return Err(EditError::Range(
+                        cutlass_model::RangeError::NonPositiveDuration,
+                    ));
+                }
+                source.duration = Micros(source_duration);
             }
         }
     }
@@ -73,6 +80,11 @@ fn apply_edge(segment: &mut Segment, edge: TrimEdge, time: Micros) -> Result<(),
 }
 
 fn shift_source_start(source: &mut TimeRange, delta: i64, duration: i64) -> Result<(), EditError> {
+    if duration <= 0 {
+        return Err(EditError::Range(
+            cutlass_model::RangeError::NonPositiveDuration,
+        ));
+    }
     let start = source
         .start
         .0

@@ -124,8 +124,8 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
-        Draft, MaterialAudioFade, MaterialId, Micros, Segment, TimeRange, Track, TrackAttribute,
-        TrackId,
+        ConstantSpeedError, Draft, MaterialAudioFade, MaterialId, MaterialSpeed, Micros, Segment,
+        SpeedMode, TimeRange, Track, TrackAttribute, TrackId,
     };
 
     use super::*;
@@ -313,6 +313,141 @@ mod tests {
             segment.source_range.as_ref().map(|range| range.duration),
             Some(Micros(1_500_000))
         );
+    }
+
+    #[test]
+    fn a_constant_speed_maps_target_duration_and_trim_maps_the_source() {
+        let (mut session, track) = session();
+        let mut segment = Segment::new("a", "media", TimeRange::new(0, 2_000_000));
+        segment.source_range = Some(TimeRange::new(0, 2_000_000));
+        segment.volume = 0.4;
+        segment.extra_material_refs.push(MaterialId::new("spd"));
+        session.draft.materials.speeds.push(MaterialSpeed {
+            id: MaterialId::new("spd"),
+            mode: SpeedMode::Normal,
+            speed: 1.0,
+            ..MaterialSpeed::default()
+        });
+        session
+            .apply(
+                0,
+                &[Request::Place {
+                    track_id: track.clone(),
+                    segment: Box::new(segment),
+                }],
+            )
+            .unwrap();
+        session
+            .apply(
+                1,
+                &[Request::SetConstantSpeed {
+                    segment_id: "a".into(),
+                    speed: 2.0,
+                }],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert_eq!(segment.speed, 2.0);
+        assert_eq!(segment.target, TimeRange::new(0, 1_000_000));
+        assert_eq!(segment.source_range, Some(TimeRange::new(0, 2_000_000)));
+        assert_eq!(segment.volume, 0.4);
+        assert_eq!(session.draft().materials.speeds[0].speed, 2.0);
+        assert_eq!(session.draft().materials.speeds[0].mode, SpeedMode::Normal);
+        assert_eq!(session.draft().duration, Micros(1_000_000));
+
+        session
+            .apply(
+                2,
+                &[Request::Trim {
+                    segment_id: "a".into(),
+                    edge: TrimEdge::Start,
+                    time: Micros(200_000),
+                }],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert_eq!(segment.target, TimeRange::new(200_000, 800_000));
+        assert_eq!(
+            segment.source_range,
+            Some(TimeRange::new(400_000, 1_600_000))
+        );
+        assert_eq!(segment.volume, 0.4);
+
+        session
+            .apply(
+                3,
+                &[Request::Trim {
+                    segment_id: "a".into(),
+                    edge: TrimEdge::End,
+                    time: Micros(600_000),
+                }],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert_eq!(segment.target, TimeRange::new(200_000, 400_000));
+        assert_eq!(segment.source_range, Some(TimeRange::new(400_000, 800_000)));
+    }
+
+    #[test]
+    fn a_speed_that_cannot_map_leaves_the_draft() {
+        let (mut session, track) = session();
+        let mut segment = Segment::new("a", "media", TimeRange::new(0, 2_000_000));
+        segment.source_range = Some(TimeRange::new(0, 2_000_000));
+        session
+            .apply(
+                0,
+                &[
+                    Request::Place {
+                        track_id: track.clone(),
+                        segment: Box::new(segment),
+                    },
+                    place(&track, "b", 2_000_000, 100_000),
+                ],
+            )
+            .unwrap();
+        let before = session.draft().clone();
+        let error = session
+            .apply(
+                1,
+                &[Request::SetConstantSpeed {
+                    segment_id: "a".into(),
+                    speed: 0.5,
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::Overlap);
+        assert_eq!(session.draft(), &before);
+        let error = session
+            .apply(
+                1,
+                &[Request::SetConstantSpeed {
+                    segment_id: "a".into(),
+                    speed: 0.0,
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            EditError::Speed(ConstantSpeedError::NonPositiveSpeed)
+        );
+        assert_eq!(session.draft(), &before);
+        session.draft.tracks[0].segments[0].speed = 0.0;
+        let before = session.draft().clone();
+        let error = session
+            .apply(
+                1,
+                &[Request::Trim {
+                    segment_id: "a".into(),
+                    edge: TrimEdge::End,
+                    time: Micros(1_000_000),
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            EditError::Speed(ConstantSpeedError::NonPositiveSpeed)
+        );
+        assert_eq!(session.draft(), &before);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 mod move_segment;
 mod place;
+mod speed;
 mod track;
 mod trim;
 
@@ -27,8 +28,8 @@ pub enum EditError {
     LockedTrack,
     /// Two positive spans on one track overlap. Touching does not.
     Overlap,
-    /// The source range is set and speed is not 1, so the trim has no mapping yet.
-    SpeedUnmapped,
+    /// The constant-speed mapping refused the duration or the speed.
+    Speed(cutlass_model::ConstantSpeedError),
     Range(RangeError),
     EmptyUndo,
     EmptyRedo,
@@ -57,6 +58,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         } => trim(draft, segment_id, *edge, *time),
         Request::SetTrackAttribute { track_id, bit, on } => {
             track::set_track_attribute(draft, track_id, *bit, *on)
+        }
+        Request::SetConstantSpeed { segment_id, speed } => {
+            speed::set_constant_speed(draft, segment_id, *speed)
         }
     }
 }

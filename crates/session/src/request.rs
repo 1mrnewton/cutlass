@@ -23,7 +23,7 @@ pub enum Request {
         track_id: TrackId,
         start: Micros,
     },
-    /// Move one target edge. At speed 1, a source range moves with that edge.
+    /// Move one target edge. A source range maps through the segment speed.
     Trim {
         segment_id: SegmentId,
         edge: TrimEdge,
@@ -35,4 +35,6 @@ pub enum Request {
         bit: i32,
         on: bool,
     },
+    /// Set a constant speed. Target duration becomes the source duration mapped by `speed`.
+    SetConstantSpeed { segment_id: SegmentId, speed: f64 },
 }

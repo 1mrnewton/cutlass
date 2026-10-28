@@ -32,6 +32,9 @@ pub struct MaterialVideo {
     pub crop_ratio: String,
     #[serde(default = "one")]
     pub crop_scale: f64,
+    /// Eight coordinates. Absent and `Default` are zero, not a full-frame quad.
+    #[serde(default)]
+    pub crop: Crop,
     #[serde(default)]
     pub reverse_path: String,
     #[serde(default)]
@@ -41,6 +44,27 @@ pub struct MaterialVideo {
     pub freeze: Option<FreezeInfo>,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+/// A crop quad. Each corner is an `x` and a `y`. Zero is the empty value.
+#[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct Crop {
+    #[serde(default)]
+    pub upper_left_x: f64,
+    #[serde(default)]
+    pub upper_left_y: f64,
+    #[serde(default)]
+    pub upper_right_x: f64,
+    #[serde(default)]
+    pub upper_right_y: f64,
+    #[serde(default)]
+    pub lower_left_x: f64,
+    #[serde(default)]
+    pub lower_left_y: f64,
+    #[serde(default)]
+    pub lower_right_x: f64,
+    #[serde(default)]
+    pub lower_right_y: f64,
 }
 
 /// The source frame a freeze holds across the segment's target range.
@@ -82,6 +106,7 @@ impl Default for MaterialVideo {
             has_audio: false,
             crop_ratio: free_crop(),
             crop_scale: 1.0,
+            crop: Crop::default(),
             reverse_path: String::new(),
             reverse_intensifies_path: String::new(),
             freeze: None,
@@ -101,6 +126,8 @@ mod tests {
         assert_eq!(video, parsed);
         assert_eq!(video.crop_ratio, "free");
         assert_eq!(video.crop_scale, 1.0);
+        assert_eq!(video.crop, Crop::default());
+        assert_eq!(video.crop.upper_left_x, 0.0);
         assert_eq!(video.duration, Micros(0));
         assert_ne!(video.duration, MaterialVideo::MAPPING_DURATION);
         assert_eq!(MaterialVideo::new("clip").id.as_str(), "clip");

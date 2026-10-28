@@ -1,13 +1,18 @@
+mod crop;
+mod fade;
 mod freeze;
+mod keyframe;
 mod linkage;
 mod move_segment;
 mod place;
 mod reverse;
 mod speed;
 mod split;
+mod text;
 mod track;
 mod transition;
 mod trim;
+mod volume;
 
 use cutlass_model::{Draft, LinkageSettings, Micros, RangeError, TrackAttribute};
 
@@ -98,6 +103,22 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::SetFreeze { segment_id, freeze } => {
             freeze::set_freeze(draft, segment_id, freeze.clone())
         }
+        Request::SetVolume { segment_id, volume } => volume::set_volume(draft, segment_id, *volume),
+        Request::SetFade {
+            segment_id,
+            fade_id,
+            fade_in,
+            fade_out,
+        } => fade::set_fade(draft, segment_id, fade_id, *fade_in, *fade_out),
+        Request::SetCrop { segment_id, crop } => crop::set_crop(draft, segment_id, *crop),
+        Request::SetTextContent {
+            segment_id,
+            content,
+        } => text::set_text(draft, segment_id, content),
+        Request::SetKeyframes {
+            segment_id,
+            keyframes,
+        } => keyframe::set_keyframes(draft, segment_id, keyframes),
     }
 }
 

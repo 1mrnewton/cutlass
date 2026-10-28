@@ -35,7 +35,7 @@ pub use id::{DraftId, MaterialId, SegmentId, TrackId};
 pub use keyframe::{CommonKeyframe, CommonKeyframeGroup};
 pub use linkage::{KindSwitches, LinkageSettings, linkage_from_biz};
 pub use materials::{
-    ConstantSpeedError, CurveSpeed, FreezeInfo, MaterialAnimations, MaterialAudio,
+    ConstantSpeedError, Crop, CurveSpeed, FreezeInfo, MaterialAnimations, MaterialAudio,
     MaterialAudioFade, MaterialCanvas, MaterialColorConfig, MaterialDraft, MaterialEffect,
     MaterialHsl, MaterialPictureAdjust, MaterialPluginEffect, MaterialRef, MaterialShape,
     MaterialSpeed, MaterialText, MaterialTransition, MaterialVideo, MaterialVideoEffect, Materials,

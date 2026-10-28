@@ -1,5 +1,6 @@
 use cutlass_model::{
-    FreezeInfo, MaterialId, MaterialTransition, Micros, Segment, SegmentId, SpeedPoint, TrackId,
+    CommonKeyframeGroup, Crop, FreezeInfo, MaterialId, MaterialTransition, Micros, Segment,
+    SegmentId, SpeedPoint, TrackId,
 };
 
 /// Which edge of a segment a trim moves.
@@ -73,5 +74,26 @@ pub enum Request {
     SetFreeze {
         segment_id: SegmentId,
         freeze: Option<FreezeInfo>,
+    },
+    /// Set the segment gain. This is not mute, solo, or a fade.
+    SetVolume { segment_id: SegmentId, volume: f64 },
+    /// Store fade-in and fade-out durations. The segment volume stays.
+    SetFade {
+        segment_id: SegmentId,
+        fade_id: MaterialId,
+        fade_in: Micros,
+        fade_out: Micros,
+    },
+    /// Store the crop quad. Ratio and scale stay.
+    SetCrop { segment_id: SegmentId, crop: Crop },
+    /// Replace the text material's string. Word columns stay as stored.
+    SetTextContent {
+        segment_id: SegmentId,
+        content: String,
+    },
+    /// Replace the segment's keyframe groups.
+    SetKeyframes {
+        segment_id: SegmentId,
+        keyframes: Vec<CommonKeyframeGroup>,
     },
 }

@@ -14,7 +14,7 @@ mod upgrade;
 use std::fmt;
 use std::path::PathBuf;
 
-pub use backup::copy_draft_backup;
+pub use backup::copy_backup;
 pub use json::{parse_draft, write_draft};
 pub use repair::{RepairNote, repair};
 pub use upgrade::{BUILD, Protocol, upgrade};
@@ -30,7 +30,7 @@ pub enum StoreError {
     InvalidProtocol { draft_id: String, found: String },
     /// The file is newer than this build. It is not downgraded into something this build can edit.
     NewerProtocol { draft_id: String, found: String },
-    /// A backup is a copy of `draft_info.json` and of no other file.
+    /// A backup is a copy of `draft_info.json` or `project.json`, and of no other file.
     BackupRefused { path: PathBuf },
     /// The filesystem refused the read or the write.
     Io { path: PathBuf, message: String },
@@ -60,7 +60,7 @@ impl fmt::Display for StoreError {
             Self::BackupRefused { path } => {
                 write!(
                     formatter,
-                    "a backup copies draft_info.json only, not {}",
+                    "a backup copies draft_info.json or project.json, not {}",
                     path.display()
                 )
             }

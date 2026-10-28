@@ -550,6 +550,8 @@ name = "cutlass-storage"
 version = "0.1.0"
 dependencies = [
  "cutlass-download",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

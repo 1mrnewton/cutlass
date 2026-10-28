@@ -17,6 +17,7 @@ candle-core = { version = "0.11.0", git = "https://github.com/huggingface/candle
 candle-nn = { version = "0.11.0", git = "https://github.com/huggingface/candle", rev = "12bb5d1f6350f4ea9827d9086f213feec1f0af6a" }
 rustfft = "6.4.1"
 safetensors = "0.8.0"
+serde_json = "1.0.154"
 symphonia = { version = "0.6.1", default-features = false, features = [
     "aac",
     "aiff",

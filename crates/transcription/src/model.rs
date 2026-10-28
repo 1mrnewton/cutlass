@@ -253,7 +253,7 @@ impl Recognizer for LocalRecognizer {
 pub enum ModelError {
     /// A tensor shape does not match the head.
     Shape,
-    /// The weight bytes are not the four `f32` tensors.
+    /// The weights could not be read.
     Weights,
     /// A tensor could not be built on the device.
     Device,

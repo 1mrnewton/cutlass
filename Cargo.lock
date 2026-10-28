@@ -742,6 +742,7 @@ dependencies = [
  "cutlass-session",
  "rustfft",
  "safetensors",
+ "serde_json",
  "symphonia",
 ]
 

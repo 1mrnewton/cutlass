@@ -57,12 +57,24 @@ impl AacDecoder {
             });
         }
         for side in &packet.side {
-            if let cutlass_decode::SideData::Config(bytes) = side
-                && bytes.as_slice() != self.config.asc.as_slice()
-            {
-                return Err(CodecError::Unsupported {
-                    what: "configuration change",
-                });
+            match side {
+                cutlass_decode::SideData::Config(bytes)
+                    if bytes.as_slice() != self.config.asc.as_slice() =>
+                {
+                    return Err(CodecError::Unsupported {
+                        what: "configuration change",
+                    });
+                }
+                cutlass_decode::SideData::Protection { crc, header } => {
+                    let found = protection_crc(header.as_deref(), &packet.data, &self.config)?;
+                    if found != *crc {
+                        return Err(CodecError::Malformed {
+                            at_bit: 0,
+                            what: "crc",
+                        });
+                    }
+                }
+                _ => {}
             }
         }
         let mut scratch = self.overlaps.clone();
@@ -888,6 +900,122 @@ fn skip_fill(bits: &mut BitReader<'_>) -> Result<(), CodecError> {
     Ok(())
 }
 
+/// CRC-16, polynomial x^16 + x^15 + x^2 + 1, register starting at `0xFFFF`.
+///
+/// ISO/IEC 13818-7 points this at ISO/IEC 11172-3. A single-block ADTS CRC
+/// covers the 56 header bits and then, per element, the first 192 bits after
+/// `id_syn_ele` (128 more from the second channel stream of a pair). A
+/// multi-block raw CRC omits the header. Short elements are zero-padded to
+/// that length. Data-stream elements are covered in full.
+pub fn protection_crc(
+    header: Option<&[u8]>,
+    raw: &[u8],
+    config: &AudioConfig,
+) -> Result<u16, CodecError> {
+    let mut crc = Crc16::new();
+    if let Some(header) = header {
+        if header.len() != 7 {
+            return Err(CodecError::InvalidApi {
+                what: "adts header",
+            });
+        }
+        for byte in header {
+            for shift in (0..8).rev() {
+                crc.bit((byte >> shift) & 1);
+            }
+        }
+    }
+    let mut bits = BitReader::new(raw);
+    let mut seen = 0usize;
+    while bits.bits_left() >= 3 {
+        seen += 1;
+        if seen > 32 {
+            return Err(CodecError::Limit { what: "elements" });
+        }
+        let id = bits.read(3)?;
+        if id == END {
+            break;
+        }
+        let after = bits.position();
+        match id {
+            0 | 3 => {
+                let _ = decode_single(&mut bits, config, id == 3)?;
+                crc.cover(raw, after, bits.position(), 192);
+            }
+            1 => {
+                let second = consume_pair(&mut bits, config)?;
+                crc.cover(raw, after, bits.position(), 192);
+                crc.cover(raw, second, bits.position(), 128);
+            }
+            4 => {
+                skip_data(&mut bits)?;
+                crc.cover(raw, after, bits.position(), bits.position() - after);
+            }
+            2 => return Err(CodecError::Unsupported { what: "coupling" }),
+            5 => {
+                return Err(CodecError::Unsupported {
+                    what: "program config",
+                });
+            }
+            6 => skip_fill(&mut bits)?,
+            _ => return Err(malformed(&bits, "element")),
+        }
+    }
+    Ok(crc.finish())
+}
+
+fn consume_pair(bits: &mut BitReader<'_>, config: &AudioConfig) -> Result<usize, CodecError> {
+    let _tag = bits.read(4)?;
+    let common = bits.read(1)? == 1;
+    let shared = if common {
+        let ics = read_ics_info(bits, config)?;
+        let _ms = read_ms(bits, &ics)?;
+        Some(ics)
+    } else {
+        None
+    };
+    let _left = decode_ics(bits, config, shared.clone())?;
+    let second = bits.position();
+    let _right = decode_ics(bits, config, shared)?;
+    Ok(second)
+}
+
+struct Crc16 {
+    reg: u16,
+}
+
+impl Crc16 {
+    fn new() -> Self {
+        Self { reg: 0xFFFF }
+    }
+
+    fn bit(&mut self, bit: u8) {
+        let out = (self.reg >> 15) & 1;
+        self.reg <<= 1;
+        if out ^ u16::from(bit & 1) != 0 {
+            self.reg ^= 0x8005;
+        }
+    }
+
+    fn cover(&mut self, data: &[u8], start: usize, end: usize, width: usize) {
+        let available = end.saturating_sub(start);
+        let take = available.min(width);
+        for index in 0..take {
+            let at = start + index;
+            let byte = data.get(at / 8).copied().unwrap_or(0);
+            let shift = 7 - (at % 8);
+            self.bit((byte >> shift) & 1);
+        }
+        for _ in take..width {
+            self.bit(0);
+        }
+    }
+
+    fn finish(self) -> u16 {
+        self.reg
+    }
+}
+
 fn skip_bits(bits: &mut BitReader<'_>, mut count: usize) -> Result<(), CodecError> {
     while count > 0 {
         let take = u32::try_from(count.min(24)).unwrap_or(24);
@@ -963,7 +1091,7 @@ mod tests {
     use super::group_lengths;
     use crate::bits::{BitSink, BitWriter};
     use crate::decode::AacDecoder;
-    use cutlass_decode::{ChannelLayout, CodecId, CodecParams, Packet};
+    use cutlass_decode::{ChannelLayout, CodecError, CodecId, CodecParams, Packet, SideData};
 
     #[test]
     fn grouping_bits_follow_transmission_order() {
@@ -998,6 +1126,35 @@ mod tests {
         assert_eq!(pcm.len(), 1024);
         assert!(pcm.iter().all(|sample| sample.abs() < 1.0e-6));
         assert!(decoder.drain_pcm().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_wrong_crc_does_not_advance_the_decoder() {
+        let params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono());
+        let mut decoder = AacDecoder::open(&params).unwrap();
+        let raw = silent_frame();
+        let header = [0xFFu8, 0xF0, 0x4C, 0x40, 0x00, 0x1F, 0xFC];
+        let crc = super::protection_crc(Some(&header), &raw, decoder.config()).unwrap();
+        let mut packet = Packet::audio(raw, 0, 1024, 48_000);
+        packet.side.push(SideData::Protection {
+            crc: crc ^ 1,
+            header: Some(header.to_vec()),
+        });
+        let err = decoder.push_packet(&packet).unwrap_err();
+        assert_eq!(
+            err,
+            CodecError::Malformed {
+                at_bit: 0,
+                what: "crc"
+            }
+        );
+        assert_eq!(decoder.frame_index(), 0);
+        packet.side.clear();
+        packet.side.push(SideData::Protection {
+            crc,
+            header: Some(header.to_vec()),
+        });
+        assert_eq!(decoder.push_packet(&packet).unwrap().len(), 1024);
     }
 
     #[test]

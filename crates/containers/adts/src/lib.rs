@@ -4,9 +4,10 @@
 //! configuration 1 through 7. It cannot carry a program-config element,
 //! an explicit sample rate, or spectral-band-replication signaling: those
 //! stay in the raw access unit, and a caller that needs them in the header
-//! is rejected. `protection_absent = 0` and more than one raw data block per
-//! frame are recognized and rejected. The CRC polynomial is not applied
-//! until a fixture has confirmed which bits it covers.
+//! is rejected. `protection_absent = 0` stores the ISO/IEC 11172-3 CRC.
+//! One raw block leaves the element CRC for the codec. More than one raw
+//! block is accepted when the header carries each later block's byte
+//! position; without those positions the frame is rejected.
 //!
 //! Bytes that are not yet a whole frame stay buffered. `finish` of a trailing
 //! partial frame is truncation, not another packet. A decoded packet's `data`
@@ -18,7 +19,7 @@ use std::collections::VecDeque;
 
 use cutlass_container::{
     Channel, ChannelLayout, CodecError, CodecId, CodecParams, ContainerId, Demuxer, Muxer, Packet,
-    StreamInfo,
+    SideData, StreamInfo,
 };
 
 const RATES: [u32; 13] = [
@@ -129,14 +130,10 @@ impl AdtsDemuxer {
     }
 
     fn accept(&mut self, header: Header) -> Result<(), CodecError> {
-        if !header.protection_absent {
-            self.buf.drain(..header.frame_len);
-            return Err(CodecError::Unsupported { what: "crc" });
-        }
-        if header.blocks != 0 {
+        if header.blocks != 0 && header.protection_absent {
             self.buf.drain(..header.frame_len);
             return Err(CodecError::Unsupported {
-                what: "multiple raw data blocks",
+                what: "unpositioned raw data blocks",
             });
         }
         if header.profile != 1 {
@@ -161,14 +158,79 @@ impl AdtsDemuxer {
             });
         }
         self.layout = Some(layout);
-        let payload = self.buf[header.header_len..header.frame_len].to_vec();
+        let frame: Vec<u8> = self.buf[..header.frame_len].to_vec();
         self.buf.drain(..header.frame_len);
         self.skipped = 0;
+        self.emit_blocks(&frame, &header, rate)?;
+        Ok(())
+    }
+
+    fn emit_blocks(&mut self, frame: &[u8], header: &Header, rate: u32) -> Result<(), CodecError> {
+        if header.protection_absent {
+            self.push_unit(&frame[header.header_len..], None, rate);
+            return Ok(());
+        }
+        if header.blocks == 0 {
+            let crc = u16::from_be_bytes([frame[7], frame[8]]);
+            self.push_unit(
+                &frame[header.header_len..],
+                Some(SideData::Protection {
+                    crc,
+                    header: Some(frame[..7].to_vec()),
+                }),
+                rate,
+            );
+            return Ok(());
+        }
+        let count = usize::from(header.blocks);
+        let mut positions = vec![0usize];
+        for index in 0..count {
+            let at = 7 + index * 2;
+            positions.push(usize::from(u16::from_be_bytes([frame[at], frame[at + 1]])));
+        }
+        let crc_at = 7 + count * 2;
+        let found = u16::from_be_bytes([frame[crc_at], frame[crc_at + 1]]);
+        if mpeg_crc(&frame[..crc_at]) != found {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "crc",
+            });
+        }
+        let base = header.header_len;
+        let end = frame.len() - base;
+        let blocks = usize::from(header.blocks) + 1;
+        for index in 0..blocks {
+            let start = positions[index];
+            let next = if index + 1 < blocks {
+                positions[index + 1]
+            } else {
+                end
+            };
+            if next < start.saturating_add(2) || next > end {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "raw data block position",
+                });
+            }
+            let crc_pos = base + next - 2;
+            let crc = u16::from_be_bytes([frame[crc_pos], frame[crc_pos + 1]]);
+            self.push_unit(
+                &frame[base + start..crc_pos],
+                Some(SideData::Protection { crc, header: None }),
+                rate,
+            );
+        }
+        Ok(())
+    }
+
+    fn push_unit(&mut self, payload: &[u8], side: Option<SideData>, rate: u32) {
         let pts = i64::try_from(self.samples).unwrap_or(i64::MAX);
         self.samples = self.samples.saturating_add(1024);
-        self.ready
-            .push_back(Packet::audio(payload, pts, 1024, rate));
-        Ok(())
+        let mut packet = Packet::audio(payload.to_vec(), pts, 1024, rate);
+        if let Some(side) = side {
+            packet.side.push(side);
+        }
+        self.ready.push_back(packet);
     }
 
     fn conflicts(&self, rate: u32, layout: &ChannelLayout, mpeg2: bool) -> bool {
@@ -236,6 +298,74 @@ impl AdtsMuxer {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// Writes up to four raw blocks in one ADTS frame.
+    ///
+    /// Each packet carries [`SideData::Protection`] for that block alone.
+    /// The header CRC covers the fixed header, the variable header, and the
+    /// byte positions, which is the check ISO/IEC 13818-7 assigns to
+    /// `adts_header_error_check`.
+    pub fn write_blocks(&mut self, packets: &[Packet]) -> Result<(), CodecError> {
+        if self.done {
+            return Err(CodecError::InvalidApi {
+                what: "write after finish",
+            });
+        }
+        if packets.is_empty() || packets.len() > 4 {
+            return Err(CodecError::Limit {
+                what: "raw data blocks",
+            });
+        }
+        if packets.len() == 1 {
+            return self.write_packet(&packets[0]);
+        }
+        let Some(params) = &self.params else {
+            return Err(CodecError::InvalidApi { what: "stream" });
+        };
+        let layout = params
+            .layout
+            .clone()
+            .ok_or(CodecError::InvalidApi { what: "layout" })?;
+        let mut positions = Vec::new();
+        let mut body = Vec::new();
+        let mut cursor = 0usize;
+        for (index, packet) in packets.iter().enumerate() {
+            if packet.data.is_empty() {
+                return Err(CodecError::InvalidApi {
+                    what: "empty packet",
+                });
+            }
+            if index > 0 {
+                let pos = u16::try_from(cursor).map_err(|_| CodecError::Limit {
+                    what: "raw data block position",
+                })?;
+                positions.extend(pos.to_be_bytes());
+            }
+            let crc = block_crc(packet)?;
+            body.extend_from_slice(&packet.data);
+            body.extend_from_slice(&crc.to_be_bytes());
+            cursor = cursor.saturating_add(packet.data.len() + 2);
+        }
+        let blocks = u8::try_from(packets.len() - 1).unwrap_or(0);
+        let header = encode_header(
+            positions.len() + 2 + body.len(),
+            index_of_rate(params.sample_rate, self.mpeg2)?,
+            config_of(&layout)?,
+            self.mpeg2,
+            true,
+            blocks,
+        )?;
+        let mut covered = header.to_vec();
+        covered.extend_from_slice(&positions);
+        let crc = mpeg_crc(&covered);
+        self.bytes.extend_from_slice(&header);
+        self.bytes.extend_from_slice(&positions);
+        self.bytes.extend_from_slice(&crc.to_be_bytes());
+        self.bytes.extend_from_slice(&body);
+        let count = u64::try_from(packets.len()).unwrap_or(0);
+        self.samples = self.samples.saturating_add(1024u64.saturating_mul(count));
+        Ok(())
+    }
 }
 
 impl Default for AdtsMuxer {
@@ -286,14 +416,32 @@ impl Muxer for AdtsMuxer {
             .layout
             .clone()
             .ok_or(CodecError::InvalidApi { what: "layout" })?;
-        let header = encode_header(
-            packet.data.len(),
-            index_of_rate(params.sample_rate, self.mpeg2)?,
-            config_of(&layout)?,
-            self.mpeg2,
-        )?;
-        self.bytes.extend_from_slice(&header);
-        self.bytes.extend_from_slice(&packet.data);
+        let rate_index = index_of_rate(params.sample_rate, self.mpeg2)?;
+        let channels = config_of(&layout)?;
+        if let Some(crc) = protection_crc(packet) {
+            let header = encode_header(
+                packet.data.len() + 2,
+                rate_index,
+                channels,
+                self.mpeg2,
+                true,
+                0,
+            )?;
+            self.bytes.extend_from_slice(&header);
+            self.bytes.extend_from_slice(&crc.to_be_bytes());
+            self.bytes.extend_from_slice(&packet.data);
+        } else {
+            let header = encode_header(
+                packet.data.len(),
+                rate_index,
+                channels,
+                self.mpeg2,
+                false,
+                0,
+            )?;
+            self.bytes.extend_from_slice(&header);
+            self.bytes.extend_from_slice(&packet.data);
+        }
         self.samples = self.samples.saturating_add(1024);
         Ok(())
     }
@@ -323,6 +471,7 @@ fn sniff(data: &[u8]) -> Sniff {
         return Sniff::Skip;
     }
     match parse_header(data) {
+        Err(CodecError::NeedMoreData) => Sniff::NeedMore,
         Ok(header) if header.frame_len <= MAX_FRAME && header.frame_len >= header.header_len => {
             if data.len() < header.header_len {
                 Sniff::NeedMore
@@ -346,7 +495,12 @@ fn parse_header(data: &[u8]) -> Result<Header, CodecError> {
         });
     }
     let protection_absent = data[1] & 1 == 1;
-    let header_len = if protection_absent { 7 } else { 9 };
+    let blocks = data[6] & 0b11;
+    let header_len = if protection_absent {
+        7
+    } else {
+        9 + 2 * usize::from(blocks)
+    };
     if data.len() < header_len {
         return Err(CodecError::NeedMoreData);
     }
@@ -359,32 +513,70 @@ fn parse_header(data: &[u8]) -> Result<Header, CodecError> {
         rate_index: (data[2] >> 2) & 0b1111,
         channels: ((data[2] & 0b11) << 1) | (data[3] >> 6),
         frame_len,
-        blocks: data[6] & 0b11,
+        blocks,
         protection_absent,
         header_len,
     })
 }
 
 fn encode_header(
-    payload: usize,
+    extra: usize,
     rate_index: u8,
     channels: u8,
     mpeg2: bool,
+    protect: bool,
+    blocks: u8,
 ) -> Result<[u8; 7], CodecError> {
-    let frame_len = payload.saturating_add(7);
-    if frame_len > MAX_FRAME {
+    let frame_len = extra.saturating_add(7);
+    if frame_len > MAX_FRAME || blocks > 3 {
         return Err(CodecError::Limit { what: "adts frame" });
     }
     let id = u8::from(mpeg2);
     let mut bytes = [0u8; 7];
     bytes[0] = 0xFF;
-    bytes[1] = 0xF1 | (id << 3);
+    bytes[1] = 0xF0 | (id << 3) | u8::from(!protect);
     bytes[2] = (1 << 6) | (rate_index << 2) | ((channels >> 2) & 0b11);
     bytes[3] = (channels << 6) | u8::try_from((frame_len >> 11) & 0b11).unwrap_or(0);
     bytes[4] = u8::try_from((frame_len >> 3) & 0xFF).unwrap_or(0);
     bytes[5] = u8::try_from((frame_len & 0b111) << 5).unwrap_or(0) | 0x1F;
-    bytes[6] = 0xFC;
+    bytes[6] = 0xFC | blocks;
     Ok(bytes)
+}
+
+fn protection_crc(packet: &Packet) -> Option<u16> {
+    packet.side.iter().find_map(|side| match side {
+        SideData::Protection {
+            crc,
+            header: Some(_),
+        } => Some(*crc),
+        _ => None,
+    })
+}
+
+fn block_crc(packet: &Packet) -> Result<u16, CodecError> {
+    packet
+        .side
+        .iter()
+        .find_map(|side| match side {
+            SideData::Protection { crc, header: None } => Some(*crc),
+            _ => None,
+        })
+        .ok_or(CodecError::InvalidApi { what: "crc" })
+}
+
+fn mpeg_crc(data: &[u8]) -> u16 {
+    let mut reg = 0xffffu16;
+    for byte in data {
+        for shift in (0..8).rev() {
+            let bit = u16::from((byte >> shift) & 1);
+            let out = (reg >> 15) & 1;
+            reg <<= 1;
+            if out ^ bit != 0 {
+                reg ^= 0x8005;
+            }
+        }
+    }
+    reg
 }
 
 fn rate_of(index: u8, mpeg2: bool) -> Result<u32, CodecError> {
@@ -483,7 +675,7 @@ fn named_profile(profile: u8) -> CodecError {
 mod tests {
     use super::{AdtsDemuxer, AdtsMuxer};
     use cutlass_container::{
-        ChannelLayout, CodecError, CodecId, CodecParams, Demuxer, Muxer, Packet,
+        ChannelLayout, CodecError, CodecId, CodecParams, Demuxer, Muxer, Packet, SideData,
     };
 
     fn mono() -> CodecParams {
@@ -573,15 +765,63 @@ mod tests {
     }
 
     #[test]
-    fn crc_and_multiple_blocks_are_rejected() {
-        let mut crc = super::encode_header(4, 3, 1, false).unwrap().to_vec();
-        crc[1] &= !1;
-        crc.extend_from_slice(&[0, 0, 1, 2, 3, 4]);
+    fn a_protected_block_keeps_its_crc_and_payload() {
+        let mut packet = Packet::audio(vec![1, 2, 3, 4], 0, 1024, 48_000);
+        packet.side.push(SideData::Protection {
+            crc: 0xABCD,
+            header: Some(vec![0; 7]),
+        });
+        let mut mux = AdtsMuxer::new();
+        mux.add_stream(mono()).unwrap();
+        mux.write_packet(&packet).unwrap();
+        let packets = packets_from(&mux.finish().unwrap());
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].data, vec![1, 2, 3, 4]);
+        assert!(matches!(
+            packets[0].side.as_slice(),
+            [SideData::Protection {
+                crc: 0xABCD,
+                header: Some(header),
+            }] if header.len() == 7 && header[1] & 1 == 0
+        ));
+    }
+
+    #[test]
+    fn two_raw_blocks_round_trip_when_positions_are_present() {
+        let mut first = Packet::audio(vec![1, 2, 3], 0, 1024, 48_000);
+        let mut second = Packet::audio(vec![4, 5], 1024, 1024, 48_000);
+        first.side.push(SideData::Protection {
+            crc: 0x1111,
+            header: None,
+        });
+        second.side.push(SideData::Protection {
+            crc: 0x2222,
+            header: None,
+        });
+        let mut mux = AdtsMuxer::new();
+        mux.add_stream(mono()).unwrap();
+        mux.write_blocks(&[first, second]).unwrap();
+        let packets = packets_from(&mux.finish().unwrap());
+        assert_eq!(packets.len(), 2);
+        assert_eq!(packets[0].data, vec![1, 2, 3]);
+        assert_eq!(packets[1].data, vec![4, 5]);
+        assert_eq!(packets[1].pts, 1024);
+        let mut broken = mux.bytes().to_vec();
+        broken[7] ^= 0x01;
         let mut demux = AdtsDemuxer::new();
-        let err = demux.push_bytes(&crc).unwrap_err();
-        assert_eq!(err, CodecError::Unsupported { what: "crc" });
-        let mut blocks = super::encode_header(4, 3, 1, false).unwrap();
-        blocks[6] |= 1;
+        let err = demux.push_bytes(&broken).unwrap_err();
+        assert_eq!(
+            err,
+            CodecError::Malformed {
+                at_bit: 0,
+                what: "crc"
+            }
+        );
+    }
+
+    #[test]
+    fn unpositioned_multiple_blocks_are_rejected() {
+        let blocks = super::encode_header(4, 3, 1, false, false, 1).unwrap();
         let mut framed = blocks.to_vec();
         framed.extend_from_slice(&[1, 2, 3, 4]);
         let mut demux = AdtsDemuxer::new();
@@ -589,7 +829,7 @@ mod tests {
         assert_eq!(
             err,
             CodecError::Unsupported {
-                what: "multiple raw data blocks"
+                what: "unpositioned raw data blocks"
             }
         );
     }

@@ -28,6 +28,12 @@ pub enum SideData {
     },
     /// Codec configuration that becomes active at this packet.
     Config(Vec<u8>),
+    /// CRC-16 from ISO/IEC 11172-3 over the bits named by ISO/IEC 13818-7.
+    ///
+    /// `header` is the 7-byte ADTS fixed and variable header when this CRC
+    /// also covers that header. It is absent when the CRC covers one raw
+    /// data block of a multi-block frame.
+    Protection { crc: u16, header: Option<Vec<u8>> },
 }
 
 impl Packet {

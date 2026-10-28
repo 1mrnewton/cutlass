@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub use cutlass_codec::{
-    Channel, ChannelLayout, CodecError, CodecId, CodecParams, ContainerId, Packet,
+    Channel, ChannelLayout, CodecError, CodecId, CodecParams, ContainerId, Packet, SideData,
 };
 
 #[derive(Clone, Debug, PartialEq)]

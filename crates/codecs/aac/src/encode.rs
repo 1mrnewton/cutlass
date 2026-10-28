@@ -1442,7 +1442,7 @@ mod tests {
                     trailing_padding,
                     ..
                 } => Some((*encoder_delay, *trailing_padding)),
-                SideData::Config(_) => None,
+                SideData::Config(_) | SideData::Protection { .. } => None,
             })
             .unwrap()
     }

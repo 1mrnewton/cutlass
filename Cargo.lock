@@ -518,6 +518,7 @@ name = "cutlass-store"
 version = "0.1.0"
 dependencies = [
  "cutlass-model",
+ "serde_json",
 ]
 
 [[package]]

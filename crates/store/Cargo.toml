@@ -8,6 +8,7 @@ description = "The project folder, JSON, upgrade, and repair."
 
 [dependencies]
 cutlass-model = { path = "../model", version = "0.1.0" }
+serde_json = "1.0.154"
 
 [lints]
 workspace = true

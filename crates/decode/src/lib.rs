@@ -16,8 +16,22 @@
 
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
-    Channel, ChannelLayout, CodecError, CodecParams, Packet, Pcm, SampleFormat, SideData,
+    BitDepth, Channel, ChannelLayout, CodecError, CodecParams, ColorType, ImageError, Packet, Pcm,
+    PhysicalPixel, Rgb8, SampleFormat, SideData, StillImage, TextItem, Transparency,
 };
+
+/// One decoded still.
+///
+/// `pts` and `duration` are copied from the packet. A still file has no
+/// clock, so both are zero and `timescale` is zero unless the container
+/// named one. The samples are the coded domain, not a display conversion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PictureOutput {
+    pub image: StillImage,
+    pub pts: i64,
+    pub duration: i64,
+    pub timescale: u32,
+}
 
 /// One decoded audio buffer.
 ///
@@ -45,6 +59,17 @@ pub trait Decoder: Send {
     fn drain(&mut self) -> Result<Vec<AudioOutput>, CodecError>;
 
     fn reset(&mut self);
+
+    /// Decode one still. Audio codecs refuse this.
+    ///
+    /// The default keeps an audio decoder on the audio methods. A picture
+    /// codec overrides this and refuses [`Self::push`].
+    fn decode_picture(&mut self, packet: &Packet) -> Result<Vec<PictureOutput>, CodecError> {
+        let _ = (self, packet);
+        Err(CodecError::Unsupported {
+            what: "picture output",
+        })
+    }
 }
 
 pub struct DecodeFactory {
@@ -152,6 +177,13 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(!out[0].concealed);
         assert!(decoder.drain().expect("drain").is_empty());
+        let picture = decoder.decode_picture(&packet);
+        assert_eq!(
+            picture.expect_err("audio"),
+            CodecError::Unsupported {
+                what: "picture output",
+            }
+        );
     }
 
     #[test]

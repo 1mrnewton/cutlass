@@ -2,13 +2,19 @@
 
 **English** · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Italiano](README.it.md) · [Русский](README.ru.md) · [العربية](README.ar.md) · [हिन्दी](README.hi.md) · [Bahasa Indonesia](README.id.md)
 
-Cutlass is an AI-powered video editor. You arrange clips on a timeline, watch them play, and save the finished video. You can ask the AI to help you edit.
+Free all-in-one video editor for everyone to create anything.
 
-A working prototype is ready today. Download it and install it from the [releases](https://github.com/1mrnewton/cutlass/releases) page on GitHub.
+Cutlass has everything you need to make a video, with AI built in. Flexible editing, and an assistant you can talk to. Make the video you have in mind.
 
-We are rewriting Cutlass to make it better. This repository is that work.
+Bring in footage, audio, and images. Trim, split, and arrange them on a multi-track timeline. Add text, stickers, shapes, effects, and transitions. Adjust color, speed, and crop, and animate with keyframes. Play it back, then export a finished video.
 
-It runs on a computer, iPhone, and Android.
+Start simple, or go further. The same editor covers a quick cut and a careful one.
+
+You can also say what you want. Describe the edit in plain language, and Cutlass makes it on the timeline, where you can change it or undo it. The editor is just as complete when you do the work yourself.
+
+Download Cutlass and install it today from the [releases](https://github.com/1mrnewton/cutlass/releases) page on GitHub. It is a real video editor, ready to use on Mac and Windows.
+
+We are rewriting Cutlass to make the next version better. This repository is that work.
 
 ## License
 

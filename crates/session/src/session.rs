@@ -123,7 +123,10 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{Draft, Micros, Segment, TimeRange, TrackAttribute, TrackId};
+    use cutlass_model::{
+        Draft, MaterialAudioFade, MaterialId, Micros, Segment, TimeRange, Track, TrackAttribute,
+        TrackId,
+    };
 
     use super::*;
     use crate::request::{Request, TrimEdge};
@@ -436,6 +439,161 @@ mod tests {
         let placed = session.draft().clone();
         assert_eq!(session.begin().unwrap_err(), EditError::HistoryOpen);
         assert_eq!(session.draft(), &placed);
+    }
+
+    #[test]
+    fn mute_hide_and_solo_do_not_change_volume_or_fade() {
+        let (mut session, track) = session();
+        let other = TrackId::new("over");
+        session.draft.tracks.push(Track::main(other.clone()));
+        session
+            .apply(0, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap();
+        session.draft.tracks[0].segments[0].volume = 0.25;
+        session.draft.materials.audio_fades.push(MaterialAudioFade {
+            id: MaterialId::new("fade"),
+            fade_in_duration: Micros(80_000),
+            fade_out_duration: Micros(120_000),
+            ..MaterialAudioFade::default()
+        });
+        session.draft.tracks[0].segments[0]
+            .extra_material_refs
+            .push(MaterialId::new("fade"));
+
+        let mut expected = session.draft().clone();
+        expected.tracks[0].attribute = TrackAttribute(TrackAttribute::MUTE);
+        session
+            .apply(
+                1,
+                &[Request::SetTrackAttribute {
+                    track_id: track.clone(),
+                    bit: TrackAttribute::MUTE,
+                    on: true,
+                }],
+            )
+            .unwrap();
+        assert_eq!(session.draft(), &expected);
+        assert_eq!(session.draft().tracks[0].segments[0].volume, 0.25);
+
+        expected.tracks[0].attribute = TrackAttribute(TrackAttribute::MUTE | TrackAttribute::HIDE);
+        session
+            .apply(
+                2,
+                &[Request::SetTrackAttribute {
+                    track_id: track.clone(),
+                    bit: TrackAttribute::HIDE,
+                    on: true,
+                }],
+            )
+            .unwrap();
+        assert_eq!(session.draft(), &expected);
+
+        expected.tracks[0].attribute =
+            TrackAttribute(TrackAttribute::MUTE | TrackAttribute::HIDE | TrackAttribute::SOLO);
+        expected.tracks[1].attribute = TrackAttribute(TrackAttribute::MUTE_BY_SOLO);
+        session
+            .apply(
+                3,
+                &[Request::SetTrackAttribute {
+                    track_id: track.clone(),
+                    bit: TrackAttribute::SOLO,
+                    on: true,
+                }],
+            )
+            .unwrap();
+        assert_eq!(session.draft(), &expected);
+        assert_eq!(
+            session.draft().materials.audio_fades[0].fade_in_duration,
+            Micros(80_000)
+        );
+
+        expected.tracks[1].attribute = TrackAttribute(TrackAttribute::SOLO);
+        expected.tracks[0].attribute = TrackAttribute(
+            TrackAttribute::MUTE | TrackAttribute::HIDE | TrackAttribute::MUTE_BY_SOLO,
+        );
+        session
+            .apply(
+                4,
+                &[
+                    Request::SetTrackAttribute {
+                        track_id: track.clone(),
+                        bit: TrackAttribute::SOLO,
+                        on: false,
+                    },
+                    Request::SetTrackAttribute {
+                        track_id: other.clone(),
+                        bit: TrackAttribute::SOLO,
+                        on: true,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(session.draft(), &expected);
+
+        expected.tracks[1].attribute = TrackAttribute(0);
+        expected.tracks[0].attribute = TrackAttribute(TrackAttribute::MUTE | TrackAttribute::HIDE);
+        session
+            .apply(
+                5,
+                &[Request::SetTrackAttribute {
+                    track_id: other,
+                    bit: TrackAttribute::SOLO,
+                    on: false,
+                }],
+            )
+            .unwrap();
+        assert_eq!(session.draft(), &expected);
+    }
+
+    #[test]
+    fn a_missing_track_attribute_leaves_the_draft() {
+        let (mut session, track) = session();
+        session
+            .apply(0, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap();
+        let before = session.draft().clone();
+        let error = session
+            .apply(
+                1,
+                &[
+                    place(&track, "b", 1_000_000, 100_000),
+                    Request::SetTrackAttribute {
+                        track_id: TrackId::new("missing"),
+                        bit: TrackAttribute::MUTE,
+                        on: true,
+                    },
+                ],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::MissingTrack);
+        assert_eq!(session.draft(), &before);
+        let error = session
+            .apply(
+                1,
+                &[Request::SetTrackAttribute {
+                    track_id: track.clone(),
+                    bit: 32,
+                    on: true,
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::UnknownAttribute);
+        assert_eq!(session.draft(), &before);
+
+        let mut expected = before.clone();
+        expected.tracks[0].attribute = TrackAttribute(TrackAttribute::MUTE_BY_SOLO);
+        session
+            .apply(
+                1,
+                &[Request::SetTrackAttribute {
+                    track_id: track,
+                    bit: TrackAttribute::MUTE_BY_SOLO,
+                    on: true,
+                }],
+            )
+            .unwrap();
+        assert_eq!(session.draft(), &expected);
+        assert_eq!(session.draft().tracks[0].segments[0].volume, 1.0);
     }
 
     #[test]

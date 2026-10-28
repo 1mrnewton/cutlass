@@ -29,4 +29,10 @@ pub enum Request {
         edge: TrimEdge,
         time: Micros,
     },
+    /// Turn one track-attribute bit on or off. Mute and solo are not gains.
+    SetTrackAttribute {
+        track_id: TrackId,
+        bit: i32,
+        on: bool,
+    },
 }

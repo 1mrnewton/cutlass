@@ -1,5 +1,6 @@
 mod move_segment;
 mod place;
+mod track;
 mod trim;
 
 use cutlass_model::{Draft, Micros, RangeError, TrackAttribute};
@@ -37,6 +38,8 @@ pub enum EditError {
     HistoryClosed,
     /// `amend` folds into a recorded step, and none exists yet.
     NothingToAmend,
+    /// The bit is not mute, hide, lock, solo, or muted-by-solo.
+    UnknownAttribute,
 }
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {
@@ -52,6 +55,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             edge,
             time,
         } => trim(draft, segment_id, *edge, *time),
+        Request::SetTrackAttribute { track_id, bit, on } => {
+            track::set_track_attribute(draft, track_id, *bit, *on)
+        }
     }
 }
 

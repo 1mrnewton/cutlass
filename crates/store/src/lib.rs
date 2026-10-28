@@ -1,17 +1,20 @@
 //! The project folder on disk.
 //!
-//! Open is parse, then upgrade, then a report. Upgrade and repair return a
-//! draft. They do not push history. The undo stack stays in the session.
+//! Open is parse, then upgrade, then a report. Upgrade returns a draft.
+//! Repair names problems and does not change that draft. Neither pushes
+//! history. The undo stack stays in the session.
 
 #![forbid(unsafe_code)]
 
 mod json;
+mod repair;
 mod upgrade;
 
 use std::fmt;
 use std::path::PathBuf;
 
 pub use json::{parse_draft, write_draft};
+pub use repair::{RepairNote, repair};
 pub use upgrade::{BUILD, Protocol, upgrade};
 
 /// Why a folder could not be read or written.

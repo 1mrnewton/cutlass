@@ -31,6 +31,12 @@ pub enum EditError {
     Range(RangeError),
     EmptyUndo,
     EmptyRedo,
+    /// `begin` or `record` was called while a transaction was already open.
+    HistoryOpen,
+    /// `commit`, `amend`, or `rollback` needs the transaction `begin` or `record` opened.
+    HistoryClosed,
+    /// `amend` folds into a recorded step, and none exists yet.
+    NothingToAmend,
 }
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {

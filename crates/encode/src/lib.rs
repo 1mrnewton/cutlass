@@ -9,13 +9,17 @@
 
 #![forbid(unsafe_code)]
 
+mod video;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
-    Channel, ChannelLayout, CodecError, CodecParams, Packet, Pcm, SampleFormat, SideData,
+    Channel, ChannelLayout, CodecError, CodecParams, ColorPrimaries, ColorRange,
+    MatrixCoefficients, Packet, Pcm, PixelFormat, Plane, SampleFormat, SideData, VideoFrame,
 };
+pub use video::{VideoEncodeFactory, VideoEncoder, VideoInput, request_video_cancel};
 
 /// PCM presented to an encoder, contiguous with the samples already accepted.
 ///

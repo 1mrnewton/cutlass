@@ -49,6 +49,21 @@ impl Packet {
             side: Vec::new(),
         }
     }
+
+    /// One video access unit. `keyframe` is true when the unit can be decoded
+    /// without an earlier picture.
+    #[must_use]
+    pub fn video(data: Vec<u8>, pts: i64, duration: i64, timescale: u32, keyframe: bool) -> Self {
+        Self {
+            stream: 0,
+            data,
+            pts,
+            duration,
+            timescale,
+            keyframe,
+            side: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

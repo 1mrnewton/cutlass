@@ -24,3 +24,27 @@ pub enum Transfer {
     Unspecified,
     Bt709,
 }
+
+/// Studio swing or full swing for a video picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum ColorRange {
+    #[default]
+    Unspecified,
+    /// Limited range, 16–235 for 8-bit luma.
+    Studio,
+    /// Full range, 0–255 for 8-bit luma.
+    Full,
+}
+
+/// Matrix used to relate Y′CbCr to RGB. The codec does not convert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum MatrixCoefficients {
+    #[default]
+    Unspecified,
+    /// ITU-R BT.709.
+    Bt709,
+    /// ITU-R BT.601.
+    Bt601,
+    /// Identity / RGB, stored only as a tag.
+    Rgb,
+}

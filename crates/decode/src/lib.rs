@@ -14,10 +14,16 @@
 
 #![forbid(unsafe_code)]
 
+mod video;
+
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
     Channel, ChannelLayout, CodecError, CodecParams, Packet, Pcm, SampleFormat, SideData,
 };
+pub use cutlass_codec::access::{
+    ColorPrimaries, ColorRange, MatrixCoefficients, Plane, VideoFrame,
+};
+pub use video::{VideoDecodeFactory, VideoDecoder, VideoOutput};
 
 /// One decoded audio buffer.
 ///

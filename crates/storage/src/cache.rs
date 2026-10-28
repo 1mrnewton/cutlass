@@ -186,7 +186,7 @@ pub(crate) fn persist(cache_root: &Path, index: &Index) -> Result<(), StorageErr
     replace_file(&temporary, &path)
 }
 
-fn replace_file(from: &Path, to: &Path) -> Result<(), StorageError> {
+pub(crate) fn replace_file(from: &Path, to: &Path) -> Result<(), StorageError> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {

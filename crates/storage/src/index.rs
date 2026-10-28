@@ -124,6 +124,27 @@ impl Record {
     pub fn age(&self) -> u64 {
         self.age
     }
+
+    pub(crate) fn cached(
+        id: ResourceId,
+        relative: PathBuf,
+        size: u64,
+        checksum: Option<Checksum>,
+        partial: bool,
+        preview: bool,
+        age: u64,
+    ) -> Self {
+        Self {
+            id,
+            place: Place::Cache,
+            relative,
+            size,
+            checksum,
+            partial,
+            preview,
+            age,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +167,38 @@ impl Index {
 
     pub(crate) fn insert(&mut self, record: Record) {
         self.records.insert(record.id.clone(), record);
+    }
+
+    pub(crate) fn remove(&mut self, id: &ResourceId) -> Option<Record> {
+        self.records.remove(id)
+    }
+
+    pub(crate) fn set_checksum(&mut self, id: &ResourceId, checksum: Checksum) -> bool {
+        let Some(record) = self.records.get_mut(id) else {
+            return false;
+        };
+        record.checksum = Some(checksum);
+        true
+    }
+
+    /// The next preview age. The counter moves only after the age is returned.
+    pub(crate) fn allocate_age(&mut self) -> Result<u64, StorageError> {
+        let age = self.next_age;
+        self.next_age = self
+            .next_age
+            .checked_add(1)
+            .ok_or_else(|| StorageError::Index {
+                path: PathBuf::from("index.json"),
+                message: "the cache age counter is exhausted".to_owned(),
+            })?;
+        Ok(age)
+    }
+
+    pub(crate) fn used_except(&self, id: &ResourceId) -> u64 {
+        self.records
+            .values()
+            .filter(|record| record.place == Place::Cache && &record.id != id)
+            .fold(0u64, |total, record| total.saturating_add(record.size))
     }
 
     pub(crate) fn used_bytes(&self) -> u64 {

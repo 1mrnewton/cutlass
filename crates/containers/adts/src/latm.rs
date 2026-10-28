@@ -9,9 +9,9 @@
 
 use std::collections::VecDeque;
 
-use cutlass_container::{
-    CodecError, CodecId, CodecParams, ContainerId, Demuxer, Muxer, Packet, StreamInfo,
-};
+use crate::api::{Demuxer, Muxer, StreamInfo};
+use cutlass_codec::access::{CodecError, CodecParams, Packet};
+use cutlass_codec::{CodecId, ContainerId};
 
 const MAX_FRAME: usize = 0x1FFF;
 const MAX_BUFFER: usize = 1 << 20;
@@ -310,7 +310,7 @@ fn write_length(out: &mut BitOut, mut size: usize) {
 struct ParsedAsc {
     bytes: Vec<u8>,
     rate: u32,
-    layout: cutlass_container::ChannelLayout,
+    layout: cutlass_codec::access::ChannelLayout,
     frame: u32,
 }
 
@@ -381,8 +381,8 @@ fn read_asc(bits: &mut Bits<'_>) -> Result<ParsedAsc, CodecError> {
     })
 }
 
-fn layout_for(config: u32) -> Result<cutlass_container::ChannelLayout, CodecError> {
-    use cutlass_container::{Channel, ChannelLayout};
+fn layout_for(config: u32) -> Result<cutlass_codec::access::ChannelLayout, CodecError> {
+    use cutlass_codec::access::{Channel, ChannelLayout};
     let channels = match config {
         1 => return Ok(ChannelLayout::mono()),
         2 => return Ok(ChannelLayout::stereo()),
@@ -570,13 +570,15 @@ impl BitOut {
 #[cfg(test)]
 mod tests {
     use super::{LatmDemuxer, LatmMuxer};
-    use cutlass_container::{CodecError, CodecId, CodecParams, Demuxer, Muxer, Packet};
+    use crate::{Demuxer, Muxer};
+    use cutlass_codec::access::{ChannelLayout, CodecError, CodecParams, Packet};
+    use cutlass_codec::CodecId;
 
     fn params() -> CodecParams {
         let mut params = CodecParams::audio(
             CodecId::Aac,
             48_000,
-            cutlass_container::ChannelLayout::mono(),
+            ChannelLayout::mono(),
         );
         params.extra = vec![0x11, 0x88];
         params

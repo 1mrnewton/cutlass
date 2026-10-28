@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod access;
+
 mod error;
 mod id;
 mod packet;

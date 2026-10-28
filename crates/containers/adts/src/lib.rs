@@ -15,16 +15,18 @@
 
 #![forbid(unsafe_code)]
 
+mod api;
 mod latm;
+mod m4a;
 
+pub use api::{Demuxer, Muxer, StreamInfo};
 pub use latm::{LatmDemuxer, LatmMuxer};
+pub use m4a::{Mp4Demuxer, Mp4Muxer};
 
 use std::collections::VecDeque;
 
-use cutlass_container::{
-    Channel, ChannelLayout, CodecError, CodecId, CodecParams, ContainerId, Demuxer, Muxer, Packet,
-    SideData, StreamInfo,
-};
+use cutlass_codec::access::{Channel, ChannelLayout, CodecError, CodecParams, Packet, SideData};
+use cutlass_codec::{CodecId, ContainerId};
 
 const RATES: [u32; 13] = [
     96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050, 16_000, 12_000, 11_025, 8_000,
@@ -677,10 +679,11 @@ fn named_profile(profile: u8) -> CodecError {
 
 #[cfg(test)]
 mod tests {
-    use super::{AdtsDemuxer, AdtsMuxer};
-    use cutlass_container::{
-        ChannelLayout, CodecError, CodecId, CodecParams, Demuxer, Muxer, Packet, SideData,
+    use super::{AdtsDemuxer, AdtsMuxer, Demuxer, Muxer};
+    use cutlass_codec::access::{
+        ChannelLayout, CodecError, CodecParams, Packet, SideData,
     };
+    use cutlass_codec::CodecId;
 
     fn mono() -> CodecParams {
         CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono())

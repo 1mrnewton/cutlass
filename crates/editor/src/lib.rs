@@ -5,11 +5,13 @@
 
 #![forbid(unsafe_code)]
 
+mod gesture;
 mod hit;
 mod lane;
 mod snap;
 mod zoom;
 
+pub use gesture::{GestureError, GestureOutcome, MoveGesture, Placement, move_gesture, placement};
 pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
 pub use lane::{Lane, lane_category, lanes};
 pub use snap::{SnapKind, SnapTarget, snap, transition_middle};

@@ -1,7 +1,8 @@
 //! Load-time report.
 //!
-//! Repair names a missing main track, a bad track order, or a range conflict.
-//! It does not move segments, and it does not invent a transition overlap.
+//! Repair names a missing main track, a bad track order, a range conflict, or
+//! a transition window that runs past a segment. It does not move segments,
+//! and it does not change the transition material.
 //!
 //! File order is the row order, from the top of the timeline to the bottom.
 //! Audio is the bottom block. The main track sits just above it. Overlay,
@@ -12,7 +13,10 @@
 
 use std::collections::BTreeSet;
 
-use cutlass_model::{Draft, SegmentId, Track, TrackId, TrackType};
+use cutlass_model::{
+    Draft, MaterialId, MaterialRef, MaterialTransition, Segment, SegmentId, Track, TrackId,
+    TrackType,
+};
 
 /// One problem found on open. The draft that was read is not changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,6 +30,13 @@ pub enum RepairNote {
     RangeConflict {
         track_id: TrackId,
         segment_id: SegmentId,
+    },
+    /// The blend window runs past a segment, or `duration` is negative.
+    /// The material and the ranges stay as stored.
+    TransitionWindow {
+        track_id: TrackId,
+        segment_id: SegmentId,
+        material_id: MaterialId,
     },
 }
 
@@ -50,6 +61,7 @@ pub fn repair(draft: &Draft) -> Vec<RepairNote> {
     }
     for track in &draft.tracks {
         range_conflicts(track, &mut notes);
+        transition_windows(draft, track, &mut notes);
     }
     notes
 }
@@ -118,10 +130,84 @@ fn range_conflicts(track: &Track, notes: &mut Vec<RepairNote>) {
     }
 }
 
+/// A transition is a material on the outgoing segment, not a segment of its own.
+/// The cut is that segment's target end. A duration of 0 is a hard cut.
+fn transition_windows(draft: &Draft, track: &Track, notes: &mut Vec<RepairNote>) {
+    for segment in &track.segments {
+        for material_id in &segment.extra_material_refs {
+            let Some(MaterialRef::Transition(transition)) =
+                draft.materials.get(material_id.as_str())
+            else {
+                continue;
+            };
+            if window_overruns(track, segment, transition) {
+                notes.push(RepairNote::TransitionWindow {
+                    track_id: track.id.clone(),
+                    segment_id: segment.id.clone(),
+                    material_id: material_id.clone(),
+                });
+            }
+        }
+    }
+}
+
+fn window_overruns(track: &Track, segment: &Segment, transition: &MaterialTransition) -> bool {
+    let duration = transition.duration.0;
+    if duration < 0 {
+        return true;
+    }
+    if duration == 0 {
+        return false;
+    }
+    let Some(cut) = segment
+        .target
+        .start
+        .0
+        .checked_add(segment.target.duration.0)
+    else {
+        return true;
+    };
+    let (left, right) = if transition.is_overlap {
+        let left = duration / 2;
+        (left, duration - left)
+    } else {
+        (duration, 0)
+    };
+    let Some(window_start) = cut.checked_sub(left) else {
+        return true;
+    };
+    if window_start < segment.target.start.0 {
+        return true;
+    }
+    if right == 0 {
+        return false;
+    }
+    let Some(window_end) = cut.checked_add(right) else {
+        return true;
+    };
+    let Some(incoming) = track
+        .segments
+        .iter()
+        .find(|other| other.id != segment.id && other.target.start.0 == cut)
+    else {
+        return true;
+    };
+    let Some(incoming_end) = incoming
+        .target
+        .start
+        .0
+        .checked_add(incoming.target.duration.0)
+    else {
+        return true;
+    };
+    window_end > incoming_end
+}
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
-        Draft, Segment, SegmentId, TimeRange, Track, TrackFlag, TrackId, TrackType,
+        Draft, MaterialId, MaterialTransition, Micros, Segment, SegmentId, TimeRange, Track,
+        TrackFlag, TrackId, TrackType,
     };
 
     use super::{RepairNote, repair};
@@ -137,6 +223,36 @@ mod tests {
             track_id: TrackId::new(track),
             segment_id: SegmentId::new(segment),
         }
+    }
+
+    fn note_window(track: &str, segment: &str, material: &str) -> RepairNote {
+        RepairNote::TransitionWindow {
+            track_id: TrackId::new(track),
+            segment_id: SegmentId::new(segment),
+            material_id: MaterialId::new(material),
+        }
+    }
+
+    fn with_transition(
+        draft: &mut Draft,
+        segment: &str,
+        material: &str,
+        duration: i64,
+        overlap: bool,
+    ) {
+        draft.materials.transitions.push(MaterialTransition {
+            id: MaterialId::new(material),
+            duration: Micros(duration),
+            is_overlap: overlap,
+            ..MaterialTransition::default()
+        });
+        let segment = draft
+            .tracks
+            .iter_mut()
+            .flat_map(|track| track.segments.iter_mut())
+            .find(|item| item.id.as_str() == segment)
+            .unwrap();
+        segment.extra_material_refs.push(MaterialId::new(material));
     }
 
     fn lane(id: &str, kind: TrackType) -> Track {
@@ -250,5 +366,95 @@ mod tests {
             repair(&draft),
             vec![RepairNote::MissingMainTrack, note_range("audio", "b")]
         );
+    }
+
+    #[test]
+    fn a_window_past_the_outgoing_segment_is_reported_and_the_material_stays() {
+        let mut draft = Draft::empty("D");
+        let mut main = Track::main("main");
+        main.segments = vec![clip("a", 0, 100), clip("b", 100, 50)];
+        draft.tracks = vec![main];
+        with_transition(&mut draft, "a", "blend", 150, false);
+        let before = draft.clone();
+        assert_eq!(repair(&draft), vec![note_window("main", "a", "blend")]);
+        assert_eq!(draft.materials.transitions[0].duration, Micros(150));
+        assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn a_window_that_fills_the_outgoing_segment_is_not_past_it() {
+        let mut draft = Draft::empty("D");
+        let mut main = Track::main("main");
+        main.segments = vec![clip("a", 0, 100), clip("b", 100, 50)];
+        draft.tracks = vec![main];
+        with_transition(&mut draft, "a", "blend", 100, false);
+        assert!(repair(&draft).is_empty());
+    }
+
+    #[test]
+    fn a_hard_cut_is_not_a_window() {
+        let mut draft = Draft::empty("D");
+        let mut main = Track::main("main");
+        main.segments = vec![clip("a", 0, 100), clip("b", 100, 50)];
+        draft.tracks = vec![main];
+        with_transition(&mut draft, "a", "blend", 0, false);
+        assert!(repair(&draft).is_empty());
+    }
+
+    #[test]
+    fn a_negative_duration_is_reported_and_stays_negative() {
+        let mut draft = Draft::empty("D");
+        let mut main = Track::main("main");
+        main.segments = vec![clip("a", 0, 100), clip("b", 100, 50)];
+        draft.tracks = vec![main];
+        with_transition(&mut draft, "a", "blend", -1, false);
+        let before = draft.clone();
+        assert_eq!(repair(&draft), vec![note_window("main", "a", "blend")]);
+        assert_eq!(draft.materials.transitions[0].duration, Micros(-1));
+        assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn an_overlap_that_fits_both_sides_is_not_reported() {
+        let mut draft = Draft::empty("D");
+        let mut main = Track::main("main");
+        main.segments = vec![clip("a", 0, 50), clip("b", 50, 51)];
+        draft.tracks = vec![main];
+        with_transition(&mut draft, "a", "blend", 101, true);
+        assert!(repair(&draft).is_empty());
+    }
+
+    #[test]
+    fn an_overlap_past_the_incoming_segment_is_reported() {
+        let mut draft = Draft::empty("D");
+        let mut main = Track::main("main");
+        main.segments = vec![clip("a", 0, 50), clip("b", 50, 50)];
+        draft.tracks = vec![main];
+        with_transition(&mut draft, "a", "blend", 101, true);
+        let before = draft.clone();
+        assert_eq!(repair(&draft), vec![note_window("main", "a", "blend")]);
+        assert!(draft.materials.transitions[0].is_overlap);
+        assert_eq!(draft.tracks[0].segments, before.tracks[0].segments);
+    }
+
+    #[test]
+    fn an_overlap_with_no_incoming_segment_is_reported() {
+        let mut draft = Draft::empty("D");
+        let mut main = Track::main("main");
+        main.segments = vec![clip("a", 0, 100)];
+        draft.tracks = vec![main];
+        with_transition(&mut draft, "a", "blend", 10, true);
+        assert_eq!(repair(&draft), vec![note_window("main", "a", "blend")]);
+    }
+
+    #[test]
+    fn a_ref_that_is_not_a_transition_is_not_a_window() {
+        let mut draft = Draft::empty("D");
+        let mut main = Track::main("main");
+        let mut segment = clip("a", 0, 100);
+        segment.extra_material_refs.push(MaterialId::new("missing"));
+        main.segments = vec![segment];
+        draft.tracks = vec![main];
+        assert!(repair(&draft).is_empty());
     }
 }

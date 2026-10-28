@@ -15,6 +15,10 @@
 
 #![forbid(unsafe_code)]
 
+mod latm;
+
+pub use latm::{LatmDemuxer, LatmMuxer};
+
 use std::collections::VecDeque;
 
 use cutlass_container::{

@@ -36,6 +36,7 @@ pub enum ContainerId {
     Caf,
     Flac,
     Isobmff,
+    Latm,
     Matroska,
     Mp3,
     MpegTs,

@@ -133,6 +133,21 @@ impl StreamParams {
         })
     }
 
+    /// A stream with no picture size and no audio rate.
+    ///
+    /// Timed metadata and an unclassified track use this. Absence is not a
+    /// zero-sized picture and it is not a silent audio stream.
+    #[must_use]
+    pub fn opaque(codec: StreamCodec, extradata: Vec<u8>) -> Self {
+        Self {
+            codec,
+            extradata,
+            size: None,
+            sample_rate: None,
+            channels: None,
+        }
+    }
+
     #[must_use]
     pub const fn codec(&self) -> &StreamCodec {
         &self.codec
@@ -204,6 +219,16 @@ mod tests {
         assert_eq!(params.channels(), Some(2));
         assert_eq!(params.extradata(), &[9]);
         assert_eq!(params.size(), None);
+    }
+
+    #[test]
+    fn opaque_leaves_size_and_rate_absent() {
+        let params = StreamParams::opaque(StreamCodec::Known(CodecId::Jpeg), vec![4]);
+        assert_eq!(params.codec(), &StreamCodec::Known(CodecId::Jpeg));
+        assert_eq!(params.extradata(), &[4]);
+        assert_eq!(params.size(), None);
+        assert_eq!(params.sample_rate(), None);
+        assert_eq!(params.channels(), None);
     }
 
     #[test]

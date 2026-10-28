@@ -747,9 +747,11 @@ fn correlated(left: &[f32], right: &[f32]) -> bool {
 }
 
 fn lowpass_lfe(spec: &mut [f32], rate: u32, frame: usize) {
+    // 500 Hz keeps the MDCT leakage of a low tone. A hard 300 Hz cut
+    // removes that leakage and the overlap no longer reconstructs it.
     let width = f64::from(rate.max(1)) / f64::from(u32::try_from(frame).unwrap_or(1).max(1));
     let mut limit = 1usize;
-    while limit < spec.len() && (limit as f64) * width < 300.0 {
+    while limit < spec.len() && (limit as f64) * width < 500.0 {
         limit += 1;
     }
     for sample in spec.iter_mut().skip(limit) {
@@ -812,13 +814,18 @@ fn code_prepared(
     for element in prepared {
         let bands = config.bands(element.short)?;
         let mut channels = Vec::with_capacity(element.channels.len());
+        let channel_offset = if element.kind == ElementKind::Lfe {
+            offset.saturating_sub(24)
+        } else {
+            offset
+        };
         for channel in &element.channels {
             channels.push(code_channel(
                 channel,
                 bands,
                 element.short,
                 element.seq,
-                offset,
+                channel_offset,
                 sfb_limit,
             )?);
         }
@@ -1409,8 +1416,9 @@ mod tests {
         let mut packets = encoder.push(&AudioInput { pcm }).unwrap();
         packets.extend(encoder.drain().unwrap());
         assert!(encoder.drain().unwrap().is_empty());
-        let mut decoder =
-            AacDecoder::open(&CodecParams::audio(CodecId::Aac, rate, layout)).unwrap();
+        let mut params = CodecParams::audio(CodecId::Aac, rate, layout);
+        params.extra = encoder.config().asc.clone();
+        let mut decoder = AacDecoder::open(&params).unwrap();
         let mut decoded = Vec::new();
         for packet in &packets {
             for output in decoder.push(packet).unwrap() {
@@ -1775,5 +1783,186 @@ mod tests {
     fn rms(samples: &[f32]) -> f32 {
         let energy = samples.iter().map(|sample| sample * sample).sum::<f32>();
         (energy / samples.len() as f32).sqrt()
+    }
+
+    fn configured(frame: usize, layout: ChannelLayout, bitrate: u32) -> AacEncoder {
+        AacEncoder::from_config(EncoderConfig {
+            profile: Profile::AacLc,
+            mpeg2: false,
+            sample_rate: 48_000,
+            layout,
+            frame_length: frame,
+            rate: RateControl::Average { bitrate },
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_nine_sixty_frame_clears_the_mono_gate() {
+        let samples = sine(48_000, 960 * 4, 1_000.0, 0.5, 1);
+        let mut encoder = configured(960, ChannelLayout::mono(), 96_000);
+        let (decoded, delay, _) = round_trip(&mut encoder, samples.clone());
+        assert_eq!(delay, 960);
+        assert_eq!(decoded.len(), samples.len());
+        let score = snr(&samples, &decoded);
+        assert!(score >= 40.0, "snr {score}");
+    }
+
+    #[test]
+    fn dc_stays_near_the_input() {
+        let samples = vec![0.25; 4096];
+        let mut encoder = configured(1024, ChannelLayout::mono(), 96_000);
+        let (decoded, _, _) = round_trip(&mut encoder, samples);
+        let mean = decoded.iter().sum::<f32>() / decoded.len() as f32;
+        assert!((mean - 0.25).abs() < 0.02, "mean {mean}");
+    }
+
+    #[test]
+    fn a_near_nyquist_sine_stays_above_the_floor() {
+        let samples = sine(48_000, 4096, 0.45 * 48_000.0, 0.5, 2);
+        let mut encoder = configured(1024, ChannelLayout::stereo(), 128_000);
+        let (decoded, _, _) = round_trip(&mut encoder, samples.clone());
+        for channel in 0..2 {
+            let reference: Vec<f32> = samples.iter().skip(channel).step_by(2).copied().collect();
+            let coded: Vec<f32> = decoded.iter().skip(channel).step_by(2).copied().collect();
+            let score = snr(&reference, &coded);
+            assert!(score >= 20.0, "channel {channel} snr {score}");
+        }
+    }
+
+    #[test]
+    fn five_one_keeps_each_channel_and_limits_the_lfe() {
+        let layout = ChannelLayout::five_one();
+        let channels = layout.len();
+        let mut samples = Vec::new();
+        for n in 0..4096 {
+            let tone = 0.4 * (2.0 * std::f32::consts::PI * 1_000.0 * n as f32 / 48_000.0).sin();
+            let low = 0.4 * (2.0 * std::f32::consts::PI * 80.0 * n as f32 / 48_000.0).sin();
+            for (index, label) in layout.channels().iter().enumerate() {
+                let _ = index;
+                samples.push(if *label == cutlass_decode::Channel::Lfe {
+                    low
+                } else {
+                    tone
+                });
+            }
+        }
+        let mut encoder = configured(1024, layout.clone(), 384_000);
+        let (decoded, _, _) = round_trip(&mut encoder, samples.clone());
+        assert_eq!(decoded.len(), samples.len());
+        for (index, label) in layout.channels().iter().enumerate() {
+            let reference: Vec<f32> = samples
+                .iter()
+                .skip(index)
+                .step_by(channels)
+                .copied()
+                .collect();
+            let coded: Vec<f32> = decoded
+                .iter()
+                .skip(index)
+                .step_by(channels)
+                .copied()
+                .collect();
+            let score = snr(&reference, &coded);
+            let floor = if *label == cutlass_decode::Channel::Lfe {
+                25.0
+            } else {
+                30.0
+            };
+            assert!(score >= floor, "{label:?} snr {score}");
+        }
+    }
+
+    #[test]
+    fn seven_one_round_trips_a_distinct_tone_per_channel() {
+        let layout = ChannelLayout::seven_one();
+        let channels = layout.len();
+        let mut samples = Vec::new();
+        for n in 0..4096 {
+            for (index, label) in layout.channels().iter().enumerate() {
+                let freq = if *label == cutlass_decode::Channel::Lfe {
+                    70.0
+                } else {
+                    300.0 + 120.0 * index as f32
+                };
+                samples
+                    .push(0.25 * (2.0 * std::f32::consts::PI * freq * n as f32 / 48_000.0).sin());
+            }
+        }
+        let mut encoder = configured(1024, layout.clone(), 512_000);
+        let (decoded, _, _) = round_trip(&mut encoder, samples.clone());
+        for (index, label) in layout.channels().iter().enumerate() {
+            let reference: Vec<f32> = samples
+                .iter()
+                .skip(index)
+                .step_by(channels)
+                .copied()
+                .collect();
+            let coded: Vec<f32> = decoded
+                .iter()
+                .skip(index)
+                .step_by(channels)
+                .copied()
+                .collect();
+            let score = snr(&reference, &coded);
+            assert!(score >= 25.0, "{label:?} snr {score}");
+        }
+    }
+
+    #[test]
+    fn noise_over_two_seconds_stays_inside_the_rate_window() {
+        let mut state = 0x1234_5678u32;
+        let mut samples = Vec::with_capacity(48_000 * 2);
+        for _ in 0..48_000 * 2 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let unit = (state >> 8) as f32 / ((1u32 << 24) as f32);
+            samples.push(unit * 2.0 - 1.0);
+        }
+        let mut encoder = configured(1024, ChannelLayout::mono(), 64_000);
+        let pcm = cutlass_decode::Pcm::from_f32(48_000, ChannelLayout::mono(), samples).unwrap();
+        let mut packets = encoder.push(&AudioInput { pcm }).unwrap();
+        packets.extend(encoder.drain().unwrap());
+        let bits: usize = packets.iter().map(|packet| packet.data.len() * 8).sum();
+        let seconds = 2.0;
+        let rate = bits as f32 / seconds;
+        assert!(rate <= 64_000.0 * 1.10, "rate {rate}");
+        assert!(rate >= 64_000.0 * 0.70, "rate {rate}");
+    }
+
+    #[test]
+    fn integer_pcm_uses_the_sixteen_bit_full_scale() {
+        let mut samples = Vec::new();
+        for n in 0..4096 {
+            let unit = (2.0 * std::f32::consts::PI * 1_000.0 * n as f32 / 48_000.0).sin();
+            samples.push((unit * 0.5 * 32768.0).round() as i16);
+        }
+        let reference: Vec<f32> = samples
+            .iter()
+            .map(|sample| f32::from(*sample) / 32768.0)
+            .collect();
+        let mut encoder = configured(1024, ChannelLayout::mono(), 96_000);
+        let pcm = cutlass_decode::Pcm::from_i16(48_000, ChannelLayout::mono(), samples).unwrap();
+        let mut packets = encoder.push(&AudioInput { pcm }).unwrap();
+        packets.extend(encoder.drain().unwrap());
+        let mut decoder = AacDecoder::open(&CodecParams::audio(
+            CodecId::Aac,
+            48_000,
+            ChannelLayout::mono(),
+        ))
+        .unwrap();
+        let mut decoded = Vec::new();
+        for packet in &packets {
+            for output in decoder.push(packet).unwrap() {
+                decoded.extend_from_slice(output.pcm.as_f32().unwrap());
+            }
+        }
+        if let Some(tail) = decoder.drain().unwrap().pop() {
+            decoded.extend_from_slice(tail.pcm.as_f32().unwrap());
+        }
+        let (delay, padding) = gapless(packets.last().unwrap());
+        let start = delay as usize;
+        let end = decoded.len() - padding as usize;
+        let score = snr(&reference, &decoded[start..end]);
+        assert!(score >= 40.0, "snr {score}");
     }
 }

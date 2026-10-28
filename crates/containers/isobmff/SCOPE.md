@@ -63,6 +63,7 @@ Committed fixtures are built in the tests. They are not separate media files. Re
 | `ffmpeg-mov` | `testsrc=duration=0.2:size=16x16:rate=10`, `-f mov` | QuickTime H.264 | Same comparison |
 | `gst-discoverer` | GStreamer 1.28.3 on the progressive file | Codec and width | stdout contains `H.264` or `avc`, and `Width: 32` |
 | `local-mp4-mov-m4a` | files already in `../local-files` | Real mp4, mov, and m4a; a webm is refused | Open, at least one packet, seek to 0 uses an index |
+| `ffmpeg-reads-our-mux` | this muxer, packets taken from ffmpeg 8.1.1 libx264 (`-bf 2 -g 5`) and AAC | `moov` at end, `moov` at start, fragmented MP4, QuickTime, and M4A | ffmpeg 8.1.1 `-c copy -f framehash` sha256, duration, keyframe, composition offset |
 | `perf-4k` | this muxer, 4000 samples of 16 bytes, `moov` at end | Open and seek cost | Open under 2s, seek under 500ms |
 
 `ffprobe` on each ffmpeg file reported `h264`. Payload hashes use `openssl dgst -sha256`. No hash crate was added.
@@ -90,6 +91,8 @@ The matrix above is the result. Still unsupported, and not treated as done: edit
 Independent producers: ffmpeg 8.1.1 for progressive MP4, fragmented MP4, and QuickTime. Independent check of the progressive file: ffprobe and GStreamer 1.28.3. GPAC and Bento4 tools were not available.
 
 `ffmpeg_and_gstreamer_see_the_same_packets` passed. For each file, packet count, payload sha256, size, duration, keyframe, and composition offset (`pts - dts`) matched ffmpeg `-c copy -f framehash -hash sha256`. Absolute dts and pts differed by one constant per file. That constant is ffmpeg's decode-time shift. This crate does not apply it. The test requires the shift to be the same for every packet in the file.
+
+`ffmpeg_reads_files_this_muxer_wrote` passed. This muxer rewrote those H.264 packets as `moov` at the end, `moov` at the start, a fragmented file, and QuickTime, and rewrote AAC packets as M4A. FFmpeg 8.1.1 `-c copy -f framehash -hash sha256` matched payload sha256, duration, keyframe, and composition offset on each file, with the same constant dts/pts shift rule.
 
 Self round trips cover `moov` at either end, brands, edits, interleave, fragments, and an unknown fourcc. They are supplementary to the ffmpeg comparison.
 
@@ -123,7 +126,7 @@ Commands after the last code change:
 | `cargo lint` | 0 |
 | `cargo test --workspace --offline` | 0 |
 | `cargo deny check` | 0 |
-| `cargo test -p cutlass-isobmff --offline --lib` | 31 passed, 0 failed (fuzz tests return immediately unless their environment variables are set) |
+| `cargo test -p cutlass-isobmff --offline --lib` | 32 passed, 0 failed (fuzz tests return immediately unless their environment variables are set) |
 
 `cargo deny check` reported advisories, bans, licenses, and sources ok. It also warned that some allowed licenses were not encountered. Production dependencies of this crate: `cutlass-container` only. No `unsafe`. Clippy warnings are denied. The fuzz and local-media tests skip, with a printed reason, when their inputs are absent. They are not empty selections: with the environment and the folder present, they assert.
 

@@ -125,7 +125,7 @@ impl Session {
 mod tests {
     use cutlass_model::{
         ConstantSpeedError, Draft, MaterialAudioFade, MaterialId, MaterialSpeed, Micros, Segment,
-        SpeedMode, TimeRange, Track, TrackAttribute, TrackId,
+        SpeedMode, SpeedPoint, TimeRange, Track, TrackAttribute, TrackId,
     };
 
     use super::*;
@@ -386,6 +386,118 @@ mod tests {
         let segment = &session.draft().tracks[0].segments[0];
         assert_eq!(segment.target, TimeRange::new(200_000, 400_000));
         assert_eq!(segment.source_range, Some(TimeRange::new(400_000, 800_000)));
+    }
+
+    fn speed_point(x: f64, y: f64) -> SpeedPoint {
+        SpeedPoint {
+            x,
+            y,
+            rest: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_curve_speed_maps_duration_by_the_integral_and_trim_uses_that_factor() {
+        let (mut session, track) = session();
+        let mut segment = Segment::new("a", "media", TimeRange::new(0, 2_000_000));
+        segment.source_range = Some(TimeRange::new(0, 2_000_000));
+        segment.volume = 0.4;
+        session
+            .apply(
+                0,
+                &[Request::Place {
+                    track_id: track.clone(),
+                    segment: Box::new(segment),
+                }],
+            )
+            .unwrap();
+        session
+            .apply(
+                1,
+                &[Request::SetCurveSpeed {
+                    segment_id: "a".into(),
+                    speed_id: MaterialId::new("curve"),
+                    points: vec![speed_point(0.0, 2.0), speed_point(1.0, 2.0)],
+                }],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert_eq!(segment.speed, 1.0);
+        assert_eq!(segment.volume, 0.4);
+        assert_eq!(segment.target, TimeRange::new(0, 1_000_000));
+        assert_eq!(segment.source_range, Some(TimeRange::new(0, 2_000_000)));
+        assert_eq!(session.draft().materials.speeds[0].mode, SpeedMode::Curve);
+        assert_eq!(
+            session.draft().materials.speeds[0]
+                .curve_speed
+                .as_ref()
+                .map(|curve| curve.speed_points.clone()),
+            Some(vec![speed_point(0.0, 2.0), speed_point(1.0, 2.0)])
+        );
+        session
+            .apply(
+                2,
+                &[Request::Trim {
+                    segment_id: "a".into(),
+                    edge: TrimEdge::Start,
+                    time: Micros(200_000),
+                }],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert_eq!(segment.target, TimeRange::new(200_000, 800_000));
+        assert_eq!(
+            segment.source_range,
+            Some(TimeRange::new(400_000, 1_600_000))
+        );
+        assert_eq!(segment.volume, 0.4);
+    }
+
+    #[test]
+    fn a_curve_point_at_or_below_zero_leaves_the_draft() {
+        let (mut session, track) = session();
+        let mut segment = Segment::new("a", "media", TimeRange::new(0, 2_000_000));
+        segment.source_range = Some(TimeRange::new(0, 2_000_000));
+        session
+            .apply(
+                0,
+                &[
+                    Request::Place {
+                        track_id: track.clone(),
+                        segment: Box::new(segment),
+                    },
+                    place(&track, "b", 2_000_000, 100_000),
+                ],
+            )
+            .unwrap();
+        let before = session.draft().clone();
+        let error = session
+            .apply(
+                1,
+                &[Request::SetCurveSpeed {
+                    segment_id: "a".into(),
+                    speed_id: MaterialId::new("curve"),
+                    points: vec![speed_point(0.0, 0.0), speed_point(1.0, 1.0)],
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            EditError::Speed(ConstantSpeedError::NonPositiveSpeed)
+        );
+        assert_eq!(session.draft(), &before);
+        let error = session
+            .apply(
+                1,
+                &[Request::SetCurveSpeed {
+                    segment_id: "a".into(),
+                    speed_id: MaterialId::new("curve"),
+                    points: vec![speed_point(0.0, 0.5), speed_point(1.0, 0.5)],
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::Overlap);
+        assert_eq!(session.draft(), &before);
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub use effect::{
 pub use shape::MaterialShape;
 pub use speed::{
     ConstantSpeedError, CurveSpeed, MaterialSpeed, SpeedPoint, constant_target_duration,
+    curve_speed_factor, curve_target_duration,
 };
 pub use text::MaterialText;
 pub use transition::MaterialTransition;

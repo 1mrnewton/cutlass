@@ -1,8 +1,8 @@
 //! The open cut and its history.
 //!
 //! One apply is a list of requests and one undo step. A failed request
-//! leaves the draft as it was. Magnet, linkage, transitions, and speed
-//! curves are not applied here.
+//! leaves the draft as it was. Magnet, linkage, and transitions are not
+//! applied here.
 
 #![forbid(unsafe_code)]
 

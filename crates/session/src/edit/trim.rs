@@ -15,7 +15,8 @@ pub fn trim(
     ensure_unlocked(draft.tracks[track_index].attribute)?;
     let current = draft.tracks[track_index].segments[segment_index].clone();
     let mut next = current.clone();
-    apply_edge(&mut next, edge, time)?;
+    let speed = super::speed::timeline_speed(draft, &current);
+    apply_edge(&mut next, edge, time, speed)?;
     if overlaps_except(&draft.tracks[track_index], &next, segment_id)? {
         return Err(EditError::Overlap);
     }
@@ -23,7 +24,12 @@ pub fn trim(
     Ok(())
 }
 
-fn apply_edge(segment: &mut Segment, edge: TrimEdge, time: Micros) -> Result<(), EditError> {
+fn apply_edge(
+    segment: &mut Segment,
+    edge: TrimEdge,
+    time: Micros,
+    speed: f64,
+) -> Result<(), EditError> {
     let end = segment
         .target
         .start
@@ -46,7 +52,6 @@ fn apply_edge(segment: &mut Segment, edge: TrimEdge, time: Micros) -> Result<(),
                 .ok_or(EditError::Range(cutlass_model::RangeError::EndOverflow))?;
             segment.target.start = time;
             segment.target.duration = Micros(duration);
-            let speed = segment.speed;
             if let Some(source) = segment.source_range.as_mut() {
                 let source_delta = map_timeline_to_source(delta, speed)?;
                 let source_duration = map_timeline_to_source(duration, speed)?;
@@ -64,7 +69,6 @@ fn apply_edge(segment: &mut Segment, edge: TrimEdge, time: Micros) -> Result<(),
                 ));
             }
             segment.target.duration = Micros(duration);
-            let speed = segment.speed;
             if let Some(source) = segment.source_range.as_mut() {
                 let source_duration = map_timeline_to_source(duration, speed)?;
                 if source_duration <= 0 {

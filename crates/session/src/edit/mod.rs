@@ -41,6 +41,9 @@ pub enum EditError {
     NothingToAmend,
     /// The bit is not mute, hide, lock, solo, or muted-by-solo.
     UnknownAttribute,
+    MissingMaterial,
+    /// The material id is already in a pool.
+    DuplicateMaterial,
 }
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {
@@ -62,6 +65,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::SetConstantSpeed { segment_id, speed } => {
             speed::set_constant_speed(draft, segment_id, *speed)
         }
+        Request::SetCurveSpeed {
+            segment_id,
+            speed_id,
+            points,
+        } => speed::set_curve_speed(draft, segment_id, speed_id, points),
     }
 }
 

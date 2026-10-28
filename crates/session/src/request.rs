@@ -1,4 +1,4 @@
-use cutlass_model::{Micros, Segment, SegmentId, TrackId};
+use cutlass_model::{MaterialId, Micros, Segment, SegmentId, SpeedPoint, TrackId};
 
 /// Which edge of a segment a trim moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,4 +37,10 @@ pub enum Request {
     },
     /// Set a constant speed. Target duration becomes the source duration mapped by `speed`.
     SetConstantSpeed { segment_id: SegmentId, speed: f64 },
+    /// Store a curve. `y` is speed and is linear in `x`. Target duration is the integral.
+    SetCurveSpeed {
+        segment_id: SegmentId,
+        speed_id: MaterialId,
+        points: Vec<SpeedPoint>,
+    },
 }

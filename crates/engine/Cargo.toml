@@ -1,0 +1,20 @@
+[package]
+name = "cutlass-engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The media graph under the draft."
+
+[dependencies]
+cutlass-model = { path = "../model", version = "0.1.0" }
+cutlass-picture = { path = "../picture", version = "0.1.0" }
+cutlass-gpu = { path = "../gpu", version = "0.1.0" }
+cutlass-codec = { path = "../codec", version = "0.1.0" }
+cutlass-container = { path = "../container", version = "0.1.0" }
+cutlass-decode = { path = "../decode", version = "0.1.0" }
+cutlass-color = { path = "../color", version = "0.1.0" }
+cutlass-audio = { path = "../audio", version = "0.1.0" }
+
+[lints]
+workspace = true

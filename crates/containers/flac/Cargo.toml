@@ -1,0 +1,13 @@
+[package]
+name = "cutlass-flac-container"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Demux and mux for flac."
+
+[dependencies]
+cutlass-container = { path = "../../container", version = "0.1.0" }
+
+[lints]
+workspace = true

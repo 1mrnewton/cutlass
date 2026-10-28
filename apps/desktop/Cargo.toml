@@ -1,0 +1,63 @@
+[package]
+name = "cutlass"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The desktop editor."
+
+[dependencies]
+cutlass-editor = { path = "../../crates/editor", version = "0.1.0" }
+cutlass-playback = { path = "../../crates/playback", version = "0.1.0" }
+cutlass-export = { path = "../../crates/export", version = "0.1.0" }
+cutlass-effects = { path = "../../crates/effects", version = "0.1.0" }
+cutlass-store = { path = "../../crates/store", version = "0.1.0" }
+cutlass-storage = { path = "../../crates/storage", version = "0.1.0" }
+cutlass-session = { path = "../../crates/session", version = "0.1.0" }
+cutlass-eval = { path = "../../crates/eval", version = "0.1.0" }
+cutlass-transcription = { path = "../../crates/transcription", version = "0.1.0" }
+cutlass-font = { path = "../../crates/font", version = "0.1.0" }
+cutlass-agent = { path = "../../crates/agent", version = "0.1.0" }
+cutlass-settings = { path = "../../crates/settings", version = "0.1.0" }
+cutlass-decode-platform = { path = "../../crates/decode-platform", version = "0.1.0" }
+cutlass-encode-platform = { path = "../../crates/encode-platform", version = "0.1.0" }
+cutlass-renderer-metal = { path = "../../crates/renderer-metal", version = "0.1.0" }
+cutlass-renderer-windows = { path = "../../crates/renderer-windows", version = "0.1.0" }
+cutlass-renderer-android = { path = "../../crates/renderer-android", version = "0.1.0" }
+cutlass-renderer-software = { path = "../../crates/renderer-software", version = "0.1.0" }
+cutlass-isobmff = { path = "../../crates/containers/isobmff", version = "0.1.0" }
+cutlass-matroska = { path = "../../crates/containers/matroska", version = "0.1.0" }
+cutlass-mpegts = { path = "../../crates/containers/mpegts", version = "0.1.0" }
+cutlass-avi = { path = "../../crates/containers/avi", version = "0.1.0" }
+cutlass-riff = { path = "../../crates/containers/riff", version = "0.1.0" }
+cutlass-aiff = { path = "../../crates/containers/aiff", version = "0.1.0" }
+cutlass-still = { path = "../../crates/containers/still", version = "0.1.0" }
+cutlass-mp3-container = { path = "../../crates/containers/mp3", version = "0.1.0" }
+cutlass-adts = { path = "../../crates/containers/adts", version = "0.1.0" }
+cutlass-ogg = { path = "../../crates/containers/ogg", version = "0.1.0" }
+cutlass-flac-container = { path = "../../crates/containers/flac", version = "0.1.0" }
+cutlass-caf = { path = "../../crates/containers/caf", version = "0.1.0" }
+cutlass-h264 = { path = "../../crates/codecs/h264", version = "0.1.0" }
+cutlass-hevc = { path = "../../crates/codecs/hevc", version = "0.1.0" }
+cutlass-av1 = { path = "../../crates/codecs/av1", version = "0.1.0" }
+cutlass-vp8 = { path = "../../crates/codecs/vp8", version = "0.1.0" }
+cutlass-vp9 = { path = "../../crates/codecs/vp9", version = "0.1.0" }
+cutlass-mpeg4 = { path = "../../crates/codecs/mpeg4", version = "0.1.0" }
+cutlass-mpeg2 = { path = "../../crates/codecs/mpeg2", version = "0.1.0" }
+cutlass-mjpeg = { path = "../../crates/codecs/mjpeg", version = "0.1.0" }
+cutlass-prores = { path = "../../crates/codecs/prores", version = "0.1.0" }
+cutlass-aac = { path = "../../crates/codecs/aac", version = "0.1.0" }
+cutlass-opus = { path = "../../crates/codecs/opus", version = "0.1.0" }
+cutlass-mp3 = { path = "../../crates/codecs/mp3", version = "0.1.0" }
+cutlass-flac = { path = "../../crates/codecs/flac", version = "0.1.0" }
+cutlass-pcm = { path = "../../crates/codecs/pcm", version = "0.1.0" }
+cutlass-vorbis = { path = "../../crates/codecs/vorbis", version = "0.1.0" }
+cutlass-alac = { path = "../../crates/codecs/alac", version = "0.1.0" }
+cutlass-ac3 = { path = "../../crates/codecs/ac3", version = "0.1.0" }
+cutlass-jpeg = { path = "../../crates/codecs/jpeg", version = "0.1.0" }
+cutlass-png = { path = "../../crates/codecs/png", version = "0.1.0" }
+cutlass-webp = { path = "../../crates/codecs/webp", version = "0.1.0" }
+cutlass-gif = { path = "../../crates/codecs/gif", version = "0.1.0" }
+
+[lints]
+workspace = true

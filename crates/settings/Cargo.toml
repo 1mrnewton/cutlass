@@ -1,0 +1,10 @@
+[package]
+name = "cutlass-settings"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Shortcuts and the other user settings."
+
+[lints]
+workspace = true

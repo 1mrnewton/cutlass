@@ -1,0 +1,10 @@
+[package]
+name = "cutlass-gpu"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Framebuffers, passes, and draw."
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "cutlass-mpegts"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Demux and mux for mpegts."
+
+[dependencies]
+cutlass-container = { path = "../../container", version = "0.1.0" }
+
+[lints]
+workspace = true

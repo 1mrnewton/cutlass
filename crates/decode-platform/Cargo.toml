@@ -1,0 +1,13 @@
+[package]
+name = "cutlass-decode-platform"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Platform decoders."
+
+[dependencies]
+cutlass-decode = { path = "../decode", version = "0.1.0" }
+
+[lints]
+workspace = true

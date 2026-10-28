@@ -1,0 +1,10 @@
+[package]
+name = "cutlass-font"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Font outlines and advances."
+
+[lints]
+workspace = true

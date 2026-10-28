@@ -1,0 +1,49 @@
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Workspace lints are opted in
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          root = Path(".")
+          manifest = (root / "Cargo.toml").read_text()
+          block = re.search(r"members = \[(.*?)\]", manifest, re.S).group(1)
+          members = re.findall(r'"([^"]+)"', block)
+          missing = []
+          allowed_unsafe = []
+          for member in members:
+              text = (root / member / "Cargo.toml").read_text()
+              if "[lints]\nworkspace = true" not in text:
+                  missing.append(member)
+              if 'unsafe_code = "allow"' in text:
+                  allowed_unsafe.append(member)
+          if missing or allowed_unsafe:
+              raise SystemExit(
+                  "missing workspace lints: "
+                  + ", ".join(missing)
+                  + "\nunsafe_code set to allow: "
+                  + ", ".join(allowed_unsafe)
+              )
+          PY
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace --all-targets
+      - name: Dependency policy
+        uses: EmbarkStudios/cargo-deny-action@v2

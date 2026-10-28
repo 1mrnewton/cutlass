@@ -1,0 +1,19 @@
+[package]
+name = "cutlass-eval"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "One snapshot at one time."
+
+[dependencies]
+cutlass-model = { path = "../model", version = "0.1.0" }
+cutlass-compositor = { path = "../compositor", version = "0.1.0" }
+cutlass-engine = { path = "../engine", version = "0.1.0" }
+cutlass-text = { path = "../text", version = "0.1.0" }
+cutlass-generated = { path = "../generated", version = "0.1.0" }
+cutlass-captions = { path = "../captions", version = "0.1.0" }
+cutlass-effects = { path = "../effects", version = "0.1.0" }
+
+[lints]
+workspace = true

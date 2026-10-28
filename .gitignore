@@ -1,0 +1,20 @@
+target/
+/dist
+/docs/*
+!/docs/roadmap.md
+/.cursor/
+local-assets/
+local-files/
+.env
+.DS_Store
+frames/
+proxy/
+.cutlass/
+librry/
+run.sh
+xcuserdata/
+*.xcuserstate
+
+# Added by cargo
+
+/target

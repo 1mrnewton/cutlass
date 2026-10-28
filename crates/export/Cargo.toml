@@ -1,0 +1,17 @@
+[package]
+name = "cutlass-export"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Encode a range and mux it."
+
+[dependencies]
+cutlass-eval = { path = "../eval", version = "0.1.0" }
+cutlass-encode = { path = "../encode", version = "0.1.0" }
+cutlass-container = { path = "../container", version = "0.1.0" }
+cutlass-codec = { path = "../codec", version = "0.1.0" }
+cutlass-model = { path = "../model", version = "0.1.0" }
+
+[lints]
+workspace = true

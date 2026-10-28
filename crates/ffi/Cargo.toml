@@ -1,0 +1,16 @@
+[package]
+name = "cutlass-ffi"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The calls the phone shells make."
+
+[dependencies]
+cutlass-session = { path = "../session", version = "0.1.0" }
+cutlass-store = { path = "../store", version = "0.1.0" }
+cutlass-storage = { path = "../storage", version = "0.1.0" }
+cutlass-playback = { path = "../playback", version = "0.1.0" }
+
+[lints]
+workspace = true

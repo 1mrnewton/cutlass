@@ -1,0 +1,13 @@
+[package]
+name = "cutlass-audio"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "PCM resample, stretch, fades, and the limiter."
+
+[dependencies]
+cutlass-codec = { path = "../codec", version = "0.1.0" }
+
+[lints]
+workspace = true

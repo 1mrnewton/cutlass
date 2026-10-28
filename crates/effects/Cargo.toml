@@ -1,0 +1,15 @@
+[package]
+name = "cutlass-effects"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Effect packages and their pictures."
+
+[dependencies]
+cutlass-model = { path = "../model", version = "0.1.0" }
+cutlass-picture = { path = "../picture", version = "0.1.0" }
+cutlass-storage = { path = "../storage", version = "0.1.0" }
+
+[lints]
+workspace = true

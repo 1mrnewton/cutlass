@@ -1,0 +1,10 @@
+[package]
+name = "cutlass-codec"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Codec ids, packets, and parameters."
+
+[lints]
+workspace = true

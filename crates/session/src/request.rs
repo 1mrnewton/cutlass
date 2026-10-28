@@ -1,0 +1,32 @@
+use cutlass_model::{Micros, Segment, SegmentId, TrackId};
+
+/// Which edge of a segment a trim moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrimEdge {
+    /// The timeline start. The end stays put.
+    Start,
+    /// The timeline end. The start stays put.
+    End,
+}
+
+/// One change. A combo is a slice of these.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Request {
+    /// Insert `segment` on `track_id`, ordered by its target start.
+    Place {
+        track_id: TrackId,
+        segment: Box<Segment>,
+    },
+    /// Keep the duration. `start` is the new target start. `track_id` may be the same track.
+    Move {
+        segment_id: SegmentId,
+        track_id: TrackId,
+        start: Micros,
+    },
+    /// Move one target edge. At speed 1, a source range moves with that edge.
+    Trim {
+        segment_id: SegmentId,
+        edge: TrimEdge,
+        time: Micros,
+    },
+}

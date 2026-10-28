@@ -1,0 +1,13 @@
+[package]
+name = "cutlass-renderer-android"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The Vulkan device."
+
+[dependencies]
+cutlass-gpu = { path = "../gpu", version = "0.1.0" }
+
+[lints]
+workspace = true

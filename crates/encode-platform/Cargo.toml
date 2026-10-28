@@ -1,0 +1,13 @@
+[package]
+name = "cutlass-encode-platform"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Platform encoders."
+
+[dependencies]
+cutlass-encode = { path = "../encode", version = "0.1.0" }
+
+[lints]
+workspace = true

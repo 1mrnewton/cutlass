@@ -1,0 +1,15 @@
+[package]
+name = "cutlass-agent"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The tool loop, skills, and the sandbox trait."
+
+[dependencies]
+cutlass-model = { path = "../model", version = "0.1.0" }
+cutlass-session = { path = "../session", version = "0.1.0" }
+cutlass-settings = { path = "../settings", version = "0.1.0" }
+
+[lints]
+workspace = true

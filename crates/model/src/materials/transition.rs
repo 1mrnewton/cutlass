@@ -4,8 +4,15 @@ use serde_json::{Map, Value};
 use crate::id::MaterialId;
 use crate::time::Micros;
 
-/// A transition material. `is_overlap` is the stored flag.
-/// How a cut keeps a duration while segments on a track do not overlap is still open.
+/// A transition material named by the outgoing segment.
+///
+/// `duration` is microseconds. Zero is a hard cut. A negative duration is
+/// reported and played as a hard cut. `is_overlap` false places the window
+/// on the outgoing segment: `[cut - duration, cut)`. `is_overlap` true gives
+/// the outgoing side `duration / 2`, rounded toward zero, and the incoming
+/// side the remainder: `[cut - left, cut + right)`. The two target ranges
+/// still only touch. Load reports a window that runs past a segment and
+/// leaves this material as stored.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct MaterialTransition {
     #[serde(default)]

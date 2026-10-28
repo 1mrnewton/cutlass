@@ -38,6 +38,10 @@ pub enum RepairNote {
         segment_id: SegmentId,
         material_id: MaterialId,
     },
+    /// The top draft and the main timeline differ. The timeline folder was loaded.
+    OutwardCopyDiffers,
+    /// This timeline folder's draft id is not the directory name. It was not loaded.
+    TimelineIdMismatch { directory: String, draft_id: String },
 }
 
 /// The problems in `draft`. The same draft is the one the caller still holds.

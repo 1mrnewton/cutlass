@@ -63,4 +63,10 @@ pub enum Request {
     },
     /// Remove one segment. An owner takes its dependents with it when follow is on.
     Remove { segment_id: SegmentId },
+    /// Store the reverse flag and the path on the video material. This does not seek.
+    SetReverse {
+        segment_id: SegmentId,
+        reverse: bool,
+        path: String,
+    },
 }

@@ -1,6 +1,7 @@
 mod linkage;
 mod move_segment;
 mod place;
+mod reverse;
 mod speed;
 mod split;
 mod track;
@@ -88,6 +89,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         } => split::split(draft, segment_id, *at, right_id),
         Request::Link { owner, dependent } => linkage::link(draft, owner, dependent),
         Request::Remove { segment_id } => linkage::remove(draft, segment_id),
+        Request::SetReverse {
+            segment_id,
+            reverse,
+            path,
+        } => reverse::set_reverse(draft, segment_id, *reverse, path),
     }
 }
 

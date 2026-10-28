@@ -49,6 +49,20 @@ impl Packet {
             side: Vec::new(),
         }
     }
+
+    /// One video access unit. `keyframe` is the random-access flag.
+    #[must_use]
+    pub fn video(data: Vec<u8>, pts: i64, duration: i64, timescale: u32, keyframe: bool) -> Self {
+        Self {
+            stream: 0,
+            data,
+            pts,
+            duration,
+            timescale,
+            keyframe,
+            side: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -66,5 +80,13 @@ mod tests {
         assert_eq!(packet.duration, 1024);
         assert_eq!(packet.data, vec![1, 2, 3]);
         assert!(packet.keyframe);
+    }
+
+    #[test]
+    fn a_video_packet_can_be_a_non_key_picture() {
+        let packet = Packet::video(vec![0, 0, 0, 1], 3_000, 1_001, 30_000, false);
+        assert!(!packet.keyframe);
+        assert_eq!(packet.pts, 3_000);
+        assert_eq!(packet.timescale, 30_000);
     }
 }

@@ -22,12 +22,15 @@
 
 #![forbid(unsafe_code)]
 
+mod video;
+
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
-    BitDepth, Channel, ChannelLayout, CodecError, CodecParams, ColorPrimaries, ColorType,
-    ImageError, Packet, Pcm, PhysicalPixel, PixelFormat, Rgb8, SampleFormat, SideData, StillImage,
-    TextItem, Transfer, Transparency,
+    BitDepth, Channel, ChannelLayout, CodecError, CodecParams, ColorPrimaries, ColorRange,
+    ColorType, ImageError, MatrixCoefficients, Packet, Pcm, PhysicalPixel, PixelFormat, Plane,
+    Rgb8, SampleFormat, SideData, StillImage, TextItem, Transfer, Transparency, VideoFrame,
 };
+pub use video::{VideoDecodeFactory, VideoDecoder, VideoOutput};
 
 /// One decoded still.
 ///
@@ -359,19 +362,10 @@ mod tests {
     }
 
     fn jpeg(width: u32, height: u32, pixel: PixelFormat) -> CodecParams {
-        CodecParams {
-            codec: CodecId::Jpeg,
-            extra: Vec::new(),
-            sample_rate: 0,
-            layout: None,
-            sample_format: None,
-            bitrate: 0,
-            width,
-            height,
-            pixel,
-            primaries: ColorPrimaries::Bt709,
-            transfer: Transfer::Bt709,
-        }
+        let mut params = CodecParams::video(CodecId::Jpeg, width, height, pixel);
+        params.primaries = ColorPrimaries::Bt709;
+        params.transfer = Transfer::Bt709;
+        params
     }
 
     struct Raw {

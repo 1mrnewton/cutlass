@@ -76,6 +76,10 @@ pub(crate) fn source<'a>(directory: &Directory<'a>) -> Result<Source<'a>, FontEr
     }
 }
 
+pub(crate) fn has_outlines(source: &Source<'_>) -> bool {
+    matches!(source.kind, Kind::Cff(_))
+}
+
 pub(crate) fn outline(source: &Source<'_>, glyph_id: u16) -> Result<Outline, FontError> {
     let Kind::Cff(cff) = &source.kind else {
         return Err(FontError::Unsupported);

@@ -1,11 +1,14 @@
 //! Reads a TrueType or OpenType font, including one face of a collection.
 //!
-//! The file yields an advance width for each character and the outline of a
-//! glyph. Shaping, atlases, and meshes are not part of this crate.
+//! The file yields a glyph id, an advance width, an outline, and horizontal
+//! kerning pairs from a `kern` table. Glyph 0 is the missing glyph. A face
+//! with `CFF2` and no `CFF ` table has no outlines this reader can draw.
+//! Shaping, atlases, and meshes are not part of this crate.
 
 #![forbid(unsafe_code)]
 
 mod collection;
+mod kern;
 mod otf;
 mod ttf;
 
@@ -122,6 +125,7 @@ pub struct Font<'a> {
     num_glyphs: u16,
     hmtx: Hmtx<'a>,
     cmap: Cmap<'a>,
+    kern: kern::Kerning,
     outlines: Outlines<'a>,
 }
 
@@ -173,12 +177,15 @@ impl Font<'_> {
     /// Advance width of each character, in font design units.
     ///
     /// A character with no glyph fails the whole string. The file is left unread
-    /// past that character, and nothing is substituted.
+    /// past that character, and nothing is substituted. [`Self::glyph_id`] reports
+    /// that miss without failing the rest of a run.
     pub fn advances(&self, text: &str) -> Result<Vec<Advance>, FontError> {
         let mut advances = Vec::new();
         for character in text.chars() {
-            let glyph_id = self.glyph(character)?;
-            let units = self.hmtx.advance(glyph_id)?;
+            let Some(glyph_id) = self.glyph_id(character)? else {
+                return Err(FontError::MissingGlyph { character });
+            };
+            let units = self.advance(glyph_id)?;
             advances.push(Advance {
                 character,
                 glyph_id,
@@ -186,6 +193,62 @@ impl Font<'_> {
             });
         }
         Ok(advances)
+    }
+
+    /// Glyph id for one character.
+    ///
+    /// `Ok(None)` means the character map has no glyph. The missing glyph is
+    /// still [`Self::missing_glyph`]. A map entry past the face's glyph count
+    /// is a bad table.
+    pub fn glyph_id(&self, character: char) -> Result<Option<u16>, FontError> {
+        let Some(glyph_id) = self.cmap.glyph(u32::from(character))? else {
+            return Ok(None);
+        };
+        if glyph_id >= self.num_glyphs {
+            return Err(FontError::BadTable);
+        }
+        Ok(Some(glyph_id))
+    }
+
+    /// Glyph 0. OpenType requires this to be the face's missing glyph.
+    #[must_use]
+    pub fn missing_glyph(&self) -> u16 {
+        debug_assert!(self.num_glyphs > 0);
+        0
+    }
+
+    /// Outline of [`Self::missing_glyph`], in font design units.
+    pub fn missing_outline(&self) -> Result<Outline, FontError> {
+        self.outline(self.missing_glyph())
+    }
+
+    /// Advance width of one glyph, in font design units.
+    pub fn advance(&self, glyph_id: u16) -> Result<u16, FontError> {
+        if glyph_id >= self.num_glyphs {
+            return Err(FontError::UnknownGlyph);
+        }
+        self.hmtx.advance(glyph_id)
+    }
+
+    /// `true` when this face has TrueType or CFF outlines.
+    ///
+    /// A `CFF2` face is readable and returns `false`. Sampling those outlines
+    /// is [`FontError::Unsupported`].
+    #[must_use]
+    pub fn has_outlines(&self) -> bool {
+        match &self.outlines {
+            Outlines::TrueType(_) => true,
+            Outlines::OpenType(source) => otf::has_outlines(source),
+        }
+    }
+
+    /// Horizontal kerning for a glyph pair, in font design units.
+    ///
+    /// The value is added to the advance of `left` before `right` is placed.
+    /// A face with no `kern` table, and a pair the table does not store, is 0.
+    #[must_use]
+    pub fn kerning(&self, left: u16, right: u16) -> i16 {
+        self.kern.get(left, right)
     }
 
     /// Outline of one glyph, in font design units.
@@ -199,22 +262,17 @@ impl Font<'_> {
         }
     }
 
-    fn glyph(&self, character: char) -> Result<u16, FontError> {
-        let Some(glyph_id) = self.cmap.glyph(u32::from(character))? else {
-            return Err(FontError::MissingGlyph { character });
-        };
-        if glyph_id >= self.num_glyphs {
-            return Err(FontError::BadTable);
-        }
-        Ok(glyph_id)
-    }
-
     fn from_directory(directory: Directory<'_>) -> Result<Font<'_>, FontError> {
         let head = parse_head(directory.table(b"head")?)?;
         let num_glyphs = parse_maxp(directory.table(b"maxp")?)?;
         let metrics = parse_hhea(directory.table(b"hhea")?, num_glyphs)?;
         let hmtx = Hmtx::parse(directory.table(b"hmtx")?, metrics, num_glyphs)?;
         let cmap = parse_cmap(directory.table(b"cmap")?)?;
+        let kern = match directory.table(b"kern") {
+            Ok(table) => kern::parse(table)?,
+            Err(FontError::MissingTable) => kern::Kerning::empty(),
+            Err(error) => return Err(error),
+        };
         let outlines = match directory.kind {
             FontKind::TrueType => {
                 Outlines::TrueType(ttf::source(&directory, head.loca, num_glyphs)?)
@@ -227,6 +285,7 @@ impl Font<'_> {
             num_glyphs,
             hmtx,
             cmap,
+            kern,
             outlines,
         })
     }
@@ -766,6 +825,7 @@ mod tests {
     const SAMPLE_TTF: &[u8] = include_bytes!("../fixtures/sample.ttf");
     const SAMPLE_OTF: &[u8] = include_bytes!("../fixtures/sample.otf");
     const SAMPLE_TTC: &[u8] = include_bytes!("../fixtures/sample.ttc");
+    const NO_OUTLINE: &[u8] = include_bytes!("../fixtures/no-outline.otf");
 
     #[test]
     fn advances_for_a_string_come_from_the_fixture() {
@@ -800,6 +860,93 @@ mod tests {
                 .iter()
                 .all(|item| item.units == 600 && item.glyph_id == 2)
         );
+    }
+
+    #[test]
+    fn a_missing_character_has_no_glyph_id_and_the_font_still_has_glyph_zero() {
+        let font = read(SAMPLE_TTF).expect("fixture");
+        assert!(font.has_outlines());
+        assert_eq!(font.glyph_id('A').expect("map"), Some(2));
+        assert_eq!(font.glyph_id('Z').expect("map"), None);
+        assert_eq!(font.glyph_id('😀').expect("map"), None);
+        assert_eq!(font.missing_glyph(), 0);
+        assert_eq!(font.advance(0).expect("notdef"), 500);
+        assert_eq!(font.advance(2).expect("A"), 600);
+        assert_eq!(font.advance(10), Err(FontError::UnknownGlyph));
+        let missing = font.missing_outline().expect("notdef outline");
+        assert_eq!(missing, font.outline(0).expect("glyph 0"));
+        assert!(missing.contours.is_empty());
+        assert_eq!(font.kerning(2, 2), 0);
+        assert_eq!(
+            font.advances("Z"),
+            Err(FontError::MissingGlyph { character: 'Z' })
+        );
+    }
+
+    #[test]
+    fn kerning_pairs_come_from_the_file() {
+        let font = read(SAMPLE_TTF).expect("fixture");
+        let pair = [0, 2, 0, 3, 0xff, 0xb0];
+        assert!(
+            SAMPLE_TTF.windows(pair.len()).any(|window| window == pair),
+            "the fixture stores the pair"
+        );
+        assert_eq!(font.kerning(2, 3), -80);
+        assert_eq!(font.kerning(3, 2), 40);
+        assert_eq!(font.kerning(2, 2), 0);
+        assert_eq!(font.advance(2).expect("A"), 600);
+        assert_eq!(font.advance(3).expect("B"), 700);
+
+        let mut shifted = SAMPLE_TTF.to_vec();
+        let at = shifted
+            .windows(pair.len())
+            .position(|window| window == pair)
+            .expect("pair");
+        shifted[at + 4] = 0;
+        shifted[at + 5] = 10;
+        let changed = read(&shifted).expect("edited pair");
+        assert_eq!(changed.kerning(2, 3), 10);
+
+        let mut hostile = SAMPLE_TTF.to_vec();
+        let kern_at = table_offset(&hostile, b"kern");
+        hostile[kern_at + 10] = 0x01;
+        hostile[kern_at + 11] = 0xF4;
+        assert!(matches!(read(&hostile), Err(FontError::Truncated)));
+
+        let otf = read(SAMPLE_OTF).expect("otf");
+        assert_eq!(otf.kerning(2, 3), -80);
+        assert_eq!(otf.kerning(3, 2), 40);
+        let collection = read_collection(SAMPLE_TTC, 0).expect("face");
+        assert_eq!(collection.kerning(2, 3), 0);
+    }
+
+    fn table_offset(bytes: &[u8], tag: &[u8; 4]) -> usize {
+        let count = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
+        for index in 0..count {
+            let at = 12 + index * 16;
+            if &bytes[at..at + 4] == tag {
+                return usize::try_from(u32::from_be_bytes([
+                    bytes[at + 8],
+                    bytes[at + 9],
+                    bytes[at + 10],
+                    bytes[at + 11],
+                ]))
+                .expect("offset");
+            }
+        }
+        panic!("missing {tag:?}");
+    }
+
+    #[test]
+    fn a_face_without_outlines_still_opens() {
+        let font = read(NO_OUTLINE).expect("cff2");
+        assert_eq!(font.kind(), FontKind::OpenType);
+        assert!(!font.has_outlines());
+        assert_eq!(font.glyph_count(), 1);
+        assert_eq!(font.advance(font.missing_glyph()).expect("advance"), 500);
+        assert_eq!(font.glyph_id('A').expect("map"), None);
+        assert_eq!(font.missing_outline(), Err(FontError::Unsupported));
+        assert_eq!(font.outline(0), Err(FontError::Unsupported));
     }
 
     #[test]

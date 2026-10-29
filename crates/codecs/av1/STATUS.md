@@ -24,7 +24,7 @@ Progressive 8-bit 4:2:0, `seq_profile` 0, one operating point, dimensions up to 
 
 Main profile allows 10-bit 4:2:0 and monochrome. This crate rejects both. It is not a Main-profile-compliant decoder. The rejection is a typed error before the frame is published.
 
-Film grain and switchable restoration are legal in profile 0 and are not required to be switched on. A stream that turns one of them on is rejected. The picture is not published with that stage skipped. Consequence: a production encode that leaves film grain on, or that lets each restoration unit choose its filter, will not open. Wiener and self-guided restoration are applied for 8-bit 4:2:0 after CDEF. Super resolution is applied for 8-bit 4:2:0: the frame is reconstructed at the coded width and the shown picture is the upscaled width. The encoder leaves both off.
+Film grain is legal in profile 0 and is not required to be switched on. A stream that turns it on is rejected. The picture is not published with that stage skipped. Consequence: a production encode that leaves film grain on will not open. Wiener, self-guided, and switchable restoration are applied for 8-bit 4:2:0 after CDEF. Super resolution is applied for 8-bit 4:2:0: the frame is reconstructed at the coded width and the shown picture is the upscaled width. The encoder leaves both off. A frame whose two luma loop-filter levels are zero is left unfiltered, including when a reference delta is present.
 
 Also rejected, with the same rule: 4:2:2, 4:4:4, 12-bit, scalability beyond operating point 0, large-scale tile lists, warped motion, OBMC, palette, intra block copy, filter intra, masked and distance-weighted compound, 128×128 superblocks, quantization matrices, screen-content tools, and lossless (`base_q_idx` 0, which forces 4×4 Walsh-Hadamard). The encoder does not emit them. Chroma-from-luma is implemented for profile 0 and matched on an `aomenc` stream that uses it. CDEF is applied after the loop filter for 8-bit 4:2:0. The encoder still leaves it off.
 
@@ -57,12 +57,13 @@ Matched exactly against dav1d 1.5.3, with default in-loop filters:
 - Two embedded `aomenc` keyframes with CDEF on and the loop filter off: a 64×64 step, and a 64×128 ramp that crosses a 64-sample stripe. Both match dav1d with the filter applied.
 - One embedded `aomenc` keyframe that codes a 64×64 horizontal ramp at width 43 and upscales it. The shown picture matches dav1d. Inter frames that use super resolution are not in that stream.
 - One embedded `aomenc` keyframe whose luma uses the self-guided restoration filter. Chroma selects no restoration. The shown picture matches dav1d.
-- One embedded `aomenc` keyframe whose luma uses the Wiener restoration filter. Chroma selects no restoration. The shown picture matches dav1d. A frame that switches the filter per unit is not in those streams.
+- One embedded `aomenc` keyframe whose luma uses the Wiener restoration filter. Chroma selects no restoration. The shown picture matches dav1d.
+- One embedded `aomenc` keyframe whose luma chooses the restoration filter per unit. Chroma selects no restoration. The shown picture matches dav1d.
 - When the files are present: `aomenc` streams for a step, a ramp, chroma-from-luma, AB partitions, angle delta, rectangular transforms, and 64-point transforms. Deblocking runs on the constrained keyframe (loop-filter levels are non-zero there) and those samples match.
 
 Not matched, so not claimed: identity and 1D transforms (horizontal and vertical DCT, ADST, and flip-ADST). The inverse exists. The coefficient order for that set was not proven against dav1d. Within-frame CDF adaptation is implemented and was not the path this inter stream used.
 
-Unsupported, refused with a typed error before a picture is published: compound prediction, warped motion, overlapped motion, reference-frame motion vectors, order hint, CDF state carried from another frame, variable transform size, scaled references, lossless, switchable restoration, film grain, 10-bit, 12-bit, monochrome, and the other tools named above. A 2160p Main-profile sample from `../local-files` was pushed after `ffmpeg` copied one frame out of the container. The push returned without a panic. That file uses tools this decoder refuses, so it does not play.
+Unsupported, refused with a typed error before a picture is published: compound prediction, warped motion, overlapped motion, reference-frame motion vectors, order hint, CDF state carried from another frame, variable transform size, scaled references, lossless, film grain, 10-bit, 12-bit, monochrome, and the other tools named above. A 2160p Main-profile sample from `../local-files` was pushed after `ffmpeg` copied one frame out of the container. The push returned without a panic. That file uses tools this decoder refuses, so it does not play.
 
 ### Encoder
 

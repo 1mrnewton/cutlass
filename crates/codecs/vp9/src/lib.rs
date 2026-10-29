@@ -8,6 +8,8 @@
 mod bits;
 mod coef;
 mod decode;
+mod encode;
+mod fwd;
 mod geom;
 mod header;
 mod intra;
@@ -17,7 +19,29 @@ mod recon;
 mod tables;
 mod txfm;
 
-pub use decode::Decoder;
+pub use decode::{Decoder, Vp9Decoder};
+pub use encode::Vp9Encoder;
+
+use cutlass_decode::{CodecError, CodecId, CodecParams, VideoDecodeFactory, VideoDecoder};
+use cutlass_encode::{VideoEncodeFactory, VideoEncoder};
+
+/// Registers the profile-0 decoder on a video decode factory.
+pub fn register_decoders(factory: &mut VideoDecodeFactory) {
+    factory.register(CodecId::Vp9, open_decoder);
+}
+
+/// Registers the profile-0 encoder on a video encode factory.
+pub fn register_encoders(factory: &mut VideoEncodeFactory) {
+    factory.register(CodecId::Vp9, open_encoder);
+}
+
+fn open_decoder(params: &CodecParams) -> Result<Box<dyn VideoDecoder>, CodecError> {
+    Ok(Box::new(Vp9Decoder::open(params)?))
+}
+
+fn open_encoder(params: &CodecParams) -> Result<Box<dyn VideoEncoder>, CodecError> {
+    Ok(Box::new(Vp9Encoder::open(params)?))
+}
 
 #[cfg(test)]
 mod tests {

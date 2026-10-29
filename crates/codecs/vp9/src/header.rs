@@ -872,7 +872,7 @@ fn check_edge(edge: u32) -> Result<(), CodecError> {
     }
 }
 
-fn tile_limits(mi_cols: usize) -> (u32, u32) {
+pub(crate) fn tile_limits(mi_cols: usize) -> (u32, u32) {
     let sb64 = mi_cols.div_ceil(8);
     let mut min_log2 = 0u32;
     while (64u32 << min_log2) < u32::try_from(sb64).unwrap_or(u32::MAX) {

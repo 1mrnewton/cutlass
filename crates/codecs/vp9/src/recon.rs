@@ -9,6 +9,7 @@
 mod mc;
 mod mv;
 
+pub(crate) use mc::{Job, RefPlane, render};
 pub use mc::{Motion, RefSlots, Reference};
 
 /// A reconstructed picture plus the counts and motion the next frame adapts from.
@@ -198,6 +199,11 @@ pub fn reconstruct<'a>(
             what: "previous motion",
         });
     }
+    let prev = if parsed.header.use_prev_mvs {
+        prev
+    } else {
+        None
+    };
     let mut frame = Scratch::new(&parsed.header, &parsed.fc, slots, prev)?;
     frame.decode_tiles(parsed.tiles)?;
     frame.loop_filter()?;

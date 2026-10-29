@@ -5,8 +5,12 @@
 //! displays a stored picture and does not refresh those slots.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use cutlass_decode::CodecError;
+use cutlass_decode::{
+    CodecError, CodecId, CodecParams, Packet, Plane, VideoDecoder, VideoFrame, VideoOutput,
+};
+use cutlass_encode::PixelFormat;
 
 use crate::geom::{SWITCHABLE, TX_MODE_SELECT};
 use crate::header::{Header, Parsed, Persist, parse};
@@ -159,6 +163,95 @@ impl Default for Decoder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Profile-0 decoder on the video codec contract.
+///
+/// `push` consumes one access unit. A hidden frame returns no picture.
+/// `drain` is empty. `reset` drops reference pictures. A failed `push`
+/// leaves those pictures as they were.
+pub struct Vp9Decoder {
+    inner: Decoder,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Vp9Decoder {
+    pub fn open(params: &CodecParams) -> Result<Self, CodecError> {
+        if params.codec != CodecId::Vp9 {
+            return Err(CodecError::Unsupported {
+                what: "vp9 decoder",
+            });
+        }
+        if params.pixel != PixelFormat::Yuv420p {
+            return Err(CodecError::Unsupported {
+                what: "vp9 pixel format",
+            });
+        }
+        check_open_size(params.width, params.height)?;
+        Ok(Self {
+            inner: Decoder::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+        })
+    }
+}
+
+impl VideoDecoder for Vp9Decoder {
+    fn codec(&self) -> CodecId {
+        CodecId::Vp9
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<VideoOutput>, CodecError> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(CodecError::Cancelled);
+        }
+        let Some(picture) = self.inner.decode(&packet.data)? else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![VideoOutput {
+            frame: picture_frame(&picture)?,
+            pts: packet.pts,
+            duration: packet.duration,
+            timescale: packet.timescale,
+        }])
+    }
+
+    fn drain(&mut self) -> Result<Vec<VideoOutput>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+}
+
+fn picture_frame(picture: &Picture) -> Result<VideoFrame, CodecError> {
+    let chroma_w = picture.width.div_ceil(2);
+    let chroma_h = picture.height.div_ceil(2);
+    VideoFrame::yuv420p(
+        picture.width,
+        picture.height,
+        Plane::tight(picture.width, picture.height, picture.y.clone())?,
+        Plane::tight(chroma_w, chroma_h, picture.u.clone())?,
+        Plane::tight(chroma_w, chroma_h, picture.v.clone())?,
+    )
+}
+
+fn check_open_size(width: u32, height: u32) -> Result<(), CodecError> {
+    if width == 0 || height == 0 {
+        return Err(CodecError::InvalidApi {
+            what: "empty picture",
+        });
+    }
+    if width > crate::geom::MAX_EDGE || height > crate::geom::MAX_EDGE {
+        return Err(CodecError::Limit {
+            what: "vp9 frame edge",
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

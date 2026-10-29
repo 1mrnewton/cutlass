@@ -272,9 +272,57 @@ impl Default for BoolWriter {
     }
 }
 
+/// Most-significant-bit-first writer. A partial last byte is padded with zeros.
+pub struct BitWriter {
+    buf: Vec<u8>,
+    acc: u8,
+    bit: u8,
+}
+
+impl BitWriter {
+    pub fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            acc: 0,
+            bit: 0,
+        }
+    }
+
+    pub fn write(&mut self, value: u32, n: u32) {
+        for shift in (0..n).rev() {
+            self.write_bit(((value >> shift) & 1) == 1);
+        }
+    }
+
+    pub fn write_bit(&mut self, one: bool) {
+        self.acc = (self.acc << 1) | u8::from(one);
+        self.bit += 1;
+        if self.bit == 8 {
+            self.buf.push(self.acc);
+            self.acc = 0;
+            self.bit = 0;
+        }
+    }
+
+    /// Bytes consumed, including a partial trailing byte.
+    pub fn finish(mut self) -> Vec<u8> {
+        if self.bit != 0 {
+            self.acc <<= 8 - self.bit;
+            self.buf.push(self.acc);
+        }
+        self.buf
+    }
+}
+
+impl Default for BitWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BitReader, BoolDecoder, BoolWriter};
+    use super::{BitReader, BitWriter, BoolDecoder, BoolWriter};
 
     #[test]
     fn bool_round_trip_mixed_probabilities() {
@@ -293,6 +341,18 @@ mod tests {
         }
         assert_eq!(dec.read_literal(12).expect("literal"), 0x15a);
         dec.finish().expect("padding");
+    }
+
+    #[test]
+    fn bit_writer_matches_the_reader() {
+        let mut writer = BitWriter::new();
+        writer.write(0b1011, 4);
+        writer.write(0b00_0111, 6);
+        let bytes = writer.finish();
+        assert_eq!(bytes, [0b1011_0001, 0b1100_0000]);
+        let mut reader = BitReader::new(&bytes);
+        assert_eq!(reader.read(4).expect("nibble"), 0b1011);
+        assert_eq!(reader.read(6).expect("six"), 0b00_0111);
     }
 
     #[test]

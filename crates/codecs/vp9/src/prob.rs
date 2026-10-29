@@ -235,6 +235,33 @@ impl FrameContext {
     }
 }
 
+pub fn write_tree(w: &mut crate::bits::BoolWriter, tree: &[i8], probs: &[u8], symbol: u8) {
+    let mut index = 0i16;
+    loop {
+        let at = usize::try_from(index).unwrap_or(0);
+        let left = i16::from(tree[at]);
+        let right = i16::from(tree[at + 1]);
+        let bit = u32::from(!reaches(tree, left, symbol));
+        let prob_at = usize::from(u16::try_from(index).unwrap_or(0) >> 1);
+        w.write(bit, u32::from(probs[prob_at]));
+        let next = if bit == 0 { left } else { right };
+        if next <= 0 {
+            return;
+        }
+        index = next;
+    }
+}
+
+fn reaches(tree: &[i8], node: i16, symbol: u8) -> bool {
+    if node <= 0 {
+        return u8::try_from(-i32::from(node)).unwrap_or(255) == symbol;
+    }
+    let at = usize::try_from(node).unwrap_or(0);
+    let left = i16::from(tree[at]);
+    let right = i16::from(tree[at + 1]);
+    reaches(tree, left, symbol) || reaches(tree, right, symbol)
+}
+
 pub fn read_tree(r: &mut BoolDecoder<'_>, tree: &[i8], probs: &[u8]) -> Result<u8, CodecError> {
     let mut i = 0i16;
     loop {

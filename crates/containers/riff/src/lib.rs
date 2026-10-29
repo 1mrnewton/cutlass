@@ -72,7 +72,7 @@ pub const FEATURES: &[Feature] = &[
     Feature {
         name: "alaw-mulaw",
         demux: true,
-        mux: true,
+        mux: false,
     },
     Feature {
         name: "mpeg-in-wav",
@@ -169,6 +169,8 @@ mod tests {
         assert!(feature("waveformatextensible").mux);
         assert!(feature("unknown-codec").demux);
         assert!(!feature("unknown-codec").mux);
+        assert!(feature("alaw-mulaw").demux);
+        assert!(!feature("alaw-mulaw").mux);
         assert!(feature("unknown-chunk-kept").mux);
         assert!(!feature("unknown-chunk-dropped").mux);
         for name in [

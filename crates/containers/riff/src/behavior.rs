@@ -143,6 +143,32 @@ fn a_stereo_pcm_file_is_one_frame_per_packet_at_the_sample_rate() {
 }
 
 #[test]
+fn alaw_and_mulaw_are_sample_frames_and_are_not_muxed() {
+    for tag in [0x0006u16, 0x0007] {
+        let mut fmt = pcm_fmt(1, 8_000, 8);
+        fmt[0] = u8::try_from(tag & 0x00FF).expect("low");
+        fmt[1] = u8::try_from(tag >> 8).expect("high");
+        let file = riff(&[chunk(b"fmt ", &fmt), chunk(b"data", &[0xD5, 0x2A])].concat());
+        let mut demux = must_open(&file);
+        let StreamCodec::Unknown(codec) = demux.format().codec() else {
+            panic!("pcm");
+        };
+        assert_eq!(codec.tag(), format!("wav:{tag:04x}").as_bytes());
+        let packets = read_all(&mut demux);
+        assert_eq!(packets.len(), 2);
+        assert_eq!(packets[0].bytes(), &[0xD5]);
+        assert_eq!(packets[0].timestamp().duration(), Some(1));
+        let mut mux = WavMux::new(Cursor::new(Vec::new()));
+        let error = mux.add_stream(NewStream {
+            params: demux.streams()[0].params().clone(),
+            timescale: Timescale::new(8_000),
+            language: None,
+        });
+        assert!(error.is_err());
+    }
+}
+
+#[test]
 fn one_frame_and_many_frames_both_open() {
     let (short, _) = stereo_file(1);
     let (longer, _) = stereo_file(4);

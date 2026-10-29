@@ -127,6 +127,8 @@ pub fn decode_with_refs(
         }
         tile.tile_row = part.row;
         tile.tile_col = part.col;
+        tile.tile_row_end = part.row_end;
+        tile.tile_col_end = part.col_end;
         tile.clear_above(part.col, part.col_end);
         let mut row = part.row;
         while row < part.row_end {
@@ -326,6 +328,8 @@ struct Tile<'a, 'r> {
     mi_rows: usize,
     tile_row: usize,
     tile_col: usize,
+    tile_row_end: usize,
+    tile_col_end: usize,
     q_index: usize,
     y_mode: Vec<u8>,
     uv_mode: Vec<u8>,
@@ -494,6 +498,8 @@ impl<'a, 'r> Tile<'a, 'r> {
             mi_rows,
             tile_row: 0,
             tile_col: 0,
+            tile_row_end: frame.mi_rows as usize,
+            tile_col_end: frame.mi_cols as usize,
             q_index: q_ctx,
             y_mode: vec![DC_PRED; cells],
             uv_mode: vec![DC_PRED; cells],
@@ -602,12 +608,20 @@ impl<'a, 'r> Tile<'a, 'r> {
             let sb_h = (self.mi_rows - mi_row) >> sub_y;
             let sb_x = SB4 >> sub_x;
             let sb_y = SB4 >> sub_y;
+            // Prediction stops at the tile. The row above this superblock is
+            // already decoded, but it must not include the next tile's columns.
+            let tile_x1 = (self.tile_col_end >> sub_x) as i32;
+            let tile_y1 = (self.tile_row_end >> sub_y) as i32;
+            let origin_x = (mi_col >> sub_x) as i32;
+            let origin_y = (mi_row >> sub_y) as i32;
             for y in -1..=sb_y as i32 {
                 for x in -1..=sb_x as i32 {
                     let above_ok = mi_row > self.tile_row;
                     let left_ok = mi_col > self.tile_col;
-                    let flag = if (y < 0 && x < sb_w as i32 && above_ok)
-                        || (x < 0 && y < sb_h as i32 && left_ok)
+                    let col_in_tile = origin_x + x < tile_x1;
+                    let row_in_tile = origin_y + y < tile_y1;
+                    let flag = if (y < 0 && x < sb_w as i32 && above_ok && col_in_tile)
+                        || (x < 0 && y < sb_h as i32 && left_ok && row_in_tile)
                     {
                         1
                     } else {
@@ -1938,8 +1952,12 @@ impl<'a, 'r> Tile<'a, 'r> {
         self.coding_inter = block.inter;
         self.cur_luma_row = block.row + (block.y4 << block.sub_y);
         self.cur_luma_col = block.col + (block.x4 << block.sub_x);
-        let local_row = ((start_y >> 2) & (SB4 - 1)) as i32;
-        let local_col = ((start_x >> 2) & (SB4 - 1)) as i32;
+        // The decoded-neighbor grid is one superblock. Chroma 4:2:0 has half
+        // as many 4×4 cells on each axis as luma, so the mask follows the plane.
+        let row_mask = (SB4 >> block.sub_y) - 1;
+        let col_mask = (SB4 >> block.sub_x) - 1;
+        let local_row = ((start_y >> 2) & row_mask) as i32;
+        let local_col = ((start_x >> 2) & col_mask) as i32;
         if !block.inter {
             self.predict_intra_block(
                 &block,

@@ -1529,7 +1529,7 @@ mod tests {
     }
 
     #[test]
-    fn a_production_av1_file_returns_a_picture_or_a_typed_error() {
+    fn a_production_av1_keyframe_matches_dav1d_when_present() {
         let Some(root) = local_media() else { return };
         if std::process::Command::new("ffmpeg")
             .arg("-version")
@@ -1557,8 +1557,8 @@ mod tests {
             return;
         }
         let file = std::fs::read(&ivf_path).expect("ivf");
-        let _ = std::fs::remove_file(&ivf_path);
         if file.len() < 44 || &file[..4] != b"DKIF" {
+            let _ = std::fs::remove_file(&ivf_path);
             return;
         }
         let size = u32::from_le_bytes([file[32], file[33], file[34], file[35]]) as usize;
@@ -1577,15 +1577,39 @@ mod tests {
             keyframe: true,
             side: Vec::new(),
         };
+        let yuv_path =
+            std::env::temp_dir().join(format!("cutlass-av1-file-{}.yuv", std::process::id()));
         match decoder.push(&packet) {
             Ok(frames) => {
                 let video = frames
                     .first()
                     .and_then(|frame| frame.as_video())
                     .expect("picture");
-                assert!(video.picture.y.width() > 0);
+                let compared = std::process::Command::new("dav1d")
+                    .arg("-i")
+                    .arg(&ivf_path)
+                    .arg("-o")
+                    .arg(&yuv_path)
+                    .output()
+                    .ok()
+                    .filter(|out| out.status.success())
+                    .is_some();
+                let _ = std::fs::remove_file(&ivf_path);
+                if !compared {
+                    let _ = std::fs::remove_file(&yuv_path);
+                    assert!(video.picture.y.width() > 0);
+                    return;
+                }
+                let raw = std::fs::read(&yuv_path).expect("yuv");
+                let _ = std::fs::remove_file(&yuv_path);
+                let mut packed = Vec::new();
+                packed.extend_from_slice(video.picture.y.samples());
+                packed.extend_from_slice(video.picture.u.samples());
+                packed.extend_from_slice(video.picture.v.samples());
+                assert_eq!(packed, raw);
             }
             Err(error) => {
+                let _ = std::fs::remove_file(&ivf_path);
                 let text = format!("{error:?}");
                 assert!(
                     text.contains("Unsupported")

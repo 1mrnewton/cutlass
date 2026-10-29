@@ -70,9 +70,9 @@ Byte 1 is endian: `0` little, `1` big. Byte 2 is arrangement: `0` interleaved, `
 | Independent s16 and f32 bitstream | n/a | ffmpeg 8.1.1 reads the packet back | `ffmpeg_reads_an_independent_bitstream` | Verified on this machine. Skips when ffmpeg is absent unless `PCM_REQUIRE_ORACLES` is set |
 | ffmpeg s24le compared after widening to s32 | Matches the scale above | n/a | same test | Verified on this machine |
 | Local WAV and M4A, first 0.2 s as s16le | Matches the ffmpeg dump | n/a | `local_files_match_an_independent_pcm_dump` | Verified on this machine when `../local-files` and ffmpeg are present. Skips when the folder is missing |
-| 30-minute decoder fuzz | Not run | n/a | `thirty_minute_decoder_campaign` | Not run |
-| Bounded encoder fuzz | n/a | Not run | `bounded_encoder_campaign` | Not run |
-| Release throughput | Not run | Not run | `release_decode_and_encode_throughput` | Not run. A debug figure is not the result |
+| 30-minute decoder fuzz | Run | n/a | `thirty_minute_decoder_campaign` | Verified, this machine, 1800.00 s, seed `0x5043_4D5F_4655_5A5A` |
+| Bounded encoder fuzz | n/a | Run | `bounded_encoder_campaign` | Verified, this machine, 120.00 s, seed `0x5043_4D5F_454E_4300` |
+| Release throughput | At least 10× realtime | At least 10× realtime | `release_decode_and_encode_throughput` | Passed. Decode about 25,392×, encode about 7,811×. Resident set grew 48 KiB |
 | 8-bit, unsigned, A-law, μ-law, ADPCM, s64, 24-in-32 | Error | Error | `named_tools_are_refused` | Unsupported |
 | Resample, remix, dither, container framing | Outside this crate | Outside this crate | n/a | Unsupported |
 | Linux and Windows | Not run | Not run | This file was written on macOS | Not run |
@@ -85,16 +85,36 @@ A platform rate above 192 kHz returns `Limit`, and the factory walk stops. The s
 
 ## Campaigns
 
-Decoder fuzz is ignored, seed `0x5043_4D5F_4655_5A5A`, default 1800 seconds (`PCM_FUZZ_SECS` overrides). Encoder fuzz is ignored, seed `0x5043_4D5F_454E_4300`, default 120 seconds (`PCM_ENCODER_FUZZ_SECS` overrides). Neither has been executed. A crash or a hang fails the run.
+These runs used commit `758dc542` on `pcm`, release, one thread. Exit status 0. No panic and no hang.
 
-Release measurement, when run, is 10 seconds of 48 kHz stereo s16le, decode and encode, 8 timed iterations after 2 warmup iterations, one thread, `ps -o rss=`. The gate is at least 10× realtime and resident-set growth under 64 MiB. The test panics if `debug_assertions` is on.
+Decoder fuzz, seed `0x5043_4D5F_4655_5A5A`, 1800.00 seconds:
 
-```text
-cargo test -p cutlass-pcm --offline --release --lib thirty_minute_decoder_campaign -- --ignored --nocapture --test-threads=1
-cargo test -p cutlass-pcm --offline --release --lib bounded_encoder_campaign -- --ignored --nocapture --test-threads=1
-cargo test -p cutlass-pcm --offline --release --lib release_decode_and_encode_throughput -- --ignored --nocapture --test-threads=1
-```
+`cargo test -p cutlass-pcm --offline --release --lib thirty_minute_decoder_campaign -- --ignored --nocapture --test-threads=1`
+
+18,360,653,459 packets. 14,409,105,067 returned an error. The rest returned PCM whose stored length matched the frame count. Every 10,000 packets a known s16 frame still decoded. Findings 0.
+
+Encoder fuzz, seed `0x5043_4D5F_454E_4300`, 120.00 seconds:
+
+`cargo test -p cutlass-pcm --offline --release --lib bounded_encoder_campaign -- --ignored --nocapture --test-threads=1`
+
+317,009,906 inputs. 22,647,259 returned an error. 294,362,647 round-tripped through the decoder at the expected frame count. Every 1,000 inputs a known s16 frame still encoded. Random 3-byte layouts were opened and did not panic. Findings 0.
+
+Release measurement, 48 kHz stereo, 480,000 frames (10 seconds), s16le, 8 timed iterations after 2 warmup iterations. The timed loop checks the frame count and the encoded byte length, so the compiler cannot delete it. `ps -o rss=` was sampled before the timed loop and after it.
+
+`cargo test -p cutlass-pcm --offline --release --lib release_decode_and_encode_throughput -- --ignored --nocapture --test-threads=1`
+
+Decode 0.003151 seconds, about 25,392× realtime. Encode 0.010241 seconds, about 7,811× realtime. Resident set 17,728 KiB before and 17,776 KiB after, growth 48 KiB. The gates are 10× realtime and growth under 64 MiB. Both passed. The test panics when `debug_assertions` is set, so this is not a debug figure. Resident size is those two samples, not a peak between them.
 
 ## Machine
 
 Apple M5 Pro, 18 cores, arm64, macOS 27.0.1, `rustc 1.99.1 (58cf8f9c3 2026-10-13)`. ffmpeg 8.1.1 at `/opt/homebrew/bin/ffmpeg` for the oracle tests. The decoder and encoder do not spawn threads.
+
+## Checks
+
+Checked on the PCM sources in `758dc542`:
+
+- `cargo fmt --all -- --check` passed
+- `cargo lint` passed
+- `cargo test --workspace` passed. The PCM library reported 21 passed, 3 ignored, 0 failed. The ignored tests are the campaigns above, which were run separately in release.
+
+`cargo deny check` was not run. Linux and Windows were not run. There is no PCM conformance bitstream suite. The export crate is still empty, so this codec is selected by `EncodeFactory` and by the desktop registration, not by an export job.

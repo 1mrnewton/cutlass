@@ -1,0 +1,80 @@
+name: Feature
+description: One planned behavior that can be closed on its own
+title: "[feature] "
+labels: ["feature", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        File one behavior. Name the crate that will own it, and the check that proves it.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - model
+        - session
+        - store
+        - timeline
+        - text
+        - font
+        - captions
+        - transcription
+        - shapes
+        - effects
+        - compositor
+        - renderer
+        - engine
+        - playback
+        - export
+        - audio
+        - color
+        - codec
+        - container
+        - agent
+        - settings
+        - storage
+        - desktop
+        - ios
+        - android
+        - platform
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - now
+        - next
+        - later
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: What a person or a crate can do when this is done.
+    validations:
+      required: true
+  - type: textarea
+    id: state
+    attributes:
+      label: Current state
+      description: What the tree does today. Say if the crate is empty or only part of this exists.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: Checks that must be true before this closes. Include the test that fails if the behavior is removed.
+    validations:
+      required: true
+  - type: textarea
+    id: limits
+    attributes:
+      label: Out of scope
+      description: What this issue does not include.
+    validations:
+      required: false

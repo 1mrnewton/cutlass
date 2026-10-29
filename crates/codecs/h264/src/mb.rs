@@ -2075,6 +2075,87 @@ mod oracle {
     }
 
     #[test]
+    fn main_cabac_temporal_direct_matches_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg() else {
+            eprintln!("skip: ffmpeg is not installed");
+            return;
+        };
+        let dir = std::env::temp_dir().join("cutlass-h264-temporal");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let coded = dir.join("temporal.h264");
+        let yuv = dir.join("temporal.yuv");
+        let encoded = Command::new(&ffmpeg)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x64:rate=30",
+                "-frames:v",
+                "4",
+                "-c:v",
+                "libx264",
+                "-profile:v",
+                "main",
+                "-pix_fmt",
+                "yuv420p",
+                "-x264-params",
+                "cabac=1:bframes=1:weightp=0:8x8dct=0:keyint=30:scenecut=0:ref=1:threads=1:b-pyramid=0:direct=temporal",
+                "-f",
+                "h264",
+            ])
+            .arg(&coded)
+            .status()
+            .unwrap();
+        assert!(encoded.success(), "ffmpeg encode failed");
+        let decoded = Command::new(&ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&coded)
+            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .arg(&yuv)
+            .status()
+            .unwrap();
+        assert!(decoded.success(), "ffmpeg decode failed");
+        let bytes = std::fs::read(&coded).unwrap();
+        let expected = std::fs::read(&yuv).unwrap();
+        let params = CodecParams::video(CodecId::H264, 64, 64);
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let mut got = Vec::new();
+        for (unit_index, unit) in access_units(&bytes).into_iter().enumerate() {
+            let packet = Packet::video(unit, 0, 1, 30, false);
+            match decoder.push(&packet) {
+                Ok(frames) => got.extend(pictures(&frames)),
+                Err(error) => panic!("push {unit_index} failed: {error:?}"),
+            }
+        }
+        match decoder.drain() {
+            Ok(frames) => got.extend(pictures(&frames)),
+            Err(error) => panic!("drain failed: {error:?}"),
+        }
+        assert_eq!(got.len(), expected.len(), "picture bytes");
+        let mut count = 0usize;
+        let mut max = 0u8;
+        let mut first = None;
+        for (index, (a, b)) in got.iter().zip(expected.iter()).enumerate() {
+            if a == b {
+                continue;
+            }
+            count += 1;
+            let delta = a.abs_diff(*b);
+            if delta >= max {
+                max = delta;
+            }
+            if first.is_none() {
+                first = Some((index, *a, *b));
+            }
+        }
+        if count != 0 {
+            panic!("temporal mismatches {count} max {max} first {first:?}");
+        }
+    }
+
+    #[test]
     fn high_cabac_8x8_matches_ffmpeg() {
         let Some(ffmpeg) = ffmpeg() else {
             eprintln!("skip: ffmpeg is not installed");
@@ -3368,6 +3449,96 @@ fn direct_16(
     Ok(())
 }
 
+/// Clause 8.4.1.2.3. Scale the co-located motion vector by the picture-order distance.
+fn temporal_direct(
+    pic: &Frame,
+    dpb: &[Frame],
+    slice: &Slice<'_>,
+    mx: usize,
+    my: usize,
+    mb: &mut Mb,
+    blocks: &[(usize, usize)],
+) {
+    let addr = my * pic.mb_w + mx;
+    let col = slice
+        .ref1
+        .first()
+        .and_then(|&index| dpb.get(index))
+        .and_then(|frame| frame.mb.get(addr).map(|col| (frame.poc, col)));
+    for &(bx, by) in blocks {
+        let index = by * 4 + bx;
+        let part = (by / 2) * 2 + (bx / 2);
+        let (ref0, mv0, mv1) = temporal_block(slice, col, bx, by);
+        mb.mv0[index] = mv0;
+        mb.mv1[index] = mv1;
+        mb.ref0[part] = ref0;
+        mb.ref1[part] = 0;
+        mb.ready |= 1 << index;
+    }
+}
+
+fn temporal_block(
+    slice: &Slice<'_>,
+    col: Option<(i32, &Mb)>,
+    bx: usize,
+    by: usize,
+) -> (i8, [i16; 2], [i16; 2]) {
+    let Some((col_poc, col)) = col else {
+        return (0, [0, 0], [0, 0]);
+    };
+    if col.intra || col.pcm {
+        return (0, [0, 0], [0, 0]);
+    }
+    let part = (by / 2) * 2 + (bx / 2);
+    let index = if slice.sps.direct_8x8_inference {
+        (by & !1) * 4 + (bx & !1)
+    } else {
+        by * 4 + bx
+    };
+    let (mv_col, ref_poc) = if col.ref0[part] >= 0 {
+        (col.mv0[index], col.ref_poc0[part])
+    } else if col.ref1[part] >= 0 {
+        (col.mv1[index], col.ref_poc1[part])
+    } else {
+        return (0, [0, 0], [0, 0]);
+    };
+    let ref0 = slice
+        .poc0
+        .iter()
+        .position(|&poc| poc == ref_poc)
+        .and_then(|index| i8::try_from(index).ok())
+        .unwrap_or(0);
+    let Some(&pic0) = slice.poc0.get(usize::from(u8::try_from(ref0).unwrap_or(0))) else {
+        return (0, [0, 0], [0, 0]);
+    };
+    let long = slice
+        .long0
+        .get(usize::from(u8::try_from(ref0).unwrap_or(0)))
+        .copied()
+        .unwrap_or(false);
+    let td = (col_poc - pic0).clamp(-128, 127);
+    if long || td == 0 {
+        return (ref0, mv_col, [0, 0]);
+    }
+    let tb = (slice.poc - pic0).clamp(-128, 127);
+    let tx = (16_384 + (td.abs() / 2)) / td;
+    let factor = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
+    let mv0 = [scale_mv(factor, mv_col[0]), scale_mv(factor, mv_col[1])];
+    let mv1 = [
+        clip_mv(i32::from(mv0[0]) - i32::from(mv_col[0])),
+        clip_mv(i32::from(mv0[1]) - i32::from(mv_col[1])),
+    ];
+    (ref0, mv0, mv1)
+}
+
+fn scale_mv(factor: i32, component: i16) -> i16 {
+    clip_mv((factor * i32::from(component) + 128) >> 8)
+}
+
+fn clip_mv(value: i32) -> i16 {
+    i16::try_from(value.clamp(-32_768, 32_767)).unwrap_or(0)
+}
+
 /// Clause 8.4.1.2.2. One reference pair for the macroblock; each 4×4 may be forced to a zero vector.
 fn apply_direct(
     pic: &Frame,
@@ -3379,22 +3550,7 @@ fn apply_direct(
     blocks: &[(usize, usize)],
 ) {
     if !slice.spatial_direct {
-        for &(bx, by) in blocks {
-            let index = by * 4 + bx;
-            mb.mv0[index] = mvp(
-                pic,
-                Place { mx, my },
-                Cell { bx: 0, by: 0 },
-                (16, 16),
-                0,
-                0,
-                mb,
-            );
-            mb.mv1[index] = [0, 0];
-            mb.ref0[(by / 2) * 2 + bx / 2] = 0;
-            mb.ref1[(by / 2) * 2 + bx / 2] = 0;
-            mb.ready |= 1 << index;
-        }
+        temporal_direct(pic, dpb, slice, mx, my, mb, blocks);
         return;
     }
     let (ref0, ref1, zero) = direct_refs(pic, mx, my, mb);
@@ -4169,7 +4325,16 @@ fn bind_refs(mb: &mut Mb, slice: &Slice<'_>) {
     for i in 0..4 {
         mb.slot0[i] = ref_slot(&slice.ref0, mb.ref0[i]);
         mb.slot1[i] = ref_slot(&slice.ref1, mb.ref1[i]);
+        mb.ref_poc0[i] = listed_poc(&slice.poc0, mb.ref0[i]);
+        mb.ref_poc1[i] = listed_poc(&slice.poc1, mb.ref1[i]);
     }
+}
+
+fn listed_poc(pocs: &[i32], index: i8) -> i32 {
+    let Ok(index) = usize::try_from(index) else {
+        return 0;
+    };
+    pocs.get(index).copied().unwrap_or(0)
 }
 
 fn ref_slot(list: &[usize], index: i8) -> i8 {

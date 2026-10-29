@@ -50,6 +50,10 @@ pub(crate) struct Mb {
     slot1: [i8; 4],
     mv0: [[i16; 2]; 16],
     mv1: [[i16; 2]; 16],
+    /// Picture order count of the reference each 8×8 partition used. Kept so a later
+    /// temporal-direct picture can find that reference after the buffer moves.
+    ref_poc0: [i32; 4],
+    ref_poc1: [i32; 4],
     mvd0: [[i16; 2]; 16],
     mvd1: [[i16; 2]; 16],
     /// 4×4 blocks whose motion vector is already decoded. Same-macroblock predictors ignore the rest.
@@ -90,6 +94,8 @@ impl Mb {
             slot1: [-1; 4],
             mv0: [[0; 2]; 16],
             mv1: [[0; 2]; 16],
+            ref_poc0: [0; 4],
+            ref_poc1: [0; 4],
             mvd0: [[0; 2]; 16],
             mvd1: [[0; 2]; 16],
             ready: 0,

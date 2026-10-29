@@ -17,6 +17,7 @@ mod sandbox;
 mod settings_tool;
 mod skill;
 mod subagent;
+mod tools;
 
 pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize_then};
 pub use draft::{
@@ -36,3 +37,7 @@ pub use sandbox::{
 pub use settings_tool::{SettingsTool, SettingsToolError, SettingsView};
 pub use skill::{Skill, SkillError, SkillLibrary, SkillPlan, parse_skill_md};
 pub use subagent::{Subagent, SubagentError, SubagentResult, allowed_tools, parent_apply};
+pub use tools::{
+    Catalog, Export, Invocation, Media, MediaInfo, Packages, Player, Registry, Speech, SpeechJob,
+    SpeechPoll, TOOL_NAMES, ToolError, tool_definitions,
+};

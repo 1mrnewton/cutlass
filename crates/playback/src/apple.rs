@@ -20,7 +20,7 @@ pub(crate) const RATE: u32 = 48_000;
 pub(crate) const CHANNELS: u16 = 2;
 
 /// One stereo `f32` frame.
-pub(crate) const FRAME_BYTES: usize = 8;
+pub(crate) const FRAME_BYTES: usize = (CHANNELS as usize) * size_of::<f32>();
 
 /// Largest slice the callback will look at. A longer slice is refused
 /// before any of it is copied.

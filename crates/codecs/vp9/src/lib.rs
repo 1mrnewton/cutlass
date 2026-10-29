@@ -7,6 +7,7 @@
 
 mod bits;
 mod coef;
+mod decode;
 mod geom;
 mod header;
 mod intra;
@@ -15,6 +16,8 @@ mod prob;
 mod recon;
 mod tables;
 mod txfm;
+
+pub use decode::Decoder;
 
 #[cfg(test)]
 mod tests {

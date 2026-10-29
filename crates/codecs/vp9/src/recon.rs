@@ -1,11 +1,15 @@
-//! Intra reconstruction for profile 0.
+//! Profile 0 reconstruction.
 //!
 //! Partition walk, mode decode, and coefficient reconstruction follow
-//! libvpx `decode_partition` and `decode_block`. Inter frames are rejected
-//! until motion compensation is in place. A loop filter level of zero is
-//! the lossless keyframe path and skips the filter.
+//! libvpx `decode_partition` and `decode_block`. Inter prediction is unscaled.
+//! A loop filter level of zero skips the filter.
 
 #![allow(dead_code)]
+
+mod mc;
+mod mv;
+
+pub use mc::{RefSlots, Reference};
 
 use cutlass_decode::CodecError;
 
@@ -13,9 +17,9 @@ use crate::bits::BoolDecoder;
 use crate::coef::decode_coefs;
 use crate::geom::{
     self, BLOCK_4X4, BLOCK_4X8, BLOCK_8X4, BLOCK_8X8, BLOCK_64X64, BLOCK_INVALID, DCT_DCT,
-    INTRA_FRAME, PARTITION_HORZ, PARTITION_NONE, PARTITION_SPLIT, PARTITION_VERT, SWITCHABLE,
-    TX_4X4, TX_8X8, TX_16X16, TX_32X32, TX_MODE_SELECT, align8, intra_tx_type, max_tx, mi_count,
-    mi_width_log2, partition_context_byte, subsize, tx_mode_biggest, uv_tx_420,
+    INTRA_FRAME, PARTITION_HORZ, PARTITION_NONE, PARTITION_SPLIT, PARTITION_VERT, TX_4X4, TX_8X8,
+    TX_16X16, TX_32X32, TX_MODE_SELECT, align8, intra_tx_type, max_tx, mi_count, mi_width_log2,
+    partition_context_byte, subsize, tx_mode_biggest, uv_tx_420,
 };
 use crate::header::{Header, Parsed};
 use crate::intra;
@@ -49,6 +53,8 @@ struct Mi {
     seg: u8,
     interp: u8,
     refs: [u8; 2],
+    mv: [mc::Mv; 2],
+    sub_mv: [[mc::Mv; 2]; 4],
 }
 
 #[derive(Clone, Copy)]
@@ -68,6 +74,16 @@ struct Split {
 struct BlockPos {
     mi_row: usize,
     mi_col: usize,
+    bw: usize,
+    bh: usize,
+}
+
+struct BlockAt {
+    mi_row: usize,
+    mi_col: usize,
+    bsize: u8,
+    x_mis: usize,
+    y_mis: usize,
     bw: usize,
     bh: usize,
 }
@@ -114,8 +130,10 @@ impl Default for Mi {
             skip: false,
             tx: TX_4X4,
             seg: 0,
-            interp: SWITCHABLE,
+            interp: 3,
             refs: [INTRA_FRAME, INTRA_FRAME],
+            mv: [mc::Mv::default(); 2],
+            sub_mv: [[mc::Mv::default(); 2]; 4],
         }
     }
 }
@@ -152,25 +170,36 @@ struct Scratch<'a> {
     levels: lpf::Levels,
     masks: Vec<lpf::Mask>,
     sb_cols: usize,
+    slots: &'a RefSlots<'a>,
+    tile_col_end: usize,
 }
 
-pub fn reconstruct(parsed: &Parsed<'_>) -> Result<Picture, CodecError> {
+pub fn reconstruct<'a>(
+    parsed: &'a Parsed<'_>,
+    slots: &'a RefSlots<'a>,
+) -> Result<Picture, CodecError> {
     if parsed.header.show_existing {
         return Err(CodecError::Unsupported {
             what: "vp9 show_existing",
         });
     }
-    if !parsed.header.is_intra() {
-        return Err(CodecError::Unsupported { what: "vp9 inter" });
+    if !parsed.header.is_intra() && parsed.header.use_prev_mvs {
+        return Err(CodecError::Unsupported {
+            what: "vp9 previous motion",
+        });
     }
-    let mut frame = Scratch::new(&parsed.header, &parsed.fc)?;
+    let mut frame = Scratch::new(&parsed.header, &parsed.fc, slots)?;
     frame.decode_tiles(parsed.tiles)?;
     frame.loop_filter()?;
     frame.picture()
 }
 
 impl<'a> Scratch<'a> {
-    fn new(header: &'a Header, fc: &'a FrameContext) -> Result<Self, CodecError> {
+    fn new(
+        header: &'a Header,
+        fc: &'a FrameContext,
+        slots: &'a RefSlots<'a>,
+    ) -> Result<Self, CodecError> {
         let width = header.width;
         let height = header.height;
         if width == 0 || height == 0 || width > geom::MAX_EDGE || height > geom::MAX_EDGE {
@@ -227,6 +256,8 @@ impl<'a> Scratch<'a> {
                 }
             ],
             sb_cols: mi_cols.div_ceil(8),
+            slots,
+            tile_col_end: mi_cols,
         })
     }
 
@@ -257,6 +288,7 @@ impl<'a> Scratch<'a> {
     ) -> Result<(), CodecError> {
         let mut reader = BoolDecoder::new(data)?;
         self.tile_col = col0;
+        self.tile_col_end = col1;
         for mi_row in (row0..row1).step_by(8) {
             self.left_part = [0; 8];
             self.left_y = [0; 16];
@@ -431,20 +463,34 @@ impl<'a> Scratch<'a> {
         let bh = 1usize << (bhl - 1);
         let x_mis = bw.min(self.mi_cols - mi_col);
         let y_mis = bh.min(self.mi_rows - mi_row);
-        let mi = self.read_intra_mode(reader, mi_row, mi_col, bsize, x_mis, y_mis)?;
+        let at = BlockAt {
+            mi_row,
+            mi_col,
+            bsize,
+            x_mis,
+            y_mis,
+            bw,
+            bh,
+        };
+        let mi = if self.header.is_intra() {
+            self.read_intra_mode(reader, mi_row, mi_col, bsize, x_mis, y_mis)?
+        } else {
+            self.read_inter_frame(reader, at)?
+        };
         if mi.skip {
             self.reset_skip(mi_row, mi_col, bw, bh)?;
         }
-        self.recon_intra(
-            reader,
-            &mi,
-            BlockPos {
-                mi_row,
-                mi_col,
-                bw,
-                bh,
-            },
-        )?;
+        let pos = BlockPos {
+            mi_row,
+            mi_col,
+            bw,
+            bh,
+        };
+        if mi.refs[0] == INTRA_FRAME {
+            self.recon_intra(reader, &mi, pos)?;
+        } else {
+            self.recon_inter(reader, &mi, pos)?;
+        }
         self.store_mi(mi, mi_row, mi_col, x_mis, y_mis);
         self.note_filter(&mi, mi_row, mi_col, bw, bh);
         Ok(())
@@ -463,7 +509,7 @@ impl<'a> Scratch<'a> {
         mi.bsize = bsize;
         mi.seg = self.read_segment(reader, mi_row, mi_col, x_mis, y_mis)?;
         mi.skip = self.read_skip(reader, mi_row, mi_col, mi.seg)?;
-        mi.tx = self.read_tx(reader, bsize, mi_row, mi_col)?;
+        mi.tx = self.read_tx(reader, bsize, mi_row, mi_col, true)?;
         self.read_y_modes(reader, &mut mi, mi_row, mi_col)?;
         let mode = usize::from(mi.mode);
         mi.uv = prob::read_tree(reader, &prob::INTRA_TREE, &KF_UV_MODE_PROB[mode])?;
@@ -539,10 +585,11 @@ impl<'a> Scratch<'a> {
         bsize: u8,
         mi_row: usize,
         mi_col: usize,
+        allow: bool,
     ) -> Result<u8, CodecError> {
         let limit = max_tx(bsize);
         let biggest = tx_mode_biggest(self.header.tx_mode);
-        if self.header.tx_mode == TX_MODE_SELECT && bsize >= BLOCK_8X8 {
+        if allow && self.header.tx_mode == TX_MODE_SELECT && bsize >= BLOCK_8X8 {
             let ctx = self.tx_ctx(limit, mi_row, mi_col);
             self.read_selected_tx(reader, limit, ctx)
         } else {
@@ -742,7 +789,7 @@ impl<'a> Scratch<'a> {
         pos: BlockPos,
     ) -> Result<(), CodecError> {
         for plane in 0..3 {
-            self.recon_plane(reader, mi, plane, pos)?;
+            self.recon_plane(reader, mi, plane, pos, false)?;
         }
         Ok(())
     }
@@ -753,6 +800,7 @@ impl<'a> Scratch<'a> {
         mi: &Mi,
         plane: usize,
         pos: BlockPos,
+        inter: bool,
     ) -> Result<(), CodecError> {
         let ss = u32::from(plane > 0);
         let tx = if plane == 0 {
@@ -783,7 +831,7 @@ impl<'a> Scratch<'a> {
                     shift_w,
                     shift_h,
                 };
-                self.recon_tx(reader, mi, &at)?;
+                self.recon_tx(reader, mi, &at, inter)?;
             }
         }
         Ok(())
@@ -794,34 +842,37 @@ impl<'a> Scratch<'a> {
         reader: &mut BoolDecoder<'_>,
         mi: &Mi,
         at: &TxPos,
+        inter: bool,
     ) -> Result<(), CodecError> {
         let mode = block_mode(mi, at.plane, at.row, at.col);
-        let have_above = at.row > 0 || at.mi_row > 0;
-        let have_left = at.col > 0 || at.mi_col > self.tile_col;
-        let have_right = at.col + (1usize << at.tx) < at.n4_w;
         let x = ((at.mi_col << 3) >> at.ss) + (at.col << 2);
         let y = ((at.mi_row << 3) >> at.ss) + (at.row << 2);
-        let (crop_w, crop_h, stride, dest) = self.plane_mut(at.plane);
-        intra::predict(
-            mode,
-            dest,
-            intra::Site {
-                tx: at.tx,
-                stride,
-                crop_w,
-                crop_h,
-                x,
-                y,
-                have_left,
-                have_above,
-                have_right,
-            },
-        );
+        if !inter {
+            let have_above = at.row > 0 || at.mi_row > 0;
+            let have_left = at.col > 0 || at.mi_col > self.tile_col;
+            let have_right = at.col + (1usize << at.tx) < at.n4_w;
+            let (crop_w, crop_h, stride, dest) = self.plane_mut(at.plane);
+            intra::predict(
+                mode,
+                dest,
+                intra::Site {
+                    tx: at.tx,
+                    stride,
+                    crop_w,
+                    crop_h,
+                    x,
+                    y,
+                    have_left,
+                    have_above,
+                    have_right,
+                },
+            );
+        }
         if mi.skip {
             return Ok(());
         }
         let ctx = self.coef_ctx(at)?;
-        let eob = self.decode_tx(reader, mi, at, Residual { mode, x, y, ctx })?;
+        let eob = self.decode_tx(reader, mi, at, Residual { mode, x, y, ctx }, inter)?;
         self.write_eob(at, eob)
     }
 
@@ -851,8 +902,9 @@ impl<'a> Scratch<'a> {
         mi: &Mi,
         at: &TxPos,
         residual: Residual,
+        inter: bool,
     ) -> Result<usize, CodecError> {
-        let kind = if at.plane > 0 || self.header.lossless || at.tx == TX_32X32 {
+        let kind = if inter || at.plane > 0 || self.header.lossless || at.tx == TX_32X32 {
             DCT_DCT
         } else {
             intra_tx_type(residual.mode)
@@ -872,7 +924,7 @@ impl<'a> Scratch<'a> {
             self.collect,
             usize::from(at.tx),
             usize::from(at.plane > 0),
-            false,
+            inter,
             dq,
             residual.ctx,
             scan,
@@ -1174,7 +1226,7 @@ fn bad(what: &'static str) -> CodecError {
 
 #[cfg(test)]
 mod tests {
-    use super::reconstruct;
+    use super::{RefSlots, reconstruct};
     use crate::header::{Persist, parse};
 
     /// libvpx-vp9 lossless 16×16 red keyframe. ffmpeg raw yuv420p is Y=81, U=90, V=240.
@@ -1187,7 +1239,7 @@ mod tests {
     #[test]
     fn lossless_red_keyframe_matches_ffmpeg() {
         let parsed = parse(&Persist::new(), &RED_16).expect("header");
-        let pic = reconstruct(&parsed).expect("recon");
+        let pic = reconstruct(&parsed, &RefSlots::none()).expect("recon");
         assert_eq!((pic.width, pic.height), (16, 16));
         assert_eq!(pic.y.len(), 256);
         assert_eq!(pic.u.len(), 64);
@@ -1227,7 +1279,8 @@ mod tests {
         ];
         for (name, payload, raw, w, h) in cases {
             let parsed = parse(&Persist::new(), payload).expect("header");
-            let pic = reconstruct(&parsed).unwrap_or_else(|err| panic!("{name} recon {err}"));
+            let pic = reconstruct(&parsed, &RefSlots::none())
+                .unwrap_or_else(|err| panic!("{name} recon {err}"));
             assert_eq!((pic.width, pic.height), (w, h), "{name}");
             let got = [&pic.y[..], &pic.u[..], &pic.v[..]].concat();
             assert_eq!(got.len(), raw.len(), "{name}");

@@ -694,6 +694,19 @@ fn ffmpeg_sixteen_bit_truecolor_alpha_matches_exact_samples() {
 }
 
 #[test]
+fn ffmpeg_one_bit_grey_matches_exact_samples() {
+    let Some(ffmpeg) = tool("ffmpeg") else {
+        require_or_skip("ffmpeg");
+        return;
+    };
+    let png = ffmpeg_png(&ffmpeg, &[0b1011_0010], 8, 1, "monob", None);
+    let image = decode_bytes(&png).expect("monob");
+    assert_eq!(image.color, ColorType::Gray);
+    assert_eq!(image.depth, BitDepth::One);
+    assert_eq!(image.samples, vec![1, 0, 1, 1, 0, 0, 1, 0]);
+}
+
+#[test]
 fn a_local_png_matches_ffmpeg_when_the_file_is_present() {
     let Some(path) = local_png() else {
         return;

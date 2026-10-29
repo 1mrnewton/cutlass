@@ -452,8 +452,12 @@ dependencies = [
  "cutlass-container",
  "cutlass-decode",
  "cutlass-gpu",
+ "cutlass-jpeg",
  "cutlass-model",
  "cutlass-picture",
+ "cutlass-png",
+ "cutlass-still",
+ "serde_json",
 ]
 
 [[package]]

@@ -160,6 +160,28 @@ Apple M5 Pro, Darwin arm64, 48 GiB, rustc 1.99.1, `--release`, one thread. `full
 
 Both are inside 500 ms encode and 250 ms decode. Linux and Windows were not run.
 
+`cargo bench -p cutlass-png` (`benches/against_ffmpeg.rs`) repeats each pass 5 times after one warmup and reports the median wall time. Same machine, release, one thread. ffmpeg 8.1.1 at `/opt/homebrew/bin/ffmpeg`. Pixels matched before the timed passes. An ffmpeg row includes process start. `ffmpeg -version` itself is 19.1 ms (18.6–20.1). Cutlass stays in-process. Encode `out` is the PNG size. Decode `out` is the raw sample count.
+
+| Picture | Side | Op | Median | Out | Settings |
+| --- | --- | --- | --- | --- | --- |
+| 1920×1080 RGBA8 gradient | cutlass | encode | 35.0 ms | 54958 | filter search, fixed Huffman |
+| 1920×1080 RGBA8 gradient | ffmpeg | encode | 46.9 ms | 59164 | pred Paeth, zlib default |
+| 1920×1080 RGBA8 gradient | ffmpeg | encode | 54.2 ms | 10548 | pred mixed, zlib default |
+| 1920×1080 RGBA8 gradient | cutlass | decode | 33.3 ms | 8294400 | the cutlass PNG |
+| 1920×1080 RGBA8 gradient | ffmpeg | decode | 34.1 ms | 8294400 | the same PNG |
+| 1920×1080 RGBA8 noise | cutlass | encode | 158.7 ms | 8760375 | filter search, fixed Huffman |
+| 1920×1080 RGBA8 noise | ffmpeg | encode | 147.5 ms | 8322399 | pred Paeth, zlib default |
+| 1920×1080 RGBA8 noise | ffmpeg | encode | 151.2 ms | 8322399 | pred mixed, zlib default |
+| 1920×1080 RGBA8 noise | cutlass | decode | 66.1 ms | 8294400 | the cutlass PNG |
+| 1920×1080 RGBA8 noise | ffmpeg | decode | 58.6 ms | 8294400 | the same PNG |
+| motion-graphics.png | cutlass | decode | 106.6 ms | 18889752 | the file on disk |
+| motion-graphics.png | ffmpeg | decode | 61.7 ms | 18889752 | the same file |
+| motion-graphics.png | cutlass | encode | 100.6 ms | 882146 | filter search, fixed Huffman |
+| motion-graphics.png | ffmpeg | encode | 114.6 ms | 707538 | pred Paeth, zlib default |
+| motion-graphics.png | ffmpeg | encode | 149.6 ms | 702900 | pred mixed, zlib default |
+
+On the real file, ffmpeg's decode wall time is about half of ours. That ffmpeg time still includes process start. Encode times are close. ffmpeg's mixed filter plus zlib writes a smaller gradient (10 KiB against 55 KiB) and a smaller copy of the real file (703 KiB against 882 KiB). Noise sizes are close. Ours is slightly larger.
+
 Memory: the inflater keeps a distance window of the size named in the zlib header, at most 32 KiB. Reconstruction keeps one scanline and the previous scanline, and writes the sample buffer directly. The inflated image is not retained. No heap profile. The sample buffer is the one image the gate names. Linux and Windows were not run.
 
 ### Conclusion

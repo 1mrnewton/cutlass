@@ -69,16 +69,16 @@ Hardware for the timing gates: the machine that runs them, named in the readines
 | Capability | Required | Decode | Encode | Evidence | Status |
 | --- | --- | --- | --- | --- | --- |
 | Signature, IHDR, IDAT, IEND, CRC | Yes | Accept a legal datastream. Bad CRC, bad signature, truncation, and trailing bytes are errors | Emit this order | `tests.rs` hand-built streams and malformed cases | Verified |
-| Greyscale 1, 2, 4, 8, 16 | Yes | Exact samples in range | Emit | 1-bit analytic. 1/2/4/8/16 self round trip. 8-bit ImageMagick both ways. 16-bit ffmpeg both ways | Verified. Independent 1/2/4 not run |
-| Truecolor 8 and 16 | Yes | Exact R, G, B | Emit | ffmpeg 8.1.1 both ways for 8-bit, including `-pred mixed`. 16-bit checked as this encoder's `rgb48be` output | Verified. Foreign 16-bit truecolor file not run |
-| Greyscale and truecolor with alpha, 8 and 16 | Yes | Exact straight alpha | Emit | Analytic RGBA8. ffmpeg `ya8` and `rgba` accept this encoder. 16-bit alpha is a self round trip | Partial. Foreign alpha files and 16-bit alpha oracles not run |
+| Greyscale 1, 2, 4, 8, 16 | Yes | Exact samples in range | Emit | 1-bit analytic and ffmpeg `monob`. 2-bit and 4-bit ImageMagick. 8-bit ImageMagick both ways. 16-bit ffmpeg both ways. Adam7 placement for 1, 2, and 4 | Verified |
+| Truecolor 8 and 16 | Yes | Exact R, G, B | Emit | ffmpeg 8.1.1 both ways for 8-bit, including `-pred mixed`. ffmpeg `rgb48be` both the foreign file and this encoder | Verified |
+| Greyscale and truecolor with alpha, 8 and 16 | Yes | Exact straight alpha | Emit | ffmpeg `ya8`, `rgba`, `ya16be`, and `rgba64be` foreign files, plus this encoder's `ya8` and `rgba` | Verified |
 | Indexed 1, 2, 4, 8, with PLTE | Yes | Exact indices. Palette kept | Emit | Analytic 8-bit indices. ffmpeg `pal8` both ways for 8-bit. 1/2/4 self round trip | Verified for 8-bit. Independent 1/2/4 not run |
 | `tRNS` key and palette alpha | Yes | Kept, not expanded | Emit | Hand-built key and short palette table. Self round trip. Not applied to samples | Verified in this crate. No independent metadata oracle |
 | Filter method 0, types 0–4, including Paeth | Yes | Reconstruct per the spec | Choose per scanline by minimum sum of absolute byte values | Hand-computed None, Sub, Up, Average, and Paeth. ffmpeg `-pred mixed` | Verified |
 | Interlace 0 and Adam7 | Yes | Full image | Both. `CodecParams.extra` empty or `[0]` is method 0. `[1]` is Adam7 | Hand-built 2×2 Adam7. ImageMagick `-interlace PNG` both ways. Self round trip of every required depth | Verified |
 | Multiple IDAT, including empty IDAT | Yes | Concatenate. Non-consecutive IDAT is an error | Split the zlib stream at 8192 bytes | One-byte IDAT chunks plus an empty IDAT. A `tEXt` between IDAT chunks is an error | Verified |
-| gAMA, cHRM, sRGB, iCCP, sBIT, pHYs, bKGD, tEXt, zTXt, iTXt | Yes to preserve, no to apply | Record. Do not convert | Emit when set. Do not invent an sRGB gAMA | Samples unchanged beside the metadata. Round trip keeps gamma, sRGB, cHRM, pHYs, text, ICC, sBIT, and bKGD | Verified in this crate. iTXt covered by the writer; the round-trip fixture is zTXt |
-| Unknown ancillary chunk | Yes | Ignore, including APNG `acTL` | Do not emit | `orNG` and `acTL` leave the samples intact | Verified. `fcTL` and `fdAT` use the same ancillary path and were not separate fixtures |
+| gAMA, cHRM, sRGB, iCCP, sBIT, pHYs, bKGD, tEXt, zTXt, iTXt | Yes to preserve, no to apply | Record. Do not convert | Emit when set. Do not invent an sRGB gAMA | Samples unchanged beside the metadata. Round trip keeps gamma, sRGB, cHRM, pHYs, text, ICC, sBIT, bKGD, and a compressed iTXt. A `tEXt` after IDAT is kept. A keyword with a leading space is refused | Verified in this crate |
+| Unknown ancillary chunk | Yes | Ignore, including APNG `acTL`, `fcTL`, and `fdAT` | Do not emit | `orNG`, `acTL`, and `fcTL` leave the samples intact. `fdAT` before IDAT is ignored. `fdAT` between IDAT chunks is an error | Verified |
 | Unknown critical chunk | Yes | Error | Do not emit | `ORNG` is rejected | Verified |
 | Filter method other than 0 | Yes | Error. FFmpeg accepts MNG method 64 (LOCO). Those files do not decode here | Method 0 only | Method 64 returns `Unsupported` | Verified |
 | APNG animation | No | The static IDAT image only | Not emitted | Outside the still | Unsupported |
@@ -117,8 +117,8 @@ Followed `.cursor/skills/ship-codec/SKILL.md` and `references/video-image.md`, `
 Lossless comparison is exact samples in the declared domain. Metadata is compared on its own and is not applied.
 
 - Analytic stored-zlib streams, not produced by this encoder: grey, Sub, Up, Average, Paeth, 1-bit, 16-bit, indexed plus `tRNS`, and a 2×2 Adam7 image.
-- ffmpeg 8.1.1 (`/opt/homebrew/bin/ffmpeg`) decodes this encoder for `rgb24`, `rgba`, `ya8`, `gray16be`, `rgb48be`, and `pal8` indices. This decoder matches ffmpeg output for `rgb24` (`-pred mixed` included), `gray16be`, and `pal8`.
-- ImageMagick 7.1.2-21 decodes this encoder's Adam7 grey file and writes an Adam7 grey file this decoder matches. Installed libpng headers are 1.6.58. The magick binary's linked libpng soname was not printed by `otool`.
+- ffmpeg 8.1.1 (`/opt/homebrew/bin/ffmpeg`) writes files this decoder matches for `rgb24` (`-pred mixed` included), `rgba`, `ya8`, `ya16be`, `rgb48be`, `rgba64be`, `pal8` indices, and `monob`. It also matches this encoder for `rgb24`, `rgba`, `ya8`, `gray16be`, `rgb48be`, and `pal8`.
+- ImageMagick 7.1.2-21 writes 2-bit and 4-bit grey and an Adam7 grey file this decoder matches, and it matches this encoder's Adam7 grey file. Installed libpng headers are 1.6.58. The magick binary's linked libpng soname was not printed by `otool`.
 - python3 3.9.6 zlib: inflate of level-9 streams, and decompress of this encoder's fixed-Huffman streams, for lengths 0 through 95 plus the earlier samples.
 - Local file `/Users/mrnewton/dev/cutlass/local-files/04-motion-graphics.png` (2946×1603, 8-bit RGBA, no interlace, 836790 bytes) matches ffmpeg `rgba`. Re-encoding it and decoding with ffmpeg matches those same bytes. The file was not modified.
 - ISO/IEC 15948 official conformance suite: not available. Not run.
@@ -155,13 +155,13 @@ Apple M5 Pro, Darwin arm64, 48 GiB, rustc 1.99.1, `--release`, one thread. `full
 
 | Frame | Encode | Decode | Output |
 | --- | --- | --- | --- |
-| 1920×1080 RGBA8 gradient | 51 ms | 12 ms | 54958 bytes |
-| 1920×1080 RGBA8 high-bit noise | 160 ms | 59 ms | 8760375 bytes |
+| 1920×1080 RGBA8 gradient | 53 ms | 34 ms | 54958 bytes |
+| 1920×1080 RGBA8 high-bit noise | 159 ms | 61 ms | 8760375 bytes |
 
 Both are inside 500 ms encode and 250 ms decode. Linux and Windows were not run.
 
-Memory: the decoder retains nothing between pictures. Peak during one picture is the inflated scanlines plus the `u16` sample buffer plus one previous scanline. That is two image-sized buffers, not the single image buffer named in the gate. Distance lookback uses the output itself, capped at 32 KiB. No heap profile. The single-buffer wording of the gate is not met.
+Memory: the inflater keeps a distance window of the size named in the zlib header, at most 32 KiB. Reconstruction keeps one scanline and the previous scanline, and writes the sample buffer directly. The inflated image is not retained. No heap profile. The sample buffer is the one image the gate names. Linux and Windows were not run.
 
 ### Conclusion
 
-Partial. Static PNG decode and encode work for the domains covered above, with the independent evidence named there. The 30 minute decoder campaign finished with no panic. Still open: foreign alpha and 16-bit truecolor inputs, independent 1/2/4-bit files, a heap measurement that matches the one-buffer gate, the still-container open path, desktop registration, the ISO conformance suite, and Linux/Windows. APNG animation and the ignored metadata chunks stay unsupported. Do not publish this.
+Partial. Static PNG decode and encode work for the domains covered above, with the independent evidence named there. The 30 minute decoder campaign finished with no panic. Still open: independent indexed 1/2/4-bit files, the still-container open path, desktop registration, the ISO conformance suite, and Linux/Windows. APNG animation and the ignored metadata chunks stay unsupported. Do not publish this.

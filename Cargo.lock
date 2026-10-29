@@ -484,6 +484,8 @@ dependencies = [
  "cutlass-encode",
  "cutlass-eval",
  "cutlass-model",
+ "cutlass-playback",
+ "cutlass-renderer-software",
 ]
 
 [[package]]

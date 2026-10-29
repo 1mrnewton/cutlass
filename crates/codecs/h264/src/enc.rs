@@ -1,15 +1,15 @@
 //! High-profile CABAC encoder.
 //!
 //! Each picture is one slice. A new picture is an intra slice. A later picture
-//! that is the same constant colour is a P slice of skipped macroblocks, because
-//! deblocking leaves a constant field unchanged and the skip copies that reference.
+//! that equals the deblocked reconstruction is a P slice of skipped macroblocks.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cutlass_decode::{CodecError, CodecId, CodecParams};
+use cutlass_decode::{CodecError, CodecId, CodecParams, Packet, VideoDecoder};
 use cutlass_encode::{VideoEncoder, VideoInput};
 
+use crate::dec::H264Decoder;
 use crate::nal;
 use crate::tables::{CABAC_MN, RANGE_LPS, TRANS_LPS, TRANS_MPS};
 
@@ -25,9 +25,16 @@ pub struct H264Encoder {
     idr_pic_id: u32,
     next_fn: u32,
     next_poc: u32,
-    anchor: Option<[u8; 3]>,
+    mirror: H264Decoder,
+    reference: Option<Planes>,
     sps: Vec<u8>,
     pps: Vec<u8>,
+}
+
+struct Planes {
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
 }
 
 pub fn register_encoders(factory: &mut cutlass_encode::EncodeFactory) {
@@ -81,15 +88,15 @@ impl H264Encoder {
             idr_pic_id: 0,
             next_fn: 1,
             next_poc: 2,
-            anchor: None,
+            mirror: H264Decoder::open(params)?,
+            reference: None,
             sps,
             pps,
         })
     }
 
     fn access_unit(&mut self, y: &[u8], u: &[u8], v: &[u8], key: bool) -> Vec<u8> {
-        let color = constant_color(y, u, v);
-        if !key && color.is_some() && color == self.anchor {
+        if !key && self.same_as_reference(y, u, v) {
             let slice = p_skip_slice(self.mb_w, self.mb_h, self.next_fn, self.next_poc);
             self.next_fn = (self.next_fn + 1) & 15;
             self.next_poc = (self.next_poc + 2) & 15;
@@ -114,7 +121,6 @@ impl H264Encoder {
         self.idr_pic_id = self.idr_pic_id.wrapping_add(1);
         self.next_fn = 1;
         self.next_poc = 2;
-        self.anchor = color;
         let mut unit = Vec::new();
         unit.extend(self.wrap(7, &self.sps));
         unit.extend(self.wrap(8, &self.pps));
@@ -136,7 +142,7 @@ impl VideoEncoder for H264Encoder {
         CodecId::H264
     }
 
-    fn push(&mut self, input: &VideoInput) -> Result<Vec<cutlass_encode::Packet>, CodecError> {
+    fn push(&mut self, input: &VideoInput) -> Result<Vec<Packet>, CodecError> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(CodecError::Cancelled);
         }
@@ -154,13 +160,15 @@ impl VideoEncoder for H264Encoder {
         } else {
             input.duration
         };
-        Ok(vec![cutlass_encode::Packet::video(
-            self.access_unit(
-                input.picture.y(),
-                input.picture.u(),
-                input.picture.v(),
-                input.force_keyframe,
-            ),
+        let unit = self.access_unit(
+            input.picture.y(),
+            input.picture.u(),
+            input.picture.v(),
+            input.force_keyframe,
+        );
+        self.remember(&unit)?;
+        Ok(vec![Packet::video(
+            unit,
             input.pts,
             duration,
             input.timescale,
@@ -168,7 +176,7 @@ impl VideoEncoder for H264Encoder {
         )])
     }
 
-    fn drain(&mut self) -> Result<Vec<cutlass_encode::Packet>, CodecError> {
+    fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
         if self.drained {
             return Ok(Vec::new());
         }
@@ -181,7 +189,8 @@ impl VideoEncoder for H264Encoder {
         self.idr_pic_id = 0;
         self.next_fn = 1;
         self.next_poc = 2;
-        self.anchor = None;
+        self.reference = None;
+        self.mirror.reset();
         self.cancel.store(false, Ordering::Relaxed);
     }
 
@@ -307,15 +316,28 @@ struct Flags<'a> {
     chroma_cbp: &'a [u8],
 }
 
-fn constant_color(y: &[u8], u: &[u8], v: &[u8]) -> Option<[u8; 3]> {
-    let (y0, u0, v0) = (*y.first()?, *u.first()?, *v.first()?);
-    if y.iter().all(|sample| *sample == y0)
-        && u.iter().all(|sample| *sample == u0)
-        && v.iter().all(|sample| *sample == v0)
-    {
-        Some([y0, u0, v0])
-    } else {
-        None
+impl H264Encoder {
+    fn same_as_reference(&self, y: &[u8], u: &[u8], v: &[u8]) -> bool {
+        self.reference
+            .as_ref()
+            .is_some_and(|plane| plane.y == y && plane.u == u && plane.v == v)
+    }
+
+    fn remember(&mut self, unit: &[u8]) -> Result<(), CodecError> {
+        let packet = Packet::video(unit.to_vec(), 0, 1, 1, true);
+        let frames = self.mirror.push(&packet)?;
+        let Some(frame) = frames.first() else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "reference picture",
+            });
+        };
+        self.reference = Some(Planes {
+            y: frame.picture.y().to_vec(),
+            u: frame.picture.u().to_vec(),
+            v: frame.picture.v().to_vec(),
+        });
+        Ok(())
     }
 }
 
@@ -1655,6 +1677,51 @@ mod tests {
             assert_eq!(raw.len(), 64 * 64 * 3 / 2 * 2);
             assert!(raw.iter().all(|sample| *sample == 128));
         }
+    }
+
+    #[test]
+    fn reconstructed_picture_is_a_p_skip() {
+        let mut params = CodecParams::video(CodecId::H264, 64, 64);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let mut y = vec![0u8; 64 * 64];
+        for row in 0..64 {
+            for col in 0..64 {
+                y[row * 64 + col] = u8::try_from(col * 3).unwrap_or(0);
+            }
+        }
+        let picture = Yuv420p::try_new(64, 64, y, vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
+        let mut input = VideoInput {
+            picture,
+            pts: 0,
+            duration: 1,
+            timescale: 30,
+            force_keyframe: true,
+        };
+        let first = encoder.push(&input).unwrap();
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let decoded = decoder.push(&first[0]).unwrap();
+        let again = Yuv420p::try_new(
+            64,
+            64,
+            decoded[0].picture.y().to_vec(),
+            decoded[0].picture.u().to_vec(),
+            decoded[0].picture.v().to_vec(),
+        )
+        .unwrap();
+        input.picture = again;
+        input.force_keyframe = false;
+        input.pts = 1;
+        let second = encoder.push(&input).unwrap();
+        let nals = crate::nal::access_unit(&second[0].data, 0).unwrap();
+        assert!(
+            nals.iter().any(|nal| nal.kind == 1),
+            "the reconstructed picture is coded again"
+        );
+        let frames = decoder.push(&second[0]).unwrap();
+        assert_eq!(frames[0].picture.y(), decoded[0].picture.y());
+        assert_eq!(frames[0].picture.u(), decoded[0].picture.u());
+        assert_eq!(frames[0].picture.v(), decoded[0].picture.v());
     }
 
     fn gray_planes() -> (Vec<u8>, Vec<u8>, Vec<u8>) {

@@ -310,7 +310,8 @@ mod tests {
         let written = serde_json::to_value(&pause).unwrap();
         assert_eq!(written["playback"]["seek_during_playback"], "pause");
         assert!(!pause.playback.scrub_audio);
-        let omitted: Settings = serde_json::from_str(r#"{"playback":{"scrub_audio":true}}"#).unwrap();
+        let omitted: Settings =
+            serde_json::from_str(r#"{"playback":{"scrub_audio":true}}"#).unwrap();
         assert!(omitted.playback.scrub_audio);
         assert_eq!(
             omitted.playback.seek_during_playback,

@@ -19,11 +19,11 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub use backup::copy_backup;
-pub use hold::{Hold, hold};
 pub use folder::{
     DockItem, DraftMeta, Folder, IdMap, IdPair, MaterialBin, Opened, ProjectIndex, TimelineEntry,
     TimelineLayout, open,
 };
+pub use hold::{Hold, hold};
 pub use json::{parse_draft, write_draft};
 pub use repair::{RepairNote, repair};
 pub use upgrade::{BUILD, Protocol, upgrade};

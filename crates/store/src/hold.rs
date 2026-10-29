@@ -145,10 +145,7 @@ mod tests {
             panic!("held");
         };
         assert_eq!(path, root.canonicalize().unwrap());
-        let message = StoreError::Held {
-            path: path.clone(),
-        }
-        .to_string();
+        let message = StoreError::Held { path: path.clone() }.to_string();
         assert!(message.contains("already held"));
         assert_eq!(fs::read(first.path()).unwrap(), b"{\"address\":null}\n");
         drop(first);

@@ -4,7 +4,9 @@ pub mod icons;
 pub mod probe;
 pub mod shell;
 pub mod tokens;
+pub mod view;
 pub mod widgets;
+pub mod window;
 
 /// Platform openers go first. A codec they decline falls through to the
 /// software opener registered after them.

@@ -218,7 +218,7 @@ impl VideoDecoder {
         } else {
             parameter_format(self.codec, extra)?
         };
-        let session = create_decompress(&format)?;
+        let session = create_decompress(&format, !needs_sized_format(self.codec))?;
         self.format = Some(format);
         self.session = Some(session);
         Ok(())
@@ -430,6 +430,9 @@ fn in_band_config(codec: CodecId, data: &[u8]) -> Result<Option<Vec<u8>>, CodecE
 }
 
 fn access_unit(codec: CodecId, data: &[u8]) -> Result<Vec<u8>, CodecError> {
+    if !matches!(codec, CodecId::H264 | CodecId::Hevc) {
+        return Ok(data.to_vec());
+    }
     if let Ok(nals) = nal::annex_b(data) {
         let vcl: Vec<Nal> = nals
             .into_iter()
@@ -539,8 +542,8 @@ fn sized_format(codec: CodecId, width: u32, height: u32) -> Result<Cf, CodecErro
     })
 }
 
-fn create_decompress(format: &Cf) -> Result<Decompress, CodecError> {
-    let attributes = bgra_attributes()?;
+fn create_decompress(format: &Cf, bgra: bool) -> Result<Decompress, CodecError> {
+    let attributes = if bgra { Some(bgra_attributes()?) } else { None };
     let callback = sys::VTDecompressionOutputCallbackRecord {
         callback: decode_output,
         refcon: ptr::null_mut(),
@@ -551,7 +554,7 @@ fn create_decompress(format: &Cf) -> Result<Decompress, CodecError> {
             ptr::null(),
             format.as_ptr(),
             ptr::null(),
-            attributes.as_ptr(),
+            attributes.as_ref().map(Cf::as_ptr).unwrap_or(ptr::null()),
             &callback,
             &mut raw,
         )
@@ -1275,6 +1278,89 @@ mod tests {
                 what: "odd video size"
             }
         );
+    }
+
+    fn color_round_trip(codec: CodecId) -> Result<(), CodecError> {
+        let mut encoder = open_encoder(&video_params(codec, 64, 64))?;
+        let mut packets = encoder.push_frame(&solid(64, 64, [220, 10, 10, 255], 0))?;
+        packets.extend(encoder.push_frame(&solid(64, 64, [220, 10, 10, 255], 1))?);
+        packets.extend(encoder.drain()?);
+        if packets.is_empty() {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "no packets",
+            });
+        }
+        let mut decode_params = video_params(codec, 64, 64);
+        if let Some(config) = packets.iter().find_map(|packet| {
+            packet.side.iter().find_map(|side| match side {
+                SideData::Config(bytes) if !bytes.is_empty() => Some(bytes.clone()),
+                _ => None,
+            })
+        }) {
+            decode_params.extra = config;
+        }
+        let mut decoder = open_decoder(&decode_params)?;
+        let mut red = 0u64;
+        let mut green = 0u64;
+        let mut blue = 0u64;
+        for packet in &packets {
+            for output in decoder.push(packet)? {
+                let Output::Picture(picture) = output else {
+                    continue;
+                };
+                let PictureSamples::Cpu(bytes) = picture.samples() else {
+                    continue;
+                };
+                red += channel_sum(bytes, 0);
+                green += channel_sum(bytes, 1);
+                blue += channel_sum(bytes, 2);
+            }
+        }
+        if red == 0 || red <= green.saturating_mul(4) || red <= blue.saturating_mul(4) {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "color",
+            });
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn hevc_round_trips_a_solid_color_when_the_hardware_can() {
+        match color_round_trip(CodecId::Hevc) {
+            Ok(()) => {}
+            Err(CodecError::Unsupported { .. }) => {}
+            Err(err) => panic!("{err}"),
+        }
+    }
+
+    #[test]
+    fn prores_round_trips_a_solid_color_when_the_hardware_can() {
+        match color_round_trip(CodecId::Prores) {
+            Ok(()) => {}
+            Err(CodecError::Unsupported { .. }) => {}
+            Err(err) => panic!("{err}"),
+        }
+    }
+
+    #[test]
+    fn mjpeg_round_trips_a_solid_color_when_the_hardware_can() {
+        match color_round_trip(CodecId::Mjpeg) {
+            Ok(()) => {}
+            Err(CodecError::Unsupported { .. }) => {}
+            Err(err) => panic!("{err}"),
+        }
+    }
+
+    #[test]
+    fn later_video_codecs_decline_or_open() {
+        for codec in [CodecId::Av1, CodecId::Vp9, CodecId::Mpeg4, CodecId::Mpeg2] {
+            match color_round_trip(codec) {
+                Ok(()) | Err(CodecError::Unsupported { .. }) => {}
+                Err(err) => panic!("{codec:?} {err}"),
+            }
+        }
     }
 
     #[test]

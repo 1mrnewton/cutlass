@@ -160,29 +160,29 @@ Apple M5 Pro, Darwin arm64, 48 GiB, rustc 1.99.1, `--release`, one thread. `full
 
 Both of those runs were inside 500 ms encode and 250 ms decode. Linux and Windows were not run.
 
-`cargo bench -p cutlass-png` (`benches/against_ffmpeg.rs`) repeats each pass 5 times after one warmup and reports the median wall time. Same machine, release, one thread. ffmpeg 8.1.1 at `/opt/homebrew/bin/ffmpeg`. Pixels matched before the timed passes. An ffmpeg row includes process start. `ffmpeg -version` itself is 18.4 ms (17.9–18.8). Cutlass stays in-process. Encode `out` is the PNG size. Decode `out` is the raw sample count.
+`cargo bench -p cutlass-png` (`benches/against_ffmpeg.rs`) repeats each pass 5 times after one warmup and reports the median wall time. Same machine, release, one thread. ffmpeg 8.1.1 at `/opt/homebrew/bin/ffmpeg`. Pixels matched before the timed passes. An ffmpeg row includes process start. `ffmpeg -version` itself is 18.6 ms (18.4–19.0). Cutlass stays in-process. Encode `out` is the PNG size. Decode `out` is the raw sample count.
 
-Matches are copied in runs into one reused scanline. A contiguous row is widened straight into the sample buffer. Literals still land one byte at a time. Sub, Average, and Paeth reconstruct each byte of a pixel together, because those bytes do not depend on their neighbors. The encoder picks a dynamic Huffman block when it is smaller than a fixed block, probes the previous scanline, and defers a short match when the next byte matches further. A length-3 match farther than 4096 bytes is stored as literals.
+Matches are copied in runs into one reused scanline. A contiguous row is widened straight into the sample buffer. Literals still land one byte at a time. Sub, Average, and Paeth reconstruct each byte of a pixel together, because those bytes do not depend on their neighbors. The encoder picks a dynamic Huffman block when it is smaller than a fixed block, probes the previous scanline, and defers a short match when the next byte matches further. Once a copy of 32 bytes is in hand, the search checks only a few more places. A length-3 match farther than 4096 bytes is stored as literals.
 
 | Picture | Side | Op | Median | Out | Settings |
 | --- | --- | --- | --- | --- | --- |
-| 1920×1080 RGBA8 gradient | cutlass | encode | 43.0 ms | 9782 | filter search, dynamic or fixed Huffman |
-| 1920×1080 RGBA8 gradient | ffmpeg | encode | 45.9 ms | 59164 | pred Paeth, zlib default |
-| 1920×1080 RGBA8 gradient | ffmpeg | encode | 53.7 ms | 10548 | pred mixed, zlib default |
-| 1920×1080 RGBA8 gradient | cutlass | decode | 19.5 ms | 8294400 | the cutlass PNG |
+| 1920×1080 RGBA8 gradient | cutlass | encode | 36.1 ms | 9652 | filter search, dynamic or fixed Huffman |
+| 1920×1080 RGBA8 gradient | ffmpeg | encode | 46.2 ms | 59164 | pred Paeth, zlib default |
+| 1920×1080 RGBA8 gradient | ffmpeg | encode | 53.6 ms | 10548 | pred mixed, zlib default |
+| 1920×1080 RGBA8 gradient | cutlass | decode | 19.2 ms | 8294400 | the cutlass PNG |
 | 1920×1080 RGBA8 gradient | ffmpeg | decode | 27.4 ms | 8294400 | the same PNG |
-| 1920×1080 RGBA8 noise | cutlass | encode | 234.6 ms | 8311144 | filter search, dynamic or fixed Huffman |
-| 1920×1080 RGBA8 noise | ffmpeg | encode | 129.3 ms | 8322399 | pred Paeth, zlib default |
-| 1920×1080 RGBA8 noise | ffmpeg | encode | 141.7 ms | 8322399 | pred mixed, zlib default |
-| 1920×1080 RGBA8 noise | cutlass | decode | 56.3 ms | 8294400 | the cutlass PNG |
-| 1920×1080 RGBA8 noise | ffmpeg | decode | 57.4 ms | 8294400 | the same PNG |
-| motion-graphics.png | cutlass | decode | 33.0 ms | 18889752 | the file on disk |
-| motion-graphics.png | ffmpeg | decode | 59.4 ms | 18889752 | the same file |
-| motion-graphics.png | cutlass | encode | 215.6 ms | 715569 | filter search, dynamic or fixed Huffman |
-| motion-graphics.png | ffmpeg | encode | 107.3 ms | 707538 | pred Paeth, zlib default |
-| motion-graphics.png | ffmpeg | encode | 138.2 ms | 702900 | pred mixed, zlib default |
+| 1920×1080 RGBA8 noise | cutlass | encode | 237.3 ms | 8311144 | filter search, dynamic or fixed Huffman |
+| 1920×1080 RGBA8 noise | ffmpeg | encode | 130.4 ms | 8322399 | pred Paeth, zlib default |
+| 1920×1080 RGBA8 noise | ffmpeg | encode | 144.4 ms | 8322399 | pred mixed, zlib default |
+| 1920×1080 RGBA8 noise | cutlass | decode | 57.7 ms | 8294400 | the cutlass PNG |
+| 1920×1080 RGBA8 noise | ffmpeg | decode | 57.3 ms | 8294400 | the same PNG |
+| motion-graphics.png | cutlass | decode | 33.8 ms | 18889752 | the file on disk |
+| motion-graphics.png | ffmpeg | decode | 63.6 ms | 18889752 | the same file |
+| motion-graphics.png | cutlass | encode | 139.3 ms | 720638 | filter search, dynamic or fixed Huffman |
+| motion-graphics.png | ffmpeg | encode | 109.1 ms | 707538 | pred Paeth, zlib default |
+| motion-graphics.png | ffmpeg | encode | 139.1 ms | 702900 | pred mixed, zlib default |
 
-On the real file, 1110 of 1603 rows are Paeth and 433 are Up. Inflating that file is 19 ms and the whole decode is 33 ms. ffmpeg's wall time on it is 59 ms. Decode wall time is ahead of ffmpeg on these three pictures. On the noise frame their inflater itself is still faster, because that picture is almost all literals and ffmpeg's row still includes about 18 ms of process start. The gradient encodes to 9782 bytes, smaller than ffmpeg's mixed filter at 10548. The real file encodes to 715569 bytes against ffmpeg mixed at 702900. Noise encodes to 8311144 bytes against ffmpeg 8322399, in 235 ms, inside the 500 ms budget.
+On the real file, 1110 of 1603 rows are Paeth and 433 are Up. Inflating that file is 19 ms and the whole decode is 34 ms. ffmpeg's wall time on it is 64 ms. Decode wall time is ahead of ffmpeg on these three pictures. On the noise frame their inflater itself is still faster, because that picture is almost all literals and ffmpeg's row still includes about 19 ms of process start. The gradient encodes to 9652 bytes, smaller than ffmpeg's mixed filter at 10548. The real file encodes to 720638 bytes in 139 ms, against ffmpeg mixed at 702900 bytes in 139 ms. Noise encodes to 8311144 bytes against ffmpeg 8322399, in 237 ms, inside the 500 ms budget.
 
 Memory: the inflater keeps a distance window of the size named in the zlib header, at most 32 KiB. Reconstruction keeps one scanline and the previous scanline, and writes the sample buffer directly. The inflated image is not retained. No heap profile. The sample buffer is the one image the gate names. Linux and Windows were not run.
 

@@ -3926,28 +3926,68 @@ fn predict_inter(
     my: usize,
     mb: &Mb,
 ) -> Result<(), CodecError> {
+    let mut done = [false; 16];
     for by in 0..4 {
         for bx in 0..4 {
             let index = by * 4 + bx;
+            if done[index] {
+                continue;
+            }
             let r0 = ref_of(mb, bx, by, 0);
             let r1 = ref_of(mb, bx, by, 1);
-            let x = mx * 16 + bx * 4;
-            let y = my * 16 + by * 4;
+            let mv0 = mb.mv0[index];
+            let mv1 = mb.mv1[index];
+            let mut bw = 1usize;
+            while bx + bw < 4 && same_motion(mb, bx + bw, by, r0, r1, mv0, mv1) {
+                bw += 1;
+            }
+            let mut bh = 1usize;
+            while by + bh < 4 {
+                let row = (0..bw).all(|dx| {
+                    !done[(by + bh) * 4 + bx + dx]
+                        && same_motion(mb, bx + dx, by + bh, r0, r1, mv0, mv1)
+                });
+                if !row {
+                    break;
+                }
+                bh += 1;
+            }
+            for dy in 0..bh {
+                for dx in 0..bw {
+                    done[(by + dy) * 4 + bx + dx] = true;
+                }
+            }
             mc_block(
                 pic,
                 dpb,
                 slice,
-                Block { x, y, w: 4, h: 4 },
-                McMotion {
-                    r0,
-                    r1,
-                    mv0: mb.mv0[index],
-                    mv1: mb.mv1[index],
+                Block {
+                    x: mx * 16 + bx * 4,
+                    y: my * 16 + by * 4,
+                    w: bw * 4,
+                    h: bh * 4,
                 },
+                McMotion { r0, r1, mv0, mv1 },
             )?;
         }
     }
     Ok(())
+}
+
+fn same_motion(
+    mb: &Mb,
+    bx: usize,
+    by: usize,
+    r0: i8,
+    r1: i8,
+    mv0: [i16; 2],
+    mv1: [i16; 2],
+) -> bool {
+    let index = by * 4 + bx;
+    ref_of(mb, bx, by, 0) == r0
+        && ref_of(mb, bx, by, 1) == r1
+        && mb.mv0[index] == mv0
+        && mb.mv1[index] == mv1
 }
 
 struct Block {
@@ -3997,48 +4037,158 @@ fn mc_block(
         let frame = reference_frame(dpb, slice, 1, r1)?;
         predict_chroma((&mut u1, &mut v1), frame, (x, y), (cw, ch), mv1);
     }
-    for row in 0..h {
-        for col in 0..w {
-            let sample = if r0 >= 0 && r1 >= 0 {
-                blend(
-                    slice,
-                    r0,
-                    r1,
-                    luma0[row * w + col],
-                    luma1[row * w + col],
-                    -1,
-                )
-            } else if r0 >= 0 {
-                uni_luma(slice, luma0[row * w + col], 0, r0)
-            } else if r1 >= 0 {
-                uni_luma(slice, luma1[row * w + col], 1, r1)
-            } else {
-                0
-            };
-            pic.y[(y + row) * pic.w + x + col] = sample;
-        }
-    }
-    for row in 0..ch {
-        for col in 0..cw {
-            for (plane_is_u, src0, src1) in [(true, &u0, &u1), (false, &v0, &v1)] {
-                let a = src0[row * cw + col];
-                let b = src1[row * cw + col];
-                let sample = if r0 >= 0 && r1 >= 0 {
-                    blend(slice, r0, r1, a, b, if plane_is_u { 0 } else { 1 })
-                } else if r0 >= 0 {
-                    uni_chroma(slice, a, 0, r0, plane_is_u)
-                } else if r1 >= 0 {
-                    uni_chroma(slice, b, 1, r1, plane_is_u)
-                } else {
-                    128
-                };
-                let plane = if plane_is_u { &mut pic.u } else { &mut pic.v };
-                let stride = pic.w / 2;
-                plane[(y / 2 + row) * stride + x / 2 + col] = sample;
-            }
-        }
+    store_block(
+        &mut pic.y,
+        pic.w,
+        (x, y),
+        (w, h),
+        (&luma0, &luma1),
+        mix(slice, r0, r1, -1),
+        0,
+    );
+    if cw > 0 && ch > 0 {
+        let stride = pic.w / 2;
+        let origin = (x / 2, y / 2);
+        let size = (cw, ch);
+        store_block(
+            &mut pic.u,
+            stride,
+            origin,
+            size,
+            (&u0, &u1),
+            mix(slice, r0, r1, 0),
+            128,
+        );
+        store_block(
+            &mut pic.v,
+            stride,
+            origin,
+            size,
+            (&v0, &v1),
+            mix(slice, r0, r1, 1),
+            128,
+        );
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum Mix {
+    Fill,
+    Copy(usize),
+    Uni {
+        weight: i32,
+        offset: i32,
+        denom: i32,
+        from: usize,
+    },
+    Avg,
+    Weighted(recon::BiWeight),
+}
+
+fn mix(slice: &Slice<'_>, r0: i8, r1: i8, plane: i8) -> Mix {
+    if r0 >= 0 && r1 >= 0 {
+        if slice.weighted {
+            Mix::Weighted(explicit_bi(slice, r0, r1, plane))
+        } else if slice.pps.weighted_bipred == 2 && slice.kind == 1 {
+            let (w0, w1) = implicit_weights(slice, r0, r1);
+            Mix::Weighted(recon::BiWeight {
+                w0,
+                w1,
+                o0: 0,
+                o1: 0,
+                denom: 5,
+            })
+        } else {
+            Mix::Avg
+        }
+    } else if r0 >= 0 {
+        uni_mix(slice, 0, r0, plane)
+    } else if r1 >= 0 {
+        uni_mix(slice, 1, r1, plane)
+    } else {
+        Mix::Fill
+    }
+}
+
+fn explicit_bi(slice: &Slice<'_>, r0: i8, r1: i8, plane: i8) -> recon::BiWeight {
+    let left = usize::try_from(r0).unwrap_or(0);
+    let right = usize::try_from(r1).unwrap_or(0);
+    if plane < 0 {
+        recon::BiWeight {
+            w0: slice.yw[0][left],
+            w1: slice.yw[1][right],
+            o0: slice.yo[0][left],
+            o1: slice.yo[1][right],
+            denom: slice.luma_denom,
+        }
+    } else {
+        let plane = usize::try_from(plane).unwrap_or(0);
+        recon::BiWeight {
+            w0: slice.cw[0][left][plane],
+            w1: slice.cw[1][right][plane],
+            o0: slice.co[0][left][plane],
+            o1: slice.co[1][right][plane],
+            denom: slice.chroma_denom,
+        }
+    }
+}
+
+fn uni_mix(slice: &Slice<'_>, list: usize, reference: i8, plane: i8) -> Mix {
+    if !slice.weighted {
+        return Mix::Copy(list);
+    }
+    let index = usize::try_from(reference).unwrap_or(0);
+    if plane < 0 {
+        Mix::Uni {
+            weight: slice.yw[list][index],
+            offset: slice.yo[list][index],
+            denom: slice.luma_denom,
+            from: list,
+        }
+    } else {
+        let plane = usize::try_from(plane).unwrap_or(0);
+        Mix::Uni {
+            weight: slice.cw[list][index][plane],
+            offset: slice.co[list][index][plane],
+            denom: slice.chroma_denom,
+            from: list,
+        }
+    }
+}
+
+fn store_block(
+    dst: &mut [u8],
+    stride: usize,
+    origin: (usize, usize),
+    size: (usize, usize),
+    pred: (&[u8], &[u8]),
+    mix: Mix,
+    fill: u8,
+) {
+    let (x, y) = origin;
+    let (w, h) = size;
+    let (left, right) = pred;
+    for row in 0..h {
+        let at = (y + row) * stride + x;
+        for col in 0..w {
+            let a = left[row * w + col];
+            let b = right[row * w + col];
+            dst[at + col] = match mix {
+                Mix::Fill => fill,
+                Mix::Copy(0) => a,
+                Mix::Copy(_) => b,
+                Mix::Uni {
+                    weight,
+                    offset,
+                    denom,
+                    from,
+                } => recon::weight_uni(if from == 0 { a } else { b }, weight, offset, denom),
+                Mix::Avg => recon::avg(a, b),
+                Mix::Weighted(weight) => recon::weight_bi(a, b, weight),
+            };
+        }
+    }
 }
 
 fn reference_frame<'a>(
@@ -4130,81 +4280,6 @@ fn predict_chroma(
     );
     recon::put_chroma_block(u, w, &frame.u, frame.w / 2, pic, block);
     recon::put_chroma_block(v, w, &frame.v, frame.w / 2, pic, block);
-}
-
-fn uni_luma(slice: &Slice<'_>, sample: u8, list: usize, reference: i8) -> u8 {
-    if slice.weighted {
-        let index = usize::try_from(reference).unwrap_or(0);
-        recon::weight_uni(
-            sample,
-            slice.yw[list][index],
-            slice.yo[list][index],
-            slice.luma_denom,
-        )
-    } else {
-        sample
-    }
-}
-
-fn uni_chroma(slice: &Slice<'_>, sample: u8, list: usize, reference: i8, cb: bool) -> u8 {
-    if slice.weighted {
-        let index = usize::try_from(reference).unwrap_or(0);
-        let plane = usize::from(!cb);
-        recon::weight_uni(
-            sample,
-            slice.cw[list][index][plane],
-            slice.co[list][index][plane],
-            slice.chroma_denom,
-        )
-    } else {
-        sample
-    }
-}
-
-fn blend(slice: &Slice<'_>, r0: i8, r1: i8, a: u8, b: u8, plane: i8) -> u8 {
-    if slice.weighted {
-        if plane >= 0 {
-            let plane = usize::try_from(plane).unwrap_or(0);
-            recon::weight_bi(
-                a,
-                b,
-                recon::BiWeight {
-                    w0: slice.cw[0][r0 as usize][plane],
-                    w1: slice.cw[1][r1 as usize][plane],
-                    o0: slice.co[0][r0 as usize][plane],
-                    o1: slice.co[1][r1 as usize][plane],
-                    denom: slice.chroma_denom,
-                },
-            )
-        } else {
-            recon::weight_bi(
-                a,
-                b,
-                recon::BiWeight {
-                    w0: slice.yw[0][r0 as usize],
-                    w1: slice.yw[1][r1 as usize],
-                    o0: slice.yo[0][r0 as usize],
-                    o1: slice.yo[1][r1 as usize],
-                    denom: slice.luma_denom,
-                },
-            )
-        }
-    } else if slice.pps.weighted_bipred == 2 && slice.kind == 1 {
-        let (w0, w1) = implicit_weights(slice, r0, r1);
-        recon::weight_bi(
-            a,
-            b,
-            recon::BiWeight {
-                w0,
-                w1,
-                o0: 0,
-                o1: 0,
-                denom: 5,
-            },
-        )
-    } else {
-        recon::avg(a, b)
-    }
 }
 
 /// Clause 8.4.3 implicit bipred weights from the picture-order distance.

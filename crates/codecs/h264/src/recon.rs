@@ -802,6 +802,35 @@ pub fn put_chroma_block(
     }
     let x0 = usize::try_from(x).unwrap_or(0);
     let y0 = usize::try_from(y).unwrap_or(0);
+    if xf == 0 && yf == 0 {
+        copy_block(dst, dst_stride, src_at(src, src_stride, x, y), (w, h));
+        return;
+    }
+    if yf == 0 {
+        let wa = 8 - xf;
+        for row in 0..h {
+            let samples = &src[(y0 + row) * src_stride..];
+            for col in 0..w {
+                let sx = x0 + col;
+                let value = wa * i32::from(samples[sx]) + xf * i32::from(samples[sx + 1]);
+                dst[row * dst_stride + col] = clip_u8((value + 4) >> 3);
+            }
+        }
+        return;
+    }
+    if xf == 0 {
+        let wa = 8 - yf;
+        for row in 0..h {
+            let row0 = &src[(y0 + row) * src_stride..];
+            let row1 = &src[(y0 + row + 1) * src_stride..];
+            for col in 0..w {
+                let sx = x0 + col;
+                let value = wa * i32::from(row0[sx]) + yf * i32::from(row1[sx]);
+                dst[row * dst_stride + col] = clip_u8((value + 4) >> 3);
+            }
+        }
+        return;
+    }
     let wa = (8 - xf) * (8 - yf);
     let wb = xf * (8 - yf);
     let wc = (8 - xf) * yf;
@@ -892,8 +921,7 @@ fn copy_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usi
     let (w, h) = size;
     for row in 0..h {
         let from = (src.y + row) * src.stride + src.x;
-        dst[row * dst_stride..row * dst_stride + w]
-            .copy_from_slice(&src.samples[from..from + w]);
+        dst[row * dst_stride..row * dst_stride + w].copy_from_slice(&src.samples[from..from + w]);
     }
 }
 
@@ -957,6 +985,7 @@ pub fn weight_uni(sample: u8, w: i32, o: i32, denom: i32) -> u8 {
     clip_u8(v)
 }
 
+#[derive(Clone, Copy)]
 pub struct BiWeight {
     pub w0: i32,
     pub w1: i32,

@@ -109,17 +109,76 @@ pub(crate) fn unfilter(kind: u8, row: &mut [u8], prev: &[u8], bpp: usize) -> Res
     }
     match kind {
         0 => Ok(()),
-        1 => {
-            for index in bpp..row.len() {
-                row[index] = row[index].wrapping_add(row[index - bpp]);
-            }
-            Ok(())
-        }
         2 => {
             for (byte, above) in row.iter_mut().zip(prev) {
                 *byte = byte.wrapping_add(*above);
             }
             Ok(())
+        }
+        1 | 3 | 4 => {
+            match bpp {
+                2 => lanes::<2>(kind, row, prev),
+                3 => lanes::<3>(kind, row, prev),
+                4 => lanes::<4>(kind, row, prev),
+                6 => lanes::<6>(kind, row, prev),
+                8 => lanes::<8>(kind, row, prev),
+                _ => serial(kind, row, prev, bpp),
+            }
+            Ok(())
+        }
+        _ => Err(()),
+    }
+}
+
+/// Reconstruct several pixels at once.
+///
+/// Byte `i` depends on byte `i - bpp`, not on the bytes beside it. A pixel
+/// of 2, 3, 4, 6, or 8 bytes is that many independent chains.
+fn lanes<const N: usize>(kind: u8, row: &mut [u8], prev: &[u8]) {
+    match kind {
+        1 => lanes_kind::<N, 1>(row, prev),
+        3 => lanes_kind::<N, 3>(row, prev),
+        _ => lanes_kind::<N, 4>(row, prev),
+    }
+}
+
+fn lanes_kind<const N: usize, const KIND: u8>(row: &mut [u8], prev: &[u8]) {
+    let mut index = 0;
+    while index < N && index < row.len() {
+        row[index] = row[index].wrapping_add(predict::<KIND>(0, prev[index], 0));
+        index += 1;
+    }
+    while index + N <= row.len() {
+        let mut next = [0u8; N];
+        for (lane, slot) in next.iter_mut().enumerate() {
+            let at = index + lane;
+            *slot = row[at].wrapping_add(predict::<KIND>(row[at - N], prev[at], prev[at - N]));
+        }
+        row[index..index + N].copy_from_slice(&next);
+        index += N;
+    }
+    while index < row.len() {
+        let left = if index >= N { row[index - N] } else { 0 };
+        let upper = if index >= N { prev[index - N] } else { 0 };
+        row[index] = row[index].wrapping_add(predict::<KIND>(left, prev[index], upper));
+        index += 1;
+    }
+}
+
+fn predict<const KIND: u8>(left: u8, above: u8, upper_left: u8) -> u8 {
+    match KIND {
+        1 => left,
+        3 => ((u16::from(left) + u16::from(above)) / 2) as u8,
+        _ => paeth(left, above, upper_left),
+    }
+}
+
+fn serial(kind: u8, row: &mut [u8], prev: &[u8], bpp: usize) {
+    match kind {
+        1 => {
+            for index in bpp..row.len() {
+                row[index] = row[index].wrapping_add(row[index - bpp]);
+            }
         }
         3 => {
             for index in 0..row.len() {
@@ -127,18 +186,15 @@ pub(crate) fn unfilter(kind: u8, row: &mut [u8], prev: &[u8], bpp: usize) -> Res
                 let sum = u16::from(left) + u16::from(prev[index]);
                 row[index] = row[index].wrapping_add((sum / 2) as u8);
             }
-            Ok(())
         }
-        4 => {
+        _ => {
             for index in 0..row.len() {
                 let left = if index >= bpp { row[index - bpp] } else { 0 };
                 let above = prev[index];
                 let upper_left = if index >= bpp { prev[index - bpp] } else { 0 };
                 row[index] = row[index].wrapping_add(paeth(left, above, upper_left));
             }
-            Ok(())
         }
-        _ => Err(()),
     }
 }
 
@@ -264,14 +320,16 @@ mod tests {
 
     #[test]
     fn sub_up_average_and_paeth_round_trip_a_row() {
-        let src = [10u8, 20, 30, 40];
-        let prev = [1u8, 2, 3, 4];
-        for kind in 0..5 {
-            let mut filtered = [0u8; 4];
-            filter_into(kind, &src, &prev, 1, &mut filtered);
-            let mut row = filtered;
-            unfilter(kind, &mut row, &prev, 1).expect("filter");
-            assert_eq!(row, src);
+        let src = [10u8, 20, 30, 40, 50, 60, 70, 80];
+        let prev = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        for bpp in [1usize, 2, 4] {
+            for kind in 0..5 {
+                let mut filtered = src;
+                filter_into(kind, &src, &prev, bpp, &mut filtered);
+                let mut row = filtered;
+                unfilter(kind, &mut row, &prev, bpp).expect("filter");
+                assert_eq!(row, src);
+            }
         }
     }
 

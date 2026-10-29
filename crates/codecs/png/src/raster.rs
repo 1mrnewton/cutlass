@@ -11,6 +11,7 @@ pub(crate) const PASS_Y0: [u32; 7] = [0, 0, 4, 0, 2, 0, 1];
 pub(crate) const PASS_DX: [u32; 7] = [8, 8, 4, 4, 2, 2, 1];
 pub(crate) const PASS_DY: [u32; 7] = [8, 8, 8, 4, 4, 2, 2];
 
+#[derive(Clone, Copy)]
 pub(crate) struct Pass {
     pub x0: u32,
     pub dx: u32,

@@ -14,7 +14,7 @@ use crate::raster::{
     Pass, adam_pass, bytes_per_pixel, filtered_len, full_pass, pixel_bits, pixel_offset, row_bytes,
     sample_count, unfilter, unpack,
 };
-use crate::zlib::{ZlibError, inflate};
+use crate::zlib::{ZlibError, inflate, inflate_with};
 
 const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -24,11 +24,7 @@ pub(crate) fn decode_png(bytes: &[u8]) -> Result<StillImage, CodecError> {
     let bits = pixel_bits(channels, parsed.depth);
     let expect = filtered_len(parsed.width, parsed.height, bits, parsed.interlace)
         .ok_or(CodecError::Limit { what: "png image" })?;
-    let raw = inflate(&parsed.idat, expect).map_err(zlib_err)?;
-    if raw.len() != expect {
-        return Err(malformed(0, "idat length"));
-    }
-    let samples = reconstruct(&parsed, &raw)?;
+    let samples = reconstruct(&parsed, &parsed.idat, expect)?;
     let mut image = StillImage::from_samples(
         parsed.width,
         parsed.height,
@@ -546,79 +542,133 @@ fn before_palette(at: usize, flags: &Flags) -> Result<(), CodecError> {
     }
 }
 
-fn reconstruct(parsed: &Parsed, raw: &[u8]) -> Result<Vec<u16>, CodecError> {
-    let channels = parsed.color.channels();
-    let count = sample_count(parsed.width, parsed.height, channels)
-        .ok_or(CodecError::Limit { what: "png image" })?;
-    let mut samples = vec![0u16; count];
-    let mut cursor = 0usize;
-    if parsed.interlace {
-        for index in 0..7 {
-            let pass = adam_pass(index, parsed.width, parsed.height);
-            if pass.cols == 0 || pass.rows == 0 {
-                continue;
-            }
-            decode_pass(parsed, raw, &mut samples, &mut cursor, &pass)?;
-        }
-    } else {
-        let pass = full_pass(parsed.width, parsed.height);
-        decode_pass(parsed, raw, &mut samples, &mut cursor, &pass)?;
+fn reconstruct(parsed: &Parsed, idat: &[u8], expect: usize) -> Result<Vec<u16>, CodecError> {
+    let mut scan = Scan::prepare(parsed)?;
+    inflate_with(idat, expect, |byte| scan.push(byte)).map_err(zlib_err)?;
+    if scan.got != expect || scan.pass_at != scan.passes.len() {
+        return Err(malformed(scan.got, "idat length"));
     }
-    if cursor != raw.len() {
-        return Err(malformed(cursor, "idat length"));
-    }
-    Ok(samples)
+    Ok(scan.samples)
 }
 
-fn decode_pass(
-    parsed: &Parsed,
-    raw: &[u8],
-    samples: &mut [u16],
-    cursor: &mut usize,
-    pass: &Pass,
-) -> Result<(), CodecError> {
-    let channels = parsed.color.channels();
-    let bits = pixel_bits(channels, parsed.depth);
-    let bpp = bytes_per_pixel(bits);
-    let row_len = row_bytes(pass.cols, bits).ok_or(CodecError::Limit { what: "png image" })?;
-    let mut prev = vec![0u8; row_len];
-    let mut row = vec![0u8; row_len];
-    let mut row_samples = vec![0u16; usize::try_from(pass.cols).unwrap_or(0) * channels];
-    for row_index in 0..pass.rows {
-        if *cursor >= raw.len() {
-            return Err(truncated(*cursor, "scanline"));
+struct Scan<'a> {
+    parsed: &'a Parsed,
+    samples: Vec<u16>,
+    channels: usize,
+    bits: u32,
+    bpp: usize,
+    passes: Vec<Pass>,
+    pass_at: usize,
+    row_index: u32,
+    need: usize,
+    buf: Vec<u8>,
+    prev: Vec<u8>,
+    row_samples: Vec<u16>,
+    got: usize,
+}
+
+impl<'a> Scan<'a> {
+    fn prepare(parsed: &'a Parsed) -> Result<Self, CodecError> {
+        let channels = parsed.color.channels();
+        let bits = pixel_bits(channels, parsed.depth);
+        let bpp = bytes_per_pixel(bits);
+        let count = sample_count(parsed.width, parsed.height, channels)
+            .ok_or(CodecError::Limit { what: "png image" })?;
+        let mut passes = Vec::new();
+        if parsed.interlace {
+            for index in 0..7 {
+                let pass = adam_pass(index, parsed.width, parsed.height);
+                if pass.cols > 0 && pass.rows > 0 {
+                    passes.push(pass);
+                }
+            }
+        } else {
+            passes.push(full_pass(parsed.width, parsed.height));
         }
-        let filter = raw[*cursor];
-        *cursor += 1;
-        let end = cursor.saturating_add(row_len);
-        if end > raw.len() {
-            return Err(truncated(*cursor, "scanline"));
+        let mut scan = Self {
+            parsed,
+            samples: vec![0; count],
+            channels,
+            bits,
+            bpp,
+            passes,
+            pass_at: 0,
+            row_index: 0,
+            need: 0,
+            buf: Vec::new(),
+            prev: Vec::new(),
+            row_samples: Vec::new(),
+            got: 0,
+        };
+        scan.start_pass()?;
+        Ok(scan)
+    }
+
+    fn start_pass(&mut self) -> Result<(), CodecError> {
+        let Some(pass) = self.passes.get(self.pass_at) else {
+            return Err(malformed(self.got, "idat length"));
+        };
+        let row_len =
+            row_bytes(pass.cols, self.bits).ok_or(CodecError::Limit { what: "png image" })?;
+        let cols = usize::try_from(pass.cols).unwrap_or(0);
+        self.need = row_len + 1;
+        self.buf = Vec::with_capacity(self.need);
+        self.prev = vec![0; row_len];
+        self.row_samples = vec![0; cols * self.channels];
+        self.row_index = 0;
+        Ok(())
+    }
+
+    fn push(&mut self, byte: u8) -> Result<(), ZlibError> {
+        if self.need == 0 {
+            return Err(ZlibError::Malformed("scanline"));
         }
-        row.copy_from_slice(&raw[*cursor..end]);
-        *cursor = end;
-        if unfilter(filter, &mut row, &prev, bpp).is_err() {
-            return Err(malformed(*cursor, "filter"));
+        self.buf.push(byte);
+        self.got += 1;
+        if self.buf.len() == self.need {
+            self.finish_row()?;
         }
-        unpack(&row, parsed.depth, &mut row_samples);
-        let y = pass.y0 + row_index * pass.dy;
+        Ok(())
+    }
+
+    fn finish_row(&mut self) -> Result<(), ZlibError> {
+        let filter = self.buf[0];
+        let mut row = self.buf.split_off(1);
+        self.buf.clear();
+        if unfilter(filter, &mut row, &self.prev, self.bpp).is_err() {
+            return Err(ZlibError::Malformed("filter"));
+        }
+        unpack(&row, self.parsed.depth, &mut self.row_samples);
+        let pass = self.passes[self.pass_at];
+        let y = pass.y0 + self.row_index * pass.dy;
         for col in 0..pass.cols {
             let x = pass.x0 + col * pass.dx;
-            let from = usize::try_from(col).unwrap_or(0) * channels;
-            let to = pixel_offset(parsed.width, x, y, channels)
-                .ok_or(CodecError::Limit { what: "png image" })?;
-            let from_end = from.saturating_add(channels);
-            let to_end = to.saturating_add(channels);
-            let Some(source) = row_samples.get(from..from_end) else {
-                return Err(malformed(*cursor, "scanline"));
+            let from = usize::try_from(col).unwrap_or(0) * self.channels;
+            let to =
+                pixel_offset(self.parsed.width, x, y, self.channels).ok_or(ZlibError::Limit)?;
+            let from_end = from.saturating_add(self.channels);
+            let to_end = to.saturating_add(self.channels);
+            let Some(source) = self.row_samples.get(from..from_end) else {
+                return Err(ZlibError::Malformed("scanline"));
             };
-            let Some(dest) = samples.get_mut(to..to_end) else {
-                return Err(malformed(*cursor, "scanline"));
+            let Some(dest) = self.samples.get_mut(to..to_end) else {
+                return Err(ZlibError::Malformed("scanline"));
             };
             dest.copy_from_slice(source);
         }
-        prev.copy_from_slice(&row);
+        self.prev = row;
+        self.row_index += 1;
+        if self.row_index == pass.rows {
+            self.pass_at += 1;
+            if self.pass_at == self.passes.len() {
+                self.need = 0;
+            } else {
+                self.start_pass()
+                    .map_err(|_| ZlibError::Malformed("scanline"))?;
+            }
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn bit_depth(byte: u8) -> Option<BitDepth> {

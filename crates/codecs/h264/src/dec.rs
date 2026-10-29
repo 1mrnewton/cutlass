@@ -299,6 +299,7 @@ fn decode_au(
 ) -> Result<Vec<VideoOutput>, CodecError> {
     let nals = nal::access_unit(data, length_size)?;
     let mut picture: Option<Frame> = None;
+    let mut prior = Vec::new();
     let mut slice_id = 0u16;
     let mut next_mb = 0usize;
     for nal in &nals {
@@ -328,6 +329,7 @@ fn decode_au(
                     },
                     &mut picture,
                     &mut next_mb,
+                    &mut prior,
                 )?;
                 if built {
                     slice_id = slice_id.saturating_add(1);
@@ -353,7 +355,9 @@ fn decode_au(
     let mut pic = pic;
     let _ = mb::deblock;
     mb::deblock(&mut pic);
-    finish_picture(poc, dpb, pic)
+    let mut pictures = prior;
+    pictures.extend(finish_picture(poc, dpb, pic)?);
+    Ok(pictures)
 }
 
 fn finish_picture(
@@ -502,6 +506,7 @@ fn decode_slice(
     cursor: SliceCursor<'_>,
     picture: &mut Option<Frame>,
     next_mb: &mut usize,
+    prior: &mut Vec<VideoOutput>,
 ) -> Result<bool, CodecError> {
     let SliceCursor {
         nal,
@@ -518,13 +523,17 @@ fn decode_slice(
     let (poc, frame_num_offset) = picture_order(&header, &sps, poc_state, idr)?;
     let _ = frame_num_offset;
     if picture.is_none() {
-        if idr && header.no_output_prior {
+        // An IDR marks every earlier picture unused for reference. The flag
+        // drops pictures that were still waiting; otherwise they are returned
+        // before this picture. The flag does not hide the IDR itself.
+        if idr {
             for frame in dpb.iter_mut() {
-                frame.output = false;
                 frame.referenced = false;
+                if header.no_output_prior {
+                    frame.output = false;
+                }
             }
-        } else if idr {
-            let _flushed = take_output(dpb, 0);
+            prior.extend(take_output(dpb, 0));
         }
         *picture = Some(new_frame(&sps, &header, poc, packet, idr)?);
         *next_mb = 0;
@@ -956,7 +965,7 @@ fn new_frame(
         referenced: header.nal_ref,
         long_term: header.long_term_ref,
         long_idx: if header.long_term_ref { 0 } else { -1 },
-        output: !(idr && header.no_output_prior),
+        output: true,
         key: idr || header.kind == 2,
         pts: packet.pts,
         duration: packet.duration,
@@ -1208,5 +1217,131 @@ mod tests {
         same("y", picture.picture.y(), &reference[..y_len]);
         same("u", picture.picture.u(), &reference[y_len..y_len + c_len]);
         same("v", picture.picture.v(), &reference[y_len + c_len..]);
+    }
+
+    /// A later IDR must return pictures the reorder buffer was still holding.
+    /// x264 leaves `no_output_of_prior_pics_flag` clear, which is the case
+    /// that used to drop those pictures.
+    #[test]
+    fn idr_returns_pictures_still_waiting() {
+        let Some(ff) = ffmpeg() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join("cutlass-h264-idr-wait");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let h264 = dir.join("gop.h264");
+        let yuv = dir.join("gop.yuv");
+        let encoded = Command::new(&ff)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x64:rate=30:duration=1",
+                "-frames:v",
+                "8",
+                "-c:v",
+                "libx264",
+                "-profile:v",
+                "main",
+                "-pix_fmt",
+                "yuv420p",
+                "-x264-params",
+                "cabac=1:bframes=1:keyint=4:min-keyint=4:scenecut=0:weightp=0:8x8dct=0",
+                "-f",
+                "h264",
+            ])
+            .arg(&h264)
+            .status();
+        let Ok(status) = encoded else {
+            return;
+        };
+        if !status.success() {
+            return;
+        }
+        let decoded = Command::new(&ff)
+            .args(["-y", "-i"])
+            .arg(&h264)
+            .args(["-frames:v", "8", "-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .arg(&yuv)
+            .status();
+        let Ok(status) = decoded else {
+            return;
+        };
+        if !status.success() {
+            return;
+        }
+        let bytes = std::fs::read(&h264).expect("annex b");
+        let reference = std::fs::read(&yuv).expect("yuv");
+        let mut params = CodecParams::video(CodecId::H264, 64, 64);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).expect("open");
+        let mut got = Vec::new();
+        for (n, unit) in access_units(&bytes).iter().enumerate() {
+            let pictures = decoder
+                .push(&Packet::video(unit.clone(), n as i64, 1, 30, n == 0))
+                .expect("decode");
+            got.extend(pictures);
+        }
+        got.extend(decoder.drain().expect("drain"));
+        let frame = 64 * 64 * 3 / 2;
+        assert_eq!(reference.len() / frame, 8, "ffmpeg picture count");
+        assert_eq!(
+            got.len(),
+            reference.len() / frame,
+            "dropped a waiting picture"
+        );
+        for (index, picture) in got.iter().enumerate() {
+            let start = index * frame;
+            let y_len = 64 * 64;
+            let c_len = 32 * 32;
+            same("y", picture.picture.y(), &reference[start..start + y_len]);
+            same(
+                "u",
+                picture.picture.u(),
+                &reference[start + y_len..start + y_len + c_len],
+            );
+            same(
+                "v",
+                picture.picture.v(),
+                &reference[start + y_len + c_len..start + frame],
+            );
+        }
+    }
+
+    fn access_units(data: &[u8]) -> Vec<Vec<u8>> {
+        let mut starts = Vec::new();
+        let mut i = 0;
+        while i + 3 < data.len() {
+            if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+                let header = if i > 0 && data[i - 1] == 0 { i - 1 } else { i };
+                starts.push((header, i + 3));
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+        let mut units = Vec::new();
+        let mut current = Vec::new();
+        let mut saw_vcl = false;
+        for (n, &(header, body)) in starts.iter().enumerate() {
+            let end = starts
+                .get(n + 1)
+                .map(|(next, _)| *next)
+                .unwrap_or(data.len());
+            let kind = data[body] & 31;
+            let vcl = kind == 1 || kind == 5;
+            if (kind == 9 || (vcl && saw_vcl)) && !current.is_empty() {
+                units.push(std::mem::take(&mut current));
+                saw_vcl = false;
+            }
+            current.extend_from_slice(&data[header..end]);
+            saw_vcl |= vcl;
+        }
+        if !current.is_empty() {
+            units.push(current);
+        }
+        units
     }
 }

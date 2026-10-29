@@ -805,6 +805,67 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_push_adds_no_packets() {
+        let mut encoder = open_encoder(&audio_params(CodecId::Pcm, 48_000)).expect("open");
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), Vec::new()).expect("pcm");
+        assert!(encoder.push(&AudioInput { pcm }).expect("push").is_empty());
+    }
+
+    #[test]
+    fn a_sample_past_full_scale_adds_nothing() {
+        let mut encoder = open_encoder(&audio_params(CodecId::Pcm, 48_000)).expect("open");
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![1.1]).expect("pcm");
+        assert_eq!(
+            encoder.push(&AudioInput { pcm }),
+            Err(CodecError::OutOfRange)
+        );
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.25]).expect("pcm");
+        assert!(encoder.push(&AudioInput { pcm }).is_ok());
+    }
+
+    #[test]
+    fn a_cancelled_encoder_accepts_nothing() {
+        let mut encoder = open_encoder(&audio_params(CodecId::Pcm, 48_000)).expect("open");
+        encoder
+            .cancel_flag()
+            .store(true, Ordering::Relaxed);
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.25]).expect("pcm");
+        assert_eq!(
+            encoder.push(&AudioInput { pcm }),
+            Err(CodecError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn the_wrong_sample_rate_leaves_the_buffer_empty() {
+        let mut encoder = open_encoder(&audio_params(CodecId::Pcm, 48_000)).expect("open");
+        let pcm = Pcm::from_f32(44_100, ChannelLayout::mono(), vec![0.25]).expect("pcm");
+        assert_eq!(
+            encoder.push(&AudioInput { pcm }),
+            Err(CodecError::InvalidApi {
+                what: "audio format"
+            })
+        );
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.25]).expect("pcm");
+        let packets = encoder.push(&AudioInput { pcm }).expect("push");
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].data.len(), 4);
+    }
+
+    #[test]
+    fn reset_drops_a_partial_aac_frame() {
+        let mut encoder = open_encoder(&audio_params(CodecId::Aac, 48_000)).expect("open");
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.2; 100]).expect("pcm");
+        assert!(encoder.push(&AudioInput { pcm }).expect("partial").is_empty());
+        encoder.reset();
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.2; 100]).expect("pcm");
+        assert!(encoder.push(&AudioInput { pcm }).expect("again").is_empty());
+        let drained = encoder.drain().expect("drain");
+        assert!(!drained.is_empty());
+        assert!(encoder.drain().expect("second").is_empty());
+    }
+
+    #[test]
     fn vorbis_is_declined() {
         let err = match open_encoder(&audio_params(CodecId::Vorbis, 48_000)) {
             Err(err) => err,

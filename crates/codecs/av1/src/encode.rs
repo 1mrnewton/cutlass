@@ -1529,7 +1529,7 @@ mod tests {
     }
 
     #[test]
-    fn a_production_av1_file_fails_closed_when_present() {
+    fn a_production_av1_file_returns_a_picture_or_a_typed_error() {
         let Some(root) = local_media() else { return };
         if std::process::Command::new("ffmpeg")
             .arg("-version")

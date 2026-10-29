@@ -2826,7 +2826,8 @@ pub(crate) fn coeff_base_ctx(
         let off = COEFF_BASE_CTX_OFFSET[tx * 25 + row.min(4) * 5 + col.min(4)] as usize;
         return Ok(ctx + off);
     }
-    let idx = if class == 1 { row } else { col };
+    // Vertical transforms (class 2) vary the context down the rows.
+    let idx = if class == 2 { row } else { col };
     Ok(ctx + [26, 31, 36][idx.min(2)])
 }
 
@@ -2866,10 +2867,11 @@ pub(crate) fn br_ctx(tx: usize, tx_type: u8, pos: usize, quant: &[i32]) -> usize
     }
 }
 
+/// Spec transform class. Horizontal-only is 1 and vertical-only is 2.
 fn tx_class(tx_type: u8) -> usize {
-    if matches!(tx_type, V_DCT | V_ADST | V_FLIPADST) {
+    if matches!(tx_type, H_DCT | H_ADST | H_FLIPADST) {
         1
-    } else if matches!(tx_type, H_DCT | H_ADST | H_FLIPADST) {
+    } else if matches!(tx_type, V_DCT | V_ADST | V_FLIPADST) {
         2
     } else {
         0
@@ -3120,8 +3122,28 @@ pub(crate) fn slice_q(table: &[u16], parts: usize, q: usize) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_tile;
+    use super::{br_ctx, coeff_base_ctx, decode_tile};
+    use crate::dims::{H_DCT, V_DCT};
     use crate::header::parse_unit;
+
+    #[test]
+    fn one_dimensional_transforms_use_the_spec_class() {
+        let quant = [0i32; 16];
+        let mut marked = quant;
+        marked[2] = 3;
+        // A vertical transform looks down the column, so a sample two columns over is ignored.
+        assert_eq!(
+            coeff_base_ctx(0, V_DCT, 0, 0, false, &marked).expect("ctx"),
+            26
+        );
+        // A horizontal transform looks along the row and counts that sample.
+        assert_eq!(
+            coeff_base_ctx(0, H_DCT, 0, 0, false, &marked).expect("ctx"),
+            28
+        );
+        assert_eq!(br_ctx(0, V_DCT, 1, &quant), 7);
+        assert_eq!(br_ctx(0, H_DCT, 1, &quant), 14);
+    }
 
     #[test]
     fn the_constrained_keyframe_matches_the_reference_step() {

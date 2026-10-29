@@ -60,7 +60,7 @@ impl TextSource {
         segment: &Segment,
     ) -> Result<Self, TextError> {
         if route(font) != AtlasRoute::SignedDistance {
-            return Err(TextError::BitmapAtlas);
+            return Err(TextError::MissingStrike);
         }
         let fill = fill_rgba(material)?;
         let laid = layout(font, material)?;
@@ -469,7 +469,7 @@ mod tests {
         assert!(matches!(face.sample(Micros(1_000)), Sample::Ready(_)));
         assert!(matches!(
             TextSource::open(NO_OUTLINE, None, &text, &clip),
-            Err(TextError::BitmapAtlas)
+            Err(TextError::MissingStrike)
         ));
         let mut bad = material("A");
         bad.text_color = "#gg0000".to_owned();

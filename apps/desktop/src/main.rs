@@ -12,6 +12,8 @@ fn register_codecs() -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFa
     }
     cutlass_png::register_decoders(&mut decoders);
     cutlass_png::register_encoders(&mut encoders);
+    cutlass_jpeg::register_decoders(&mut decoders);
+    cutlass_jpeg::register_encoders(&mut encoders);
     cutlass_aac::register_decoders(&mut decoders);
     cutlass_aac::register_encoders(&mut encoders);
     cutlass_av1::register_decoders(&mut decoders);
@@ -47,6 +49,17 @@ mod tests {
         encoders
             .open(&picture(CodecId::H264, 64, 64))
             .expect("h264 encoder");
+    }
+
+    #[test]
+    fn the_desktop_opens_jpeg_after_the_platform_codecs() {
+        let (decoders, encoders) = super::register_codecs();
+        decoders
+            .open(&picture(CodecId::Jpeg, 8, 8))
+            .expect("jpeg decoder");
+        encoders
+            .open(&picture(CodecId::Jpeg, 8, 8))
+            .expect("jpeg encoder");
     }
 
     #[test]

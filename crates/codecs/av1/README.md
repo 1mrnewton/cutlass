@@ -2,11 +2,11 @@
 
 Native AV1 decoder and encoder. The support record is `STATUS.md`. These percentages are a scope estimate of that record, not a line count and not a coverage report.
 
-About **55%** of the full decoder-and-encoder job is done. The constrained 8-bit 4:2:0 path is further along than a file a normal encoder writes.
+About **56%** of the full decoder-and-encoder job is done. The constrained 8-bit 4:2:0 path is further along than a file a normal encoder writes.
 
 | Slice | Done | What that covers |
 | --- | --- | --- |
-| Decoder | ~76% | Headers, references, intra, film grain, order hint, uniform tiles, a quantizer matrix, and a superblock quantizer delta. A default encode still will not open. |
+| Decoder | ~78% | Headers, references, intra (including the recursive filter), film grain, order hint, uniform tiles, a quantizer matrix, and a superblock quantizer delta. A default encode still will not open. |
 | Encoder | ~25% | Keyframes only. The rate and quality gates for that path already pass. |
 | Proof | ~40% | Exact dav1d matches on the supported subset. Speed, the long fuzz run, and a real production file are still open. |
 
@@ -46,4 +46,4 @@ Current decoder work stays on this table. The encoder is left as it is until the
 | 720×480 real time on one thread | 0%. About five round trips a second. |
 | A production 2160p file plays | 0%. It fails closed. |
 
-The 2160p file now gets past its quantizer matrix and its superblock quantizer delta, and stops on filter intra. Compound prediction, CDF carry, and variable transform size are still refused.
+The 2160p file now gets past filter intra. Its tile then fails the trailing-bit check, so the picture is not produced. That is a bitstream desync, not a named missing tool. Compound prediction, CDF carry, and variable transform size are still refused.

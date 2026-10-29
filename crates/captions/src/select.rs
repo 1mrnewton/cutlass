@@ -5,10 +5,6 @@
 //! aligns an edited string onto the recognized times and returns new columns.
 //! It does not write a draft.
 
-// The crate root does not export this module yet, so a non-test build has no
-// caller. Tests call every public function.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use cutlass_model::WordColumns;
 
 use crate::CaptionError;

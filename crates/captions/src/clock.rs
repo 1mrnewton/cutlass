@@ -4,10 +4,6 @@
 //! reads the columns and does not write them. The same timeline always
 //! returns the same clock; nothing here counts repaints.
 
-// The crate root does not export this module yet, so a non-test build has no
-// caller. Tests call every public function.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::cmp::Reverse;
 
 use cutlass_model::{Micros, WordColumns};

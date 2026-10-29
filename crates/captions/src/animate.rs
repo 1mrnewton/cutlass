@@ -5,10 +5,6 @@
 //! evaluates the same functions at another millisecond. A batch carries the
 //! placed glyphs from the letter map. It does not build an atlas or a mesh.
 
-// The crate root does not export this module yet, so a non-test build has no
-// caller. Tests call every public function.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use cutlass_text::PlacedGlyph;
 
 use crate::CaptionError;

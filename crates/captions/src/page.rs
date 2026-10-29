@@ -4,10 +4,6 @@
 //! the placed words, lays that string out, and records which word owns each
 //! glyph. Neither step writes the caller's material.
 
-// The crate root does not export this module yet, so a non-test build has no
-// caller. Tests call every public function.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::ops::Range;
 
 use cutlass_model::MaterialText;

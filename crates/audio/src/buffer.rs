@@ -199,3 +199,11 @@ pub(crate) fn as_i64(value: f64) -> Option<i64> {
     #[allow(clippy::cast_possible_truncation)]
     Some(value as i64)
 }
+
+pub(crate) fn as_u32(value: f64) -> Result<u32, Error> {
+    if !value.is_finite() || value < 0.0 || value > f64::from(u32::MAX) {
+        return Err(Error::TooLong);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(value as u32)
+}

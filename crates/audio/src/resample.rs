@@ -54,39 +54,70 @@ pub fn resample(input: &Pcm, target_rate: u32) -> Result<Pcm, Error> {
 pub(crate) enum Step {
     /// `source / target` input frames per output frame.
     Ratio { source: u32, target: u32 },
+    /// Playback speed. Pitch follows this step, so a speed above 1 lowpasses.
+    Speed(f64),
 }
 
 impl Step {
     fn cutoff(&self) -> f64 {
-        let Self::Ratio { source, target } = *self;
-        if source > target {
-            f64::from(target) / f64::from(source)
-        } else {
-            1.0
+        match *self {
+            Self::Ratio { source, target } => {
+                if source > target {
+                    f64::from(target) / f64::from(source)
+                } else {
+                    1.0
+                }
+            }
+            Self::Speed(speed) => {
+                if speed > 1.0 {
+                    1.0 / speed
+                } else {
+                    1.0
+                }
+            }
         }
     }
 
     fn center(&self, index: u32) -> f64 {
-        let Self::Ratio { source, target } = *self;
-        let product = u128::from(index) * u128::from(source);
-        let den = u128::from(target);
-        let whole = product / den;
-        let rem = product % den;
-        whole as f64 + (rem as f64) / f64::from(target)
+        match *self {
+            Self::Ratio { source, target } => {
+                let product = u128::from(index) * u128::from(source);
+                let den = u128::from(target);
+                let whole = product / den;
+                let rem = product % den;
+                whole as f64 + (rem as f64) / f64::from(target)
+            }
+            Self::Speed(speed) => f64::from(index) * speed,
+        }
     }
 
     /// Input frame index when this output frame is an impulse of the kernel.
     fn exact_frame(&self, index: u32) -> Option<usize> {
-        let Self::Ratio { source, target } = *self;
-        if source > target {
-            return None;
+        match *self {
+            Self::Ratio { source, target } => {
+                if source > target {
+                    return None;
+                }
+                let product = u128::from(index) * u128::from(source);
+                let den = u128::from(target);
+                if product % den != 0 {
+                    return None;
+                }
+                usize::try_from(product / den).ok()
+            }
+            Self::Speed(speed) => {
+                if speed > 1.0 {
+                    return None;
+                }
+                let pos = f64::from(index) * speed;
+                let nearest = pos.round();
+                if (pos - nearest).abs() > 1e-8 || nearest < 0.0 {
+                    return None;
+                }
+                let whole = as_i64(nearest)?;
+                usize::try_from(whole).ok()
+            }
         }
-        let product = u128::from(index) * u128::from(source);
-        let den = u128::from(target);
-        if product % den != 0 {
-            return None;
-        }
-        usize::try_from(product / den).ok()
     }
 }
 

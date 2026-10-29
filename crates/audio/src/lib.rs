@@ -1,14 +1,17 @@
 //! Turns decoded PCM into samples the mix can add.
 //!
-//! Each clip is resampled to the mix rate the caller chooses. This crate
-//! does not open a file.
+//! Each clip is resampled to the mix rate the caller chooses. Speed goes
+//! through [`stretch`]: keeping pitch uses overlap-add, and letting the
+//! pitch follow the speed is a resample. This crate does not open a file.
 
 #![forbid(unsafe_code)]
 
 mod buffer;
 mod resample;
+mod stretch;
 
 pub use resample::resample;
+pub use stretch::stretch;
 
 use std::fmt;
 

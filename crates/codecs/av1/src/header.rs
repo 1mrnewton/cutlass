@@ -711,7 +711,7 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
     if restoration
         .plane
         .iter()
-        .any(|kind| *kind != RESTORE_NONE && *kind != RESTORE_SGRPROJ)
+        .any(|kind| *kind != RESTORE_NONE && *kind != RESTORE_SGRPROJ && *kind != RESTORE_WIENER)
     {
         return Err(CodecError::Unsupported {
             what: "loop restoration",

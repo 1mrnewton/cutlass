@@ -1,8 +1,7 @@
-//! Self-guided loop restoration from section 7.17 of the AV1 specification.
+//! Loop restoration from section 7.17 of the AV1 specification.
 //!
-//! Wiener and switchable units are still refused. A plane that selects the
-//! self-guided filter is read at the start of each superblock and applied
-//! after CDEF, on the upscaled picture.
+//! Wiener and self-guided units are read at the start of each superblock and
+//! applied after CDEF, on the upscaled picture. A switchable frame is refused.
 
 use cutlass_decode::CodecError;
 
@@ -31,6 +30,10 @@ const SGR_PARAMS: [[i32; 4]; 16] = [
 const XQD_MIN: [i32; 2] = [-96, -32];
 const XQD_MAX: [i32; 2] = [31, 95];
 const XQD_REF: [i32; 2] = [-32, 31];
+const WIENER_MIN: [i32; 3] = [-5, -23, -17];
+const WIENER_MAX: [i32; 3] = [10, 8, 46];
+const WIENER_K: [i32; 3] = [1, 2, 3];
+const WIENER_MID: [i32; 3] = [3, -7, 15];
 const PRJ_BITS: i32 = 7;
 const RST_BITS: i32 = 4;
 const MTABLE_BITS: i32 = 20;
@@ -55,6 +58,7 @@ pub struct Grid {
     unit_size: [usize; 3],
     units: Vec<Unit>,
     reference: [[i32; 2]; 3],
+    wiener_ref: [[[i32; 3]; 2]; 3],
     active: bool,
 }
 
@@ -65,10 +69,11 @@ impl Grid {
         let mut unit_size = [0usize; 3];
         let mut count = 0usize;
         for plane in 0..3 {
-            if frame.restoration.plane[plane] == RESTORE_NONE {
+            let kind = frame.restoration.plane[plane];
+            if kind == RESTORE_NONE {
                 continue;
             }
-            if frame.restoration.plane[plane] != RESTORE_SGRPROJ {
+            if kind != RESTORE_SGRPROJ && kind != RESTORE_WIENER {
                 return Err(CodecError::Unsupported {
                     what: "loop restoration",
                 });
@@ -96,6 +101,7 @@ impl Grid {
                 count
             ],
             reference: [XQD_REF; 3],
+            wiener_ref: [[WIENER_MID; 2]; 3],
             active: count > 0,
         })
     }
@@ -134,7 +140,8 @@ pub fn read_superblock(
         return Ok(());
     }
     for plane in 0..3 {
-        if frame.restoration.plane[plane] != RESTORE_SGRPROJ {
+        let kind = frame.restoration.plane[plane];
+        if kind != RESTORE_SGRPROJ && kind != RESTORE_WIENER {
             continue;
         }
         let sub = usize::from(plane > 0);
@@ -145,7 +152,11 @@ pub fn read_superblock(
         let col_end = grid.cols[plane].min(((col + blocks) * (4 >> sub)).div_ceil(unit));
         for unit_row in row_start..row_end {
             for unit_col in col_start..col_end {
-                let decoded = read_sgr_unit(symbols, update, &mut grid.reference[plane])?;
+                let decoded = if kind == RESTORE_WIENER {
+                    read_wiener_unit(symbols, update, plane > 0, &mut grid.wiener_ref[plane])?
+                } else {
+                    read_sgr_unit(symbols, update, &mut grid.reference[plane])?
+                };
                 if let Some(slot) = grid.index(plane, unit_row, unit_col) {
                     grid.units[slot] = decoded;
                 }
@@ -153,6 +164,44 @@ pub fn read_superblock(
         }
     }
     Ok(())
+}
+
+fn read_wiener_unit(
+    symbols: &mut SymbolDecoder<'_>,
+    update: bool,
+    chroma: bool,
+    reference: &mut [[i32; 3]; 2],
+) -> Result<Unit, CodecError> {
+    let mut cdf = [11570u16, 32768, 0];
+    if symbols.read(&mut cdf, update)? == 0 {
+        return Ok(Unit {
+            kind: RESTORE_NONE,
+            set: 0,
+            xqd: [0; 2],
+            coeff: [[0; 3]; 2],
+        });
+    }
+    let mut coeff = [[0i32; 3]; 2];
+    for pass in 0..2 {
+        let first = usize::from(chroma);
+        for index in first..3 {
+            let value = signed_subexp(
+                symbols,
+                WIENER_MIN[index],
+                WIENER_MAX[index] + 1,
+                WIENER_K[index],
+                reference[pass][index],
+            )?;
+            coeff[pass][index] = value;
+            reference[pass][index] = value;
+        }
+    }
+    Ok(Unit {
+        kind: RESTORE_WIENER,
+        set: 0,
+        xqd: [0; 2],
+        coeff,
+    })
 }
 
 fn read_sgr_unit(
@@ -694,7 +743,8 @@ fn round2(value: i64, bits: i32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Grid, RESTORE_WIENER, SGR_PARAMS, Unit, XQD_REF, apply_sgr, apply_wiener, wiener_taps,
+        Grid, RESTORE_WIENER, SGR_PARAMS, Unit, WIENER_MID, XQD_REF, apply_sgr, apply_wiener,
+        wiener_taps,
     };
 
     #[test]
@@ -720,6 +770,7 @@ mod tests {
                 coeff: [[0; 3]; 2],
             }],
             reference: [XQD_REF; 3],
+            wiener_ref: [[WIENER_MID; 2]; 3],
             active: true,
         };
         let out = apply_sgr(&samples, &samples, width, height, &grid, 0);
@@ -751,6 +802,7 @@ mod tests {
                 coeff: [[3, -7, 15], [3, -7, 15]],
             }],
             reference: [XQD_REF; 3],
+            wiener_ref: [[WIENER_MID; 2]; 3],
             active: true,
         };
         let out = apply_wiener(&samples, &samples, width, height, &grid, 0);

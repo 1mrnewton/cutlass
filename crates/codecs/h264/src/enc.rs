@@ -6,7 +6,8 @@
 //! can be a B slice, using the previous and next reconstructions. The search
 //! is a radius-1 diamond, the same shape x264 uses, then a half-pel diamond
 //! and a quarter-pel diamond. A macroblock stays 16×16 unless a 16×8, 8×16,
-//! or four 8×8 blocks predict it more cheaply.
+//! or four 8×8 blocks predict it more cheaply. Inter luma uses an 8×8
+//! transform when that residual is closer than sixteen 4×4 transforms.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -557,6 +558,7 @@ fn write_b(
 ) {
     let count = mb_w as usize * mb_h as usize;
     let skipped = vec![false; count];
+    let mut used8 = vec![false; count];
     let mut cb_dc = vec![false; count];
     let mut cr_dc = vec![false; count];
     let mut luma_cbp = vec![0u8; count];
@@ -603,7 +605,36 @@ fn write_b(
         } else {
             uni_residual(src, past, mx, my, &blocks0)
         };
-        let luma = luma_pattern(&residual.luma);
+        let picked = if kind == 3 {
+            pick_luma_bi(
+                &past.y,
+                &future.y,
+                src.y,
+                (src.width, src.height),
+                (mx, my),
+                (&blocks0, &blocks1),
+                &residual.luma,
+            )
+        } else if kind == 2 {
+            pick_luma_uni(
+                &future.y,
+                src.y,
+                (src.width, src.height),
+                (mx, my),
+                &blocks1,
+                &residual.luma,
+            )
+        } else {
+            pick_luma_uni(
+                &past.y,
+                src.y,
+                (src.width, src.height),
+                (mx, my),
+                &blocks0,
+                &residual.luma,
+            )
+        };
+        let luma = picked.cbp;
         let chroma = chroma_pattern(&residual);
         cab.decision(24 + skip_context(&skipped, mb_w, mx, my), 0);
         let ctx = usize::from(mx > 0) + usize::from(my > 0);
@@ -629,12 +660,22 @@ fn write_b(
         write_luma_cbp(cab, luma, &luma_cbp, mb_w, mx, my);
         write_chroma_cbp(cab, chroma, &chroma_cbp, mb_w, mx, my);
         if luma != 0 {
-            cab.decision(399, 0);
+            cab.decision(
+                399 + transform_ctx(&used8, mb_w, mx, my),
+                u8::from(picked.use8),
+            );
+            if picked.use8 {
+                used8[index] = true;
+            }
         }
         if luma != 0 || chroma != 0 {
             cab.decision(60, 0);
         }
-        write_luma4(cab, &residual.luma, luma, &mut luma_nnz, (mb_w, mx, my, 0));
+        if picked.use8 {
+            write_luma8(cab, &picked.blocks8, luma, &mut luma_nnz, (mb_w, mx, my));
+        } else {
+            write_luma4(cab, &residual.luma, luma, &mut luma_nnz, (mb_w, mx, my, 0));
+        }
         if chroma != 0 {
             write_dc4(cab, &residual.cb, dc_inc(mx, my, &cb_dc, mb_w, 0));
             write_dc4(cab, &residual.cr, dc_inc(mx, my, &cr_dc, mb_w, 0));
@@ -941,6 +982,7 @@ fn chroma_bi(
 fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, reference: &Planes) {
     let count = mb_w as usize * mb_h as usize;
     let mut skipped = vec![false; count];
+    let mut used8 = vec![false; count];
     let mut cb_dc = vec![false; count];
     let mut cr_dc = vec![false; count];
     let mut luma_cbp = vec![0u8; count];
@@ -993,7 +1035,15 @@ fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, refer
             cb_ac,
             cr_ac,
         };
-        let luma = luma_pattern(&residual.luma);
+        let picked = pick_luma_uni(
+            &reference.y,
+            src.y,
+            (src.width, src.height),
+            (mx, my),
+            &blocks,
+            &residual.luma,
+        );
+        let luma = picked.cbp;
         let chroma = chroma_pattern(&residual);
         let ctx = skip_context(&skipped, mb_w, mx, my);
         cab.decision(11 + ctx, 0);
@@ -1034,12 +1084,22 @@ fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, refer
         write_luma_cbp(cab, luma, &luma_cbp, mb_w, mx, my);
         write_chroma_cbp(cab, chroma, &chroma_cbp, mb_w, mx, my);
         if luma != 0 {
-            cab.decision(399, 0);
+            cab.decision(
+                399 + transform_ctx(&used8, mb_w, mx, my),
+                u8::from(picked.use8),
+            );
+            if picked.use8 {
+                used8[index] = true;
+            }
         }
         if luma != 0 || chroma != 0 {
             cab.decision(60, 0);
         }
-        write_luma4(cab, &residual.luma, luma, &mut luma_nnz, (mb_w, mx, my, 0));
+        if picked.use8 {
+            write_luma8(cab, &picked.blocks8, luma, &mut luma_nnz, (mb_w, mx, my));
+        } else {
+            write_luma4(cab, &residual.luma, luma, &mut luma_nnz, (mb_w, mx, my, 0));
+        }
         if chroma != 0 {
             write_dc4(cab, &residual.cb, dc_inc(mx, my, &cb_dc, mb_w, 0));
             write_dc4(cab, &residual.cr, dc_inc(mx, my, &cr_dc, mb_w, 0));
@@ -1717,6 +1777,40 @@ fn write_luma4(
     }
 }
 
+fn write_luma8(
+    cab: &mut CabacEnc<'_>,
+    blocks: &[[i32; 64]; 4],
+    cbp: u8,
+    nnz: &mut [u8],
+    at: (u32, u32, u32),
+) {
+    let (mb_w, mx, my) = at;
+    let stride = mb_w as usize * 4;
+    for (i, block) in blocks.iter().enumerate() {
+        if cbp & (1 << i) == 0 {
+            continue;
+        }
+        write_residual(cab, 5, block, 64);
+        let count = block.iter().filter(|level| **level != 0).count();
+        let stored = u8::try_from(count).unwrap_or(0);
+        let bx = (i & 1) * 2;
+        let by = (i >> 1) * 2;
+        for dy in 0..2 {
+            for dx in 0..2 {
+                let x = mx as usize * 4 + bx + dx;
+                let y = my as usize * 4 + by + dy;
+                nnz[y * stride + x] = stored;
+            }
+        }
+    }
+}
+
+fn transform_ctx(used: &[bool], mb_w: u32, mx: u32, my: u32) -> usize {
+    let left = mx > 0 && used.get((my * mb_w + mx - 1) as usize) == Some(&true);
+    let above = my > 0 && used.get(((my - 1) * mb_w + mx) as usize) == Some(&true);
+    usize::from(left) + usize::from(above)
+}
+
 fn write_chroma_ac(
     cab: &mut CabacEnc<'_>,
     ac: &[[i32; 15]; 4],
@@ -2110,6 +2204,290 @@ fn forward4(block: &mut [i32; 16]) {
     }
 }
 
+/// Forward of the 8×8 integer transform. `idct8` is the inverse, with the
+/// final rounding shift applied once after both passes.
+fn forward8(block: &mut [i32; 64]) {
+    let mut tmp = [0i32; 64];
+    for col in 0..8 {
+        let mut src = [0i32; 8];
+        for row in 0..8 {
+            src[row] = block[row * 8 + col];
+        }
+        let dst = forward8_1d(&src);
+        for row in 0..8 {
+            tmp[row * 8 + col] = dst[row];
+        }
+    }
+    for row in 0..8 {
+        let mut src = [0i32; 8];
+        for col in 0..8 {
+            src[col] = tmp[row * 8 + col];
+        }
+        let dst = forward8_1d(&src);
+        for col in 0..8 {
+            block[row * 8 + col] = dst[col];
+        }
+    }
+}
+
+fn forward8_1d(src: &[i32; 8]) -> [i32; 8] {
+    let s07 = src[0] + src[7];
+    let s16 = src[1] + src[6];
+    let s25 = src[2] + src[5];
+    let s34 = src[3] + src[4];
+    let a0 = s07 + s34;
+    let a1 = s16 + s25;
+    let a2 = s07 - s34;
+    let a3 = s16 - s25;
+    let d07 = src[0] - src[7];
+    let d16 = src[1] - src[6];
+    let d25 = src[2] - src[5];
+    let d34 = src[3] - src[4];
+    let a4 = d16 + d25 + (d07 + (d07 >> 1));
+    let a5 = d07 - d34 - (d25 + (d25 >> 1));
+    let a6 = d07 + d34 - (d16 + (d16 >> 1));
+    let a7 = d16 - d25 + (d34 + (d34 >> 1));
+    [
+        a0 + a1,
+        a4 + (a7 >> 2),
+        a2 + (a3 >> 1),
+        a5 + (a6 >> 2),
+        a0 - a1,
+        a6 - (a5 >> 2),
+        (a2 >> 1) - a3,
+        (a4 >> 2) - a7,
+    ]
+}
+
+fn quant8(coeff: i32, qp: i32, class: usize) -> i32 {
+    // Six position classes. Flat weight 16, so the multiplier is unscaled.
+    const MF: [[i32; 6]; 6] = [
+        [13_107, 11_428, 20_972, 12_222, 16_777, 15_481],
+        [11_916, 10_826, 19_174, 11_058, 14_980, 14_290],
+        [10_082, 8_943, 15_978, 9_675, 12_710, 11_985],
+        [9_362, 8_228, 14_913, 8_931, 11_984, 11_259],
+        [8_192, 7_346, 13_159, 7_740, 10_486, 9_777],
+        [7_282, 6_428, 11_570, 6_830, 9_118, 8_640],
+    ];
+    let qbits = u32::try_from(16 + qp / 6).unwrap_or(16);
+    let row = usize::try_from(qp.rem_euclid(6)).unwrap_or(0);
+    let mf = MF[row][class.min(5)];
+    let bias = i64::from(1i32 << qbits.saturating_sub(1)) / 3;
+    let mag = i64::from(coeff.unsigned_abs()) * i64::from(mf) + bias;
+    let level = i32::try_from(mag >> qbits).unwrap_or(0);
+    if coeff < 0 { -level } else { level }
+}
+
+fn quant_block8(pix: &[i32; 64]) -> [i32; 64] {
+    let mut block = *pix;
+    forward8(&mut block);
+    let mut levels = [0i32; 64];
+    for (n, &pos) in crate::set::ZIGZAG8.iter().enumerate() {
+        let (ry, rx) = (pos / 8, pos % 8);
+        levels[n] = quant8(block[pos], QP, crate::recon::class8(rx, ry));
+    }
+    levels
+}
+
+fn inverse8(levels: &[i32; 64]) -> [i32; 64] {
+    let mut block = [0i32; 64];
+    for (n, &pos) in crate::set::ZIGZAG8.iter().enumerate() {
+        let (ry, rx) = (pos / 8, pos % 8);
+        block[ry * 8 + rx] = crate::recon::scale8(levels[n], QP, rx, ry, 16);
+    }
+    crate::recon::idct8(&mut block);
+    block
+}
+
+struct CodedLuma {
+    use8: bool,
+    cbp: u8,
+    blocks8: [[i32; 64]; 4],
+}
+
+fn pick_luma_uni(
+    reference: &[u8],
+    src: &[u8],
+    size: (u32, u32),
+    at: (u32, u32),
+    mv: &[[i16; 2]; 16],
+    luma4: &[[i32; 16]; 16],
+) -> CodedLuma {
+    let (width, height) = size;
+    let (mx, my) = at;
+    let (blocks8, sad8) = code8(src, size, at, |x, y| {
+        pel_mv(reference, width, height, (mx, my), (x, y), mv)
+    });
+    let sad4 = sad4_blocks(luma4, src, size, at, |x, y| {
+        pel_mv(reference, width, height, (mx, my), (x, y), mv)
+    });
+    choose_luma(luma4, blocks8, sad8, sad4)
+}
+
+fn pick_luma_bi(
+    past: &[u8],
+    future: &[u8],
+    src: &[u8],
+    size: (u32, u32),
+    at: (u32, u32),
+    mv: (&[[i16; 2]; 16], &[[i16; 2]; 16]),
+    luma4: &[[i32; 16]; 16],
+) -> CodedLuma {
+    let (width, height) = size;
+    let (mx, my) = at;
+    let (mv0, mv1) = mv;
+    let (blocks8, sad8) = code8(src, size, at, |x, y| {
+        let a = pel_mv(past, width, height, (mx, my), (x, y), mv0);
+        let b = pel_mv(future, width, height, (mx, my), (x, y), mv1);
+        crate::recon::avg(a, b)
+    });
+    let sad4 = sad4_blocks(luma4, src, size, at, |x, y| {
+        let a = pel_mv(past, width, height, (mx, my), (x, y), mv0);
+        let b = pel_mv(future, width, height, (mx, my), (x, y), mv1);
+        crate::recon::avg(a, b)
+    });
+    choose_luma(luma4, blocks8, sad8, sad4)
+}
+
+fn pel_mv(
+    plane: &[u8],
+    width: u32,
+    height: u32,
+    mb: (u32, u32),
+    pel: (u32, u32),
+    mv: &[[i16; 2]; 16],
+) -> u8 {
+    let (mx, my) = mb;
+    let (x, y) = pel;
+    let bx = ((x - mx * 16) / 4) as usize;
+    let by = ((y - my * 16) / 4) as usize;
+    moved_pel(plane, width, height, x, y, mv[by * 4 + bx])
+}
+
+fn choose_luma(
+    luma4: &[[i32; 16]; 16],
+    blocks8: [[i32; 64]; 4],
+    sad8: u32,
+    sad4: u32,
+) -> CodedLuma {
+    let pattern = pattern8(&blocks8);
+    let use8 = pattern != 0 && sad8 <= sad4;
+    CodedLuma {
+        use8,
+        cbp: if use8 { pattern } else { luma_pattern(luma4) },
+        blocks8,
+    }
+}
+
+fn code8(
+    src: &[u8],
+    size: (u32, u32),
+    origin: (u32, u32),
+    predicted: impl Fn(u32, u32) -> u8,
+) -> ([[i32; 64]; 4], u32) {
+    let (width, height) = size;
+    let (mx, my) = origin;
+    let mut levels = [[0i32; 64]; 4];
+    let mut sad = 0u32;
+    for (i, block) in levels.iter_mut().enumerate() {
+        let ox = (i & 1) as u32 * 8;
+        let oy = (i >> 1) as u32 * 8;
+        let mut pix = [0i32; 64];
+        let mut pred = [0u8; 64];
+        for row in 0..8u32 {
+            for col in 0..8u32 {
+                let x = mx * 16 + ox + col;
+                let y = my * 16 + oy + row;
+                let sample = predicted(x, y);
+                pred[(row * 8 + col) as usize] = sample;
+                pix[(row * 8 + col) as usize] =
+                    i32::from(at(src, width, height, x, y)) - i32::from(sample);
+            }
+        }
+        *block = quant_block8(&pix);
+        sad += plane_sad(
+            &pred,
+            &inverse8(block),
+            8,
+            src,
+            (width, height),
+            (mx * 16 + ox, my * 16 + oy),
+        );
+    }
+    (levels, sad)
+}
+
+fn sad4_blocks(
+    levels: &[[i32; 16]; 16],
+    src: &[u8],
+    size: (u32, u32),
+    origin: (u32, u32),
+    predicted: impl Fn(u32, u32) -> u8,
+) -> u32 {
+    let (width, height) = size;
+    let (mx, my) = origin;
+    let mut sad = 0u32;
+    for (i, block) in levels.iter().enumerate() {
+        let x = mx * 16 + blk_x(i) as u32 * 4;
+        let y = my * 16 + blk_y(i) as u32 * 4;
+        let mut pred = [0u8; 16];
+        for row in 0..4u32 {
+            for col in 0..4u32 {
+                pred[(row * 4 + col) as usize] = predicted(x + col, y + row);
+            }
+        }
+        sad += plane_sad(&pred, &inverse4(block), 4, src, (width, height), (x, y));
+    }
+    sad
+}
+
+fn inverse4(levels: &[i32; 16]) -> [i32; 16] {
+    let mut block = [0i32; 16];
+    for (n, &pos) in crate::set::ZIGZAG4.iter().enumerate() {
+        let (ry, rx) = (pos / 4, pos % 4);
+        block[ry * 4 + rx] = crate::recon::scale4(levels[n], QP, rx, ry, 16);
+    }
+    crate::recon::idct4(&mut block);
+    block
+}
+
+fn plane_sad(
+    pred: &[u8],
+    residual: &[i32],
+    n: usize,
+    src: &[u8],
+    size: (u32, u32),
+    origin: (u32, u32),
+) -> u32 {
+    let (width, height) = size;
+    let (x, y) = origin;
+    let mut sad = 0u32;
+    for row in 0..n {
+        for col in 0..n {
+            let sample = i32::from(pred[row * n + col]) + residual[row * n + col];
+            let original = i32::from(at(
+                src,
+                width,
+                height,
+                x + u32::try_from(col).unwrap_or(0),
+                y + u32::try_from(row).unwrap_or(0),
+            ));
+            sad += (sample.clamp(0, 255) - original).unsigned_abs();
+        }
+    }
+    sad
+}
+
+fn pattern8(blocks: &[[i32; 64]; 4]) -> u8 {
+    let mut bits = 0u8;
+    for (i, block) in blocks.iter().enumerate() {
+        if block.iter().any(|level| *level != 0) {
+            bits |= 1 << i;
+        }
+    }
+    bits
+}
+
 fn quant_coeff(coeff: i32, qp: i32, qbits_base: i32, class: usize) -> i32 {
     // Columns are the even/even, odd/odd, and mixed positions.
     const MF: [[i32; 3]; 6] = [
@@ -2179,7 +2557,8 @@ fn write_residual(cab: &mut CabacEnc<'_>, cat: usize, coeffs: &[i32], max: usize
         1 => (120, 181, 237),
         2 => (134, 195, 247),
         3 => (149, 210, 257),
-        _ => (152, 213, 266),
+        4 => (152, 213, 266),
+        _ => (402, 417, 426),
     };
     let last = coeffs
         .iter()
@@ -2190,7 +2569,9 @@ fn write_residual(cab: &mut CabacEnc<'_>, cat: usize, coeffs: &[i32], max: usize
     let end = max.saturating_sub(1);
     for (pos, coeff) in coeffs.iter().take(end).enumerate() {
         let on = *coeff != 0;
-        let sig = if cat == 3 {
+        let sig = if cat == 5 {
+            sig_base + crate::cabac::sig8(pos)
+        } else if cat == 3 {
             sig_base + pos.min(2)
         } else {
             sig_base + pos
@@ -2198,7 +2579,9 @@ fn write_residual(cab: &mut CabacEnc<'_>, cat: usize, coeffs: &[i32], max: usize
         cab.decision(sig, u8::from(on));
         if on {
             index.push(pos);
-            let last_ctx = if cat == 3 {
+            let last_ctx = if cat == 5 {
+                last_base + crate::cabac::last8(pos)
+            } else if cat == 3 {
                 last_base + pos.min(2)
             } else {
                 last_base + pos
@@ -2586,6 +2969,98 @@ mod tests {
         assert_eq!(dec.bypass().unwrap(), 0);
         assert_eq!(dec.bypass().unwrap(), 1);
         assert!(dec.terminate().unwrap());
+    }
+
+    #[test]
+    fn forward8_round_trips_a_ramp() {
+        let mut residual = [0i32; 64];
+        for row in 0..8 {
+            for col in 0..8 {
+                residual[row * 8 + col] = row as i32 * 3 + col as i32 - 12;
+            }
+        }
+        let levels = super::quant_block8(&residual);
+        assert!(levels.iter().any(|level| *level != 0));
+        let back = super::inverse8(&levels);
+        let mut err = 0i32;
+        for i in 0..64 {
+            err += (back[i] - residual[i]).abs();
+        }
+        assert!(err < 64 * 6, "8x8 round trip error {err}");
+    }
+
+    #[test]
+    fn smooth_offset_uses_the_8x8_transform() {
+        let reference = vec![100u8; 16 * 16];
+        let mut src = vec![100u8; 16 * 16];
+        for row in 0..16 {
+            for col in 0..16 {
+                src[row * 16 + col] = 108 + (col as u8) / 4;
+            }
+        }
+        let mv = [[0i16; 2]; 16];
+        let luma4 = super::inter4(&reference, &src, 16, 16, 0, 0, &mv);
+        let picked = super::pick_luma_uni(&reference, &src, (16, 16), (0, 0), &mv, &luma4);
+        assert!(picked.use8, "4x4 won, cbp {}", picked.cbp);
+    }
+
+    #[test]
+    fn eight_by_eight_transform_matches_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg() else {
+            return;
+        };
+        let mut params = CodecParams::video(CodecId::H264, 32, 32);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let picture = Yuv420p::solid(32, 32, 100, 128, 128).unwrap();
+        let mut input = VideoInput {
+            picture,
+            pts: 0,
+            duration: 1,
+            timescale: 30,
+            force_keyframe: true,
+        };
+        let first = settle(&mut encoder, &input);
+        let mut y = vec![0u8; 32 * 32];
+        for row in 0..32 {
+            for col in 0..32 {
+                y[row * 32 + col] = 108 + (col as u8) / 4;
+            }
+        }
+        input.picture =
+            Yuv420p::try_new(32, 32, y, vec![128; 16 * 16], vec![128; 16 * 16]).unwrap();
+        input.force_keyframe = false;
+        input.pts = 1;
+        let second = settle(&mut encoder, &input);
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let _opened = reveal(&mut decoder, &first[0]);
+        let frames = reveal(&mut decoder, &second[0]);
+        assert_eq!(frames.len(), 1);
+        let got = frames[0].picture.y();
+        let dir = std::env::temp_dir().join("cutlass-h264-enc-dct8");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let coded = dir.join("dct8.h264");
+        let yuv = dir.join("dct8.yuv");
+        let mut bytes = first[0].data.clone();
+        bytes.extend_from_slice(&second[0].data);
+        std::fs::write(&coded, &bytes).unwrap();
+        let decoded = std::process::Command::new(ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&coded)
+            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .arg(&yuv)
+            .status()
+            .unwrap();
+        assert!(decoded.success(), "ffmpeg rejected the 8x8 transform");
+        let raw = std::fs::read(&yuv).unwrap();
+        let frame = 32 * 32 * 3 / 2;
+        let second_raw = &raw[frame..frame * 2];
+        assert_eq!(&second_raw[..got.len()], got);
+        let u_at = got.len();
+        let u_len = frames[0].picture.u().len();
+        assert_eq!(&second_raw[u_at..u_at + u_len], frames[0].picture.u());
+        assert_eq!(&second_raw[u_at + u_len..], frames[0].picture.v());
     }
 
     #[test]

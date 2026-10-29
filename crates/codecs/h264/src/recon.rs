@@ -65,6 +65,10 @@ fn norm4(i: usize, j: usize) -> usize {
     }
 }
 
+pub(crate) fn class8(i: usize, j: usize) -> usize {
+    norm8(i, j)
+}
+
 fn norm8(i: usize, j: usize) -> usize {
     let (a, b) = (i % 4, j % 4);
     if (a, b) == (0, 0) {

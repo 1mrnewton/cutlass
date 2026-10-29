@@ -1,7 +1,8 @@
 //! Reads a TrueType or OpenType font, including one face of a collection.
 //!
-//! The file yields an advance width for each character and the outline of a
-//! glyph. Shaping, atlases, and meshes are not part of this crate.
+//! The file yields a glyph id, an advance width, and an outline. Glyph 0 is
+//! the missing glyph. A face with `CFF2` and no `CFF ` table has no outlines
+//! this reader can draw. Shaping, atlases, and meshes are not part of this crate.
 
 #![forbid(unsafe_code)]
 
@@ -173,12 +174,15 @@ impl Font<'_> {
     /// Advance width of each character, in font design units.
     ///
     /// A character with no glyph fails the whole string. The file is left unread
-    /// past that character, and nothing is substituted.
+    /// past that character, and nothing is substituted. [`Self::glyph_id`] reports
+    /// that miss without failing the rest of a run.
     pub fn advances(&self, text: &str) -> Result<Vec<Advance>, FontError> {
         let mut advances = Vec::new();
         for character in text.chars() {
-            let glyph_id = self.glyph(character)?;
-            let units = self.hmtx.advance(glyph_id)?;
+            let Some(glyph_id) = self.glyph_id(character)? else {
+                return Err(FontError::MissingGlyph { character });
+            };
+            let units = self.advance(glyph_id)?;
             advances.push(Advance {
                 character,
                 glyph_id,
@@ -186,6 +190,53 @@ impl Font<'_> {
             });
         }
         Ok(advances)
+    }
+
+    /// Glyph id for one character.
+    ///
+    /// `Ok(None)` means the character map has no glyph. The missing glyph is
+    /// still [`Self::missing_glyph`]. A map entry past the face's glyph count
+    /// is a bad table.
+    pub fn glyph_id(&self, character: char) -> Result<Option<u16>, FontError> {
+        let Some(glyph_id) = self.cmap.glyph(u32::from(character))? else {
+            return Ok(None);
+        };
+        if glyph_id >= self.num_glyphs {
+            return Err(FontError::BadTable);
+        }
+        Ok(Some(glyph_id))
+    }
+
+    /// Glyph 0. OpenType requires this to be the face's missing glyph.
+    #[must_use]
+    pub fn missing_glyph(&self) -> u16 {
+        debug_assert!(self.num_glyphs > 0);
+        0
+    }
+
+    /// Outline of [`Self::missing_glyph`], in font design units.
+    pub fn missing_outline(&self) -> Result<Outline, FontError> {
+        self.outline(self.missing_glyph())
+    }
+
+    /// Advance width of one glyph, in font design units.
+    pub fn advance(&self, glyph_id: u16) -> Result<u16, FontError> {
+        if glyph_id >= self.num_glyphs {
+            return Err(FontError::UnknownGlyph);
+        }
+        self.hmtx.advance(glyph_id)
+    }
+
+    /// `true` when this face has TrueType or CFF outlines.
+    ///
+    /// A `CFF2` face is readable and returns `false`. Sampling those outlines
+    /// is [`FontError::Unsupported`].
+    #[must_use]
+    pub fn has_outlines(&self) -> bool {
+        match &self.outlines {
+            Outlines::TrueType(_) => true,
+            Outlines::OpenType(source) => otf::has_outlines(source),
+        }
     }
 
     /// Outline of one glyph, in font design units.
@@ -197,16 +248,6 @@ impl Font<'_> {
             Outlines::TrueType(source) => ttf::outline(source, glyph_id, self.num_glyphs),
             Outlines::OpenType(source) => otf::outline(source, glyph_id),
         }
-    }
-
-    fn glyph(&self, character: char) -> Result<u16, FontError> {
-        let Some(glyph_id) = self.cmap.glyph(u32::from(character))? else {
-            return Err(FontError::MissingGlyph { character });
-        };
-        if glyph_id >= self.num_glyphs {
-            return Err(FontError::BadTable);
-        }
-        Ok(glyph_id)
     }
 
     fn from_directory(directory: Directory<'_>) -> Result<Font<'_>, FontError> {
@@ -766,6 +807,7 @@ mod tests {
     const SAMPLE_TTF: &[u8] = include_bytes!("../fixtures/sample.ttf");
     const SAMPLE_OTF: &[u8] = include_bytes!("../fixtures/sample.otf");
     const SAMPLE_TTC: &[u8] = include_bytes!("../fixtures/sample.ttc");
+    const NO_OUTLINE: &[u8] = include_bytes!("../fixtures/no-outline.otf");
 
     #[test]
     fn advances_for_a_string_come_from_the_fixture() {
@@ -800,6 +842,38 @@ mod tests {
                 .iter()
                 .all(|item| item.units == 600 && item.glyph_id == 2)
         );
+    }
+
+    #[test]
+    fn a_missing_character_has_no_glyph_id_and_the_font_still_has_glyph_zero() {
+        let font = read(SAMPLE_TTF).expect("fixture");
+        assert!(font.has_outlines());
+        assert_eq!(font.glyph_id('A').expect("map"), Some(2));
+        assert_eq!(font.glyph_id('Z').expect("map"), None);
+        assert_eq!(font.glyph_id('😀').expect("map"), None);
+        assert_eq!(font.missing_glyph(), 0);
+        assert_eq!(font.advance(0).expect("notdef"), 500);
+        assert_eq!(font.advance(2).expect("A"), 600);
+        assert_eq!(font.advance(10), Err(FontError::UnknownGlyph));
+        let missing = font.missing_outline().expect("notdef outline");
+        assert_eq!(missing, font.outline(0).expect("glyph 0"));
+        assert!(missing.contours.is_empty());
+        assert_eq!(
+            font.advances("Z"),
+            Err(FontError::MissingGlyph { character: 'Z' })
+        );
+    }
+
+    #[test]
+    fn a_face_without_outlines_still_opens() {
+        let font = read(NO_OUTLINE).expect("cff2");
+        assert_eq!(font.kind(), FontKind::OpenType);
+        assert!(!font.has_outlines());
+        assert_eq!(font.glyph_count(), 1);
+        assert_eq!(font.advance(font.missing_glyph()).expect("advance"), 500);
+        assert_eq!(font.glyph_id('A').expect("map"), None);
+        assert_eq!(font.missing_outline(), Err(FontError::Unsupported));
+        assert_eq!(font.outline(0), Err(FontError::Unsupported));
     }
 
     #[test]

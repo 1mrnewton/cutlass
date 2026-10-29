@@ -641,6 +641,19 @@ fn ffmpeg_truecolor_alpha_matches_exact_samples() {
 }
 
 #[test]
+fn ffmpeg_grey_alpha_matches_exact_samples() {
+    let Some(ffmpeg) = tool("ffmpeg") else {
+        require_or_skip("ffmpeg");
+        return;
+    };
+    let png = ffmpeg_png(&ffmpeg, &[8, 9, 10, 11], 2, 1, "ya8", None);
+    let image = decode_bytes(&png).expect("ya8");
+    assert_eq!(image.color, ColorType::GrayAlpha);
+    assert_eq!(image.depth, BitDepth::Eight);
+    assert_eq!(image.samples, vec![8, 9, 10, 11]);
+}
+
+#[test]
 fn a_local_png_matches_ffmpeg_when_the_file_is_present() {
     let Some(path) = local_png() else {
         return;

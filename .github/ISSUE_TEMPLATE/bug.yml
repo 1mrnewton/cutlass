@@ -1,0 +1,68 @@
+name: Bug
+description: Current behavior that disagrees with the plan or loses data
+title: "[bug] "
+labels: ["bug", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A bug is behavior the tree already has and gets wrong. Missing work belongs on the feature form.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - model
+        - session
+        - store
+        - timeline
+        - text
+        - font
+        - captions
+        - transcription
+        - shapes
+        - effects
+        - compositor
+        - renderer
+        - engine
+        - playback
+        - export
+        - audio
+        - color
+        - codec
+        - container
+        - agent
+        - settings
+        - storage
+        - desktop
+        - ios
+        - android
+        - platform
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happens
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should happen
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to see it
+      description: The smallest draft, file, or request that shows the failure.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: The regression test that fails on this behavior and passes when it is fixed.
+    validations:
+      required: true

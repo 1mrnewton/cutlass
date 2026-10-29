@@ -1,0 +1,41 @@
+name: Timeline
+description: A draft edit, a gesture, or the timeline on a shell
+title: "[timeline] "
+labels: ["feature", "area:timeline", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The session changes the draft. A gesture only names a request. The shell paints.
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Layer
+      options:
+        - session request
+        - editor gesture
+        - desktop
+        - ios
+        - android
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: The draft after the edit, or the request a gesture produces.
+    validations:
+      required: true
+  - type: textarea
+    id: refusal
+    attributes:
+      label: What is refused
+      description: The edge that must leave the draft unchanged, such as a locked track, an overlap, or a split inside a transition.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+    validations:
+      required: true

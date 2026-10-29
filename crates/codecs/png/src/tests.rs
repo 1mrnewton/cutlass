@@ -927,7 +927,7 @@ trait Samples {
     fn samples(&self) -> &[u16];
 }
 
-impl Samples for cutlass_decode::PictureOutput {
+impl Samples for cutlass_decode::StillOutput {
     fn samples(&self) -> &[u16] {
         &self.image.samples
     }

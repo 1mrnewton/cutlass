@@ -3,7 +3,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cutlass_encode::{AudioInput, CodecError, CodecId, CodecParams, Encoder, Packet, PictureInput};
+use cutlass_encode::{
+    AudioInput, CodecError, CodecId, CodecParams, Encoder, FrameInput, Packet, PictureInput,
+};
 
 use crate::write::encode_png;
 
@@ -42,6 +44,10 @@ impl Encoder for PngEncoder {
         Err(CodecError::InvalidApi {
             what: "png encodes a picture",
         })
+    }
+
+    fn push_frame(&mut self, _input: &FrameInput) -> Result<Vec<Packet>, CodecError> {
+        Err(CodecError::Unsupported { what: "frame" })
     }
 
     fn push_picture(&mut self, input: &PictureInput) -> Result<Vec<Packet>, CodecError> {

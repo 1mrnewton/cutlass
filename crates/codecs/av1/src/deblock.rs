@@ -152,6 +152,27 @@ fn filter_edge(
     }
 }
 
+/// Pixels on one side of an edge. Index `origin` is `q0`; `origin + p` is the
+/// sample `p` steps into the block.
+struct Line {
+    values: [i32; 16],
+    origin: i32,
+    from: i32,
+    to: i32,
+}
+
+fn filter_window(filter_size: usize, plane: usize) -> i32 {
+    if filter_size == 4 {
+        2
+    } else if plane != 0 {
+        3
+    } else if filter_size == 8 {
+        4
+    } else {
+        7
+    }
+}
+
 fn on_screen(x: usize, y: usize, frame_w: usize, frame_h: usize, pass: usize) -> bool {
     if x >= frame_w || y >= frame_h {
         return false;
@@ -235,19 +256,22 @@ fn filter_sample(
     filter_size: usize,
     plane: usize,
 ) {
-    let Some(mask) = masks(samples, width, height, axis, strength, filter_size, plane) else {
+    let radius = filter_window(filter_size, plane);
+    let Some(mut line) = load_line(samples, width, height, axis, radius) else {
         return;
     };
+    let mask = masks(&line, strength, filter_size, plane);
     if !mask.filter {
         return;
     }
     if filter_size == 4 || !mask.flat {
-        narrow(samples, width, axis, mask.hev);
+        narrow(&mut line, mask.hev);
     } else if filter_size == 8 || !mask.flat2 {
-        wide(samples, width, axis, 3, plane);
+        wide(&mut line, 3, plane);
     } else {
-        wide(samples, width, axis, 4, plane);
+        wide(&mut line, 4, plane);
     }
+    store_line(samples, width, axis, &line);
 }
 
 struct Mask {
@@ -257,26 +281,65 @@ struct Mask {
     flat2: bool,
 }
 
-fn masks(
-    samples: &[u8],
-    width: usize,
-    height: usize,
-    axis: Axis,
-    strength: Strength,
-    filter_size: usize,
-    plane: usize,
-) -> Option<Mask> {
-    let Axis { x, y, dx, dy } = axis;
+fn load_line(samples: &[u8], width: usize, height: usize, axis: Axis, radius: i32) -> Option<Line> {
+    let mut values = [0i32; 16];
+    let origin = radius;
+    let mut p = -radius;
+    while p < radius {
+        values[(origin + p) as usize] = sample(
+            samples,
+            width,
+            height,
+            axis.x + p * axis.dx,
+            axis.y + p * axis.dy,
+        )?;
+        p += 1;
+    }
+    Some(Line {
+        values,
+        origin,
+        from: -radius,
+        to: radius,
+    })
+}
+
+fn store_line(samples: &mut [u8], width: usize, axis: Axis, line: &Line) {
+    let mut p = line.from;
+    while p < line.to {
+        store(
+            samples,
+            width,
+            axis.x + p * axis.dx,
+            axis.y + p * axis.dy,
+            line.values[(line.origin + p) as usize],
+        );
+        p += 1;
+    }
+}
+
+fn at(line: &Line, p: i32) -> i32 {
+    line.values
+        .get((line.origin + p) as usize)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn put(line: &mut Line, p: i32, value: i32) {
+    if let Some(slot) = line.values.get_mut((line.origin + p) as usize) {
+        *slot = value;
+    }
+}
+
+fn masks(line: &Line, strength: Strength, filter_size: usize, plane: usize) -> Mask {
     let Strength {
         limit,
         blimit,
         thresh,
     } = strength;
-    let at = |p: i32| sample(samples, width, height, x + p * dx, y + p * dy);
-    let q0 = at(0)?;
-    let q1 = at(1)?;
-    let p0 = at(-1)?;
-    let p1 = at(-2)?;
+    let q0 = at(line, 0);
+    let q1 = at(line, 1);
+    let p0 = at(line, -1);
+    let p1 = at(line, -2);
     let hev = (p1 - p0).abs() > thresh || (q1 - q0).abs() > thresh;
     let filter_len = if filter_size == 4 {
         4
@@ -290,25 +353,25 @@ fn masks(
     let mut mask = (p1 - p0).abs() > limit || (q1 - q0).abs() > limit;
     mask |= (p0 - q0).abs() * 2 + (p1 - q1).abs() / 2 > blimit;
     if filter_len >= 6 {
-        let p2 = at(-3)?;
-        let q2 = at(2)?;
+        let p2 = at(line, -3);
+        let q2 = at(line, 2);
         mask |= (p2 - p1).abs() > limit || (q2 - q1).abs() > limit;
     }
     if filter_len >= 8 {
-        let p2 = at(-3)?;
-        let q2 = at(2)?;
-        let p3 = at(-4)?;
-        let q3 = at(3)?;
+        let p2 = at(line, -3);
+        let q2 = at(line, 2);
+        let p3 = at(line, -4);
+        let q3 = at(line, 3);
         mask |= (p3 - p2).abs() > limit || (q3 - q2).abs() > limit;
     }
     let flat = if filter_size >= 8 {
-        let p2 = at(-3)?;
-        let q2 = at(2)?;
+        let p2 = at(line, -3);
+        let q2 = at(line, 2);
         let mut flat_mask = (p1 - p0).abs() > 1 || (q1 - q0).abs() > 1;
         flat_mask |= (p2 - p0).abs() > 1 || (q2 - q0).abs() > 1;
         if filter_len >= 8 {
-            let p3 = at(-4)?;
-            let q3 = at(3)?;
+            let p3 = at(line, -4);
+            let q3 = at(line, 3);
             flat_mask |= (p3 - p0).abs() > 1 || (q3 - q0).abs() > 1;
         }
         !flat_mask
@@ -318,34 +381,25 @@ fn masks(
     let flat2 = if filter_size >= 16 {
         let mut flat_mask = false;
         for p in [4, 5, 6] {
-            flat_mask |= (at(-1 - p)? - p0).abs() > 1 || (at(p)? - q0).abs() > 1;
+            flat_mask |= (at(line, -1 - p) - p0).abs() > 1 || (at(line, p) - q0).abs() > 1;
         }
         !flat_mask
     } else {
         false
     };
-    Some(Mask {
+    Mask {
         hev,
         filter: !mask,
         flat,
         flat2,
-    })
+    }
 }
 
-fn narrow(samples: &mut [u8], width: usize, axis: Axis, hev: bool) {
-    let Axis { x, y, dx, dy } = axis;
-    let Some(q0) = sample(samples, width, usize::MAX, x, y) else {
-        return;
-    };
-    let Some(q1) = sample(samples, width, usize::MAX, x + dx, y + dy) else {
-        return;
-    };
-    let Some(p0) = sample(samples, width, usize::MAX, x - dx, y - dy) else {
-        return;
-    };
-    let Some(p1) = sample(samples, width, usize::MAX, x - 2 * dx, y - 2 * dy) else {
-        return;
-    };
+fn narrow(line: &mut Line, hev: bool) {
+    let q0 = at(line, 0);
+    let q1 = at(line, 1);
+    let p0 = at(line, -1);
+    let p1 = at(line, -2);
     let ps1 = p1 - 128;
     let ps0 = p0 - 128;
     let qs0 = q0 - 128;
@@ -354,23 +408,16 @@ fn narrow(samples: &mut [u8], width: usize, axis: Axis, hev: bool) {
     filter = clamp4(filter + 3 * (qs0 - ps0));
     let filter1 = clamp4(filter + 4) >> 3;
     let filter2 = clamp4(filter + 3) >> 3;
-    store(samples, width, x, y, clamp4(qs0 - filter1) + 128);
-    store(samples, width, x - dx, y - dy, clamp4(ps0 + filter2) + 128);
+    put(line, 0, clamp4(qs0 - filter1) + 128);
+    put(line, -1, clamp4(ps0 + filter2) + 128);
     if !hev {
         let filter = round2(filter1, 1);
-        store(samples, width, x + dx, y + dy, clamp4(qs1 - filter) + 128);
-        store(
-            samples,
-            width,
-            x - 2 * dx,
-            y - 2 * dy,
-            clamp4(ps1 + filter) + 128,
-        );
+        put(line, 1, clamp4(qs1 - filter) + 128);
+        put(line, -2, clamp4(ps1 + filter) + 128);
     }
 }
 
-fn wide(samples: &mut [u8], width: usize, axis: Axis, log2_size: u32, plane: usize) {
-    let Axis { x, y, dx, dy } = axis;
+fn wide(line: &mut Line, log2_size: u32, plane: usize) {
     let (n, n2) = if log2_size == 4 {
         (6i32, 1i32)
     } else if plane == 0 {
@@ -384,21 +431,12 @@ fn wide(samples: &mut [u8], width: usize, axis: Axis, log2_size: u32, plane: usi
         for j in -n..=n {
             let p = (i + j).clamp(-(n + 1), n);
             let tap = if j.abs() <= n2 { 2 } else { 1 };
-            let Some(value) = sample(samples, width, usize::MAX, x + p * dx, y + p * dy) else {
-                return;
-            };
-            total += value * tap;
+            total += at(line, p) * tap;
         }
         filtered[(i + n) as usize] = round2(total, log2_size);
     }
     for i in -n..n {
-        store(
-            samples,
-            width,
-            x + i * dx,
-            y + i * dy,
-            filtered[(i + n) as usize],
-        );
+        put(line, i, filtered[(i + n) as usize]);
     }
 }
 

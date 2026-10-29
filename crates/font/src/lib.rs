@@ -1,12 +1,14 @@
 //! Reads a TrueType or OpenType font, including one face of a collection.
 //!
-//! The file yields a glyph id, an advance width, and an outline. Glyph 0 is
-//! the missing glyph. A face with `CFF2` and no `CFF ` table has no outlines
-//! this reader can draw. Shaping, atlases, and meshes are not part of this crate.
+//! The file yields a glyph id, an advance width, an outline, and horizontal
+//! kerning pairs from a `kern` table. Glyph 0 is the missing glyph. A face
+//! with `CFF2` and no `CFF ` table has no outlines this reader can draw.
+//! Shaping, atlases, and meshes are not part of this crate.
 
 #![forbid(unsafe_code)]
 
 mod collection;
+mod kern;
 mod otf;
 mod ttf;
 
@@ -123,6 +125,7 @@ pub struct Font<'a> {
     num_glyphs: u16,
     hmtx: Hmtx<'a>,
     cmap: Cmap<'a>,
+    kern: kern::Kerning,
     outlines: Outlines<'a>,
 }
 
@@ -239,6 +242,15 @@ impl Font<'_> {
         }
     }
 
+    /// Horizontal kerning for a glyph pair, in font design units.
+    ///
+    /// The value is added to the advance of `left` before `right` is placed.
+    /// A face with no `kern` table, and a pair the table does not store, is 0.
+    #[must_use]
+    pub fn kerning(&self, left: u16, right: u16) -> i16 {
+        self.kern.get(left, right)
+    }
+
     /// Outline of one glyph, in font design units.
     pub fn outline(&self, glyph_id: u16) -> Result<Outline, FontError> {
         if glyph_id >= self.num_glyphs {
@@ -256,6 +268,11 @@ impl Font<'_> {
         let metrics = parse_hhea(directory.table(b"hhea")?, num_glyphs)?;
         let hmtx = Hmtx::parse(directory.table(b"hmtx")?, metrics, num_glyphs)?;
         let cmap = parse_cmap(directory.table(b"cmap")?)?;
+        let kern = match directory.table(b"kern") {
+            Ok(table) => kern::parse(table)?,
+            Err(FontError::MissingTable) => kern::Kerning::empty(),
+            Err(error) => return Err(error),
+        };
         let outlines = match directory.kind {
             FontKind::TrueType => {
                 Outlines::TrueType(ttf::source(&directory, head.loca, num_glyphs)?)
@@ -268,6 +285,7 @@ impl Font<'_> {
             num_glyphs,
             hmtx,
             cmap,
+            kern,
             outlines,
         })
     }
@@ -858,10 +876,65 @@ mod tests {
         let missing = font.missing_outline().expect("notdef outline");
         assert_eq!(missing, font.outline(0).expect("glyph 0"));
         assert!(missing.contours.is_empty());
+        assert_eq!(font.kerning(2, 2), 0);
         assert_eq!(
             font.advances("Z"),
             Err(FontError::MissingGlyph { character: 'Z' })
         );
+    }
+
+    #[test]
+    fn kerning_pairs_come_from_the_file() {
+        let font = read(SAMPLE_TTF).expect("fixture");
+        let pair = [0, 2, 0, 3, 0xff, 0xb0];
+        assert!(
+            SAMPLE_TTF.windows(pair.len()).any(|window| window == pair),
+            "the fixture stores the pair"
+        );
+        assert_eq!(font.kerning(2, 3), -80);
+        assert_eq!(font.kerning(3, 2), 40);
+        assert_eq!(font.kerning(2, 2), 0);
+        assert_eq!(font.advance(2).expect("A"), 600);
+        assert_eq!(font.advance(3).expect("B"), 700);
+
+        let mut shifted = SAMPLE_TTF.to_vec();
+        let at = shifted
+            .windows(pair.len())
+            .position(|window| window == pair)
+            .expect("pair");
+        shifted[at + 4] = 0;
+        shifted[at + 5] = 10;
+        let changed = read(&shifted).expect("edited pair");
+        assert_eq!(changed.kerning(2, 3), 10);
+
+        let mut hostile = SAMPLE_TTF.to_vec();
+        let kern_at = table_offset(&hostile, b"kern");
+        hostile[kern_at + 10] = 0x01;
+        hostile[kern_at + 11] = 0xF4;
+        assert!(matches!(read(&hostile), Err(FontError::Truncated)));
+
+        let otf = read(SAMPLE_OTF).expect("otf");
+        assert_eq!(otf.kerning(2, 3), -80);
+        assert_eq!(otf.kerning(3, 2), 40);
+        let collection = read_collection(SAMPLE_TTC, 0).expect("face");
+        assert_eq!(collection.kerning(2, 3), 0);
+    }
+
+    fn table_offset(bytes: &[u8], tag: &[u8; 4]) -> usize {
+        let count = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
+        for index in 0..count {
+            let at = 12 + index * 16;
+            if &bytes[at..at + 4] == tag {
+                return usize::try_from(u32::from_be_bytes([
+                    bytes[at + 8],
+                    bytes[at + 9],
+                    bytes[at + 10],
+                    bytes[at + 11],
+                ]))
+                .expect("offset");
+            }
+        }
+        panic!("missing {tag:?}");
     }
 
     #[test]

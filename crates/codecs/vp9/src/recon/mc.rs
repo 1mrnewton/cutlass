@@ -16,6 +16,20 @@ pub struct Mv {
     pub col: i16,
 }
 
+/// One mode-info cell of the previous coded frame, libvpx `MV_REF`.
+#[derive(Clone, Copy, Default)]
+pub struct MotionCell {
+    pub mv: [Mv; 2],
+    pub refs: [u8; 2],
+}
+
+/// Motion vectors from the previous coded frame, indexed in mode-info order.
+#[derive(Clone)]
+pub struct Motion {
+    pub cols: usize,
+    pub cells: Vec<MotionCell>,
+}
+
 pub struct RefPlane {
     pub samples: Vec<u8>,
     pub stride: usize,

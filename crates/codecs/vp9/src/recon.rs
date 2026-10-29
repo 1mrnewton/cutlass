@@ -9,7 +9,14 @@
 mod mc;
 mod mv;
 
-pub use mc::{RefSlots, Reference};
+pub use mc::{Motion, RefSlots, Reference};
+
+/// A reconstructed picture plus the counts and motion the next frame adapts from.
+pub struct Recon {
+    pub picture: Picture,
+    pub counts: Counts,
+    pub motion: Motion,
+}
 
 use cutlass_decode::CodecError;
 
@@ -172,26 +179,35 @@ struct Scratch<'a> {
     sb_cols: usize,
     slots: &'a RefSlots<'a>,
     tile_col_end: usize,
+    prev: Option<&'a Motion>,
 }
 
 pub fn reconstruct<'a>(
     parsed: &'a Parsed<'_>,
     slots: &'a RefSlots<'a>,
-) -> Result<Picture, CodecError> {
+    prev: Option<&'a Motion>,
+) -> Result<Recon, CodecError> {
     if parsed.header.show_existing {
         return Err(CodecError::Unsupported {
             what: "vp9 show_existing",
         });
     }
-    if !parsed.header.is_intra() && parsed.header.use_prev_mvs {
-        return Err(CodecError::Unsupported {
-            what: "vp9 previous motion",
+    if !parsed.header.is_intra() && parsed.header.use_prev_mvs && prev.is_none() {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "previous motion",
         });
     }
-    let mut frame = Scratch::new(&parsed.header, &parsed.fc, slots)?;
+    let mut frame = Scratch::new(&parsed.header, &parsed.fc, slots, prev)?;
     frame.decode_tiles(parsed.tiles)?;
     frame.loop_filter()?;
-    frame.picture()
+    let picture = frame.picture()?;
+    let motion = frame.motion();
+    Ok(Recon {
+        picture,
+        counts: frame.counts,
+        motion,
+    })
 }
 
 impl<'a> Scratch<'a> {
@@ -199,6 +215,7 @@ impl<'a> Scratch<'a> {
         header: &'a Header,
         fc: &'a FrameContext,
         slots: &'a RefSlots<'a>,
+        prev: Option<&'a Motion>,
     ) -> Result<Self, CodecError> {
         let width = header.width;
         let height = header.height;
@@ -258,7 +275,22 @@ impl<'a> Scratch<'a> {
             sb_cols: mi_cols.div_ceil(8),
             slots,
             tile_col_end: mi_cols,
+            prev,
         })
+    }
+
+    fn motion(&self) -> Motion {
+        Motion {
+            cols: self.mi_cols,
+            cells: self
+                .grid
+                .iter()
+                .map(|mi| mc::MotionCell {
+                    mv: mi.mv,
+                    refs: mi.refs,
+                })
+                .collect(),
+        }
     }
 
     fn decode_tiles(&mut self, mut data: &[u8]) -> Result<(), CodecError> {
@@ -1239,7 +1271,9 @@ mod tests {
     #[test]
     fn lossless_red_keyframe_matches_ffmpeg() {
         let parsed = parse(&Persist::new(), &RED_16).expect("header");
-        let pic = reconstruct(&parsed, &RefSlots::none()).expect("recon");
+        let pic = reconstruct(&parsed, &RefSlots::none(), None)
+            .expect("recon")
+            .picture;
         assert_eq!((pic.width, pic.height), (16, 16));
         assert_eq!(pic.y.len(), 256);
         assert_eq!(pic.u.len(), 64);
@@ -1279,8 +1313,9 @@ mod tests {
         ];
         for (name, payload, raw, w, h) in cases {
             let parsed = parse(&Persist::new(), payload).expect("header");
-            let pic = reconstruct(&parsed, &RefSlots::none())
-                .unwrap_or_else(|err| panic!("{name} recon {err}"));
+            let pic = reconstruct(&parsed, &RefSlots::none(), None)
+                .unwrap_or_else(|err| panic!("{name} recon {err}"))
+                .picture;
             assert_eq!((pic.width, pic.height), (w, h), "{name}");
             let got = [&pic.y[..], &pic.u[..], &pic.v[..]].concat();
             assert_eq!(got.len(), raw.len(), "{name}");

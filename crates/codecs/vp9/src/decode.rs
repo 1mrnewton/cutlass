@@ -8,12 +8,15 @@ use std::sync::Arc;
 
 use cutlass_decode::CodecError;
 
+use crate::geom::{SWITCHABLE, TX_MODE_SELECT};
 use crate::header::{Header, Parsed, Persist, parse};
-use crate::recon::{Picture, RefSlots, Reference, reconstruct};
+use crate::prob::{self, Counts, FrameContext};
+use crate::recon::{Motion, Picture, RefSlots, Reference, reconstruct};
 
 pub struct Decoder {
     persist: Persist,
     refs: [Option<Arc<Reference>>; 8],
+    prev: Option<Arc<Motion>>,
 }
 
 impl Decoder {
@@ -21,6 +24,7 @@ impl Decoder {
         Self {
             persist: Persist::new(),
             refs: [const { None }; 8],
+            prev: None,
         }
     }
 
@@ -37,13 +41,14 @@ impl Decoder {
             self.persist.last_height = parsed.header.height;
             return Ok(Some(picture));
         }
-        let picture = {
+        let prev = self.prev.clone();
+        let built = {
             let slots = self.slots();
-            reconstruct(&parsed, &slots)?
+            reconstruct(&parsed, &slots, prev.as_deref())?
         };
-        self.commit(&parsed, &picture);
+        self.commit(&parsed, &built.picture, &built.counts, built.motion);
         if parsed.header.show_frame {
-            Ok(Some(picture))
+            Ok(Some(built.picture))
         } else {
             Ok(None)
         }
@@ -52,6 +57,7 @@ impl Decoder {
     pub fn reset(&mut self) {
         self.persist = Persist::new();
         self.refs = [const { None }; 8];
+        self.prev = None;
     }
 
     fn slots(&self) -> RefSlots<'_> {
@@ -79,8 +85,10 @@ impl Decoder {
         })
     }
 
-    fn commit(&mut self, parsed: &Parsed<'_>, picture: &Picture) {
+    fn commit(&mut self, parsed: &Parsed<'_>, picture: &Picture, counts: &Counts, motion: Motion) {
         let header = &parsed.header;
+        let after_key = self.persist.key_frame;
+        let fc = adapted(parsed, counts, after_key);
         self.persist.width = header.width;
         self.persist.height = header.height;
         self.persist.last_width = header.width;
@@ -96,8 +104,9 @@ impl Decoder {
         self.persist.contexts = parsed.contexts.clone();
         if header.refresh_context {
             let index = usize::from(header.context_idx);
-            self.persist.contexts[index] = parsed.fc.clone();
+            self.persist.contexts[index] = fc;
         }
+        self.prev = Some(Arc::new(motion));
         self.store_refs(header, picture);
     }
 
@@ -122,6 +131,30 @@ impl Decoder {
     }
 }
 
+fn adapted(parsed: &Parsed<'_>, counts: &Counts, after_key: bool) -> FrameContext {
+    let header = &parsed.header;
+    let mut fc = parsed.fc.clone();
+    if header.error_resilient || header.frame_parallel {
+        return fc;
+    }
+    let pre = &parsed.contexts[usize::from(header.context_idx)];
+    let key = header.is_intra();
+    for tx in 0..4 {
+        prob::adapt_coef(&mut fc, pre, counts, tx, key, after_key);
+    }
+    if !key {
+        prob::adapt_modes(
+            &mut fc,
+            pre,
+            counts,
+            header.tx_mode == TX_MODE_SELECT,
+            header.interp == SWITCHABLE,
+        );
+        prob::adapt_mv(&mut fc, pre, counts, header.allow_hp);
+    }
+    fc
+}
+
 impl Default for Decoder {
     fn default() -> Self {
         Self::new()
@@ -131,6 +164,63 @@ impl Default for Decoder {
 #[cfg(test)]
 mod tests {
     use super::Decoder;
+
+    #[test]
+    fn normal_inter_matches_ffvp9() {
+        let frames = [
+            include_bytes!("../fixtures/vp9_normal32_0.bin").as_slice(),
+            include_bytes!("../fixtures/vp9_normal32_1.bin").as_slice(),
+            include_bytes!("../fixtures/vp9_normal32_2.bin").as_slice(),
+        ];
+        let yuv = include_bytes!("../fixtures/vp9_normal32.yuv");
+        let mut decoder = Decoder::new();
+        let mut got = Vec::new();
+        for (index, frame) in frames.iter().enumerate() {
+            let picture = decoder
+                .decode(frame)
+                .unwrap_or_else(|err| panic!("frame {index} {err}"))
+                .unwrap_or_else(|| panic!("frame {index} hidden"));
+            got.extend_from_slice(&picture.y);
+            got.extend_from_slice(&picture.u);
+            got.extend_from_slice(&picture.v);
+        }
+        assert_eq!(got.len(), yuv.len());
+        let mismatch = got.iter().zip(yuv.iter()).position(|(a, b)| a != b);
+        assert_eq!(mismatch, None, "first mismatch {mismatch:?}");
+    }
+
+    #[test]
+    fn altref_inter_matches_ffvp9() {
+        let frames = [
+            include_bytes!("../fixtures/vp9_altref64_0.bin").as_slice(),
+            include_bytes!("../fixtures/vp9_altref64_1.bin").as_slice(),
+            include_bytes!("../fixtures/vp9_altref64_2.bin").as_slice(),
+            include_bytes!("../fixtures/vp9_altref64_3.bin").as_slice(),
+            include_bytes!("../fixtures/vp9_altref64_4.bin").as_slice(),
+            include_bytes!("../fixtures/vp9_altref64_5.bin").as_slice(),
+            include_bytes!("../fixtures/vp9_altref64_6.bin").as_slice(),
+            include_bytes!("../fixtures/vp9_altref64_7.bin").as_slice(),
+        ];
+        let yuv = include_bytes!("../fixtures/vp9_altref64.yuv");
+        decode_all(&frames, yuv);
+    }
+
+    fn decode_all(frames: &[&[u8]], yuv: &[u8]) {
+        let mut decoder = Decoder::new();
+        let mut got = Vec::new();
+        for (index, frame) in frames.iter().enumerate() {
+            let picture = decoder
+                .decode(frame)
+                .unwrap_or_else(|err| panic!("frame {index} {err}"))
+                .unwrap_or_else(|| panic!("frame {index} hidden"));
+            got.extend_from_slice(&picture.y);
+            got.extend_from_slice(&picture.u);
+            got.extend_from_slice(&picture.v);
+        }
+        assert_eq!(got.len(), yuv.len());
+        let mismatch = got.iter().zip(yuv.iter()).position(|(a, b)| a != b);
+        assert_eq!(mismatch, None, "first mismatch {mismatch:?}");
+    }
 
     #[test]
     fn error_resilient_inter_matches_ffvp9() {

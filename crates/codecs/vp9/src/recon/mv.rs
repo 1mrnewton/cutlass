@@ -738,31 +738,36 @@ impl<'a> Scratch<'a> {
         let mut different = false;
         let early = query.mode != NEAR;
         let mut done = false;
-        let mut search = CandidateSearch {
-            list: &mut list,
-            count: &mut count,
-            different: &mut different,
-            early,
-            done: &mut done,
-        };
-        let mut index = 0usize;
-        if query.block >= 0 {
-            for _ in 0..2 {
-                self.consider(query, index, true, &mut search);
-                index += 1;
-                if *search.done {
-                    break;
+        {
+            let mut search = CandidateSearch {
+                list: &mut list,
+                count: &mut count,
+                different: &mut different,
+                early,
+                done: &mut done,
+            };
+            let mut index = 0usize;
+            if query.block >= 0 {
+                for _ in 0..2 {
+                    self.consider(query, index, true, &mut search);
+                    index += 1;
+                    if *search.done {
+                        break;
+                    }
+                }
+            }
+            if !*search.done {
+                while index < 8 {
+                    self.consider(query, index, false, &mut search);
+                    index += 1;
+                    if *search.done {
+                        break;
+                    }
                 }
             }
         }
-        if !*search.done {
-            while index < 8 {
-                self.consider(query, index, false, &mut search);
-                index += 1;
-                if *search.done {
-                    break;
-                }
-            }
+        if !done {
+            self.push_prev_same(query, &mut list, &mut count, early, &mut done);
         }
         if !done && different {
             for pos in MV_REF[usize::from(query.bsize)] {
@@ -782,6 +787,9 @@ impl<'a> Scratch<'a> {
             }
         }
         if !done {
+            self.push_prev_diff(query, &mut list, &mut count, early, &mut done);
+        }
+        if !done {
             count = if query.mode == NEAR { 2 } else { 1 };
         }
         for mv in list.iter_mut().take(count) {
@@ -791,6 +799,55 @@ impl<'a> Scratch<'a> {
             return Err(super::bad("motion vector"));
         }
         Ok((list, count))
+    }
+
+    fn prev_cell(&self, row: usize, col: usize) -> Option<mc::MotionCell> {
+        let motion = self.prev?;
+        if motion.cols != self.mi_cols {
+            return None;
+        }
+        motion.cells.get(row * motion.cols + col).copied()
+    }
+
+    fn push_prev_same(
+        &self,
+        query: &MvQuery,
+        list: &mut [Mv; 2],
+        count: &mut usize,
+        early: bool,
+        done: &mut bool,
+    ) {
+        let Some(cell) = self.prev_cell(query.mi_row, query.mi_col) else {
+            return;
+        };
+        let Some(mv) = motion_same(&cell, query.frame) else {
+            return;
+        };
+        if push_mv(list, count, mv, early) {
+            *done = true;
+        }
+    }
+
+    fn push_prev_diff(
+        &self,
+        query: &MvQuery,
+        list: &mut [Mv; 2],
+        count: &mut usize,
+        early: bool,
+        done: &mut bool,
+    ) {
+        let Some(cell) = self.prev_cell(query.mi_row, query.mi_col) else {
+            return;
+        };
+        for mv in motion_diff(&cell, query.frame, &self.header.sign_bias) {
+            if *done {
+                break;
+            }
+            let Some(mv) = mv else { continue };
+            if push_mv(list, count, mv, early) {
+                *done = true;
+            }
+        }
     }
 
     fn consider(&self, query: &MvQuery, index: usize, sub: bool, search: &mut CandidateSearch<'_>) {
@@ -1325,6 +1382,26 @@ fn comp_single_and_compound(above_ref: u8, left_ref: u8, left_single: bool, var:
 
 fn mentions(mi: &Mi, frame: u8) -> bool {
     mi.refs[0] == frame || mi.refs[1] == frame
+}
+
+fn motion_same(cell: &mc::MotionCell, frame: u8) -> Option<Mv> {
+    if cell.refs[0] == frame {
+        Some(cell.mv[0])
+    } else if cell.refs[1] == frame {
+        Some(cell.mv[1])
+    } else {
+        None
+    }
+}
+
+fn motion_diff(cell: &mc::MotionCell, frame: u8, bias: &[u8; 4]) -> [Option<Mv>; 2] {
+    if cell.refs[0] == INTRA_FRAME {
+        return [None, None];
+    }
+    let first = (cell.refs[0] != frame).then(|| flip(cell.mv[0], cell.refs[0], frame, bias));
+    let second = (cell.refs[1] > INTRA_FRAME && cell.refs[1] != frame && cell.mv[1] != cell.mv[0])
+        .then(|| flip(cell.mv[1], cell.refs[1], frame, bias));
+    [first, second]
 }
 
 fn same_mv(mi: &Mi, frame: u8) -> Option<Mv> {

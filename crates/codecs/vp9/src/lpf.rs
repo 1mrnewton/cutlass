@@ -407,28 +407,26 @@ fn filter_luma(
     stride: usize,
     origin: &Origin,
 ) -> Result<(), CodecError> {
-    for row in 0..8 {
+    let mut row = 0;
+    while row < 8 {
         if origin.mi_row + row >= origin.mi_rows {
             break;
         }
         let cols = origin.mi_cols.saturating_sub(origin.mi_col).min(8);
         let y = (origin.mi_row + row) * 8;
-        let lfl = &mask.lfl_y[row * 8..(row + 1) * 8];
-        vertical_edges(
+        let first = edge_run(mask, levels, row);
+        let second = (row + 1 < 8 && origin.mi_row + row + 1 < origin.mi_rows)
+            .then(|| edge_run(mask, levels, row + 1));
+        vertical_pair(
             plane,
             stride,
             origin.mi_col * 8,
             y,
             cols,
-            &EdgeRun {
-                wide: row_byte(mask.left_y[2], row),
-                mid: row_byte(mask.left_y[1], row),
-                narrow: row_byte(mask.left_y[0], row),
-                inner: row_byte(mask.int_y, row),
-                lfl,
-                levels,
-            },
+            &first,
+            second.as_ref(),
         )?;
+        row += 2;
     }
     for row in 0..8 {
         if origin.mi_row + row >= origin.mi_rows {
@@ -476,7 +474,8 @@ fn filter_chroma(
     stride: usize,
     origin: &Origin,
 ) -> Result<(), CodecError> {
-    for row in 0..4 {
+    let mut row = 0;
+    while row < 4 {
         let mi = origin.mi_row + row * 2;
         if mi >= origin.mi_rows {
             break;
@@ -487,22 +486,23 @@ fn filter_chroma(
             .div_ceil(2)
             .min(4);
         let y = origin.mi_row * 4 + row * 8;
-        let lfl = chroma_levels(&mask.lfl_y, row);
-        vertical_edges(
+        let lfl0 = chroma_levels(&mask.lfl_y, row);
+        let first = chroma_edge(mask, levels, row, &lfl0);
+        let lfl1 = (row + 1 < 4).then(|| chroma_levels(&mask.lfl_y, row + 1));
+        let second = lfl1
+            .as_ref()
+            .filter(|_| origin.mi_row + (row + 1) * 2 < origin.mi_rows)
+            .map(|lfl| chroma_edge(mask, levels, row + 1, lfl));
+        vertical_pair(
             plane,
             stride,
             origin.mi_col * 4,
             y,
             cols,
-            &EdgeRun {
-                wide: uv_nibble(mask.left_uv[2], row),
-                mid: uv_nibble(mask.left_uv[1], row),
-                narrow: uv_nibble(mask.left_uv[0], row),
-                inner: uv_nibble(mask.int_uv, row),
-                lfl: &lfl,
-                levels,
-            },
+            &first,
+            second.as_ref(),
         )?;
+        row += 2;
     }
     for row in 0..4 {
         let mi = origin.mi_row + row * 2;
@@ -562,6 +562,88 @@ struct EdgeRun<'a> {
     levels: &'a Levels,
 }
 
+fn edge_run<'a>(mask: &'a Mask, levels: &'a Levels, row: usize) -> EdgeRun<'a> {
+    EdgeRun {
+        wide: row_byte(mask.left_y[2], row),
+        mid: row_byte(mask.left_y[1], row),
+        narrow: row_byte(mask.left_y[0], row),
+        inner: row_byte(mask.int_y, row),
+        lfl: &mask.lfl_y[row * 8..(row + 1) * 8],
+        levels,
+    }
+}
+
+fn chroma_edge<'a>(mask: &Mask, levels: &'a Levels, row: usize, lfl: &'a [u8]) -> EdgeRun<'a> {
+    EdgeRun {
+        wide: uv_nibble(mask.left_uv[2], row),
+        mid: uv_nibble(mask.left_uv[1], row),
+        narrow: uv_nibble(mask.left_uv[0], row),
+        inner: uv_nibble(mask.int_uv, row),
+        lfl,
+        levels,
+    }
+}
+
+fn vertical_pair(
+    plane: &mut [u8],
+    stride: usize,
+    x0: usize,
+    y: usize,
+    cols: usize,
+    above: &EdgeRun<'_>,
+    below: Option<&EdgeRun<'_>>,
+) -> Result<(), CodecError> {
+    let Some(below) = below else {
+        return vertical_edges(plane, stride, x0, y, cols, above);
+    };
+    let cols = cols.min(above.lfl.len()).min(below.lfl.len());
+    for col in 0..cols {
+        let bit = 1u8 << col;
+        let x = x0 + col * 8;
+        if above.wide & bit != 0 && below.wide & bit != 0 {
+            let Some(thr) = above.levels.thresh(above.lfl[col]) else {
+                return Err(bad("loop filter level"));
+            };
+            vert16(plane, stride, x, y, 16, &thr)?;
+            vertical_column(plane, stride, x, y, bit, above, true)?;
+            vertical_column(plane, stride, x, y + 8, bit, below, true)?;
+        } else {
+            vertical_column(plane, stride, x, y, bit, above, false)?;
+            vertical_column(plane, stride, x, y + 8, bit, below, false)?;
+        }
+    }
+    Ok(())
+}
+
+fn vertical_column(
+    plane: &mut [u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    bit: u8,
+    run: &EdgeRun<'_>,
+    skip_wide: bool,
+) -> Result<(), CodecError> {
+    let col = usize::try_from(bit.trailing_zeros()).unwrap_or(0);
+    let Some(level) = run.lfl.get(col).copied() else {
+        return Ok(());
+    };
+    let Some(thr) = run.levels.thresh(level) else {
+        return Err(bad("loop filter level"));
+    };
+    if !skip_wide && run.wide & bit != 0 {
+        vert16(plane, stride, x, y, 8, &thr)?;
+    } else if run.mid & bit != 0 {
+        vert8(plane, stride, x, y, &thr)?;
+    } else if run.narrow & bit != 0 {
+        vert4(plane, stride, x, y, &thr)?;
+    }
+    if run.inner & bit != 0 {
+        vert4(plane, stride, x + 4, y, &thr)?;
+    }
+    Ok(())
+}
+
 fn vertical_edges(
     plane: &mut [u8],
     stride: usize,
@@ -577,7 +659,7 @@ fn vertical_edges(
             return Err(bad("loop filter level"));
         };
         if run.wide & bit != 0 {
-            vert16(plane, stride, x, y, &thr)?;
+            vert16(plane, stride, x, y, 8, &thr)?;
         } else if run.mid & bit != 0 {
             vert8(plane, stride, x, y, &thr)?;
         } else if run.narrow & bit != 0 {
@@ -598,14 +680,23 @@ fn horizontal_edges(
     cols: usize,
     run: &EdgeRun<'_>,
 ) -> Result<(), CodecError> {
-    for col in 0..cols.min(run.lfl.len()) {
+    let cols = cols.min(run.lfl.len());
+    let mut col = 0;
+    while col < cols {
         let bit = 1u8 << col;
         let x = x0 + col * 8;
         let Some(thr) = run.levels.thresh(run.lfl[col]) else {
             return Err(bad("loop filter level"));
         };
+        let paired = col + 1 < cols && run.wide & bit != 0 && run.wide & (1u8 << (col + 1)) != 0;
+        if paired {
+            // Two adjacent 16-tap columns share the first column's threshold.
+            horiz16(plane, stride, x, y, 16, &thr)?;
+            col += 2;
+            continue;
+        }
         if run.wide & bit != 0 {
-            horiz16(plane, stride, x, y, &thr)?;
+            horiz16(plane, stride, x, y, 8, &thr)?;
         } else if run.mid & bit != 0 {
             horiz8(plane, stride, x, y, &thr)?;
         } else if run.narrow & bit != 0 {
@@ -614,6 +705,7 @@ fn horizontal_edges(
         if run.inner & bit != 0 {
             horiz4(plane, stride, x, y + 4, &thr)?;
         }
+        col += 1;
     }
     Ok(())
 }
@@ -682,9 +774,10 @@ fn vert16(
     stride: usize,
     x: usize,
     y: usize,
+    rows: usize,
     thr: &Thresh,
 ) -> Result<(), CodecError> {
-    for row in 0..8 {
+    for row in 0..rows {
         let at = index(plane, stride, x, y + row, 8, 8)?;
         let p = side(plane, at, 8);
         let mut q = [0u8; 8];
@@ -736,9 +829,10 @@ fn horiz16(
     stride: usize,
     x: usize,
     y: usize,
+    pixels: usize,
     thr: &Thresh,
 ) -> Result<(), CodecError> {
-    for col in 0..8 {
+    for col in 0..pixels {
         let samples = column(plane, stride, x + col, y, 8, 8)?;
         let wide = filter16(thr, &samples[..8], &samples[8..]);
         put_column(plane, stride, x + col, y, &wide, 7)?;
@@ -838,12 +932,20 @@ fn flat4(thresh: u8, p: &[u8], q: &[u8]) -> i8 {
     if reject { 0 } else { -1 }
 }
 
-fn flat5(p4: u8, p: &[u8], q: &[u8], q4: u8) -> i8 {
-    if flat4(1, p, q) == 0 || p4.abs_diff(p[3]) > 1 || q4.abs_diff(q[0]) > 1 {
-        0
-    } else {
-        -1
-    }
+/// Outer taps of the 16-pixel flat test. `p` is p7..p0 and `q` is q0..q7.
+fn flat_outer(p: &[u8], q: &[u8]) -> i8 {
+    let p0 = p[7];
+    let q0 = q[0];
+    let mut reject = false;
+    reject |= p[0].abs_diff(p0) > 1;
+    reject |= p[1].abs_diff(p0) > 1;
+    reject |= p[2].abs_diff(p0) > 1;
+    reject |= p[3].abs_diff(p0) > 1;
+    reject |= q[4].abs_diff(q0) > 1;
+    reject |= q[5].abs_diff(q0) > 1;
+    reject |= q[6].abs_diff(q0) > 1;
+    reject |= q[7].abs_diff(q0) > 1;
+    if reject { 0 } else { -1 }
 }
 
 fn filter4(mask: i8, hev_thr: u8, p1: &mut u8, p0: &mut u8, q0: &mut u8, q1: &mut u8) {
@@ -905,7 +1007,7 @@ fn filter16(thr: &Thresh, p: &[u8], q: &[u8]) -> [u8; 14] {
     let inner_q = [q[0], q[1], q[2], q[3]];
     let mask = filter_mask(thr, &inner_p, &inner_q);
     let flat = flat4(1, &inner_p, &inner_q);
-    let flat2 = flat5(p[3], &inner_p, &inner_q, q[4]);
+    let flat2 = flat_outer(p, q);
     if flat2 != 0 && flat != 0 && mask != 0 {
         wide15(p, q)
     } else {

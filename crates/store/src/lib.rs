@@ -18,6 +18,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub use backup::copy_backup;
+pub use cutlass_model::Draft;
 pub use folder::{
     DockItem, DraftMeta, Folder, IdMap, IdPair, MaterialBin, Opened, ProjectIndex, TimelineEntry,
     TimelineLayout, open,

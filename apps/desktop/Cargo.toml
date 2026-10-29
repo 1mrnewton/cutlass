@@ -7,6 +7,8 @@ license.workspace = true
 description = "The desktop editor."
 
 [dependencies]
+cutlass-decode = { path = "../../crates/decode", version = "0.1.0" }
+cutlass-encode = { path = "../../crates/encode", version = "0.1.0" }
 cutlass-editor = { path = "../../crates/editor", version = "0.1.0" }
 cutlass-playback = { path = "../../crates/playback", version = "0.1.0" }
 cutlass-export = { path = "../../crates/export", version = "0.1.0" }
@@ -19,8 +21,6 @@ cutlass-transcription = { path = "../../crates/transcription", version = "0.1.0"
 cutlass-font = { path = "../../crates/font", version = "0.1.0" }
 cutlass-agent = { path = "../../crates/agent", version = "0.1.0" }
 cutlass-settings = { path = "../../crates/settings", version = "0.1.0" }
-cutlass-decode = { path = "../../crates/decode", version = "0.1.0" }
-cutlass-encode = { path = "../../crates/encode", version = "0.1.0" }
 cutlass-renderer-metal = { path = "../../crates/renderer-metal", version = "0.1.0" }
 cutlass-renderer-windows = { path = "../../crates/renderer-windows", version = "0.1.0" }
 cutlass-renderer-android = { path = "../../crates/renderer-android", version = "0.1.0" }

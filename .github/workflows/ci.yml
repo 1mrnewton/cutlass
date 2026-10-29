@@ -19,18 +19,49 @@ jobs:
           import re
           from pathlib import Path
 
+          def lint_lines(text, header):
+              start = text.find(header)
+              if start < 0:
+                  return []
+              rest = text[start + len(header):]
+              end = rest.find("\n[")
+              body = rest if end < 0 else rest[:end]
+              lines = []
+              for line in body.splitlines():
+                  line = line.strip()
+                  if line and not line.startswith("#"):
+                      lines.append(line)
+              return lines
+
           root = Path(".")
           manifest = (root / "Cargo.toml").read_text()
           block = re.search(r"members = \[(.*?)\]", manifest, re.S).group(1)
           members = re.findall(r'"([^"]+)"', block)
+          workspace_rust = lint_lines(manifest, "[workspace.lints.rust]")
+          workspace_clippy = lint_lines(manifest, "[workspace.lints.clippy]")
+          denied_rust = [
+              'unsafe_code = "deny"' if line.startswith("unsafe_code") else line
+              for line in workspace_rust
+          ]
           missing = []
           allowed_unsafe = []
           for member in members:
               text = (root / member / "Cargo.toml").read_text()
-              if "[lints]\nworkspace = true" not in text:
-                  missing.append(member)
               if 'unsafe_code = "allow"' in text:
                   allowed_unsafe.append(member)
+              if "[lints]\nworkspace = true" in text:
+                  continue
+              # A platform crate copies the tables. Cargo rejects mixing
+              # `workspace = true` with the one `unsafe_code` override.
+              rust = lint_lines(text, "[lints.rust]")
+              clippy = lint_lines(text, "[lints.clippy]")
+              if (
+                  member.startswith("crates/platform-")
+                  and rust == denied_rust
+                  and clippy == workspace_clippy
+              ):
+                  continue
+              missing.append(member)
           if missing or allowed_unsafe:
               raise SystemExit(
                   "missing workspace lints: "

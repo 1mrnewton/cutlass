@@ -1,16 +1,17 @@
 #![forbid(unsafe_code)]
 
-#[allow(clippy::print_stdout)]
-fn main() {
-    let _factories = register_codecs();
-    println!("cutlass");
-}
-
-/// Platform crates are linked and export no opener. The Rust codecs are what
-/// runs when the platform has none for an id. The first registration wins.
+/// Platform openers go first. A codec they decline falls through to the
+/// software opener registered after them.
 fn register_codecs() -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFactory) {
     let mut decoders = cutlass_decode::DecodeFactory::new();
     let mut encoders = cutlass_encode::EncodeFactory::new();
+    #[cfg(target_os = "macos")]
+    {
+        cutlass_platform_apple::register_decoders(&mut decoders);
+        cutlass_platform_apple::register_encoders(&mut encoders);
+    }
+    cutlass_png::register_decoders(&mut decoders);
+    cutlass_png::register_encoders(&mut encoders);
     cutlass_aac::register_decoders(&mut decoders);
     cutlass_aac::register_encoders(&mut encoders);
     cutlass_av1::register_decoders(&mut decoders);
@@ -18,9 +19,33 @@ fn register_codecs() -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFa
     (decoders, encoders)
 }
 
+#[allow(clippy::print_stdout)]
+fn main() {
+    let _factories = register_codecs();
+    println!("cutlass");
+}
+
 #[cfg(test)]
 mod tests {
-    use cutlass_decode::{CodecId, CodecParams};
+    use cutlass_decode::{CodecId, CodecParams, ColorPrimaries, PixelFormat};
+
+    fn picture(codec: CodecId, width: u32, height: u32) -> CodecParams {
+        let mut params = CodecParams::with_format(codec, width, height, PixelFormat::Rgba8);
+        params.primaries = ColorPrimaries::Bt709;
+        params
+    }
+
+    #[test]
+    fn the_desktop_opens_png_after_the_platform_codecs() {
+        let (_decoders, encoders) = super::register_codecs();
+        encoders
+            .open(&picture(CodecId::Png, 0, 0))
+            .expect("png encoder");
+        #[cfg(target_os = "macos")]
+        encoders
+            .open(&picture(CodecId::H264, 64, 64))
+            .expect("h264 encoder");
+    }
 
     #[test]
     fn rust_codecs_open_when_the_platform_has_none() {

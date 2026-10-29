@@ -79,8 +79,9 @@ publish = false
 license = "MIT OR Apache-2.0"
 
 # Every member opts in with `[lints] workspace = true`.
-# `forbid` cannot be allowed later in a crate. A platform crate that calls an
-# OS framework may override `unsafe_code` to `deny`, then allow it on that module.
+# Cargo cannot mix that with one overridden lint. `forbid` cannot be allowed
+# later in a crate. A platform crate that calls an OS framework copies these
+# tables and sets `unsafe_code` to `deny`, then allows it on that module.
 [workspace.lints.rust]
 unsafe_code = "forbid"
 future_incompatible = { level = "deny", priority = -1 }

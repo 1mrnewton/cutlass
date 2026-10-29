@@ -628,6 +628,19 @@ fn ffmpeg_sixteen_bit_truecolor_matches_exact_samples() {
 }
 
 #[test]
+fn ffmpeg_truecolor_alpha_matches_exact_samples() {
+    let Some(ffmpeg) = tool("ffmpeg") else {
+        require_or_skip("ffmpeg");
+        return;
+    };
+    let png = ffmpeg_png(&ffmpeg, &[9, 8, 7, 6, 5, 4, 3, 2], 2, 1, "rgba", None);
+    let image = decode_bytes(&png).expect("rgba");
+    assert_eq!(image.color, ColorType::Rgba);
+    assert_eq!(image.depth, BitDepth::Eight);
+    assert_eq!(image.samples, vec![9, 8, 7, 6, 5, 4, 3, 2]);
+}
+
+#[test]
 fn a_local_png_matches_ffmpeg_when_the_file_is_present() {
     let Some(path) = local_png() else {
         return;

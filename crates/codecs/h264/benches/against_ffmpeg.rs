@@ -27,7 +27,7 @@ const FRAME_LEN: usize = Y_LEN + C_LEN * 2;
 
 fn main() -> Result<(), String> {
     let Ok(ffmpeg) = ffmpeg_bin() else {
-        eprintln!("skip: ffmpeg is not installed");
+        println!("skip: ffmpeg is not installed");
         return Ok(());
     };
     let dir = std::env::temp_dir().join("cutlass-h264-bench");

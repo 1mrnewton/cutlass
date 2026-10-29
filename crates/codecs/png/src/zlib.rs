@@ -221,7 +221,13 @@ where
 }
 
 pub(crate) fn deflate(src: &[u8]) -> Vec<u8> {
-    let tokens = tokenize(src);
+    deflate_spans(src, &[])
+}
+
+/// `spans` are `(end, stride)` in order. `end` is the exclusive offset of that
+/// scanline group. A stride of 0 does not probe a previous line.
+pub(crate) fn deflate_spans(src: &[u8], spans: &[(usize, usize)]) -> Vec<u8> {
+    let tokens = tokenize(src, spans);
     let fixed = encode_fixed(&tokens);
     let body = match encode_dynamic(&tokens) {
         Some(dynamic) if dynamic.len() < fixed.len() => dynamic,
@@ -629,13 +635,18 @@ impl BitWriter {
     }
 }
 
-fn tokenize(src: &[u8]) -> Vec<u32> {
+fn tokenize(src: &[u8], spans: &[(usize, usize)]) -> Vec<u32> {
     let mut tokens = Vec::new();
     let mut head = vec![-1i32; 32_768];
     let mut prev = vec![-1i32; src.len()];
     let mut index = 0usize;
+    let mut span_at = 0usize;
     while index < src.len() {
-        let (matched, distance) = best_match(src, index, &mut head, &mut prev);
+        while span_at < spans.len() && index >= spans[span_at].0 {
+            span_at += 1;
+        }
+        let (span_start, stride) = span_at_index(spans, span_at, src.len());
+        let (matched, distance) = best_match(src, index, &mut head, &mut prev, stride, span_start);
         if matched >= 3 {
             for step in 1..matched {
                 insert_hash(src, index + step, &mut head, &mut prev);
@@ -650,7 +661,29 @@ fn tokenize(src: &[u8]) -> Vec<u32> {
     tokens
 }
 
-fn best_match(src: &[u8], index: usize, head: &mut [i32], prev: &mut [i32]) -> (usize, u16) {
+fn span_at_index(spans: &[(usize, usize)], span_at: usize, len: usize) -> (usize, usize) {
+    if spans.is_empty() {
+        return (0, 0);
+    }
+    let span_start = if span_at == 0 {
+        0
+    } else {
+        spans[span_at - 1].0
+    };
+    if span_at >= spans.len() {
+        return (span_start.min(len), 0);
+    }
+    (span_start, spans[span_at].1)
+}
+
+fn best_match(
+    src: &[u8],
+    index: usize,
+    head: &mut [i32],
+    prev: &mut [i32],
+    stride: usize,
+    span_start: usize,
+) -> (usize, u16) {
     let mut matched = 0usize;
     let mut distance = 0u16;
     if index + 3 > src.len() {
@@ -665,7 +698,7 @@ fn best_match(src: &[u8], index: usize, head: &mut [i32], prev: &mut [i32]) -> (
             break;
         }
         let len = match_at(src, index, earlier);
-        if len > matched {
+        if better_match(len, index - earlier, matched, distance) {
             matched = len;
             distance = (index - earlier) as u16;
         }
@@ -675,9 +708,43 @@ fn best_match(src: &[u8], index: usize, head: &mut [i32], prev: &mut [i32]) -> (
         pos = prev[earlier];
         steps += 1;
     }
+    if matched < NICE_LEN {
+        probe_rows(src, index, stride, span_start, &mut matched, &mut distance);
+    }
     prev[index] = head[hash];
     head[hash] = index as i32;
     (matched, distance)
+}
+
+fn probe_rows(
+    src: &[u8],
+    index: usize,
+    stride: usize,
+    span_start: usize,
+    matched: &mut usize,
+    distance: &mut u16,
+) {
+    if stride == 0 {
+        return;
+    }
+    for rows in 1..=4 {
+        let back = stride.saturating_mul(rows);
+        if back == 0 || back > MAX_WINDOW || index < span_start.saturating_add(back) {
+            break;
+        }
+        let len = match_at(src, index, index - back);
+        if better_match(len, back, *matched, *distance) {
+            *matched = len;
+            *distance = u16::try_from(back).unwrap_or(0);
+        }
+        if len >= NICE_LEN {
+            break;
+        }
+    }
+}
+
+fn better_match(len: usize, back: usize, matched: usize, distance: u16) -> bool {
+    len > matched || (len == matched && len >= 3 && back < usize::from(distance))
 }
 
 fn insert_hash(src: &[u8], index: usize, head: &mut [i32], prev: &mut [i32]) {
@@ -1115,7 +1182,7 @@ mod tests {
     #[test]
     fn dynamic_codes_beat_fixed_codes_on_a_small_alphabet() {
         let sample: Vec<u8> = (0..8_000).map(|index| (index % 7) as u8).collect();
-        let tokens = super::tokenize(&sample);
+        let tokens = super::tokenize(&sample, &[]);
         let fixed = super::encode_fixed(&tokens);
         let dynamic = super::encode_dynamic(&tokens).expect("dynamic block");
         assert!(
@@ -1129,6 +1196,39 @@ mod tests {
         assert_eq!(inflate(&ours, sample.len()).expect("inflate"), sample);
         let back = python_zlib(&ours, false).expect("python");
         assert_eq!(back, sample);
+    }
+
+    #[test]
+    fn a_previous_scanline_is_found_past_the_hash_chain() {
+        let mut row = vec![9u8; 240];
+        for (index, byte) in row.iter_mut().enumerate().take(80) {
+            *byte = u8::try_from((index * 3) % 251).unwrap_or(0);
+        }
+        row[0] = 1;
+        row[1] = 2;
+        row[2] = 3;
+        for decoy in 0..16 {
+            let at = 80 + decoy * 4;
+            row[at] = 1;
+            row[at + 1] = 2;
+            row[at + 2] = 3;
+            row[at + 3] = 200;
+        }
+        let mut image = Vec::new();
+        for _ in 0..30 {
+            image.extend_from_slice(&row);
+        }
+        let plain = deflate(&image);
+        let spanned = super::deflate_spans(&image, &[(image.len(), row.len())]);
+        assert!(
+            spanned.len() < plain.len(),
+            "span {} plain {}",
+            spanned.len(),
+            plain.len()
+        );
+        assert_eq!(inflate(&spanned, image.len()).expect("inflate"), image);
+        let back = python_zlib(&spanned, false).expect("python");
+        assert_eq!(back, image);
     }
 
     #[test]

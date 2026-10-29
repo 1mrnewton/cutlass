@@ -14,9 +14,12 @@ use crate::raster::{
     Pass, adam_pass, bytes_per_pixel, filter_into, full_pass, pack, pixel_bits, pixel_offset,
     row_bytes,
 };
-use crate::zlib::deflate;
+use crate::zlib::{deflate, deflate_spans};
 
 const IDAT_SPLIT: usize = 8_192;
+
+/// Filtered bytes, then `(end, stride)` of each scanline group.
+type Filtered = (Vec<u8>, Vec<(usize, usize)>);
 
 pub(crate) fn encode_png(
     image: &StillImage,
@@ -30,8 +33,8 @@ pub(crate) fn encode_png(
     if !edge_ok(image.width, image.height) {
         return Err(CodecError::Limit { what: "png image" });
     }
-    let filtered = filter_image(image, interlace, cancel)?;
-    let compressed = deflate(&filtered);
+    let (filtered, spans) = filter_image(image, interlace, cancel)?;
+    let compressed = deflate_spans(&filtered, &spans);
     let mut out = Vec::with_capacity(compressed.len() + 256);
     out.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
     push_chunk(&mut out, b"IHDR", &ihdr(image, interlace))?;
@@ -94,24 +97,27 @@ fn filter_image(
     image: &StillImage,
     interlace: bool,
     cancel: &AtomicBool,
-) -> Result<Vec<u8>, CodecError> {
+) -> Result<Filtered, CodecError> {
     let channels = image.color.channels();
     let bits = pixel_bits(channels, image.depth);
     let bpp = bytes_per_pixel(bits);
     let mut out = Vec::new();
+    let mut spans = Vec::new();
     if interlace {
         for index in 0..7 {
             let pass = adam_pass(index, image.width, image.height);
             if pass.cols == 0 || pass.rows == 0 {
                 continue;
             }
-            write_pass(image, cancel, &mut out, &pass, channels, bits, bpp)?;
+            let stride = write_pass(image, cancel, &mut out, &pass, channels, bits, bpp)?;
+            spans.push((out.len(), stride));
         }
     } else {
         let pass = full_pass(image.width, image.height);
-        write_pass(image, cancel, &mut out, &pass, channels, bits, bpp)?;
+        let stride = write_pass(image, cancel, &mut out, &pass, channels, bits, bpp)?;
+        spans.push((out.len(), stride));
     }
-    Ok(out)
+    Ok((out, spans))
 }
 
 fn write_pass(
@@ -122,7 +128,7 @@ fn write_pass(
     channels: usize,
     bits: u32,
     bpp: usize,
-) -> Result<(), CodecError> {
+) -> Result<usize, CodecError> {
     let row_len = row_bytes(pass.cols, bits).ok_or(CodecError::Limit { what: "png image" })?;
     let mut prev = vec![0u8; row_len];
     let mut raw = vec![0u8; row_len];
@@ -155,7 +161,7 @@ fn write_pass(
         out.extend_from_slice(filtered);
         prev.copy_from_slice(&raw);
     }
-    Ok(())
+    Ok(row_len.saturating_add(1))
 }
 
 fn choose_filter<'a>(

@@ -11,6 +11,8 @@ mod clock;
 mod error;
 mod map;
 mod mix;
+mod reader;
+mod source;
 
 pub use cache::{FrameWindow, MAX_WINDOW};
 pub use clock::{ClockKind, MediaClock};
@@ -22,3 +24,10 @@ pub use map::{
 pub use mix::{
     AudioSample, ClipPcm, ClipRole, Mix, MixClip, MixResult, mix_inputs, render, volume_at,
 };
+pub use reader::{
+    DecodedFrame, HeldFrame, Media, MediaInfo, PcmReady, ReaderFactory, StreamReport,
+};
+pub use source::{VideoSource, open_segment};
+
+#[cfg(test)]
+mod tests;

@@ -16,5 +16,11 @@ cutlass-decode = { path = "../decode", version = "0.1.0" }
 cutlass-color = { path = "../color", version = "0.1.0" }
 cutlass-audio = { path = "../audio", version = "0.1.0" }
 
+[dev-dependencies]
+cutlass-jpeg = { path = "../codecs/jpeg", version = "0.1.0" }
+cutlass-png = { path = "../codecs/png", version = "0.1.0" }
+cutlass-still = { path = "../containers/still", version = "0.1.0" }
+serde_json = "1.0.154"
+
 [lints]
 workspace = true

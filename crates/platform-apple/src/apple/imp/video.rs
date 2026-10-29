@@ -1306,19 +1306,10 @@ mod tests {
     use cutlass_encode::{CpuFrame, FrameTime, PlatformFrame};
 
     fn video_params(codec: CodecId, width: u32, height: u32) -> CodecParams {
-        CodecParams {
-            codec,
-            extra: Vec::new(),
-            sample_rate: 0,
-            layout: None,
-            sample_format: None,
-            bitrate: 500_000,
-            width,
-            height,
-            pixel: PixelFormat::Rgba8,
-            primaries: ColorPrimaries::Bt709,
-            transfer: Transfer::Unspecified,
-        }
+        let mut params = CodecParams::with_format(codec, width, height, PixelFormat::Rgba8);
+        params.bitrate = 500_000;
+        params.primaries = ColorPrimaries::Bt709;
+        params
     }
 
     fn solid(width: u32, height: u32, pixel: [u8; 4], pts: i64) -> FrameInput {

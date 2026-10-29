@@ -14,6 +14,12 @@
 //! the sample clock; the configuration stays. `push` after `drain` continues.
 //! `push` of an empty packet is an invalid call, not a silent success.
 //!
+//! [`VideoDecoder`] is the picture path. It has the same push, drain, and
+//! reset rules. One push is one access unit and may return zero pictures
+//! when display order is still waiting on a later picture. `drain` releases
+//! those pictures. A second `drain` is empty. `reset` drops references and
+//! the reorder queue. Configuration from the open parameters stays.
+//!
 //! The factory walks the openers registered for that id, in order, and uses
 //! the first that accepts the parameters. An opener declines with
 //! [`CodecError::Unsupported`]. Any other error means the parameters are
@@ -22,12 +28,16 @@
 
 #![forbid(unsafe_code)]
 
+pub mod video;
+
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
-    BitDepth, Channel, ChannelLayout, CodecError, CodecParams, ColorPrimaries, ColorType,
-    ImageError, Packet, Pcm, PhysicalPixel, PixelFormat, Rgb8, SampleFormat, SideData, StillImage,
-    TextItem, Transfer, Transparency,
+    BitDepth, Channel, ChannelLayout, CodecError, CodecParams, ColorMatrix, ColorPrimaries,
+    ColorRange, ColorType, FrameError, ImageError, MatrixCoefficients, Packet, Pcm, PhysicalPixel,
+    PixelFormat, Plane, Rgb8, SampleFormat, SideData, StillImage, TextItem, Transfer, Transparency,
+    VideoFrame, Yuv420p,
 };
+pub use video::VideoDecodeFactory;
 
 /// One decoded still.
 ///
@@ -233,8 +243,36 @@ pub trait Decoder: Send {
     }
 }
 
+/// One decoded picture, in display order once it is released.
+///
+/// `picture` is the cropped coded-domain sample buffer. Color tags describe
+/// that buffer. They are not a conversion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoOutput {
+    pub picture: Yuv420p,
+    pub pts: i64,
+    pub duration: i64,
+    pub timescale: u32,
+    pub keyframe: bool,
+    pub range: ColorRange,
+    pub primaries: ColorPrimaries,
+    pub transfer: Transfer,
+    pub matrix: ColorMatrix,
+}
+
+pub trait VideoDecoder: Send {
+    fn codec(&self) -> CodecId;
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<VideoOutput>, CodecError>;
+
+    fn drain(&mut self) -> Result<Vec<VideoOutput>, CodecError>;
+
+    fn reset(&mut self);
+}
+
 pub struct DecodeFactory {
     openers: Vec<Opener>,
+    video_openers: Vec<VideoOpener>,
 }
 
 struct Opener {
@@ -242,11 +280,17 @@ struct Opener {
     open: fn(&CodecParams) -> Result<Box<dyn Decoder>, CodecError>,
 }
 
+struct VideoOpener {
+    id: CodecId,
+    open: fn(&CodecParams) -> Result<Box<dyn VideoDecoder>, CodecError>,
+}
+
 impl DecodeFactory {
     #[must_use]
     pub fn new() -> Self {
         Self {
             openers: Vec::new(),
+            video_openers: Vec::new(),
         }
     }
 
@@ -260,6 +304,15 @@ impl DecodeFactory {
         open: fn(&CodecParams) -> Result<Box<dyn Decoder>, CodecError>,
     ) {
         self.openers.push(Opener { id, open });
+    }
+
+    /// Later video registrations do not hide an earlier one for the same id.
+    pub fn register_video(
+        &mut self,
+        id: CodecId,
+        open: fn(&CodecParams) -> Result<Box<dyn VideoDecoder>, CodecError>,
+    ) {
+        self.video_openers.push(VideoOpener { id, open });
     }
 
     pub fn open(&self, params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
@@ -285,6 +338,17 @@ impl DecodeFactory {
             })
         }
     }
+
+    pub fn open_video(&self, params: &CodecParams) -> Result<Box<dyn VideoDecoder>, CodecError> {
+        for opener in &self.video_openers {
+            if opener.id == params.codec {
+                return (opener.open)(params);
+            }
+        }
+        Err(CodecError::Unsupported {
+            what: "video codec is not registered",
+        })
+    }
 }
 
 impl Default for DecodeFactory {
@@ -299,12 +363,12 @@ mod tests {
 
     use super::{
         AudioOutput, DecodeFactory, Decoder, Output, PictureInfo, PictureOutput, PictureSamples,
-        picture_byte_len,
+        VideoDecoder, VideoOutput, picture_byte_len,
     };
     use cutlass_codec::CodecId;
     use cutlass_codec::access::{
-        ChannelLayout, CodecError, CodecParams, ColorPrimaries, Packet, Pcm, PixelFormat,
-        SampleFormat, Transfer,
+        ChannelLayout, CodecError, CodecParams, ColorMatrix, ColorPrimaries, ColorRange, Packet,
+        Pcm, PixelFormat, SampleFormat, Transfer, Yuv420p,
     };
 
     struct Silent;
@@ -359,19 +423,10 @@ mod tests {
     }
 
     fn jpeg(width: u32, height: u32, pixel: PixelFormat) -> CodecParams {
-        CodecParams {
-            codec: CodecId::Jpeg,
-            extra: Vec::new(),
-            sample_rate: 0,
-            layout: None,
-            sample_format: None,
-            bitrate: 0,
-            width,
-            height,
-            pixel,
-            primaries: ColorPrimaries::Bt709,
-            transfer: Transfer::Bt709,
-        }
+        let mut params = CodecParams::with_format(CodecId::Jpeg, width, height, pixel);
+        params.primaries = ColorPrimaries::Bt709;
+        params.transfer = Transfer::Bt709;
+        params
     }
 
     struct Raw {
@@ -556,6 +611,71 @@ mod tests {
                 what: "codec is not registered",
             }
         );
+    }
+
+    struct Solid;
+
+    impl VideoDecoder for Solid {
+        fn codec(&self) -> CodecId {
+            CodecId::H264
+        }
+
+        fn push(&mut self, packet: &Packet) -> Result<Vec<VideoOutput>, CodecError> {
+            if packet.data.is_empty() {
+                return Err(CodecError::InvalidApi {
+                    what: "empty packet",
+                });
+            }
+            let picture = Yuv420p::solid(2, 2, 16, 128, 128).expect("picture");
+            Ok(vec![VideoOutput {
+                picture,
+                pts: packet.pts,
+                duration: packet.duration,
+                timescale: packet.timescale,
+                keyframe: packet.keyframe,
+                range: ColorRange::Limited,
+                primaries: ColorPrimaries::Bt709,
+                transfer: Transfer::Bt709,
+                matrix: ColorMatrix::Bt709,
+            }])
+        }
+
+        fn drain(&mut self) -> Result<Vec<VideoOutput>, CodecError> {
+            Ok(Vec::new())
+        }
+
+        fn reset(&mut self) {}
+    }
+
+    fn open_solid(params: &CodecParams) -> Result<Box<dyn VideoDecoder>, CodecError> {
+        if params.codec != CodecId::H264 {
+            return Err(CodecError::Unsupported { what: "solid test" });
+        }
+        Ok(Box::new(Solid))
+    }
+
+    #[test]
+    fn video_factory_uses_the_first_registration() {
+        let mut factory = DecodeFactory::new();
+        factory.register_video(CodecId::H264, open_solid);
+        let params = CodecParams::video(CodecId::H264, 2, 2);
+        let mut decoder = factory.open_video(&params).expect("open");
+        let packet = Packet::video(vec![1], 0, 1, 30, true);
+        let out = decoder.push(&packet).expect("push");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].picture.y(), &[16, 16, 16, 16]);
+        assert!(decoder.drain().expect("drain").is_empty());
+        let audio = factory.open(&CodecParams::audio(
+            CodecId::H264,
+            48_000,
+            ChannelLayout::mono(),
+        ));
+        assert!(matches!(
+            audio,
+            Err(CodecError::Unsupported {
+                what: "codec is not registered",
+            })
+        ));
     }
 
     #[test]

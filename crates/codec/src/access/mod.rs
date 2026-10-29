@@ -5,6 +5,7 @@
 //! no PCM. A still is coded samples. Color conversion is not done here.
 
 mod error;
+mod frame;
 mod packet;
 mod params;
 mod pixel;
@@ -12,9 +13,12 @@ mod sample;
 mod still;
 
 pub use error::CodecError;
+pub use frame::{FrameError, Plane, VideoFrame, Yuv420p};
 pub use packet::{Packet, SideData};
 pub use params::CodecParams;
-pub use pixel::{ColorPrimaries, PixelFormat, Transfer};
+pub use pixel::{
+    ColorMatrix, ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat, Transfer,
+};
 pub use sample::{Channel, ChannelLayout, Pcm, SampleFormat};
 pub use still::{
     BitDepth, ColorType, ImageError, PhysicalPixel, Rgb8, StillImage, TextItem, Transparency,

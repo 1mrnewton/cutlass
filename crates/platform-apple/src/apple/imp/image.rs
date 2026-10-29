@@ -569,19 +569,7 @@ mod tests {
     }
 
     fn params(codec: CodecId) -> CodecParams {
-        CodecParams {
-            codec,
-            extra: Vec::new(),
-            sample_rate: 0,
-            layout: None,
-            sample_format: None,
-            bitrate: 0,
-            width: 0,
-            height: 0,
-            pixel: cutlass_decode::PixelFormat::Rgba8,
-            primaries: cutlass_decode::ColorPrimaries::Unspecified,
-            transfer: cutlass_decode::Transfer::Unspecified,
-        }
+        CodecParams::with_format(codec, 0, 0, cutlass_decode::PixelFormat::Rgba8)
     }
 
     #[test]
